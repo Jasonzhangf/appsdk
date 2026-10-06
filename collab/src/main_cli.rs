@@ -2,7 +2,6 @@ use super::board::BoardCommand;
 use super::subagent::Action;
 use clap::Subcommand;
 
-
 #[derive(Subcommand)]
 pub(crate) enum NotifyCmd {
     /// List supported notification methods and events
@@ -93,8 +92,6 @@ pub(crate) enum TaskCmd {
         #[arg(long)]
         legacy_assignment: bool,
     },
-    /// Deprecated: peers self-register tasks; no central available queue
-    Claim { id: String },
     /// Put an owned task into resource-waiting state until another task releases
     Wait {
         id: String,
@@ -155,8 +152,6 @@ pub(crate) enum TaskCmd {
         #[arg(long = "reason")]
         reason: Option<String>,
     },
-    /// Deprecated: peers self-register tasks; no central dispatch
-    Dispatch,
     /// Show task registry
     Status { id: Option<String> },
 }
@@ -171,9 +166,6 @@ pub enum MailboxCmd {
         /// Sorting order: time-asc (default) or time-desc
         #[arg(long, default_value = "time-asc")]
         sort: String,
-        /// Filter messages by specific worker ID
-        #[arg(long)]
-        worker: Option<String>,
     },
 }
 
@@ -199,8 +191,6 @@ pub(crate) enum MasterCmd {
     },
     /// Show the current live master, if any
     Status,
-    /// Deprecated: permanent master recovery was removed
-    Recover,
 }
 
 #[derive(Subcommand)]
@@ -250,8 +240,6 @@ pub(crate) enum LiveClosureCmd {
 
 #[derive(Subcommand)]
 pub(crate) enum WorkerCmd {
-    /// Re-register the current App Server thread without changing task ownership
-    Recover,
     /// Inspect worker status (liveness, identity, agent state, unacked notifications)
     Status {
         /// Optional worker ID to inspect (defaults to all registered workers)
@@ -287,7 +275,6 @@ pub(crate) enum MigrateCmd {
     Verify,
 }
 
-
 #[derive(Subcommand)]
 pub(crate) enum Cmd {
     /// Managed persistent agent peers (current project only)
@@ -297,13 +284,9 @@ pub(crate) enum Cmd {
     },
     /// Show the effective policy from ~/.appsdk/config.toml
     Config,
-    /// Create .agent-collab skeleton in the current directory
-    Init {
-        /// Explicitly select or create this peer identity when the current
-        /// runtime cannot be recovered from its existing session/thread anchors.
-        #[arg(long)]
-        worker_id: Option<String>,
-    },
+    /// Hidden: create .agent-collab skeleton for internal AppSDK initialization
+    #[command(hide = true)]
+    Init,
     /// Hidden: daemon entrypoint (spawned by `up`)
     #[command(hide = true)]
     Serve,
@@ -332,8 +315,6 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         cmd: MailboxCmd,
     },
-    /// Deprecated: declared roles were removed
-    Role,
     /// List registered peers and their local activity projection
     /// (does not report live master authority; use `collab master status`)
     Who,
@@ -363,14 +344,6 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         cmd: WorkerCmd,
     },
-    /// Deprecated: permanent master role was removed
-    TransferMaster { target: String },
-    /// Deprecated: use explicit lifecycle cleanup or daemon migration tooling
-    RemoveWorker {
-        target: String,
-        #[arg(long)]
-        force: bool,
-    },
     /// Retire accumulated control-plane burden and rebuild the baseline.
     /// Offline, explicit authorization, transactional. Exactly one level is
     /// required.
@@ -394,17 +367,9 @@ pub(crate) enum Cmd {
         #[arg(long)]
         include_runs: bool,
     },
-    /// Get or create your worker identity and bind the Codex thread
-    Whoami {
-        #[arg(long)]
-        worker: Option<String>,
-    },
     /// Send a message to another worker
     #[command(alias = "sendmessage")]
     Send {
-        /// Sender identity; defaults to current collab identity, COLLAB_WORKER, or 'operator'
-        #[arg(long)]
-        from: Option<String>,
         #[arg(long)]
         to: String,
         /// Short topic shown in the notification preview
@@ -428,29 +393,21 @@ pub(crate) enum Cmd {
     Recv {
         #[arg(long, default_value_t = 600)]
         timeout: u64,
-        /// act as another registered worker (testing / delegated runs)
-        #[arg(long)]
-        worker: Option<String>,
         /// Replay one committed receive identity instead of consuming new mail
         #[arg(long = "receive-id")]
         receive_id: Option<String>,
     },
     /// List unread inbox
-    Inbox {
-        #[arg(long)]
-        worker: Option<String>,
-    },
+    Inbox,
     /// Single agent bootstrap: resolve root, start daemon, restore identity and
     /// registration, re-arm default notify, then return the authoritative snapshot
     Context {
         #[arg(long)]
-        worker: Option<String>,
+        provide: Option<String>,
     },
     /// Mark messages as read
     Ack {
         ids: Vec<String>,
-        #[arg(long)]
-        worker: Option<String>,
         /// Acknowledge all pending and delivered messages in inbox
         #[arg(long)]
         all: bool,

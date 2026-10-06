@@ -1,6 +1,6 @@
 use super::{AdapterCapabilities, AdapterError, EndpointKind, WakeMode};
 use crate::identity::NativeThreadId;
-use crate::proto::{AppServerCandidate, SelectedTransport, TransportKind};
+use crate::proto::{AppServerCandidate, IdentityFacts, SelectedTransport, TransportKind};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
@@ -333,6 +333,51 @@ pub fn candidate_from_env() -> Result<Option<AppServerCandidate>, AdapterError> 
         thread_id,
         cwd,
     }))
+}
+
+/// Observe partial identity facts without granting or selecting an identity.
+///
+/// Missing session/thread fields are valid here because the daemon decides
+/// which facts it needs and whether the caller may establish a new identity.
+pub(crate) fn identity_facts_from_env() -> Result<IdentityFacts, AdapterError> {
+    let mut facts = IdentityFacts::default();
+    facts.session_id = std::env::var("CODEX_SESSION_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    facts.thread_id = std::env::var("CODEX_THREAD_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+
+    let explicit_endpoint = [APPSERVER_SOCKET_ENV, "CODEX_APP_SERVER_SOCKET"]
+        .into_iter()
+        .find_map(|key| std::env::var_os(key).filter(|value| !value.is_empty()));
+    if let Some(endpoint) = explicit_endpoint.as_ref() {
+        facts.endpoint = Some(format!("unix://{}", PathBuf::from(endpoint).display()));
+    }
+    let explicit_namespace = std::env::var(APPSERVER_NAMESPACE_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    match appserver_namespace_from_env() {
+        Ok(namespace) => {
+            facts.namespace = Some(namespace.to_owned());
+            if facts.endpoint.is_none() {
+                if let Some(socket_path) = socket_candidate(namespace) {
+                    facts.endpoint = Some(format!("unix://{}", socket_path.display()));
+                }
+            }
+        }
+        Err(error) if explicit_namespace.is_some() => return Err(error),
+        Err(_) => {}
+    }
+
+    if std::env::var_os("TMUX_PANE").is_some() {
+        facts.tmux = Some(crate::client::adapters::tmux::candidate_from_env().map_err(
+            |error| AdapterError::InvalidBinding {
+                detail: format!("cannot collect tmux candidate: {error}"),
+            },
+        )?);
+    }
+    Ok(facts)
 }
 
 /// Independently verify one worker-proposed App Server endpoint. The worker

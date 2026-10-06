@@ -1,6 +1,6 @@
 ---
 name: collab
-description: "已启用并注册 Collab 的 peer/master 通信、任务、claim、共享任务板与资源协作；明确要求注册时也用本 Skill。未注册独立完成，不寻找 Master；普通开发、worktree 与 goal 不自动启用 Collab。只跑 collab context 一条命令即自动查身份/恢复/注册/返回 peers/master/scheduling/env 快照，身份需修复时返回 requires_identity_update (reason/action/exact_error)。高频: sendmessage, recv, task accept/update/deliver/review/close, collab board publish/invite/respond/update, collab dashboard, master 派单 collab subagent dispatch。review --accept 会登记 daemon pending merge, task integrated 才能 close (TASK_MERGE_PENDING)。"
+description: "已启用并注册 Collab 的 peer/master 通信、任务、claim、共享任务板与资源协作；明确要求注册时也用本 Skill。未注册独立完成，不寻找 Master；普通开发、worktree 与 goal 不自动启用 Collab。只跑 collab context 一条命令，由 CLI 自动观察运行事实、daemon 选择或恢复身份并返回 peers/master/scheduling/env 快照；缺事实时返回 requires_identity_update.required_fields，Agent 用 collab context --provide '<JSON>' 一次补充。高频: sendmessage, recv, task accept/update/deliver/review/close, collab board publish/invite/respond/update, collab dashboard, master 派单 collab subagent dispatch。review --accept 会登记 daemon pending merge, task integrated 才能 close (TASK_MERGE_PENDING)。"
 ---
 
 # Collab
@@ -46,7 +46,8 @@ latest_main_candidate
 ```
 
 For ordinary peer bootstrap and identity recovery, the only entry remains
-`collab context`. That command is not a daemon lifecycle owner. A Collab runtime
+`collab context`, plus one factual `--provide` supplement only when required.
+That command is not a daemon lifecycle owner. A Collab runtime
 delivery that changes server, notification, identity, route, MCP, CLI, or daemon
 behavior must cross the runtime lifecycle boundary in the same delivery unit
 after installation, unless the owner explicitly records why no daemon change is
@@ -131,73 +132,49 @@ affected project.
 ### 1. Recovery
 
 Start with the one-step bootstrap. `collab context` is the single automatic
-state entry: it resolves the canonical project root (from a live route, a
-registered route, or the local baseline), creates a missing local baseline,
-starts the daemon unless an explicit `DOWN` marker exists, restores identity and
-registration, and returns the server snapshot plus the current role's
-`operations`. It is idempotent and fails closed on unproven identity or an
-explicit `DOWN` marker.
+state entry. The CLI resolves the canonical project root, creates a missing
+baseline, starts the daemon unless an explicit `DOWN` marker exists, observes
+the available runtime facts, and sends a typed identity request to the daemon.
+The daemon owns identity selection, creation, recovery, update, credential and
+binding persistence, route publication, and default direct-message lease
+restoration. It returns either a registered snapshot or an explicit
+missing-facts result. The active contract is
+[`docs/design/collab-identity-minimal-interaction.md`](../../../docs/design/collab-identity-minimal-interaction.md).
 
 ```sh
 collab context
 ```
 
-`collab context` owns identity and the host route selected by the daemon. When
-an AppServer candidate is available, the route binds its owner, session ID, and
-native thread ID; a verified tmux tuple may also be stored as a recovery anchor.
-AppServer-bound peers use native `thread/read` for presence and status. Tmux is
-considered for identity recovery only when both runtime IDs are absent.
-
-The same snapshot carries `binding`: the caller's own runtime binding exactly as
-the daemon recorded it (`binding_id`, `endpoint_generation`, `runtime_id`,
-`session_id`, `native_thread_id`). It is the read-back path for a peer whose
-local registration receipt was lost, so the peer can address its route again
-without reading a control value out of an error message. A worker with no unique
-binding in the selected route reports `binding: null`.
-
-Use the wider recovery path below only when that bootstrap fails:
+When the snapshot contains `requires_identity_update`, read
+`required_fields`, `reason`, and `exact_error`. Supply only the requested facts
+from their real source once:
 
 ```sh
-collab status --all
-collab worker status <peer>
-collab context
+collab context --provide '{"session_id":"...","thread_id":"...","endpoint":"...","namespace":"..."}'
 ```
 
-Verify the bound AppServer owner and exact session/thread route. If runtime
-IDs are unavailable, the daemon may recover the same identity from one exact,
-live tmux anchor. If endpoint ownership or liveness is unknown, preserve the
-error; do not use pane injection, edit route state, guess among peers, or
-replay an old message batch.
+After successful registration, the daemon reuses missing facts from the
+committed identity when the current observed anchor uniquely identifies it.
+Later calls need no repeated supplement. A caller with no current anchor must
+provide its own facts; it cannot inherit another caller's identity.
 
-Do not start the default agent flow with `collab master status`,
-`appsdk init .`, `collab down`/`up`, or `collab route resolve`. Those commands
-remain available only as explicit human diagnostics and are not required for
-recovery. `collab context` performs the minimal bootstrap write automatically.
+The supplement accepts only the missing scalar facts `session_id`, `thread_id`,
+`endpoint`, and `namespace`. The supplement rejects any other key. An agent
+never guesses, selects, or hunts a worker, and never supplies `worker_id`,
+approval, token, generation, binding, or project scope. Invalid or unsupported
+input fails explicitly. The returned snapshot is the complete state read: role,
+operations, peers, master, scheduling, tasks, binding, and filtered environment.
+`binding` comes from the daemon ledger when the caller has a unique binding.
 
-Daemon restart is not part of ordinary identity recovery. After a daemon binary
-is replaced as part of a verified Collab runtime delivery, the old daemon still
-counts as an open delivery node until the controlled down/up window is
-completed and the live entry points are rechecked. Ordinary peer recovery still
-uses `collab context` only: it rebinds the current runtime in place and must not
-run `collab down`/`collab up`, `collab worker recover`, or a status hunt.
+If `collab context` fails explicitly, preserve the original error and affected
+scope. Do not retry automatically, edit route/identity files, copy tokens,
+start another daemon, or invent a fallback. Daemon restart remains a separate
+controlled maintenance action after a verified runtime delivery. Ordinary
+identity recovery uses `collab context` only.
 
-When `collab context` cannot match a current pane/session/thread to any
-persisted peer, it probes the project's persisted identities before failing.
-Records that are provably dead (tmux pane missing, AppServer thread reported
-`systemError`, thread/read returns not-found/no-rollout) are archived under
-`~/.collab/archives/identities-retired-<ms>/` automatically; only then is a
-fresh peer registration allowed. A cold (`notLoaded`) AppServer thread is
-*not* dead: the endpoint can resume it through `turn/start`, so it keeps
-blocking with `IDENTITY_REBIND_UNPROVEN` and a live agent is never silently
-displaced. This archival is automatic and reversible: nothing is deleted, and
-the retired bytes stay on disk for audit.
-
-Master recovery is the same one-step shape: when `collab context` shows no
-live master, it also lists `promote_master` with `requires_approval`, and
-promotion completes automatically once the user supplies an explicit
-approval. Never promote without that approval or from a stale-view status
-hunt; `collab master promote --approval "<user authorization>"` is the single
-action that records and completes the handoff.
+Master authority is separate from identity. When context shows no live master,
+promotion still requires explicit user approval and the recorded master
+command. Context does not auto-promote or infer authority.
 
 ### 2. Failure
 
@@ -301,13 +278,12 @@ does not close the bug.
 ## Automatic multi-worker collaboration
 
 Keep Collab enabled. At multi-worker startup, run `collab context` once
-in the inherited live peer environment unless AppSDK already initialized it.
-This registers the peer and default finite direct-message subscription.
-Registration also returns `role_brief`. Read it as the active operating
-contract. It is the registration-time projection; `collab context`,
-`collab who`, and worker status project the current brief, and promotion or
-delegation returns the replacement brief. Do not maintain a separate role
-prompt:
+in the inherited live peer environment. This lets the daemon establish or
+recover the peer and the default finite direct-message subscription.
+Registration returns `role_brief`. Read it as the active operating contract.
+It is the registration-time projection; `collab context` returns the current
+brief, and promotion or delegation returns the replacement brief. Do not
+maintain a separate role prompt:
 
 - `master`: dispatch and allocate resources, keep workers loaded, own blockers,
   and drive verify/merge/cleanup/close. Implementation is not the primary job.
@@ -354,8 +330,9 @@ collab sendmessage --to <peer> --subject <short-topic> "<original message>"
 
 `--to`, a non-empty short `--subject`, and the original body are required.
 
-Do not first run `notify methods`, `notify subscribe --help`, `whoami`, or
-choose `mailbox-only`. There is no separate mailbox-only send mode.
+Do not first run `notify methods`, `notify subscribe --help`, or a separate
+identity probe, or choose `mailbox-only`. There is no separate mailbox-only
+send mode.
 `sendmessage` always commits the full subject/body to the durable mailbox.
 With a matching live subscription, the first pending message opens a fixed
 120-second window by default. `~/.appsdk/config.toml` can select immediate or
@@ -512,7 +489,8 @@ actions with the CLI in the inherited project cwd:
 `collab sendmessage --to <parent> --subject <topic> "<body>"`.
 The CLI is a complete protocol path. Missing MCP is not a blocker and
 does not justify skipping receive or waiting. `collab context` is the only
-bootstrap entry; do not run `collab init` or `collab whoami` as an agent.
+bootstrap entry; do not run `collab init` or a separate identity probe as an
+agent.
 Child results go to the parent with
 `collab sendmessage`, not the parent-only `subagent send` action.
 No ACK loops, automatic respawn or redispatch.
@@ -734,13 +712,15 @@ Escalation routing is explicit:
   approval with `collab master promote --approval "<user text>"` and verify the
   promoted peer has a live registered identity/transport before treating it as
   master. If a live master already exists, do not promote; only that master
-  may `collab master delegate <peer>`. `appsdk init` alone never proves master
-  ownership. Only `collab master status` proves whether a live master exists:
-  `master` with `endpoint_live=true` means a live master exists; only
-  `master: null` (with no `recorded_unusable` entry) means none exists. A
-  missing worktree-local `.agent-collab/`, a failed `collab context`, a token
-  mismatch, or a missing `who.master` field never proves there is no live
-  master and never authorizes promotion. Codex root is not Collab master.
+  may `collab master delegate <peer>`. An internal init adapter result alone
+  never proves master ownership. The `collab context` snapshot is the agent's
+  live-master authority: `master` with `endpoint_live=true` means a live
+  master exists; only `master: null` with no `recorded_unusable` entry permits
+  the explicit user-approved promotion path. A missing worktree-local
+  `.agent-collab/`, a failed `collab context`, a token mismatch, or a missing
+  `who.master` field never proves there is no live master and never authorizes
+  promotion. Codex root is not Collab master. Operators may use
+  `collab master status` read-only for audit.
 - If a blocker or wait cannot be executed locally after a real solution is
   found, report that solution to the live master immediately instead of
   silently waiting. Keep the durable wait/task state, continue any
@@ -1011,61 +991,47 @@ projections that used to require separate calls, so no agent flow needs to run
 
 | Situation | Do this | Never do this |
 |---|---|---|
-| First time in a project | `collab context` | `collab init`, `collab whoami` |
-| Thread/session changed, or after daemon restart | `collab context` (rebinds in place) | `collab worker recover`, `collab down`/`up` |
+| First time in a project | `collab context` | `collab init`, a separate identity probe |
+| Thread/session changed, or after daemon restart | `collab context` (daemon reconciles identity in place) | a manual identity recovery command, `collab down`/`up` |
 | Need peer list, master state, scheduling state, or env | read them from the single `collab context` snapshot | call `collab who`, `collab status --all`, `collab master status`, or grep the environment as a separate step |
-| `requires_identity_update` is present | read `reason`, `action`, and `exact_error` from the field; run the named `action` from the canonical project main checkout with a live runtime anchor; if it persists, report `exact_error` + `worker_id` to the live master | treat exit 0 as "identity is fine"; ignore the field and continue |
+| `requires_identity_update` is present | read `required_fields` and `exact_error`; when the returned action is the factual supplement, run that one action with only the requested `session_id`, `thread_id`, `endpoint`, or `namespace` from their real source | select or guess a worker; run an identity selection or recovery command, or a status/route/init hunt; set an identity override or approval supplement |
 | `collab context` exits non-zero with `COLLAB_CONTEXT_UNRESOLVED` | preserve the error, run `collab context` from the canonical main tree | edit routes/token state, copy identity, reset the project |
 | Default lease looks stopped | `collab context` re-arms it unless the owner explicitly unsubscribed | probe sockets, call a transport directly |
 | Notification arrived | `collab msg <id>`, then act; `collab recv` consumes | ACK-only, or treat submission as consumption |
 | Master has a pending merge | `collab context` → `pending_merges`, merge the candidate, then `collab task integrated` | rely on a remembered message, or try to close first |
 
-Only these are operator-facing diagnostics and are not part of the agent flow:
-`collab init`, `collab whoami`, `collab worker recover`, `collab route resolve`,
-`collab down`/`up`, `collab who`, `collab status --all`, `collab master status`,
-and any direct transport or socket call. `collab master status` remains the
-authority when an operator must adjudicate master promotion by hand; a live
-agent reads the same fields from `collab context`.
+Read-only operator diagnostics remain available for human maintenance and
+audit: `collab who`, `collab status --all`, `collab worker status`, `collab
+route resolve`, and `collab master status`. They are not agent identity
+recovery steps. `collab down`/`up` require explicit human authorization.
+`collab init` remains an internal compatibility adapter, not an agent bootstrap.
 
 ### Context 状态与终点（DAGpipe：单源单汇）
 
 `context_request` 是唯一入口，`state_snapshot` 是唯一成功出口，中间节点按
-DAGpipe 顺序执行：解析项目根 → 检查/创建基线 → 检查/启动守护 → 装载/创建身份
-→ 校验令牌 → 注册/重建对端 → 恢复默认订阅 → 查找主控 → 输出快照。身份无法装载、
-注册或验真时进入 `identity_update` 终点：退出码仍为 0，但 `registered` 为 false、
-`identity` 为 null，且 `requires_identity_update` 给出 `reason` / `action` /
-`exact_error`；同一响应仍携带只读的 peers/master/status/env 投影，便于一次调用同时
-回答"项目状态是什么"和"我的身份要修什么"。根解析失败仍显式非零退出，不允许把失败
-当作成功快照：
+DAGpipe 顺序执行：解析项目根 → 检查/创建基线 → 检查/启动守护 → daemon 身份门
+→ 环境投影 → 输出快照。CLI 自动观察可用事实；daemon 身份门负责选择、创建、
+恢复、更新身份，持久化 credential/binding/lease，并返回完整快照。缺失事实是本次
+调用的终态：`registered=false`、`identity=null`，`requires_identity_update`
+给出精确 `required_fields`、`reason`、`action` 和 `exact_error`。Agent 只按
+`required_fields` 使用一次 `collab context --provide` 补充真实事实。没有 pending
+workflow，没有第二个修复入口。根解析失败和显式冲突/错误保持原错，不伪装为成功快照：
 
 | 状态/终态 | 含义 | Agent 动作 |
 | --- | --- | --- |
 | `state_snapshot` | 引导成功；含 role/operations/master/peers/peer_count/summary/master_wake/subagents/inbox/worktrees/tasks/env | 读快照执行当前角色的 `operations`；无需再跑 who/status/master status |
-| `identity_update` | 身份装载/注册/验真失败；`registered=false`，`requires_identity_update.required=true` | 读 `reason`/`action`/`exact_error`；在 canonical main 且带 live runtime anchor 时执行 `action`；仍失败则携 `exact_error` 与 `worker_id` 报告 live master；不复制 token、不 mint 新身份 |
+| `identity_update` | daemon 需要缺失事实或报告显式身份冲突；`registered=false`，`requires_identity_update.required=true` | 只读 `required_fields`/`reason`/`action`/`exact_error`；若 action 是 factual supplement，则用一次 `collab context --provide` 提供请求的四个 scalar keys；显式冲突保留原错，不选择 worker，不跑 status/route/init 恢复 |
 | `COLLAB_CONTEXT_UNRESOLVED` | 无 route、无 baseline、无 git 根（非零退出） | 保留错误，改在 canonical main 再跑 `collab context` |
 | 拒绝在 playground 创建基线 | 在 worktree 内引导（非零退出） | 回到项目 main 根执行，不删旧身份 |
 | 默认订阅已停 | owner 显式 unsubscribe 持久生效 | 需要再收消息时用 `collab notify subscribe --event direct-message` 重订阅 |
 
-`requires_identity_update.reason` is the classified failure code, not a slice of
-prose: `TOKEN_MISMATCH`, `IDENTITY_REBIND_UNPROVEN`,
-`IDENTITY_RESTORE_CROSS_PROJECT`, or `COLLAB_IDENTITY_ANCHOR_MISSING`. A caller
-can branch on it without parsing natural language.
-
-`action` is never the invocation that just failed, so following it cannot loop:
-
-| reason | `action` | `requires_approval` |
-| --- | --- | --- |
-| `IDENTITY_REBIND_UNPROVEN` / `IDENTITY_RESTORE_CROSS_PROJECT` / `COLLAB_IDENTITY_ANCHOR_MISSING` | `collab context --worker <worker_id>` — the operator declares the durable identity; `collab context` must not infer one | `true` |
-| `TOKEN_MISMATCH` | escalate out of band with the concrete `worker_id`: report `exact_error` and `worker_id` to the project owner, or to the live master through a healthy peer. Every `collab` command run as that worker re-authenticates through `me()` and re-sends the rejected token, so no command can be the repair | `false` |
-
-`worker_id` is the identity the terminal actually rejected: the loaded identity
-for `TOKEN_MISMATCH` and for a failed registration, or the `--worker` you passed.
-It is null only when no durable identity could be loaded at all. It is not a
-substitute for choosing one.
-
-Only these classified identity failures reach the `identity_update` exit. A
-route, runtime-binding, or transport failure is a different problem: it keeps its
-original error and a non-zero exit, so `requires_identity_update` never masks it.
+`requires_identity_update.reason` is a typed code. It is not prose and it is not
+permission to select a worker. The supplement has exactly the four scalar fields
+`session_id`, `thread_id`, `endpoint`, and `namespace`. A value that conflicts
+with an automatically observed fact is `IDENTITY_FACT_CONFLICT`, not an override.
+Explicit conflicts, token rejection, route failure, runtime-binding failure, and
+transport failure keep their original error and non-zero exit; no fallback or
+pending workflow conceals them.
 
 完整语义图、转移表和 owner 映射见 `docs/collab-context-state-machine.md`；
 机器可校验 SESE 图见 `docs/dagpipe/collab-context.graph.json`
@@ -1079,15 +1045,10 @@ The automatic state entry is always:
 collab context
 ```
 
-`collab context` runs official `collab init` logic for the missing parts,
-registers the current AppServer owner/session/thread with the already managed
-daemon, optionally records a verified tmux recovery anchor, and returns the
-current `role_brief` plus `operations`. Do not run a second `collab init`,
-`collab whoami`, or manual ordinary-message subscription as part of an agent
-bootstrap.
-
-`collab init` remains the explicit AppSDK-side command for operator-driven
-project initialization; agents do not need to run it before `collab context`.
+The daemon-owned identity context completes the bootstrap. `collab init` remains
+an internal compatibility adapter for existing consumers; it is not a second
+agent entry and agents do not run it as bootstrap. Agents do not run a separate
+identity probe or a manual subscription as part of bootstrap.
 
 ## AppServer runtime registration
 
@@ -1123,27 +1084,14 @@ switch transports after an RPC error.
 ## Worktree identity
 
 A Git worktree is a task execution directory, not a second identity or a
-substitute for the canonical project root. Identity recovery first uses the
-exact current AppServer session/thread within the project scope. A tmux pane is
-a last-resort anchor only when both runtime IDs are unavailable.
-`collab context` resolves the canonical root automatically: it prefers the live
-route, then the registered route on disk, then the local `.agent-collab`
-baseline. Registration, recovery, and rebind run against that canonical root,
-not against a `playground/` worktree.
-
-Use `collab master status` for the authoritative live-master answer; `collab
-who` only lists registered peers. This query resolves the canonical route from
-the global Collab route state from the canonical project main tree. Do not run
-`appsdk init`, `collab init`, `collab worker recover`, or master promotion from
-a worktree, and do not report "no master" because `.agent-collab/`,
-`collab context`, or a `who.master` field is absent or failed. If
-`collab context` fails with `token mismatch`, `PROJECT_SCOPE_UNKNOWN`, or
-another exact error, preserve that error, run `collab master status` separately
-from the canonical root, and report the registration problem to the live
-master. Do not infer "no master", recover by copying or editing identity/token
-state, or reset the project. Only `master status` returning `master: null`
-with no `recorded_unusable` entry means no live master; then follow the
-explicit user-approved promotion protocol.
+substitute for the canonical project root. `collab context` resolves the
+canonical root automatically and the daemon owns identity selection, creation,
+recovery, update, route publication, and binding persistence. Do not create a
+worktree-local peer. The `collab context` snapshot is the agent's complete
+live-master and peer read. A failed context is not evidence that no master
+exists; preserve the exact error. Master promotion still requires explicit user
+approval and a live registered transport. `collab master status` remains a
+read-only operator diagnostic.
 
 ### Native thread route resolution
 
@@ -1153,16 +1101,13 @@ are not candidates. The daemon verifies the selected owner with native
 `thread/read`; a tmux tuple can recover identity only when both runtime IDs are
 missing and never substitutes for communication or presence.
 
-`collab route resolve` exposes this read-only lookup for the current native
-thread; `--native-thread-id <id>` and `--session-id <id>` must match the live
-runtime binding. The daemon returns exactly one route,
-`ROUTE_RESOLVE_NOT_FOUND` for zero matches, and `ROUTE_RESOLVE_AMBIGUOUS` when
-multiple current bindings match. A pane-only recovery lookup requires an exact
-verified tmux server/session/pane/process tuple after both runtime IDs are
-absent. Missing, unknown, mismatched, or malformed endpoints fail explicitly.
-The resolver is read-only and returns no token;
-identity/token loading remains a separate authentication step after the route
-is selected.
+`collab route resolve` exposes a read-only operator diagnostic for the current
+native thread; `--native-thread-id <id>` and `--session-id <id>` must match the
+live runtime binding. It is not an agent identity recovery step. The daemon
+returns exactly one route, `ROUTE_RESOLVE_NOT_FOUND` for zero matches, and
+`ROUTE_RESOLVE_AMBIGUOUS` when multiple current bindings match. Missing, unknown,
+mismatched, or malformed endpoints fail explicitly. The resolver is read-only
+and returns no token.
 
 ## Subscribe to a future event
 

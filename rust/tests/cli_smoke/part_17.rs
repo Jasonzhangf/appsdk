@@ -1186,7 +1186,6 @@ fn dagpipe_validate_reports_every_embedded_graph_as_single_source_single_sink() 
         .map(|graph| graph["id"].as_str().unwrap())
         .collect::<Vec<_>>();
     assert_eq!(ids.len(), expected_ids.len());
-    assert!(ids.contains(&"appsdk-collab-identity-adjudication"));
     assert!(ids.contains(&"appsdk-collab-dsh-channel"));
     assert_eq!(
         ids.into_iter().collect::<std::collections::BTreeSet<_>>(),

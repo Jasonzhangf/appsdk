@@ -43,7 +43,6 @@ Common commands:
 
 ```sh
 collab context
-collab master status
 collab task status [task-id]
 collab task conflicts --feature <feature-id>
 collab task register <task-id> --feature <feature-id> \
@@ -68,12 +67,11 @@ owner-scoped lease can be cancelled with
   `<base>/<project-key>/<short-slug>`; legacy paths under
   `<project-main>/playground/<short-slug>` remain valid during the transition.
 - A worktree is only the task execution directory and has no identity context.
-  Run `collab context`, `collab master status`, registration, and recovery
-  from the canonical project main tree. Identity requires sessionID, threadID,
-  and canonical cwd to match the same current binding; a worktree cwd must
-  fail closed. Use `collab context` for this peer's registration/task context
-  and `collab who` only for the peer list. Never infer "no master" from a
-  missing worktree directory, a failed `context`, or `who` output.
+  Run `collab context`. The CLI automatically observes runtime facts, and the
+  daemon owns identity selection, creation, recovery, update, registration,
+  and binding persistence. Use the same snapshot for this peer's task context,
+  peers, and live-master state. Never create a worktree-local peer, and never
+  infer "no master" from a missing worktree directory or a failed `context`.
 - Declare task ID, owner, feature/resource ID, worktree, branch, base commit,
   priority, status, and next step before product edits.
 - Never share/reuse a worktree. Never depend on dirty main.
@@ -105,8 +103,6 @@ task id and notifies the live master. That registration, not a chat message,
 is the single source for the merge obligation: the master stays busy, changes
 session, or restarts, and the obligation survives. While it exists:
 
-- `collab status --all` exposes `pending_merges`; each task view carries
-  `merge.pending`.
 - `collab context` for the live master lists a `merge_pending` operation.
 - `appsdk longhorizon show` prints a `待合并` section and includes
   `pending_merges` in `--json`.
@@ -148,9 +144,11 @@ Route escalation by worker type:
 - A peer becomes master only after explicit user approval for that peer and
   project, with a live registered transport verified. If a live master
   exists, only that master may `collab master delegate`; if none exists, the
-  peer may `collab master promote --approval` itself. `appsdk init` proves
-  initialization of the current peer, not master ownership. A dead recorded
-  thread is not a live master. Codex root is not Collab master.
+  peer may `collab master promote --approval` itself. An internal init adapter
+  result alone proves neither peer initialization nor master ownership; only
+  `collab context` and the returned snapshot have that authority for the
+  current agent. A dead recorded thread is not a live master. Codex root is
+  not Collab master.
 - Master compiles the goal into a dependency graph, then parallel unique-write
   scopes. It assigns registered peers with `collab sendmessage` only when
   delivery conditions (done-iff, artifacts, in/out of

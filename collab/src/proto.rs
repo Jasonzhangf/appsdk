@@ -84,6 +84,23 @@ pub struct TransportCandidates {
     pub dsh: Option<DshCandidate>,
 }
 
+/// Observed caller facts for host-local identity reconciliation. The daemon
+/// determines the worker and credentials; neither is a caller-selected field.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityFacts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmux: Option<TmuxCandidate>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelectedTransport {
     pub kind: TransportKind,
@@ -441,6 +458,11 @@ pub enum Req {
     Context {
         worker_id: String,
         token: String,
+    },
+    /// Host-local bootstrap. Endpoint admission and credential issuance belong
+    /// to the daemon, not the CLI that collected these partial facts.
+    IdentityContext {
+        facts: IdentityFacts,
     },
     /// Resolve the unique registered project route for one tmux pane. The
     /// complete endpoint prevents equal session/pane names on different tmux

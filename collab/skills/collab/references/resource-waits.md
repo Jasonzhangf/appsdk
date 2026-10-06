@@ -34,7 +34,8 @@ parent when parent is not the master. If no live master exists, escalate to
 the task-initiating collaborator. Independent peers may decline a master
 collaboration invite. Include the blocking task, responsible actor,
 deadline, proposed solution, attempted actions, and requested decision. Never
-invent a master from `appsdk init`; master promotion requires explicit user
-approval for the exact peer and project plus live identity verification. If a
+invent a master from an internal init adapter; master promotion requires
+explicit user approval for the exact peer and project plus live identity
+verification. Use `collab context` as the agent's live-master read. If a
 live master exists, only that master may delegate; if none exists, a peer may
 promote itself after approval. Codex root is not Collab master.

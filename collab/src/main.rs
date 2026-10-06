@@ -1,7 +1,7 @@
 mod board;
-mod dashboard;
 mod client;
 mod config;
+mod dashboard;
 mod identity;
 mod install_skills;
 pub(crate) mod migration;
@@ -38,105 +38,15 @@ struct Cli {
     cmd: Cmd,
 }
 
-
 fn out<T: serde::Serialize>(v: &T) {
     println!("{}", serde_json::to_string_pretty(v).unwrap());
 }
 
-/// Register an identity with the server (idempotent for the same token).
-fn register(scope: &Scope, ident: &mut Identity) -> anyhow::Result<serde_json::Value> {
-    let context_runtime = match ident.runtime.as_ref() {
-        Some(runtime) => {
-            runtime.validate()?;
-            runtime.clone()
-        }
-        None => RuntimeIdentity::cli_adapter(&ident.worker_id)?,
-    };
-    register_with_runtime(scope, ident, context_runtime)
-}
-
-/// Bootstrap recovery with the only runtime identity accepted before the
-/// daemon has restored this worker's registered route.
-fn register_recovery(scope: &Scope, ident: &mut Identity) -> anyhow::Result<serde_json::Value> {
-    register_with_runtime(
-        scope,
-        ident,
-        RuntimeIdentity::cli_adapter(&ident.worker_id)?,
-    )
-}
-
-fn register_with_runtime(
-    scope: &Scope,
-    ident: &mut Identity,
-    context_runtime: RuntimeIdentity,
-) -> anyhow::Result<serde_json::Value> {
-    let cwd = scope.root.display().to_string();
-    // Candidate collection yields at most one channel family.
-    //
-    // dsh is mutually exclusive with the pane transports (design F1), and a
-    // persisted binding keeps its own channel: collecting a pane candidate for
-    // a persisted dsh peer would silently migrate it onto another transport.
-    //
-    // This CLI never produces a dsh candidate. Every dsh field comes from the
-    // gateway's own registry (design section 3.1) and DSH exposes no ambient
-    // agent/session identity to derive it from, so the gateway supplies the
-    // candidate through its own client path (design section 7.2) instead.
-    let persisted_kind = ident
-        .transport
-        .as_ref()
-        .map(|transport| transport.kind.clone());
-    let (appserver_candidate, tmux_candidate) = match persisted_kind {
-        Some(proto::TransportKind::Dsh) => (None, None),
-        Some(proto::TransportKind::Tmux) => (
-            None,
-            crate::client::adapters::tmux::candidate_from_env().ok(),
-        ),
-        _ => (
-            crate::client::adapters::candidate_from_env().map_err(anyhow::Error::msg)?,
-            crate::client::adapters::tmux::candidate_from_env().ok(),
-        ),
-    };
-    let response: serde_json::Value = client::call_with_runtime_identity_at_root_daemon(
-        &scope.sock_path(),
-        &Req::Register {
-            worker_id: ident.worker_id.clone(),
-            token: ident.token.clone(),
-            cwd,
-            candidates: Some(proto::TransportCandidates {
-                appserver: appserver_candidate,
-                tmux: tmux_candidate,
-                dsh: None,
-            }),
-        },
-        &scope.root,
-        &context_runtime,
-    )?;
-    let (runtime, transport) =
-        identity::registration_from_receipt(&response, &ident.worker_id, &scope.root)?;
-    if runtime.appserver_id != context_runtime.appserver_id {
-        anyhow::bail!(
-            "registration receipt app scope mismatch: expected {}, observed {}",
-            context_runtime.appserver_id,
-            runtime.appserver_id
-        );
-    }
-    identity::persist_registration(scope, ident, runtime, transport)?;
-    Ok(response)
-}
-
-/// Identity bootstrap used by every command that acts as a worker.
-fn me(scope: &Scope, worker: Option<String>) -> anyhow::Result<Identity> {
-    let worker = worker.or_else(|| std::env::var("COLLAB_WORKER").ok());
-    let mut ident = identity::load_or_create(scope, worker, None)?;
-    if ident.runtime.is_none() || ident.transport.is_none() {
-        let _ = register(scope, &mut ident)?;
-    } else if !persisted_runtime_matches_scope(scope, &ident)? {
-        // A persisted binding that no longer matches this session, thread, or
-        // canonical cwd must not be reused: commands would then be dispatched
-        // under a stale App Server address.  Re-register through the same
-        // owner used by `ensure_registration`.
-        register_recovery(scope, &mut ident)?;
-    }
+/// Resolve the authenticated worker through the daemon-owned identity context.
+fn me(scope: &Scope) -> anyhow::Result<Identity> {
+    let facts = collect_identity_facts(None)?;
+    let (snapshot, receipt) = identity_context_response(scope, facts)?;
+    let ident = receipt.ok_or_else(|| identity_context_required(&snapshot))?;
     runtime_for_request(&ident)?;
     Ok(ident)
 }
@@ -150,60 +60,6 @@ fn registered_board_identity(scope: &Scope) -> anyhow::Result<Identity> {
     }
     runtime_for_request(&identity)?;
     Ok(identity)
-}
-
-/// How `collab context` changed an identity during automatic bootstrap.
-enum RegistrationOutcome {
-    Created,
-    Reused,
-    Recovered,
-    Recreated,
-}
-
-fn ensure_registration(scope: &Scope, ident: &mut Identity) -> anyhow::Result<serde_json::Value> {
-    ensure_registration_with_outcome(scope, ident).map(|(value, _)| value)
-}
-
-fn ensure_registration_with_outcome(
-    scope: &Scope,
-    ident: &mut Identity,
-) -> anyhow::Result<(serde_json::Value, RegistrationOutcome)> {
-    if ident.runtime.is_none() || ident.transport.is_none() {
-        let value = register(scope, ident)?;
-        Ok((value, RegistrationOutcome::Created))
-    } else if !persisted_runtime_matches_scope(scope, ident)? {
-        match register_recovery(scope, ident) {
-            Ok(value) => Ok((value, RegistrationOutcome::Recovered)),
-            Err(error) => {
-                if ident.transport.as_ref().is_some_and(|transport| {
-                    transport.kind == TransportKind::Tmux
-                        && transport.tmux_endpoint.as_ref().is_some_and(|old| {
-                            crate::client::adapters::tmux::candidate_from_env()
-                                .ok()
-                                .is_some_and(|current| {
-                                    crate::client::adapters::tmux::same_pane_route(
-                                        old,
-                                        &current.endpoint,
-                                    )
-                                })
-                        })
-                }) {
-                    return Err(error);
-                }
-                // A stale binding that can no longer be recovered in place.
-                // Re-register fresh with the same worker token so the server
-                // supersedes the old transport; the previous identity is
-                // dropped as the active peer without a daemon restart.
-                ident.runtime = None;
-                ident.transport = None;
-                let value = register(scope, ident)?;
-                Ok((value, RegistrationOutcome::Recreated))
-            }
-        }
-    } else {
-        runtime_for_request(ident)?;
-        Ok((json!({"reused": true}), RegistrationOutcome::Reused))
-    }
 }
 
 fn persisted_runtime_matches_scope(scope: &Scope, ident: &Identity) -> anyhow::Result<bool> {
@@ -477,7 +333,10 @@ fn main() {
     if let Err(e) = run(cli.cmd) {
         eprintln!("collab: {}", format_cli_error(&e.to_string()));
         if let Some(server_error) = e.downcast_ref::<client::ServerResponseError>() {
-            eprintln!("collab response: {}", serde_json::json!(&server_error.response));
+            eprintln!(
+                "collab response: {}",
+                serde_json::json!(&server_error.response)
+            );
         }
         std::process::exit(1);
     }
@@ -485,9 +344,6 @@ fn main() {
 
 const LEGACY_ROUTE_RESOLVE_NOT_FOUND_RECOVERY: &str = "recovery: run `collab context` from the canonical project main checkout to resolve the route and restore registration; do not re-register a worktree or edit routes.jsonl";
 const LEGACY_ROUTE_RESOLVE_NOT_FOUND_UPGRADE: &str = "recovery: run `collab context` from the canonical project main checkout; preserve daemon state and do not start a second daemon or use mailbox state as transport delivery";
-const IDENTITY_REBIND_UNPROVEN_RECOVERY: &str = "recovery: run `collab context` from the canonical project main checkout; if the same identity error persists, report the exact error and worker_id to the live master with `COLLAB_WORKER=<worker_id> collab sendmessage --from <worker_id> --to <master> --subject blocker \"<exact error; worker_id=<worker_id>; cause; decision needed>\"`; if that also fails, report out-of-band through a healthy peer or the human; do not edit routes, copy tokens, or start a second daemon";
-const IDENTITY_RESTORE_CROSS_PROJECT_RECOVERY: &str = "recovery: run `collab context` from the canonical project main checkout for the current project; if it persists, preserve the exact error and worker_id and report out-of-band to the live master through a healthy peer or the human; do not try `collab sendmessage` through the same failing identity path; do not edit routes, copy tokens, or start a second daemon";
-
 include!("main_error_format.rs");
 
 fn run(cmd: Cmd) -> anyhow::Result<()> {
@@ -524,7 +380,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             out(&v);
             Ok(())
         }
-        Cmd::Init { worker_id } => {
+        Cmd::Init => {
             let project_root = scope::project_root_for_init()?;
             if project_root.ancestors().skip(1).any(|ancestor| {
                 ancestor
@@ -539,8 +395,9 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             let scope = Scope { root: project_root };
             let started = !client::alive(&scope.sock_path());
             client::ensure_server(&scope.sock_path())?;
-            let mut ident = identity::load_or_create_for_init(&scope, worker_id)?;
-            let registration = ensure_registration(&scope, &mut ident)?;
+            let facts = collect_identity_facts(None)?;
+            let (snapshot, ident) = identity_context_response(&scope, facts)?;
+            let ident = ident.ok_or_else(|| identity_context_required(&snapshot))?;
             let daemon_pid = std::fs::read_to_string(scope.host_paths()?.pid_path())
                 .map_err(|error| anyhow::anyhow!("registered daemon PID is unavailable: {error}"))?
                 .trim()
@@ -557,9 +414,9 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 "runtime": runtime,
                 "transport_selected": ident.transport,
                 "daemon_started": started,
-                "role_brief": registration["role_brief"],
+                "role_brief": snapshot["role_brief"],
                 "task_board": task_board["tasks"],
-                "recovery_action": registration["role_brief"]["communication_recovery"]
+                "recovery_action": snapshot["role_brief"]["communication_recovery"]
             }));
             Ok(())
         }
@@ -672,14 +529,13 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
         Cmd::Mailbox { cmd } => {
             let scope = Scope::resolve()?;
             match cmd {
-                MailboxCmd::Read { all, sort, worker } => {
-                    let explicit_worker = worker.is_some();
-                    let actorless = all || explicit_worker;
+                MailboxCmd::Read { all, sort } => {
+                    let actorless = all;
                     let mut identity = None;
                     let worker_id = if actorless {
-                        worker
+                        None
                     } else {
-                        let ident = me(&scope, None)?;
+                        let ident = me(&scope)?;
                         let worker_id = ident.worker_id.clone();
                         identity = Some(ident);
                         Some(worker_id)
@@ -705,9 +561,6 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     Ok(())
                 }
             }
-        }
-        Cmd::Role => {
-            anyhow::bail!("collab role is deprecated; declared roles were removed")
         }
         Cmd::Route {
             command:
@@ -799,13 +652,8 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 return Ok(());
             }
             let scope = Scope::resolve()?;
-            let ident = me(&scope, None)?;
+            let ident = me(&scope)?;
             let req = match command {
-                MasterCmd::Recover => {
-                    anyhow::bail!(
-                        "collab master recover is deprecated; use collab master promote or delegate"
-                    )
-                }
                 MasterCmd::Promote { approval } => Req::MasterPromote {
                     worker_id: ident.worker_id.clone(),
                     token: ident.token.clone(),
@@ -876,32 +724,17 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Worker { cmd } => {
-            let scope = match cmd {
-                WorkerCmd::Recover => scope::resolve_for_recovery()?,
-                _ => Scope::resolve()?,
-            };
+            let scope = Scope::resolve()?;
             match cmd {
-                WorkerCmd::Recover => {
-                    let mut ident = identity::load_or_create(&scope, None, None)?;
-                    let _ = register_recovery(&scope, &mut ident)?;
-                    out(&json!({
-                        "recovered": true,
-                        "worker_id": ident.worker_id,
-                        "transport": ident.transport,
-                        "identity_kind": "peer",
-                        "next": "run collab who and collab task status; task ownership is unchanged"
-                    }));
-                    Ok(())
-                }
                 WorkerCmd::Status { id } => {
-                    let ident = me(&scope, None)?;
+                    let ident = me(&scope)?;
                     let v: serde_json::Value =
                         call_project(&scope, &ident, &Req::WorkerStatus { worker_id: id })?;
                     out(&v);
                     Ok(())
                 }
                 WorkerCmd::Snapshot { id, lines } => {
-                    let ident = me(&scope, None)?;
+                    let ident = me(&scope)?;
                     let v: serde_json::Value = call_project(
                         &scope,
                         &ident,
@@ -916,7 +749,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     Ok(())
                 }
                 WorkerCmd::Close { id, reason } => {
-                    let ident = me(&scope, None)?;
+                    let ident = me(&scope)?;
                     let v: serde_json::Value = call_project(
                         &scope,
                         &ident,
@@ -931,16 +764,6 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     Ok(())
                 }
             }
-        }
-        Cmd::TransferMaster { target } => {
-            let _ = target;
-            anyhow::bail!("collab transfer-master is deprecated; use collab master delegate")
-        }
-        Cmd::RemoveWorker { target, force } => {
-            let _ = (target, force);
-            anyhow::bail!(
-                "collab remove-worker is deprecated; use owner cleanup and migration verify"
-            )
         }
         Cmd::Reset {
             approval,
@@ -966,17 +789,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 },
             )
         }
-        Cmd::Whoami { worker } => {
-            let scope = Scope::resolve()?;
-            let mut ident = identity::load_or_create(&scope, worker, None)?;
-            let registration = ensure_registration(&scope, &mut ident)?;
-            let mut response = serde_json::to_value(&ident)?;
-            response["role_brief"] = registration["role_brief"].clone();
-            out(&response);
-            Ok(())
-        }
         Cmd::Send {
-            from,
             to,
             subject,
             r#type,
@@ -985,13 +798,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             body,
         } => {
             let scope = Scope::resolve()?;
-            let ident = me(&scope, None)?;
-            if from
-                .as_deref()
-                .is_some_and(|requested| requested != ident.worker_id)
-            {
-                anyhow::bail!("--from must match the authenticated worker identity");
-            }
+            let ident = me(&scope)?;
             let body = body.join(" ");
             if body.is_empty() {
                 anyhow::bail!("empty message body");
@@ -1018,7 +825,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
         }
         Cmd::Notify { cmd } => {
             let scope = Scope::resolve()?;
-            let ident = me(&scope, None)?;
+            let ident = me(&scope)?;
             let request = match cmd {
                 NotifyCmd::Methods => Req::NotificationMethods,
                 NotifyCmd::Subscribe {
@@ -1056,11 +863,10 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
         }
         Cmd::Recv {
             timeout,
-            worker,
             receive_id,
         } => {
             let scope = Scope::resolve()?;
-            let ident = me(&scope, worker)?;
+            let ident = me(&scope)?;
             let receive_id = receive_id.unwrap_or_else(new_receive_id);
             // The caller must know the receive identity before consumption, not
             // only after a successful reply: a lost socket response still
@@ -1081,9 +887,9 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             out(&v);
             Ok(())
         }
-        Cmd::Inbox { worker } => {
+        Cmd::Inbox => {
             let scope = Scope::resolve()?;
-            let ident = me(&scope, worker)?;
+            let ident = me(&scope)?;
             let v: serde_json::Value = call_project(
                 &scope,
                 &ident,
@@ -1095,16 +901,16 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             out(&v);
             Ok(())
         }
-        Cmd::Context { worker } => {
-            out(&context_snapshot(worker)?);
+        Cmd::Context { provide } => {
+            out(&context_snapshot(provide)?);
             Ok(())
         }
-        Cmd::Ack { ids, worker, all } => {
+        Cmd::Ack { ids, all } => {
             if ids.is_empty() && !all {
-                anyhow::bail!("usage: collab ack <msg_id>... [--all] [--worker <id>]");
+                anyhow::bail!("usage: collab ack <msg_id>... [--all]");
             }
             let scope = Scope::resolve()?;
-            let ident = me(&scope, worker)?;
+            let ident = me(&scope)?;
             let v: serde_json::Value = call_project(
                 &scope,
                 &ident,
@@ -1119,7 +925,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
         }
         Cmd::Msg { msg_id } => {
             let scope = Scope::resolve()?;
-            let ident = me(&scope, None)?;
+            let ident = me(&scope)?;
             let v: serde_json::Value = call_project(&scope, &ident, &Req::MsgStatus { msg_id })?;
             out(&v);
             Ok(())
@@ -1128,7 +934,10 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             let scope = Scope::resolve()?;
             let identity = registered_board_identity(&scope)?;
             let runtime = runtime_for_request(&identity)?;
-            let context = proto::ProjectContext::for_registered_root_with_app(&scope.root, runtime.appserver_id.clone())?;
+            let context = proto::ProjectContext::for_registered_root_with_app(
+                &scope.root,
+                runtime.appserver_id.clone(),
+            )?;
             dashboard::run(scope.sock_path(), context, port)
         }
         Cmd::Board { cmd } => {
@@ -1136,7 +945,11 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             let ident = registered_board_identity(&scope)?;
             let request = match cmd {
                 board::BoardCommand::Show => Req::BoardShow,
-                command => Req::Board { worker_id: ident.worker_id.clone(), token: ident.token.clone(), command },
+                command => Req::Board {
+                    worker_id: ident.worker_id.clone(),
+                    token: ident.token.clone(),
+                    command,
+                },
             };
             let value: serde_json::Value = call_project(&scope, &ident, &request)?;
             out(&value);
@@ -1144,7 +957,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
         }
         Cmd::Task { cmd } => {
             let scope = Scope::resolve()?;
-            let ident = me(&scope, None)?;
+            let ident = me(&scope)?;
             let worker_id = ident.worker_id.clone();
             let token = ident.token.clone();
             let req = match cmd {
@@ -1178,19 +991,49 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     status,
                     next_step: next,
                 },
-                TaskCmd::Accept { id, expected_revision } => match expected_revision {
+                TaskCmd::Accept {
+                    id,
+                    expected_revision,
+                } => match expected_revision {
                     Some(expected_revision) => Req::Board {
-                        worker_id: worker_id.clone(), token: token.clone(),
-                        command: board::BoardCommand::Respond { id, accept: true, decline: false, expected_revision, reason: None },
+                        worker_id: worker_id.clone(),
+                        token: token.clone(),
+                        command: board::BoardCommand::Respond {
+                            id,
+                            accept: true,
+                            decline: false,
+                            expected_revision,
+                            reason: None,
+                        },
                     },
-                    None => Req::TaskAccept { worker_id: worker_id.clone(), token: token.clone(), task_id: id },
+                    None => Req::TaskAccept {
+                        worker_id: worker_id.clone(),
+                        token: token.clone(),
+                        task_id: id,
+                    },
                 },
-                TaskCmd::Decline { id, expected_revision, reason, legacy_assignment } => Req::Board {
-                    worker_id: worker_id.clone(), token: token.clone(),
+                TaskCmd::Decline {
+                    id,
+                    expected_revision,
+                    reason,
+                    legacy_assignment,
+                } => Req::Board {
+                    worker_id: worker_id.clone(),
+                    token: token.clone(),
                     command: if legacy_assignment {
-                        board::BoardCommand::DeclineAssigned { id, expected_revision, reason }
+                        board::BoardCommand::DeclineAssigned {
+                            id,
+                            expected_revision,
+                            reason,
+                        }
                     } else {
-                        board::BoardCommand::Respond { id, accept: false, decline: true, expected_revision, reason: Some(reason) }
+                        board::BoardCommand::Respond {
+                            id,
+                            accept: false,
+                            decline: true,
+                            expected_revision,
+                            reason: Some(reason),
+                        }
                     },
                 },
                 TaskCmd::Relocate {
@@ -1205,11 +1048,6 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     worktree_path: worktree,
                     branch,
                     base_commit,
-                },
-                TaskCmd::Claim { id } => Req::TaskClaim {
-                    worker_id: worker_id.clone(),
-                    token: token.clone(),
-                    task_id: id,
                 },
                 TaskCmd::Wait { id, blocking_task } => Req::TaskWait {
                     worker_id: worker_id.clone(),
@@ -1271,10 +1109,6 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     token: token.clone(),
                     task_id: id,
                 },
-                TaskCmd::Dispatch => Req::TaskDispatch {
-                    worker_id: worker_id.clone(),
-                    token: token.clone(),
-                },
                 TaskCmd::Status { id } => Req::TaskStatus { task_id: id },
             };
             let v: serde_json::Value = call_project(&scope, &ident, &req)?;
@@ -1283,7 +1117,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
         }
         Cmd::Migrate { cmd } => {
             let scope = Scope::resolve()?;
-            let ident = me(&scope, None)?;
+            let ident = me(&scope)?;
             let worker_id = ident.worker_id.clone();
             let token = ident.token.clone();
             let req = match cmd {

@@ -1,22 +1,23 @@
 ---
 name: appsdk-migration
-description: "AppSDK+Collab 迁移/升级/身份重绑/授权重置。owner 全程记录证据; worker 只可查候选, 不可删状态/重启/重绑他人/未授权删除。"
+description: "AppSDK+Collab 迁移/升级/身份上下文恢复/授权重置。owner 全程记录证据; worker 只可查候选, 不可删状态/重启/改身份/未授权删除。"
 ---
 
 # AppSDK migration
 
 Use this Skill when an existing AppSDK or its Collab runtime must move to a
-reviewed version, when a daemon or peer identity must be rebound, or when the
-operator has explicitly authorized discarding a named legacy control plane.
+reviewed version, when peer identity must be reconciled after a reviewed
+migration, or when the operator has explicitly authorized discarding a named
+legacy control plane.
 The migration owner runs the whole operation and records its evidence. A
 worker may inspect or prepare a candidate, but may not independently delete
-state, restart the daemon, rebind another peer, or resume admissions.
+state, restart the daemon, change identity, or resume admissions.
 
 This Skill owns the migration state machine:
 
 ```text
 prepare -> inspect -> classify -> snapshot -> freeze
-        -> install/restart -> identity-rebind -> verify -> resume
+        -> install/restart -> identity-context -> verify -> resume
 ```
 
 The installed `collab` Skill owns transport, daemon, route, and identity
@@ -44,9 +45,9 @@ delivery, review, install, restart, or live communication.
   not prove a registered identity or route.
 - A durable peer registration and its live runtime route are the identity
   authority. A transcript/session ID is observation metadata and may change
-  after compression, fork, thread replacement, or restart. Rebind the new live
-  runtime through the official registration path; never copy tokens or make a
-  session ID the durable identity.
+  after compression, fork, thread replacement, or restart. Run `collab context`
+  once for the new live runtime; the daemon reconciles the durable peer
+  identity. Never copy tokens or make a session ID the durable identity.
 - User authorization is required before promoting a peer to `master`. A peer
   can register and communicate only through a server-selected App Server route
   that passed its capability self-check. A Desktop runtime must not register a
@@ -183,7 +184,7 @@ The Collab-owned project control plane uses a separate reset owner:
 collab down
 collab reset --discard-legacy --approval "<explicit user authorization>"
 collab up
-collab init
+collab context
 ```
 
 It archives the exact `.agent-collab/` and `.agent-collab-v2/` bytes, removes
@@ -294,32 +295,40 @@ binary as an implicit fallback.
 
 After the restart, prove one PID and socket, the expected binary hash, and no
 old writer. A restart error or ambiguous process ownership is `unknown`; do
-not rebind peers or send recovery messages until the owner resolves it.
+not run identity reconciliation or send recovery messages until the owner
+resolves it.
 
-## Identity rebind
+## Identity context reconciliation
 
-Rebind only the named live peers after the daemon and socket pass the restart
-gate. The current peer must have a live App Server runtime whose capability
-self-check and server selection passed. Use the official current-peer
-initialization or rebind operation once in that runtime, then inspect:
+After the daemon and socket pass the restart gate, run `collab context` once
+for each named live peer whose runtime must be reconciled. The current peer
+must have a live App Server runtime whose capability self-check and server
+selection passed. The daemon owns identity creation, selection, restoration,
+update, registration, route publication, and lease restoration. If context
+returns `required_fields`, supply only those real facts once:
 
 ```sh
-collab context
+collab context --provide '<JSON>'
 ```
+
+The supplement may contain only requested `session_id`, `thread_id`,
+`endpoint`, or `namespace` facts; it never supplies a worker, approval, token,
+route, or binding.
 
 The evidence must bind the durable peer ID to the live runtime, selected
 App Server target, exact project cwd, role, parent, and capabilities. A screen
 preview, process name, or session ID alone is insufficient.
 
 When an App Server binding is replaced, or a transcript is forked/compressed,
-preserve the durable peer identity only through the supported authenticated
-rebind. Do not reuse a stale endpoint, register a new master, copy identity
-tokens, or replay the old mailbox batch. A user-approved master assignment is
-the only basis for the `master` role; otherwise the peer remains a peer.
+run `collab context` once from the new live runtime. The daemon reconciles the
+durable peer identity from proven anchors. Do not reuse a stale endpoint,
+register a new master, copy identity tokens, or replay the old mailbox batch. A
+user-approved master assignment is the only basis for the `master` role;
+otherwise the peer remains a peer.
 
 If any identity, scope, parent, or capability differs from the snapshot, stop
-before messaging. Record `identity_mismatch` and require an explicit
-operator/master repair decision.
+before messaging. Record `identity_mismatch` and require an explicit migration
+owner or user decision before continuing.
 
 ## Verify
 
@@ -331,7 +340,7 @@ does not imply the next.
 2. **Durability:** journal, mailbox, tasks, workers, leases, and last durable
    IDs are continuous with the snapshot, apart from explicitly recorded
    migration events. Any unexplained count or ID loss fails the gate.
-3. **Identity:** each rebound peer has a confirmed durable identity, exact
+3. **Identity:** each reconciled peer has a confirmed durable identity, exact
    cwd/project scope, role, and live bidirectional App Server route.
 4. **Communication:** send one unique migration marker to an authorized
    registered peer and require separate evidence for durable journal
@@ -375,8 +384,8 @@ Use this contract at every phase:
 | incomplete snapshot or count/hash mismatch | keep current state; repair snapshot inputs or escalate | freeze with incomplete truth or overwrite the snapshot |
 | lease/owner conflict | preserve both owners and task IDs; ask the migration owner to resolve | steal, force-close, or invent an owner |
 | candidate/version/hash mismatch | stop before install; report expected and observed values | install “close enough” or use the old binary silently |
-| restart timeout or ambiguous PID/socket | leave lifecycle state explicit; inspect once through the official command | send/rebind, start a second daemon, or kill by process name |
-| identity/scope mismatch | stop all messaging and goal operations; perform authenticated rebind or escalate | copy tokens, guess a session binding, or promote a peer |
+| restart timeout or ambiguous PID/socket | leave lifecycle state explicit; inspect once through the official command | send, run another identity command, start a second daemon, or kill by process name |
+| identity/scope mismatch | stop all messaging and goal operations; use `collab context` once or escalate to the migration owner | copy tokens, guess a session binding, or promote a peer |
 | partial reset/migration result | preserve transaction ID and files; use the canonical recovery path | manually finish deletion or run a second reset |
 | communication marker missing reply | classify the failing layer and keep the route unverified | treat durable send or notification as peer consumption |
 

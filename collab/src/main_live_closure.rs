@@ -504,7 +504,7 @@ pub(crate) fn live_closure_observe(
             anyhow::bail!("COLLAB_LIVE_CLOSURE_OBSERVE_MISSING:{name}");
         }
     }
-    let ident = me(scope, None)?;
+    let ident = me(scope)?;
     let workers: serde_json::Value = call_project(scope, &ident, &Req::Workers)?;
     let target = workers
         .get("workers")
@@ -586,7 +586,7 @@ pub(crate) fn live_closure_probe(
         }
     }
 
-    let ident = me(scope, None)?;
+    let ident = me(scope)?;
     let context: serde_json::Value = call_project(
         scope,
         &ident,

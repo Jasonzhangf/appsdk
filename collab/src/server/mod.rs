@@ -1,4 +1,5 @@
 pub mod global_state;
+mod identity_context;
 pub(crate) mod keepalive;
 pub mod mailbox;
 pub mod notification_contract;

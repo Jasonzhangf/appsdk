@@ -1267,50 +1267,16 @@ fn init_waits_for_slow_collab_route_recovery_before_timeout() {
 }
 
 #[test]
-fn init_recovers_peer_identity_once_before_declaring_collab_unavailable() {
-    assert_init_recovers_peer_identity_error(
-        "init-collab-peer-identity-recover",
+fn init_reports_token_mismatch_once_without_repair() {
+    assert_init_reports_identity_failure_once(
+        "init-collab-token-mismatch",
         "collab: token mismatch: identity does not own this worker_id",
-        "runtime-peer-recovered",
-        "thread-peer-recovered",
     );
 }
 
-#[test]
-fn init_recovers_persisted_peer_identity_with_missing_runtime() {
-    assert_init_recovers_peer_identity_error(
-        "init-collab-peer-persisted-identity-runtime-recover",
-        "collab: persisted Collab identity peer-recovered has no registered runtime",
-        "runtime-peer-persisted-recovered",
-        "thread-peer-persisted-recovered",
-    );
-}
-
-#[test]
-fn init_recovers_peer_identity_with_missing_runtime_binding() {
-    assert_init_recovers_peer_identity_error(
-        "init-collab-peer-runtime-binding-recover",
-        "collab: identity has no registered runtime binding",
-        "runtime-peer-binding-recovered",
-        "thread-peer-binding-recovered",
-    );
-}
-
-#[test]
-fn init_recovers_typed_runtime_binding_missing_runtime() {
-    assert_init_recovers_peer_identity_error(
-        "init-collab-peer-typed-runtime-missing-recover",
-        "RUNTIME_BINDING_REJECTED: persisted identity has no registered runtime",
-        "runtime-peer-typed-runtime-recovered",
-        "thread-peer-typed-runtime-recovered",
-    );
-}
-
-fn assert_init_recovers_peer_identity_error(
+fn assert_init_reports_identity_failure_once(
     fixture_name: &str,
     init_error: &str,
-    runtime_id: &str,
-    thread_id: &str,
 ) {
     let root = temp_root(fixture_name);
     fs::create_dir_all(&root).unwrap();
@@ -1319,25 +1285,16 @@ fn assert_init_recovers_peer_identity_error(
     let fake_bin = root.join("fake-bin");
     fs::create_dir_all(&fake_bin).unwrap();
     let fake_collab = fake_bin.join("collab");
-    let state = root.join("collab-state.txt");
     let probe = root.join("collab-probe.txt");
     fs::write(
         &fake_collab,
         format!(
             r#"#!/bin/sh
 printf '%s\n' "$*" >> "{}"
-state="{}"
 case "$*" in
   "init")
-    if [ ! -f "$state" ]; then
-      printf '%s\n' '{}' >&2
-      exit 1
-    fi
-    printf '%s\n' '{{"ok":true,"runtime":{{"runtimeId":"{}","appserverId":"appserver-cli","namespace":"codex_tui","endpoint":"unix:///tmp/codex.sock","projectRoot":"{}","capabilities":["session_status","read_thread","send_message_to_thread","wait_reply"],"processId":4242}},"transport_selected":{{"kind":"appserver","endpoint":"unix:///tmp/codex.sock","namespace":"codex_tui","thread_id":"{}","capabilities":["session_status","read_thread","send_message_to_thread","wait_reply"],"self_check":"test"}}}}'
-    ;;
-  "worker recover")
-    printf '%s\n' recovered > "$state"
-    printf '%s\n' '{{"recovered":true,"worker_id":"peer-recovered","transport":{{"kind":"appserver","endpoint":"unix:///tmp/codex.sock","namespace":"codex_tui","thread_id":"thread-peer-recovered","capabilities":["send_message_to_thread"],"self_check":"test"}}}}'
+    printf '%s\n' '{}' >&2
+    exit 1
     ;;
   *)
     printf '%s\n' "unexpected collab command: $*" >&2
@@ -1346,11 +1303,7 @@ case "$*" in
 esac
 "#,
             probe.display(),
-            state.display(),
-            init_error,
-            runtime_id,
-            root.canonicalize().unwrap().display(),
-            thread_id
+            init_error
         ),
     )
     .unwrap();
@@ -1373,25 +1326,31 @@ esac
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("collab-channel"),
+        String::from_utf8_lossy(&output.stderr).contains("COLLAB_INIT_FAILED"),
         "stdout={} stderr={}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        !String::from_utf8_lossy(&output.stderr).contains("COLLAB_INIT_FAILED"),
+        String::from_utf8_lossy(&output.stderr).contains(init_error),
         "stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("collab-channel"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     let invocations = fs::read_to_string(&probe).unwrap();
-    assert_eq!(invocations, "init\nworker recover\ninit\n");
+    assert_eq!(invocations, "init\n");
 
     fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn init_does_not_recover_peer_identity_from_non_canonical_root() {
-    let root = temp_root("init-collab-peer-recover-noncanonical");
+fn init_reports_pending_identity_facts_without_repair() {
+    let root = temp_root("init-collab-pending-identity-facts");
     fs::create_dir_all(&root).unwrap();
     confirm_preparation(&root, ".", "project_refactor");
 
@@ -1406,12 +1365,7 @@ fn init_does_not_recover_peer_identity_from_non_canonical_root() {
 printf '%s\n' "$*" >> "{}"
 case "$*" in
   "init")
-    printf '%s\n' 'collab: token mismatch: identity does not own this worker_id' >&2
-    exit 1
-    ;;
-  "worker recover")
-    printf '%s\n' 'recover must not run from this root' >&2
-    exit 64
+    printf '%s\n' '{{"ok":true,"snapshot":{{"registered":false,"requires_identity_update":{{"required":true,"reason":"IDENTITY_INFORMATION_REQUIRED","required_fields":["session_id","thread_id"]}}}}}}'
     ;;
   *)
     printf '%s\n' "unexpected collab command: $*" >&2
@@ -1424,12 +1378,14 @@ esac
     )
     .unwrap();
     fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+    init_git(&root);
+    let path = format!("{}:{}", fake_bin.display(), env::var("PATH").unwrap());
 
     let output = Command::new(binary())
         .args(["init", root.to_str().unwrap()])
         .current_dir(&root)
         .env("APPSDK_HOME", test_global_registry_root_for_project(&root))
-        .env("PATH", &fake_bin)
+        .env("PATH", &path)
         .output()
         .unwrap();
 
@@ -1440,8 +1396,14 @@ esac
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
+        String::from_utf8_lossy(&output.stderr).contains("COLLAB_INIT_PENDING"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
-            .contains("COLLAB_INIT_RECOVER_SKIPPED_NON_CANONICAL_ROOT"),
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("\"required_fields\":[\"session_id\",\"thread_id\"]"),
         "stdout={} stderr={}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
@@ -1454,6 +1416,11 @@ esac
     );
     let invocations = fs::read_to_string(&probe).unwrap();
     assert_eq!(invocations, "init\n");
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("worker recover"),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     fs::remove_dir_all(root).unwrap();
 }

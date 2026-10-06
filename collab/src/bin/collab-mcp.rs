@@ -9,7 +9,7 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
     json!({
         "name": name,
         "description": description,
-        "inputSchema": {"type":"object", "properties": properties, "required": required}
+        "inputSchema": {"type":"object", "properties": properties, "required": required, "additionalProperties": false}
     })
 }
 
@@ -26,18 +26,6 @@ fn tools() -> Value {
             &["receive_id"]
         ),
         tool("collab_subagent", "Parent manages children; child uses ready/working and sends results via collab_sendmessage. status includes mailbox, keepalive and notification history. snapshot is explicit screen-tail read only, not a health probe. Observers without an App Server push channel must check status/mailbox themselves. rearm requires an explicit operator request after exhaustion. start accepts optional runtime=codex to override ~/.appsdk/config.toml. dispatch retains the legacy private managed-child path and is idempotent by request_id; ordinary peers must instead use collab_board_publish/invite with delivery/test conditions and an observed revision.", json!({"action":{"type":"string","enum":["start","dispatch","list","status","snapshot","rearm","send","ready","working","close"]},"id":{"type":"string"},"request_id":{"type":"string"},"runtime":{"type":"string","enum":["codex"]},"lines":{"type":"integer","minimum":1,"maximum":200},"subject":{"type":"string"},"body":{"type":"string"},"feature_id":{"type":"string"},"worktree_path":{"type":"string"},"branch":{"type":"string"},"base_commit":{"type":"string"},"priority":{"type":"string","enum":["p0","p1","p2","p3","p4"]},"next_step":{"type":"string"}}), &["action"]),
-        tool(
-            "collab_init",
-            "Operator-only. Prefer `collab_context`, which performs initialization, recovery, and registration automatically. Use this only for explicit operator-driven project initialization or an intentional peer selection via worker_id.",
-            json!({"worker_id":{"type":"string","minLength":1}}),
-            &[]
-        ),
-        tool(
-            "collab_whoami",
-            "Operator-only diagnostic. Returns the authenticated Collab identity; `collab_context` already restores and returns identity automatically.",
-            json!({}),
-            &[]
-        ),
         tool(
             "collab_who",
             "List registered workers and active tasks.",
@@ -154,8 +142,8 @@ fn tools() -> Value {
         ),
         tool(
             "collab_context",
-            "The single agent bootstrap entry. Automatically resolves the canonical project root, creates a missing baseline, starts a stopped daemon, restores identity and registration, re-arms the default direct-message lease unless the owner explicitly unsubscribed, and returns the authoritative snapshot plus the current role's operations. An identity failure is NOT a failed call: it succeeds with registered=false, identity=null, and requires_identity_update carrying reason/action/exact_error alongside the read-only peers/master/status/env projection, so branch on those fields instead of on the call's success. Idempotent; call it on bootstrap, thread/session change, daemon restart, identity mismatch, or route loss. Do not use init, whoami, worker recover, route resolve, or down/up for this.",
-            json!({}),
+            "The single agent bootstrap entry. Automatically resolves the canonical project root, creates a missing baseline, starts a stopped daemon, and lets the daemon establish, restore, or update identity, binding, and the default direct-message lease. Pass `provide` only when the returned snapshot has requires_identity_update.required=true; it must be a JSON object or JSON string containing only the exact `required_fields` (session_id, thread_id, endpoint, namespace). Values are observed facts, not identity selection; unknown, duplicate, null, empty, whitespace, or conflicting fields fail explicitly. The response displays only the authoritative snapshot and never the internal identity receipt or token. Do not use init, whoami, worker recover, route resolve, or down/up for this.",
+            json!({"provide":{"description":"JSON object or JSON string containing only the snapshot's exact required_fields; optional when facts are already observable","oneOf":[{"type":"object","additionalProperties":false,"properties":{"session_id":{"type":"string","minLength":1},"thread_id":{"type":"string","minLength":1},"endpoint":{"type":"string","minLength":1},"namespace":{"type":"string","minLength":1}}},{"type":"string","minLength":1}]}}),
             &[]
         ),
         tool(
@@ -171,7 +159,10 @@ fn tools() -> Value {
             &["action"]
         )
     ]);
-    tools.as_array_mut().expect("tool list").extend(board_tools::tools());
+    tools
+        .as_array_mut()
+        .expect("tool list")
+        .extend(board_tools::tools());
     tools
 }
 
@@ -199,7 +190,19 @@ fn call(name: &str, args: &Value) -> Result<String, String> {
 }
 
 fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
-    if let Some(argv) = board_tools::argv(name, args)? { return Ok(argv); }
+    let catalog = tools();
+    let spec = catalog.as_array().unwrap().iter().find(|tool| tool["name"] == name)
+        .ok_or_else(|| format!("unknown tool {name}"))?;
+    let properties = spec["inputSchema"]["properties"].as_object().unwrap();
+    let object = args.as_object().ok_or_else(|| format!("{name} arguments must be an object"))?;
+    for key in object.keys() {
+        if !properties.contains_key(key) {
+            return Err(format!("unknown argument {key} for {name}"));
+        }
+    }
+    if let Some(argv) = board_tools::argv(name, args)? {
+        return Ok(argv);
+    }
     let mut argv = Vec::<String>::new();
     match name {
         "collab_msg" => argv.extend(["msg".into(), required(args, "id")?]),
@@ -253,11 +256,6 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
                 optional_integer_flag(&mut argv, args, "lines", "--lines")?;
             }
         }
-        "collab_init" => {
-            argv.push("init".into());
-            optional_flag(&mut argv, args, "worker_id", "--worker-id")?;
-        }
-        "collab_whoami" => argv.push("whoami".into()),
         "collab_who" => argv.push("who".into()),
         "collab_sendmessage" => {
             argv.extend([
@@ -304,7 +302,41 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
             required(args, "subscription_id")?,
         ]),
         "collab_inbox" => argv.push("inbox".into()),
-        "collab_context" => argv.push("context".into()),
+        "collab_context" => {
+            argv.push("context".into());
+            if let Some(provide) = args.get("provide") {
+                let value = match provide {
+                    Value::String(value) => value.clone(),
+                    Value::Object(object) => {
+                        if object.is_empty() {
+                            return Err("provide must contain at least one identity fact".into());
+                        }
+                        for (key, value) in object {
+                            if !matches!(
+                                key.as_str(),
+                                "session_id" | "thread_id" | "endpoint" | "namespace"
+                            ) {
+                                return Err(format!("unknown provide field {key}"));
+                            }
+                            let value = value
+                                .as_str()
+                                .ok_or_else(|| format!("provide {key} must be a string"))?;
+                            if value.trim().is_empty() {
+                                return Err(format!("provide {key} must not be empty"));
+                            }
+                        }
+                        serde_json::to_string(provide).map_err(|error| {
+                            format!("provide must be JSON serializable: {error}")
+                        })?
+                    }
+                    _ => return Err("provide must be a JSON object or string".into()),
+                };
+                if value.trim().is_empty() {
+                    return Err("provide must not be empty".into());
+                }
+                argv.extend(["--provide".into(), value]);
+            }
+        }
         "collab_ack" => {
             argv.push("ack".into());
             for id in args
@@ -611,19 +643,76 @@ mod tests {
     }
 
     #[test]
-    fn init_schema_allows_explicit_peer_identity_for_new_runtime() {
+    fn collab_init_is_not_exposed_by_mcp() {
         let definitions = tools();
-        let init = definitions
+        assert!(
+            definitions
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|tool| tool["name"] != "collab_init"),
+            "the removed CLI compatibility entry must not remain an MCP tool"
+        );
+        assert!(build_argv("collab_init", &json!({})).is_err());
+    }
+
+    #[test]
+    fn context_schema_exposes_only_optional_fact_supplement() {
+        let definitions = tools();
+        let context = definitions
             .as_array()
             .unwrap()
             .iter()
-            .find(|tool| tool["name"] == "collab_init")
-            .unwrap();
-        assert_eq!(init["inputSchema"]["required"], json!([]));
-        assert_eq!(
-            init["inputSchema"]["properties"]["worker_id"]["type"],
-            "string"
+            .find(|tool| tool["name"] == "collab_context")
+            .expect("collab_context tool");
+        assert_eq!(context["inputSchema"]["required"], json!([]));
+        let provide = &context["inputSchema"]["properties"]["provide"];
+        assert!(provide["oneOf"].is_array(), "{provide}");
+        assert!(context["description"]
+            .as_str()
+            .unwrap()
+            .contains("required_fields"));
+        assert!(
+            definitions
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|tool| tool["name"] != "collab_whoami"),
+            "removed identity command must not remain in the MCP surface"
         );
+    }
+
+    #[test]
+    fn context_forwards_provide_object_and_string_unchanged() {
+        let object = json!({
+            "session_id": "session-1",
+            "thread_id": "thread-1",
+            "endpoint": "unix:///tmp/codex.sock",
+            "namespace": "codex_tui"
+        });
+        let argv = build_argv("collab_context", &json!({"provide": object.clone()}))
+            .expect("object supplement must build argv");
+        assert_eq!(argv[0], "context");
+        assert_eq!(argv[1], "--provide");
+        assert_eq!(serde_json::from_str::<Value>(&argv[2]).unwrap(), object);
+
+        let raw = r#"{"session_id":"session-1"}"#;
+        assert_eq!(
+            build_argv("collab_context", &json!({"provide": raw})).unwrap(),
+            vec!["context", "--provide", raw]
+        );
+        assert!(build_argv("collab_context", &json!({"provide": 42})).is_err());
+        assert!(build_argv("collab_context", &json!({"provide": ""})).is_err());
+        assert!(build_argv(
+            "collab_context",
+            &json!({"provide": {"worker_id": "worker-1"}})
+        )
+        .is_err());
+        assert!(build_argv("collab_context", &json!({"provide": {}})).is_err());
+        assert!(build_argv("collab_context", &json!({"provide": {"session_id": null}})).is_err());
+        assert!(build_argv("collab_context", &json!({"worker_id": "worker-1"})).is_err());
+        assert!(build_argv("collab_sendmessage", &json!({"to":"peer", "subject":"s", "body":"b", "from":"guessed-peer"})).is_err());
+        assert!(build_argv("collab_recv", &json!({"receive_id":"r", "worker":"guessed-peer"})).is_err());
     }
 
     #[test]

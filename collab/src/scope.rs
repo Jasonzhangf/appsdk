@@ -805,12 +805,16 @@ the installed independent binaries are `~/.cargo/bin/collab` and
 Collab checkout.
 
 The daemon is detached. Normal commands may start it when no explicit `DOWN`
-marker exists. `collab init` creates the local
-`.agent-collab/server` skeleton, so old projects need no manual repair. Use
+marker exists. `collab context` creates a missing local baseline, observes
+available runtime facts, and asks the daemon to establish or recover identity.
+If it returns `requires_identity_update.required_fields`, supply only those
+real facts once with `collab context --provide '<JSON>'`. The daemon completes
+the binding and lease; do not choose a worker or run a recovery command. Use
 `collab down` only for an explicit stop; use `collab up` to clear that stop and
 start it again. Never start a second daemon.
 Existing projects migrate through `collab migrate inspect`, `plan`, `apply`,
-controlled daemon upgrade/restart, identity rebind, and `verify`;
+controlled daemon upgrade/restart, daemon identity reconciliation through
+`collab context`, and `verify`;
 deleting `.agent-collab`, editing JSON state, clearing mailboxes, copying
 tokens, mixed runtime writes, and guessing thread identity are deprecated.
 
@@ -829,7 +833,7 @@ tokens, mixed runtime writes, and guessing thread identity are deprecated.
 
 - Every registered identity is an equal `peer`; there is no inferred master
   from first registration. Codex root is not Collab master.
-- `collab init` and peer registration never create a master. A master exists
+- Context bootstrap and peer registration never create a master. A master exists
   only when a registered peer has a live server-verified transport and was assigned by
   user-approved self-promotion or live-master delegation. A recorded identity
   with a dead App Server thread is not a live master.
@@ -1057,7 +1061,7 @@ impl Scope {
             Ok(Scope { root })
         } else {
             Err(anyhow::anyhow!(
-                "no .agent-collab found in exact project root {}; run `collab init` there first",
+                "no .agent-collab found in exact project root {}; run `collab context` there first",
                 root.display()
             ))
         }

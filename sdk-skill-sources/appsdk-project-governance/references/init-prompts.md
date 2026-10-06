@@ -32,48 +32,55 @@ collab context
 
 `collab context` returns identity, liveness, tasks, inbox, `next_actions`,
 master/authority state, `role_brief`, and truth. Registration returns the brief
-effective at registration; `collab context` and `collab who` project the
-current brief, and promotion or delegation returns the replacement brief. That
-output is the truth. Stop after reading it. Do not inspect local
-environment/control paths or run any other exploratory command after it.
-Registration and wake use the internal Codex App Server native thread.
-
-Ordinary initialization and Collab registration run only in the canonical
-project main checkout. A Git worktree contains tracked `.appsdk/` files but
-does not inherit ignored `.agent-collab/` or `.appsdk-control/` state. The
-separate authorized AppSDK `--fresh --discard-legacy` reset may run from its
-clean non-main owner worktree as specified below. Inside a worktree, the same
-Codex sessionID/thread remains the same peer. Run `collab context` directly
-there; it resolves the canonical project root from global Collab state and
-reports the inherited identity, liveness, tasks, inbox, `next_actions`, and
-master/authority state. Never register the worktree as a second peer, promote
-yourself, or create a second route.
-
-## If unregistered
-
-An unregistered project may fail `collab context` instead of returning an
-`unregistered` field. Run the idempotent registration once from the project
-main tree, then use `collab context` only to verify the resulting identity:
+effective at registration; `collab context` projects the current brief, and
+promotion or delegation returns the replacement brief. That output is the
+truth. `registered: true` ends bootstrap. If the snapshot returns
+`required_fields`, supply only those real facts once:
 
 ```sh
-cd /abs/path/project
-appsdk init .
+collab context --provide '<JSON>'
 ```
 
-Then run `collab context` to verify the registration. Do not run
-`appsdk init .` repeatedly; it is idempotent and returns the same
-initialization result every time.
+The supplement may contain only requested `session_id`, `thread_id`,
+`endpoint`, or `namespace` facts; it never supplies a worker, approval, token,
+route, or binding. The supplement invocation returns the resulting snapshot.
+Do not choose a worker or run another identity command. If context returns an
+explicit daemon DOWN or runtime error, preserve the exact error and stop;
+daemon lifecycle maintenance is human-authorized. Do not inspect local
+environment/control paths or run any other exploratory command. Registration
+and wake use the internal Codex App Server native thread.
+
+Ordinary AppSDK project initialization runs only in the canonical project main
+checkout. Agent identity bootstrap is `collab context`; it may run from the
+project or worktree, and the daemon resolves the canonical route. A Git
+worktree contains tracked `.appsdk/` files but does not inherit ignored
+`.agent-collab/` or `.appsdk-control/` state. The separate authorized AppSDK
+`--fresh --discard-legacy` reset may run from its clean non-main owner worktree
+as specified below. Inside a worktree, the same Codex sessionID/thread remains
+the same peer. Run `collab context` directly there; it reports the inherited
+identity, liveness, tasks, inbox, `next_actions`, and master/authority state.
+Never register the worktree as a second peer, promote yourself, or create a
+second route.
+
+## If required facts are missing
+
+`collab context` can return `registered: false`, `identity: null`, and
+`required_fields`. Supply only the real requested facts once with
+`collab context --provide '<JSON>'`. The supplement may contain only requested
+`session_id`, `thread_id`, `endpoint`, or `namespace` facts; it never supplies
+a worker, approval, token, route, or binding. The daemon owns identity
+creation, selection, restoration, update, registration, route publication, and
+lease restoration. Do not run AppSDK or Collab initialization to repair
+identity, and do not inspect routes or worker state to guess a binding.
 
 ## Master (after user approval for the exact project + peer)
 
 ```sh
 cd /abs/path/project
 collab context                  # verify sessionID binding and role
-collab master status            # authoritative live-master query
-# if the project is unregistered:
-appsdk init .
-collab context
-# only when no live master exists and the user approved this exact peer:
+# if required_fields are present, provide only those facts once
+# only when the context snapshot has no live master and the user approved
+# this exact peer:
 collab master promote --approval "<user approval text>"
 collab context
 # only after the plan exists and long-horizon work is approved:
@@ -99,10 +106,10 @@ The master then owns orchestration:
 6. Remove only resources created by this round. Preserve other peers'
    worktrees, processes, and evidence.
 
-Stop normal setup here. No `collab status --all`, no `routes.jsonl`, no
-`whoami`, no `ps`, no `.agent-collab` listing. The explicit stale-daemon
-recovery procedure below is the only exception: it may run `collab status
---all` to diagnose the unavailable host daemon.
+Stop normal setup here. Do not run operator diagnostics, read `routes.jsonl`,
+inspect processes, or list `.agent-collab/`. If context explicitly reports
+daemon DOWN or a runtime error, preserve the exact error and stop; daemon
+lifecycle maintenance is human-authorized.
 
 ## Long-horizon master initialization and timer proof
 
@@ -148,27 +155,24 @@ workaround.
 ```sh
 cd /abs/path/project
 collab context
+# if required_fields are present, provide only those facts once
 ```
 
-If the project is unregistered, run `appsdk init .` once and then `collab
-context` to verify the binding. If it reports `role=master`, stop and report
-the conflict to the master; do not promote yourself and do not start a second
-daemon.
+If context reports `role=master`, stop and report the conflict to the master;
+do not promote yourself and do not start a second daemon.
 
-Use `collab master status` for the live master. A live master exists iff the
-returned `master` is an object with `endpoint_live=true`. `master: null` means
-no live master is recorded; a `master` object with `endpoint_live=false` is a
-recorded-but-dead identity and is not a live master. `collab who` only lists
-registered peers and does not contain a top-level `master` field. A worktree
-normally has no local `.agent-collab/`; that does not mean the peer is
-unregistered or that no master exists. A failed `collab context`, including
+Read master/authority state from the same context snapshot. A live master
+exists iff the returned `master` is an object with `endpoint_live=true`.
+`master: null` means no live master is recorded; a `master` object with
+`endpoint_live=false` is a recorded-but-dead identity and is not a live master.
+A worktree normally has no local `.agent-collab/`; that does not mean the peer
+is unregistered or that no master exists. A failed `collab context`, including
 `token mismatch`, is a registration problem, not evidence of no master. If it
-fails, preserve the exact error and query `collab master status` separately:
-report the registration error to the live master only when `endpoint_live=true`;
-when no live master exists, report it to the explicitly authorized
-migration/reset owner or the user and stop registration repair. Do not infer
-"no master", copy/edit identity state, reset, or promote yourself from the
-worktree.
+fails, preserve the exact error. Report the registration error to the live
+master only when the snapshot shows `endpoint_live=true`; when no live master
+exists, report it to the explicitly authorized migration/reset owner or the
+user and stop identity repair. Do not infer "no master", copy/edit identity
+state, reset, or promote yourself from the worktree.
 
 For an explicitly authorized clean epoch, the reset owners are separate. The
 AppSDK line is a reset/reinitialize operation, not ordinary initialization:
@@ -181,62 +185,28 @@ appsdk init <project> --fresh --discard-legacy
 collab down
 collab reset --discard-legacy --approval "<user authorization>"
 collab up
-collab init
+collab context
 ```
 
 Neither reset removes the other owner's state or proves delivery, review,
 install, restart, or live communication.
 
-## Recover own binding
+## Identity and route reconciliation
 
-If `collab context` reports a missing binding with no token mismatch:
-
-```sh
-collab worker recover
-```
-
-Then run `collab context` again. Do not edit `~/.collab`, do not grep
-`routes.jsonl`, do not touch `server.pid`, do not inspect terminal environment
-paths, do not start a second daemon.
-
-If recovery returns `token mismatch`, stop. That error means the global
-identity token does not own the project reducer's registered worker; it is not
-repairable by copying the token or editing identity files. Preserve the exact
-error and query `collab master status` separately. Report the registration
-problem to the live master only when `endpoint_live=true`; otherwise report it
-to the explicitly authorized migration/reset owner or the user and stop
-registration repair. Use the migration/reset owner only when that owner
-explicitly decides the project-local control plane is unrecoverable.
-
-If recovery reports `DAEMON_UNAVAILABLE` or a stale route, use the controlled
-lifecycle first:
-
-```sh
-collab down
-collab up
-collab context
-```
-
-If `collab up` reports `HOST_ROUTE_REPLAY_FAILED` for a named missing root,
-preserve the exact output and follow the installed Collab migration reference.
-Never delete the route file or project state by hand.
+Identity creation, selection, restoration, update, route publication,
+registration, and lease restoration belong to the daemon. `collab context` and
+its one factual supplement are the only agent bootstrap. Do not copy tokens,
+edit identity state, or run separate route/status discovery for repair. If
+context explicitly reports daemon DOWN or a runtime error, preserve the exact
+error and stop.
 
 ## Stale daemon, socket, or lock
 
 `~/.collab/server.sock`, `server.pid`, and `daemon.lock` are host-owned runtime
-objects. A stale socket/PID after a crash is not permission to remove them by
-hand. Diagnose in this order from the canonical project root:
-
-```sh
-collab context
-collab status --all
-collab up
-collab context
-```
-
-If `collab context` reports an unavailable daemon, use `collab up` once and
-preserve its exact output. If `collab up` reports a stale lock, a second
-writer, or an unknown PID, stop and report the exact error plus the canonical
-project root; the Collab owner must repair the global daemon. Never use
-`pkill`, `killall`, `kill $(...)`, delete `daemon.lock`, unlink `server.sock`,
-or start a project-local daemon as a workaround.
+objects. If `collab context` explicitly reports daemon DOWN or a runtime error,
+preserve the exact output and stop. Starting, stopping, or restarting the host
+daemon is human-authorized maintenance. An authorized human operator may use
+the official `collab down` / `collab up` lifecycle when a maintenance window is
+approved. Never diagnose identity by chaining status commands, remove lock or
+socket files by hand, use broad process-kill commands, or start a project-local
+daemon.

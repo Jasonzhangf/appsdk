@@ -168,6 +168,7 @@ impl ProjectRuntimeManager {
             routes: Mutex::new(routes),
             project_locks: Mutex::new(std::collections::BTreeMap::new()),
             register_gate: Mutex::new(()),
+            identity_gate: Mutex::new(()),
             runtime_init_gates: Mutex::new(std::collections::BTreeMap::new()),
             #[cfg(test)]
             fail_current_thread_route_publish: std::sync::atomic::AtomicBool::new(false),

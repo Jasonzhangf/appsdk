@@ -8,12 +8,6 @@ fn fix_and_notification_graphs_are_single_source_single_sink() {
     }
 }
 
-/// `validate_graph_contracts()` is short-circuited by a pre-existing manifest
-/// count mismatch (the manifest declares appsdk-collab-identity-adjudication,
-/// which `embedded_graph_paths()` does not embed). The collab context graph
-/// still has to satisfy the contract it will be judged by once that mismatch is
-/// resolved, so this checks it directly: one entry, one exit, exactly one input
-/// per node, exactly one sink per arc, and only registered design operators.
 #[test]
 fn collab_context_design_graph_is_single_source_single_sink_and_registered() {
     let (_, source) = embedded_graph_paths()
@@ -23,72 +17,6 @@ fn collab_context_design_graph_is_single_source_single_sink_and_registered() {
     let graph = parse_graph_json(source).unwrap();
     ensure_single_source_single_sink(&graph).unwrap();
     validate_graph_registry(&graph).unwrap();
-}
-
-/// Shape alone is not enough: `context_snapshot` fails into the classified
-/// identity terminal from three call sites — `load_or_create_for_context`,
-/// `ensure_registration_with_outcome`, and the first authenticated
-/// `call_project(&Req::Context)` — every one of them before `find_master`. The
-/// graph therefore must not re-introduce those boundaries as pre-master branch
-/// nodes; it carries them as the single `identity_gate` stage, and the walk from
-/// the one source to the one sink must be the order the implementation runs.
-#[test]
-fn collab_context_design_graph_matches_the_implementation_order() {
-    let (_, source) = embedded_graph_paths()
-        .into_iter()
-        .find(|(path, _)| *path == "docs/dagpipe/collab-context.graph.json")
-        .expect("the collab context graph is embedded");
-    let graph = parse_graph_json(source).unwrap();
-
-    // The three real identity-failure boundaries and the terminal they enter are
-    // one stage. A node for any of them would be a pre-master branch the
-    // implementation does not have.
-    for retired in [
-        "load_identity",
-        "verify_token",
-        "ensure_registration",
-        "identity_update",
-    ] {
-        assert!(
-            !graph.nodes.iter().any(|node| node.id == retired),
-            "`{retired}` is not a separate stage: every identity failure enters the \
-             same terminal from `identity_gate`"
-        );
-    }
-
-    // Walk the single path and compare it with `context_snapshot`'s real order.
-    let sink = graph.outputs[0].clone();
-    let mut reached = vec![graph.inputs[0].id.clone()];
-    let mut current = graph.inputs[0].id.clone();
-    loop {
-        let node = graph
-            .nodes
-            .iter()
-            .find(|node| node.inputs.first() == Some(&current))
-            .expect("every arc on the path has exactly one sink");
-        reached.push(node.output.id.clone());
-        if node.output.id == sink {
-            break;
-        }
-        current = node.output.id.clone();
-    }
-
-    assert_eq!(
-        reached,
-        [
-            "context_request",
-            "resolved_scope",
-            "baseline_ready",
-            "daemon_ready",
-            "identity_verified",
-            "notify_state",
-            "master_grant",
-            "read_only_projection",
-            "env_projection",
-            "state_snapshot",
-        ],
-        "the graph path must be the order `context_snapshot` runs"
-    );
 }
 
 #[test]

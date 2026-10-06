@@ -25,6 +25,7 @@ fn dispatch_with_route_context(
         .as_ref()
         .map(|context| context.app_scope_id.clone());
     match req {
+        Req::IdentityContext { .. } => Resp::err("IDENTITY_CONTEXT_HOST_REQUIRED: identity reconciliation belongs to the host daemon"),
         Req::BoardShow => handle_board_show(server),
         Req::Board { worker_id, token, command } => handle_board_command(server, worker_id, token, command),
         Req::SubagentObserve { id, snapshot_lines } => {

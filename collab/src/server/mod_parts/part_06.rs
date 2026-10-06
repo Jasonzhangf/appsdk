@@ -1114,9 +1114,9 @@ fn handle_register_with_app_scope_inner(
                 }
             }
         }
-        if existing.token != token && (!recover_existing || !same_thread) {
+        if existing.token != token {
             return Resp::err(format!(
-                "worker_id {} already registered by another token",
+                "TOKEN_MISMATCH: worker {} is registered by another token",
                 worker_id
             ));
         }
@@ -1388,9 +1388,8 @@ fn communication_recovery_brief() -> serde_json::Value {
         "on_error": "Preserve the exact communication error and durable IDs; an ACK, notification acceptance, daemon health, or timeout is not delivery.",
         "steps": [
             "Run `collab context` and inspect the named route, identity, daemon, task, and inbox state.",
-            "After a daemon restart, identity mismatch, or missing route, run `collab context` from the canonical project main tree; do not run `collab worker recover` or inject recovery into a foreign thread.",
-            "If `collab context` still fails with `IDENTITY_REBIND_UNPROVEN`, preserve that error and the worker_id from the error or the last successful `collab context`; report both to the live master with `COLLAB_WORKER=<worker_id> collab sendmessage --from <worker_id> --to <master> --subject blocker \"<exact error; worker_id=<worker_id>; cause; decision needed>\"`; if that command cannot authenticate, report out-of-band to the live master through a healthy peer or the human. For `IDENTITY_RESTORE_CROSS_PROJECT`, report out-of-band to the live master through a healthy peer or the human instead of retrying `collab sendmessage` through the same failing identity path. For `TOKEN_MISMATCH` no `collab` command can be the repair, because every command run as that worker re-authenticates through `me()` and re-sends the rejected token: escalate out of band with the concrete `worker_id` to the project owner, or to the live master through a healthy peer.",
-            "If recovery still fails, report the exact error, root cause, proposed fix, and decision needed to the live master; do not edit routes, journal, mailbox, tokens, or start a second daemon."
+            "If context returns requires_identity_update, supply only its required_fields once through `collab context --provide '<JSON>'`; the daemon owns identity recovery and binding updates.",
+            "If context fails, preserve the exact error and report through a healthy peer or the human. TOKEN_MISMATCH and identity conflicts need owner repair; do not choose another worker, copy credentials, edit routes, or start a second daemon."
         ],
         "close_only_when": [
             "the same native target produces a result item",

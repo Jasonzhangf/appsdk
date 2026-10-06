@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -28,6 +28,51 @@ fn unique_root() -> PathBuf {
 
 fn binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_collab"))
+}
+
+/// Seed the project baseline marker. `collab context` resolves its project root
+/// from the `.agent-collab` baseline or a git root; a temp fixture is neither,
+/// so it seeds the marker instead of reaching into daemon state.
+fn seed_baseline(project: &std::path::Path) {
+    std::fs::create_dir_all(project.join(".agent-collab")).expect("seed .agent-collab baseline");
+}
+
+/// Walk a parsed context snapshot and fail if any object key carries a secret.
+fn assert_no_secret_surface(label: &str, value: &Value) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                assert_ne!(key, "token", "{label}: raw token key leaked");
+                assert_ne!(key, "identity_receipt", "{label}: private receipt leaked");
+                assert_no_secret_surface(label, child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                assert_no_secret_surface(label, item);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The public `collab context` display must never expose the private credential
+/// or the internal identity receipt, in raw text or in any parsed object.
+fn assert_context_display_is_public(label: &str, output: &Output) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stdout.contains("identity_receipt"),
+        "{label}: context printed the private identity receipt: {stdout}"
+    );
+    assert!(
+        !stdout.contains("\"token\""),
+        "{label}: context printed a token field: {stdout}"
+    );
+    let parsed: Value = serde_json::from_str(&stdout).unwrap_or_else(|error| {
+        panic!("{label}: context emits JSON: {error}: stdout={stdout} stderr={stderr}")
+    });
+    assert_no_secret_surface(label, &parsed);
 }
 
 struct AppFixture {
@@ -63,6 +108,7 @@ impl AppFixture {
         std::fs::create_dir_all(&host_state).expect("create host state root");
         std::fs::create_dir_all(app_socket.parent().unwrap())
             .expect("create AppServer socket root");
+        seed_baseline(&project);
         let project_str = std::fs::canonicalize(&project)
             .unwrap()
             .to_string_lossy()
@@ -98,7 +144,7 @@ impl AppFixture {
         }
     }
 
-    fn command(&self, args: &[&str], thread: &str, worker: &str) -> Output {
+    fn command_public(&self, args: &[&str], thread: &str) -> Output {
         Command::new(binary())
             .args(args)
             .current_dir(&self.project)
@@ -109,13 +155,34 @@ impl AppFixture {
             .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex TUI")
             .env("CODEX_SESSION_ID", thread)
             .env("CODEX_THREAD_ID", thread)
-            .env("COLLAB_WORKER", worker)
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .env_remove("COLLAB_WORKER")
             .env("CODEX_HOME", self.root.join("home"))
             .output()
             .expect("run collab CLI")
     }
 
-    fn command_desktop(&self, args: &[&str], thread: &str, worker: &str) -> Output {
+    fn command_without_thread(&self, args: &[&str], session: &str) -> Output {
+        Command::new(binary())
+            .args(args)
+            .current_dir(&self.project)
+            .env("COLLAB_STATE_DIR", &self.host_state)
+            .env("COLLAB_APPSERVER_SOCKET", &self.app_socket)
+            .env_remove("CODEX_APP_SERVER_SOCKET")
+            .env_remove("COLLAB_APPSERVER_NAMESPACE")
+            .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex TUI")
+            .env("CODEX_SESSION_ID", session)
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .env_remove("COLLAB_WORKER")
+            .env("CODEX_HOME", self.root.join("home"))
+            .output()
+            .expect("run collab CLI with a continuously missing thread fact")
+    }
+
+    fn command_desktop(&self, args: &[&str], thread: &str) -> Output {
         Command::new(binary())
             .args(args)
             .current_dir(&self.project)
@@ -126,7 +193,9 @@ impl AppFixture {
             .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop")
             .env("CODEX_SESSION_ID", thread)
             .env("CODEX_THREAD_ID", thread)
-            .env("COLLAB_WORKER", worker)
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .env_remove("COLLAB_WORKER")
             .env("CODEX_HOME", self.root.join("home"))
             .output()
             .expect("run Desktop collab CLI")
@@ -136,7 +205,6 @@ impl AppFixture {
         &self,
         args: &[&str],
         thread: &str,
-        worker: &str,
     ) -> Output {
         Command::new(binary())
             .args(args)
@@ -148,14 +216,38 @@ impl AppFixture {
             .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex TUI")
             .env("CODEX_SESSION_ID", thread)
             .env("CODEX_THREAD_ID", thread)
-            .env("COLLAB_WORKER", worker)
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .env_remove("COLLAB_WORKER")
             .env("CODEX_HOME", self.root.join("home"))
             .output()
             .expect("run TUI collab CLI without an explicit endpoint")
     }
 
-    fn run_ok(&self, args: &[&str], thread: &str, worker: &str) -> Value {
-        let output = self.command(args, thread, worker);
+    /// No automatically observed native facts: no AppServer socket, no
+    /// session/thread, no tmux, and an originator the runtime cannot map to a
+    /// namespace. The caller must supply every fact through `--provide`.
+    fn command_without_native_facts(&self, args: &[&str]) -> Output {
+        Command::new(binary())
+            .args(args)
+            .current_dir(&self.project)
+            .env("COLLAB_STATE_DIR", &self.host_state)
+            .env_remove("COLLAB_APPSERVER_SOCKET")
+            .env_remove("CODEX_APP_SERVER_SOCKET")
+            .env_remove("COLLAB_APPSERVER_NAMESPACE")
+            .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex future host")
+            .env_remove("CODEX_SESSION_ID")
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .env_remove("COLLAB_WORKER")
+            .env("CODEX_HOME", self.root.join("home"))
+            .output()
+            .expect("run collab CLI without native facts")
+    }
+
+    fn run_public(&self, args: &[&str], thread: &str) -> Value {
+        let output = self.command_public(args, thread);
         assert!(
             output.status.success(),
             "collab {:?} failed: stdout={} stderr={}",
@@ -166,8 +258,8 @@ impl AppFixture {
         serde_json::from_slice(&output.stdout).expect("collab CLI emits JSON")
     }
 
-    fn run_ok_desktop(&self, args: &[&str], thread: &str, worker: &str) -> Value {
-        let output = self.command_desktop(args, thread, worker);
+    fn run_ok_desktop(&self, args: &[&str], thread: &str) -> Value {
+        let output = self.command_desktop(args, thread);
         assert!(
             output.status.success(),
             "Desktop collab {:?} failed: stdout={} stderr={}",
@@ -176,6 +268,16 @@ impl AppFixture {
             String::from_utf8_lossy(&output.stderr)
         );
         serde_json::from_slice(&output.stdout).expect("collab CLI emits JSON")
+    }
+
+    /// The daemon owns the worker id. Fixtures must read it back from the
+    /// registration receipt rather than assume a `COLLAB_WORKER`-derived name.
+    fn worker_id(&self, thread: &str) -> String {
+        let context = self.run_public(&["context"], thread);
+        context["identity"]["worker_id"]
+            .as_str()
+            .expect("context receipt names the daemon-owned worker")
+            .to_owned()
     }
 }
 
@@ -440,84 +542,82 @@ fn write_frame(stream: &mut UnixStream, payload: &Value) -> std::io::Result<()> 
 fn two_tui_appserver_receipt_flow() {
     let fixture = AppFixture::new();
 
-    fixture.run_ok(&["init"], THREAD_A, "codex-a");
-    fixture.run_ok(&["init"], THREAD_B, "codex-b");
+    let context_a = fixture.run_public(&["context"], THREAD_A);
+    let context_b = fixture.run_public(&["context"], THREAD_B);
+    let worker_a = context_a["identity"]["worker_id"]
+        .as_str()
+        .expect("daemon receipt names TUI worker A")
+        .to_owned();
+    let worker_b = context_b["identity"]["worker_id"]
+        .as_str()
+        .expect("daemon receipt names TUI worker B")
+        .to_owned();
     let mut app_fixture = fixture;
     app_fixture.initialized = true;
 
-    let context_a = app_fixture.run_ok(&["context", "--worker", "codex-a"], THREAD_A, "codex-a");
+    let context_a = app_fixture.run_public(&["context"], THREAD_A);
     assert_eq!(context_a["identity"]["transport"]["kind"], "appserver");
     assert_eq!(context_a["liveness"]["presence"], "present");
-    let context_b = app_fixture.run_ok(&["context", "--worker", "codex-b"], THREAD_B, "codex-b");
+    let context_b = app_fixture.run_public(&["context"], THREAD_B);
     assert_eq!(context_b["identity"]["transport"]["kind"], "appserver");
     assert_eq!(context_b["liveness"]["presence"], "present");
+    assert_eq!(context_a["identity"]["worker_id"], worker_a);
+    assert_eq!(context_b["identity"]["worker_id"], worker_b);
 
-    let sent = app_fixture.run_ok(
+    let sent = app_fixture.run_public(
         &[
             "send",
-            "--from",
-            "codex-a",
             "--to",
-            "codex-b",
+            &worker_b,
             "--subject",
             "appserver immediate",
             "immediate body",
         ],
         THREAD_A,
-        "codex-a",
     );
     let immediate_id = sent["msg_id"].as_str().unwrap().to_string();
     assert_eq!(sent["notification"], "appserver-input-submitted");
     assert_eq!(sent["consumed"], false);
 
-    let steered = app_fixture.run_ok(
+    let steered = app_fixture.run_public(
         &[
             "send",
-            "--from",
-            "codex-a",
             "--to",
-            "codex-b",
+            &worker_b,
             "--subject",
             "appserver steer",
             "steer body",
         ],
         THREAD_A,
-        "codex-a",
     );
     let steered_id = steered["msg_id"].as_str().unwrap().to_string();
     assert_eq!(steered["notification"], "appserver-input-submitted");
     assert_eq!(steered["consumed"], false);
 
-    let queued = app_fixture.run_ok(
+    let queued = app_fixture.run_public(
         &[
             "send",
-            "--from",
-            "codex-a",
             "--to",
-            "codex-b",
+            &worker_b,
             "--subject",
             "appserver queued",
             "queued body",
         ],
         THREAD_A,
-        "codex-a",
     );
     let queued_id = queued["msg_id"].as_str().unwrap().to_string();
     assert_eq!(queued["notification"], "appserver-input-submitted");
     assert_eq!(queued["consumed"], false);
 
-    let received = app_fixture.run_ok(
+    let received = app_fixture.run_public(
         &[
             "recv",
-            "--worker",
-            "codex-b",
             "--receive-id",
             "appserver-receive-1",
             "--timeout",
             "0",
         ],
         THREAD_B,
-        "codex-b",
     );
     assert_eq!(received["count"], 3);
     let ids = received["messages"]
@@ -531,20 +631,20 @@ fn two_tui_appserver_receipt_flow() {
     assert!(ids.contains(&queued_id));
     assert_eq!(received["receive_id"], "appserver-receive-1");
 
-    let msg_state = app_fixture.run_ok(&["msg", &immediate_id], THREAD_A, "codex-a");
+    let msg_state = app_fixture.run_public(&["msg", &immediate_id], THREAD_A);
     assert_eq!(msg_state["state"], "read");
 
-    let _down = app_fixture.command(&["down"], THREAD_B, "codex-b");
+    let _down = app_fixture.command_public(&["down"], THREAD_B);
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline && app_fixture.host_state.join("server.sock").exists() {
         thread::sleep(Duration::from_millis(50));
     }
-    let _up = app_fixture.command(&["up"], THREAD_B, "codex-b");
-    let replay_context =
-        app_fixture.run_ok(&["context", "--worker", "codex-b"], THREAD_B, "codex-b");
+    let _up = app_fixture.command_public(&["up"], THREAD_B);
+    let replay_context = app_fixture.run_public(&["context"], THREAD_B);
     assert_eq!(replay_context["inbox"]["unread"], 0);
     assert_eq!(replay_context["identity"]["transport"]["kind"], "appserver");
-    let replayed_msg = app_fixture.run_ok(&["msg", &immediate_id], THREAD_A, "codex-a");
+    assert_eq!(replay_context["identity"]["worker_id"], worker_b);
+    let replayed_msg = app_fixture.run_public(&["msg", &immediate_id], THREAD_A);
     assert_eq!(replayed_msg["state"], "read");
 
     drop(app_fixture);
@@ -554,18 +654,21 @@ fn two_tui_appserver_receipt_flow() {
 fn desktop_managed_socket_registration_persists_and_uses_codex_app_namespace() {
     let mut fixture = AppFixture::new_desktop_managed();
 
-    let init_a = fixture.run_ok_desktop(&["init"], THREAD_A, "desktop-a");
-    assert_eq!(init_a["transport_selected"]["namespace"], "codex_app");
+    let context_a = fixture.run_ok_desktop(&["context"], THREAD_A);
+    assert_eq!(context_a["identity"]["transport"]["namespace"], "codex_app");
     assert_eq!(
-        init_a["transport_selected"]["endpoint"],
+        context_a["identity"]["transport"]["endpoint"],
         format!("unix://{}", fixture.app_socket.display())
     );
-    let init_b = fixture.run_ok_desktop(&["init"], THREAD_B, "desktop-b");
-    assert_eq!(init_b["transport_selected"]["namespace"], "codex_app");
+    let context_b = fixture.run_ok_desktop(&["context"], THREAD_B);
+    let worker_b = context_b["identity"]["worker_id"]
+        .as_str()
+        .expect("daemon receipt names Desktop worker B")
+        .to_owned();
+    assert_eq!(context_b["identity"]["transport"]["namespace"], "codex_app");
     fixture.initialized = true;
 
-    let context_b =
-        fixture.run_ok_desktop(&["context", "--worker", "desktop-b"], THREAD_B, "desktop-b");
+    let context_b = fixture.run_ok_desktop(&["context"], THREAD_B);
     assert_eq!(context_b["identity"]["transport"]["namespace"], "codex_app");
     assert_eq!(
         context_b["identity"]["transport"]["endpoint"],
@@ -575,16 +678,13 @@ fn desktop_managed_socket_registration_persists_and_uses_codex_app_namespace() {
     let sent = fixture.run_ok_desktop(
         &[
             "send",
-            "--from",
-            "desktop-a",
             "--to",
-            "desktop-b",
+            &worker_b,
             "--subject",
             "desktop namespace",
             "desktop body",
         ],
         THREAD_A,
-        "desktop-a",
     );
     assert_eq!(sent["notification"], "appserver-input-submitted");
     assert_eq!(sent["consumed"], false);
@@ -599,28 +699,24 @@ fn desktop_managed_socket_registration_persists_and_uses_codex_app_namespace() {
     let received = fixture.run_ok_desktop(
         &[
             "recv",
-            "--worker",
-            "desktop-b",
             "--receive-id",
             "desktop-receive-1",
             "--timeout",
             "0",
         ],
         THREAD_B,
-        "desktop-b",
     );
     assert_eq!(received["count"], 1);
 
-    let down = fixture.command_desktop(&["down"], THREAD_B, "desktop-b");
+    let down = fixture.command_desktop(&["down"], THREAD_B);
     assert!(down.status.success());
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline && fixture.host_state.join("server.sock").exists() {
         thread::sleep(Duration::from_millis(50));
     }
-    let up = fixture.command_desktop(&["up"], THREAD_B, "desktop-b");
+    let up = fixture.command_desktop(&["up"], THREAD_B);
     assert!(up.status.success());
-    let replay_context =
-        fixture.run_ok_desktop(&["context", "--worker", "desktop-b"], THREAD_B, "desktop-b");
+    let replay_context = fixture.run_ok_desktop(&["context"], THREAD_B);
     assert_eq!(
         replay_context["identity"]["transport"]["namespace"],
         "codex_app"
@@ -633,11 +729,15 @@ fn tui_does_not_borrow_the_desktop_managed_socket() {
     fixture.initialized = true;
 
     let output = fixture.command_tui_without_explicit_endpoint(
-        &["init", "--worker-id", "tui-without-endpoint"],
+        &["init"],
         THREAD_A,
-        "tui-without-endpoint",
     );
-    assert!(!output.status.success());
+    assert!(
+        !output.status.success(),
+        "TUI init must not synthesize a managed Desktop endpoint: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(
         fixture.appserver_connections.load(Ordering::Relaxed),
         0,
@@ -680,22 +780,259 @@ fn wrong_appserver_endpoint_fails_closed() {
 }
 
 #[test]
-fn appserver_thread_identity_cannot_be_claimed_twice() {
+fn repeated_appserver_context_reuses_the_same_identity_and_binding() {
     let mut fixture = AppFixture::new();
-    fixture.run_ok(&["init"], THREAD_A, "codex-a");
+    let context_a = fixture.run_public(&["context"], THREAD_A);
+    assert!(
+        context_a["identity"]["worker_id"].as_str().is_some(),
+        "daemon receipt must name the AppServer worker"
+    );
     fixture.initialized = true;
-    let conflict = fixture.command(&["init"], THREAD_A, "codex-a2");
+    let repeated = fixture.run_public(&["context"], THREAD_A);
+    assert_eq!(repeated["identity"]["worker_id"], context_a["identity"]["worker_id"]);
+    assert_eq!(repeated["binding"], context_a["binding"]);
+    assert_eq!(fixture.run_public(&["who"], THREAD_A)["workers"].as_array().unwrap().len(), 1);
+    drop(fixture);
+}
+
+#[test]
+fn context_partial_native_facts_require_the_missing_endpoint_fields() {
+    let mut fixture = AppFixture::new();
+
+    // No explicit AppServer endpoint: the TUI originator still yields a
+    // namespace, but the native socket is absent, so the endpoint is the one
+    // fact the caller must supply. The already-observed facts are not
+    // re-requested.
+    let partial = fixture.command_tui_without_explicit_endpoint(&["context"], THREAD_A);
+    assert!(
+        partial.status.success(),
+        "partial native facts are a classified success terminal: stdout={} stderr={}",
+        String::from_utf8_lossy(&partial.stdout),
+        String::from_utf8_lossy(&partial.stderr)
+    );
+    let partial: Value = serde_json::from_slice(&partial.stdout).unwrap();
+    assert_eq!(partial["registered"], false);
+    let update = &partial["requires_identity_update"];
+    assert_eq!(update["reason"], "IDENTITY_INFORMATION_REQUIRED");
+    assert_eq!(
+        update["required_fields"],
+        json!(["endpoint"]),
+        "observed session/thread facts must not be re-requested: {partial}"
+    );
+    assert!(update["worker_id"].is_null());
+
+    // Supplying a conflicting session/thread must be rejected before the daemon
+    // creates any identity: a supplement may fill gaps, never override the
+    // caller's real anchor.
+    let invalid = fixture.command_tui_without_explicit_endpoint(
+        &[
+            "context",
+            "--provide",
+            "{\"session_id\":\"different\",\"thread_id\":\"different\"}",
+        ],
+        THREAD_A,
+    );
     let combined = format!(
         "{}{}",
-        String::from_utf8_lossy(&conflict.stdout),
-        String::from_utf8_lossy(&conflict.stderr)
+        String::from_utf8_lossy(&invalid.stdout),
+        String::from_utf8_lossy(&invalid.stderr)
     );
-    assert!(!conflict.status.success(), "{combined}");
+    assert!(!invalid.status.success(), "{combined}");
     assert!(
-        combined.contains("CONFLICT")
-            || combined.contains("already")
-            || combined.contains("session-bound"),
+        combined.contains("IDENTITY_FACT_CONFLICT"),
+        "supplied facts must not override the observed caller anchor: {combined}"
+    );
+    let identities = fixture.host_state.join("identities");
+    let created = identities.exists()
+        && std::fs::read_dir(&identities)
+            .expect("read isolated identities dir")
+            .next()
+            .is_some();
+    assert!(
+        !created,
+        "a conflicting supplement must not create an identity: {identities:?}"
+    );
+    fixture.initialized = true;
+    drop(fixture);
+}
+
+/// One complete supplement, supplied through the real CLI to the real daemon,
+/// must finish the whole bootstrap: identity, runtime binding and default
+/// lease. A plain replay of the same actual anchor must then return the same
+/// worker and generation with no second identity.
+#[test]
+fn one_full_supplement_establishes_and_then_replays_the_same_identity() {
+    let mut fixture = AppFixture::new();
+
+    let missing = fixture.command_without_native_facts(&["context"]);
+    assert!(
+        missing.status.success(),
+        "no-anchor context is a classified success terminal: stdout={} stderr={}",
+        String::from_utf8_lossy(&missing.stdout),
+        String::from_utf8_lossy(&missing.stderr)
+    );
+    let missing: Value = serde_json::from_slice(&missing.stdout).unwrap();
+    assert_eq!(
+        missing["requires_identity_update"]["required_fields"],
+        json!(["session_id", "thread_id", "endpoint", "namespace"])
+    );
+
+    let endpoint = format!("unix://{}", fixture.app_socket.display());
+    let supplement = format!(
+        "{{\"session_id\":\"{THREAD_A}\",\"thread_id\":\"{THREAD_A}\",\"endpoint\":\"{endpoint}\",\"namespace\":\"codex_tui\"}}"
+    );
+    let registered = fixture.command_without_native_facts(&[
+        "context",
+        "--provide",
+        &supplement,
+    ]);
+    assert_context_display_is_public("full-supplement context", &registered);
+    assert!(
+        registered.status.success(),
+        "a complete real supplement must register: stdout={} stderr={}",
+        String::from_utf8_lossy(&registered.stdout),
+        String::from_utf8_lossy(&registered.stderr)
+    );
+    let registered: Value = serde_json::from_slice(&registered.stdout).unwrap();
+    assert_eq!(
+        registered["registered"], true,
+        "complete supplement must register: {registered}"
+    );
+    let worker = registered["identity"]["worker_id"]
+        .as_str()
+        .expect("registered receipt names the daemon-owned worker")
+        .to_owned();
+    assert_eq!(
+        registered["identity"]["transport"]["kind"], "appserver",
+        "the verified endpoint must be the selected transport: {registered}"
+    );
+    assert_eq!(
+        registered["identity"]["transport"]["namespace"], "codex_tui"
+    );
+    let generation = registered["binding"]["endpoint_generation"].clone();
+    let binding = registered["binding"].clone();
+    assert!(
+        registered["subscriptions"]
+            .as_array()
+            .expect("context lists subscriptions")
+            .iter()
+            .any(|subscription| subscription["event"] == "direct-message"
+                && subscription["status"] == "armed"),
+        "the default direct-message lease must be armed after registration: {registered}"
+    );
+
+    // The same real native anchor replayed through the automatic path returns
+    // the same worker and generation, so the supplement is idempotent.
+    let replay = fixture.run_public(&["context"], THREAD_A);
+    assert_eq!(replay["identity"]["worker_id"], worker);
+    assert_eq!(replay["binding"]["endpoint_generation"], generation);
+    assert_eq!(replay["binding"], binding);
+
+    fixture.initialized = true;
+    drop(fixture);
+}
+
+#[test]
+fn one_thread_supplement_survives_continuously_missing_environment() {
+    let mut fixture = AppFixture::new();
+    let missing = fixture.command_without_thread(&["context"], THREAD_A);
+    assert!(missing.status.success());
+    let missing: Value = serde_json::from_slice(&missing.stdout).unwrap();
+    assert_eq!(missing["requires_identity_update"]["required_fields"], json!(["thread_id"]));
+    let supplement = format!("{{\"thread_id\":\"{THREAD_A}\"}}");
+    let registered = fixture.command_without_thread(&["context", "--provide", &supplement], THREAD_A);
+    assert_context_display_is_public("thread supplement", &registered);
+    assert!(registered.status.success(), "{}", String::from_utf8_lossy(&registered.stderr));
+    let registered: Value = serde_json::from_slice(&registered.stdout).unwrap();
+    assert_eq!(registered["registered"], true);
+    for args in [vec!["context"], vec!["task", "status"]] {
+        let output = fixture.command_without_thread(&args, THREAD_A);
+        assert!(output.status.success(), "{args:?}: {}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        if args == ["context"] {
+            assert_eq!(value["registered"], true);
+            assert_eq!(value["identity"], registered["identity"]);
+            assert_eq!(value["binding"], registered["binding"]);
+        } else {
+            assert_eq!(value["tasks"], json!([]));
+        }
+    }
+    let anonymous = fixture.command_without_native_facts(&["context"]);
+    assert!(anonymous.status.success());
+    let anonymous: Value = serde_json::from_slice(&anonymous.stdout).unwrap();
+    assert_eq!(anonymous["registered"], false);
+    assert_eq!(anonymous["requires_identity_update"]["required_fields"], json!(["session_id", "thread_id", "endpoint", "namespace"]));
+    fixture.initialized = true;
+    drop(fixture);
+}
+
+#[test]
+fn forged_appserver_endpoint_and_missing_project_context_fail_closed() {
+    let root = unique_root();
+    let project = root.join("project");
+    let host_state = root.join("h");
+    let forged = root.join("forged.sock");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&host_state).unwrap();
+    seed_baseline(&project);
+
+    let output = Command::new(binary())
+        .args([
+            "context",
+            "--provide",
+            &format!(
+                "{{\"session_id\":\"{THREAD_A}\",\"thread_id\":\"{THREAD_A}\",\"endpoint\":\"unix://{}\",\"namespace\":\"codex_tui\"}}",
+                forged.display()
+            ),
+        ])
+        .current_dir(&project)
+        .env("COLLAB_STATE_DIR", &host_state)
+        .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex TUI")
+        .env("CODEX_HOME", root.join("home"))
+        .env_remove("COLLAB_APPSERVER_SOCKET")
+        .env_remove("CODEX_APP_SERVER_SOCKET")
+        .env_remove("COLLAB_APPSERVER_NAMESPACE")
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env_remove("CODEX_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("COLLAB_WORKER")
+        .output()
+        .expect("run context with forged endpoint");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!output.status.success(), "{combined}");
+    assert!(
+        combined.contains("APPSERVER_ENDPOINT_REJECTED")
+            || combined.contains("endpoint")
+            || combined.contains("RouteUnavailable"),
         "{combined}"
     );
-    drop(fixture);
+    assert!(
+        !host_state.join("identities").exists(),
+        "forged endpoint must not mint an identity"
+    );
+
+    // A request envelope that omits ProjectContext is rejected by the daemon
+    // before identity selection. This mirrors the public wire contract without
+    // reaching into daemon state.
+    let server_socket = host_state.join("server.sock");
+    if server_socket.exists() {
+        let mut stream = UnixStream::connect(&server_socket).expect("connect isolated daemon");
+        stream
+            .write_all(b"{\"op\":\"IdentityContext\",\"facts\":{}}\n")
+            .unwrap();
+        let mut reader = std::io::BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        assert!(
+            line.contains("PROJECT_CONTEXT_REQUIRED"),
+            "missing ProjectContext must fail explicitly: {line}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
 }

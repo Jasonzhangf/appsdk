@@ -148,6 +148,13 @@ native thread ID; a verified tmux tuple may also be stored as a recovery anchor.
 AppServer-bound peers use native `thread/read` for presence and status. Tmux is
 considered for identity recovery only when both runtime IDs are absent.
 
+The same snapshot carries `binding`: the caller's own runtime binding exactly as
+the daemon recorded it (`binding_id`, `endpoint_generation`, `runtime_id`,
+`session_id`, `native_thread_id`). It is the read-back path for a peer whose
+local registration receipt was lost, so the peer can address its route again
+without reading a control value out of an error message. A worker with no unique
+binding in the selected route reports `binding: null`.
+
 Use the wider recovery path below only when that bootstrap fails:
 
 ```sh

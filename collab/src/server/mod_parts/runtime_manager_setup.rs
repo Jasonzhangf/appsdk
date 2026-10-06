@@ -212,9 +212,9 @@ impl ProjectRuntimeManager {
             .values()
             .flat_map(|project| project.runtime_bindings.values())
             .filter(|binding| {
-                let Some(endpoint) = binding.tmux_endpoint.as_ref() else {
+                if binding.tmux_endpoint.is_none() {
                     return false;
-                };
+                }
                 let binding_text = binding.binding_id.as_str();
                 let command_prefix = format!(
                     "register-{binding_text}-{}",
@@ -257,92 +257,36 @@ impl ProjectRuntimeManager {
             return Ok(());
         }
         for binding in pending {
-            // A pane is addressable by exactly one live peer per project. Once
-            // another binding in the same route scope owns this pane with a
-            // live native thread, the stale same-pane master anchor is
-            // superseded and must not fence the whole project route forever.
-            if same_scope_pane_owner_supersedes(&self.host, runtime, &binding) {
+            let Some(endpoint) = binding.tmux_endpoint.as_ref() else {
                 continue;
-            }
-            // A retired claim is deliberately absent from the index. It is
-            // resolved, not stuck, so it must not fence the project forever.
-            // This is the request path, so a fence here would reproduce the
-            // original opaque failure on every non-Register request.
-            let retired = self
-                .host
-                .state
-                .lock()
-                .unwrap()
-                .global
-                .lookup_retired_route_claim(&binding)
-                .cloned();
-            if let Some(record) = retired {
+            };
+            let owner = self.pane_owner_other_than(&binding);
+            let is_claimant = {
+                let host = self.host.state.lock().unwrap();
+                host.global.lookup_unique_tmux_pane_route(endpoint) == Some(&binding)
+            };
+            if let Some(owner) = owner {
+                // One pane owns exactly one binding host-wide, so a live route
+                // on this pane at another address is the owner. The stale
+                // same-pane master anchor is superseded by it, and this is the
+                // request path: fencing here would reproduce the original
+                // opaque failure on every non-Register request.
                 append_log(
                     &self.host.log_path(),
                     &format!(
-                        "RECOVERY_RECONCILE_SKIPPED_RETIRED: {} was retired at {} under approval {:?}; request fencing skipped",
-                        binding.binding_id, record.at_ms, record.approval
+                        "RECOVERY_RECONCILE_SKIPPED_SUPERSEDED: {} lost pane {}:{} to {} binding {}; request fencing skipped",
+                        binding.binding_id,
+                        endpoint.tmux_session_id,
+                        endpoint.pane_id,
+                        owner.agent_id,
+                        owner.binding_id
                     ),
                 );
                 continue;
             }
-            let scope = binding.route_scope();
-            let (route, claimants) = {
-                let host = self.host.state.lock().unwrap();
-                let claimants = match binding.tmux_endpoint.as_ref() {
-                    Some(endpoint) => host
-                        .global
-                        .tmux_pane_route_claimants_in_scope(&scope, endpoint)
-                        .into_iter()
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                    None => Vec::new(),
-                };
-                let route = if claimants.len() == 1 {
-                    claimants.first().cloned()
-                } else {
-                    None
-                };
-                (route, claimants)
-            };
-            if route.as_ref() != Some(&binding) {
-                let pane = binding
-                    .tmux_endpoint
-                    .as_ref()
-                    .map(|endpoint| format!("{}:{}", endpoint.tmux_session_id, endpoint.pane_id))
-                    .unwrap_or_else(|| "<unknown>".to_owned());
-                let describe = |claimant: &RuntimeBinding| {
-                    format!(
-                        "{} binding {} generation {}",
-                        claimant.agent_id, claimant.binding_id, claimant.endpoint_generation
-                    )
-                };
-                if claimants.len() > 1 {
-                    return Err(format!(
-                        "RECOVERY_RECONCILE_REQUIRED: pane {pane} has {} route claimants in project {}; expected exactly one: {}; resolve with `collab reset --routes --keep <binding_id>`",
-                        claimants.len(),
-                        binding.project_scope.as_str(),
-                        claimants
-                            .iter()
-                            .map(describe)
-                            .collect::<Vec<_>>()
-                            .join("; ")
-                    ));
-                }
-                if let Some(owner) = claimants.first() {
-                    // One claimant in scope, and it is not this binding. Name
-                    // both sides and the remedy instead of reporting a
-                    // generation mismatch that has no operator action.
-                    return Err(format!(
-                        "RECOVERY_RECONCILE_REQUIRED: pane {pane} in project {} is owned by {}; {} binding {} is not the claimant; resolve with `collab reset --routes --keep <binding_id>` naming the claimant to keep",
-                        binding.project_scope.as_str(),
-                        describe(owner),
-                        binding.agent_id,
-                        binding.binding_id
-                    ));
-                }
+            if !is_claimant {
                 return Err(format!(
-                    "RECOVERY_RECONCILE_REQUIRED: host route for {} is not at project generation {}",
+                    "RECOVERY_RECONCILE_REQUIRED: host route for {} is not at project generation {}; re-register the worker to publish the route",
                     binding.agent_id, binding.endpoint_generation
                 ));
             }
@@ -359,74 +303,44 @@ impl ProjectRuntimeManager {
                 let Some(endpoint) = binding.tmux_endpoint.as_ref() else {
                     continue;
                 };
-                if same_scope_pane_owner_supersedes(&self.host, &runtime, &binding) {
-                    continue;
-                }
-                // An operator retirement is durable and outranks this repair.
-                // Publishing here would recreate the claim the operator
-                // removed and reintroduce the duplicate pane route.
-                let retired = self
-                    .host
-                    .state
-                    .lock()
-                    .unwrap()
-                    .global
-                    .lookup_retired_route_claim(&binding)
-                    .cloned();
-                if let Some(record) = retired {
+                if let Some(owner) = self.pane_owner_other_than(&binding) {
+                    // A republisher never evicts. One pane owns exactly one
+                    // binding host-wide, and this pane belongs to another
+                    // route address, so this pending master anchor stays out
+                    // of the index. Releasing the pane needs either the owner's
+                    // own route removal or a fresh registration, which is a
+                    // writer path and does evict.
                     append_log(
                         &self.host.log_path(),
                         &format!(
-                            "RECOVERY_RECONCILE_SKIPPED_RETIRED: {} was retired at {} under approval {:?}",
-                            binding.binding_id, record.at_ms, record.approval
+                            "RECOVERY_RECONCILE_SKIPPED_SUPERSEDED: {} lost pane {}:{} to {} binding {}",
+                            binding.binding_id,
+                            endpoint.tmux_session_id,
+                            endpoint.pane_id,
+                            owner.agent_id,
+                            owner.binding_id
                         ),
                     );
                     continue;
                 }
-                let scope = binding.route_scope();
                 let host_route = {
                     let host = self.host.state.lock().unwrap();
-                    host.global
-                        .lookup_unique_tmux_pane_route_in_scope(&scope, endpoint)
-                        .cloned()
+                    host.global.lookup_unique_tmux_pane_route(endpoint).cloned()
                 };
                 if host_route.as_ref() == Some(&binding) {
                     continue;
                 }
-                let Some(old) = host_route else {
-                    self.host
-                        .commit_checked(&[Event::GlobalCurrentThreadRouteSet { binding }])
-                        .map_err(|error| {
-                            format!("RECOVERY_RECONCILE_REQUIRED: {error}")
-                        })?;
-                    continue;
-                };
-                let is_same_durable_route = old.same_principal(&binding)
-                    && old.binding_id == binding.binding_id
-                    && old.runtime_id == binding.runtime_id
-                    && old.session_id == binding.session_id
-                    && old.native_thread_id == binding.native_thread_id
-                    && old.tmux_endpoint.as_ref().is_some_and(|previous| {
-                        crate::client::adapters::tmux::same_pane_route(previous, endpoint)
-                    });
-                if !is_same_durable_route {
-                    return Err(format!(
-                        "RECOVERY_RECONCILE_REQUIRED: host and project pane routes disagree for {}: pane {}:{} in project {} is held by {} binding {} generation {}, not by binding {}; resolve with `collab reset --routes --keep <binding_id>` naming the claimant to keep",
-                        binding.agent_id,
-                        endpoint.tmux_session_id,
-                        endpoint.pane_id,
-                        binding.project_scope.as_str(),
-                        old.agent_id,
-                        old.binding_id,
-                        old.endpoint_generation,
-                        binding.binding_id
-                    ));
-                }
-                if old.endpoint_generation >= binding.endpoint_generation {
-                    return Err(format!(
-                        "RECOVERY_RECONCILE_REQUIRED: host route for {} is at generation {} and project route is at generation {}",
-                        binding.binding_id, old.endpoint_generation, binding.endpoint_generation
-                    ));
+                // The guard above skipped every claimant at another address, so
+                // the only remaining claimant is this binding's own route at
+                // the same address and a lower generation. Publishing it is a
+                // refresh of this address, never an eviction.
+                if let Some(old) = host_route.as_ref() {
+                    if old.endpoint_generation >= binding.endpoint_generation {
+                        return Err(format!(
+                            "RECOVERY_RECONCILE_REQUIRED: host route for {} is at generation {} and project route is at generation {}; re-register the worker to advance the route",
+                            binding.binding_id, old.endpoint_generation, binding.endpoint_generation
+                        ));
+                    }
                 }
                 self.host
                     .commit_checked(&[Event::GlobalCurrentThreadRouteSet { binding }])
@@ -463,23 +377,16 @@ impl ProjectRuntimeManager {
             }
             let session_id = binding.session_id.clone().unwrap();
             let native_thread_id = binding.native_thread_id.clone().unwrap();
-            // An operator retirement is durable and outranks this repair. The
-            // journal still holds the route set event for this address, so
-            // publishing here would undo the retirement at the next start.
-            let retired = self
-                .host
-                .state
-                .lock()
-                .unwrap()
-                .global
-                .lookup_retired_route_claim(&binding)
-                .cloned();
-            if let Some(record) = retired {
+            // A republisher never evicts. One pane owns exactly one binding
+            // host-wide, so when another route address holds this pane, this
+            // project route stays out of the index until the owner releases it
+            // or a fresh registration takes the pane.
+            if let Some(owner) = self.pane_owner_other_than(&binding) {
                 append_log(
                     &self.host.log_path(),
                     &format!(
-                        "RECOVERY_RECONCILE_SKIPPED_RETIRED: {} was retired at {} under approval {:?}",
-                        binding.binding_id, record.at_ms, record.approval
+                        "RECOVERY_RECONCILE_SKIPPED_SUPERSEDED: {} lost pane to {} binding {}",
+                        binding.binding_id, owner.agent_id, owner.binding_id
                     ),
                 );
                 continue;
@@ -496,7 +403,10 @@ impl ProjectRuntimeManager {
                 continue;
             }
             let Some(old) = current else {
-                self.publish_current_thread_route(&binding)
+                self.host
+                    .commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+                        binding: binding.clone(),
+                    }])
                     .map_err(|error| format!("RECOVERY_RECONCILE_REQUIRED: {error}"))?;
                 continue;
             };
@@ -519,19 +429,28 @@ impl ProjectRuntimeManager {
                     binding.binding_id, old.endpoint_generation, binding.endpoint_generation
                 ));
             }
-            self.publish_current_thread_route(&binding)
+            self.host
+                .commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+                    binding: binding.clone(),
+                }])
                 .map_err(|error| format!("RECOVERY_RECONCILE_REQUIRED: {error}"))?;
         }
         Ok(())
     }
 
-    fn publish_current_thread_route(&self, binding: &RuntimeBinding) -> Result<(), String> {
-        self.host
-            .commit_checked(&[Event::GlobalCurrentThreadRouteSet {
-                binding: binding.clone(),
-            }])
-            .map(|_| ())
-            .map_err(|error| error.to_string())
+    /// The live route that owns this binding's pane as a different claim.
+    ///
+    /// One pane owns exactly one binding host-wide, so this is the single
+    /// question every republisher must ask before publishing. A claimant at
+    /// this binding's own address is not an owner: a generation refresh keeps
+    /// its address and must still be published. A claimant that is this same
+    /// durable binding at an older address is this route's own stale entry, and
+    /// the reconciler advances it instead of treating it as another owner. The
+    /// caller decides what to log, because the request path and the startup
+    /// paths report different things.
+    fn pane_owner_other_than(&self, binding: &RuntimeBinding) -> Option<RuntimeBinding> {
+        let host = self.host.state.lock().unwrap();
+        host.global.pane_claimant_other_than(binding).cloned()
     }
 
     fn restore_resident_route_record(
@@ -629,8 +548,7 @@ impl ProjectRuntimeManager {
                 });
                 let same_tmux_pane = binding.tmux_endpoint.as_ref().is_some_and(|previous| {
                     // A live native thread is authoritative. The tmux pane is
-                    // only a recovery anchor when both Codex IDs are absent,
-                    // so a shared pane cannot block a second App Server peer.
+                    // only a recovery anchor when both Codex IDs are absent.
                     // Pane identity has one owner (`same_pane_route`): socket,
                     // server pid, session, pane id and pane pid.
                     endpoint.codex_session_id.is_none()
@@ -644,11 +562,14 @@ impl ProjectRuntimeManager {
                 }
             }
         }
-        // Two projects may share one pane, so a match in another project scope is
-        // not an ambiguity: it is the cross-scope anchor the retirement path
-        // handles. Only a second match inside this scope makes the candidate
-        // ambiguous, because only then would two live peers of this project claim
-        // one pane. When nothing matches in scope, the previous fail-closed rule
+        // This is an identity question, not a pane-ownership question. Pane
+        // ownership is global and the route reducer enforces it, so at most one
+        // route claims this pane. The binding ledger can still hold more than one
+        // record for the pane, and only a second record inside this scope makes
+        // the candidate ambiguous, because two live peers of one project cannot
+        // share a pane. A match in another project scope is not an ambiguity
+        // here: it is the cross-project anchor that the retirement path below
+        // handles. When nothing matches in scope, the previous fail-closed rule
         // still applies to several foreign matches.
         let in_scope = anchor_matches
             .iter()

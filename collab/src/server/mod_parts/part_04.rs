@@ -1,83 +1,3 @@
-/// Decide whether a project's same-pane master binding has been superseded by
-/// another binding that now owns the same tmux pane.
-///
-/// A pane is addressable by exactly one live peer per project. The host route
-/// index keys a binding that carries live Codex session/thread IDs by its
-/// thread address, so a pane that was reused by a new peer keeps both the
-/// stale master anchor and the new owner in the index. This is the same rule
-/// `validate_current_thread_candidate` already applies: a live native thread
-/// is authoritative, and a shared pane must not block a second peer. The
-/// stale anchor therefore stops gating the project route instead of fencing
-/// every non-register request forever.
-///
-/// Only a peer that actually has a native session/thread can supersede the
-/// anchor; a bare pane recovery anchor never does.
-///
-/// The host route index is durable: closing a peer retires its worker and
-/// keepalives but keeps its current-thread route, so a closed or moved peer's
-/// route is not evidence that the pane has a new owner. A superseding binding
-/// therefore only counts when its worker is still registered and that worker's
-/// current transport is present.
-fn same_scope_pane_owner_supersedes(
-    host_server: &Arc<Server>,
-    runtime: &Arc<Server>,
-    binding: &RuntimeBinding,
-) -> bool {
-    let Some(endpoint) = binding.tmux_endpoint.as_ref() else {
-        return false;
-    };
-    let candidates = {
-        let host = host_server.state.lock().unwrap();
-        host.global
-            .tmux_pane_route_claimants_in_scope(&binding.route_scope(), endpoint)
-            .into_iter()
-            .filter(|other| {
-                other.binding_id != binding.binding_id
-                    && other.session_id.is_some()
-                    && other.native_thread_id.is_some()
-            })
-            .cloned()
-            .collect::<Vec<_>>()
-    };
-    // Probing the transport spawns a process, so it runs without the state
-    // lock held.
-    candidates.into_iter().any(|route| {
-        let owner = {
-            let state = runtime.state.lock().unwrap();
-            state
-                .workers
-                .get(route.agent_id.as_str())
-                .cloned()
-                .map(|worker| (runtime.clone(), worker))
-        };
-        let owner = owner.or_else(|| {
-            let state = host_server.state.lock().unwrap();
-            state
-                .workers
-                .get(route.agent_id.as_str())
-                .cloned()
-                .map(|worker| (host_server.clone(), worker))
-        });
-        owner.is_some_and(|(server, worker)| {
-            // The durable host route must still be this worker's current
-            // transport. A worker that moved to another pane keeps its old
-            // route in the index and no longer owns the pane of that route.
-            let route_is_current = worker
-                .transport
-                .as_ref()
-                .and_then(|transport| transport.tmux_endpoint.as_ref())
-                .is_some_and(|current| {
-                    route.tmux_endpoint.as_ref().is_some_and(|route_endpoint| {
-                        crate::client::adapters::tmux::same_pane_route(current, route_endpoint)
-                    })
-                });
-            route_is_current
-                && crate::server::worker_presence(&server, &worker)
-                    == crate::server::presence::IdentityPresence::Present
-        })
-    })
-}
-
 include!("runtime_manager_setup.rs");
 
 impl ProjectRuntimeManager {
@@ -211,17 +131,13 @@ impl ProjectRuntimeManager {
         if verify(&runtime.state.lock().unwrap(), worker_id, token).is_err() {
             return Err("TOKEN_MISMATCH: pane register retry credential does not own worker".into());
         }
-        let retry_scope = RouteScope {
-            project_scope_id: context.project_scope.clone(),
-            app_scope_id: previous.appserver_id.clone(),
-        };
         let host_route = self
             .host
             .state
             .lock()
             .unwrap()
             .global
-            .lookup_unique_tmux_pane_route_in_scope(&retry_scope, &candidate.endpoint)
+            .lookup_unique_tmux_pane_route(&candidate.endpoint)
             .cloned();
         let host_matches = host_route.as_ref().is_some_and(|host|
             host == &binding ||

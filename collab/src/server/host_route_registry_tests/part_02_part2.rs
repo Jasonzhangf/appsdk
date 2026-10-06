@@ -288,21 +288,31 @@
         }])
         .unwrap();
 
-        // Both bindings now share the pane in the host index. The stale master
-        // anchor is superseded by the live same-scope peer and must no longer
-        // fence the project route.
+        // Publishing the peer at a second address evicts the master anchor from
+        // the pane: one pane owns exactly one binding host-wide. The superseded
+        // master anchor must no longer fence the project route, and the startup
+        // reconciler must not resurrect it.
         assert!(manager.same_pane_master_route_ready(&runtime).is_ok());
         manager.reconcile_same_pane_master_routes().unwrap();
         assert!(manager.same_pane_master_route_ready(&runtime).is_ok());
+        {
+            let state = host.state.lock().unwrap();
+            let endpoint = peer_binding.tmux_endpoint.as_ref().unwrap();
+            assert_eq!(
+                state.global.tmux_pane_route_claimants(endpoint).len(),
+                1,
+                "the reconciler must not republish a superseded pane claim"
+            );
+        }
         std::fs::remove_dir_all(host_root).unwrap();
         std::fs::remove_dir_all(project_root).unwrap();
     }
 
-    /// A pane may be shared by two projects.  The contract is one claimant per
-    /// project scope, so a claimant from another project must neither fence nor
-    /// be retired by this project.
+    /// One pane owns exactly one binding host-wide, across projects.  A second
+    /// project that takes the pane evicts the first project's claimant, and the
+    /// evicted claimant must still not fence its own project's route.
     #[tokio::test]
-    async fn cross_scope_pane_claimant_does_not_fence_the_project_route() {
+    async fn cross_scope_pane_claimant_takes_the_pane_without_fencing_the_project_route() {
         let (host, host_root, _) = test_server();
         let (runtime, project_root, _) = test_server();
         let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
@@ -400,146 +410,45 @@
             .expect("the master has a pane route");
         {
             let state = host.state.lock().unwrap();
+            let claimants = state.global.tmux_pane_route_claimants(&endpoint);
             assert_eq!(
-                state.global.tmux_pane_route_claimants(&endpoint).len(),
-                2,
-                "the pane is shared host-wide"
-            );
-            assert_eq!(
-                state
-                    .global
-                    .tmux_pane_route_claimants_in_scope(&scope, &endpoint)
-                    .len(),
+                claimants.len(),
                 1,
-                "this project has exactly one claimant"
+                "one pane owns exactly one binding host-wide"
+            );
+            assert_eq!(
+                claimants[0].binding_id, peer_binding.binding_id,
+                "the later writer takes the pane"
             );
             assert_eq!(
                 state
                     .global
-                    .lookup_unique_tmux_pane_route_in_scope(&scope, &endpoint)
+                    .lookup_unique_tmux_pane_route(&endpoint)
                     .map(|binding| binding.binding_id.clone()),
-                Some(master_binding.binding_id.clone())
+                Some(peer_binding.binding_id.clone())
             );
             assert!(
                 state
                     .global
-                    .lookup_unique_tmux_pane_route(&endpoint)
+                    .lookup_current_thread_route(
+                        master_binding.session_id.as_ref().unwrap(),
+                        master_binding.native_thread_id.as_ref().unwrap(),
+                    )
                     .is_none(),
-                "the host-wide query stays ambiguous"
+                "the evicted project's address is gone from the index"
             );
         }
         assert!(
             manager.same_pane_master_route_ready(&runtime).is_ok(),
-            "a cross-scope claimant must not fence this project's route"
+            "an evicted claimant must not fence another project's route"
+        );
+        assert!(
+            manager.reconcile_same_pane_master_routes().is_ok(),
+            "the startup reconciler must skip the evicted claimant instead of failing"
         );
         std::fs::remove_dir_all(host_root).unwrap();
         std::fs::remove_dir_all(project_root).unwrap();
         std::fs::remove_dir_all(peer_root).unwrap();
-    }
-
-    /// Two claimants inside one project scope stay ambiguous.  The fence must
-    /// name the pane, each claimant, and the remedy instead of reporting a
-    /// generation mismatch that hides the cause.
-    #[tokio::test]
-    async fn same_scope_pane_claimants_are_named_in_the_fence_error() {
-        let (host, host_root, _) = test_server();
-        let (runtime, project_root, _) = test_server();
-        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
-        let manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
-        let app = AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
-
-        let master_worker = "ambiguous-pane-master";
-        let master_token = "token-ambiguous-pane-master";
-        let candidates = test_candidates(master_worker).unwrap();
-        let registered = handle_register_with_app_scope_unfinalized(
-            &runtime,
-            master_worker.into(),
-            master_token.into(),
-            project_root.display().to_string(),
-            Some(app.clone()),
-            Some(candidates),
-        );
-        assert!(registered.ok, "{registered:?}");
-        let promoted = handle_master_promote(
-            &runtime,
-            master_worker.into(),
-            master_token.into(),
-            "user approved ambiguous pane master".into(),
-        );
-        assert!(promoted.ok, "{promoted:?}");
-        let scope = crate::server::global_state::RouteScope {
-            app_scope_id: app.clone(),
-            project_scope_id: GlobalState::canonical_project_scope(&project_root).unwrap(),
-        };
-        let master_binding = runtime
-            .state
-            .lock()
-            .unwrap()
-            .global
-            .lookup_binding_for(
-                &scope,
-                &BindingId::new(format!("binding-{master_worker}")).unwrap(),
-            )
-            .unwrap()
-            .clone();
-        host.commit_checked(&[Event::GlobalCurrentThreadRouteSet {
-            binding: master_binding.clone(),
-        }])
-        .unwrap();
-        manager.install_runtime(
-            &(
-                app.as_str().to_owned(),
-                master_binding.project_scope.as_str().to_owned(),
-            ),
-            runtime.clone(),
-            None,
-        );
-
-        // A second claimant in the same scope, on the same pane, whose worker is
-        // gone.  It is not a live owner, so it cannot supersede the master, and
-        // the pane stays ambiguous inside this scope.
-        let mut stale = master_binding.clone();
-        stale.agent_id = crate::identity::AgentId::new("stale-ambiguous-claimant").unwrap();
-        stale.binding_id = BindingId::new("binding-stale-ambiguous-claimant").unwrap();
-        stale.endpoint_generation = 1;
-        stale.session_id =
-            Some(crate::identity::SessionId::new("session-stale-ambiguous-claimant").unwrap());
-        stale.native_thread_id =
-            Some(crate::identity::NativeThreadId::new("thread-stale-ambiguous-claimant").unwrap());
-        // A distinct Codex address on the same pane, so the binding validates
-        // and does not collide with the master's thread address.
-        if let Some(endpoint) = stale.tmux_endpoint.as_mut() {
-            endpoint.codex_session_id = Some("session-stale-ambiguous-claimant".into());
-            endpoint.codex_thread_id = Some("thread-stale-ambiguous-claimant".into());
-        }
-        host.commit_checked(&[Event::GlobalCurrentThreadRouteSet {
-            binding: stale.clone(),
-        }])
-        .unwrap();
-
-        let endpoint = master_binding
-            .tmux_endpoint
-            .clone()
-            .expect("the master has a pane route");
-        let error = manager
-            .same_pane_master_route_ready(&runtime)
-            .expect_err("two same-scope claimants must fence the route");
-        assert!(error.contains("RECOVERY_RECONCILE_REQUIRED"), "{error}");
-        assert!(
-            error.contains(&format!("{}:{}", endpoint.tmux_session_id, endpoint.pane_id)),
-            "the error must name the pane: {error}"
-        );
-        assert!(error.contains(master_worker), "the error must name each claimant: {error}");
-        assert!(
-            error.contains("stale-ambiguous-claimant"),
-            "the error must name each claimant: {error}"
-        );
-        assert!(
-            error.contains("--keep"),
-            "the error must name the remedy: {error}"
-        );
-        std::fs::remove_dir_all(host_root).unwrap();
-        std::fs::remove_dir_all(project_root).unwrap();
     }
 
     #[tokio::test]
@@ -592,13 +501,20 @@
         );
         assert!(manager.same_pane_master_route_ready(&runtime).is_ok());
 
-        // The host route is missing again, but a live same-scope peer owns the
-        // same pane in the host index. The master anchor is superseded by that
-        // peer, so the project route must not fail closed.
+        // The host route is gone and no route holds the pane, so the project
+        // route is unowned and the request must fail closed with the remedy.
         host.commit_checked(&[Event::GlobalCurrentThreadRouteRetired {
             binding: master_binding.clone(),
         }])
         .unwrap();
+        let fenced = manager
+            .same_pane_master_route_ready(&runtime)
+            .expect_err("a missing host route must fence the request");
+        assert!(fenced.contains("RECOVERY_RECONCILE_REQUIRED"), "{fenced}");
+        assert!(fenced.contains("re-register"), "{fenced}");
+
+        // A second address then takes the same pane. The master anchor is
+        // superseded by it, so the project route must not fail closed again.
         let mut peer_candidates = candidates.clone();
         let endpoint = &mut peer_candidates.tmux.as_mut().unwrap().endpoint;
         endpoint.codex_session_id = Some("session-active-same-pane-peer".into());
@@ -633,7 +549,7 @@
     }
 
     #[tokio::test]
-    async fn closed_same_pane_peer_does_not_supersede_the_master_anchor() {
+    async fn closed_same_pane_peer_keeps_the_pane_ownership() {
         let (host, host_root, _) = test_server();
         let (runtime, project_root, _) = test_server();
         let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
@@ -764,15 +680,26 @@
             "a closed peer keeps its durable host route"
         );
 
-        // The master host route is gone again. The durable route of the closed
-        // peer is not a live pane owner, so the anchor still fences the project
-        // route instead of being silently superseded.
+        // The master host route is gone again, but the pane is still held by the
+        // closed peer's durable route. Ownership is a fact of the index and not
+        // of liveness, so the master anchor is superseded and must not fence.
         host.commit_checked(&[Event::GlobalCurrentThreadRouteRetired {
             binding: master_binding,
         }])
         .unwrap();
         let fenced = manager.same_pane_master_route_ready(&runtime);
-        assert!(fenced.is_err(), "{fenced:?}");
+        assert!(fenced.is_ok(), "{fenced:?}");
+        {
+            let state = host.state.lock().unwrap();
+            assert_eq!(
+                state.global.tmux_pane_route_claimants(
+                    peer_binding.tmux_endpoint.as_ref().unwrap()
+                )
+                .len(),
+                1,
+                "the closed peer's route still owns the pane"
+            );
+        }
         std::fs::remove_dir_all(host_root).unwrap();
         std::fs::remove_dir_all(project_root).unwrap();
     }

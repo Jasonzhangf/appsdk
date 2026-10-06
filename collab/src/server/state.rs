@@ -763,14 +763,6 @@ pub enum Event {
     GlobalCurrentThreadRouteTombstoneSet {
         tombstone: super::global_state::RuntimeBindingTombstone,
     },
-    /// Operator-authorized retirement of one route claim.
-    ///
-    /// Unlike the tombstone this has no replacement binding. The reducer
-    /// removes the claim from the index and records that it must not be
-    /// republished, so replay reconstructs both facts.
-    GlobalRouteClaimRetired {
-        record: super::global_state::RetiredRouteClaim,
-    },
     GlobalMigrationCommitEvidence {
         evidence: super::global_state::MigrationCommitEvidence,
     },

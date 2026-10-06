@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-control-plane-reset",
-  "version": "0.2.1",
-  "description": "SESE control-plane reset graph. It captures the routes level, the only level that inventories duplicate pane claimants and has a postcondition to verify. It authorizes one explicit reset level, proves exclusivity, inventories the exact retire set including duplicate pane claimants, retires the selected state transactionally, verifies the postcondition by replaying the daemon's own reader, and emits one audit receipt. The project and host levels share the inventory, archive, retire, and receipt nodes but never call verify_retirement, and the routes level never stages an archive or rebuilds a baseline, so those two nodes are no-ops there; the level selects the inventory and retire set, not the topology. Failure terminals are bound to the node that produces them, because dagpipe requires an audited SESE graph to declare exactly one output arc, so a terminal cannot also be a sink node. authorize_reset produces RESET_LEVEL_REQUIRED, RESET_LEVEL_FLAG_MISMATCH, RESET_AUTHORIZATION_REQUIRED, RESET_STORAGE_ROOT_REQUIRED, and RESET_STORAGE_ROOT_INVALID. prove_exclusivity produces RESET_DAEMON_LIVE. inventory_control_plane produces RESET_KEEP_REQUIRED (carrying the candidate list), RESET_INDEX_ROOT_UNRESOLVED, and RESET_PROJECT_HOLDS_HOST_INDEX. verify_retirement produces RESET_VERIFY_FAILED, after restoring the whole journal file from its pre-image snapshot. Every terminal leaves the source untouched.",
+  "version": "0.3.0",
+  "description": "SESE control-plane reset graph. It authorizes one explicit reset level, proves exclusivity, inventories the exact retire set, retires the selected state transactionally, rebuilds that level's baseline, and emits one audit receipt. Two levels exist: --project rebuilds one project's runtime baseline and --host rebuilds the host control plane. They share one topology; the level selects the inventory and the retire set, not the shape of the transaction. Duplicate route claimants are not a level here. One tmux pane owns exactly one route binding host-wide, and the route reducer enforces that on every write and on every replay, so no ambiguous pane is left for an operator to resolve. Failure terminals are bound to the node that produces them, because dagpipe requires an audited SESE graph to declare exactly one output arc, so a terminal cannot also be a sink node. authorize_reset produces RESET_LEVEL_REQUIRED, RESET_LEVEL_FLAG_MISMATCH, RESET_AUTHORIZATION_REQUIRED, RESET_STORAGE_ROOT_REQUIRED, and RESET_STORAGE_ROOT_INVALID. prove_exclusivity produces RESET_DAEMON_LIVE. inventory_control_plane produces RESET_INDEX_ROOT_UNRESOLVED, RESET_PROJECT_HOLDS_HOST_INDEX, RESET_CONTROL_ROOT_INSPECTION_FAILED, RESET_CONTROL_ROOT_INVALID, RESET_CONTROL_ROOT_SYMLINK_REJECTED, RESET_CONTROL_TREE_SYMLINK_REJECTED, and RESET_DOC_SYMLINK_REJECTED. archive_inventory produces RESET_ARCHIVE_MISMATCH and RESET_SOURCE_SOCKET_CHANGED. rebuild_baseline produces RESET_BASELINE_INVALID, and any step can end in RESET_INCOMPLETE when the journal and reset-record rollback also fails. Every terminal leaves the source untouched.",
   "inputs": [
     {
       "id": "reset_request",
@@ -125,34 +125,11 @@
       "iterator": "Whole"
     },
     {
-      "id": "verify_retirement",
-      "operator": "appsdk.collab_control_plane.verify_retirement",
-      "operator_version": "1",
-      "inputs": [
-        "retired_state"
-      ],
-      "output": {
-        "id": "verified_retirement",
-        "schema": "Object"
-      },
-      "input_selector": {
-        "include": [],
-        "exclude": [],
-        "predicate": null
-      },
-      "output_selector": {
-        "include": [],
-        "exclude": [],
-        "predicate": null
-      },
-      "iterator": "Whole"
-    },
-    {
       "id": "rebuild_baseline",
       "operator": "appsdk.collab_control_plane.rebuild_baseline",
       "operator_version": "1",
       "inputs": [
-        "verified_retirement"
+        "retired_state"
       ],
       "output": {
         "id": "rebuilt_baseline",
@@ -217,13 +194,8 @@
     },
     {
       "from": "retire_selected_state",
-      "to": "verify_retirement",
-      "arc_id": "retired_state"
-    },
-    {
-      "from": "verify_retirement",
       "to": "rebuild_baseline",
-      "arc_id": "verified_retirement"
+      "arc_id": "retired_state"
     },
     {
       "from": "rebuild_baseline",

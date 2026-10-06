@@ -381,22 +381,15 @@ pub(crate) enum Cmd {
         /// Confirm that the named control plane may be discarded.
         #[arg(long)]
         discard_legacy: bool,
-        /// L1: retire duplicate route claimants in one scope, keeping one.
-        #[arg(long)]
-        routes: bool,
         /// L2: rebuild this project's runtime baseline.
         #[arg(long)]
         project: bool,
         /// L3: rebuild the host control plane.
         #[arg(long)]
         host: bool,
-        /// The live host index root. Required for --routes and --host.
+        /// The live host index root. Required for --host.
         #[arg(long)]
         storage_root: Option<std::path::PathBuf>,
-        /// L1: the binding id to keep. Repeat once per ambiguous pane; each
-        /// ambiguous pane must have exactly one of its claimants kept.
-        #[arg(long)]
-        keep: Vec<String>,
         /// L3: also remove ~/.collab/runs/.
         #[arg(long)]
         include_runs: bool,

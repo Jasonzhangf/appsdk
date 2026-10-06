@@ -1146,14 +1146,13 @@ fn handle_register_with_app_scope_inner(
                             && old.tmux_endpoint.as_ref().is_some_and(|endpoint| {
                                 crate::client::adapters::tmux::same_pane_route(endpoint, candidate)
                             })
-                    }) && existing_route_scope.as_ref().is_some_and(|route_scope| {
-                        st.global
-                            .lookup_unique_tmux_pane_route_in_scope(route_scope, candidate)
-                            .is_some_and(|binding| {
-                                binding.agent_id.as_str() == worker_id
-                                    && binding.binding_id == binding_id
-                            })
-                    })
+                    }) && st
+                        .global
+                        .lookup_unique_tmux_pane_route(candidate)
+                        .is_some_and(|binding| {
+                            binding.agent_id.as_str() == worker_id
+                                && binding.binding_id == binding_id
+                        })
                 });
             // A dsh peer has no pane to point at, so the tmux arm can never
             // hold for it. Once a changed gateway address is a rebind, a dsh

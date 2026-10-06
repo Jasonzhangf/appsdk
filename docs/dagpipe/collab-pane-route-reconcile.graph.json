@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-pane-route-reconcile",
-  "version": "0.3.0",
-  "description": "SESE pane-route reconciliation graph entered only when the host route index disagrees with the project route owner. It classifies the scope-local pane claimants, resolves the scope-local owner binding, publishes that owner route when the host index lagged, verifies the scope-local uniqueness postcondition, and returns one named outcome: either the reconciler converges with no live conflict, or it names the remaining scope-local conflict and its remedy. A claimant from another project scope is never a conflict. Two claimants inside one scope stay ambiguous, and a claimant an operator retired is not a claimant at all: it is skipped and the address is never republished. The outcome is the reconciler's own Result, not a persisted receipt type, because nothing consumes a receipt.",
+  "version": "0.4.0",
+  "description": "SESE pane-route reconciliation graph entered only when the host route index disagrees with the project route owner. It classifies the pane claimants host-wide, resolves the owner binding, publishes that owner route only when this binding's own route advanced at its own address, verifies the host-wide pane uniqueness postcondition, and returns one named outcome. One tmux pane owns exactly one route binding host-wide, so a claimant from another project is the owner of the pane and not a neighbour. The reconciler is a republisher and never evicts: while any other claim holds the pane it leaves the index untouched and records the skip, because the pane is released only by the owner's own route removal or by a fresh registration, which is a writer path and does evict. It reports the remaining lag as RECOVERY_RECONCILE_REQUIRED with the remedy. The outcome is the reconciler's own Result, not a persisted receipt type, because nothing consumes a receipt.",
   "inputs": [
     {
       "id": "route_index_disagreement",
@@ -33,14 +33,14 @@
       "iterator": "Whole"
     },
     {
-      "id": "resolve_scope_pane_owner",
-      "operator": "appsdk.collab_pane_route.resolve_scope_pane_owner",
+      "id": "resolve_pane_owner",
+      "operator": "appsdk.collab_pane_route.resolve_pane_owner",
       "operator_version": "1",
       "inputs": [
         "pane_claimant_classification"
       ],
       "output": {
-        "id": "scope_pane_owner_resolution",
+        "id": "pane_owner_resolution",
         "schema": "Object"
       },
       "input_selector": {
@@ -60,7 +60,7 @@
       "operator": "appsdk.collab_pane_route.publish_owner_route",
       "operator_version": "1",
       "inputs": [
-        "scope_pane_owner_resolution"
+        "pane_owner_resolution"
       ],
       "output": {
         "id": "owner_route_publication",
@@ -79,14 +79,14 @@
       "iterator": "Whole"
     },
     {
-      "id": "verify_scope_pane_uniqueness",
-      "operator": "appsdk.collab_pane_route.verify_scope_uniqueness",
+      "id": "verify_pane_uniqueness",
+      "operator": "appsdk.collab_pane_route.verify_pane_uniqueness",
       "operator_version": "1",
       "inputs": [
         "owner_route_publication"
       ],
       "output": {
-        "id": "scope_pane_uniqueness_postcondition",
+        "id": "pane_uniqueness_postcondition",
         "schema": "Object"
       },
       "input_selector": {
@@ -106,7 +106,7 @@
       "operator": "appsdk.collab_pane_route.return_named_outcome",
       "operator_version": "1",
       "inputs": [
-        "scope_pane_uniqueness_postcondition"
+        "pane_uniqueness_postcondition"
       ],
       "output": {
         "id": "reconcile_outcome",
@@ -128,23 +128,23 @@
   "edges": [
     {
       "from": "classify_pane_claimants",
-      "to": "resolve_scope_pane_owner",
+      "to": "resolve_pane_owner",
       "arc_id": "pane_claimant_classification"
     },
     {
-      "from": "resolve_scope_pane_owner",
+      "from": "resolve_pane_owner",
       "to": "publish_owner_route",
-      "arc_id": "scope_pane_owner_resolution"
+      "arc_id": "pane_owner_resolution"
     },
     {
       "from": "publish_owner_route",
-      "to": "verify_scope_pane_uniqueness",
+      "to": "verify_pane_uniqueness",
       "arc_id": "owner_route_publication"
     },
     {
-      "from": "verify_scope_pane_uniqueness",
+      "from": "verify_pane_uniqueness",
       "to": "return_named_outcome",
-      "arc_id": "scope_pane_uniqueness_postcondition"
+      "arc_id": "pane_uniqueness_postcondition"
     }
   ],
   "outputs": [

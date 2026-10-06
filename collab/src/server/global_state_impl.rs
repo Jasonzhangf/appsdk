@@ -23,7 +23,6 @@ impl GlobalState {
             current_thread_routes: BTreeMap::new(),
             legacy_thread_routes: BTreeMap::new(),
             current_thread_route_tombstones: BTreeMap::new(),
-            retired_route_claims: BTreeMap::new(),
             command_receipts: BTreeMap::new(),
             migration_commit_evidence: BTreeMap::new(),
             ledger_scan_receipts: BTreeMap::new(),
@@ -128,30 +127,6 @@ impl GlobalState {
             if self.current_thread_routes.contains_key(&old_address) {
                 return Err(StateError::Invariant(format!(
                     "current thread route tombstone {key} is also live"
-                )));
-            }
-        }
-        for (key, record) in &self.retired_route_claims {
-            record.validate()?;
-            if key != &retired_route_claim_key(&record.binding)? {
-                return Err(StateError::Invariant(format!(
-                    "retired route claim key {key} does not match its route address"
-                )));
-            }
-            let session_id = record.binding.session_id.as_ref().ok_or_else(|| {
-                StateError::Invariant("retired route claim has no session id".to_owned())
-            })?;
-            let native_thread_id = record.binding.native_thread_id.as_ref().ok_or_else(|| {
-                StateError::Invariant("retired route claim has no native thread id".to_owned())
-            })?;
-            let address = current_thread_route_address(
-                session_id,
-                native_thread_id,
-                record.binding.tmux_endpoint.as_ref(),
-            );
-            if self.current_thread_routes.contains_key(&address) {
-                return Err(StateError::Invariant(format!(
-                    "retired route claim {key} is also live"
                 )));
             }
         }
@@ -557,9 +532,9 @@ impl GlobalState {
 
     /// Every live route that claims this pane, host-wide.
     ///
-    /// Pane uniqueness is a per-project contract, so this host-wide view is
-    /// only for callers that genuinely ask a host-wide question.  Scope-aware
-    /// callers use [`Self::tmux_pane_route_claimants_in_scope`].
+    /// One pane owns exactly one binding host-wide, so this returns at most one
+    /// route. The host-wide view is the only view: a claimant from another
+    /// project is a conflict, not a neighbour.
     pub fn tmux_pane_route_claimants(&self, endpoint: &TmuxEndpoint) -> Vec<&RuntimeBinding> {
         self.current_thread_routes
             .values()
@@ -571,19 +546,29 @@ impl GlobalState {
             .collect()
     }
 
-    /// Every live route in `scope` that claims this pane.
+    /// The live route that claims this binding's pane as a *different* claim.
     ///
-    /// A claimant from another project scope is not a conflict: it neither
-    /// blocks this scope nor may be retired by it.
-    pub fn tmux_pane_route_claimants_in_scope(
-        &self,
-        scope: &RouteScope,
-        endpoint: &TmuxEndpoint,
-    ) -> Vec<&RuntimeBinding> {
+    /// One pane owns exactly one binding host-wide. Two claimants on the same
+    /// pane are therefore never two owners: one of them is this binding's own
+    /// route, and the other is the claim that took the pane.
+    ///
+    /// A claimant at this binding's own route address is this route, not a
+    /// conflict, because a generation refresh keeps its address and must still
+    /// be published. A claimant that is this same durable binding at another
+    /// address is this route's own stale entry, and the repair is to advance it
+    /// rather than to hand the pane to another project. Everything else on the
+    /// pane is the claim that owns it.
+    pub fn pane_claimant_other_than(&self, binding: &RuntimeBinding) -> Option<&RuntimeBinding> {
+        let endpoint = binding.tmux_endpoint.as_ref()?;
+        let address_key = installed_route_address_key(binding);
         self.tmux_pane_route_claimants(endpoint)
             .into_iter()
-            .filter(|binding| binding.route_scope() == *scope)
-            .collect()
+            .find(|other| {
+                let same_claim = other.binding_id == binding.binding_id
+                    && other.same_principal(binding);
+                !same_claim
+                    && installed_route_address_key(other).as_deref() != address_key.as_deref()
+            })
     }
 
     /// Recovery-only lookup of the complete pane address. The caller still
@@ -593,24 +578,6 @@ impl GlobalState {
         endpoint: &TmuxEndpoint,
     ) -> Option<&RuntimeBinding> {
         let mut matches = self.tmux_pane_route_claimants(endpoint).into_iter();
-        let binding = matches.next()?;
-        matches.next().is_none().then_some(binding)
-    }
-
-    /// Recovery-only lookup of the complete pane address inside one project
-    /// scope.  Returns a route only when this scope has exactly one claimant.
-    ///
-    /// This is the scope-aware form used by the recovery fence, the reconciler,
-    /// register recovery and the CLI rebind.  Two claimants inside one scope
-    /// stay ambiguous and fail closed.
-    pub fn lookup_unique_tmux_pane_route_in_scope(
-        &self,
-        scope: &RouteScope,
-        endpoint: &TmuxEndpoint,
-    ) -> Option<&RuntimeBinding> {
-        let mut matches = self
-            .tmux_pane_route_claimants_in_scope(scope, endpoint)
-            .into_iter();
         let binding = matches.next()?;
         matches.next().is_none().then_some(binding)
     }

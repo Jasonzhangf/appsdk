@@ -64,7 +64,7 @@ fn appserver_pane_recovery_anchor_does_not_hide_a_distinct_live_thread() {
         }),
     };
 
-    // A different App Server thread in the shared pane is a different peer: the
+    // A different App Server thread in the same pane is a different peer: the
     // pane is only this peer's recovery anchor, not its identity.
     let other_thread = tmux_candidate(Some("new-session"), Some("new-thread"), "%910");
     assert!(!identity_anchor_conflicts_with_candidate(

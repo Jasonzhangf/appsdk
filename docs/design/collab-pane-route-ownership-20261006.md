@@ -1,6 +1,6 @@
 # Pane route ownership: one pane, one binding
 
-Status: design revision 6. Supersedes the L1 half of
+Status: design revision 7. Supersedes the L1 half of
 `collab-reset-operation-20261005.md` and the scope-local decision recorded in
 `collab-control-plane-reset-run-notes.md` (2026-10-05 17:15).
 
@@ -21,6 +21,14 @@ session-and-thread ambiguity error while the pane case goes to the reducer.
 Both were found by the rewritten contract tests, not by review. Sections
 changed since revision 3 are marked `(revision N, review M Pn)`; sections
 changed by implementation are marked `(Revision 6, …)`.
+
+Revision 7 answers the sixth review. It found the "never reaches the reducer"
+absolute in section 5 false: `collab context --worker <owner>` retires the stale
+cross-project anchor through the pre-existing adjudication channel, so a
+stranded pane is releasable in band. It also found that the deleted in-scope
+pane query used to provide a scope check that the host-wide
+`MASTER_RECOVERY_BLOCKED_LIVE` gate no longer made, which is restored. Sections
+changed here are marked `(Revision 7, review 6 Pn)`.
 
 ## 1. The defect
 
@@ -230,22 +238,34 @@ The pane is released by one of two events:
 2. A writer commits a new route on the pane. A registration is a writer path, so
    the reducer evicts the stale claim and the new writer wins.
 
-Case 2 is narrower than it first looks, and the black box measured the limit. A
-**cross-project** registration on a pane whose stale claim is still in the index
-never reaches the reducer: the pre-existing identity guard refuses it first with
-`RUNTIME_BINDING_REJECTED: tmux identity anchor is already bound to worker
-<owner>`. The merged-main binary and this candidate emit that refusal
-identically, so the invariant neither causes nor fixes it. What case 2 does cover
-is a writer inside the same anchor (a generation refresh, or a re-registration
-once the old route is gone), and the reducer contract itself: whenever an
-accepted writer installs a route on the pane, the older claimant is gone instead
-of co-resident.
+Case 2 has two doors, and the difference is whether the operator names the
+worker.
 
-A cross-project stranded pane therefore still needs the owner's own route
-retirement, or an operator reset. That gap is pre-existing and is reported, not
+- **Without `--worker`**, a cross-project registration on a pane whose stale
+  claim is still in the index never reaches the reducer: the pre-existing
+  identity guard refuses it first with `RUNTIME_BINDING_REJECTED: tmux identity
+  anchor is already bound to worker <owner>`. The merged-main binary and this
+  candidate emit that refusal identically, so the invariant neither causes nor
+  fixes it. *(Revision 6, measured by the isolated black box in
+  `/tmp/collab-pane-bb/stale-claim.log`.)*
+- **With `collab context --worker <owner>`**, the pre-existing adjudication
+  channel sets `retire_cross_project_anchor`, so the guard does not refuse: it
+  retires the stale cross-project anchor
+  (`retire_cross_project_anchor_candidate`, `runtime_manager_setup.rs:619`) and
+  the registration then reaches the reducer, which evicts the same-pane claim. A
+  stranded pane is therefore releasable in band, through an operator channel
+  that predates this delivery. *(Revision 7, review 6 P2-1; pinned by
+  `named_override_retires_a_stale_cross_scope_anchor`.)*
+
+What case 2 covers without an operator override is a writer inside the same
+anchor: a generation refresh, or a re-registration once the old route is gone.
+And the reducer contract holds either way: whenever an accepted writer installs
+a route on the pane, the older claimant is gone instead of co-resident.
+
+A cross-project stranded pane therefore needs either the owner's own route
+retirement or `collab context --worker <owner>`. A plain registration is refused
+before the reducer runs. That boundary is pre-existing and is reported, not
 hidden.
-*(Revision 6, measured by the isolated black box in
-`/tmp/collab-pane-bb/stale-claim.log`.)*
 
 ## 6. Ablation
 
@@ -266,6 +286,19 @@ The retirement mechanism's only producer was L1 (`reset.rs:1117` builds
 `RetiredRouteClaim`, `record_retired_route_claim`,
 `lookup_retired_route_claim`, `retired_route_claim_key`, and
 `state_impl.rs:1096-1108`'s snapshot emission.
+
+Removing the variant is a journal-format change, and the consequence is stated
+rather than hidden: `decode_journal_line` (`part_12.rs`) rejects an unknown `ev`
+tag with no catch-all, so a journal that already holds a
+`GlobalRouteClaimRetired` record no longer replays and the daemon refuses to
+start loudly instead of starting with silent data loss. The live host journal
+holds zero such records (measured over 122 route sets), and the level that wrote
+them shipped only in the immediately preceding delivery, so no host is expected
+to carry one. If one does, `collab reset --host` archives the journal and
+rebuilds the baseline. A decode-only shim is deliberately not kept: the
+variant's producer is gone, and a permanent ignore-arm for a removed event is
+the dead path this ablation removes.
+*(Revision 7, both sixth-review passes.)*
 
 This settles review 2's P1. The pane-conflict `RECOVERY_RECONCILE_REQUIRED`
 returns at `runtime_manager_setup.rs:322`, `:337` and `:414` are exactly what a
@@ -350,7 +383,10 @@ It is rewritten, not deleted, because the reconcilers and the fence survive.
 `resolve_scope_pane_owner` becomes `resolve_pane_owner` and
 `verify_scope_pane_uniqueness` becomes `verify_pane_uniqueness`, with their
 `arc_id`s and output ids renamed to match; both take host-wide, no-liveness
-semantics. The node count stays 5. Version bumps to 0.4.0.
+semantics. The node count stays 5. Version bumps to 0.4.0. The uniqueness check
+sits *before* the publish, because the guard is what decides whether to publish
+at all: the graph must not claim a post-publish verification the code does not
+perform. *(Revision 7, review 6 P2-7.)*
 
 **`rust/src/dagpipe.rs`** — `design_graph_ids()` stays `[&'static str; 11]` and
 `design_graph_operator_names()` goes from `[&'static str; 64]` to
@@ -490,16 +526,25 @@ of section 6.2 are replaced by a skip, and no terminal names the deleted
   up` cycles and assert the claimant set and the route count are unchanged
   after each cycle, and that the journal does not grow by a route set per
   cycle.
-- **Stale-claim release.** A cross-project registration onto a pane whose stale
-  claim is still in the index is refused before the reducer runs, by the
+- **Stale-claim release.** A plain cross-project registration onto a pane whose
+  stale claim is still in the index is refused before the reducer runs, by the
   pre-existing identity guard. That refusal is measured identically on the
   merged-main binary and on this candidate
   (`RUNTIME_BINDING_REJECTED: tmux identity anchor is already bound to worker
-  <owner>`, `/tmp/collab-pane-bb/stale-claim.log`), so the acceptance is
-  demonstrated at the reducer instead: the fixture replay shows the earlier
-  claimant absent from the index once the later one is installed, and
+  <owner>`, `/tmp/collab-pane-bb/stale-claim.log`). The in-band release is the
+  pre-existing adjudication channel: `collab context --worker <owner>` retires
+  the stale cross-project anchor and the registration then reaches the reducer
+  (pinned by `named_override_retires_a_stale_cross_scope_anchor`). At the reducer
+  itself the acceptance is direct: the fixture replay shows the earlier claimant
+  absent from the index once the later one is installed, and
   `closed_same_pane_peer_keeps_the_pane_ownership` and
   `same_pane_peer_that_moved_away_still_owns_the_pane` pin the index behaviour.
+- **Fence scope.** The `MASTER_RECOVERY_BLOCKED_LIVE` exemption
+  (`same_pane_tmux_recovery`) uses the host-wide pane query, so it re-applies the
+  scope check the deleted in-scope query used to provide: the found route must
+  match the requesting worker's project and app scope. Without it, a foreign
+  route that reuses the pane-derived `binding-codex-%N` name would skip the
+  fence.
 - **Live index.** A read-only replay of the live host journal under the delivered
   rule reports the same 8 evictions and the same five winners as section 8, and
   the running daemon was then probed one address at a time with the read-only

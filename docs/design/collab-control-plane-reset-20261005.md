@@ -3,10 +3,12 @@
 Status: revision 3, frozen for delivery 1. Three independent reviews ran against
 revisions 1 and 2. All three agree on the core: pane uniqueness is a per-project
 contract, the host-wide scan is the defect, and the scope-local query fixes both
-failure modes. Their P0 findings were all against the reset operation or against
-a reconcile change that revision 3 deletes. Delivery 1 is D1, D2 and D3 as
-specified in section 5. Delivery 2 is D5 and D4; its open problems are recorded
-in section 5.5.
+failure modes. *(Historical: the three reviews endorsed the scope-local pane
+contract; it was reversed by `collab-pane-route-ownership-20261006.md` §2 — one
+pane now owns one binding host-wide.)* Their P0 findings were all against the
+reset operation or against a reconcile change that revision 3 deletes. Delivery 1
+is D1, D2 and D3 as specified in section 5. Delivery 2 is D5 and D4; its open
+problems are recorded in section 5.5.
 
 Revision 4 (ablation, after delivery): the routes level (L1) was removed. One
 tmux pane now owns exactly one route binding host-wide, and the route reducer
@@ -15,9 +17,13 @@ for an operator to resolve and the operator retirement mechanism has no
 producer. `collab reset` has exactly two levels, `--project` and `--host`. See
 `docs/design/collab-pane-route-ownership-20261006.md` for the design of record.
 L1 references below survive only inside historical review notes, and each such
-note is marked as naming a removed level.
+note is marked as naming a removed level. References to the reversed scope-local
+pane contract are likewise historical; each affected block carries a
+`(historical: the scope-local pane contract …)` marker.
 
-Revision history:
+Revision history (historical; the pane contract these entries describe is the
+reversed scope-local contract — see `collab-pane-route-ownership-20261006.md`
+§2):
 
 - Revision 1 retired every same-pane claimant when a route was installed. Review
   round 1 rejected it: the contract is per-project pane ownership, and an
@@ -77,6 +83,8 @@ The same global lookup causes the second failure mode. At
 that lookup return `None`, so the flag is false, the request falls through to the
 live-master guard at `part_06.rs:1165-1179`, and the answer is
 `MASTER_RECOVERY_BLOCKED_LIVE`. One wrong query produces both failures.
+*(historical: the scope-local pane contract; reversed by
+`collab-pane-route-ownership-20261006.md` §2.)*
 
 Pane distribution of the current index (read-only replay, grouped by
 `(route_scope, pane)`):
@@ -91,7 +99,9 @@ Pane distribution of the current index (read-only replay, grouped by
 
 The codebase already states the intended invariant. The comment at
 `collab/src/server/mod_parts/runtime_manager_setup.rs:248` says "A pane is
-addressable by exactly one live peer **per project**";
+addressable by exactly one live peer **per project**" *(historical: the
+scope-local pane contract; reversed by `collab-pane-route-ownership-20261006.md`
+§2)*;
 `same_scope_pane_owner_supersedes`
 (`collab/src/server/mod_parts/part_04.rs:21-45`) filters by
 `other.route_scope() == binding.route_scope()`;
@@ -102,12 +112,14 @@ pane cannot block a second App Server peer"; and the test
 (`collab/src/server/host_route_registry_tests/part_02.rs:1055`) asserts that two
 same-scope claimants may coexist in the host index and must not fence the project
 route. Pane uniqueness is **scope-local** by contract, and the global scan is the
-defect.
+defect. *(historical: the scope-local pane contract; reversed by
+`collab-pane-route-ownership-20261006.md` §2.)*
 
 Read-only verification of the fix hypothesis: with the same replayed index, the
 master's pane has 2 claimants globally but exactly 1 within its own scope, so a
 scope-local query returns `Some(master)` and the fence passes, while the
-cross-scope `codex-%2` stays untouched.
+cross-scope `codex-%2` stays untouched. *(historical: the scope-local pane
+contract; reversed by `collab-pane-route-ownership-20261006.md` §2.)*
 
 ## 2. Goal
 
@@ -136,11 +148,15 @@ review also raised P0 findings against the reset operation only. So:
 - No global pane retirement and no implicit retirement of a live conflict. The
   recovery DAG (`docs/design/collab-recovery-dag-audit-20260930.md:9`) keeps
   "explicit user override is the only path that may retire or supersede a live
-  conflict".
+  conflict". *(historical: the scope-local pane contract; reversed by
+  `collab-pane-route-ownership-20261006.md` §2 — the route reducer now evicts any
+  earlier claimant on the pane, in any project or scope.)*
 - No symmetric liveness resolution on the fence. The same-scope stale case is
   demonstrated in data but not observed as a failure; it was given the explicit
   L1 remedy instead of new fence logic. That L1 routes level was later removed
-  (see `docs/design/collab-pane-route-ownership-20261006.md`).
+  (see `docs/design/collab-pane-route-ownership-20261006.md`). *(historical: the
+  scope-local pane contract; reversed by
+  `collab-pane-route-ownership-20261006.md` §2.)*
 - No control-plane storage relocation in this delivery (D4 below).
 - No change to the unmerged `codex/collab-master-liveness-fence` branch.
 
@@ -164,8 +180,16 @@ claimants, 0 retirements ever.
 
 ### D1 Pane uniqueness is scope-local
 
+*(Historical: D1–D3 below record the delivery-1 scope-local pane contract. It was
+reversed by `collab-pane-route-ownership-20261006.md` §2: one pane owns one
+binding host-wide, and a later writer evicts any earlier claimant in any project
+or scope. Every scope-local statement in these sections is part of that
+historical record.)*
+
 Invariant: within one route scope, at most one route claims a given tmux pane.
-Two projects may share a pane, and neither may block or retire the other.
+Two projects may share a pane, and neither may block or retire the other. *(historical:
+the scope-local pane contract; reversed by `collab-pane-route-ownership-20261006.md`
+§2 — one pane owns one binding host-wide.)*
 
 - The pane-claimant query takes a route scope and returns the claimant only when
   the scope-local claimant count is exactly one.
@@ -193,7 +217,9 @@ Two projects may share a pane, and neither may block or retire the other.
   a host-wide question, and is expressed through the same claimant scan. It is
   not a second mechanism.
 - The reducer is unchanged. Cross-scope claimants are never retired by another
-  scope's publication.
+  scope's publication. *(historical: the scope-local pane contract; reversed by
+  `collab-pane-route-ownership-20261006.md` §2 — the reducer now evicts any
+  earlier claimant of the same pane before inserting the new route.)*
 
 This alone clears both failure modes: the fence resolves the master, and
 `same_pane_tmux_recovery` becomes true so the master can re-register.
@@ -204,15 +230,21 @@ This alone clears both failure modes: the fence resolves the master, and
   takes the route scope. The scope-local lookup and the pane-only branch of
   `lookup_tmux_route` (`global_state_impl.rs:525-533`, currently a duplicate of
   the same scan) are expressed through it. The host-wide lookup is the same scan
-  without the scope filter and keeps its own caller.
+  without the scope filter and keeps its own caller. *(historical: the
+  scope-local pane contract; reversed by
+  `collab-pane-route-ownership-20261006.md` §2 — the claimant scan is now
+  host-wide and `pane_claimant_other_than` is its single owner.)*
 - Conflict messages are always scope-local. A cross-scope claimant is never
-  listed as a conflict, because it is not one.
+  listed as a conflict, because it is not one. *(historical: the scope-local pane
+  contract; reversed by `collab-pane-route-ownership-20261006.md` §2 — a claimant
+  from another project is now the pane's owner.)*
 - When the scope-local claimant count is greater than one, the fence error names
   the pane and each claimant (agent id, binding id, generation) and names the
   remedy (an explicit operator reset; the pane-conflict routes level it once
   named was later removed — see
   `docs/design/collab-pane-route-ownership-20261006.md`). Today it reports a
-  generation mismatch that hides the real cause.
+  generation mismatch that hides the real cause. *(historical: the scope-local
+  pane contract; reversed by `collab-pane-route-ownership-20261006.md` §2.)*
 
 ### D3 Reconcile reachability and logging
 
@@ -223,7 +255,10 @@ This alone clears both failure modes: the fence resolves the master, and
 - Every reconciler pane lookup is scope-local: `reconcile_same_pane_master_routes`
   (`runtime_manager_setup.rs:287`) uses the scope-local claimant query, like the
   fence. A cross-scope claimant can no longer make the reconciler see "no unique
-  host pane route" for a route that its own scope resolves.
+  host pane route" for a route that its own scope resolves. *(historical: the
+  scope-local pane contract; reversed by
+  `collab-pane-route-ownership-20261006.md` §2 — every reconciler pane lookup now
+  goes through the host-wide `pane_owner_other_than`.)*
 - Startup failures stay fatal. `ProjectRuntimeManager::new(...)?`
   (`part_12.rs:893-894`) still stops the daemon when a reconcile cannot be
   resolved. Review round 3 showed that making the round non-aborting would remove
@@ -317,7 +352,9 @@ recorded here so the delivery-2 design starts from them, and none of them is
 touched by delivery 1. The first three items concern the L1 routes level and its
 operator retirement mechanism; that level was later removed (see
 `docs/design/collab-pane-route-ownership-20261006.md`), so they are kept as
-historical review notes rather than open work.
+historical review notes rather than open work. Their scope-local pane statements
+are likewise historical *(historical: the scope-local pane contract; reversed by
+`collab-pane-route-ownership-20261006.md` §2)*.
 
 - **Retirement durability.** `retire_current_thread_route`
   (`global_state_impl.rs:799-827`) removes the route and writes no tombstone.
@@ -375,25 +412,27 @@ them, and each leaves the source untouched.
 
 `docs/dagpipe/collab-pane-route-reconcile.graph.json` (5 nodes, 4 edges)
 
-Revision 4 note: the chain below is the delivery-1 shape. The later pane-global
-reversal (`docs/design/collab-pane-route-ownership-20261006.md`) renamed two
-nodes and made the reconciler a republisher that never evicts. The graph is now
-`0.4.0`: `resolve_owner_route` is `resolve_pane_owner`,
-`verify_scope_pane_uniqueness` is `verify_pane_uniqueness`, and
-`emit_reconcile_receipt` is `return_named_outcome` (the reconciler returns its own
-outcome; there is no `ReconcileReceipt` type). The chain is otherwise unchanged.
+Revision 4 note: the delivery-1 shape named `resolve_owner_route`,
+`verify_scope_pane_uniqueness` and `emit_reconcile_receipt`, and classified the
+claimants scope-locally. The later pane-global reversal
+(`docs/design/collab-pane-route-ownership-20261006.md`) renamed two nodes and
+made the reconciler a republisher that never evicts. The graph is now `0.4.0`;
+the chain below is its current shape. There is no `ReconcileReceipt` type: the
+reconciler returns its own outcome.
 
 ```text
 route_index_disagreement
-  -> classify_pane_claimants          (scope-local: none / exactly one / several)
-  -> resolve_owner_route              (highest-generation scope-local owner)
-  -> publish_owner_route              (host index lagged: publish that owner)
-  -> verify_scope_pane_uniqueness     (postcondition: one claimant in scope)
-  -> emit_reconcile_receipt           (converged, or the named scope-local conflict)
+  -> classify_pane_claimants          (host-wide: none / exactly one / several)
+  -> resolve_pane_owner               (the claimant that owns the pane)
+  -> verify_pane_uniqueness           (no other claim holds the pane)
+  -> publish_owner_route              (this binding's own route; never evicts)
+  -> return_named_outcome             (converged, or the named lag)
 ```
 
-Single sink: `reconcile_receipt`, which carries either convergence or the named
-remainder. A cross-scope claimant is not a conflict and never appears as one.
+Single sink: `reconcile_outcome`, which carries either convergence or the named
+remainder. One pane owns exactly one binding host-wide, so a claimant from
+another project is the pane's owner, not a neighbour, and never appears as a
+conflict.
 
 ## 7. Acceptance
 
@@ -402,8 +441,8 @@ remainder. A cross-scope claimant is not a conflict and never appears as one.
 | Id | Case | Expected |
 | --- | --- | --- |
 | A1 | Real routecodex master. Precondition recorded first: replaying the live host journal still shows 2 claimants on pane `$2:%2` and `collab context` still fails with `RECOVERY_RECONCILE_REQUIRED`. Then install the candidate, restart the daemon, and repeat | `collab context` in routecodex reports the master live (`master.worker_id` and `endpoint_live: true`) and reports no `exact_error`; a window of >= 10 non-`Register` operations from routecodex adds **zero** `RECOVERY_RECONCILE_REQUIRED` lines to the routecodex project log and event stream (`<project>/.agent-collab/server/log.txt` and `events.jsonl`), with before/after counts recorded and a positive control: the same count before the fix is non-zero. Two further conditions need a registered tmux pane and are therefore recorded as environment-limited rather than met: `registered: true` and `collab master status`. Both answer from the caller's own pane, and the author's non-interactive shell has no Codex thread anchor, so it reports `IDENTITY_REBIND_UNPROVEN` and `TMUX_ENDPOINT_MISSING` for broken and unbroken projects alike |
-| A2 | Cross-scope pane sharing (`$2:%2`, `$138:%138`) | neither peer is fenced or retired; `collab context` succeeds in both scopes; the host index still shows both claimants |
-| A3 | Ambiguous same-scope pane (`$6:%6`, `$8:%8`, `$16:%16`) | the failure names the pane and each claimant with agent id, binding id, and generation, and names the remedy. It is not reported as a generation mismatch |
+| A2 | Cross-scope pane sharing (`$2:%2`, `$138:%138`) | *(historical: the scope-local pane contract; reversed by `collab-pane-route-ownership-20261006.md` §2)* neither peer is fenced or retired; `collab context` succeeds in both scopes; the host index still shows both claimants |
+| A3 | Ambiguous same-scope pane (`$6:%6`, `$8:%8`, `$16:%16`) | *(historical: the scope-local pane contract; reversed by `collab-pane-route-ownership-20261006.md` §2)* the failure names the pane and each claimant with agent id, binding id, and generation, and names the remedy. It is not reported as a generation mismatch |
 | A4 | A project runtime that cannot be ensured at startup | the failure appears in `<state_root>/log.txt` with the route, the storage root, and the underlying error. It is no longer discarded. Delivery 1 keeps this a diagnostic line and does not add a journal event for it |
 | A5 | A daemon restart after a claimant lost its pane group | **moved to delivery 2.** Delivery 1 does not change the reconciler publish rule, and the durable-retirement rule that makes a lost claimant stay retired is a delivery 2 item (§5.5, B6). Delivery 1 verifies the weaker property it can own: two consecutive restarts produce an identical index |
 
@@ -430,7 +469,9 @@ fixed deliberately rather than forgotten.
   ambiguity only among same-scope matches and to leave a single cross-scope
   match on the existing `retire_cross_project_anchor` path, without changing
   what retirement means. Delivery 2 owns this, because it also changes the
-  reconciler in the same file and the same invariant family.
+  reconciler in the same file and the same invariant family. *(historical: the
+  scope-local pane contract; reversed by
+  `collab-pane-route-ownership-20261006.md` §2.)*
 - **P3-1, a startup input class that changed direction.**
   `reconcile_same_pane_master_routes` (`:321-377`) publishes a pending same-pane
   master when the in-scope lookup finds no claimant (`:343-349`). When a scope
@@ -467,7 +508,8 @@ fixed deliberately rather than forgotten.
 
 - D1 changes a shared query. Every non-test call site is listed in D1 and each
   one already filters by scope afterwards, so the scope argument does not change
-  its intent.
+  its intent. *(historical: the scope-local pane contract; reversed by
+  `collab-pane-route-ownership-20261006.md` §2.)*
 - D3 keeps startup fail-closed. A reconcile that cannot be resolved still stops
   the daemon (`part_12.rs:893-894`), so an unresolved binding never serves
   traffic. Only the `ensure_runtime` failure is downgraded to a log line, and a
@@ -475,7 +517,9 @@ fixed deliberately rather than forgotten.
 - D1 narrows a shared query from host-wide to scope-local. The residual risk is
   the opposite of before: a genuine same-scope duplicate no longer resolves to a
   route, so the fence fails closed and names the conflict instead of silently
-  picking one claimant.
+  picking one claimant. *(historical: the scope-local pane contract; reversed by
+  `collab-pane-route-ownership-20261006.md` §2 — the query is host-wide and the
+  reducer evicts the earlier claimant.)*
 - Every level requires an explicit approval and archives before it removes.
 - Rollback is the reverse commit. No project journal is rewritten.
 
@@ -483,7 +527,7 @@ fixed deliberately rather than forgotten.
 
 Delivery 1 (D1, D2, D3):
 
-- `collab/src/server/global_state_impl.rs` (claimant query, scope-local lookup)
+- `collab/src/server/global_state_impl.rs` (claimant query, scope-local lookup) *(historical: the scope-local pane contract; reversed by `collab-pane-route-ownership-20261006.md` §2)*
 - `collab/src/server/mod_parts/runtime_manager_setup.rs` (fence, reconciler)
 - `collab/src/server/mod_parts/part_06.rs` (register recovery scope)
 - `collab/src/server/mod_parts/part_04.rs` (committed-register retry admission)

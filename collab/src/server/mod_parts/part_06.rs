@@ -949,11 +949,10 @@ pub(crate) fn commit_current_thread_route_for_runtime(
     {
         return Ok(());
     }
-    // A successful registration is live activity. It deliberately re-activates
-    // an address an operator retired, and `set_current_thread_route` clears the
-    // retirement record for exactly that address. The retirement exists to stop
-    // the reconcilers and the replay helper from republishing a claim from the
-    // project side, which is a different signal from a peer registering again.
+    // A successful registration is live activity, so it is the later writer for
+    // its address and for its pane: the reducer evicts whatever claimed either
+    // before it. The reconcilers and the replay helper are the paths that must
+    // not republish a superseded claim; this path is not one of them.
     route_owner
         .commit_checked(&[Event::GlobalCurrentThreadRouteSet { binding }])
         .map(|_| ())
@@ -1146,13 +1145,20 @@ fn handle_register_with_app_scope_inner(
                             && old.tmux_endpoint.as_ref().is_some_and(|endpoint| {
                                 crate::client::adapters::tmux::same_pane_route(endpoint, candidate)
                             })
-                    }) && st
-                        .global
-                        .lookup_unique_tmux_pane_route(candidate)
-                        .is_some_and(|binding| {
-                            binding.agent_id.as_str() == worker_id
-                                && binding.binding_id == binding_id
-                        })
+                    }) && existing_route_scope.as_ref().is_some_and(|route_scope| {
+                        // The pane query is host-wide, so the scope check that
+                        // the deleted in-scope query used to provide is now
+                        // explicit: a foreign route with the same pane-derived
+                        // worker name must not count as this worker's recovery.
+                        st.global
+                            .lookup_unique_tmux_pane_route(candidate)
+                            .is_some_and(|binding| {
+                                binding.agent_id.as_str() == worker_id
+                                    && binding.binding_id == binding_id
+                                    && binding.project_scope == route_scope.project_scope_id
+                                    && binding.app_scope_id == route_scope.app_scope_id
+                            })
+                    })
                 });
             // A dsh peer has no pane to point at, so the tmux arm can never
             // hold for it. Once a changed gateway address is a rebind, a dsh

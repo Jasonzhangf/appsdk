@@ -300,8 +300,9 @@
         .unwrap();
         assert!(manager.same_pane_master_route_ready(&runtime).is_ok());
 
-        // The peer rebinds to another pane. Its old route stays in the durable
-        // host index, but the peer no longer owns the master pane.
+        // The peer rebinds to another pane. Its durable route on the master pane
+        // is untouched: pane ownership is an index fact, not the peer's current
+        // transport, so the moved peer still owns the master pane.
         let moved = handle_register_with_app_scope_unfinalized(
             &runtime,
             peer_worker.into(),

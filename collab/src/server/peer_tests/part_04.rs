@@ -976,7 +976,12 @@ fn worker_snapshot_rejects_tmux_without_writing_a_receipt() {
     let tmux = IsolatedTmux::start(&root);
     let endpoints = tmux.endpoints();
     assert_eq!(endpoints.len(), 2);
-    assert!(register_tmux(&server, "snapshot-master", endpoints[0].clone()).ok);
+    // The master must carry an explicit AppServer session and thread: a
+    // tmux-only binding is Unknown and therefore holds no live master authority.
+    let mut master_endpoint = endpoints[0].clone();
+    master_endpoint.codex_session_id = Some("session-snapshot-master".into());
+    master_endpoint.codex_thread_id = Some("thread-snapshot-master".into());
+    assert!(register_tmux(&server, "snapshot-master", master_endpoint).ok);
     assert!(register_tmux(&server, "snapshot-peer", endpoints[1].clone()).ok);
     let promoted = super::handle_master_promote(
         &server,
@@ -1016,7 +1021,12 @@ fn ordinary_worker_requires_its_own_snapshot_and_closes_idempotently() {
     let tmux = IsolatedTmux::start(&root);
     let endpoints = tmux.endpoints();
     assert_eq!(endpoints.len(), 2);
-    assert!(register_tmux(&server, "master", endpoints[0].clone()).ok);
+    // The master must carry an explicit AppServer session and thread: a
+    // tmux-only binding is Unknown and therefore holds no live master authority.
+    let mut master_endpoint = endpoints[0].clone();
+    master_endpoint.codex_session_id = Some("session-master".into());
+    master_endpoint.codex_thread_id = Some("thread-master".into());
+    assert!(register_tmux(&server, "master", master_endpoint).ok);
     assert!(register_tmux(&server, "ordinary", endpoints[1].clone()).ok);
     assert!(
         super::handle_master_promote(

@@ -120,7 +120,7 @@ fn stale_presence_probe_after_reregister_does_not_notify_or_mutate_new_worker() 
 }
 
 #[test]
-fn presence_edge_records_tmux_peer_presence() {
+fn presence_edge_skips_a_tmux_only_peer() {
     let (server, root) = test_server();
     let tmux = IsolatedTmux::start(&root);
     let endpoints = tmux.endpoints();
@@ -135,7 +135,7 @@ fn presence_edge_records_tmux_peer_presence() {
             approval: "approved".into(),
         },
     );
-    assert!(promote_resp.ok);
+    assert!(promote_resp.ok, "{promote_resp:?}");
 
     let status = dispatch(
         &server_arc,
@@ -144,10 +144,19 @@ fn presence_edge_records_tmux_peer_presence() {
         },
     );
     assert!(status.ok, "{status:?}");
-    assert_eq!(status.data["workers"][0]["presence"], "present");
-    assert_eq!(
-        server_arc.state.lock().unwrap().keepalives["edge-worker"].notified_presence,
-        "online"
+    // A tmux-only binding registers no AppServer session or thread, so the pane
+    // probe can only prove reachability. The peer stays Unknown, and an Unknown
+    // peer records no presence edge at all: it is neither announced online nor
+    // declared offline.
+    assert_eq!(status.data["workers"][0]["presence"], "unknown");
+    assert!(
+        !server_arc
+            .state
+            .lock()
+            .unwrap()
+            .keepalives
+            .contains_key("edge-worker"),
+        "an Unknown peer must not record a presence edge"
     );
     drop(server_arc);
     drop(tmux);

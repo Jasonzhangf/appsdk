@@ -7,6 +7,21 @@ fn worker_identity_presence(server: &Server, worker: &WorkerRec) -> IdentityPres
             let Some(endpoint) = transport.tmux_endpoint.as_ref() else {
                 return IdentityPresence::Missing;
             };
+            // A tmux pane is an identity anchor and an address, not a liveness
+            // credential. Only a binding that registered an explicit AppServer
+            // session and thread may be judged live; a tmux-only binding stays
+            // Unknown, because the pane probe proves reachability and nothing
+            // else. The pane probe still reports a vanished anchor as Missing.
+            if endpoint.codex_session_id.is_none() || endpoint.codex_thread_id.is_none() {
+                return match crate::client::adapters::tmux::probe(endpoint) {
+                    Ok(crate::client::adapters::tmux::PanePresence::Missing) => {
+                        IdentityPresence::Missing
+                    }
+                    Ok(crate::client::adapters::tmux::PanePresence::Present)
+                    | Ok(crate::client::adapters::tmux::PanePresence::Unknown)
+                    | Err(_) => IdentityPresence::Unknown,
+                };
+            }
             match crate::client::adapters::tmux::probe(endpoint) {
                 Ok(crate::client::adapters::tmux::PanePresence::Present) => {
                     IdentityPresence::Present
@@ -1220,21 +1235,9 @@ fn handle_master_promote(
     // tmux pane is an address, not a liveness credential: no probe in this path
     // can tell whether the recorded master still runs. Keeping that question
     // here is what strands a project with an authority that can neither act,
-    // nor be recovered, nor be replaced.
-    match worker_presence(server, &worker) {
-        IdentityPresence::Present => {}
-        // Promotion needs a master that can act immediately, so a cold thread
-        // is refused with the same rule as a missing one.
-        IdentityPresence::Cold => {
-            return Resp::err("master promotion requires a live registered transport")
-        }
-        IdentityPresence::Missing => {
-            return Resp::err("master promotion requires a live registered transport")
-        }
-        IdentityPresence::Unknown => return Resp::err(
-            "promotion candidate identity is unknown; defer promotion until transport probes succeed",
-        ),
-    }
+    // nor be recovered, nor be replaced. The candidate is not probed either:
+    // the token already proves it owns this worker id, and a pane probe can only
+    // report that a pane exists, never that the peer behind it is live.
     let route_scope = match server_route_scope(server, &state) {
         Ok(Some(route_scope)) => route_scope,
         Ok(None) => return Resp::err("master promotion requires a registered project route"),

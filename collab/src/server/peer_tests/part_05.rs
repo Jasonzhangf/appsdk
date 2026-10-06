@@ -237,18 +237,18 @@ fn init_registration_result_exposes_persisted_runtime_identity() {
 }
 
 #[test]
-fn master_promotion_requires_live_tmux_pane() {
+fn master_promotion_is_not_blocked_by_an_unproven_candidate_transport() {
     let (mut server, root) = test_server();
     register(&server, "peer-a", "thread-a");
     retire_registered_test_pane(&registered_binding(&server, "peer-a"));
-    let denied = super::handle_master_promote(
+    let promoted = super::handle_master_promote(
         &server,
         "peer-a".into(),
         "token-peer-a".into(),
         "user approved peer-a as collab master".into(),
     );
-    assert!(!denied.ok);
-    assert!(denied.error.unwrap().contains("live registered transport"));
+    assert!(promoted.ok, "{promoted:?}");
+    assert_eq!(promoted.data["master"], "peer-a");
     std::fs::remove_dir_all(root).unwrap();
 }
 

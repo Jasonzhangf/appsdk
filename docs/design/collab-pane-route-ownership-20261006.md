@@ -593,10 +593,11 @@ an anchor. Another worker that holds that thread on a *different* pane is still
 refused, because the pane is the only thing that changed owner. The refusal
 happens before any commit, so the journal does not move.
 
-A tmux-only binding has no queryable AppServer session or thread. Its liveness
-is therefore `Missing` unless a later registration re-anchors it. The pane
-probe answers addressability, and it is the anchor for the tmux identity. It
-never makes a binding live on its own.
+A tmux-only binding has no explicitly registered AppServer session or thread. It
+is therefore `Unknown` while its pane answers, and `Missing` when the pane is
+gone. The pane probe answers addressability, and it is the anchor for the tmux
+identity. It never makes a binding live on its own. An `Unknown` peer records no
+presence edge, so it is neither announced online nor declared offline.
 
 ### 11.2 Code changes
 
@@ -614,9 +615,23 @@ never makes a binding live on its own.
 - `pane_claimants` and `pane_reclaim_events` (`part_06.rs`) are the single
   builder for a replacement. `typed_dispatch` calls it inside the registration
   commit; `validate_current_thread_candidate` calls it for a foreign runtime.
-- `handle_master_promote` no longer vetoes an incumbent. An explicit approval is
-  the whole authority for the transition, so the grant moves to the named
-  worker.
+- `handle_master_promote` consults no probe at all. An explicit approval is the
+  whole authority for the transition, so the grant moves to the named worker even
+  when the incumbent or the candidate cannot be proven live. The removed gate
+  answered `promotion candidate identity is unknown; defer promotion until
+  transport probes succeed`, which is exactly the refusal that stranded a project
+  whose only candidate is a tmux-only peer.
+- `worker_identity_presence` (`part_07.rs`) stops reporting `Present` for a
+  tmux-only binding. A tmux transport whose endpoint carries no
+  `codex_session_id` and no `codex_thread_id` has no registered AppServer anchor,
+  so the pane probe can only report a vanished anchor as `Missing`; a reachable
+  pane is `Unknown`. The pane stays an address, never a liveness credential.
+- `load_or_create_resolved_full_at` (`identity.rs`) mints a named worker on a
+  pane another peer owns. A tmux registration anchors on the pane alone, so the
+  identity gate must not refuse the later registrant that the daemon is required
+  to accept. The gate still fails closed when the anchor is a Codex
+  session/thread: `appserver_worker.is_some()` or no tmux candidate keeps
+  `IDENTITY_RESTORE_CONFLICT` and `IDENTITY_RESTORE_CROSS_PROJECT`.
 
 ### 11.3 Delivery gates, unchanged
 
@@ -626,6 +641,13 @@ A cross-project send still requires `Present` on both sides, and `collab master
 send` still requires `master.endpoint_live == true`. The stale-master symptom is
 fixed at the root: the pane re-anchors to the later registrant, and an
 authorized promotion always replaces the incumbent.
+
+The liveness rule has one consequence that is deliberate: a tmux-only peer is
+`Unknown`, so it holds no live master authority, `endpoint_live` is `null` rather
+than `false`, and `master send` refuses it. A peer that registers an explicit
+AppServer session and thread keeps its reachability probe. Removing the tmux arm
+from liveness altogether is a larger change: it fails 138 of the 946 unit tests
+across the delivery, wake and authority paths, so it belongs to its own round.
 
 ### 11.4 Tests
 
@@ -649,4 +671,18 @@ authorized promotion always replaces the incumbent.
 - `closed_same_pane_peer_keeps_the_pane_ownership` (rewritten): the later
   registrant closes the recorded master, and the closed peer keeps its durable
   host route, so the pane stays owned.
+- `a_named_worker_mints_on_an_owned_pane_because_the_pane_is_the_anchor` (new):
+  the identity gate mints the later registrant on an owned pane and leaves the
+  previous claimant untouched, because the daemon commits the replacement.
+- `master_promotion_is_not_blocked_by_an_unproven_candidate_transport` (renamed
+  from `master_promotion_requires_live_tmux_pane`): an authorized promotion is
+  not refused when the candidate cannot be proven live.
+- `worker_status_query_exposes_unknown_liveness_for_a_tmux_only_peer` (renamed):
+  a tmux-only peer reports `presence: unknown` and a `null` `endpoint_live`.
+- `presence_edge_skips_a_tmux_only_peer` (renamed): an `Unknown` peer records no
+  presence edge.
+- `worker_snapshot_rejects_tmux_without_writing_a_receipt` and
+  `ordinary_worker_requires_its_own_snapshot_and_closes_idempotently` (updated):
+  the master fixture registers an explicit AppServer session and thread, because
+  a tmux-only master holds no live authority.
 

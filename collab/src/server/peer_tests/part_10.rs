@@ -568,7 +568,7 @@ fn codex_subagents_exchange_messages() {
 }
 
 #[test]
-fn worker_status_query_exposes_liveness_identity_and_notification_pressure() {
+fn worker_status_query_exposes_unknown_liveness_for_a_tmux_only_peer() {
     let (server, root) = test_server();
     let tmux = IsolatedTmux::start(&root);
     register_tmux(&server, "status-worker", tmux.endpoints().remove(0));
@@ -579,9 +579,13 @@ fn worker_status_query_exposes_liveness_identity_and_notification_pressure() {
     let w = &workers[0];
     assert_eq!(w["id"], "status-worker");
     assert_eq!(w["transport"]["kind"], "tmux");
-    assert_eq!(w["endpoint_live"], true);
-    assert_eq!(w["identity_valid"], true);
-    assert_eq!(w["presence"], "present");
+    // A tmux-only binding registers no AppServer session or thread, so its
+    // liveness is unprovable. The pane proves reachability only, so the peer
+    // stays Unknown, and an Unknown peer reports neither `endpoint_live` nor
+    // `identity_valid` rather than claiming either.
+    assert_eq!(w["endpoint_live"], serde_json::Value::Null);
+    assert_eq!(w["identity_valid"], serde_json::Value::Null);
+    assert_eq!(w["presence"], "unknown");
     assert_eq!(w["agent_state"], "unknown");
     assert_eq!(w["status"], "unknown");
     assert_eq!(w["transport_view"]["transport"], "tmux");

@@ -274,18 +274,12 @@ fn notification_sink(server: &Server) -> &Arc<TmuxNotificationSink> {
 
 fn default_appserver_thread_status() -> Arc<AppServerThreadStatus> {
     Arc::new(|transport, thread_id| match transport.kind {
-        TransportKind::Tmux => {
-            let endpoint = transport.tmux_endpoint.as_ref().ok_or_else(|| {
-                "TMUX_ENDPOINT_MISSING: selected transport has no endpoint".to_owned()
-            })?;
-            if endpoint.pane_id != thread_id {
-                return Err(
-                    "TMUX_ENDPOINT_MISMATCH: requested pane does not match selected endpoint"
-                        .into(),
-                );
-            }
-            crate::client::adapters::tmux::view(endpoint)
-        }
+        // A tmux transport has no App Server endpoint to query, so this oracle
+        // refuses it. The pane is an address, never a liveness credential: a
+        // caller must not read presence out of a pane probe.
+        TransportKind::Tmux => Err(
+            "TMUX_ENDPOINT_NOT_QUERYABLE: a tmux transport has no App Server endpoint".to_owned(),
+        ),
         TransportKind::AppServer => {
             crate::client::adapters::codex_app_server::read_thread_status(transport, thread_id)
                 .map_err(|error| error.to_string())

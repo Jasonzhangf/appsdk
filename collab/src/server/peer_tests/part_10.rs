@@ -278,6 +278,34 @@ fn retired_appserver_candidate_check_does_not_override_live_tmux_presence() {
 }
 
 #[test]
+fn a_tmux_pane_id_recorded_as_the_codex_thread_is_not_liveness() {
+    let (mut server, root) = test_server();
+    // A tmux registration copies CODEX_SESSION_ID and CODEX_THREAD_ID from the
+    // caller's environment, so a worker can record its own pane address as the
+    // thread. The production AppServer oracle must refuse a tmux transport
+    // instead of answering from the pane.
+    server.appserver_thread_status = default_appserver_thread_status();
+    let tmux = IsolatedTmux::start_single(&root);
+    let mut endpoint = tmux.endpoints().remove(0);
+    endpoint.codex_session_id = Some("session-pane-address".into());
+    endpoint.codex_thread_id = Some(endpoint.pane_id.clone());
+    let registration = register_tmux(&server, "pane-address-worker", endpoint);
+    assert!(registration.ok, "{registration:?}");
+
+    let worker = server.state.lock().unwrap().workers["pane-address-worker"].clone();
+    assert_eq!(worker_presence(&server, &worker), IdentityPresence::Unknown);
+
+    let status = dispatch(&Arc::new(server), Req::WorkerStatus { worker_id: None });
+    assert_eq!(status.data["workers"][0]["presence"], "unknown");
+    assert_eq!(
+        status.data["workers"][0]["endpoint_live"],
+        serde_json::Value::Null
+    );
+    drop(tmux);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn architecture_source_has_no_live_declared_role_or_dispatch_owner() {
     let server_source = include_str!("../mod.rs");
     let state_source = include_str!("../state.rs");

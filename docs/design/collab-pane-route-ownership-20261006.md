@@ -642,9 +642,15 @@ presence edge, so it is neither announced online nor declared offline.
   reachable pane is not liveness. A tmux endpoint with no `codex_session_id` or
   no `codex_thread_id` has no registered anchor, so it is `Unknown`; one that
   carries both asks the AppServer status seam for that exact thread and is
-  `Present` only when that query answers. A tmux transport has no AppServer
-  endpoint, so the default probe refuses the foreign thread and the answer stays
-  `Unknown`. The pane stays an address, never a liveness credential.
+  `Present` only when that query answers.
+- `default_appserver_thread_status` (`part_01.rs`) refuses every tmux transport
+  unconditionally. A tmux transport's endpoint is the tmux socket, so it has no
+  App Server endpoint to query; the old arm compared the requested thread with
+  `pane_id` and then answered `Ok` from `tmux::view`, which turned a caller-set
+  `CODEX_THREAD_ID=%N` into `Present` with no AppServer query at all. The pane
+  probe stays the address check (`Missing` when the pane is gone); it can never
+  answer liveness. The status seam remains the daemon's AppServer oracle, so the
+  test seam keeps every delivery and wake test meaningful.
 - `load_or_create_resolved_full_at` (`identity.rs`) mints a named worker on a
   pane another peer owns. A tmux registration anchors on the pane alone, so the
   identity gate must not refuse the later registrant that the daemon is required
@@ -747,4 +753,16 @@ does not answer is not.
   `ordinary_worker_requires_its_own_snapshot_and_closes_idempotently` (updated):
   the master fixture registers an explicit AppServer session and thread, because
   a tmux-only master holds no live authority.
+- `a_tmux_pane_id_recorded_as_the_codex_thread_is_not_liveness` (new): a tmux
+  registration that records its own pane address as `CODEX_THREAD_ID` and any
+  non-empty `CODEX_SESSION_ID` is `Unknown` under the production AppServer
+  oracle, and its `endpoint_live` is `null`. The test is red before the oracle
+  refuses tmux: it fails with `left: Present, right: Unknown`, because the old
+  tmux arm compared the requested thread with `pane_id` and then answered from
+  `tmux::view`.
+- `a_forged_token_cannot_reclaim_a_retired_workers_pane` (new): the tombstone
+  exemption does not widen the ownership fence. A worker whose binding a takeover
+  retired is refused when it applies again with a token that does not match the
+  identity it persisted, and the refused attempt leaves the pane with its current
+  owner.
 

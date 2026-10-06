@@ -484,6 +484,62 @@ fn context_never_returns_another_peers_binding() {
     std::fs::remove_dir_all(root).ok();
 }
 
+/// One root can hold several app scopes. The resolved route scope then names no
+/// single scope, and a read-back that first resolved it returned null even
+/// though the caller's own binding was unambiguous. The caller's receipt must
+/// not depend on that resolution.
+#[test]
+fn context_returns_the_callers_binding_when_the_root_holds_several_app_scopes() {
+    let (server, root) = test_server();
+    let registered = register(&server, "receipt-multi", "thread-multi");
+    assert!(registered.ok, "registering the peer failed: {registered:?}");
+    let receipt = registered.data["command"]["binding"].clone();
+    assert!(receipt.is_object(), "{registered:?}");
+
+    // A second app scope on the same root makes the resolved route scope
+    // ambiguous. Nothing about the caller's own binding becomes ambiguous.
+    let project_scope = crate::server::GlobalState::canonical_project_scope(&server.root).unwrap();
+    let other = crate::server::global_state::RuntimeBinding::new_with_session(
+        project_scope.clone(),
+        AppServerId::new("appserver-cli").unwrap(),
+        crate::identity::AgentId::new("agent-other-scope").unwrap(),
+        RuntimeId::new("runtime-other-scope").unwrap(),
+        BindingId::new("binding-other-scope").unwrap(),
+        1,
+        Some(SessionId::new("session-other-scope").unwrap()),
+        Some(crate::identity::NativeThreadId::new("thread-other-scope").unwrap()),
+    )
+    .unwrap();
+    server
+        .commit_checked(&[
+            Event::GlobalProjectRegistered {
+                registration: crate::server::global_state::ProjectRegistration::new(
+                    project_scope,
+                    AppServerId::new("appserver-cli").unwrap(),
+                )
+                .unwrap(),
+            },
+            Event::GlobalRuntimeBound { binding: other },
+        ])
+        .expect("adding a second app scope for this root must commit");
+    {
+        let state = server.state.lock().unwrap();
+        assert!(
+            server_route_scope(&server, &state).is_err(),
+            "the fixture must make the resolved route scope ambiguous"
+        );
+    }
+
+    let response = handle_context(&server, "receipt-multi".into(), "token-receipt-multi".into());
+    assert!(response.ok, "context failed: {response:?}");
+    assert_eq!(
+        response.data["binding"], receipt,
+        "an ambiguous route scope must not hide the caller's own binding: {response:?}"
+    );
+
+    std::fs::remove_dir_all(root).ok();
+}
+
 /// `collab context` replaces `collab who` / `collab status --all` for agents,
 /// and `Workers` / `StatusAll` were the calls that recorded ordinary-peer
 /// presence edges. Driving the same transition through the consolidated entry

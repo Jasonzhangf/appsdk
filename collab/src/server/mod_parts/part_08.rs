@@ -64,7 +64,7 @@ fn prune_master_wake_idle_capacity(server: &Server) {
     );
     if changed {
         let accumulator = state.master_wake.clone();
-        server.commit_locked(&mut state, &[Event::MasterWakeUpdated { accumulator }]);
+        server.commit_locked_reporting(&mut state, &[Event::MasterWakeUpdated { accumulator }]);
     }
 }
 
@@ -732,7 +732,10 @@ fn handle_cross_project_send(
             subscription_id: subscription.id.clone(),
         });
     }
-    server.commit_locked(&mut st, &events);
+    if let Err(error) = server.commit_locked(&mut st, &events) {
+        drop(st);
+        return Resp::err(format!("CROSS_PROJECT_SEND_DURABILITY_FAILED: {error}"));
+    }
     drop(st);
     let notification = subscription
         .as_ref()
@@ -975,7 +978,10 @@ fn handle_task_relocate(
     if let Some(binding) = worktree_binding_for_task(server, &task) {
         events.push(Event::WorktreeBound { binding });
     }
-    server.commit_locked(&mut st, &events);
+    if let Err(error) = server.commit_locked(&mut st, &events) {
+        drop(st);
+        return Resp::err(format!("TASK_RELOCATE_DURABILITY_FAILED: {error}"));
+    }
     Resp::data(json!({
         "task": task.id,
         "relocated": true,
@@ -1374,7 +1380,7 @@ fn handle_task_deliver(
     // Capture the exact candidate commit so a later pending merge can prove
     // the delivered candidate itself reached main, not just some main ref.
     lifecycle.delivery_commit = resolve_candidate_commit(&server.root, &task, &worktree);
-    server.commit_locked(
+    if let Err(error) = server.commit_locked(
         &mut st,
         &[
             Event::TaskUpdated { task: task.clone() },
@@ -1383,7 +1389,10 @@ fn handle_task_deliver(
                 record: lifecycle,
             },
         ],
-    );
+    ) {
+        drop(st);
+        return Resp::err(format!("TASK_DELIVER_DURABILITY_FAILED: {error}"));
+    }
 
     Resp::data(json!({
         "delivered": task.id,

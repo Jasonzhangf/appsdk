@@ -740,15 +740,13 @@ fn run_project(scope: &Scope, host_paths: &HostPaths, request: &ResetRequest) ->
             host_paths.socket_path().display()
         );
     }
-    if resident_index_root(host_paths)?.is_some_and(|owner| owner == root) {
-        anyhow::bail!(
-            "RESET_PROJECT_HOLDS_HOST_INDEX: {} is the storage root of the running daemon, so its \
-             .agent-collab/ is the live route index; retire that index with `collab reset --host \
-             --storage-root {}` instead",
-            root.display(),
-            root.display()
-        );
-    }
+    // The project level may be run from the daemon's own storage root. In that
+    // case the project retire set below already covers the resident index under
+    // `.agent-collab/server/`, so the run retires it together with the business
+    // payload and records that it did so. The descriptor is still read, and an
+    // unreadable one still fails closed, because that read is what proves which
+    // root holds the index.
+    let held_resident_index = resident_index_root(host_paths)?.is_some_and(|owner| owner == root);
 
     let run_id = format!("reset-{}-{}", now_ms(), std::process::id());
     let archive_root = host_paths
@@ -844,6 +842,7 @@ fn run_project(scope: &Scope, host_paths: &HostPaths, request: &ResetRequest) ->
             "project_root": root,
             "approval": request.approval,
             "already_reset": already_reset,
+            "held_resident_index": held_resident_index,
             "archive_root": if already_reset { None } else { Some(archive_root) },
             "removed_host_routes": removed_routes,
             "removed_stale_host_routes": removed_stale_routes,
@@ -933,10 +932,22 @@ fn run_project(scope: &Scope, host_paths: &HostPaths, request: &ResetRequest) ->
 /// it. The journal inside it must exist, and a non-empty journal must hold a
 /// record for that root, so a typo cannot retarget the operation at another
 /// project's control plane.
+///
+/// Returns the canonical storage root, the replay state (`None` when the
+/// journal could not be replayed), and the original replay error text in that
+/// degraded case.
+///
+/// An unreplayable journal is exactly the state reset exists to repair, so it
+/// does not abort the run unconditionally. The failing replay cannot prove
+/// ownership, so the daemon's own `service_scope_root` descriptor must prove
+/// that this root is the index root instead. When the descriptor names a
+/// different root, the original replay error propagates unchanged and nothing
+/// is retired.
 fn resolve_index_root(
     request: &ResetRequest,
     level: &str,
-) -> anyhow::Result<(PathBuf, crate::server::state::State)> {
+    host_paths: &HostPaths,
+) -> anyhow::Result<(PathBuf, Option<crate::server::state::State>, Option<String>)> {
     let raw = request
         .storage_root
         .as_ref()
@@ -955,7 +966,23 @@ fn resolve_index_root(
             storage_root.display()
         );
     }
-    let state = crate::server::replay_host_index(&storage_root)?;
+    let state = match crate::server::replay_host_index(&storage_root) {
+        Ok(state) => state,
+        Err(error) => {
+            // Only the daemon's own descriptor can prove that this root owns
+            // the index when the journal cannot be replayed. A descriptor that
+            // is missing, unreadable, or names another root does not prove it,
+            // so the original replay error stands unchanged.
+            let descriptor_owns_index = resident_index_root(host_paths)
+                .ok()
+                .flatten()
+                .is_some_and(|owner| owner == storage_root);
+            if !descriptor_owns_index {
+                return Err(error);
+            }
+            return Ok((storage_root, None, Some(error.to_string())));
+        }
+    };
     let expected_scope = crate::server::GlobalState::canonical_project_scope(&storage_root)
         .map_err(|error| anyhow::anyhow!("RESET_STORAGE_ROOT_INVALID: {error}"))?;
     let has_any_record =
@@ -974,7 +1001,7 @@ fn resolve_index_root(
             index_journal.display()
         );
     }
-    Ok((storage_root, state))
+    Ok((storage_root, Some(state), None))
 }
 
 /// The host control-plane entries that level 3 retires.
@@ -1029,7 +1056,8 @@ fn host_control_plane_entries(
 /// `<storage_root>/.agent-collab/`, the external service descriptor, and
 /// `~/.collab/runs/` unless `--include-runs` was given.
 fn run_host(scope: &Scope, host_paths: &HostPaths, request: &ResetRequest) -> anyhow::Result<()> {
-    let (storage_root, _state) = resolve_index_root(request, "host")?;
+    let (storage_root, _state, degraded_replay_error) =
+        resolve_index_root(request, "host", host_paths)?;
     let state_root = host_paths.state_root().to_path_buf();
 
     let _lock =
@@ -1085,7 +1113,7 @@ fn run_host(scope: &Scope, host_paths: &HostPaths, request: &ResetRequest) -> an
     }
 
     let reset_record_snapshot = snapshot_file(state_root.join("reset.jsonl"))?;
-    let record = json!({
+    let mut record = json!({
         "schema": "collab-reset/v1",
         "run_id": run_id,
         "at_ms": now_ms(),
@@ -1111,6 +1139,18 @@ fn run_host(scope: &Scope, host_paths: &HostPaths, request: &ResetRequest) -> an
         "delivery_verified": false,
         "next": "run collab up; it recreates the host index, identities, and project registry",
     });
+    if let Some(replay_error) = &degraded_replay_error {
+        record["degraded"] = json!(true);
+        record["index_replay"] = json!("unreadable");
+        record["index_replay_error"] = json!(replay_error);
+        record["warning"] = json!(format!(
+            "the resident index journal at {} could not be replayed; reset archived it as \
+             evidence and rebuilt the host control plane without it: {replay_error}",
+            storage_root
+                .join(".agent-collab/server/journal.jsonl")
+                .display()
+        ));
+    }
 
     let transaction = (|| -> anyhow::Result<()> {
         if !already_reset {

@@ -234,7 +234,10 @@ fn handle_task_review(
             }
         }
     }
-    server.commit_locked(&mut st, &events);
+    if let Err(error) = server.commit_locked(&mut st, &events) {
+        drop(st);
+        return Resp::err(format!("TASK_REVIEW_DURABILITY_FAILED: {error}"));
+    }
     drop(st);
     let mut notification_attempt_failure: Option<String> = None;
     if let Some((message_id, subscription_id)) = pending_notification {
@@ -416,7 +419,10 @@ fn handle_task_integrated(
             events.push(Event::Superseded { ids: stale_notices });
         }
     }
-    server.commit_locked(&mut st, &events);
+    if let Err(error) = server.commit_locked(&mut st, &events) {
+        drop(st);
+        return Resp::err(format!("TASK_INTEGRATED_DURABILITY_FAILED: {error}"));
+    }
     Resp::data(json!({
         "task": task_id,
         "status": integrated.status,
@@ -576,7 +582,10 @@ fn handle_task_close(
                 }
             }
         }
-        server.commit_locked(&mut st, &events);
+        if let Err(error) = server.commit_locked(&mut st, &events) {
+            drop(st);
+            return Resp::err(format!("TASK_CLOSE_DURABILITY_FAILED: {error}"));
+        }
         let stale_workers = stale_worker_views(&st, &|worker| worker_presence(server, worker));
         drop(st);
         return Resp::data(json!({
@@ -724,7 +733,10 @@ fn handle_task_close(
             }
         }
     }
-    server.commit_locked(&mut st, &close_events);
+    if let Err(error) = server.commit_locked(&mut st, &close_events) {
+        drop(st);
+        return Resp::err(format!("TASK_CLOSE_DURABILITY_FAILED: {error}"));
+    }
 
     let subscribed_notifications = release_dependents_of_closed_task(server, &mut st, &closed.id);
 
@@ -852,7 +864,7 @@ fn release_dependents_of_closed_task(
             ]);
             subscribed_notifications.push((message_id, subscription.id));
         }
-        server.commit_locked(st, &events);
+        server.commit_locked_reporting(st, &events);
     }
     subscribed_notifications
 }
@@ -998,12 +1010,15 @@ fn handle_task_finalize_cleanup(
         verification: CleanupVerification::Verified,
         manual_reason: existing.and_then(|receipt| receipt.manual_reason),
     };
-    server.commit_locked(
+    if let Err(error) = server.commit_locked(
         &mut st,
         &[Event::CleanupVerified {
             receipt: receipt.clone(),
         }],
-    );
+    ) {
+        drop(st);
+        return Resp::err(format!("TASK_CLEANUP_DURABILITY_FAILED: {error}"));
+    }
     let released = waiting_dependents_of(&st, &task.id)
         .into_iter()
         .map(|waiter| waiter.id)

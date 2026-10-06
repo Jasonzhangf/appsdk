@@ -169,7 +169,7 @@ ARC 契约：
 | `identity_verified` | Object | 身份门通过：身份已装载、令牌已校验、route 已注册、首次鉴权调用成功 |
 | `notify_state` | Object | 默认订阅状态 |
 | `master_grant` | Object | live master grant 或空 |
-| `read_only_projection` | Object | peers / master / status 只读投影，以及调用方自身 runtime binding 的回执 |
+| `read_only_projection` | Object | peers / master / status 只读投影；**不含** binding |
 | `env_projection` | Object | 过滤后的 shell 环境子集（凭据形状的键已丢弃） |
 | `state_snapshot` | Object | 唯一出口，含 bootstrap/identity/daemon/route/subscriptions/master/operations/peers/peer_count/summary/master_wake/subagents/pending_merges/inbox/worktrees/tasks/binding/env；身份修复时另有 requires_identity_update 且 registered=false |
 
@@ -178,6 +178,13 @@ ARC 契约：
 并只按已鉴权调用方过滤。它是丢失注册回执的 peer 的唯一回读路径：否则该 peer 只能从
 拒绝报文里推断 generation，而控制真值不得从错误文本重建。所选 route 内没有唯一
 binding 时该字段为 null。
+
+`binding` 的**唯一生产者是 `emit_snapshot` 节点**（`handle_context` /
+`collab/src/server/mod_parts/part_09.rs`），不是 `read_only_projection` 节点：
+`read_only_project_state`（`collab/src/main_context.rs`）只产出 peers / master / status。
+身份修复终点走的是**另一个**快照（`identity_update_snapshot`），它**没有 `binding` 键**，
+只有 `registered=false` 与 `requires_identity_update`。因此 `binding` 只出现在身份已确立的
+`state_snapshot` 上。
 
 失败终点不进入成功 DAG，作为 attempt 终态显式存在：
 `路径未识别`、`拒绝在 playground`。只有**已分类的身份失败**

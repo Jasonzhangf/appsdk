@@ -119,6 +119,6 @@ fn record_ordinary_peer_presence_edges(server: &Server, worker_filter: Option<&s
                 }
             }
         }
-        server.commit_locked(&mut state, &events);
+        server.commit_locked_reporting(&mut state, &events);
     }
 }

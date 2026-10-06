@@ -277,7 +277,7 @@ pub(crate) fn tick_at(server: &Server, now: i64) {
                 );
             }
             if !events.is_empty() {
-                server.commit_locked(&mut state, &events);
+                server.commit_locked_reporting(&mut state, &events);
             }
         }
     }
@@ -383,7 +383,7 @@ fn flush_idle_batches_if_ready(server: &Server, now: i64) {
     events.push(Event::MasterWakeUpdated {
         accumulator: state.master_wake.clone(),
     });
-    server.commit_locked(&mut state, &events);
+    server.commit_locked_reporting(&mut state, &events);
 }
 
 #[cfg(test)]

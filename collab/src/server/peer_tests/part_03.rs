@@ -324,7 +324,7 @@ fn typed_token_rotation_rejects_dual_key_session_mismatch() {
 }
 
 #[test]
-fn global_reducer_failure_is_explicit_and_poisoned_after_journal_append() {
+fn global_reducer_failure_is_explicit_and_rolls_back_the_unreducible_append() {
     let (server, root) = test_server();
     let binding = crate::server::global_state::RuntimeBinding::new(
         crate::scope::ProjectScopeId::new("/unregistered-project").unwrap(),
@@ -336,14 +336,52 @@ fn global_reducer_failure_is_explicit_and_poisoned_after_journal_append() {
         None,
     )
     .unwrap();
-    let error = server
-        .commit_checked(&[Event::GlobalRuntimeBound { binding }])
-        .unwrap_err();
-    assert!(matches!(error, JournalError::Reducer(_)));
-    assert!(server.state.lock().unwrap().journal_poison.is_some());
+    let journal_path = root.join(".agent-collab/server/journal.jsonl");
+    let before = std::fs::read_to_string(&journal_path).unwrap_or_default();
+
+    // The reducer rejects this event: the project scope is not registered. The
+    // failure must come back as an error. It must not panic while the caller
+    // holds the state guard, because that panic poisons the process-wide mutex
+    // and kills every later request.
+    let error = {
+        let mut state = server.state.lock().unwrap();
+        server
+            .commit_locked(&mut state, &[Event::GlobalRuntimeBound { binding }])
+            .unwrap_err()
+    };
+    assert!(matches!(error, JournalError::Reducer(_)), "{error:?}");
+
+    // The state guard is released and still usable: re-locking must not panic.
+    let poison = {
+        let state = server.state.lock().unwrap();
+        state.journal_poison.clone()
+    };
+    assert!(
+        poison.is_some(),
+        "a reducer rejection must fail the owner closed"
+    );
+
+    // Nothing was reduced, and the unreducible line is not left durable. A
+    // journal that keeps it can never be replayed again.
     assert_eq!(server.state.lock().unwrap().global.projects.len(), 0);
-    let journal = std::fs::read_to_string(root.join(".agent-collab/server/journal.jsonl")).unwrap();
-    assert!(journal.contains("GlobalRuntimeBound"));
+    assert_eq!(
+        std::fs::read_to_string(&journal_path).unwrap_or_default(),
+        before
+    );
+    assert!(replay(&root).is_ok());
+
+    // Fail-closed, not crash: the next write is refused with the poison error,
+    // and it still does not panic.
+    let refused = server
+        .commit_checked(&[Event::KeepaliveUpdated {
+            worker_id: "worker".into(),
+            record: crate::server::keepalive::Record::default(),
+        }])
+        .unwrap_err();
+    assert!(refused.to_string().contains("unregistered-project"), "{refused}");
+
+    // The journal stays replayable, so a restart restores a clean owner.
+    assert!(replay(&root).is_ok());
     std::fs::remove_dir_all(root).unwrap();
 }
 

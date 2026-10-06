@@ -585,7 +585,7 @@ fn scheduler_dispatch_recover_pending(server: &Server, request_id: &str) -> Opti
         if admission.status == "notifying"
             && now_ms().saturating_sub(admission.updated_ms) >= state::REQUEST_COOLDOWN_MS
         {
-            server.commit_locked(
+            if let Err(error) = server.commit_locked(
                 &mut state,
                 &[Event::SchedulerAdmissionStatus {
                     request_id: request_id.into(),
@@ -593,7 +593,11 @@ fn scheduler_dispatch_recover_pending(server: &Server, request_id: &str) -> Opti
                     error: admission.error.clone(),
                     updated_ms: now_ms(),
                 }],
-            );
+            ) {
+                return Some(Resp::err(format!(
+                    "SCHEDULER_DURABILITY_FAILED: {error}"
+                )));
+            }
         }
         state
             .scheduler_admissions
@@ -619,7 +623,7 @@ fn scheduler_dispatch_recover_pending(server: &Server, request_id: &str) -> Opti
             .notification_delivery_accepted
             .contains_key(&pending.message_id)
         {
-            server.commit_locked(
+            if let Err(error) = server.commit_locked(
                 &mut state,
                 &[Event::SchedulerAdmissionStatus {
                     request_id: request_id.into(),
@@ -627,7 +631,11 @@ fn scheduler_dispatch_recover_pending(server: &Server, request_id: &str) -> Opti
                     error: None,
                     updated_ms: now_ms(),
                 }],
-            );
+            ) {
+                return Some(Resp::err(format!(
+                    "SCHEDULER_DURABILITY_FAILED: {error}"
+                )));
+            }
             let admission = state.scheduler_admissions.get(request_id).cloned()?;
             return Some(Resp::data(json!({
                 "request_id": admission.request_id,
@@ -656,7 +664,7 @@ fn scheduler_dispatch_recover_pending(server: &Server, request_id: &str) -> Opti
             })));
         }
         if matches!(message_state, "read" | "delivered") {
-            server.commit_locked(
+            if let Err(error) = server.commit_locked(
                 &mut state,
                 &[Event::SchedulerAdmissionStatus {
                     request_id: request_id.into(),
@@ -664,7 +672,11 @@ fn scheduler_dispatch_recover_pending(server: &Server, request_id: &str) -> Opti
                     error: None,
                     updated_ms: now_ms(),
                 }],
-            );
+            ) {
+                return Some(Resp::err(format!(
+                    "SCHEDULER_DURABILITY_FAILED: {error}"
+                )));
+            }
             let admission = state.scheduler_admissions.get(request_id).cloned()?;
             return Some(Resp::data(json!({
                 "request_id": admission.request_id,
@@ -1063,11 +1075,13 @@ pub(crate) fn handle_scheduler_dispatch(
         events.push(Event::SchedulerAdmission {
             admission: admission_record,
         });
-        server.commit_locked(&mut state, &events);
+        if let Err(error) = server.commit_locked(&mut state, &events) {
+            return Resp::err(format!("SCHEDULER_DURABILITY_FAILED: {error}"));
+        }
         if let Some(error) =
             scheduler_admission_audit_error(ensure_scheduler_admission_audit(server, &admission))
         {
-            server.commit_locked(
+            if let Err(commit_error) = server.commit_locked(
                 &mut state,
                 &[Event::SchedulerAdmissionStatus {
                     request_id: request_id.clone(),
@@ -1075,7 +1089,9 @@ pub(crate) fn handle_scheduler_dispatch(
                     error: Some(error.clone()),
                     updated_ms: now_ms(),
                 }],
-            );
+            ) {
+                server.report_journal_commit_error(&commit_error);
+            }
             drop(state);
             admission["status"] = json!("failed");
             admission["error"] = json!(error.clone());
@@ -1305,7 +1321,9 @@ fn handle_master_promote(
             Err(error) => return Resp::err(error),
         };
     let events = master_authority_transfer_events(&state, &route_scope, grant);
-    server.commit_locked(&mut state, &events);
+    if let Err(error) = server.commit_locked(&mut state, &events) {
+        return Resp::err(format!("MASTER_DURABILITY_FAILED: {error}"));
+    }
     Resp::data(json!({
         "master": worker_id,
         "mode": "user_approved_self_promotion",
@@ -1356,7 +1374,10 @@ fn handle_master_delegate(
         Err(error) => return Resp::err(error),
     };
     let events = master_authority_transfer_events(&state, &route_scope, grant);
-    server.commit_locked(&mut state, &events);
+    if let Err(error) = server.commit_locked(&mut state, &events) {
+        drop(state);
+        return Resp::err(format!("MASTER_DELEGATE_DURABILITY_FAILED: {error}"));
+    }
     Resp::data(json!({
         "master": target_id,
         "delegated_by": worker_id,
@@ -1433,7 +1454,7 @@ fn handle_worker_close(
     };
 
     let now = now_ms();
-    server.commit_locked(
+    if let Err(error) = server.commit_locked(
         &mut state,
         &[Event::WorkerClosed {
             worker_id: target_id.clone(),
@@ -1442,7 +1463,10 @@ fn handle_worker_close(
             snapshot_captured_ms: Some(snapshot_captured_ms),
             at_ms: now,
         }],
-    );
+    ) {
+        drop(state);
+        return Resp::err(format!("WORKER_CLOSE_DURABILITY_FAILED: {error}"));
+    }
     Resp::data(json!({
         "closed": target_id,
         "closed_by": worker_id,

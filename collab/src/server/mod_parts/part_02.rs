@@ -472,13 +472,17 @@ impl Server {
     }
 
     /// Apply events to memory and persist them atomically-ordered in the journal.
+    ///
+    /// Entry point for paths that have no client to answer. A rejected batch is
+    /// reported through the explicit failure channel instead of panicking while
+    /// the state guard is held; callers that can answer a client use the
+    /// checked entry points and propagate the error.
     pub(crate) fn commit(&self, evs: &[Event]) {
         let mut st = self.state.lock().unwrap();
-        self.commit_locked(&mut st, evs);
+        self.commit_locked_reporting(&mut st, evs);
     }
 
-    /// Fallible reducer entry point used by typed producers. Legacy v1 call
-    /// sites still use `commit`; they retain the fail-closed panic boundary.
+    /// Fallible reducer entry point used by typed producers.
     pub fn commit_checked(
         &self,
         evs: &[Event],
@@ -713,9 +717,30 @@ impl Server {
         })
     }
 
-    pub(crate) fn commit_locked(&self, st: &mut State, evs: &[Event]) {
-        self.commit_locked_checked(st, evs)
-            .unwrap_or_else(|error| panic!("collab journal commit failed: {error}"));
+    /// Commit events while the caller holds the state guard.
+    ///
+    /// A rejected batch is returned to the caller as an error. The journal
+    /// owner has already rolled the batch back and poisoned this owner, so
+    /// this never panics while the caller holds the process-wide state mutex.
+    pub(crate) fn commit_locked(
+        &self,
+        st: &mut State,
+        evs: &[Event],
+    ) -> Result<(), notification_contract::JournalError> {
+        self.commit_locked_checked(st, evs).map(|_| ())
+    }
+
+    /// Commit events while the caller holds the state guard, for callers that
+    /// have no client to answer.
+    ///
+    /// The journal owner is already fail-closed after a rejection, so the
+    /// failure is reported through the explicit failure channel and the daemon
+    /// keeps serving reads instead of panicking while the state guard is held.
+    /// Callers that can answer a client use `commit_locked` and propagate.
+    pub(crate) fn commit_locked_reporting(&self, st: &mut State, evs: &[Event]) {
+        if let Err(error) = self.commit_locked(st, evs) {
+            self.report_journal_commit_error(&error);
+        }
     }
 
     pub(crate) fn commit_locked_checked(
@@ -818,6 +843,17 @@ impl Server {
             return Err(notification_contract::JournalError::Append(message));
         }
         let mut j = self.journal.lock().unwrap();
+        // Record the durable length before the append so a batch the reducer
+        // rejects can be rolled back instead of being replayed as an
+        // unreducible event after a restart.
+        let journal_len = match j.metadata() {
+            Ok(metadata) => metadata.len(),
+            Err(error) => {
+                let message = error.to_string();
+                st.journal_poison = Some(message.clone());
+                return Err(notification_contract::JournalError::Append(message));
+            }
+        };
         if let Err(error) = j.write_all(&buf) {
             let message = error.to_string();
             st.journal_poison = Some(message.clone());
@@ -867,7 +903,26 @@ impl Server {
             st.journal_poison = Some(message.clone());
             return Err(notification_contract::JournalError::Flush(message));
         }
-        self.apply_committed_events(st, evs)?;
+        if let Err(error) = self.apply_committed_events(st, evs) {
+            // The append is already durable, but the reducer rejected the
+            // batch. Roll the journal back to its pre-append length and re-sync
+            // so a rejected event is never replayed: without this, the bad line
+            // is permanent and even a restart cannot reduce the journal.
+            //
+            // The owner stays poisoned. `apply_committed_events` applies events
+            // one by one, so the events before the rejected one are already in
+            // memory and absent from the rolled-back journal. Clearing the
+            // poison here would let later commits succeed on a state that no
+            // longer matches the journal. Poison keeps writes fail-closed, and
+            // because the poison is in-memory only, replaying the repaired
+            // journal restores a clean owner.
+            if let Err(rollback_error) = j.set_len(journal_len).and_then(|()| j.sync_data()) {
+                st.journal_poison = Some(format!(
+                    "journal rollback failed after reducer rejection: {rollback_error}"
+                ));
+            }
+            return Err(error);
+        }
         let has_pending_scheduler_admission = evs.iter().any(|event| {
             matches!(
                 event,
@@ -1049,6 +1104,31 @@ impl Server {
             append_log(
                 &self.log_path(),
                 &format!("MAILBOX_PROJECTION_ERROR_RECORD_FAILED: {activity_error}"),
+            );
+        }
+    }
+
+    /// Report a rejected reducer commit from a context that has no client to
+    /// answer. The journal owner has already rolled the batch back, or set
+    /// `journal_poison` when the rollback failed. This keeps the failure
+    /// explicit and queryable without panicking while the caller holds the
+    /// state guard.
+    pub(crate) fn report_journal_commit_error(
+        &self,
+        error: &notification_contract::JournalError,
+    ) {
+        append_log(
+            &self.log_path(),
+            &format!("JOURNAL_COMMIT_FAILED: {error}"),
+        );
+        if let Err(activity_error) = record_activity(
+            &self.storage_root,
+            "journal_commit_error",
+            json!({"exact_error": error.to_string(), "recoverable": true}),
+        ) {
+            append_log(
+                &self.log_path(),
+                &format!("JOURNAL_COMMIT_ERROR_RECORD_FAILED: {activity_error}"),
             );
         }
     }

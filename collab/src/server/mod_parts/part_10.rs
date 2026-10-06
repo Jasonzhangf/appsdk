@@ -103,7 +103,10 @@ fn poll_messages_with_context(
             });
         }
     }
-    server.commit_locked(&mut st, &events);
+    if let Err(error) = server.commit_locked(&mut st, &events) {
+        drop(st);
+        return Some(Resp::err(format!("RECV_DURABILITY_FAILED: {error}")));
+    }
     // Project from the committed reducer state so the first response and a
     // receipt replay answer from the same owner. Retention still owns the
     // body; the receipt keeps only the message identities.
@@ -268,7 +271,10 @@ fn handle_task_wait(
         escalation: "resource_owner_and_waiter_recheck".into(),
     });
     task.updated_ms = now_ms();
-    server.commit_locked(&mut st, &[Event::TaskUpdated { task: task.clone() }]);
+    if let Err(error) = server.commit_locked(&mut st, &[Event::TaskUpdated { task: task.clone() }]) {
+        drop(st);
+        return Resp::err(format!("TASK_WAIT_DURABILITY_FAILED: {error}"));
+    }
     Resp::data(json!({
         "task": task.id,
         "status": task.status,

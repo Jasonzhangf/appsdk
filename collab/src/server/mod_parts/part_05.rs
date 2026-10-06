@@ -767,7 +767,7 @@ fn attempt_tmux_notification_with_retry(
             "notification delivery window has not elapsed".into(),
         );
     }
-    server.commit_locked(
+    server.commit_locked_reporting(
         &mut state,
         &[Event::WakeAttempted {
             ids: batch.iter().map(|message| message.1.clone()).collect(),
@@ -807,7 +807,7 @@ fn attempt_tmux_notification_with_retry(
             );
             let accepted_ms = now_ms();
             let mut state = server.state.lock().unwrap();
-            server.commit_locked(
+            server.commit_locked_reporting(
                 &mut state,
                 &batch
                     .iter()
@@ -829,7 +829,7 @@ fn attempt_tmux_notification_with_retry(
                 ),
             );
             let mut state = server.state.lock().unwrap();
-            server.commit_locked(
+            server.commit_locked_reporting(
                 &mut state,
                 &[Event::NotificationDeliveryFailed {
                     message_id: seed_id,
@@ -951,7 +951,7 @@ fn attempt_notification_detailed_with_mode_at(
                     "subscription does not match the selected {method} transport",
                     method = notification_transport_method(&transport)
                 );
-                server.commit_locked(
+                server.commit_locked_reporting(
                     &mut state,
                     &[
                         Event::NotificationStatus {
@@ -970,7 +970,7 @@ fn attempt_notification_detailed_with_mode_at(
                 );
                 return NotificationAttempt::NotAttempted(error);
             }
-            server.commit_locked(&mut state, &repair_events);
+            server.commit_locked_reporting(&mut state, &repair_events);
             binding_subscription_id.clone_from(&default_id);
         }
         (
@@ -1013,7 +1013,7 @@ fn attempt_notification_detailed_with_mode_at(
             .notification_delivery_failures
             .contains_key(message_id)
         {
-            server.commit_locked(
+            server.commit_locked_reporting(
                 &mut state,
                 &[Event::NotificationDeliveryFailed {
                     message_id: message_id.to_string(),
@@ -1172,7 +1172,7 @@ fn attempt_scheduler_notification(
             return SchedulerNotificationAttempt::Unavailable;
         }
         let claim_ms = now_ms();
-        server.commit_locked(
+        server.commit_locked_reporting(
             &mut state,
             &[Event::SchedulerAdmissionStatus {
                 request_id: request_id.into(),
@@ -1261,7 +1261,7 @@ fn attempt_scheduler_notification(
     if notified.accepted() {
         let mut state = server.state.lock().unwrap();
         if scheduler_notification_claim_is_current(&state, request_id, claim_ms) {
-            server.commit_locked(
+            server.commit_locked_reporting(
                 &mut state,
                 &[Event::SchedulerAdmissionStatus {
                     request_id: request_id.into(),
@@ -1302,7 +1302,7 @@ fn clear_scheduler_notification_claim(server: &Server, request_id: &str, claim_m
             .scheduler_admissions
             .get(request_id)
             .and_then(|admission| admission.error.clone());
-        server.commit_locked(
+        server.commit_locked_reporting(
             &mut state,
             &[Event::SchedulerAdmissionStatus {
                 request_id: request_id.into(),

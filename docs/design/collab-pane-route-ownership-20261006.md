@@ -48,8 +48,8 @@ The shipped tests encode the overlap as intended behaviour:
   is shared host-wide".
 - `superseded_same_pane_master_does_not_fence_project_route` states "Both
   bindings now share the pane in the host index".
-- `runtime_manager_setup.rs:260-263` states "A pane is addressable by exactly
-  one live peer per project".
+- `runtime_manager_setup.rs:260-263` (pre-change; this delivery deletes the
+  comment) stated "A pane is addressable by exactly one live peer per project".
 
 Both sides of every pair are ordinary bindings with full codex anchors
 (`session_id == native_thread_id == codex_session_id == codex_thread_id`). The
@@ -82,7 +82,7 @@ drop it.
 (`server/global_state_impl_part2.rs`) owns the invariant. The eviction happens
 inside its `mutate` closure, before the insert. `set_current_thread_route` is
 the only writer of `current_thread_routes` on both the live and the replay path
-(the five funnel sites are `state_impl.rs:750-767`, `part_04.rs:584`,
+(the five funnel sites are `state_impl.rs:747-767`, `part_04.rs:500`,
 `part_06.rs:958`, `part_02.rs:312`, and the identity).
 
 The predicate is pane identity, not raw endpoint equality:
@@ -118,8 +118,9 @@ evicted address would stay marked.
 live. That cannot work and is removed.)*
 
 Revision 2 proposed widening the liveness probe to host-wide. The review proved
-this is impossible. `same_scope_pane_owner_supersedes` (`part_04.rs:32,44-60`)
-resolves the owner through `runtime.state.workers`, and then through the host
+this is impossible. `same_scope_pane_owner_supersedes` (`part_04.rs:32,44-60`
+before this delivery deleted it) resolves the owner through
+`runtime.state.workers`, and then through the host
 server's worker table, both keyed by `route.agent_id`. The journal holds 7
 `Registered` events, all appsdk, while 122 route sets come from at least 10
 projects. A project's workers never enter the host table. Two failures follow:
@@ -138,10 +139,10 @@ The guard therefore uses no liveness at all. It is a pure read of the index.
 `Event::GlobalCurrentThreadRouteSet` directly, evict, and are never guarded.**
 The later writer wins by definition. There are exactly three:
 
-- `commit_current_thread_route_for_runtime` (`part_06.rs:942-960`). A
-  successful registration is live activity.
-- `finalize_registration` (`part_04.rs:633`, calling `commit_current_thread_route`
-  at `:647`, which commits at `:584`).
+- `commit_current_thread_route_for_runtime` (`part_06.rs:901-960`, committing at
+  `:958`). A successful registration is live activity.
+- `finalize_registration` (`part_04.rs:549`, calling `commit_current_thread_route`
+  at `:563`, which commits at `:500`).
 - `typed_dispatch` (`part_02.rs:312`).
 
 **Republisher paths — recovery restores a route after a restart. They never
@@ -364,6 +365,16 @@ check and must not be used as the gate.
 table lose their L1 rows. `docs/design/collab-control-plane-reset-run-notes.md`
 gains a note that the scope-local decision of 17:15 is reversed here.
 
+**`docs/design/collab-control-plane-reset-20261005.md`** — the delivery-1 design
+loses its routes-level rows, tables and DAG entries and is reframed as a
+two-level document. Its historical review notes stay, each marked as naming a
+removed level.
+
+**`collab/skills/collab/SKILL.md`** and
+**`collab/skills/collab/references/state-paths.md`** — the shipped operator
+description of the reset levels loses the `--routes`/`--keep` surface, so the
+installed skill bundle matches the two-level CLI.
+
 `docs/dagpipe/manifest.json` carries only id and path, so it needs no version
 or operator change. *(Revision 3: revision 2 wrongly listed it.)*
 
@@ -489,6 +500,21 @@ of section 6.2 are replaced by a skip, and no terminal names the deleted
   claimant absent from the index once the later one is installed, and
   `closed_same_pane_peer_keeps_the_pane_ownership` and
   `same_pane_peer_that_moved_away_still_owns_the_pane` pin the index behaviour.
+- **Live index.** A read-only replay of the live host journal under the delivered
+  rule reports the same 8 evictions and the same five winners as section 8, and
+  the running daemon was then probed one address at a time with the read-only
+  `collab route resolve`. All five panes agree: the winner is in the index and
+  the evicted claimant is not. `$2:%2` resolves to routecodex
+  `binding-codex-01a0cd77-…` gen22 while appsdk `binding-codex-_2` returns
+  `ROUTE_RESOLVE_NOT_FOUND`; `$6:%6` resolves to routecodex
+  `binding-01a0d7c0-…` gen3 and `$16:%16` to OneStop
+  `binding-collab-master-status`, with their evicted claims absent. The `%8` and
+  `%138` panes no longer exist, so their winner's address answers
+  `tmux endpoint does not match the current route for pane …`, which
+  `part_04.rs:321-326` emits only after the strict address lookup has already
+  succeeded, while their evicted addresses answer "no registered Collab route is
+  bound to …". The real-entry window confirms the decisive consequence:
+  routecodex `collab context` reports the master live with no `exact_error`.
 - **Real entry.** routecodex `collab context` stays clean across a down/up
   window, and the host log gains no new `RECOVERY_RECONCILE_REQUIRED` or
   `MASTER_RECOVERY_BLOCKED_LIVE` line.

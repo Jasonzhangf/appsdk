@@ -229,11 +229,18 @@
     }
 
     #[test]
-    fn admission_uses_live_tmux_presence_without_appserver_status() {
+    fn admission_uses_the_appserver_answer_for_a_registered_tmux_peer() {
         let (mut server, root) = test_server();
         register(&server, "master", "%master");
         register(&server, "not-loaded-peer", "%not-loaded-peer");
-        server.appserver_thread_status = Arc::new(|_, _| panic!("AppServer status is retired"));
+        // A tmux registration is live only when its explicitly registered
+        // AppServer thread answers; the pane alone is not a liveness proof.
+        server.appserver_thread_status = Arc::new(|_, thread_id| {
+            Ok(serde_json::json!({
+                "thread": {"id": thread_id, "status": {"type": "idle"}},
+                "thread_state": "idle"
+            }))
+        });
 
         assert_eq!(
             registered_available_peer_for_admission(&server, "master")

@@ -220,7 +220,7 @@ impl GlobalState {
                 next.current_thread_routes.retain(|other_address, existing| {
                     other_address == &route_address
                         || existing.tmux_endpoint.as_ref().is_none_or(|other| {
-                            !crate::client::adapters::tmux::same_pane_route(other, endpoint)
+                            !crate::client::adapters::tmux::same_owned_pane(other, endpoint)
                         })
                 });
             }

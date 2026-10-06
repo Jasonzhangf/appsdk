@@ -253,7 +253,7 @@ impl Server {
                         && previous.is_some_and(|current| {
                             current.tmux_endpoint.as_ref().is_some_and(|old| {
                                 binding.tmux_endpoint.as_ref().is_some_and(|new| {
-                                    crate::client::adapters::tmux::same_pane_route(old, new)
+                                    crate::client::adapters::tmux::same_owned_pane(old, new)
                                 })
                             })
                         })
@@ -300,6 +300,24 @@ impl Server {
                                 project_scope: binding.project_scope.clone(),
                                 binding_id: binding.binding_id.clone(),
                             });
+                        }
+                    }
+                    // A pane has one owner. The later registrant therefore
+                    // replaces the previous claimant of this pane in this same
+                    // commit, so the ledger never holds two owners of one pane
+                    // and cannot fence the new owner on the next attempt.
+                    if let Some(endpoint) = binding.tmux_endpoint.as_ref() {
+                        for claimant in pane_claimants(
+                            &st,
+                            binding.agent_id.as_str(),
+                            &binding.route_scope(),
+                            endpoint,
+                        ) {
+                            events.extend(pane_reclaim_events(
+                                binding.agent_id.as_str(),
+                                &claimant,
+                            )
+                            .map_err(notification_contract::JournalError::InvalidCommand)?);
                         }
                     }
                     events.push(Event::GlobalRuntimeBound {

@@ -7,16 +7,38 @@ fn worker_identity_presence(server: &Server, worker: &WorkerRec) -> IdentityPres
             let Some(endpoint) = transport.tmux_endpoint.as_ref() else {
                 return IdentityPresence::Missing;
             };
+            // A tmux pane is an address, never a liveness credential. The pane
+            // probe decides one thing only: a vanished pane is a vanished
+            // address, so it is Missing. It can never make the binding live.
             match crate::client::adapters::tmux::probe(endpoint) {
-                Ok(crate::client::adapters::tmux::PanePresence::Present) => {
-                    IdentityPresence::Present
-                }
                 Ok(crate::client::adapters::tmux::PanePresence::Missing) => {
+                    return IdentityPresence::Missing
+                }
+                Ok(crate::client::adapters::tmux::PanePresence::Present)
+                | Ok(crate::client::adapters::tmux::PanePresence::Unknown)
+                | Err(_) => {}
+            }
+            // Liveness needs an explicitly registered and queryable AppServer
+            // session and thread. A tmux registration carries them only when it
+            // recorded both ids, and the answer must come from the AppServer
+            // probe. A tmux-only binding has no such anchor, so it stays
+            // Unknown.
+            let Some(thread_id) = endpoint.codex_thread_id.as_deref() else {
+                return IdentityPresence::Unknown;
+            };
+            if endpoint.codex_session_id.is_none() || thread_id.trim().is_empty() {
+                return IdentityPresence::Unknown;
+            }
+            match (server.appserver_thread_status)(&transport, thread_id) {
+                Ok(_) => IdentityPresence::Present,
+                Err(error)
+                    if error.contains("not found")
+                        || error.contains("MISSING")
+                        || error.contains("GONE") =>
+                {
                     IdentityPresence::Missing
                 }
-                Ok(crate::client::adapters::tmux::PanePresence::Unknown) | Err(_) => {
-                    IdentityPresence::Unknown
-                }
+                Err(_) => IdentityPresence::Unknown,
             }
         }
         TransportKind::AppServer => {
@@ -1199,71 +1221,6 @@ fn verify_master_actor(
     }
 }
 
-/// Whether a distinct live worker has taken over the recorded master's pane.
-///
-/// A pane's `pane_pid` is the pane shell, so it survives a Codex restart inside
-/// that pane: the pane probe behind `live_master_id` proves the *pane* is alive,
-/// never that the recorded master still owns it. Only a same-scope worker that
-/// is registered, whose *current* transport is still that pane, and which
-/// probes `Present` counts as a takeover — the same route-plus-presence
-/// invariant the close path enforces. A route left behind by a closed or
-/// moved-away peer is not evidence, and neither is the absence of a route:
-/// host-managed current-thread routes are published to the host server, so this
-/// runtime's route index is not authoritative for ownership.
-fn master_anchor_is_superseded(server: &Server, state: &State, master_worker_id: &str) -> bool {
-    let Ok(route_scope) = server_route_scope(server, state) else {
-        return false;
-    };
-    let Some(grant) = current_master_grant(state, route_scope.as_ref()) else {
-        return false;
-    };
-    if grant.agent_id.as_str() != master_worker_id {
-        return false;
-    }
-    let grant_scope = RouteScope {
-        app_scope_id: grant.app_scope_id.clone(),
-        project_scope_id: grant.project_scope.clone(),
-    };
-    let Some(endpoint) = state
-        .global
-        .lookup_binding_for(&grant_scope, &grant.binding_id)
-        .and_then(|binding| binding.tmux_endpoint.as_ref())
-        .cloned()
-    else {
-        // A transport without a pane anchor has no anchor for another
-        // registration to take over.
-        return false;
-    };
-    let owners = state
-        .global
-        .projects
-        .values()
-        .flat_map(|project| project.runtime_bindings.values())
-        .filter(|other| {
-            other.route_scope() == grant_scope
-                && other.binding_id != grant.binding_id
-                && other.tmux_endpoint.as_ref().is_some_and(|other_endpoint| {
-                    crate::client::adapters::tmux::same_pane_route(other_endpoint, &endpoint)
-                })
-        })
-        .map(|other| other.agent_id.clone())
-        .collect::<Vec<_>>();
-    owners.into_iter().any(|agent_id| {
-        state.workers.get(agent_id.as_str()).is_some_and(|worker| {
-            // The taker's *current* transport must still be this pane: a worker
-            // that moved away keeps its old binding and no longer owns it.
-            let owns_pane = worker
-                .transport
-                .as_ref()
-                .and_then(|transport| transport.tmux_endpoint.as_ref())
-                .is_some_and(|current| {
-                    crate::client::adapters::tmux::same_pane_route(current, &endpoint)
-                });
-            owns_pane && worker_presence(server, worker) == IdentityPresence::Present
-        })
-    })
-}
-
 fn handle_master_promote(
     server: &Server,
     worker_id: String,
@@ -1280,36 +1237,14 @@ fn handle_master_promote(
     if approval.trim().is_empty() {
         return Resp::err("master promotion requires explicit user approval");
     }
-    match live_master_id(server, &state) {
-        Ok(Some(master)) => {
-            if !master_anchor_is_superseded(server, &state, &master) {
-                return Resp::err("master already exists; only the registered master may delegate");
-            }
-            // The recorded master no longer owns its anchor. A pane's
-            // `pane_pid` is the pane shell, so it survives a Codex restart in
-            // that pane; `live_master_id` therefore still reports the recorded
-            // master live. Letting that veto stand leaves the project with an
-            // authority that can neither act on its anchor, nor be recovered,
-            // nor be replaced. The explicit approval checked above is what
-            // authorizes this repair.
-        }
-        Err(error) => return Resp::err(error),
-        Ok(None) => {}
-    }
-    match worker_presence(server, &worker) {
-        IdentityPresence::Present => {}
-        // Promotion needs a master that can act immediately, so a cold thread
-        // is refused with the same rule as a missing one.
-        IdentityPresence::Cold => {
-            return Resp::err("master promotion requires a live registered transport")
-        }
-        IdentityPresence::Missing => {
-            return Resp::err("master promotion requires a live registered transport")
-        }
-        IdentityPresence::Unknown => return Resp::err(
-            "promotion candidate identity is unknown; defer promotion until transport probes succeed",
-        ),
-    }
+    // An explicit user approval is the whole authority for this transition, so
+    // the recorded incumbent is replaced and never consulted for liveness. A
+    // tmux pane is an address, not a liveness credential: no probe in this path
+    // can tell whether the recorded master still runs. Keeping that question
+    // here is what strands a project with an authority that can neither act,
+    // nor be recovered, nor be replaced. The candidate is not probed either:
+    // the token already proves it owns this worker id, and a pane probe can only
+    // report that a pane exists, never that the peer behind it is live.
     let route_scope = match server_route_scope(server, &state) {
         Ok(Some(route_scope)) => route_scope,
         Ok(None) => return Resp::err("master promotion requires a registered project route"),

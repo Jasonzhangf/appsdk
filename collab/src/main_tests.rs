@@ -756,38 +756,6 @@ fn default_recv_publishes_the_replay_identity_before_dispatch() {
     );
 }
 
-/// The cross-project retire request is carried by exactly one thread-local
-/// cell. If the getter and the setter each declare their own `thread_local!`,
-/// they read and write different cells, `context_registration_requested()`
-/// always returns `false`, and every `Req::Register` is sent with
-/// `retire_cross_project_anchor: false` — so an unnamed `collab context` in a
-/// foreign scope fails closed forever instead of retiring a provably dead
-/// cross-project anchor and minting.
-#[test]
-fn context_registration_requested_reads_the_cell_the_setter_writes() {
-    assert!(!context_registration_requested());
-    set_context_registration_requested(true);
-    assert!(
-        context_registration_requested(),
-        "the setter and the getter must share one thread-local cell"
-    );
-    set_context_registration_requested(false);
-    assert!(!context_registration_requested());
-}
-
-/// The retire request is the adjudication channel, so it belongs to the explicit
-/// `--worker` override only. If the implicit `collab context` path also asked for
-/// it, an unnamed peer could retire another peer's live anchor on a foreign
-/// project scope instead of failing closed with the error that points the user
-/// at `--worker`.
-#[test]
-fn only_the_named_override_may_retire_a_foreign_anchor() {
-    assert!(!crate::main_context::context_may_retire_foreign_anchor(None));
-    assert!(crate::main_context::context_may_retire_foreign_anchor(Some(
-        "codex-%3"
-    )));
-}
-
 #[test]
 fn context_root_resolution_fails_closed_without_route_or_baseline() {
     let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
@@ -993,7 +961,7 @@ fn only_classified_identity_failures_enter_the_identity_terminal() {
         "DAEMON_UNKNOWN: failed to send request to /tmp/server.sock",
         "DAEMON_UNAVAILABLE: no daemon at /tmp/server.sock",
         "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: worker has no registered runtime binding",
-        "RUNTIME_BINDING_REJECTED: tmux identity anchor is already bound to worker codex-%8",
+        "RUNTIME_BINDING_REJECTED: registered worker binding does not match the CLI route",
         "RECOVERY_RECONCILE_REQUIRED: host route is not at project generation 22",
     ] {
         assert_eq!(

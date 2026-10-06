@@ -534,13 +534,15 @@ impl GlobalState {
     ///
     /// One pane owns exactly one binding host-wide, so this returns at most one
     /// route. The host-wide view is the only view: a claimant from another
-    /// project is a conflict, not a neighbour.
+    /// project is a conflict, not a neighbour. Ownership follows the pane
+    /// address (`same_owned_pane`), so a reissued shell pid in the same pane is
+    /// still the same owned pane.
     pub fn tmux_pane_route_claimants(&self, endpoint: &TmuxEndpoint) -> Vec<&RuntimeBinding> {
         self.current_thread_routes
             .values()
             .filter(|binding| {
                 binding.tmux_endpoint.as_ref().is_some_and(|persisted| {
-                    crate::client::adapters::tmux::same_pane_route(persisted, endpoint)
+                    crate::client::adapters::tmux::same_owned_pane(persisted, endpoint)
                 })
             })
             .collect()

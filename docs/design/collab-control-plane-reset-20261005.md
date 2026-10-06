@@ -5,7 +5,9 @@ revisions 1 and 2. All three agree on the core: pane uniqueness is a per-project
 contract, the host-wide scan is the defect, and the scope-local query fixes both
 failure modes. *(Historical: the three reviews endorsed the scope-local pane
 contract; it was reversed by `collab-pane-route-ownership-20261006.md` §2 — one
-pane now owns one binding host-wide.)* Their P0 findings were all against the
+pane now owns one binding host-wide. That revision also deleted
+`Req::Register.retire_cross_project_anchor` and `master_anchor_is_superseded`,
+both named below as the then-current mechanism.)* Their P0 findings were all against the
 reset operation or against a reconcile change that revision 3 deletes. Delivery 1
 is D1, D2 and D3 as specified in section 5. Delivery 2 is D5 and D4; its open
 problems are recorded in section 5.5.

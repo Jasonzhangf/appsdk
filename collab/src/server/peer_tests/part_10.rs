@@ -179,20 +179,23 @@ fn context_does_not_project_retired_appserver_thread_or_turn_state() {
         "{}",
         registration.error.unwrap_or_default()
     );
-    server.appserver_thread_status =
-        Arc::new(|_, _| panic!("context must not call retired AppServer status"));
+    server.appserver_thread_status = Arc::new(|_, _| {
+        Err("APP_SERVER_RETIRED: the registered AppServer endpoint is gone".into())
+    });
     let server = Arc::new(server);
     let context = handle_context(&server, "state-peer".into(), "token-state-peer".into());
     assert_eq!(context.data["agent"]["thread_state"], "unknown");
     let status = dispatch(&server, Req::WorkerStatus { worker_id: None });
     assert_eq!(status.data["workers"][0]["agent_state"], "unknown");
-    assert_eq!(status.data["workers"][0]["presence"], "present");
+    // The pane answers, but the registered AppServer anchor does not, so the
+    // peer is not live and its retired thread state is not projected.
+    assert_eq!(status.data["workers"][0]["presence"], "unknown");
 
     std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
-fn retired_appserver_status_callback_does_not_override_live_tmux_presence() {
+fn retired_appserver_status_callback_leaves_a_tmux_binding_unknown() {
     let (mut server, root) = test_server();
     let registration = register_appserver(&mut server, "timeout-peer", "thread-timeout-peer");
     assert!(
@@ -200,23 +203,30 @@ fn retired_appserver_status_callback_does_not_override_live_tmux_presence() {
         "{}",
         registration.error.unwrap_or_default()
     );
-    server.appserver_thread_status =
-        Arc::new(|_, _| panic!("status must come from the registered tmux pane"));
+    server.appserver_thread_status = Arc::new(|_, _| {
+        Err("APP_SERVER_RETIRED: the registered AppServer endpoint is gone".into())
+    });
     let server = Arc::new(server);
 
     let context = handle_context(&server, "timeout-peer".into(), "token-timeout-peer".into());
     assert_eq!(context.data["agent"]["thread_state"], "unknown");
 
     let status = dispatch(&server, Req::WorkerStatus { worker_id: None });
-    assert_eq!(status.data["workers"][0]["presence"], "present");
-    assert_eq!(status.data["workers"][0]["endpoint_live"], true);
-    assert_eq!(status.data["workers"][0]["identity_valid"], true);
+    assert_eq!(status.data["workers"][0]["presence"], "unknown");
+    assert_eq!(
+        status.data["workers"][0]["endpoint_live"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        status.data["workers"][0]["identity_valid"],
+        serde_json::Value::Null
+    );
 
     std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
-fn retired_appserver_route_error_does_not_mark_live_tmux_pane_missing() {
+fn retired_appserver_route_error_leaves_a_tmux_binding_unknown_not_missing() {
     let (mut server, root) = test_server();
     let registration = register_appserver(&mut server, "missing-peer", "thread-missing-peer");
     assert!(
@@ -224,14 +234,23 @@ fn retired_appserver_route_error_does_not_mark_live_tmux_pane_missing() {
         "{}",
         registration.error.unwrap_or_default()
     );
-    server.appserver_thread_status =
-        Arc::new(|_, _| panic!("status must come from the registered tmux pane"));
+    server.appserver_thread_status = Arc::new(|_, _| {
+        Err("APP_SERVER_ROUTE_RETIRED: the registered route is gone".into())
+    });
     let server = Arc::new(server);
 
     let status = dispatch(&server, Req::WorkerStatus { worker_id: None });
-    assert_eq!(status.data["workers"][0]["presence"], "present");
-    assert_eq!(status.data["workers"][0]["endpoint_live"], true);
-    assert_eq!(status.data["workers"][0]["identity_valid"], true);
+    // A retired AppServer route is not evidence that the pane vanished, so the
+    // peer stays Unknown instead of Missing.
+    assert_eq!(status.data["workers"][0]["presence"], "unknown");
+    assert_eq!(
+        status.data["workers"][0]["endpoint_live"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        status.data["workers"][0]["identity_valid"],
+        serde_json::Value::Null
+    );
 
     std::fs::remove_dir_all(root).ok();
 }
@@ -255,6 +274,34 @@ fn retired_appserver_candidate_check_does_not_override_live_tmux_presence() {
     assert_eq!(status.data["workers"][0]["endpoint_live"], true);
     assert_eq!(status.data["workers"][0]["identity_valid"], true);
 
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn a_tmux_pane_id_recorded_as_the_codex_thread_is_not_liveness() {
+    let (mut server, root) = test_server();
+    // A tmux registration copies CODEX_SESSION_ID and CODEX_THREAD_ID from the
+    // caller's environment, so a worker can record its own pane address as the
+    // thread. The production AppServer oracle must refuse a tmux transport
+    // instead of answering from the pane.
+    server.appserver_thread_status = default_appserver_thread_status();
+    let tmux = IsolatedTmux::start_single(&root);
+    let mut endpoint = tmux.endpoints().remove(0);
+    endpoint.codex_session_id = Some("session-pane-address".into());
+    endpoint.codex_thread_id = Some(endpoint.pane_id.clone());
+    let registration = register_tmux(&server, "pane-address-worker", endpoint);
+    assert!(registration.ok, "{registration:?}");
+
+    let worker = server.state.lock().unwrap().workers["pane-address-worker"].clone();
+    assert_eq!(worker_presence(&server, &worker), IdentityPresence::Unknown);
+
+    let status = dispatch(&Arc::new(server), Req::WorkerStatus { worker_id: None });
+    assert_eq!(status.data["workers"][0]["presence"], "unknown");
+    assert_eq!(
+        status.data["workers"][0]["endpoint_live"],
+        serde_json::Value::Null
+    );
+    drop(tmux);
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -568,7 +615,7 @@ fn codex_subagents_exchange_messages() {
 }
 
 #[test]
-fn worker_status_query_exposes_liveness_identity_and_notification_pressure() {
+fn worker_status_query_exposes_unknown_liveness_for_a_tmux_only_peer() {
     let (server, root) = test_server();
     let tmux = IsolatedTmux::start(&root);
     register_tmux(&server, "status-worker", tmux.endpoints().remove(0));
@@ -579,9 +626,13 @@ fn worker_status_query_exposes_liveness_identity_and_notification_pressure() {
     let w = &workers[0];
     assert_eq!(w["id"], "status-worker");
     assert_eq!(w["transport"]["kind"], "tmux");
-    assert_eq!(w["endpoint_live"], true);
-    assert_eq!(w["identity_valid"], true);
-    assert_eq!(w["presence"], "present");
+    // A tmux-only binding registers no AppServer session or thread, so its
+    // liveness is unprovable. The pane proves reachability only, so the peer
+    // stays Unknown, and an Unknown peer reports neither `endpoint_live` nor
+    // `identity_valid` rather than claiming either.
+    assert_eq!(w["endpoint_live"], serde_json::Value::Null);
+    assert_eq!(w["identity_valid"], serde_json::Value::Null);
+    assert_eq!(w["presence"], "unknown");
     assert_eq!(w["agent_state"], "unknown");
     assert_eq!(w["status"], "unknown");
     assert_eq!(w["transport_view"]["transport"], "tmux");

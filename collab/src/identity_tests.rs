@@ -353,6 +353,98 @@ fn tmux_identity_recovery_rejects_anchor_conflict_and_cross_project() {
     std::fs::remove_dir_all(root).ok();
 }
 
+/// A tmux registration anchors on the pane alone, so the pane is a resource: a
+/// later worker that names a new identity on a pane another peer already claims
+/// is a normal registration. The identity gate mints the named worker and the
+/// daemon replaces the pane's previous claimant in the same commit; only a
+/// Codex session/thread anchor still fails closed.
+#[test]
+fn a_named_worker_mints_on_an_owned_pane_because_the_pane_is_the_anchor() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let root = test_root("ci-pane-owner-mint");
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    let state_root = root.join("global");
+    let scope = test_scope(root.clone());
+    let host_paths = HostPaths::for_state_root(&state_root).unwrap();
+
+    struct OwnedTmux(std::path::PathBuf);
+    impl Drop for OwnedTmux {
+        fn drop(&mut self) {
+            let status = std::process::Command::new("tmux")
+                .arg("-S").arg(&self.0).arg("kill-server").status().unwrap();
+            assert!(status.success(), "owned identity fixture tmux cleanup failed");
+        }
+    }
+    let tmux_socket = root.join("s");
+    let status = std::process::Command::new("tmux").arg("-S").arg(&tmux_socket)
+        .args(["new-session", "-d", "-s", "identity", "-c"]).arg(&root).arg("sleep 600")
+        .status().unwrap();
+    assert!(status.success());
+    let owned_tmux = OwnedTmux(tmux_socket.clone());
+    let output = std::process::Command::new("tmux").arg("-S").arg(&tmux_socket)
+        .args(["display-message", "-p", "-t", "identity:0.0", "#{pid}\t#{pane_id}"])
+        .output().unwrap();
+    assert!(output.status.success());
+    let metadata = String::from_utf8(output.stdout).unwrap();
+    let (server_pid, pane_id) = metadata.trim().split_once('\t').unwrap();
+
+    let previous = [
+        ("TMUX", std::env::var_os("TMUX")),
+        ("TMUX_PANE", std::env::var_os("TMUX_PANE")),
+        ("CODEX_THREAD_ID", std::env::var_os("CODEX_THREAD_ID")),
+        ("CODEX_SESSION_ID", std::env::var_os("CODEX_SESSION_ID")),
+        ("COLLAB_WORKER", std::env::var_os("COLLAB_WORKER")),
+        ("COLLAB_APPSERVER_SOCKET", std::env::var_os("COLLAB_APPSERVER_SOCKET")),
+        ("CODEX_APP_SERVER_SOCKET", std::env::var_os("CODEX_APP_SERVER_SOCKET")),
+        ("COLLAB_APPSERVER_NAMESPACE", std::env::var_os("COLLAB_APPSERVER_NAMESPACE")),
+    ];
+    std::env::set_var("TMUX", format!("{},{server_pid},0", tmux_socket.display()));
+    std::env::set_var("TMUX_PANE", pane_id);
+    std::env::remove_var("CODEX_THREAD_ID");
+    std::env::remove_var("CODEX_SESSION_ID");
+    std::env::remove_var("COLLAB_WORKER");
+    std::env::remove_var("COLLAB_APPSERVER_SOCKET");
+    std::env::remove_var("CODEX_APP_SERVER_SOCKET");
+    std::env::remove_var("COLLAB_APPSERVER_NAMESPACE");
+
+    let endpoint = crate::client::adapters::tmux::candidate_from_env()
+        .unwrap()
+        .endpoint;
+    saved_identity(
+        &host_paths,
+        &scope,
+        "pane-owner",
+        Some("session-owner"),
+        Some("thread-owner"),
+        Some(endpoint),
+    );
+
+    let minted = load_or_create_resolved_at(&host_paths, &scope, Some("later-peer".into()), true)
+        .expect("a named worker on an owned pane is a normal registration");
+    assert_eq!(minted.worker_id, "later-peer");
+    assert!(
+        minted.runtime.is_none(),
+        "the daemon commits the pane replacement, so the gate mints an unregistered identity"
+    );
+    assert_eq!(
+        read_identity(&identity_path_at(&host_paths, "pane-owner").unwrap())
+            .unwrap()
+            .unwrap()
+            .token,
+        "token-pane-owner",
+        "the previous claimant stays untouched until the daemon commits the replacement"
+    );
+
+    for (name, value) in previous {
+        match value {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
+        }
+    }
+    drop(owned_tmux);
+    std::fs::remove_dir_all(root).ok();
+}
+
 #[test]
 fn scope_rebind_command_retires_a_unique_cross_project_tmux_anchor() {
     let _guard = ENV_LOCK.lock().unwrap();

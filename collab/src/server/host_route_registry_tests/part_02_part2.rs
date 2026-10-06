@@ -598,8 +598,9 @@
         );
         assert!(manager.same_pane_master_route_ready(&runtime).is_ok());
 
-        // A second peer takes over the pane with a live native thread, then
-        // closes. Its host route survives the close.
+        // A second peer takes over the pane. The recorded master loses the pane
+        // and is closed, because a pane has one owner and can never prove
+        // liveness.
         let peer_worker = "closed-same-pane-peer";
         let peer_token = "token-closed-same-pane-peer";
         let mut peer_candidates = candidates.clone();
@@ -615,6 +616,16 @@
             Some(peer_candidates),
         );
         assert!(peer.ok, "{peer:?}");
+        assert!(
+            runtime
+                .state
+                .lock()
+                .unwrap()
+                .workers
+                .get(master_worker)
+                .is_none(),
+            "the later registrant takes the pane and closes the previous claimant"
+        );
         let peer_binding = runtime
             .state
             .lock()
@@ -628,6 +639,42 @@
             .clone();
         host.commit_checked(&[Event::GlobalCurrentThreadRouteSet {
             binding: peer_binding.clone(),
+        }])
+        .unwrap();
+
+        // Another master closes the peer. The peer's durable host route survives
+        // the close, so the pane stays owned by a worker that is gone.
+        let closer_worker = "closed-peer-pane-closer";
+        let closer_token = "token-closed-peer-pane-closer";
+        let closer = handle_register_with_app_scope_unfinalized(
+            &runtime,
+            closer_worker.into(),
+            closer_token.into(),
+            project_root.display().to_string(),
+            Some(app.clone()),
+            Some(test_candidates(closer_worker).unwrap()),
+        );
+        assert!(closer.ok, "{closer:?}");
+        let closer_promoted = handle_master_promote(
+            &runtime,
+            closer_worker.into(),
+            closer_token.into(),
+            "user approved closer".into(),
+        );
+        assert!(closer_promoted.ok, "{closer_promoted:?}");
+        let closer_binding = runtime
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_binding_for(
+                &scope,
+                &BindingId::new(format!("binding-{closer_worker}")).unwrap(),
+            )
+            .unwrap()
+            .clone();
+        host.commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+            binding: closer_binding,
         }])
         .unwrap();
         // Closing the peer through the real close path needs the snapshot
@@ -656,8 +703,8 @@
             );
         let closed = handle_worker_close(
             &runtime,
-            master_worker.into(),
-            master_token.into(),
+            closer_worker.into(),
+            closer_token.into(),
             peer_worker.into(),
             "peer finished".into(),
         );
@@ -680,13 +727,9 @@
             "a closed peer keeps its durable host route"
         );
 
-        // The master host route is gone again, but the pane is still held by the
-        // closed peer's durable route. Ownership is a fact of the index and not
-        // of liveness, so the master anchor is superseded and must not fence.
-        host.commit_checked(&[Event::GlobalCurrentThreadRouteRetired {
-            binding: master_binding,
-        }])
-        .unwrap();
+        // The pane is still held by the closed peer's durable route. Ownership
+        // is a fact of the index and not of liveness, so the master route check
+        // must not fence on it.
         let fenced = manager.same_pane_master_route_ready(&runtime);
         assert!(fenced.is_ok(), "{fenced:?}");
         {

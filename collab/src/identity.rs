@@ -1218,24 +1218,28 @@ fn load_or_create_resolved_full_at(
                 anyhow::bail!("IDENTITY_REBIND_UNPROVEN: {detail}")
             }
             ScopeRebindOutcome::NoCandidate => {
-                // The name resolves to no durable record, so this is a typo or a
-                // stale name, not a recovery. Minting would create a second
-                // owner for an anchor that already belongs to a peer, so fail
-                // closed exactly like the unnamed conflict path.
-                match identity_by_current_anchors_at(
-                    host_paths,
-                    scope,
-                    candidate.as_ref().ok().copied(),
-                )? {
-                    Some(AnchorResolution::CurrentScope(identity)) => anyhow::bail!(
-                        "IDENTITY_RESTORE_CONFLICT: --worker {named} names no durable identity and the current anchor already belongs to {}",
-                        identity.worker_id
-                    ),
-                    Some(AnchorResolution::CrossProject { chosen, .. }) => anyhow::bail!(
-                        "IDENTITY_RESTORE_CROSS_PROJECT: --worker {named} names no durable identity and the current anchor belongs to another project ({})",
-                        chosen.worker_id
-                    ),
-                    None => {}
+                // A tmux registration anchors on the pane alone, so the pane is
+                // a resource: a later worker that names a new identity on a pane
+                // another peer already claims is a normal registration, and the
+                // daemon replaces that pane's previous claimant in the same
+                // commit. Only a Codex session/thread anchor still fails closed,
+                // because two workers cannot share one thread.
+                if appserver_worker.is_some() || tmux_candidate.is_none() {
+                    match identity_by_current_anchors_at(
+                        host_paths,
+                        scope,
+                        candidate.as_ref().ok().copied(),
+                    )? {
+                        Some(AnchorResolution::CurrentScope(identity)) => anyhow::bail!(
+                            "IDENTITY_RESTORE_CONFLICT: --worker {named} names no durable identity and the current anchor already belongs to {}",
+                            identity.worker_id
+                        ),
+                        Some(AnchorResolution::CrossProject { chosen, .. }) => anyhow::bail!(
+                            "IDENTITY_RESTORE_CROSS_PROJECT: --worker {named} names no durable identity and the current anchor belongs to another project ({})",
+                            chosen.worker_id
+                        ),
+                        None => {}
+                    }
                 }
             }
         }

@@ -1029,7 +1029,7 @@
     }
 
     #[tokio::test]
-    async fn wire_cli_recover_rejects_forged_token_thread_and_route() {
+    async fn wire_cli_recover_rejects_a_forged_token_and_a_forged_route() {
         let (server, root, journal_path) = test_server();
         let app = crate::identity::CLI_APP_SERVER_ID;
         let worker_id = "recover-negative-worker";
@@ -1098,10 +1098,11 @@
         )
         .unwrap();
 
-        let before = mutation_snapshot(&server);
-        let before_journal = std::fs::read(&journal_path).unwrap();
-        let before_mailbox = directory_snapshot(&root.join(".agent-collab/mailbox"));
-        let wrong_thread = dispatch_wire(
+        // The same pane, claimed by another worker. A pane has one owner, so the
+        // later registrant takes it and the previous claimant is closed. The
+        // Codex thread the request carries is not the anchor and cannot fence
+        // that replacement.
+        let taken = dispatch_wire(
             server.clone(),
             Some(context_with_runtime(&root, app, &provisional)),
             Req::register(worker_id.into(),
@@ -1110,17 +1111,29 @@
                  test_candidates_for_registered(&server, &root, "other-worker", app)),
         )
         .await;
-        assert!(!wrong_thread.ok, "{wrong_thread:?}");
-        assert!(wrong_thread
-            .error
-            .as_deref()
-            .is_some_and(|error| error.starts_with("RUNTIME_BINDING_REJECTED:")));
-        assert_eq!(mutation_snapshot(&server), before);
-        assert_eq!(std::fs::read(&journal_path).unwrap(), before_journal);
-        assert_eq!(
-            directory_snapshot(&root.join(".agent-collab/mailbox")),
-            before_mailbox
-        );
+        assert!(taken.ok, "{taken:?}");
+        {
+            let state = server.state.lock().unwrap();
+            assert!(
+                !state.workers.contains_key("other-worker"),
+                "the replaced claimant must be closed; workers={:?} bindings={:?}",
+                state.workers.keys().collect::<Vec<_>>(),
+                state
+                    .global
+                    .projects
+                    .values()
+                    .flat_map(|project| project.runtime_bindings.values())
+                    .map(|binding| (
+                        binding.agent_id.as_str().to_owned(),
+                        binding.tmux_endpoint.is_some(),
+                        binding
+                            .native_thread_id
+                            .as_ref()
+                            .map(|thread| thread.as_str().to_owned()),
+                    ))
+                    .collect::<Vec<_>>()
+            );
+        }
 
         let wrong_root = root.with_file_name(format!(
             "{}-wrong-route",
@@ -1180,4 +1193,255 @@
         assert_eq!(runtime.endpoint_generation, 1);
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_dir_all(wrong_root).unwrap();
+    }
+
+    /// A worker that lost its pane to a later registrant is not registered any
+    /// more: the takeover left a retirement tombstone (no thread, no pane) and
+    /// closed the worker record. When that worker applies again on the same pane
+    /// the daemon must accept the later registrant and hand it the pane, even
+    /// though the identity it persisted before the takeover still names the
+    /// pre-retirement generation. A tombstone owns nothing, so it cannot fence
+    /// its own worker.
+    #[tokio::test]
+    async fn a_retired_worker_reclaims_the_pane_from_the_later_registrant() {
+        let (server, root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+        let app = crate::identity::CLI_APP_SERVER_ID;
+        let context = context_with_app(&root, app);
+        let worker_id = "reclaim-tombstone-worker";
+        let token = "token-reclaim-tombstone-worker";
+        let taker_id = "reclaim-tombstone-taker";
+        let candidates = test_candidates(&format!("thread-{worker_id}")).unwrap();
+        let endpoint = candidates.tmux.as_ref().unwrap().endpoint.clone();
+        let (_, registered) = manager.dispatch_sync(
+            Some(context.clone()),
+            Req::register(worker_id.into(),
+                 token.into(),
+                 root.display().to_string(),
+                 Some(candidates)),
+        );
+        assert!(registered.ok, "{registered:?}");
+
+        // The CLI persists the runtime the daemon just gave it. The takeover
+        // below advances the daemon's generation, so this record goes stale.
+        let registered_binding = {
+            let runtime = manager.select_runtime(&context).unwrap();
+            let state = runtime.state.lock().unwrap();
+            state
+                .global
+                .projects
+                .values()
+                .flat_map(|project| project.runtime_bindings.values())
+                .find(|binding| binding.agent_id.as_str() == worker_id)
+                .cloned()
+                .expect("the registration binding is durable")
+        };
+        let persisted = RuntimeIdentity {
+            agent_id: registered_binding.agent_id.clone(),
+            runtime_id: registered_binding.runtime_id.clone(),
+            appserver_id: registered_binding.app_scope_id.clone(),
+            endpoint_generation: registered_binding.endpoint_generation,
+            binding_id: registered_binding.binding_id.clone(),
+            session_id: registered_binding.session_id.clone(),
+            native_thread_id: registered_binding.native_thread_id.clone(),
+        };
+        write_global_identity(
+            &server.host_paths,
+            worker_id,
+            token,
+            Some(&GlobalState::canonical_project_scope(&root).unwrap()),
+            &persisted,
+        );
+
+        // A later registration on the same pane wins it and retires the first
+        // worker in the same commit.
+        let mut taker_candidates = test_candidates(&format!("thread-{taker_id}")).unwrap();
+        {
+            let taker_endpoint = &mut taker_candidates.tmux.as_mut().unwrap().endpoint;
+            taker_endpoint.socket_path = endpoint.socket_path.clone();
+            taker_endpoint.server_pid = endpoint.server_pid;
+            taker_endpoint.tmux_session_id = endpoint.tmux_session_id.clone();
+            taker_endpoint.pane_id = endpoint.pane_id.clone();
+            taker_endpoint.pane_pid = endpoint.pane_pid;
+        }
+        let (_, taken) = manager.dispatch_sync(
+            Some(context.clone()),
+            Req::register(taker_id.into(),
+                 format!("token-{taker_id}"),
+                 root.display().to_string(),
+                 Some(taker_candidates)),
+        );
+        assert!(taken.ok, "{taken:?}");
+        {
+            let runtime = manager.select_runtime(&context).unwrap();
+            let state = runtime.state.lock().unwrap();
+            assert!(
+                !state.workers.contains_key(worker_id),
+                "the takeover closes the superseded worker"
+            );
+            let tombstone = state
+                .global
+                .projects
+                .values()
+                .flat_map(|project| project.runtime_bindings.values())
+                .find(|binding| binding.agent_id.as_str() == worker_id)
+                .cloned()
+                .expect("the superseded binding stays in the ledger");
+            assert!(
+                tombstone.native_thread_id.is_none() && tombstone.tmux_endpoint.is_none(),
+                "the superseded binding is a retirement tombstone: {tombstone:?}"
+            );
+        }
+
+        // The same worker applies again on the same pane with the identity it
+        // persisted before the takeover.
+        let provisional = RuntimeIdentity::cli_adapter(worker_id).unwrap();
+        let mut reclaim_candidates = test_candidates(&format!("thread-{worker_id}")).unwrap();
+        reclaim_candidates.tmux.as_mut().unwrap().endpoint = endpoint.clone();
+        let (_, reclaimed) = manager.dispatch_sync(
+            Some(context_with_runtime(&root, app, &provisional)),
+            Req::register(worker_id.into(),
+                 token.into(),
+                 root.display().to_string(),
+                 Some(reclaim_candidates)),
+        );
+        assert!(reclaimed.ok, "{reclaimed:?}");
+
+        let pane_owners = server
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .current_thread_routes
+            .values()
+            .filter(|binding| {
+                binding.tmux_endpoint.as_ref().is_some_and(|current| {
+                    crate::client::adapters::tmux::same_owned_pane(current, &endpoint)
+                })
+            })
+            .map(|binding| binding.agent_id.as_str().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(pane_owners, vec![worker_id.to_owned()]);
+        {
+            let runtime = manager.select_runtime(&context).unwrap();
+            let state = runtime.state.lock().unwrap();
+            assert!(
+                !state.workers.contains_key(taker_id),
+                "the reclaimed pane closes the taker"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_forged_token_cannot_reclaim_a_retired_workers_pane() {
+        let (server, root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+        let app = crate::identity::CLI_APP_SERVER_ID;
+        let context = context_with_app(&root, app);
+        let worker_id = "forged-tombstone-worker";
+        let token = "token-forged-tombstone-worker";
+        let taker_id = "forged-tombstone-taker";
+        let candidates = test_candidates(&format!("thread-{worker_id}")).unwrap();
+        let endpoint = candidates.tmux.as_ref().unwrap().endpoint.clone();
+        let (_, registered) = manager.dispatch_sync(
+            Some(context.clone()),
+            Req::register(
+                worker_id.into(),
+                token.into(),
+                root.display().to_string(),
+                Some(candidates),
+            ),
+        );
+        assert!(registered.ok, "{registered:?}");
+        let registered_binding = {
+            let runtime = manager.select_runtime(&context).unwrap();
+            let state = runtime.state.lock().unwrap();
+            state
+                .global
+                .projects
+                .values()
+                .flat_map(|project| project.runtime_bindings.values())
+                .find(|binding| binding.agent_id.as_str() == worker_id)
+                .cloned()
+                .expect("the registration binding is durable")
+        };
+        let persisted = RuntimeIdentity {
+            agent_id: registered_binding.agent_id.clone(),
+            runtime_id: registered_binding.runtime_id.clone(),
+            appserver_id: registered_binding.app_scope_id.clone(),
+            endpoint_generation: registered_binding.endpoint_generation,
+            binding_id: registered_binding.binding_id.clone(),
+            session_id: registered_binding.session_id.clone(),
+            native_thread_id: registered_binding.native_thread_id.clone(),
+        };
+        write_global_identity(
+            &server.host_paths,
+            worker_id,
+            token,
+            Some(&GlobalState::canonical_project_scope(&root).unwrap()),
+            &persisted,
+        );
+
+        // A later registration on the same pane retires the first worker to a
+        // tombstone. The tombstone owns no resource, but the persisted identity
+        // still owns the worker name, so a forged token must not ride the
+        // tombstone exemption back onto the pane.
+        let mut taker_candidates = test_candidates(&format!("thread-{taker_id}")).unwrap();
+        {
+            let taker_endpoint = &mut taker_candidates.tmux.as_mut().unwrap().endpoint;
+            taker_endpoint.socket_path = endpoint.socket_path.clone();
+            taker_endpoint.server_pid = endpoint.server_pid;
+            taker_endpoint.tmux_session_id = endpoint.tmux_session_id.clone();
+            taker_endpoint.pane_id = endpoint.pane_id.clone();
+            taker_endpoint.pane_pid = endpoint.pane_pid;
+        }
+        let (_, taken) = manager.dispatch_sync(
+            Some(context.clone()),
+            Req::register(
+                taker_id.into(),
+                format!("token-{taker_id}"),
+                root.display().to_string(),
+                Some(taker_candidates),
+            ),
+        );
+        assert!(taken.ok, "{taken:?}");
+
+        let provisional = RuntimeIdentity::cli_adapter(worker_id).unwrap();
+        let mut forged_candidates = test_candidates(&format!("thread-{worker_id}")).unwrap();
+        forged_candidates.tmux.as_mut().unwrap().endpoint = endpoint.clone();
+        let (_, forged) = manager.dispatch_sync(
+            Some(context_with_runtime(&root, app, &provisional)),
+            Req::register(
+                worker_id.into(),
+                "token-forged".into(),
+                root.display().to_string(),
+                Some(forged_candidates),
+            ),
+        );
+        assert!(!forged.ok, "a forged token reclaimed the pane: {forged:?}");
+        let error = forged.error.unwrap_or_default();
+        assert!(error.contains("RUNTIME_BINDING_REJECTED"), "{error}");
+        let pane_owners = server
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .current_thread_routes
+            .values()
+            .filter(|binding| {
+                binding.tmux_endpoint.as_ref().is_some_and(|current| {
+                    crate::client::adapters::tmux::same_owned_pane(current, &endpoint)
+                })
+            })
+            .map(|binding| binding.agent_id.as_str().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            pane_owners,
+            vec![taker_id.to_owned()],
+            "a refused forged registration must leave the pane with its owner"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }

@@ -305,6 +305,26 @@ pub fn validate_endpoint(endpoint: &TmuxEndpoint) -> Result<(), String> {
     Ok(())
 }
 
+/// One pane on one tmux server.
+///
+/// A pane id names a pane only together with the server that issued it, so the
+/// socket path and session id complete the identity. The tmux server pid and the
+/// pane's shell pid are *not* part of it: tmux reissues both across restarts
+/// while the pane id stays the address, and the contract fixes ownership on the
+/// pane address alone. Use this predicate for every ownership question — who
+/// owns a pane, who a later registration replaces, which routes claim one pane.
+pub fn same_owned_pane(left: &TmuxEndpoint, right: &TmuxEndpoint) -> bool {
+    left.socket_path == right.socket_path
+        && left.tmux_session_id == right.tmux_session_id
+        && left.pane_id == right.pane_id
+}
+
+/// The exact persisted endpoint address, including the server and shell pids.
+///
+/// Use this when a caller must prove that an endpoint it recorded earlier is
+/// still the same concrete endpoint, for example when resolving a route or
+/// re-anchoring an identity. Ownership never uses it: a new pane pid is a new
+/// process in the same owned pane, not a second pane.
 pub fn same_pane_route(left: &TmuxEndpoint, right: &TmuxEndpoint) -> bool {
     left.socket_path == right.socket_path
         && left.server_pid == right.server_pid

@@ -117,50 +117,12 @@ impl GlobalState {
         })
     }
 
-    /// Record an operator-authorized retirement for one route address.
-    ///
-    /// The reducer does both halves of the operation: it removes the claim from
-    /// the live index, and it records that the claim must not be republished.
-    /// Replay reconstructs both facts from the one event, which is what makes
-    /// an offline retirement survive the next daemon start.
-    pub fn record_retired_route_claim(
-        &mut self,
-        record: RetiredRouteClaim,
-    ) -> Result<StateVersion, StateError> {
-        record.validate()?;
-        let binding = record.binding.clone();
-        let key = retired_route_claim_key(&binding)?;
-        if self
-            .retired_route_claims
-            .get(&key)
-            .is_some_and(|existing| existing == &record)
-        {
-            return Ok(self.version());
-        }
-        self.mutate(|next| {
-            next.current_thread_routes
-                .retain(|_, existing| existing != &binding);
-            next.retired_route_claims.insert(key, record);
-            Ok(())
-        })
-    }
-
-    /// The operator retirement recorded for this exact claim, if any.
-    ///
-    /// The lookup is by route address, so a later binding generation at the
-    /// same address is not covered by an earlier retirement.
-    pub fn lookup_retired_route_claim(
-        &self,
-        binding: &RuntimeBinding,
-    ) -> Option<&RetiredRouteClaim> {
-        let key = retired_route_claim_key(binding).ok()?;
-        self.retired_route_claims.get(&key)
-    }
-
     /// Advance the one current route for one session/thread pair.
     ///
     /// Runtime history remains in `projects`; this index is the only route
-    /// selector and retires the prior entry for the same binding.
+    /// selector. It retires the prior entry for the same binding, and it evicts
+    /// every other claimant of the same tmux pane host-wide, so one pane owns
+    /// exactly one binding.
     pub fn set_current_thread_route(
         &mut self,
         binding: RuntimeBinding,
@@ -246,16 +208,22 @@ impl GlobalState {
                 &native_thread_id,
                 binding.tmux_endpoint.as_ref(),
             ));
-            // The same rule applies to an operator retirement. A live route at
-            // this exact address is a real reactivation, so the retirement
-            // record must not outlive it. Both reconcilers read this record
-            // before republishing, so a stale entry would strand the address.
-            next.retired_route_claims
-                .remove(&current_route_address_key(
-                    &session_id,
-                    &native_thread_id,
-                    binding.tmux_endpoint.as_ref(),
-                ));
+            // One tmux pane owns exactly one binding, host-wide. Installing this
+            // route evicts every other claimant of the same pane, whatever its
+            // project or route scope, so the later writer takes the resource.
+            // This reducer is the same path for a live write and for journal
+            // replay, so the invariant holds in both and needs no second
+            // mechanism. An entry at this exact address is left for the insert
+            // below; an entry without a pane is left alone, because it shares no
+            // resource.
+            if let Some(endpoint) = binding.tmux_endpoint.as_ref() {
+                next.current_thread_routes.retain(|other_address, existing| {
+                    other_address == &route_address
+                        || existing.tmux_endpoint.as_ref().is_none_or(|other| {
+                            !crate::client::adapters::tmux::same_pane_route(other, endpoint)
+                        })
+                });
+            }
             next.current_thread_routes.insert(route_address, binding);
             // Installing the strict dual-key route for a thread upgrades that
             // identity off the legacy compatibility index.  Only the upgraded

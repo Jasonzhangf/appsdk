@@ -3,12 +3,27 @@
 Status: revision 3, frozen for delivery 1. Three independent reviews ran against
 revisions 1 and 2. All three agree on the core: pane uniqueness is a per-project
 contract, the host-wide scan is the defect, and the scope-local query fixes both
-failure modes. Their P0 findings were all against the reset operation or against
-a reconcile change that revision 3 deletes. Delivery 1 is D1, D2 and D3 as
-specified in section 5. Delivery 2 is D5 and D4; its open problems are recorded
-in section 5.5.
+failure modes. *(Historical: the three reviews endorsed the scope-local pane
+contract; it was reversed by `collab-pane-route-ownership-20261006.md` §2 — one
+pane now owns one binding host-wide.)* Their P0 findings were all against the
+reset operation or against a reconcile change that revision 3 deletes. Delivery 1
+is D1, D2 and D3 as specified in section 5. Delivery 2 is D5 and D4; its open
+problems are recorded in section 5.5.
 
-Revision history:
+Revision 4 (ablation, after delivery): the routes level (L1) was removed. One
+tmux pane now owns exactly one route binding host-wide, and the route reducer
+enforces that on every write and on every replay, so no ambiguous pane is left
+for an operator to resolve and the operator retirement mechanism has no
+producer. `collab reset` has exactly two levels, `--project` and `--host`. See
+`docs/design/collab-pane-route-ownership-20261006.md` for the design of record.
+L1 references below survive only inside historical review notes, and each such
+note is marked as naming a removed level. References to the reversed scope-local
+pane contract are likewise historical; each affected block carries a
+`(historical: the scope-local pane contract …)` marker.
+
+Revision history (historical; the pane contract these entries describe is the
+reversed scope-local contract — see `collab-pane-route-ownership-20261006.md`
+§2):
 
 - Revision 1 retired every same-pane claimant when a route was installed. Review
   round 1 rejected it: the contract is per-project pane ownership, and an
@@ -68,6 +83,8 @@ The same global lookup causes the second failure mode. At
 that lookup return `None`, so the flag is false, the request falls through to the
 live-master guard at `part_06.rs:1165-1179`, and the answer is
 `MASTER_RECOVERY_BLOCKED_LIVE`. One wrong query produces both failures.
+*(historical: the scope-local pane contract; reversed by
+`collab-pane-route-ownership-20261006.md` §2.)*
 
 Pane distribution of the current index (read-only replay, grouped by
 `(route_scope, pane)`):
@@ -82,7 +99,9 @@ Pane distribution of the current index (read-only replay, grouped by
 
 The codebase already states the intended invariant. The comment at
 `collab/src/server/mod_parts/runtime_manager_setup.rs:248` says "A pane is
-addressable by exactly one live peer **per project**";
+addressable by exactly one live peer **per project**" *(historical: the
+scope-local pane contract; reversed by `collab-pane-route-ownership-20261006.md`
+§2)*;
 `same_scope_pane_owner_supersedes`
 (`collab/src/server/mod_parts/part_04.rs:21-45`) filters by
 `other.route_scope() == binding.route_scope()`;
@@ -93,12 +112,14 @@ pane cannot block a second App Server peer"; and the test
 (`collab/src/server/host_route_registry_tests/part_02.rs:1055`) asserts that two
 same-scope claimants may coexist in the host index and must not fence the project
 route. Pane uniqueness is **scope-local** by contract, and the global scan is the
-defect.
+defect. *(historical: the scope-local pane contract; reversed by
+`collab-pane-route-ownership-20261006.md` §2.)*
 
 Read-only verification of the fix hypothesis: with the same replayed index, the
 master's pane has 2 claimants globally but exactly 1 within its own scope, so a
 scope-local query returns `Some(master)` and the fence passes, while the
-cross-scope `codex-%2` stays untouched.
+cross-scope `codex-%2` stays untouched. *(historical: the scope-local pane
+contract; reversed by `collab-pane-route-ownership-20261006.md` §2.)*
 
 ## 2. Goal
 
@@ -127,10 +148,15 @@ review also raised P0 findings against the reset operation only. So:
 - No global pane retirement and no implicit retirement of a live conflict. The
   recovery DAG (`docs/design/collab-recovery-dag-audit-20260930.md:9`) keeps
   "explicit user override is the only path that may retire or supersede a live
-  conflict".
+  conflict". *(historical: the scope-local pane contract; reversed by
+  `collab-pane-route-ownership-20261006.md` §2 — the route reducer now evicts any
+  earlier claimant on the pane, in any project or scope.)*
 - No symmetric liveness resolution on the fence. The same-scope stale case is
-  demonstrated in data but not observed as a failure; it gets the explicit L1
-  remedy instead of new fence logic.
+  demonstrated in data but not observed as a failure; it was given the explicit
+  L1 remedy instead of new fence logic. That L1 routes level was later removed
+  (see `docs/design/collab-pane-route-ownership-20261006.md`). *(historical: the
+  scope-local pane contract; reversed by
+  `collab-pane-route-ownership-20261006.md` §2.)*
 - No control-plane storage relocation in this delivery (D4 below).
 - No change to the unmerged `codex/collab-master-liveness-fence` branch.
 
@@ -154,8 +180,16 @@ claimants, 0 retirements ever.
 
 ### D1 Pane uniqueness is scope-local
 
+*(Historical: D1–D3 below record the delivery-1 scope-local pane contract. It was
+reversed by `collab-pane-route-ownership-20261006.md` §2: one pane owns one
+binding host-wide, and a later writer evicts any earlier claimant in any project
+or scope. Every scope-local statement in these sections is part of that
+historical record.)*
+
 Invariant: within one route scope, at most one route claims a given tmux pane.
-Two projects may share a pane, and neither may block or retire the other.
+Two projects may share a pane, and neither may block or retire the other. *(historical:
+the scope-local pane contract; reversed by `collab-pane-route-ownership-20261006.md`
+§2 — one pane owns one binding host-wide.)*
 
 - The pane-claimant query takes a route scope and returns the claimant only when
   the scope-local claimant count is exactly one.
@@ -183,7 +217,9 @@ Two projects may share a pane, and neither may block or retire the other.
   a host-wide question, and is expressed through the same claimant scan. It is
   not a second mechanism.
 - The reducer is unchanged. Cross-scope claimants are never retired by another
-  scope's publication.
+  scope's publication. *(historical: the scope-local pane contract; reversed by
+  `collab-pane-route-ownership-20261006.md` §2 — the reducer now evicts any
+  earlier claimant of the same pane before inserting the new route.)*
 
 This alone clears both failure modes: the fence resolves the master, and
 `same_pane_tmux_recovery` becomes true so the master can re-register.
@@ -194,13 +230,21 @@ This alone clears both failure modes: the fence resolves the master, and
   takes the route scope. The scope-local lookup and the pane-only branch of
   `lookup_tmux_route` (`global_state_impl.rs:525-533`, currently a duplicate of
   the same scan) are expressed through it. The host-wide lookup is the same scan
-  without the scope filter and keeps its own caller.
+  without the scope filter and keeps its own caller. *(historical: the
+  scope-local pane contract; reversed by
+  `collab-pane-route-ownership-20261006.md` §2 — the claimant scan is now
+  host-wide and `pane_claimant_other_than` is its single owner.)*
 - Conflict messages are always scope-local. A cross-scope claimant is never
-  listed as a conflict, because it is not one.
+  listed as a conflict, because it is not one. *(historical: the scope-local pane
+  contract; reversed by `collab-pane-route-ownership-20261006.md` §2 — a claimant
+  from another project is now the pane's owner.)*
 - When the scope-local claimant count is greater than one, the fence error names
   the pane and each claimant (agent id, binding id, generation) and names the
-  remedy (`collab reset --routes ... --keep <binding_id>`). Today it reports a
-  generation mismatch that hides the real cause.
+  remedy (an explicit operator reset; the pane-conflict routes level it once
+  named was later removed — see
+  `docs/design/collab-pane-route-ownership-20261006.md`). Today it reports a
+  generation mismatch that hides the real cause. *(historical: the scope-local
+  pane contract; reversed by `collab-pane-route-ownership-20261006.md` §2.)*
 
 ### D3 Reconcile reachability and logging
 
@@ -211,7 +255,10 @@ This alone clears both failure modes: the fence resolves the master, and
 - Every reconciler pane lookup is scope-local: `reconcile_same_pane_master_routes`
   (`runtime_manager_setup.rs:287`) uses the scope-local claimant query, like the
   fence. A cross-scope claimant can no longer make the reconciler see "no unique
-  host pane route" for a route that its own scope resolves.
+  host pane route" for a route that its own scope resolves. *(historical: the
+  scope-local pane contract; reversed by
+  `collab-pane-route-ownership-20261006.md` §2 — every reconciler pane lookup now
+  goes through the host-wide `pane_owner_other_than`.)*
 - Startup failures stay fatal. `ProjectRuntimeManager::new(...)?`
   (`part_12.rs:893-894`) still stops the daemon when a reconcile cannot be
   resolved. Review round 3 showed that making the round non-aborting would remove
@@ -225,9 +272,11 @@ Dropped after review: an earlier revision of D3 also made
 `(route_scope, pane)` owner, to keep an offline retirement from being
 republished. Review rounds 3 and 4 rejected it: `endpoint_generation` is a
 per-binding counter (`part_04.rs:159,211`), so it cannot order two different
-bindings, and the rule would skip the very binding an operator named with
-`--keep`. Durability of an offline retirement is therefore an open problem for
-delivery 2 (section 5.5), and delivery 1 does not touch that loop.
+bindings, and the rule would skip the very binding an operator named as the
+survivor. Durability of an offline retirement is therefore an open problem for
+delivery 2 (section 5.5), and delivery 1 does not touch that loop. That
+retirement mechanism and the routes level it served were later removed (see
+`docs/design/collab-pane-route-ownership-20261006.md`).
 
 ### D4 Control-plane storage isolation (designed, separate delivery)
 
@@ -237,8 +286,9 @@ replays and appends the host reducer state at `scope.server_dir()`, which is
 started from. `HostPaths::server_dir()` is the state root, and
 `<state_root>/journal.jsonl` holds only legacy host events (22 route sets, last
 written 2026-09-21). The host control plane therefore shares a journal with one
-arbitrary project, and `collab reset --project <that project>` would retire the
-host index with it.
+arbitrary project, and `collab reset --project` run from that project must not
+retire the host index with it; the delivered project level refuses exactly that
+case with `RESET_PROJECT_HOLDS_HOST_INDEX` and sends the operator to `--host`.
 
 Why it is not in this delivery: the root cause has no causal link to the storage
 location, and a move loses state that the reconcilers do not rebuild. Review
@@ -249,78 +299,49 @@ rebuilt from project bindings. The state-root journal is also not empty, so an
 "empty means migrate" trigger cannot move the live index. The relocation needs
 its own merge design, its own acceptance case, and its own review.
 
-### D5 Reset operation, three levels
+### D5 Reset operation, two levels
 
-All three levels run offline, need an explicit approval, archive before they
-remove, and record one receipt. One entry, three scopes.
+Both levels run offline, need an explicit approval, archive before they remove,
+and record one receipt. One entry, two scopes.
 
 | Level | Command | Retires | Keeps |
 | --- | --- | --- | --- |
-| L1 routes | `collab reset --routes --approval <t> [--storage-root <path>] [--keep <binding_id>]` | stale same-scope pane claimants and their host routes; stale host route records whose project is gone (reusing the existing `prune_stale_host_routes` owner) | all business state (tasks, messages, journals, identities) |
-| L2 project | `collab reset --project <path> --approval <t>` | that project's `.agent-collab`, including its project-local business history and its project-local `runs/`, plus its host route records and its identities | other projects and all host state |
-| L3 host | `collab reset --host --approval <t> [--storage-root <path>]` | host route table, host control-plane journal, identities, host project directories; with `--storage-root`, also that project's control plane | `~/.collab/runs/` (host run notes and evidence) unless `--include-runs` is given |
+| L2 project | `collab reset --project --discard-legacy --approval <t>` | that project's `.agent-collab`, including its project-local business history and its project-local `runs/`, plus its host route records and its identities | other projects and all host state |
+| L3 host | `collab reset --host --storage-root <path> --discard-legacy --approval <t>` | host route table, host control-plane journal, events, log, identities, host project directories, and the resident project's `.agent-collab/server` journal, events, and log (the live index) | `~/.collab/runs/` (host run notes and evidence) unless `--include-runs` is given |
 
 `runs` means two different things and the two levels treat them differently on
 purpose: L2 removes the project's own `.agent-collab/runs`, and L3 keeps the
 host-level `~/.collab/runs` unless `--include-runs` is given. L3's default keeps
 the evidence that the user asked to preserve.
 
-L1 rule, deterministic and offline:
-
-- replay the resolved host control-plane journal and group live routes by
-  `(route_scope, pane)`;
-- a group with one claimant needs nothing;
-- inside a group, a claimant whose owning project root no longer exists is
-  provably stale and is retired without a decision;
-- if two or more claimants remain, L1 does not guess. `endpoint_generation` is a
-  per-binding counter that starts at 1 and only advances when that same binding
-  rebinds (`part_04.rs:159,211`), so it is not comparable across different
-  bindings and cannot order them. L1 changes nothing, lists the candidates with
-  agent id, binding id, and generation, and requires `--keep <binding_id>` to
-  name the winner;
-- the retirement is appended as
-  `Event::GlobalCurrentThreadRouteRetired { binding }`
-  (`collab/src/server/state.rs:760`, reducer `state_impl.rs:761-767`). The
-  reducer removes a route only when the stored binding equals the event binding,
-  so L1 replays first and appends the exact stored binding;
-- a cross-scope claimant is never a target: it is not a conflict;
-- durability: because of D3, the owner journal does not republish a same-scope
-  claimant that lost its pane group;
-- L1 does not retire tombstones. No event removes a tombstone; it disappears only
-  when the same address is reactivated (`global_state_impl.rs:779-783`). Stale
-  host route records stay owned by the existing `prune_stale_host_routes`;
-- L1 never removes business state and adds no daemon request. The appended event
-  is applied when the daemon next replays the journal.
-
 L2 additionally refuses when the target project holds the resolved host index
 journal. That journal is the host control plane, and L2 promises to keep host
 state, so the operator is sent to L3 instead.
 
-`--storage-root` is required for L1 and L3, and it is the project root the daemon
+`--storage-root` is required for `--host`, and it is the project root the daemon
 was started from. The live host index is
 `<storage-root>/.agent-collab/server/journal.jsonl`, because
 `run_with_host_paths` replays `scope.server_dir()` (`part_12.rs:349-350,866-871`,
 `scope.rs:1065-1068`). It is **not** `<state_root>/journal.jsonl`; that file holds
-only legacy host events, so a default that pointed there would find no real
-conflict and still report success. Review round 4 rejected an "at least one route
-set event" guard for exactly that reason: the state-root journal has 22 of them.
-L1 and L3 therefore fail with `RESET_STORAGE_ROOT_REQUIRED` when the parameter is
-absent, and change nothing. The receipt always prints the journal path that was
-used. D4 removes the requirement.
+only legacy host events, so a default that pointed there would not be the live
+index and would still report success. Review round 4 rejected an "at least one
+route set event" guard for exactly that reason: the state-root journal has 22 of
+them. `--host` therefore fails with `RESET_STORAGE_ROOT_REQUIRED` when the
+parameter is absent, and changes nothing. The receipt always prints the journal
+path that was used. D4 removes the requirement.
 
-`--discard-legacy` keeps its current meaning and is the L2 authorization flag;
-when no level flag is given, `collab reset` behaves as today (L2 on the current
-project), so existing callers and tests are unchanged.
+`--discard-legacy` keeps its current meaning and is required by both levels. A
+run with no level, or with two, fails with `RESET_LEVEL_REQUIRED` before any
+control file is read or written, and a flag the selected level does not use
+fails with `RESET_LEVEL_FLAG_MISMATCH` rather than being ignored.
 
-Shared contract for all three levels:
+Shared contract for both levels:
 
 - non-empty `--approval`; the text is recorded verbatim in the audit record;
 - the daemon must be down, proven by the existing reset lock, the legacy writer
   fence, and the liveness check (`reset.rs:444-454`);
 - archive first, then mutate. For the levels that remove files, the archive must
-  be byte-equal to the source, and a mismatch leaves the source untouched. L1
-  removes nothing: it archives a byte copy of the journal it is about to append
-  to, so the pre-state is recoverable;
+  be byte-equal to the source, and a mismatch leaves the source untouched;
 - one audit record per run in `<state_root>/reset.jsonl`;
 - idempotent: a repeated reset of an already clean plane changes nothing.
 
@@ -328,7 +349,12 @@ Shared contract for all three levels:
 
 Review rounds 3 and 4 raised these against the reset operation. They are
 recorded here so the delivery-2 design starts from them, and none of them is
-touched by delivery 1.
+touched by delivery 1. The first three items concern the L1 routes level and its
+operator retirement mechanism; that level was later removed (see
+`docs/design/collab-pane-route-ownership-20261006.md`), so they are kept as
+historical review notes rather than open work. Their scope-local pane statements
+are likewise historical *(historical: the scope-local pane contract; reversed by
+`collab-pane-route-ownership-20261006.md` §2)*.
 
 - **Retirement durability.** `retire_current_thread_route`
   (`global_state_impl.rs:799-827`) removes the route and writes no tombstone.
@@ -370,35 +396,43 @@ Two SESE graphs, one per delivery unit. Both pass
 reset_request
   -> authorize_reset                  (level flag + non-empty approval)
   -> prove_exclusivity                (daemon down, reset lock, writer fence)
-  -> inventory_control_plane          (exact retire set, incl. pane claimants)
+  -> inventory_control_plane          (exact retire set)
   -> archive_inventory                (byte-equality verified archive)
   -> retire_selected_state            (transactional retirement)
   -> rebuild_baseline                 (empty, registration-ready baseline)
   -> record_reset_receipt             (reset.jsonl record + stdout contract)
 ```
 
-The three levels share this pipeline; the level selects the inventory and the
-retire set, not the topology. The graph models the success path. The failure
-terminals are declared in the graph description and each leaves the source
-untouched: `RESET_AUTHORIZATION_REQUIRED`, `RESET_DAEMON_LIVE`,
-`RESET_AMBIGUOUS_PANE_CLAIMANTS` (with the candidate list), and
-`RESET_ARCHIVE_MISMATCH`.
+The two levels share this pipeline; the level selects the inventory and the
+retire set, not the topology. The graph models the success path. Failure
+terminals are declared in the graph description, bound to the node that produces
+them, and each leaves the source untouched.
 
 ### 6.2 Pane-route reconciliation
 
 `docs/dagpipe/collab-pane-route-reconcile.graph.json` (5 nodes, 4 edges)
 
+Revision 4 note: the delivery-1 shape named `resolve_owner_route`,
+`verify_scope_pane_uniqueness` and `emit_reconcile_receipt`, and classified the
+claimants scope-locally. The later pane-global reversal
+(`docs/design/collab-pane-route-ownership-20261006.md`) renamed two nodes and
+made the reconciler a republisher that never evicts. The graph is now `0.4.0`;
+the chain below is its current shape. There is no `ReconcileReceipt` type: the
+reconciler returns its own outcome.
+
 ```text
 route_index_disagreement
-  -> classify_pane_claimants          (scope-local: none / exactly one / several)
-  -> resolve_owner_route              (highest-generation scope-local owner)
-  -> publish_owner_route              (host index lagged: publish that owner)
-  -> verify_scope_pane_uniqueness     (postcondition: one claimant in scope)
-  -> emit_reconcile_receipt           (converged, or the named scope-local conflict)
+  -> classify_pane_claimants          (host-wide: none / exactly one / several)
+  -> resolve_pane_owner               (the claimant that owns the pane)
+  -> verify_pane_uniqueness           (no other claim holds the pane)
+  -> publish_owner_route              (this binding's own route; never evicts)
+  -> return_named_outcome             (converged, or the named lag)
 ```
 
-Single sink: `reconcile_receipt`, which carries either convergence or the named
-remainder. A cross-scope claimant is not a conflict and never appears as one.
+Single sink: `reconcile_outcome`, which carries either convergence or the named
+remainder. One pane owns exactly one binding host-wide, so a claimant from
+another project is the pane's owner, not a neighbour, and never appears as a
+conflict.
 
 ## 7. Acceptance
 
@@ -407,8 +441,8 @@ remainder. A cross-scope claimant is not a conflict and never appears as one.
 | Id | Case | Expected |
 | --- | --- | --- |
 | A1 | Real routecodex master. Precondition recorded first: replaying the live host journal still shows 2 claimants on pane `$2:%2` and `collab context` still fails with `RECOVERY_RECONCILE_REQUIRED`. Then install the candidate, restart the daemon, and repeat | `collab context` in routecodex reports the master live (`master.worker_id` and `endpoint_live: true`) and reports no `exact_error`; a window of >= 10 non-`Register` operations from routecodex adds **zero** `RECOVERY_RECONCILE_REQUIRED` lines to the routecodex project log and event stream (`<project>/.agent-collab/server/log.txt` and `events.jsonl`), with before/after counts recorded and a positive control: the same count before the fix is non-zero. Two further conditions need a registered tmux pane and are therefore recorded as environment-limited rather than met: `registered: true` and `collab master status`. Both answer from the caller's own pane, and the author's non-interactive shell has no Codex thread anchor, so it reports `IDENTITY_REBIND_UNPROVEN` and `TMUX_ENDPOINT_MISSING` for broken and unbroken projects alike |
-| A2 | Cross-scope pane sharing (`$2:%2`, `$138:%138`) | neither peer is fenced or retired; `collab context` succeeds in both scopes; the host index still shows both claimants |
-| A3 | Ambiguous same-scope pane (`$6:%6`, `$8:%8`, `$16:%16`) | the failure names the pane and each claimant with agent id, binding id, and generation, and names the remedy. It is not reported as a generation mismatch |
+| A2 | Cross-scope pane sharing (`$2:%2`, `$138:%138`) | *(historical: the scope-local pane contract; reversed by `collab-pane-route-ownership-20261006.md` §2)* neither peer is fenced or retired; `collab context` succeeds in both scopes; the host index still shows both claimants |
+| A3 | Ambiguous same-scope pane (`$6:%6`, `$8:%8`, `$16:%16`) | *(historical: the scope-local pane contract; reversed by `collab-pane-route-ownership-20261006.md` §2)* the failure names the pane and each claimant with agent id, binding id, and generation, and names the remedy. It is not reported as a generation mismatch |
 | A4 | A project runtime that cannot be ensured at startup | the failure appears in `<state_root>/log.txt` with the route, the storage root, and the underlying error. It is no longer discarded. Delivery 1 keeps this a diagnostic line and does not add a journal event for it |
 | A5 | A daemon restart after a claimant lost its pane group | **moved to delivery 2.** Delivery 1 does not change the reconciler publish rule, and the durable-retirement rule that makes a lost claimant stay retired is a delivery 2 item (§5.5, B6). Delivery 1 verifies the weaker property it can own: two consecutive restarts produce an identical index |
 
@@ -435,7 +469,9 @@ fixed deliberately rather than forgotten.
   ambiguity only among same-scope matches and to leave a single cross-scope
   match on the existing `retire_cross_project_anchor` path, without changing
   what retirement means. Delivery 2 owns this, because it also changes the
-  reconciler in the same file and the same invariant family.
+  reconciler in the same file and the same invariant family. *(historical: the
+  scope-local pane contract; reversed by
+  `collab-pane-route-ownership-20261006.md` §2.)*
 - **P3-1, a startup input class that changed direction.**
   `reconcile_same_pane_master_routes` (`:321-377`) publishes a pending same-pane
   master when the in-scope lookup finds no claimant (`:343-349`). When a scope
@@ -446,28 +482,34 @@ fixed deliberately rather than forgotten.
   it refuses to create a second in-scope claimant, which is the invariant
   delivery 1 exists to protect, but it can stop the daemon from starting. The
   input class does not occur in the live index. Delivery 2 owns it, together
-  with the durable-retirement rule.
+  with the durable-retirement rule. Revision 4: delivery 3 removed that rule and
+  rewrote `reconcile_same_pane_master_routes` for pane-global ownership, so the
+  function no longer has a scope-local query to disagree with
+  (`docs/design/collab-pane-route-ownership-20261006.md`, section 5).
 - **P3-4, the reconcile graph is ahead of the code.**
   `docs/dagpipe/collab-pane-route-reconcile.graph.json` names
   `resolve_owner_route` and `emit_reconcile_receipt` as nodes, but the
   reconciler returns `Result` and there is no `ReconcileReceipt` type. Delivery 2
-  aligns the graph with the code it describes.
+  aligns the graph with the code it describes. Closed: the graph now carries the
+  code's own names, and delivery 3 renamed two of them again to
+  `resolve_pane_owner` and `verify_pane_uniqueness` at revision `0.4.0` (section
+  6.2).
 
 ### 7.2 Delivery 2 (D5), black box
 
 | Id | Case | Expected |
 | --- | --- | --- |
-| B1 | `collab reset --routes` without `--storage-root`, while the live index is not at the state root | fails with `RESET_STORAGE_ROOT_REQUIRED` and changes nothing |
-| B2 | `collab reset --routes --storage-root <root> --approval <t>` on a state copy with a same-scope duplicate | after the daemon replays, the named claimant is retired; business state and identities are unchanged; a second run is a no-op |
-| B3 | The same command with several remaining claimants and no `--keep` | nothing changes; the candidates are listed; the exit code is non-zero |
-| B4 | `collab reset --project <the storage root>` | refused, because that project holds the host index; the error points to L3 |
-| B5 | `collab reset --project` and `collab reset --host` | the archive holds the retired bytes, `reset.jsonl` holds the receipt with the approval text, the baseline is rebuilt, and `~/.collab/runs/` survives unless `--include-runs` was given |
+| B1 | `collab reset` with no level, or with both `--project` and `--host` | fails with `RESET_LEVEL_REQUIRED` and changes nothing |
+| B2 | `collab reset --host` without `--storage-root`, while the live index is not at the state root | fails with `RESET_STORAGE_ROOT_REQUIRED` and changes nothing |
+| B3 | `collab reset --project` run from the storage root | refused with `RESET_PROJECT_HOLDS_HOST_INDEX`, because that project holds the host index; the error points to `--host` |
+| B4 | `collab reset --project` and `collab reset --host --storage-root <root>` | the archive holds the retired bytes, `reset.jsonl` holds the receipt with the approval text, the baseline is rebuilt, and `~/.collab/runs/` survives unless `--include-runs` was given |
 
 ## 8. Risks and rollback
 
 - D1 changes a shared query. Every non-test call site is listed in D1 and each
   one already filters by scope afterwards, so the scope argument does not change
-  its intent.
+  its intent. *(historical: the scope-local pane contract; reversed by
+  `collab-pane-route-ownership-20261006.md` §2.)*
 - D3 keeps startup fail-closed. A reconcile that cannot be resolved still stops
   the daemon (`part_12.rs:893-894`), so an unresolved binding never serves
   traffic. Only the `ensure_runtime` failure is downgraded to a log line, and a
@@ -475,18 +517,17 @@ fixed deliberately rather than forgotten.
 - D1 narrows a shared query from host-wide to scope-local. The residual risk is
   the opposite of before: a genuine same-scope duplicate no longer resolves to a
   route, so the fence fails closed and names the conflict instead of silently
-  picking one claimant.
-- L1 retires only a claimant that the operator named, or one whose project root is
-  gone, and only with an explicit approval. Every level archives before it
-  removes.
-- Rollback is the reverse commit. No project journal is rewritten; L1 only
-  appends.
+  picking one claimant. *(historical: the scope-local pane contract; reversed by
+  `collab-pane-route-ownership-20261006.md` §2 — the query is host-wide and the
+  reducer evicts the earlier claimant.)*
+- Every level requires an explicit approval and archives before it removes.
+- Rollback is the reverse commit. No project journal is rewritten.
 
 ## 9. File scope
 
 Delivery 1 (D1, D2, D3):
 
-- `collab/src/server/global_state_impl.rs` (claimant query, scope-local lookup)
+- `collab/src/server/global_state_impl.rs` (claimant query, scope-local lookup) *(historical: the scope-local pane contract; reversed by `collab-pane-route-ownership-20261006.md` §2)*
 - `collab/src/server/mod_parts/runtime_manager_setup.rs` (fence, reconciler)
 - `collab/src/server/mod_parts/part_06.rs` (register recovery scope)
 - `collab/src/server/mod_parts/part_04.rs` (committed-register retry admission)

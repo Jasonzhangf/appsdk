@@ -193,7 +193,7 @@
 | I3 | 只有同锚点全部 duplicate 可证 Dead 才允许归档 | 跨项目退休门槛；survivor 存在时 Dead 不取胜 | 误删存活 peer 的归属 |
 | I4 | 显式 `--worker` 不做 liveness probe | 选中分支按路径直读 | 探测超时导致无法恢复 |
 | I5 | 锚点按 principal 归并去重 | `anchor_groups` 归并 | 同一 peer 被当成多个候选 |
-| I6 | same-pane master supersede 必须同时绑定 route 与 presence | `same_scope_pane_owner_supersedes` | 无 presence 就顶替 master |
+| I6 | 同 pane master 顶替以 host 级 pane 归属判定为准：pane 上存在不属于本 binding 自身 route 的 claim，即表示该 pane 归属他人；请求围栏仅在无人拥有该 pane 时报 `RECOVERY_RECONCILE_REQUIRED`，republisher 以 `RECOVERY_RECONCILE_SKIPPED_SUPERSEDED` 跳过而不驱逐 | `GlobalState::pane_claimant_other_than`（`collab/src/server/global_state_impl.rs:561`）与其决策包装 `ProjectRuntimeManager::pane_owner_other_than`（`collab/src/server/mod_parts/runtime_manager_setup.rs:451`） | 无 host 级 pane 归属判定就顶替 master 或围栏项目 route |
 | I7 | probe 错误只在明确文本下判 Dead，其余 Unknown | `classify_probe_error`（仅 `no rollout` / `thread not found` / `tmux_pane_missing`） | 畸形响应被当成死亡证明 |
 | I8 | pane 同一性比较必须含 `pane_pid`（5 字段） | `collab/src/adapters/tmux.rs:308-314` 的 `same_pane_route`（唯一实现；调用点唯一，见 T0-3） | pane id 复用被误认为同一 pane |
 

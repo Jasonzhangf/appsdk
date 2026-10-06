@@ -31,15 +31,13 @@ Usage:
   migration/reset owner.
 
 For an explicitly authorized reset, name the level. Exactly one level is
-required, and `--storage-root` is required for `--routes` and `--host`:
+required, and `--storage-root` is required for `--host`
+(`RESET_STORAGE_ROOT_REQUIRED`):
 
 ```sh
 collab down
 # project control plane; run from the project root
 collab reset --project --discard-legacy --approval "<explicit user authorization>"
-# duplicate pane route claimants; --keep repeats once per ambiguous pane
-collab reset --routes --storage-root <project root> \
-  --keep <binding_id> --discard-legacy --approval "<explicit user authorization>"
 # host control plane
 collab reset --host --storage-root <project root> --discard-legacy \
   --approval "<explicit user authorization>"
@@ -47,6 +45,9 @@ collab up
 collab init
 collab status --all
 ```
+
+The routes level was removed: one pane owns one route binding host-wide
+(`docs/design/collab-pane-route-ownership-20261006.md`).
 
 `--host` keeps `reset.jsonl` and `archives/`, which are the audit trail, and it
 keeps the project business payload under `.agent-collab/`. Retire that payload

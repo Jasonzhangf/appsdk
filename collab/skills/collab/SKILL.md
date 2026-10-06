@@ -220,7 +220,6 @@ level; it is not migration and it does not preserve the state it retires:
 collab down/up -> controlled daemon restart; journal/mailbox survive
 collab migrate -> authenticated migration and identity rebind
 collab reset --project -> retire the project control plane and rebuild
-collab reset --routes  -> retire duplicate pane route claimants
 collab reset --host    -> rebuild the host control plane
 ```
 
@@ -238,27 +237,6 @@ scaffold, and refuses when that project root holds the live host index
 (`RESET_PROJECT_HOLDS_HOST_INDEX`). It takes no path argument; run it from the
 project root.
 
-`--routes` is the level for the "one pane, one route claimant" invariant. It
-needs `--storage-root <project root>`, groups the live routes by route scope and
-pane, and for every pane with more than one claimant it needs `--keep
-<binding_id>` to name the survivor. `--keep` repeats once per ambiguous pane. A
-pane whose survivor is not named exactly once stops the run with
-`RESET_KEEP_REQUIRED` and lists the candidates, so nothing changes. The run then
-appends one durable retirement record per target and verifies the postcondition
-inside the same transaction, before it writes the receipt:
-
-```sh
-collab down
-collab reset --routes --storage-root <project root> \
-  --keep <binding_id> --keep <binding_id> \
-  --discard-legacy --approval "<explicit user authorization>"
-collab up
-```
-
-A retirement is durable: the two reconcilers, the replay helper, and the request
-path skip a retired address instead of republishing it. A peer that really is
-running comes back by registering at the same address, which clears the record.
-
 `--host` retires the host control plane under `~/.collab/` (`routes.jsonl`,
 `journal.jsonl`, `events.jsonl`, `log.txt`, `identities/`, `projects/`) and the
 resident project's `.agent-collab/server/` journal, events, and log. It keeps
@@ -267,10 +245,13 @@ trail, and it keeps the external service descriptor and the daemon's own socket
 and lock files. The project business payload under
 `.agent-collab/{mailbox,messages,handoff,merge-queue,runs,mailboxes}` belongs to
 `--project`, not here. `~/.collab/runs/` survives unless `--include-runs` is
-given. No baseline is rebuilt: the next `collab up` starts from empty.
+given. No baseline is rebuilt: the next `collab up` starts from empty. `--host`
+requires `--storage-root <project root>`, the root that owns the live host
+index, and fails with `RESET_STORAGE_ROOT_REQUIRED` when it is absent.
 
-`--routes` records `delivery_verified: true` once its postcondition holds. The
-other levels record `false`. Reset alone is not delivery, review, install,
+The routes level was removed: one pane owns one route binding host-wide
+(`docs/design/collab-pane-route-ownership-20261006.md`). Every level records
+`delivery_verified: false`. Reset alone is not delivery, review, install,
 restart, or live-communication evidence.
 
 `.appsdk/` and `.appsdk-control/` are AppSDK-owned and are not removed by

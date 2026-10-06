@@ -965,14 +965,12 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
         Cmd::Reset {
             approval,
             discard_legacy,
-            routes,
             project,
             host,
             storage_root,
-            keep,
             include_runs,
         } => {
-            let level = reset::ResetLevel::select(routes, project, host)?;
+            let level = reset::ResetLevel::select(project, host)?;
             let root = scope::project_root_for_init()?;
             let scope = Scope { root };
             let host_paths = scope::HostPaths::resolve()?;
@@ -984,7 +982,6 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     discard_legacy,
                     level,
                     storage_root,
-                    keep,
                     include_runs,
                 },
             )

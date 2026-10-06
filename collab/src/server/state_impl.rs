@@ -37,23 +37,20 @@ impl State {
                     })?;
                 continue;
             };
-            if recovered.lookup_retired_route_claim(&binding).is_some() {
-                // An operator retired this exact address. Rebuilding it from
-                // the project binding would undo a retirement the journal
-                // already records, and it would clear the record as a side
-                // effect of set_current_thread_route.
-                continue;
-            }
             let existing = match binding.tmux_endpoint.as_ref() {
-                Some(endpoint) => recovered.lookup_tmux_route(endpoint),
+                // A pane is resolved by the reducer below. Installing this
+                // route evicts whatever held the pane, so the fallback makes no
+                // decision for a pane address: one pane owns one binding.
+                Some(_) => None,
                 None => recovered.lookup_current_thread_route(&session, &thread),
             };
+            if existing == Some(&binding) {
+                continue;
+            }
             if let Some(existing) = existing {
-                if existing == &binding {
-                    continue;
-                }
                 return Err(format!(
-                    "journal replay rejected ambiguous current thread route {thread}"
+                    "journal replay rejected ambiguous current thread route {thread}: {} is already live at this address",
+                    existing.binding_id
                 ));
             }
             recovered
@@ -779,13 +776,6 @@ impl State {
                 next.set_counters(self.sequence, self.revision);
                 self.global = next;
             }
-            Event::GlobalRouteClaimRetired { record } => {
-                let mut next = self.global.clone();
-                next.record_retired_route_claim(record.clone())
-                    .map_err(|error| format!("global reducer rejected event: {error}"))?;
-                next.set_counters(self.sequence, self.revision);
-                self.global = next;
-            }
             Event::GlobalMigrationCommitEvidence { evidence } => {
                 self.apply_global_event(&GlobalEvent::MigrationCommitEvidence {
                     evidence: evidence.clone(),
@@ -1090,18 +1080,6 @@ impl State {
                 .values()
                 .cloned()
                 .map(|tombstone| Event::GlobalCurrentThreadRouteTombstoneSet { tombstone }),
-        );
-        // Retired claims are emitted after the route sets so the reducer removes
-        // the claim instead of re-installing it. The order is load-bearing:
-        // `set_current_thread_route` clears the retirement for the exact address
-        // it re-activates, so emitting a retirement before a route set for the
-        // same address would silently undo the retirement on replay.
-        events.extend(
-            self.global
-                .retired_route_claims
-                .values()
-                .cloned()
-                .map(|record| Event::GlobalRouteClaimRetired { record }),
         );
         let mut migration_commit_evidence: Vec<_> = self
             .global

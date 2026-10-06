@@ -10,7 +10,6 @@
 use crate::scope::{self, HostPaths, Scope};
 use anyhow::Context;
 use serde_json::json;
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -23,12 +22,14 @@ const LEGACY_CONTROL_ROOTS: [&str; 2] = [".agent-collab", ".agent-collab-v2"];
 
 /// Which accumulated burden this run retires.
 ///
-/// The three levels share one pipeline. The level selects the inventory and the
+/// The two levels share one pipeline. The level selects the inventory and the
 /// retire set; it never selects a different transaction shape.
+///
+/// Duplicate route claimants need no level here. One tmux pane owns exactly one
+/// binding host-wide, and the route reducer enforces that on every write and on
+/// every replay, so there is no ambiguous pane for an operator to resolve.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResetLevel {
-    /// Retire duplicate route claimants in one scope and keep exactly one.
-    Routes,
     /// Rebuild this project's runtime baseline.
     Project,
     /// Rebuild the host control plane.
@@ -36,27 +37,17 @@ pub enum ResetLevel {
 }
 
 impl ResetLevel {
-    /// Resolve the level from the three mutually exclusive selectors.
+    /// Resolve the level from the two mutually exclusive selectors.
     ///
     /// Exactly one selector is required. A run with none or with two fails
     /// before any control file is read or written.
-    pub fn select(routes: bool, project: bool, host: bool) -> anyhow::Result<Self> {
-        match (routes, project, host) {
-            (true, false, false) => Ok(Self::Routes),
-            (false, true, false) => Ok(Self::Project),
-            (false, false, true) => Ok(Self::Host),
+    pub fn select(project: bool, host: bool) -> anyhow::Result<Self> {
+        match (project, host) {
+            (true, false) => Ok(Self::Project),
+            (false, true) => Ok(Self::Host),
             _ => anyhow::bail!(
-                "RESET_LEVEL_REQUIRED: collab reset needs exactly one of --routes, \
-                 --project, or --host"
+                "RESET_LEVEL_REQUIRED: collab reset needs exactly one of --project or --host"
             ),
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Routes => "routes",
-            Self::Project => "project",
-            Self::Host => "host",
         }
     }
 }
@@ -65,17 +56,14 @@ pub struct ResetRequest {
     pub approval: String,
     pub discard_legacy: bool,
     pub level: ResetLevel,
-    /// The live host index root. Required for `Routes` and `Host`.
+    /// The live host index root. Required for `Host`.
     pub storage_root: Option<PathBuf>,
-    /// `Routes`: the binding ids to keep, one per ambiguous pane. Each
-    /// ambiguous pane must have exactly one of its claimants in this set.
-    pub keep: Vec<String>,
     /// `Host`: also remove `~/.collab/runs/`.
     pub include_runs: bool,
 }
 
 impl Default for ResetRequest {
-    /// The level-2 shape with no operator authorization.
+    /// The project-level shape with no operator authorization.
     ///
     /// This exists so a caller that only needs the project baseline states the
     /// fields it cares about. It is never a valid request on its own: the
@@ -86,7 +74,6 @@ impl Default for ResetRequest {
             discard_legacy: false,
             level: ResetLevel::Project,
             storage_root: None,
-            keep: Vec::new(),
             include_runs: false,
         }
     }
@@ -99,31 +86,11 @@ impl ResetRequest {
     /// a flag that the level does not use is an error rather than a no-op.
     fn validate_level_flags(&self) -> anyhow::Result<()> {
         match self.level {
-            ResetLevel::Routes => {
-                if self.include_runs {
-                    anyhow::bail!(
-                        "RESET_LEVEL_FLAG_MISMATCH: --include-runs belongs to --host, not --routes"
-                    );
-                }
-                if self.storage_root.is_none() {
-                    anyhow::bail!(
-                        "RESET_STORAGE_ROOT_REQUIRED: --routes must name the live host index \
-                         with --storage-root <path>; the index is \
-                         <storage-root>/.agent-collab/server/journal.jsonl and routes.jsonl \
-                         does not identify it"
-                    );
-                }
-            }
             ResetLevel::Project => {
                 if self.storage_root.is_some() {
                     anyhow::bail!(
-                        "RESET_LEVEL_FLAG_MISMATCH: --storage-root belongs to --routes or \
-                         --host, not --project"
-                    );
-                }
-                if !self.keep.is_empty() {
-                    anyhow::bail!(
-                        "RESET_LEVEL_FLAG_MISMATCH: --keep belongs to --routes, not --project"
+                        "RESET_LEVEL_FLAG_MISMATCH: --storage-root belongs to --host, not \
+                         --project"
                     );
                 }
                 if self.include_runs {
@@ -134,11 +101,6 @@ impl ResetRequest {
                 }
             }
             ResetLevel::Host => {
-                if !self.keep.is_empty() {
-                    anyhow::bail!(
-                        "RESET_LEVEL_FLAG_MISMATCH: --keep belongs to --routes, not --host"
-                    );
-                }
                 if self.storage_root.is_none() {
                     anyhow::bail!(
                         "RESET_STORAGE_ROOT_REQUIRED: --host must name the live host index \
@@ -695,7 +657,6 @@ pub fn run(scope: &Scope, host_paths: &HostPaths, request: ResetRequest) -> anyh
     request.validate_level_flags()?;
     match request.level {
         ResetLevel::Project => run_project(scope, host_paths, &request),
-        ResetLevel::Routes => run_routes(scope, host_paths, &request),
         ResetLevel::Host => run_host(scope, host_paths, &request),
     }
 }
@@ -1014,302 +975,6 @@ fn resolve_index_root(
         );
     }
     Ok((storage_root, state))
-}
-
-/// Group live route claimants by route scope and full pane identity.
-///
-/// The grouping key is the route scope, which is the project plus the app
-/// scope, because the invariant is per route scope. Grouping by project alone
-/// would retire a claimant that another app scope legitimately owns on the same
-/// pane.
-///
-/// The pane half of the key is all five fields of the tmux endpoint, matching
-/// `same_pane_route` and `tmux_route_address`. Keying on `session:pane` alone
-/// merges two different panes that happen to reuse a session and pane number on
-/// separate tmux servers, or on a recreated pane, and the run would then force
-/// the operator to name a survivor over a set that is not a duplicate.
-fn pane_claimant_groups(
-    state: &crate::server::state::State,
-) -> BTreeMap<
-    (String, String, String, u32, String, String, u32),
-    Vec<crate::server::RuntimeBinding>,
-> {
-    let mut groups: BTreeMap<
-        (String, String, String, u32, String, String, u32),
-        Vec<crate::server::RuntimeBinding>,
-    > = BTreeMap::new();
-    for binding in state.global.current_thread_routes.values() {
-        let Some(endpoint) = binding.tmux_endpoint.as_ref() else {
-            continue;
-        };
-        groups
-            .entry((
-                binding.project_scope.as_str().to_owned(),
-                binding.app_scope_id.as_str().to_owned(),
-                endpoint.socket_path.clone(),
-                endpoint.server_pid,
-                endpoint.tmux_session_id.clone(),
-                endpoint.pane_id.clone(),
-                endpoint.pane_pid,
-            ))
-            .or_default()
-            .push(binding.clone());
-    }
-    groups
-}
-
-/// The full pane identity, in the same order as `same_pane_route` and
-/// `tmux_route_address`.
-///
-/// Two panes retired in one run can differ only in the socket, the server pid,
-/// or the pane pid, so the string must carry all five fields to stay
-/// distinguishable in the error and the audit record.
-fn describe_pane(endpoint: &crate::proto::TmuxEndpoint) -> String {
-    format!(
-        "socket={} server_pid={} session={} pane={} pane_pid={}",
-        endpoint.socket_path,
-        endpoint.server_pid,
-        endpoint.tmux_session_id,
-        endpoint.pane_id,
-        endpoint.pane_pid
-    )
-}
-
-fn describe_claimants(claims: &[crate::server::RuntimeBinding]) -> String {
-    claims
-        .iter()
-        .map(|claim| {
-            format!(
-                "{} binding {} generation {}",
-                claim.agent_id, claim.binding_id, claim.endpoint_generation
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("; ")
-}
-
-/// Append the durable retirement events, one event per line.
-///
-/// The replay reader treats a line holding several events and no checkpoint as
-/// a root-conversion request, so a journal without a trailing newline is
-/// repaired before the append.
-fn append_retirement_events(
-    journal: &Path,
-    targets: &[crate::server::RuntimeBinding],
-    approval: &str,
-) -> anyhow::Result<()> {
-    if targets.is_empty() {
-        return Ok(());
-    }
-    use std::io::Write;
-    let mut body: Vec<u8> = Vec::new();
-    let existing = std::fs::read(journal)?;
-    if !existing.is_empty() && !existing.ends_with(b"\n") {
-        body.push(b'\n');
-    }
-    for target in targets {
-        let record = crate::server::RetiredRouteClaim::new(
-            target.clone(),
-            approval.to_owned(),
-            "collab reset --routes".to_owned(),
-            now_ms(),
-        )?;
-        let line = serde_json::to_string(&crate::server::state::Event::GlobalRouteClaimRetired {
-            record,
-        })?;
-        body.extend_from_slice(line.as_bytes());
-        body.push(b'\n');
-    }
-    let mut file = std::fs::OpenOptions::new().append(true).open(journal)?;
-    file.write_all(&body)?;
-    file.sync_data()?;
-    Ok(())
-}
-
-/// Replay the appended journal and assert the postcondition L1 promised.
-///
-/// This runs inside the transaction, before the receipt, so a journal that does
-/// not carry the retirement cannot leave behind a receipt that claims it did.
-fn verify_retirement(
-    index_journal: &Path,
-    targets: &[crate::server::RuntimeBinding],
-    keep: &[String],
-) -> anyhow::Result<()> {
-    let storage_root = index_journal
-        .parent()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "RESET_VERIFY_FAILED: cannot resolve the index root from {}",
-                index_journal.display()
-            )
-        })?;
-    let state = crate::server::replay_host_index(storage_root)?;
-    for target in targets {
-        if state.global.lookup_retired_route_claim(target).is_none() {
-            anyhow::bail!(
-                "RESET_VERIFY_FAILED: {} has no retired record after the append",
-                target.binding_id
-            );
-        }
-        if let (Some(session), Some(thread)) = (&target.session_id, &target.native_thread_id) {
-            if state
-                .global
-                .lookup_current_thread_route(session, thread)
-                .is_some()
-            {
-                anyhow::bail!(
-                    "RESET_VERIFY_FAILED: {} is still a live route after the append",
-                    target.binding_id
-                );
-            }
-        }
-    }
-    for kept in keep {
-        let live = state
-            .global
-            .current_thread_routes
-            .values()
-            .any(|binding| binding.binding_id.as_str() == kept);
-        if !live {
-            anyhow::bail!(
-                "RESET_VERIFY_FAILED: the kept claimant {kept} is not live after the append"
-            );
-        }
-    }
-    Ok(())
-}
-
-/// Level 1: retire duplicate route claimants in one route scope.
-///
-/// The invariant is "a pane is addressable by exactly one live peer per route
-/// scope (app scope plus project scope)". This level restores it where a pane
-/// accumulated several claimants, and it records the retirement in the journal
-/// so the next start does not republish the claim.
-///
-/// The `--keep` selection is the authorization and the liveness decision. An
-/// offline reader cannot tell a live claimant from a stale one: both claimants
-/// of a pane share the same pane and the same pane pid, and presence needs a
-/// live tmux probe. A gate that required "not registered" would refuse exactly
-/// the stale claims an operator needs to retire, so the level reports the
-/// candidates and requires the operator to name the survivor.
-fn run_routes(scope: &Scope, host_paths: &HostPaths, request: &ResetRequest) -> anyhow::Result<()> {
-    let (storage_root, state) = resolve_index_root(request, "routes")?;
-    let index_journal = storage_root.join(".agent-collab/server/journal.jsonl");
-
-    let _lock =
-        crate::server::acquire_reset_lock(&host_paths.lock_path(), &host_paths.socket_path())?;
-    if crate::client::alive(&host_paths.socket_path()) {
-        anyhow::bail!(
-            "RESET_DAEMON_LIVE: a Collab daemon is reachable at {}; run `collab down` \
-             before retiring route claimants",
-            host_paths.socket_path().display()
-        );
-    }
-
-    let mut targets: Vec<crate::server::RuntimeBinding> = Vec::new();
-    let mut conflicts: Vec<String> = Vec::new();
-    for ((project_scope, app_scope, ..), claims) in pane_claimant_groups(&state) {
-        if claims.len() < 2 {
-            continue;
-        }
-        // `--keep` names the survivor per ambiguous pane, so a run with several
-        // ambiguous panes passes several flags. A pane whose claimants contain
-        // no kept id, or more than one, is a conflict rather than a guess.
-        let kept = claims
-            .iter()
-            .filter(|claim| {
-                request
-                    .keep
-                    .iter()
-                    .any(|keep| keep == claim.binding_id.as_str())
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        if kept.len() != 1 {
-            let asked = if request.keep.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    "--keep {} does not name exactly one of them; ",
-                    request.keep.join(", ")
-                )
-            };
-            conflicts.push(format!(
-                "{project_scope}/{app_scope} pane {} has {} claimants; {asked}name \
-                 the one to keep with --keep <binding_id>: {}",
-                describe_pane(
-                    claims[0]
-                        .tmux_endpoint
-                        .as_ref()
-                        .expect("grouped claims carry a tmux endpoint")
-                ),
-                claims.len(),
-                describe_claimants(&claims)
-            ));
-            continue;
-        }
-        let kept_id = kept[0].binding_id.clone();
-        for claim in &claims {
-            if claim.binding_id != kept_id {
-                targets.push(claim.clone());
-            }
-        }
-    }
-    if !conflicts.is_empty() {
-        anyhow::bail!(
-            "RESET_KEEP_REQUIRED: {} pane(s) have more than one route claimant; nothing was \
-             changed:\n{}",
-            conflicts.len(),
-            conflicts.join("\n")
-        );
-    }
-
-    let run_id = format!("reset-{}-{}", now_ms(), std::process::id());
-    let record = json!({
-        "schema": "collab-reset/v1",
-        "run_id": run_id,
-        "at_ms": now_ms(),
-        "level": "routes",
-        "project_root": scope.root,
-        "storage_root": storage_root,
-        "approval": request.approval,
-        "kept_binding_ids": request.keep,
-        "already_reset": targets.is_empty(),
-        "retired_claims": targets
-            .iter()
-            .map(|target| json!({
-                "binding_id": target.binding_id.as_str(),
-                "agent_id": target.agent_id.as_str(),
-                "project_scope": target.project_scope.as_str(),
-                "app_scope_id": target.app_scope_id.as_str(),
-                "endpoint_generation": target.endpoint_generation,
-                "pane": target.tmux_endpoint.as_ref().map(describe_pane),
-            }))
-            .collect::<Vec<_>>(),
-        "delivery_verified": true,
-        "next": "run collab up; the retirement is durable and the reconcilers skip it",
-    });
-
-    let journal_snapshot = snapshot_file(index_journal.clone())?;
-    let reset_record_snapshot = snapshot_file(host_paths.state_root().join("reset.jsonl"))?;
-    let transaction = (|| -> anyhow::Result<()> {
-        append_retirement_events(&index_journal, &targets, &request.approval)?;
-        verify_retirement(&index_journal, &targets, &request.keep)?;
-        append_reset_record(host_paths, &record)?;
-        Ok(())
-    })();
-    if let Err(error) = transaction {
-        let rollback = restore_file(&journal_snapshot).and(restore_file(&reset_record_snapshot));
-        if let Err(rollback_error) = rollback {
-            anyhow::bail!("RESET_INCOMPLETE: {error}; rollback also failed: {rollback_error}");
-        }
-        return Err(error.context("reset rolled back; the route index is unchanged"));
-    }
-
-    println!("{}", serde_json::to_string_pretty(&record)?);
-    Ok(())
 }
 
 /// The host control-plane entries that level 3 retires.

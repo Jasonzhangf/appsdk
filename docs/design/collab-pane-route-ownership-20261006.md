@@ -241,31 +241,23 @@ The pane is released by one of two events:
 Case 2 has two doors, and the difference is whether the operator names the
 worker.
 
-- **Without `--worker`**, a cross-project registration on a pane whose stale
-  claim is still in the index never reaches the reducer: the pre-existing
-  identity guard refuses it first with `RUNTIME_BINDING_REJECTED: tmux identity
-  anchor is already bound to worker <owner>`. The merged-main binary and this
-  candidate emit that refusal identically, so the invariant neither causes nor
-  fixes it. *(Revision 6, measured by the isolated black box in
-  `/tmp/collab-pane-bb/stale-claim.log`.)*
-- **With `collab context --worker <owner>`**, the pre-existing adjudication
-  channel sets `retire_cross_project_anchor`, so the guard does not refuse: it
-  retires the stale cross-project anchor
-  (`retire_cross_project_anchor_candidate`, `runtime_manager_setup.rs:619`) and
-  the registration then reaches the reducer, which evicts the same-pane claim. A
-  stranded pane is therefore releasable in band, through an operator channel
-  that predates this delivery. *(Revision 7, review 6 P2-1; pinned by
-  `named_override_retires_a_stale_cross_scope_anchor`.)*
+- **Revision 8 removes the boundary.** A plain registration now takes the pane
+  across project and route scope. `validate_current_thread_candidate` matches the
+  anchor on the pane only, and `pane_claimants`/`pane_reclaim_events` retire the
+  previous claimant, so the registration reaches the reducer with no operator
+  flag. The earlier measurement is kept as history: before this revision a
+  cross-project registration on a pane whose stale claim was still in the index
+  was refused with `RUNTIME_BINDING_REJECTED: tmux identity anchor is already
+  bound to worker <owner>`, and only `collab context --worker <owner>` released
+  it. *(Revision 6, measured by the isolated black box in
+  `/tmp/collab-pane-bb/stale-claim.log`; pinned then by
+  `named_override_retires_a_stale_cross_scope_anchor`, now
+  `a_later_registration_takes_a_foreign_scope_anchor`.)*
 
-What case 2 covers without an operator override is a writer inside the same
-anchor: a generation refresh, or a re-registration once the old route is gone.
-And the reducer contract holds either way: whenever an accepted writer installs
-a route on the pane, the older claimant is gone instead of co-resident.
-
-A cross-project stranded pane therefore needs either the owner's own route
-retirement or `collab context --worker <owner>`. A plain registration is refused
-before the reducer runs. That boundary is pre-existing and is reported, not
-hidden.
+The reducer contract holds either way: whenever an accepted writer installs a
+route on the pane, the older claimant is gone instead of co-resident. A
+cross-project stranded pane is now releasable by the pane's own new owner, with
+no operator declaration.
 
 ## 6. Ablation
 

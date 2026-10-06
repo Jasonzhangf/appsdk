@@ -1,6 +1,6 @@
 ---
 name: dagpipe-runtime
-description: Use the DAGpipe Rust SDK and global governance CLI to register project Operators, validate graph topology, and run compiled project pipelines; not for changing DAGpipe itself.
+description: Govern project DAG artifacts and run the DAGpipe Rust SDK and global governance CLI — persist project DAGs as graph files, validate topology with `dagpipe graph validate`, register project Operators, and run compiled project pipelines; not for changing DAGpipe itself.
 ---
 
 # DAGpipe SDK and governance CLI
@@ -12,6 +12,15 @@ Third-party projects use two complementary interfaces:
 - `dagpipe` CLI: static governance modules inspect project graph files, validate
   DAG topology, and show node-to-Operator name/version bindings. The CLI does
   not load project code or execute project Operators.
+
+## 项目 DAG 沉淀治理（唯一治理入口）
+
+全局 `AGENTS.md` L1.2 / L2 要求项目 DAG 沉淀为项目自有图产物。本 skill 是该产物的治理 owner：
+
+- **沉淀**：feature/debug 的设计 DAG 必须落到项目自有的 graph 文件（约定 `docs/**/dagpipe/graphs/<object>.graph.json`，已有项目按此落地），随代码一起版本化；聊天里的图、临时描述或只在上下文里的图不算设计产物。
+- **校验**：每次修改图后运行 `dagpipe graph validate <graph.json>`；拓扑非法（多入口/多出口、环、悬空边）即判缺链，先修图再写代码。查看节点与 Operator 绑定用 `dagpipe graph inspect <graph.json>`。
+- **边界**：一个外部对象流一个 SESE Graph（单入口 ARC、单出口 ARC）；不把独立来源合并成多入口图，也不把模块内部函数展开成节点。DAGpipe 业务管线只是其中一类对象流，非 DAGpipe 项目同样按本 skill 沉淀与校验项目 DAG。
+- **能力不适用**：对象流无法表达为 SESE Graph 或 CLI 不可用时，必须显式给出不适用理由，不得静默跳过或 mock 通过。
 
 ## Model an existing project before changing it
 
@@ -73,6 +82,24 @@ Operator or Hook. List the concrete files/modules behind each changed node and
 the callers/edges that connect them. If the real implementation does not yet
 match the proposed graph, label the missing edge/implementation and its owner;
 do not imply the proposed graph already executes.
+
+### 外部副作用闭环审计
+
+在设计审计或实现准入中，若对象流涉及扣款、出库、发送、安装或外部状态变更，检查相关节点的以下合同。将结论写入现有项目设计与验收条目，不另建治理框架；纯变换节点不要求采购、退款或人工恢复机制。
+
+| 检查项 | 必须明确的合同 |
+| --- | --- |
+| 身份与责任 | 真实触发入口、请求的认证与归属、稳定业务身份和唯一状态 owner。区分业务履约请求与状态通知；互斥接入路线分别建模，不假设服务商之间存在转单边。 |
+| 执行与持久化 | 副作用前后保存的事实、并发领取与重启恢复边界，以及重复请求如何复用原结果。先核实外部 owner 已提供的保证，不复制库存或订单真源。 |
+| 结果未知与重试 | 区分明确未执行、已执行和无法确认；声明按原业务身份查证的入口，以及允许重试的证据。新的 execution/attempt 身份不等于新的采购或发送身份；结果未知不得按普通失败盲目重放。 |
+| 完成证明 | 节点响应能证明的完成层、下游接收者，以及最终业务目标的外部可观察证据。接口 ACK、返回交付物或状态更新不能直接替代收货、消费或实际生效证明。 |
+| 取消与恢复 | 适用取消事件的状态守卫、已发生副作用的处置，以及自动恢复与人工处理的责任和互斥。人工移交必须有接收者、允许动作和可验收的结案结果，告警不是结案。 |
+
+库存或可用性预检不是原子预占、出库或最终执行保证。第三方的幂等、查单、交付与取消保证必须绑定已选接口及依据；不能从通用能力列表推导本项目已经具备这些保证。
+
+按实际合同声明受影响的正常、重复/并发、响应丢失、重启、取消与恢复黑盒场景，不枚举假设异常。设计阶段缺少合同或必需能力时标 `INCOMPLETE` / `UNVERIFIED`，停在能力确认或图修订；调研草案不冒充实现准入 PASS，未执行场景不冒充行为证据。
+
+`dagpipe graph validate` 只证明静态拓扑与绑定形状，`compile()` 检查注册、类型和声明能力；两者均不证明外部交易幂等或最终业务完成。声明完整性与证据准入由 AppSDK 或项目已选治理 owner 承担，语义正确性由设计审查确认，实际行为由公开入口黑盒验证。不要将这些策略写入 DAGpipe Runtime，也不要新增与现有记录重复的真源。
 
 ### Semantic diagrams are mandatory
 

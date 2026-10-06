@@ -502,8 +502,62 @@ fn tick_ledger_maintenance_at(server: &Arc<Server>, now: i64) {
         }
     }
     if !events.is_empty() {
-        server.commit(&events);
+        // Re-check ownership under the same guard that commits. The snapshot at
+        // the top of this tick and this commit are taken under different
+        // guards, so a route can be retired or rebound in between. The reducer
+        // rejects a classification for a scope this index no longer owns, and a
+        // rejected commit fails the journal closed. Drop those classifications
+        // here, where the state they are checked against cannot change before
+        // the append.
+        let mut state = server.state.lock().unwrap();
+        let dropped = drop_unowned_ledger_classifications(&state, &mut events);
+        if dropped > 0 {
+            // The receipt counts these as blocked, which is also what a route
+            // this index never owned looks like. Record the race explicitly so
+            // it stays observable after the tick.
+            super::presence::append_log(
+                &server.log_path(),
+                &format!(
+                    "LEDGER_CLASSIFICATION_DROPPED_AT_COMMIT: {dropped} route(s) were no longer owned when the scan committed"
+                ),
+            );
+        }
+        if !events.is_empty() {
+            server.commit_locked_reporting(&mut state, &events);
+        }
     }
+}
+
+/// Remove ledger classifications the reducer would reject, and correct the scan
+/// receipt so it still describes what was committed.
+///
+/// A route can be retired between the snapshot a tick reads and the commit that
+/// writes it. The reducer rejects a classification this project no longer
+/// holds, and a rejected commit fails the journal closed, so the commit
+/// boundary asks the reducer's own rejection. Returns the number of
+/// classifications dropped.
+fn drop_unowned_ledger_classifications(
+    state: &super::state::State,
+    events: &mut Vec<Event>,
+) -> u32 {
+    let before = events.len();
+    events.retain(|event| match event {
+        Event::GlobalRuntimeBindingLedgerClassified { record } => {
+            state.global.runtime_binding_ledger_rejection(record).is_none()
+        }
+        _ => true,
+    });
+    let dropped = (before - events.len()) as u32;
+    if dropped > 0 {
+        for event in events.iter_mut() {
+            if let Event::GlobalLedgerScanReceiptRecorded { receipt } = event {
+                receipt.classified = receipt.classified.saturating_sub(dropped);
+                receipt.transitioned = receipt.transitioned.saturating_sub(dropped);
+                receipt.blocked = receipt.blocked.saturating_add(dropped);
+            }
+        }
+    }
+    dropped
 }
 
 fn next_subscription_trigger(

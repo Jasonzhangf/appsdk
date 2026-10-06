@@ -1,104 +1,3 @@
-fn resolve_authoritative_main_head(root: &Path) -> Result<String, Resp> {
-    let output = Command::new("git")
-        .current_dir(root)
-        .args(["rev-parse", "--verify", "refs/heads/main^{commit}"])
-        .output();
-    match output {
-        Ok(output) if output.status.success() => {
-            let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if head.is_empty() {
-                Err(Resp::err_data(
-                    "TASK_INTEGRATION_MAIN_UNRESOLVED",
-                    json!({"root": root, "ref": "refs/heads/main"}),
-                ))
-            } else {
-                Ok(head)
-            }
-        }
-        Ok(output) => {
-            let dirty = Command::new("git")
-                .current_dir(root)
-                .args(["status", "--porcelain", "--untracked-files=all"])
-                .output()
-                .map(|status| status.status.success() && !status.stdout.is_empty())
-                .unwrap_or(false);
-            Err(Resp::err_data(
-                "TASK_INTEGRATION_MAIN_UNRESOLVED",
-                json!({
-                    "root": root,
-                    "dirty": dirty,
-                    "ref": "refs/heads/main",
-                    "detail": String::from_utf8_lossy(&output.stderr).trim(),
-                }),
-            ))
-        }
-        Err(error) => Err(Resp::err_data(
-            "TASK_INTEGRATION_MAIN_UNRESOLVED",
-            json!({"root": root, "ref": "refs/heads/main", "detail": error.to_string()}),
-        )),
-    }
-}
-
-/// Integration records accept the main tip, a real merge commit, or the
-/// merged candidate SHA itself. The authoritative question is reachability
-/// from `refs/heads/main`, not string equality with its current tip, because
-/// the daemon root may be checked out on a different branch while the main
-/// worktree advances elsewhere.
-fn commit_is_integrated_in_main(root: &Path, commit: &str) -> Result<bool, Resp> {
-    let verified = Command::new("git")
-        .current_dir(root)
-        .args(["rev-parse", "--verify", &format!("{commit}^{{commit}}")])
-        .output();
-    let verified = match verified {
-        Ok(output) if output.status.success() => output,
-        Ok(output) => {
-            return Err(Resp::err_data(
-                "TASK_INTEGRATION_COMMIT_UNRESOLVED",
-                json!({
-                    "provided": commit,
-                    "detail": String::from_utf8_lossy(&output.stderr).trim(),
-                    "expected": "a commit reachable from refs/heads/main",
-                }),
-            ))
-        }
-        Err(error) => {
-            return Err(Resp::err_data(
-                "TASK_INTEGRATION_COMMIT_UNRESOLVED",
-                json!({
-                    "provided": commit,
-                    "detail": error.to_string(),
-                    "expected": "a commit reachable from refs/heads/main",
-                }),
-            ))
-        }
-    };
-    let resolved = String::from_utf8_lossy(&verified.stdout).trim().to_string();
-    let reachable = Command::new("git")
-        .current_dir(root)
-        .args(["merge-base", "--is-ancestor", &resolved, "refs/heads/main"])
-        .output();
-    match reachable {
-        Ok(output) if output.status.success() => Ok(true),
-        Ok(output) if output.status.code() == Some(1) => Ok(false),
-        Ok(output) => Err(Resp::err_data(
-            "TASK_INTEGRATION_MAIN_UNRESOLVED",
-            json!({
-                "provided": commit,
-                "ref": "refs/heads/main",
-                "detail": String::from_utf8_lossy(&output.stderr).trim(),
-            }),
-        )),
-        Err(error) => Err(Resp::err_data(
-            "TASK_INTEGRATION_MAIN_UNRESOLVED",
-            json!({
-                "provided": commit,
-                "ref": "refs/heads/main",
-                "detail": error.to_string(),
-            }),
-        )),
-    }
-}
-
 fn handle_task_review(
     server: &Server,
     worker_id: String,
@@ -1201,18 +1100,23 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
     // read-back path for a peer whose local copy of that receipt was lost.
     // Read it from the ledger the daemon validates commands against, so the
     // shape stays the `RuntimeBinding` the Register receipt already carries.
-    // A worker with no unique binding in this route reports null instead of
-    // guessing.
-    let binding = route_scope.as_ref().and_then(|route_scope| {
-        let project = st.global.lookup_project_for_route(route_scope)?;
-        let mut matches = project.runtime_bindings.values().filter(|binding| {
-            binding.project_scope == route_scope.project_scope_id
-                && binding.app_scope_id == route_scope.app_scope_id
-                && binding.agent_id.as_str() == worker_id
+    //
+    // This deliberately does not go through the resolved route scope. One root
+    // can hold several app scopes, and then no single route scope resolves
+    // even though the caller's own binding is unambiguous. Match the caller
+    // inside the project this root owns, and report null unless exactly one
+    // binding matches, so an ambiguous caller still gets null and not a guess.
+    let binding = GlobalState::canonical_project_scope(&server.root)
+        .ok()
+        .and_then(|project_scope| st.global.lookup_project(&project_scope))
+        .and_then(|project| {
+            let mut matches = project
+                .runtime_bindings
+                .values()
+                .filter(|binding| binding.agent_id.as_str() == worker_id);
+            let binding = matches.next()?.clone();
+            matches.next().is_none().then_some(binding)
         });
-        let binding = matches.next()?.clone();
-        matches.next().is_none().then_some(binding)
-    });
     let worktrees: Vec<serde_json::Value> = {
         let mut worktrees = st
             .worktree_bindings

@@ -1181,6 +1181,23 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
     let authority = current_role_brief["authority"].clone();
     let route_scope = server_route_scope(server, &st).ok().flatten();
     let current_master = current_master_worker_id(&st, route_scope.as_ref());
+    // The caller's own runtime binding is the receipt that addresses this
+    // route. `collab context` is the single bootstrap read, so it owns the
+    // read-back path for a peer whose local copy of that receipt was lost.
+    // Read it from the ledger the daemon validates commands against, so the
+    // shape stays the `RuntimeBinding` the Register receipt already carries.
+    // A worker with no unique binding in this route reports null instead of
+    // guessing.
+    let binding = route_scope.as_ref().and_then(|route_scope| {
+        let project = st.global.lookup_project_for_route(route_scope)?;
+        let mut matches = project.runtime_bindings.values().filter(|binding| {
+            binding.project_scope == route_scope.project_scope_id
+                && binding.app_scope_id == route_scope.app_scope_id
+                && binding.agent_id.as_str() == worker_id
+        });
+        let binding = matches.next()?.clone();
+        matches.next().is_none().then_some(binding)
+    });
     let worktrees: Vec<serde_json::Value> = {
         let mut worktrees = st
             .worktree_bindings
@@ -1425,6 +1442,7 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
     Resp::data(json!({
         "schema_version": 1,
         "registration": registration,
+        "binding": binding,
         "registered": true,
         "project_root": server.root,
         "identity": {

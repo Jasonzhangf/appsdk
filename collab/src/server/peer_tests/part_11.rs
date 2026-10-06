@@ -430,6 +430,60 @@ fn context_snapshot_carries_peer_status_and_scheduling_state() {
     std::fs::remove_dir_all(root).ok();
 }
 
+/// `collab context` is the single bootstrap read for an agent, so it is also
+/// where a peer reads back its own runtime binding. A peer that loses the
+/// register receipt cannot address its route again otherwise: the generation
+/// then appears only inside a rejection message, and recovering from there
+/// would mean inferring a control value from an error.
+#[test]
+fn context_returns_the_callers_own_runtime_binding_receipt() {
+    let (server, root) = test_server();
+    let registered = register(&server, "receipt-worker", "thread-receipt");
+    assert!(registered.ok, "registering the peer failed: {registered:?}");
+    let receipt = registered.data["command"]["binding"].clone();
+    assert!(
+        receipt.is_object(),
+        "the register response must carry the typed binding: {registered:?}"
+    );
+
+    let response = handle_context(
+        &server,
+        "receipt-worker".into(),
+        "token-receipt-worker".into(),
+    );
+    assert!(response.ok, "context failed: {response:?}");
+    assert_eq!(
+        response.data["binding"], receipt,
+        "context must return the caller's own binding so a peer that lost the receipt can address the route again"
+    );
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// The read-back is scoped to the caller. A peer that received another peer's
+/// binding could address a route it does not own, so the projection must never
+/// fall back to "some binding in this project".
+#[test]
+fn context_never_returns_another_peers_binding() {
+    let (server, root) = test_server();
+    let first = register(&server, "receipt-first", "thread-first");
+    let second = register(&server, "receipt-second", "thread-second");
+    assert!(first.ok, "{first:?}");
+    assert!(second.ok, "{second:?}");
+    let first_receipt = first.data["command"]["binding"].clone();
+    let second_receipt = second.data["command"]["binding"].clone();
+    assert_ne!(first_receipt, second_receipt, "{first:?} {second:?}");
+
+    let response = handle_context(&server, "receipt-first".into(), "token-receipt-first".into());
+    assert!(response.ok, "{response:?}");
+    assert_eq!(
+        response.data["binding"], first_receipt,
+        "context must return the caller's binding, never another peer's"
+    );
+
+    std::fs::remove_dir_all(root).ok();
+}
+
 /// `collab context` replaces `collab who` / `collab status --all` for agents,
 /// and `Workers` / `StatusAll` were the calls that recorded ordinary-peer
 /// presence edges. Driving the same transition through the consolidated entry

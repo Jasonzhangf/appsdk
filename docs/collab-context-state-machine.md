@@ -169,9 +169,15 @@ ARC 契约：
 | `identity_verified` | Object | 身份门通过：身份已装载、令牌已校验、route 已注册、首次鉴权调用成功 |
 | `notify_state` | Object | 默认订阅状态 |
 | `master_grant` | Object | live master grant 或空 |
-| `read_only_projection` | Object | peers / master / status 只读投影 |
+| `read_only_projection` | Object | peers / master / status 只读投影，以及调用方自身 runtime binding 的回执 |
 | `env_projection` | Object | 过滤后的 shell 环境子集（凭据形状的键已丢弃） |
-| `state_snapshot` | Object | 唯一出口，含 bootstrap/identity/daemon/route/subscriptions/master/operations/peers/peer_count/summary/master_wake/subagents/pending_merges/inbox/worktrees/tasks/env；身份修复时另有 requires_identity_update 且 registered=false |
+| `state_snapshot` | Object | 唯一出口，含 bootstrap/identity/daemon/route/subscriptions/master/operations/peers/peer_count/summary/master_wake/subagents/pending_merges/inbox/worktrees/tasks/binding/env；身份修复时另有 requires_identity_update 且 registered=false |
+
+`binding` 是调用方自身 runtime binding 的回执（`binding_id`、`endpoint_generation`、
+`runtime_id`、`session_id`、`native_thread_id`），取自 daemon 校验命令所用的 ledger，
+并只按已鉴权调用方过滤。它是丢失注册回执的 peer 的唯一回读路径：否则该 peer 只能从
+拒绝报文里推断 generation，而控制真值不得从错误文本重建。所选 route 内没有唯一
+binding 时该字段为 null。
 
 失败终点不进入成功 DAG，作为 attempt 终态显式存在：
 `路径未识别`、`拒绝在 playground`。只有**已分类的身份失败**

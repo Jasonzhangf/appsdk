@@ -309,7 +309,10 @@ fn context_recovers_archived_master_in_the_same_live_pane() {
     assert_eq!(recovered["bootstrap"]["identity"], "recovered");
     let again = fixture.run_ok(&["context"], Some(&new));
     assert_eq!(again["bootstrap"]["identity"], "reused");
-    assert_eq!(again["identity"]["endpoint_generation"], recovered["identity"]["endpoint_generation"]);
+    assert_eq!(
+        again["binding"]["endpoint_generation"],
+        recovered["binding"]["endpoint_generation"]
+    );
 
     let sent = fixture.run_ok(
         &["sendmessage", "--to", &worker_id, "--subject", "recovery", "consume me"],
@@ -440,4 +443,83 @@ fn implicit_context_names_the_resolved_identity_when_the_daemon_rejects_its_toke
         !action.contains("<worker_id>"),
         "no placeholder on the resolved path: {snapshot}"
     );
+}
+
+/// `collab context` is the bootstrap read, so it is also where a peer reads
+/// back its own runtime binding. A peer that loses the registration receipt
+/// otherwise cannot address its route again: the endpoint generation then
+/// appears only inside a rejection message, and recovering from there would
+/// mean inferring a control value from an error.
+#[test]
+fn context_returns_the_binding_receipt_that_addresses_the_route() {
+    let root = unique_root();
+    let host_state = root.join("h");
+    let tmux_socket = root.join("t.sock");
+    std::fs::create_dir_all(&host_state).unwrap();
+    let mut fixture = Fixture {
+        binary: PathBuf::from(env!("CARGO_BIN_EXE_collab")),
+        root: root.clone(),
+        host_state,
+        tmux_socket: tmux_socket.clone(),
+        initialized: false,
+    };
+    tmux(
+        &tmux_socket,
+        &[
+            "new-session",
+            "-d",
+            "-s",
+            "collab-context-binding",
+            "sleep 600",
+        ],
+    );
+    let server_pid =
+        String::from_utf8(tmux(&tmux_socket, &["display-message", "-p", "#{pid}"]).stdout)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+    let pane_id =
+        String::from_utf8(tmux(&tmux_socket, &["display-message", "-p", "#{pane_id}"]).stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+    let worker_id = format!("codex-{pane_id}");
+    let pane = Pane {
+        server_pid,
+        pane_id: pane_id.clone(),
+        session_anchor: "session-binding".into(),
+        thread_anchor: "thread-binding".into(),
+        worker_id: worker_id.clone(),
+    };
+    fixture.initialized = true;
+    let registered = fixture.run_ok(&["init"], Some(&pane));
+
+    let context = fixture.run_ok(&["context"], Some(&pane));
+    let binding = &context["binding"];
+    let canonical_root = root.canonicalize().unwrap().to_string_lossy().into_owned();
+    assert_eq!(binding["agent_id"], worker_id);
+    assert_eq!(binding["project_scope"], canonical_root);
+    assert!(
+        binding["app_scope_id"].as_str().is_some_and(|scope| !scope.is_empty()),
+        "the receipt must name its app scope: {context}"
+    );
+    assert_eq!(binding["session_id"], pane.session_anchor);
+    assert_eq!(binding["native_thread_id"], pane.thread_anchor);
+    assert_eq!(binding["runtime_id"], registered["runtime"]["runtimeId"]);
+    assert!(
+        binding["binding_id"].as_str().is_some_and(|id| !id.is_empty()),
+        "the receipt must name its binding: {context}"
+    );
+    assert!(
+        binding["endpoint_generation"]
+            .as_u64()
+            .is_some_and(|generation| generation >= 1),
+        "the receipt must carry a usable endpoint generation: {context}"
+    );
+
+    // The receipt is the daemon's record, not a copy of the caller's local
+    // state: reading it again returns the same binding.
+    let again = fixture.run_ok(&["context"], Some(&pane));
+    assert_eq!(again["binding"], *binding);
 }

@@ -99,6 +99,12 @@ pub struct IdentityFacts {
     pub namespace: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tmux: Option<TmuxCandidate>,
+    /// The adapter-designed dsh anchor, observed by the CLI from
+    /// `DSH_SESSION_ID`. It is separate from a transport candidate because the
+    /// gateway control socket may be unreachable while the anchor is still
+    /// observable; the anchor alone is enough to recover a dsh identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dsh_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

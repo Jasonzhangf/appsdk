@@ -45,6 +45,7 @@ fn observation(
         session_id: session.map(str::to_owned),
         thread_id: thread.map(str::to_owned),
         tmux,
+        dsh_session_id: None,
     }
 }
 
@@ -59,6 +60,7 @@ fn facts(
         endpoint: None,
         namespace: None,
         tmux,
+        dsh_session_id: None,
     }
 }
 
@@ -302,9 +304,8 @@ fn resolver_rejects_an_ambiguous_anchor_without_guessing_from_recency() {
         None,
     );
     // Unreachable endpoints cannot prove which of two records owns an anchor.
-    let error =
-        resolve_for_daemon_at(&host_paths, &scope, &facts(Some("session-dup"), None, None))
-            .unwrap_err();
+    let error = resolve_for_daemon_at(&host_paths, &scope, &facts(Some("session-dup"), None, None))
+        .unwrap_err();
     assert!(error.to_string().starts_with("IDENTITY_RESTORE_AMBIGUOUS:"));
     std::fs::remove_dir_all(root).ok();
 }
@@ -381,7 +382,14 @@ fn deterministic_name_does_not_adopt_a_registered_identity_with_different_anchor
     let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
     let observed = facts(Some("session-new"), Some("thread-new"), None);
     let draft = resolve_for_daemon_at(&host_paths, &scope, &observed).unwrap();
-    saved_identity(&host_paths, &scope, &draft.worker_id, Some("session-other"), Some("thread-other"), None);
+    saved_identity(
+        &host_paths,
+        &scope,
+        &draft.worker_id,
+        Some("session-other"),
+        Some("thread-other"),
+        None,
+    );
     let error = resolve_for_daemon_at(&host_paths, &scope, &observed).unwrap_err();
     assert!(error.to_string().starts_with("IDENTITY_RESTORE_CONFLICT:"));
     std::fs::remove_dir_all(root).unwrap();
@@ -455,6 +463,7 @@ fn archived_route_recovery_reads_without_calling_back() {
         endpoint: None,
         namespace: None,
         tmux: Some(candidate.clone()),
+        dsh_session_id: None,
     };
     let selected =
         resolve_for_daemon_with_route_at(&host_paths, &scope, &facts, Some(&route)).unwrap();
@@ -626,7 +635,6 @@ fn identifier_validation_rejects_empty_and_control_values() {
     assert!(DispatchId::new("d".repeat(MAX_ID_LENGTH + 1)).is_err());
 }
 
-
 #[test]
 fn observation_anchors_include_tmux_codex_ids() {
     let candidate = tmux_candidate(Some("session-tmux"), Some("thread-tmux"), "%1");
@@ -638,6 +646,99 @@ fn observation_anchors_include_tmux_codex_ids() {
     assert_eq!(observed.thread_anchors(), vec!["thread-tmux"]);
     assert!(observed.has_anchor());
     assert!(!observation(None, None, None).has_anchor());
+}
+
+/// The dsh anchor is a designed anchor, not a guess: `DSH_SESSION_ID` alone
+/// must make the caller resolvable and recover the persisted dsh identity.
+#[test]
+fn resolver_recovers_a_dsh_identity_from_its_session_anchor_alone() {
+    let root = test_root("ci-resolver-dsh-anchor");
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    let scope = test_scope(root.clone());
+    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
+
+    let worker_id = "dsh-thread-6162";
+    let runtime = RuntimeIdentity {
+        agent_id: AgentId::new(worker_id).unwrap(),
+        runtime_id: RuntimeId::new("runtime-dsh").unwrap(),
+        appserver_id: AppServerId::new(CLI_APP_SERVER_ID).unwrap(),
+        endpoint_generation: 3,
+        binding_id: BindingId::new("binding-dsh").unwrap(),
+        session_id: Some(SessionId::new("6162").unwrap()),
+        native_thread_id: Some(NativeThreadId::new("agent-7").unwrap()),
+    };
+    let transport = SelectedTransport {
+        kind: TransportKind::Dsh,
+        endpoint: Some("unix:///tmp/gateway-control.sock".into()),
+        namespace: Some("runtime-dsh".into()),
+        session_id: Some("6162".into()),
+        thread_id: Some("agent-7".into()),
+        tmux_endpoint: None,
+        capabilities: vec!["enqueue_wake".into()],
+        self_check: "test dsh transport".into(),
+    };
+    let project_scope = scope
+        .route_scope(runtime.appserver_id.clone())
+        .unwrap()
+        .project_scope_id;
+    let identity = Identity {
+        worker_id: worker_id.into(),
+        token: "token-dsh".into(),
+        project_scope: Some(project_scope),
+        runtime: Some(runtime),
+        transport: Some(transport),
+    };
+    write_identity(
+        &identity_path_at(&host_paths, worker_id).unwrap(),
+        &identity,
+    )
+    .unwrap();
+
+    let mut facts = facts(None, None, None);
+    facts.dsh_session_id = Some("6162".into());
+    let found = resolve_for_daemon_at(&host_paths, &scope, &facts).unwrap();
+    assert_eq!(found.worker_id, worker_id);
+    assert_eq!(found.token, "token-dsh");
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// Without any designed anchor the resolver still fails closed, so the new
+/// dsh arm cannot turn an anonymous caller into a peer.
+#[test]
+fn resolver_still_refuses_a_caller_with_no_anchor() {
+    let root = test_root("ci-resolver-no-anchor");
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    let scope = test_scope(root.clone());
+    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
+    let error = resolve_for_daemon_at(&host_paths, &scope, &facts(None, None, None))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("COLLAB_IDENTITY_ANCHOR_MISSING"), "{error}");
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// The tmux anchor is the owned pane, so two panes of one tmux session must
+/// never resolve to one identity.
+#[test]
+fn a_second_pane_of_the_same_tmux_session_is_not_that_identity() {
+    let root = test_root("ci-resolver-tmux-session");
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    let scope = test_scope(root.clone());
+    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
+    let first = tmux_candidate(None, None, "%1");
+    saved_identity(
+        &host_paths,
+        &scope,
+        "pane-peer",
+        None,
+        None,
+        Some(first.endpoint.clone()),
+    );
+    let second = tmux_candidate(None, None, "%2");
+    let draft = resolve_for_daemon_at(&host_paths, &scope, &facts(None, None, Some(second)))
+        .expect("a different pane is a new identity, not an ambiguity error");
+    assert_eq!(draft.worker_id, "codex-%2");
+    std::fs::remove_dir_all(root).ok();
 }
 
 #[test]

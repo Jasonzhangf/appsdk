@@ -153,6 +153,12 @@ impl ProjectRuntimeManager {
         let (Some(runtime), Some(transport)) = (existing.runtime, existing.transport) else {
             return Ok(());
         };
+        // A recovered dsh identity needs no App Server completion: its anchor is
+        // the gateway session id, and the gateway-owned address is supplied by
+        // the caller once through the `required_fields` request instead.
+        if transport.kind == TransportKind::Dsh {
+            return Ok(());
+        }
         if transport.kind != TransportKind::AppServer
             || facts.session_id.as_deref().is_some_and(|value| {
                 runtime.session_id.as_ref().map(identity::SessionId::as_str) != Some(value)
@@ -332,8 +338,14 @@ fn validate_facts(facts: &IdentityFacts) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Which facts the caller must still supply before an identity can be resolved.
+///
+/// Only the App Server path has fields the caller may have to add: its
+/// endpoint, namespace, session and thread are four separate observations that
+/// can arrive incomplete. The tmux and dsh paths each present one designed
+/// anchor that is complete on its own, so they require nothing further.
 fn required_fields(facts: &IdentityFacts) -> Vec<&'static str> {
-    if facts.endpoint.is_none() && facts.tmux.is_some() {
+    if facts.tmux.is_some() || facts.dsh_session_id.is_some() {
         return Vec::new();
     }
     [

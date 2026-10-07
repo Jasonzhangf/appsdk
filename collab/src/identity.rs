@@ -762,7 +762,18 @@ fn identity_by_current_anchors_at(
         anchors.push(("codex_thread_id", value));
     }
     if let Some(candidate) = observed.tmux.as_ref() {
-        anchors.push(("tmux_pane_id", candidate.endpoint.pane_id.clone()));
+        // One tmux anchor, named for its primary component. The tmux adapter
+        // designs the session id ($N) as the primary component and the pane id
+        // (%N) as the discriminator inside it, so the anchor is the owned pane
+        // pair. Matching the session id alone would make two panes of one tmux
+        // session claim one identity.
+        anchors.push((
+            "tmux_session_id",
+            candidate.endpoint.tmux_session_id.clone(),
+        ));
+    }
+    if let Some(value) = observed.dsh_session_id.as_ref() {
+        anchors.push(("dsh_session_id", value.clone()));
     }
     let mut matches = BTreeMap::<String, BTreeMap<String, Identity>>::new();
     for entry in std::fs::read_dir(identities_root)? {
@@ -777,6 +788,18 @@ fn identity_by_current_anchors_at(
             .transport
             .as_ref()
             .and_then(|transport| transport.tmux_endpoint.as_ref());
+        // A tmux identity is anchored by pane; a native AppServer identity that
+        // only recorded a pane address (no Codex runtime ids) may still be
+        // claimed by that pane. Both shapes are valid owners of a tmux anchor.
+        let tmux_owner_matches =
+            |candidate: &crate::proto::TmuxCandidate, persisted: &crate::proto::TmuxEndpoint| {
+                let runtime_ids_absent = candidate.endpoint.codex_session_id.is_none()
+                    && candidate.endpoint.codex_thread_id.is_none();
+                identity.transport.as_ref().is_some_and(|transport| {
+                    transport.kind == TransportKind::Tmux
+                        || (transport.kind == TransportKind::AppServer && runtime_ids_absent)
+                }) && crate::client::adapters::tmux::same_owned_pane(persisted, &candidate.endpoint)
+            };
         for (name, value) in &anchors {
             let matched =
                 match *name {
@@ -804,23 +827,26 @@ fn identity_by_current_anchors_at(
                                 .and_then(|runtime| runtime.native_thread_id.as_ref())
                                 .is_some_and(|persisted| persisted.as_str() == value))
                     }
-                    "tmux_pane_id" => persisted_endpoint.is_some_and(|persisted| {
-                        observed.tmux.as_ref().is_some_and(|candidate| {
-                            let runtime_ids_absent = candidate.endpoint.codex_session_id.is_none()
-                                && candidate.endpoint.codex_thread_id.is_none();
-                            let transport_kind_matches =
-                                identity.transport.as_ref().is_some_and(|transport| {
-                                    transport.kind == TransportKind::Tmux
-                                        || (transport.kind == TransportKind::AppServer
-                                            && runtime_ids_absent)
-                                });
-                            transport_kind_matches
-                                && crate::client::adapters::tmux::same_pane_route(
-                                    persisted,
-                                    &candidate.endpoint,
-                                )
-                        })
+                    "tmux_session_id" => persisted_endpoint.is_some_and(|persisted| {
+                        observed
+                            .tmux
+                            .as_ref()
+                            .is_some_and(|candidate| tmux_owner_matches(candidate, persisted))
                     }),
+                    // The dsh anchor lives on the runtime binding, not on a tmux
+                    // endpoint: `RuntimeIdentity.session_id` carries the gateway
+                    // session id the adapter returned in its agent-facts reply.
+                    "dsh_session_id" => {
+                        identity
+                            .transport
+                            .as_ref()
+                            .is_some_and(|transport| transport.kind == TransportKind::Dsh)
+                            && identity
+                                .runtime
+                                .as_ref()
+                                .and_then(|runtime| runtime.session_id.as_ref())
+                                .is_some_and(|persisted| persisted.as_str() == value)
+                    }
                     _ => false,
                 };
             if matched {

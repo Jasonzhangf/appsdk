@@ -80,13 +80,18 @@ Missing-information response (invocation-local terminal, no pending record):
 
 The daemon computes `required_fields` from actual missing values, so the example
 is not a fixed list. A complete verified tmux candidate needs no additional
-fields if no AppServer endpoint is selected. With an AppServer endpoint, its
+fields if no AppServer endpoint is selected. A caller that presents the dsh
+session anchor needs none either. With an AppServer endpoint, its
 namespace/session/thread are required; available values are never re-requested.
-Without either candidate, the four absent AppServer facts are requested. DSH
-remains gateway-owned through its existing Register protocol; no DSH_SESSION_ID
-guess or newly invented CLI gateway discovery. The gateway already supplies
-its verified runtime/agent/session facts to daemon. Unavailable gateway remains
-an explicit gateway failure.
+Without any designed anchor, the four absent AppServer facts are requested.
+
+DSH is treated the same way as tmux and AppServer: its anchor is the `session_id`
+the DSH runtime exports as `DSH_SESSION_ID`, chosen by the dsh adapter rather
+than guessed by the caller. A dsh identity recovered from that anchor still
+registers through the existing gateway challenge, and a gateway that cannot be
+reached stays an explicit gateway failure rather than a recovery failure.
+Identity recovery order for all three transports is the anchor ladder in
+`collab-anchor-restore-model.md`.
 
 The supplement is an ordinary new context invocation for the same canonical
 project and automatically observed caller facts. No challenge, pending state,

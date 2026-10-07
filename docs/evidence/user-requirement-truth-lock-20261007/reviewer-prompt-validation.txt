@@ -1,0 +1,5 @@
+PASS actual buildReviewPrompt: /Users/fanzhang/.agents/skills/codex-review/scripts/codex-review-mcp
+PASS actual buildReviewPrompt: /Users/fanzhang/.agents/skills/agy/scripts/agy-mcp
+PASS shared authority checks and input/output contracts appear in both generated full prompts.
+No review task, model call, backend process, authority service or controller behavior test was run.
+T16 end-to-end behavioral verdict remains UNVERIFIED.

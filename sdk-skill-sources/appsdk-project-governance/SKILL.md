@@ -374,6 +374,14 @@ If a required input changes, invalidate only that phase and its downstream
 dependants. A candidate, review PASS, merge, push, install, restart or cleanup
 receipt never implies any other state.
 
+For design or architecture review that consumes project requirements, use
+[authoritative-review-template.md](references/authoritative-review-template.md)
+to assemble the packet from the project's authoritative source. The executing
+agent supplies observed scope and evidence; the independent reviewer reads the
+source and verifies every applicable requirement item. The template does not
+grant requirement authority, replace the SDK bundle owner's distribution work,
+or claim authentication or tamper protection.
+
 ### Optional black-box test governance
 
 AppSDK owns the optional black-box test governance selection, scope
@@ -605,6 +613,7 @@ evidence location.
 - Initialization or migration: [bootstrap-migration.md](references/bootstrap-migration.md).
 - Development/debug: [development-debug.md](references/development-debug.md).
 - Runtime review/delivery/freeze: [review-delivery.md](references/review-delivery.md).
+- Authoritative requirement review: [authoritative-review-template.md](references/authoritative-review-template.md).
 - Selected persistent planning: [process-control-harness.md](references/process-control-harness.md).
 - Contract errors/compatibility: [contracts-and-failures.md](references/contracts-and-failures.md).
 - Explicit goal-prompt request: [goal-prompt.md](references/goal-prompt.md).

@@ -578,20 +578,23 @@ fn lifecycle_chain_reenters_non_pass_review_and_preserves_attempt_history() {
         let root = temp_root(&format!("lifecycle-chain-reentry-{initial_verdict}"));
         let root_text = root.to_str().unwrap();
         prepare_lifecycle_chain_fixture(&root);
+        let requirements_review = real_requirements_review(&root);
         let review = root.join(".appsdk/records/review-record-app-core.json");
         fs::remove_file(&review).unwrap();
         let input = root.join("architecture-input.json");
         let write_input = |verdict: &str| {
+            let mut architecture = serde_json::json!({
+                "reviewer": {"adapter":"test","identity":"test"},
+                "verdict": verdict,
+                "evidence_ids": ["candidate-evidence-1","positive-1","negative-1"]
+            });
+            if verdict == "pass" {
+                architecture["requirements_review"] = requirements_review.clone();
+            }
             fs::write(
                 &input,
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "architecture": {
-                        "reviewer": {"adapter":"test","identity":"test"},
-                        "verdict": verdict,
-                        "evidence_ids": ["candidate-evidence-1","positive-1","negative-1"]
-                    }
-                }))
-                .unwrap()
+                serde_json::to_string_pretty(&serde_json::json!({"architecture": architecture}))
+                    .unwrap()
                     + "\n",
             )
             .unwrap();
@@ -820,10 +823,11 @@ fn lifecycle_chain_new_candidate_preserves_pass_bytes_and_reuses_current() {
         value["fix_candidate_id"] = serde_json::json!("candidate-2");
         fs::write(file, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
     }
+    let requirements_review = real_requirements_review(&root);
     let observations = [
         (
             "architecture",
-            serde_json::json!({"reviewer":{"adapter":"test","identity":"test"},"verdict":"pass","evidence_ids":["candidate-evidence-1","positive-1","negative-1"]}),
+            serde_json::json!({"reviewer":{"adapter":"test","identity":"test"},"verdict":"pass","evidence_ids":["candidate-evidence-1","positive-1","negative-1"],"requirements_review":requirements_review}),
         ),
         (
             "effectiveness",
@@ -924,6 +928,7 @@ fn lifecycle_chain_replaces_stale_pass_and_preserves_stale_attempt() {
     let root = temp_root("lifecycle-chain-stale-pass");
     let root_text = root.to_str().unwrap();
     prepare_lifecycle_chain_fixture(&root);
+    let requirements_review = real_requirements_review(&root);
     let review = root.join(".appsdk/records/review-record-app-core.json");
     fs::remove_file(&review).unwrap();
     let input = root.join("architecture-input.json");
@@ -934,7 +939,8 @@ fn lifecycle_chain_replaces_stale_pass_and_preserves_stale_attempt() {
                 "architecture": {
                     "reviewer": {"adapter":"test","identity":identity},
                     "verdict": "pass",
-                    "evidence_ids": ["candidate-evidence-1","positive-1","negative-1"]
+                    "evidence_ids": ["candidate-evidence-1","positive-1","negative-1"],
+                    "requirements_review": requirements_review
                 }
             }))
             .unwrap()
@@ -1216,20 +1222,23 @@ fn lifecycle_chain_rejects_invalid_attempt_history_before_reusing_canonical_reco
     let root = temp_root("lifecycle-chain-attempt-integrity");
     let root_text = root.to_str().unwrap();
     prepare_lifecycle_chain_fixture(&root);
+    let requirements_review = real_requirements_review(&root);
     let review = root.join(".appsdk/records/review-record-app-core.json");
     fs::remove_file(&review).unwrap();
     let input = root.join("architecture-input.json");
     let write_input = |verdict: &str| {
+        let mut architecture = serde_json::json!({
+            "reviewer": {"adapter":"test","identity":"test"},
+            "verdict": verdict,
+            "evidence_ids": ["candidate-evidence-1","positive-1","negative-1"]
+        });
+        if verdict == "pass" {
+            architecture["requirements_review"] = requirements_review.clone();
+        }
         fs::write(
             &input,
-            serde_json::to_string_pretty(&serde_json::json!({
-                "architecture": {
-                    "reviewer": {"adapter":"test","identity":"test"},
-                    "verdict": verdict,
-                    "evidence_ids": ["candidate-evidence-1","positive-1","negative-1"]
-                }
-            }))
-            .unwrap()
+            serde_json::to_string_pretty(&serde_json::json!({"architecture": architecture}))
+                .unwrap()
                 + "\n",
         )
         .unwrap();
@@ -1313,12 +1322,14 @@ fn lifecycle_chain_rejects_invalid_attempt_history_before_first_canonical_write(
     let invalid_ledger = "{\"schema_version\":1,\"result\":\"non_pass\"}\n";
     fs::write(&attempts, invalid_ledger).unwrap();
     let input = root.join("architecture-input.json");
+    let requirements_review = real_requirements_review(&root);
     fs::write(
         &input,
         serde_json::to_string_pretty(&serde_json::json!({
             "architecture": {
                 "reviewer": {"adapter":"test","identity":"test"},
                 "verdict": "pass",
+                "requirements_review": requirements_review,
                 "evidence_ids": ["candidate-evidence-1","positive-1","negative-1"]
             }
         }))

@@ -1165,6 +1165,7 @@ fn review_requires_only_declared_deployment_operations_and_binds_the_contract() 
             serde_json::to_string_pretty(&validation).unwrap(),
         )
         .unwrap();
+        renew_fixture_requirements_review(&root, "app-core");
         let admission = run(&[
             "verify",
             "--review-admission",

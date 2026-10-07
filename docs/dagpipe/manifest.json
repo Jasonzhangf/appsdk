@@ -52,6 +52,14 @@
     {
       "id": "appsdk-collab-master-authority",
       "path": "docs/dagpipe/collab-master-authority.graph.json"
+    },
+    {
+      "id": "appsdk-user-requirement-change",
+      "path": "docs/dagpipe/user-requirement-change.graph.json"
+    },
+    {
+      "id": "appsdk-user-requirement-consumption",
+      "path": "docs/dagpipe/user-requirement-consumption.graph.json"
     }
   ]
 }

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "sdk": "appsdk",
-  "version": "0.1.0010",
+  "version": "0.1.0011",
   "runtime_entrypoint": "rust-binary",
   "resources": {
     "contracts": [
@@ -26,6 +26,11 @@
       "contracts/migrations/sdk-0.1.0007-to-0.1.0008.json",
       "contracts/migrations/sdk-0.1.0008-to-0.1.0009.json",
       "contracts/migrations/sdk-0.1.0009-to-0.1.0010.json",
+      "contracts/migrations/sdk-0.1.0010-to-0.1.0011.json",
+      "contracts/migrations/0.1.0010/governance-maps/resource-map.json",
+      "contracts/migrations/0.1.0010/governance-maps/function-map.json",
+      "contracts/migrations/0.1.0010/governance-maps/mainline-call-map.json",
+      "contracts/migrations/0.1.0010/governance-maps/verification-map.json",
       "contracts/migrations/0.1.5/governance-maps/resource-map.json",
       "contracts/migrations/0.1.5/governance-maps/function-map.json",
       "contracts/migrations/0.1.5/governance-maps/mainline-call-map.json",
@@ -101,6 +106,7 @@
       "skills/appsdk-project-governance/references/init-prompts.md",
       "skills/appsdk-project-governance/references/process-control-harness.md",
       "skills/appsdk-project-governance/references/review-delivery.md",
+      "skills/appsdk-project-governance/references/authoritative-review-template.md",
       "skills/appsdk-project-governance/references/state-paths.md",
       "skills/appsdk-project-governance/references/subagents-config.md",
       "skills/appsdk-migration/SKILL.md",

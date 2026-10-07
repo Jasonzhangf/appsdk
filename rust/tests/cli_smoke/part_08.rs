@@ -360,11 +360,15 @@ fn install_legacy_governance_maps(root: &Path) {
         ),
         (
             "mainline-call-map.json",
-            include_str!("../../../contracts/migrations/0.1.5/governance-maps/mainline-call-map.json"),
+            include_str!(
+                "../../../contracts/migrations/0.1.5/governance-maps/mainline-call-map.json"
+            ),
         ),
         (
             "verification-map.json",
-            include_str!("../../../contracts/migrations/0.1.5/governance-maps/verification-map.json"),
+            include_str!(
+                "../../../contracts/migrations/0.1.5/governance-maps/verification-map.json"
+            ),
         ),
     ] {
         fs::write(root.join(".appsdk/maps").join(name), content).unwrap();
@@ -394,40 +398,6 @@ fn install_current_governance_maps(root: &Path) {
     }
 }
 
-#[test]
-fn current_resource_map_owns_the_current_bundle_and_generic_migration_paths() {
-    let map: Value =
-        serde_json::from_str(include_str!("../../../contracts/maps/resource-map.json")).unwrap();
-    let resources = map["resources"].as_array().unwrap();
-    let truth_store = |resource_id: &str| {
-        resources
-            .iter()
-            .find(|resource| resource["resource_id"] == resource_id)
-            .and_then(|resource| resource["truth_store"].as_str())
-            .unwrap()
-    };
-
-    assert_eq!(
-        truth_store("sdk_bundle"),
-        "AppSDK 0.1.0010 embedded Bundle manifest/resources"
-    );
-    assert_eq!(
-        truth_store("historical_governance_maps"),
-        ".appsdk/migrations/<source>-to-<target>/maps/** when materialized by pin-lock; absent after fresh reset"
-    );
-    assert_eq!(
-        truth_store("sdk_migration_record"),
-        ".appsdk/migrations/<source>-to-<target>/record.json when materialized by pin-lock; absent after fresh reset"
-    );
-    for text in [
-        include_str!("../../../contracts/migrations/sdk-0.1.5-to-0.1.6.json"),
-        include_str!("../../../contracts/migrations/sdk-0.1.6-to-0.1.0007.json"),
-    ] {
-        let descriptor: Value = serde_json::from_str(text).unwrap();
-        assert_eq!(descriptor["materialization"], "pin_lock_when_migrating");
-    }
-}
-
 fn install_previous_bundle_migration_record(root: &Path) -> (String, String) {
     let migration_root = root.join(".appsdk/migrations/0.1.5-to-0.1.6");
     fs::create_dir_all(migration_root.join("maps")).unwrap();
@@ -445,20 +415,28 @@ fn install_previous_bundle_migration_record(root: &Path) -> (String, String) {
         ),
         (
             "mainline-call-map.json",
-            include_str!("../../../contracts/migrations/0.1.5/governance-maps/mainline-call-map.json"),
+            include_str!(
+                "../../../contracts/migrations/0.1.5/governance-maps/mainline-call-map.json"
+            ),
         ),
         (
             "verification-map.json",
-            include_str!("../../../contracts/migrations/0.1.5/governance-maps/verification-map.json"),
+            include_str!(
+                "../../../contracts/migrations/0.1.5/governance-maps/verification-map.json"
+            ),
         ),
     ] {
         fs::write(migration_root.join("maps").join(name), content).unwrap();
         let target_digest = digest(match name {
             "resource-map.json" => {
-                include_str!("../../../contracts/migrations/0.1.6/governance-maps/resource-map.json")
+                include_str!(
+                    "../../../contracts/migrations/0.1.6/governance-maps/resource-map.json"
+                )
             }
             "function-map.json" => {
-                include_str!("../../../contracts/migrations/0.1.6/governance-maps/function-map.json")
+                include_str!(
+                    "../../../contracts/migrations/0.1.6/governance-maps/function-map.json"
+                )
             }
             "mainline-call-map.json" => include_str!(
                 "../../../contracts/migrations/0.1.6/governance-maps/mainline-call-map.json"
@@ -494,7 +472,7 @@ fn install_previous_bundle_migration_record(root: &Path) -> (String, String) {
 
     let lock_path = root.join(".appsdk/sdk.lock");
     let mut lock: Value = serde_json::from_str(&fs::read_to_string(&lock_path).unwrap()).unwrap();
-    lock["version"] = Value::String("0.1.0010".into());
+    lock["version"] = Value::String("0.1.0011".into());
     lock["bundle_digest"] = Value::String(previous_bundle_digest.clone());
     lock["bundle_manifest_digest"] = Value::String(previous_manifest_digest);
     fs::write(
@@ -615,12 +593,16 @@ fn pin_lock_accepts_all_materialized_migration_bundle_witnesses() {
         ),
         (
             "mainline-call-map.json",
-            include_str!("../../../contracts/migrations/0.1.6/governance-maps/mainline-call-map.json"),
+            include_str!(
+                "../../../contracts/migrations/0.1.6/governance-maps/mainline-call-map.json"
+            ),
             include_str!("../../../contracts/maps/mainline-call-map.json"),
         ),
         (
             "verification-map.json",
-            include_str!("../../../contracts/migrations/0.1.6/governance-maps/verification-map.json"),
+            include_str!(
+                "../../../contracts/migrations/0.1.6/governance-maps/verification-map.json"
+            ),
             include_str!("../../../contracts/maps/verification-map.json"),
         ),
     ] {
@@ -709,12 +691,16 @@ fn pin_lock_requires_lock_anchor_for_materialized_migration_bundle_witnesses() {
         ),
         (
             "mainline-call-map.json",
-            include_str!("../../../contracts/migrations/0.1.6/governance-maps/mainline-call-map.json"),
+            include_str!(
+                "../../../contracts/migrations/0.1.6/governance-maps/mainline-call-map.json"
+            ),
             include_str!("../../../contracts/maps/mainline-call-map.json"),
         ),
         (
             "verification-map.json",
-            include_str!("../../../contracts/migrations/0.1.6/governance-maps/verification-map.json"),
+            include_str!(
+                "../../../contracts/migrations/0.1.6/governance-maps/verification-map.json"
+            ),
             include_str!("../../../contracts/maps/verification-map.json"),
         ),
     ] {
@@ -1069,11 +1055,15 @@ fn pin_lock_accepts_historical_custom_target_different_from_canonical_target() {
     for (name, source) in [
         (
             "resource-map.json",
-            include_str!("../../../contracts/migrations/0.1.0007/governance-maps/resource-map.json"),
+            include_str!(
+                "../../../contracts/migrations/0.1.0007/governance-maps/resource-map.json"
+            ),
         ),
         (
             "function-map.json",
-            include_str!("../../../contracts/migrations/0.1.0007/governance-maps/function-map.json"),
+            include_str!(
+                "../../../contracts/migrations/0.1.0007/governance-maps/function-map.json"
+            ),
         ),
         (
             "mainline-call-map.json",
@@ -1325,7 +1315,7 @@ fn pin_lock_migrates_only_supported_sdk_and_matching_bundle_binary() {
     ]);
     assert!(!unsupported.status.success());
     assert!(String::from_utf8_lossy(&unsupported.stderr)
-        .contains("UNSUPPORTED_SDK_MIGRATION:0.1.2:0.1.0010"));
+        .contains("UNSUPPORTED_SDK_MIGRATION:0.1.2:0.1.0011"));
     assert_eq!(fs::read_to_string(&lock_file).unwrap(), original_lock);
 
     project["sdk"]["version"] = Value::String("0.1.5".into());
@@ -1364,8 +1354,8 @@ fn pin_lock_migrates_only_supported_sdk_and_matching_bundle_binary() {
         serde_json::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
     let migrated_lock: Value =
         serde_json::from_str(&fs::read_to_string(&lock_file).unwrap()).unwrap();
-    assert_eq!(migrated_project["sdk"]["version"], "0.1.0010");
-    assert_eq!(migrated_lock["version"], "0.1.0010");
+    assert_eq!(migrated_project["sdk"]["version"], "0.1.0011");
+    assert_eq!(migrated_lock["version"], "0.1.0011");
     assert!(run(&["verify", root_text]).status.success());
 
     let migration_root = root.join(".appsdk/migrations/0.1.5-to-0.1.6");

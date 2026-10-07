@@ -39,10 +39,16 @@ pub(super) fn verify_review_admission(root: &Path, module_id: &str) {
         return;
     }
 
-    let artifact = read_module_artifact(root, &project, module_id);
-    module_artifact_matches_project(module, &artifact);
-    explain_review_admission_preflight(root, module_id, module);
-    assert_pre_review_validation_gate(root, module_id, &artifact);
+    let artifact = assert_review_author_readiness(root, module_id);
+    // At architecture_stable the full verifier owns this check. Before that
+    // stage, admission must still reject a supplied stale PASS; context
+    // assembly deliberately does not depend on that downstream record.
+    if stage != "architecture_stable"
+        && lifecycle_chain_read_record_if_present(root, module_id, "review-record")
+            .is_some_and(|review| review["verdict"] == "pass")
+    {
+        assert_fix_architecture_gate(root, module_id, &artifact);
+    }
     verify_internal(root, true, true, true, false);
     println!(
         "{{\"ok\":true,\"gate\":\"review_admission\",\"module_id\":\"{}\"}}",
@@ -384,6 +390,19 @@ pub(super) fn assert_fix_architecture_gate(root: &Path, module_id: &str, artifac
         }
     }
     assert_lifecycle_chain_review_identity_or_frozen_legacy(root, module_id, &review);
+    let project = read_project(root);
+    let historical = project["modules"].as_array().is_some_and(|modules| {
+        modules.iter().any(|module| {
+            module["module_id"].as_str() == Some(module_id)
+                && matches!(module["stage"].as_str(), Some("frozen" | "retired"))
+        })
+    });
+    if !historical {
+        let binding = review
+            .pointer("/project_bindings/requirements_review")
+            .unwrap_or_else(|| fail("ARCHITECTURE_REQUIREMENTS_REVIEW_MISSING"));
+        assert_review_requirements_binding(root, module_id, binding);
+    }
     if git_value(
         root,
         &["rev-parse", &format!("{}^{{tree}}", candidate_commit)],

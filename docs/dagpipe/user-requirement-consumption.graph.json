@@ -1,0 +1,76 @@
+{
+  "id": "appsdk-user-requirement-consumption",
+  "version": "0.2.0",
+  "description": "设计草案：任务只读加载权威需求，经版本核验、范围绑定、AppSDK 正式 review 材料组装、阶段适用审查证据，形成唯一准入结果。绑定尚未实现。",
+  "inputs": [{"id": "task_requirement_request", "schema": "Object"}],
+  "nodes": [
+    {
+      "id": "load_effective",
+      "operator": "appsdk.requirements.load_effective",
+      "operator_version": "1",
+      "inputs": ["task_requirement_request"],
+      "output": {"id": "effective_requirement_outcome", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "verify_effective",
+      "operator": "appsdk.requirements.verify_effective",
+      "operator_version": "1",
+      "inputs": ["effective_requirement_outcome"],
+      "output": {"id": "requirement_integrity_outcome", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "bind_task",
+      "operator": "appsdk.requirements.bind_task",
+      "operator_version": "1",
+      "inputs": ["requirement_integrity_outcome"],
+      "output": {"id": "task_binding_outcome", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "assemble_review_packet",
+      "operator": "appsdk.requirements.assemble_review_packet",
+      "operator_version": "1",
+      "inputs": ["task_binding_outcome"],
+      "output": {"id": "review_packet_outcome", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "evaluate_evidence",
+      "operator": "appsdk.requirements.evaluate_evidence",
+      "operator_version": "1",
+      "inputs": ["review_packet_outcome"],
+      "output": {"id": "acceptance_outcome", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "publish_admission",
+      "operator": "appsdk.requirements.publish_admission",
+      "operator_version": "1",
+      "inputs": ["acceptance_outcome"],
+      "output": {"id": "requirement_admission_result", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {"from": "load_effective", "to": "verify_effective", "arc_id": "effective_requirement_outcome"},
+    {"from": "verify_effective", "to": "bind_task", "arc_id": "requirement_integrity_outcome"},
+    {"from": "bind_task", "to": "assemble_review_packet", "arc_id": "task_binding_outcome"},
+    {"from": "assemble_review_packet", "to": "evaluate_evidence", "arc_id": "review_packet_outcome"},
+    {"from": "evaluate_evidence", "to": "publish_admission", "arc_id": "acceptance_outcome"}
+  ],
+  "outputs": ["requirement_admission_result"]
+}

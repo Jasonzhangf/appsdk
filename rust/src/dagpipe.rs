@@ -297,7 +297,7 @@ fn ensure_graph_nodes_use_registered_operators(
 mod notification;
 use notification::{register_notification_operator, validate_notification_objects};
 
-fn embedded_graph_paths() -> [(&'static str, &'static str); 13] {
+fn embedded_graph_paths() -> [(&'static str, &'static str); 15] {
     [
         (
             "contracts/dagpipe/fix-lifecycle.graph.json",
@@ -351,10 +351,18 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 13] {
             "docs/dagpipe/collab-master-authority.graph.json",
             include_str!("../../docs/dagpipe/collab-master-authority.graph.json"),
         ),
+        (
+            "docs/dagpipe/user-requirement-change.graph.json",
+            include_str!("../../docs/dagpipe/user-requirement-change.graph.json"),
+        ),
+        (
+            "docs/dagpipe/user-requirement-consumption.graph.json",
+            include_str!("../../docs/dagpipe/user-requirement-consumption.graph.json"),
+        ),
     ]
 }
 
-fn design_graph_ids() -> [&'static str; 11] {
+fn design_graph_ids() -> [&'static str; 13] {
     [
         "appsdk-collab-context",
         "appsdk-collab-appserver-route-repair",
@@ -367,10 +375,12 @@ fn design_graph_ids() -> [&'static str; 11] {
         "appsdk-collab-control-plane-reset",
         "appsdk-collab-pane-route-reconcile",
         "appsdk-collab-master-authority",
+        "appsdk-user-requirement-change",
+        "appsdk-user-requirement-consumption",
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 57] {
+fn design_graph_operator_names() -> [&'static str; 68] {
     [
         "appsdk.collab_context.resolve_root",
         "appsdk.collab_context.ensure_baseline",
@@ -429,6 +439,17 @@ fn design_graph_operator_names() -> [&'static str; 57] {
         "appsdk.collab_authority.resolve_scope",
         "appsdk.collab_authority.transfer_master",
         "appsdk.collab_authority.emit_receipt",
+        "appsdk.requirements.authenticate_change",
+        "appsdk.requirements.check_base",
+        "appsdk.requirements.decide_change",
+        "appsdk.requirements.commit_revision",
+        "appsdk.requirements.publish_outcome",
+        "appsdk.requirements.load_effective",
+        "appsdk.requirements.verify_effective",
+        "appsdk.requirements.bind_task",
+        "appsdk.requirements.assemble_review_packet",
+        "appsdk.requirements.evaluate_evidence",
+        "appsdk.requirements.publish_admission",
     ]
 }
 

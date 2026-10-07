@@ -1,0 +1,65 @@
+{
+  "id": "appsdk-user-requirement-change",
+  "version": "0.1.0",
+  "description": "设计草案：用户需求提交或变更，经来源核验、版本判定、范围决策、原子提交或保留，形成唯一变更结果。绑定尚未实现。",
+  "inputs": [{"id": "requirement_change_request", "schema": "Object"}],
+  "nodes": [
+    {
+      "id": "authenticate_change",
+      "operator": "appsdk.requirements.authenticate_change",
+      "operator_version": "1",
+      "inputs": ["requirement_change_request"],
+      "output": {"id": "authorization_outcome", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "check_base",
+      "operator": "appsdk.requirements.check_base",
+      "operator_version": "1",
+      "inputs": ["authorization_outcome"],
+      "output": {"id": "base_outcome", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "decide_change",
+      "operator": "appsdk.requirements.decide_change",
+      "operator_version": "1",
+      "inputs": ["base_outcome"],
+      "output": {"id": "change_decision", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "commit_revision",
+      "operator": "appsdk.requirements.commit_revision",
+      "operator_version": "1",
+      "inputs": ["change_decision"],
+      "output": {"id": "commit_outcome", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "publish_outcome",
+      "operator": "appsdk.requirements.publish_outcome",
+      "operator_version": "1",
+      "inputs": ["commit_outcome"],
+      "output": {"id": "requirement_change_result", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {"from": "authenticate_change", "to": "check_base", "arc_id": "authorization_outcome"},
+    {"from": "check_base", "to": "decide_change", "arc_id": "base_outcome"},
+    {"from": "decide_change", "to": "commit_revision", "arc_id": "change_decision"},
+    {"from": "commit_revision", "to": "publish_outcome", "arc_id": "commit_outcome"}
+  ],
+  "outputs": ["requirement_change_result"]
+}

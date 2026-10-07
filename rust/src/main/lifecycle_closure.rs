@@ -494,7 +494,7 @@ pub(super) fn lifecycle_chain_architecture(root: &Path, module_id: &str, input_p
         })
         .cloned()
         .unwrap_or_else(|| fail("ARCHITECTURE_REVIEWER_MISSING"));
-    let project_bindings = observation.get("project_bindings").map(|value| {
+    let mut project_bindings = observation.get("project_bindings").map(|value| {
         if !value.is_object() {
             fail("ARCHITECTURE_REVIEW_PROJECT_BINDINGS_INVALID");
         }
@@ -510,6 +510,15 @@ pub(super) fn lifecycle_chain_architecture(root: &Path, module_id: &str, input_p
         "pass" | "fail" | "unknown" | "new_version_required" | "manual_auth_required"
     ) {
         fail("ARCHITECTURE_REVIEW_VERDICT_INVALID");
+    }
+    if verdict == "pass" {
+        assert_review_author_readiness(root, module_id);
+        let binding = observation
+            .get("requirements_review")
+            .unwrap_or_else(|| fail("ARCHITECTURE_REQUIREMENTS_REVIEW_MISSING"));
+        assert_review_requirements_binding(root, module_id, binding);
+        project_bindings.get_or_insert_with(|| serde_json::json!({}))["requirements_review"] =
+            binding.clone();
     }
     let promotion_id = lifecycle_chain_promotion_id(&issue_id, module_id, &candidate_id);
     let review_evidence_ids = serde_json::json!(evidence_ids);

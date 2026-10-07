@@ -24,6 +24,19 @@
     "verification_map_hash": {"type": "string"},
     "ai_confidence": {"type": "number", "minimum": 0, "maximum": 1},
     "confidence_rationale": {"type": "string"},
+    "project_bindings": {
+      "type": "object",
+      "properties": {
+        "requirements_review": {
+          "type": "object",
+          "required": ["context_id", "checked"],
+          "properties": {
+            "context_id": {"type": "string", "minLength": 1},
+            "checked": {"type": "boolean"}
+          }
+        }
+      }
+    },
     "created_at": {"type": "string"}
   }
 }

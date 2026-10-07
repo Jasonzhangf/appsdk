@@ -582,28 +582,6 @@ fn file_digest(path: &Path) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
-fn stable_review_id(
-    promotion_id: &str,
-    fix_candidate_id: &str,
-    reviewer: &Value,
-    verdict: &str,
-    evidence_ids: &[&str],
-) -> String {
-    let identity = serde_json::json!({
-        "promotion_id": promotion_id,
-        "fix_candidate_id": fix_candidate_id,
-        "reviewer": reviewer,
-        "verdict": verdict,
-        "evidence_ids": evidence_ids
-    });
-    format!(
-        "review-{}",
-        digest(&canonical(&identity))
-            .strip_prefix("sha256:")
-            .unwrap()
-    )
-}
-
 fn install_authoritative_bug_fixture(root: &Path, issue_id: &str) -> PathBuf {
     let fake_bin = root.with_extension("fake-git-bug");
     fs::create_dir_all(&fake_bin).unwrap();
@@ -683,13 +661,6 @@ fn write_records(
     fs::create_dir_all(&evidence_dir).unwrap();
     let commit = git_test_value(root, &["rev-parse", "HEAD"]);
     let tree = git_test_value(root, &["rev-parse", "HEAD^{tree}"]);
-    let review_id = stable_review_id(
-        "promotion-1",
-        "candidate-1",
-        &serde_json::json!({"adapter":"test","identity":"test"}),
-        "pass",
-        &["candidate-evidence-1", "positive-1", "negative-1"],
-    );
     let map_root = root.join(".appsdk/maps");
     let evidence = |id: &str, phase: &str, kind: &str, created_at: &str| {
         serde_json::json!({
@@ -895,24 +866,48 @@ fn write_records(
             + "\n",
     )
     .unwrap();
+    let project: Value =
+        serde_json::from_slice(&fs::read(root.join(".appsdk/project.json")).unwrap()).unwrap();
+    let historical = project["modules"].as_array().unwrap().iter().any(|module| {
+        module["module_id"] == module_id
+            && matches!(module["stage"].as_str(), Some("frozen" | "retired"))
+    });
+    let project_bindings = if historical {
+        None
+    } else {
+        let context = review_context_output(root, module_id);
+        Some(
+            serde_json::json!({"requirements_review": {"context_id":context["context_id"],"checked":true}}),
+        )
+    };
+    let review_id = stable_review_id_with_bindings(
+        "promotion-1",
+        "candidate-1",
+        &serde_json::json!({"adapter":"test","identity":"test"}),
+        "pass",
+        &["candidate-evidence-1", "positive-1", "negative-1"],
+        project_bindings.as_ref(),
+    );
+    let mut review_record = serde_json::json!({
+        "review_id":review_id,"issue_id":issue_id,"promotion_id":"promotion-1",
+        "review_kind":"architecture","fix_candidate_id":"candidate-1",
+        "pre_review_validation_id":"pre-review-validation-1",
+        "reviewer":{"adapter":"test","identity":"test"},"verdict":"pass",
+        "evidence_ids":["candidate-evidence-1","positive-1","negative-1"],"reviewed_commit":commit,
+        "reviewed_tree_hash":tree,"reviewed_diff_hash":"sha256:test-diff",
+        "reviewed_artifact_hash":artifact_hash,"reviewed_scope_hash":"scope-1",
+        "resource_map_hash":file_digest(&map_root.join("resource-map.json")),
+        "function_map_hash":file_digest(&map_root.join("function-map.json")),
+        "mainline_call_map_hash":file_digest(&map_root.join("mainline-call-map.json")),
+        "verification_map_hash":file_digest(&map_root.join("verification-map.json")),
+        "created_at":"2026-01-01T00:04:00Z"
+    });
+    if let Some(bindings) = project_bindings {
+        review_record["project_bindings"] = bindings;
+    }
     fs::write(
         records.join(format!("review-record-{module_id}.json")),
-        serde_json::to_string_pretty(&serde_json::json!({
-            "review_id":review_id,"issue_id":issue_id,"promotion_id":"promotion-1",
-            "review_kind":"architecture","fix_candidate_id":"candidate-1",
-            "pre_review_validation_id":"pre-review-validation-1",
-            "reviewer":{"adapter":"test","identity":"test"},"verdict":"pass",
-            "evidence_ids":["candidate-evidence-1","positive-1","negative-1"],"reviewed_commit":commit,
-            "reviewed_tree_hash":tree,"reviewed_diff_hash":"sha256:test-diff",
-            "reviewed_artifact_hash":artifact_hash,"reviewed_scope_hash":"scope-1",
-            "resource_map_hash":file_digest(&map_root.join("resource-map.json")),
-            "function_map_hash":file_digest(&map_root.join("function-map.json")),
-            "mainline_call_map_hash":file_digest(&map_root.join("mainline-call-map.json")),
-            "verification_map_hash":file_digest(&map_root.join("verification-map.json")),
-            "created_at":"2026-01-01T00:04:00Z"
-        }))
-        .unwrap()
-            + "\n",
+        serde_json::to_string_pretty(&review_record).unwrap() + "\n",
     )
     .unwrap();
     fs::write(

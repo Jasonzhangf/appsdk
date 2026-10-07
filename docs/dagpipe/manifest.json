@@ -48,6 +48,14 @@
     {
       "id": "appsdk-collab-pane-route-reconcile",
       "path": "docs/dagpipe/collab-pane-route-reconcile.graph.json"
+    },
+    {
+      "id": "appsdk-user-requirement-change",
+      "path": "docs/dagpipe/user-requirement-change.graph.json"
+    },
+    {
+      "id": "appsdk-user-requirement-consumption",
+      "path": "docs/dagpipe/user-requirement-consumption.graph.json"
     }
   ]
 }

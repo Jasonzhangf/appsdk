@@ -364,6 +364,7 @@ fn write_v2_records(root: &Path, module_id: &str, base_hash: &str, artifact_hash
         serde_json::to_string_pretty(&freeze).unwrap() + "\n",
     )
     .unwrap();
+    renew_fixture_requirements_review(&root, module_id);
 }
 
 fn enable_regression_contract(root: &PathBuf) {
@@ -964,7 +965,7 @@ fn confirmed_goal_and_initialized_lock_allow_compile_and_adjacent_promote() {
     fs::write(root.join(".appsdk/project.json"), r#"{
   "schema_version": 1,
   "project_id": "change-me",
-  "sdk": {"name": "appsdk", "version": "0.1.0010", "bundle_manifest": ".appsdk/contracts/sdk-bundle.manifest.json", "resource_record": ".appsdk/sdk-resources.json"},
+  "sdk": {"name": "appsdk", "version": "0.1.0011", "bundle_manifest": ".appsdk/contracts/sdk-bundle.manifest.json", "resource_record": ".appsdk/sdk-resources.json"},
   "lifecycle": {"stage": "draft"},
   "development_scenarios": {"manifest": ".appsdk/contracts/development-scenarios.manifest.json", "enabled": []},
   "access": {"protected_paths":[".appsdk/**"]},

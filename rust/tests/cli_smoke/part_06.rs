@@ -18,6 +18,7 @@ fn lifecycle_chain_rejects_tampered_persisted_review_identity() {
         let root_text = root.to_str().unwrap();
         prepare_lifecycle_chain_fixture(&root);
         let records = root.join(".appsdk/records");
+        let requirements_review = real_requirements_review(&root);
         let review_file = records.join("review-record-app-core.json");
         fs::remove_file(&review_file).unwrap();
         let input = root.join("architecture-input.json");
@@ -28,6 +29,7 @@ fn lifecycle_chain_rejects_tampered_persisted_review_identity() {
                     "reviewer": {"adapter": "test", "identity": "chain-reviewer"},
                     "verdict": "pass",
                     "evidence_ids": ["candidate-evidence-1", "positive-1", "negative-1"],
+                    "requirements_review": requirements_review,
                     "project_bindings": {
                         "v4_product_map_root": "docs/architecture/maps",
                         "v4_product_map_hashes": {
@@ -1274,10 +1276,7 @@ fn init_reports_token_mismatch_once_without_repair() {
     );
 }
 
-fn assert_init_reports_identity_failure_once(
-    fixture_name: &str,
-    init_error: &str,
-) {
+fn assert_init_reports_identity_failure_once(fixture_name: &str, init_error: &str) {
     let root = temp_root(fixture_name);
     fs::create_dir_all(&root).unwrap();
     confirm_preparation(&root, ".", "project_refactor");

@@ -48,6 +48,8 @@ review 后的生命周期核验须拒绝来源/验收/候选/模板变化后的�
 
 复用既有 ReviewRecord 的 project bindings/关联证据优先；确有表达缺口再添加必要 typed 字段及身份核验。模板通过正式 bundle 分发；只改 global Skill、只写模板或只检查文档关键词都不算本增量完成。
 
+ReviewRecord schema 声明 requirements_review 的字段形状；它同时承载 FAIL/UNKNOWN 及冻结历史，不含模块当前 stage，不能把现代 PASS 的适用性复制为全局 required。唯一 runtime gate 按模块真源判定现代 PASS 必需绑定。升级保留旧 review identity 和原文字节，不替 reviewer 生成 acknowledgement；旧现代 PASS 缺绑定时必须重新审查。补充 pin-lock 公开黑盒见本任务 `review-resolution.md`。
+
 ## DAG 与停止终点
 
 复用 `docs/dagpipe/user-requirement-consumption.graph.json`：加载 → 来源/版本核验 → scope 绑定 → SDK 模板材料组装 → 独立审查及证据核验 → 准入结果。该图已通过静态验证；本增量按架构 review 阶段闭合对应节点，不声称其余阶段全已实现。

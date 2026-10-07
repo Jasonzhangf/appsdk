@@ -1,0 +1,42 @@
+{
+  "taskId": "requirements-g9-agy-20261007-r1",
+  "state": "completed",
+  "verdict": "pass",
+  "failureClass": null,
+  "outcomeReason": "controller_no_blocking_findings",
+  "output": {
+    "contract_version": "1",
+    "findings": [],
+    "module_boundary_evidence": [
+      {
+        "edges": "review_context -> assert_review_author_readiness -> build_review_context -> prompt output; review observation requirements_review {context_id, checked} -> assert_review_requirements_binding -> lifecycle_chain_review_identity incorporates bindings into review_id; user items 1-6 mapped to template distribution, material assembly, verification binding, and GCM orchestration",
+        "gates": "assert_review_author_readiness gate; authoritative_requirements_review gate; assert_review_requirements_binding gate; installed binary E2E tests in part_22.rs (7 cases pass); 519 Rust tests pass",
+        "module": "appsdk::review_context",
+        "owner": "appsdk::review_context",
+        "paths": "rust/src/main/review_context.rs; rust/src/main/cli.rs; rust/src/main.rs; rust/src/main/lifecycle_closure.rs; rust/src/main/review_gates.rs; contracts/records/review-record.schema.json; contracts/maps/function-map.json; contracts/maps/mainline-call-map.json; contracts/maps/resource-map.json; contracts/maps/verification-map.json; rust/tests/cli_smoke/part_22.rs",
+        "resources": "Requirement authority source: docs/evidence/user-requirement-truth-lock-20261007/user-input.md (conversation verbatim items 1-6); effective version: increment G9/T16 under docs/design/user-requirement-truth-lock.md and docs/design/appsdk-authoritative-review-packet.md; user change authorization: no change/revocation/reduction claimed, G1-G8 gaps explicitly uncompleted; truth stores: .appsdk/goal.json (unverified confirmation strings noted), fix-candidate-record, pre-review-validation-record, embedded REVIEW_TEMPLATE"
+      },
+      {
+        "edges": "pin_lock -> migration 0.1.0010-to-0.1.0011 -> migrate_governance_maps -> install_bundle_resources distributes authoritative-review-template.md into managed project skills references",
+        "gates": "sdk_migration, governance_map_migration, sdk_lock_integrity, verify_sdk_source_registry (no file exceeds 1500 lines); verified in sdk_0009_migration and part_22 tests",
+        "module": "appsdk::delivery",
+        "owner": "appsdk::delivery",
+        "paths": "contracts/migrations/sdk-0.1.0010-to-0.1.0011.json; contracts/sdk-bundle.manifest.json; rust/src/main/init.rs; rust/src/main/reset_governance.rs; rust/src/main/canonical_map.rs; templates/minimal/.appsdk/project.json; templates/minimal/.appsdk/sdk.lock; rust/Cargo.toml; rust/release-version; sdk-skill-sources/appsdk-project-governance/references/authoritative-review-template.md",
+        "resources": "SDK bundle manifest v0.1.0011; migration manifest sdk-0.1.0010-to-0.1.0011.json; historical maps contracts/migrations/0.1.0010/; minimal template project.json and sdk.lock; release version 0.1.0011 / crate 0.1.11"
+      },
+      {
+        "edges": "load_effective -> verify_effective -> bind_task -> assemble_review_packet -> evaluate_evidence -> publish_admission; operators registered with DAGPIPE_DESIGN_OPERATOR_NOT_EXECUTABLE guard for runtime isolation",
+        "gates": "dagpipe graph validate passes for both user-requirement-change and user-requirement-consumption; cargo test in dagpipe passes 28 tests; SESE single-source single-sink topology verified",
+        "module": "appsdk::dagpipe",
+        "owner": "appsdk::dagpipe",
+        "paths": "docs/dagpipe/user-requirement-change.graph.json; docs/dagpipe/user-requirement-consumption.graph.json; docs/dagpipe/manifest.json; rust/src/dagpipe.rs",
+        "resources": "docs/dagpipe/manifest.json; appsdk-user-requirement-change@0.1.0; appsdk-user-requirement-consumption@0.2.0; design graph definitions and SESE flow models"
+      }
+    ],
+    "scope": {
+      "base": "c3c0c8df79e69534fe30c92db61328824473d5c0",
+      "commit": null,
+      "mode": "base"
+    }
+  }
+}

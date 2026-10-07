@@ -156,8 +156,14 @@ match fails explicitly.
 
 You observe nothing by hand. `DSH_SESSION_ID`, `CODEX_SESSION_ID`,
 `CODEX_THREAD_ID` and the tmux pane are all read by the CLI. A gateway control
-socket is not something to look for; a dsh anchor alone still restores an
-existing dsh identity even while the gateway is down.
+socket is not something to look for: the dsh anchor is `DSH_SESSION_ID`, which
+is observable without a gateway.
+
+That anchor settles *who* you are, not *how* you register. A dsh transport
+needs the gateway's `endpoint`, `runtime_id` and `agent_id`, which the CLI
+cannot observe. With no gateway, a dsh caller — new or already persisted —
+fails at `TRANSPORT_NONE`. That is a gateway failure, not a missing identity,
+and it never retires the peer.
 
 When the snapshot contains `requires_identity_update`, read
 `required_fields`, `reason`, and `exact_error`. Only the AppServer path returns

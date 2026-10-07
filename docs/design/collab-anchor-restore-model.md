@@ -102,10 +102,12 @@ AppServer oracle 是否在线都不影响裁决。裁决持久化后，下一次
 `required_fields` 只对 AppServer 路径返回非空。tmux 候选与 dsh 锚点各自自带完整锚点，
 返回空列表。一个只带着 `DSH_SESSION_ID` 的调用者不会被要求补 AppServer 的四件套。
 
-**DSH 注册仍然需要 gateway。** 新 dsh 身份必须经 gateway challenge 完成 Register，gateway
-不可达是显式的 gateway 失败（`DSH_ENDPOINT_REJECTED`）。但已持久化的 dsh 身份由锚点直恢
-（阶梯第 1 级），不依赖 gateway 在线——gateway 不可达只影响 presence 判定，不使身份变成
-missing，也不退休该 peer。
+**DSH 身份创建仍由 gateway 拥有，CLI 不能绕过它。** `DSH_SESSION_ID` 只解决"我是谁"
+（锚点观测与 `required_fields`），不解决"我如何注册"。`DshCandidate` 需要 gateway 的
+`endpoint`、`runtime_id`、`agent_id` 三件套，CLI 只能观测 session id，没有 gateway 就无法
+构造 candidate。新 dsh 身份在 gateway 缺席时失败于 `TRANSPORT_NONE`——这是 gateway 的
+失败，不是身份缺失。已持久化的 dsh 身份由锚点直恢（阶梯第 1 级）判定身份归属；presence
+与注册仍需 gateway 在线。
 
 ## 6. 与既有设计的关系
 

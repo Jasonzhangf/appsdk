@@ -134,7 +134,7 @@ pub(crate) fn resolve_for_daemon_with_route_at(
     let observed = AnchorObservation::from_facts(facts);
     if !observed.has_anchor() {
         anyhow::bail!(
-            "COLLAB_IDENTITY_ANCHOR_MISSING: identity requires a Codex session/thread, a tmux pane, or a native App Server endpoint"
+            "COLLAB_IDENTITY_ANCHOR_MISSING: identity requires a Codex session/thread, a tmux pane, a dsh session, or a native App Server endpoint"
         );
     }
     // Recover only from anchors the caller actually supplied. An unrelated

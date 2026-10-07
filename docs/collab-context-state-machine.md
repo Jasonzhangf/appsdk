@@ -184,9 +184,15 @@ receipt 只供 daemon 和 immediate authenticated operation 使用；CLI 不显�
 - Agent 只执行 `collab context`；缺事实时只执行一次 factual supplement
   `collab context --provide`，且只含 `session_id`、`thread_id`、`endpoint`、
   `namespace`。
-- Agent 不运行身份选择/恢复或 status/route/init 探测命令，也不设置身份覆盖
+- Agent 不运行身份选择/恢复或 status/route 探测命令，也不设置身份覆盖
   环境或 approval supplement。
-- `collab init` 保留为内部兼容 adapter，不是 Agent bootstrap。
+- pane 冲突（陈旧 claim，或来自其他 worker/项目的 claim）由 daemon 在 `collab context`
+  内默认顶掉；agent 不参与裁决，也不需要第二条命令。一个 pane 在 host 范围内只有一个
+  binding，后注册者取胜。
+- `collab init` 不是 Agent 的默认入口，也不是第二套身份算法：它与 `collab context`
+  共用同一 daemon 身份门（`identity_gate`），保留为既有 AppSDK init 消费者的入口。
+- master 权威的转移是一条独立命令：`collab master promote --approval "<user text>"`，
+  无显式用户批准时不触碰 master 权威。
 - 只读诊断保留：`collab who`、`collab status --all`、`collab worker status`、
   `collab route resolve`、`collab master status`。
 - 人类授权操作保留：`collab down`/`up`、reset、migration、master promotion 和

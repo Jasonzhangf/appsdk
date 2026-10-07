@@ -70,7 +70,16 @@ impl ProjectRuntimeManager {
         let pane_route = if let Some(candidate) = facts.tmux.as_ref() {
             match self.resolve_route_by_tmux_endpoint(&candidate.endpoint) {
                 Ok(route) => Some(route),
-                Err(error) if error.starts_with("ROUTE_RESOLVE_NOT_FOUND:") => None,
+                // A stale host index, or no route at all, is not usable route
+                // evidence: the caller still bootstraps from its live anchors.
+                // Every other error stays fatal, so an ambiguity or a real
+                // binding conflict still reaches the identity owner.
+                Err(error)
+                    if error.starts_with("ROUTE_RESOLVE_NOT_FOUND:")
+                        || error.starts_with("ROUTE_RESOLVE_STALE_INDEX:") =>
+                {
+                    None
+                }
                 Err(error) => return Err(anyhow::Error::msg(error)),
             }
         } else {
@@ -199,16 +208,20 @@ impl ProjectRuntimeManager {
 
     /// A committed registration can outlive its local receipt file. Recover
     /// that same credential from the reducer only for the proven anchor.
-    /// A persisted credential is never replaced, even when it is rejected.
+    /// A committed persisted credential is never replaced, even when it is
+    /// rejected. A runtime-less draft is not a credential: the only production
+    /// writer (`persist_registration_at`) always persists `runtime` together
+    /// with `transport`, so a file without `runtime` is legacy residue and must
+    /// not mask the committed record for the same anchor.
     fn reconcile_committed_credential(
         &self,
         scope: &Scope,
         facts: &IdentityFacts,
         ident: &mut identity::Identity,
     ) -> anyhow::Result<()> {
-        if ident.runtime.is_some()
-            || identity::read_persisted(&self.host.host_paths, &ident.worker_id)?.is_some()
-        {
+        let committed_locally = identity::read_persisted(&self.host.host_paths, &ident.worker_id)?
+            .is_some_and(|persisted| persisted.runtime.is_some());
+        if ident.runtime.is_some() || committed_locally {
             return Ok(());
         }
         let host_binding = {

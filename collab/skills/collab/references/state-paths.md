@@ -138,11 +138,15 @@ collab context --provide '{"session_id":"...","thread_id":"...","endpoint":"..."
 
 The supplement accepts only the four scalar keys `session_id`, `thread_id`,
 `endpoint`, and `namespace`. It does not accept `worker_id`, approval, token,
-generation, binding, or project scope. Do not run `appsdk init`, `collab init`,
-a manual identity recovery command, or a status/route hunt to repair identity. If
-`collab context` fails with an explicit conflict or error, preserve the exact
-error and stop. Never edit `routes.jsonl`, `server.pid`, journal, mailbox, or
-identity files to make registration appear healthy.
+generation, binding, or project scope. Do not run `appsdk init`, run
+`collab init` as a substitute for `collab context`, run a manual identity
+recovery command, or start a status/route/archive hunt to repair identity. A
+conflicting claim on your tmux pane (stale, or from another worker or project)
+is replaced by the daemon inside the same `collab context` call, so it is not a
+case you adjudicate. If `collab context` fails with an explicit conflict or
+error, preserve the exact error and stop. Never edit `routes.jsonl`,
+`server.pid`, journal, mailbox, or identity files to make registration appear
+healthy.
 
 ## Read-only route diagnostics
 

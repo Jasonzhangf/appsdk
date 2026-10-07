@@ -48,6 +48,10 @@
     {
       "id": "appsdk-collab-pane-route-reconcile",
       "path": "docs/dagpipe/collab-pane-route-reconcile.graph.json"
+    },
+    {
+      "id": "appsdk-collab-master-authority",
+      "path": "docs/dagpipe/collab-master-authority.graph.json"
     }
   ]
 }

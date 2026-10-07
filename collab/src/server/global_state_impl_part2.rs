@@ -191,6 +191,19 @@ impl GlobalState {
                 {
                     continue;
                 }
+                // An incumbent that this reducer holds no runtime binding for
+                // is an orphan: no address can resolve it, because the read
+                // path fails closed on the missing runtime binding before it
+                // can return a route. It needs no retirement record, and its
+                // generation is not evidence about this principal, so it must
+                // not gate the takeover. Generation monotonicity for a live
+                // binding is owned by `bind_runtime` in the owning runtime.
+                if next
+                    .lookup_binding_for(&old.route_scope(), &old.binding_id)
+                    .is_none()
+                {
+                    continue;
+                }
                 let key = current_route_address_key(
                     &old_session_id,
                     &old_native_thread_id,

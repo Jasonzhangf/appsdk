@@ -262,12 +262,12 @@ impl ProjectRuntimeManager {
             let routes = self.routes.lock().unwrap();
             let route = routes.get(&key).ok_or_else(|| {
                 format!(
-                    "ROUTE_RESOLVE_INVALID: current route state for App Server thread {native_thread_id} references an unknown route"
+                    "ROUTE_RESOLVE_STALE_INDEX: current route state for App Server thread {native_thread_id} references an unknown route"
                 )
             })?;
             let runtime = route.runtime.clone().ok_or_else(|| {
                 format!(
-                    "ROUTE_RESOLVE_INVALID: current route state for App Server thread {native_thread_id} references an unavailable runtime"
+                    "ROUTE_RESOLVE_STALE_INDEX: current route state for App Server thread {native_thread_id} references an unavailable runtime"
                 )
             })?;
             (route.storage_root.clone(), runtime)
@@ -292,7 +292,7 @@ impl ProjectRuntimeManager {
             .cloned()
             .ok_or_else(|| {
                 format!(
-                    "ROUTE_RESOLVE_INVALID: current route state for App Server thread {native_thread_id} references a missing runtime binding"
+                    "ROUTE_RESOLVE_STALE_INDEX: current route state for App Server thread {native_thread_id} references a missing runtime binding"
                 )
             })?;
         if registered != binding {

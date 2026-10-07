@@ -297,7 +297,7 @@ fn ensure_graph_nodes_use_registered_operators(
 mod notification;
 use notification::{register_notification_operator, validate_notification_objects};
 
-fn embedded_graph_paths() -> [(&'static str, &'static str); 12] {
+fn embedded_graph_paths() -> [(&'static str, &'static str); 13] {
     [
         (
             "contracts/dagpipe/fix-lifecycle.graph.json",
@@ -347,10 +347,14 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 12] {
             "docs/dagpipe/collab-pane-route-reconcile.graph.json",
             include_str!("../../docs/dagpipe/collab-pane-route-reconcile.graph.json"),
         ),
+        (
+            "docs/dagpipe/collab-master-authority.graph.json",
+            include_str!("../../docs/dagpipe/collab-master-authority.graph.json"),
+        ),
     ]
 }
 
-fn design_graph_ids() -> [&'static str; 10] {
+fn design_graph_ids() -> [&'static str; 11] {
     [
         "appsdk-collab-context",
         "appsdk-collab-appserver-route-repair",
@@ -362,10 +366,11 @@ fn design_graph_ids() -> [&'static str; 10] {
         "appsdk-collab-dashboard-operation",
         "appsdk-collab-control-plane-reset",
         "appsdk-collab-pane-route-reconcile",
+        "appsdk-collab-master-authority",
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 54] {
+fn design_graph_operator_names() -> [&'static str; 57] {
     [
         "appsdk.collab_context.resolve_root",
         "appsdk.collab_context.ensure_baseline",
@@ -421,6 +426,9 @@ fn design_graph_operator_names() -> [&'static str; 54] {
         "appsdk.collab_pane_route.publish_owner_route",
         "appsdk.collab_pane_route.verify_pane_uniqueness",
         "appsdk.collab_pane_route.return_named_outcome",
+        "appsdk.collab_authority.resolve_scope",
+        "appsdk.collab_authority.transfer_master",
+        "appsdk.collab_authority.emit_receipt",
     ]
 }
 

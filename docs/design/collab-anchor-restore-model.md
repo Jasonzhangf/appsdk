@@ -95,7 +95,9 @@ AppServer oracle 是否在线都不影响裁决。裁决持久化后，下一次
 | `collab master promote --approval <text>` | 携带用户 master 裁决 |
 
 `DSH_SESSION_ID` 由 CLI 自动观察，**不在 `--provide` 里**。锚点是观测事实，不是 agent 提供的
-参数。没有 `collab init`，没有 `--restore-as`。
+参数。没有 `--restore-as`。`collab init` 不是第二条身份路径：它与 `collab context` 共用同一
+daemon 身份门（`identity_gate`），只是为既有 AppSDK init 消费者输出既有响应形状；歧义与跨项目
+在两条入口上都保持 fail-closed，见 `docs/design/collab-identity-shortest-path.md`。
 
 ## 5. `required_fields` 语义
 

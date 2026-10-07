@@ -1,0 +1,31 @@
+{
+  "id": "appsdk-collab-master-authority",
+  "version": "0.1.0",
+  "description": "One explicit authority request to one authority receipt. This is the only flow that transfers Collab master authority: `collab master promote --approval <text>`. Node 1 resolves the canonical project root and requires the caller's already-registered identity by invoking the terminal of docs/dagpipe/collab-context.graph.json (`collab context` / `collab init` share that identity gate); it is an upstream dependency edge, so the context graph's root, baseline, daemon and identity nodes are not duplicated here. Node 2 is the single daemon transaction that replaces the recorded master incumbent: the caller must already be a registered worker of that route scope with a matching token, the approval text must be non-empty, and that explicit approval is the whole authority for the transition, so the incumbent is never probed for liveness and a tmux pane is treated as an address rather than a liveness credential. Without an explicit approval the master authority is never touched. Node 3 emits the receipt. No pending workflow, no agent-side identity, route or archive probe, and no second authority command. Contracts: docs/design/collab-identity-shortest-path.md and docs/design/collab-identity-minimal-interaction.md.",
+  "inputs": [{"id": "authority_request", "schema": "Object"}],
+  "nodes": [
+    {
+      "id": "resolve_authority_scope", "operator": "appsdk.collab_authority.resolve_scope", "operator_version": "1",
+      "inputs": ["authority_request"], "output": {"id": "authority_scope", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"
+    },
+    {
+      "id": "transfer_master_authority", "operator": "appsdk.collab_authority.transfer_master", "operator_version": "1",
+      "inputs": ["authority_scope"], "output": {"id": "master_authority", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"
+    },
+    {
+      "id": "emit_authority_receipt", "operator": "appsdk.collab_authority.emit_receipt", "operator_version": "1",
+      "inputs": ["master_authority"], "output": {"id": "authority_receipt", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {"from": "resolve_authority_scope", "to": "transfer_master_authority", "arc_id": "authority_scope"},
+    {"from": "transfer_master_authority", "to": "emit_authority_receipt", "arc_id": "master_authority"}
+  ],
+  "outputs": ["authority_receipt"]
+}

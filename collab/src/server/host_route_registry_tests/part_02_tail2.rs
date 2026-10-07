@@ -809,3 +809,457 @@
 
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    /// C1/C2: a host pane-route index entry whose binding is missing from the
+    /// owning project runtime is a STALE INDEX, and the identity gate must treat
+    /// it as "no usable route evidence" instead of aborting the bootstrap.
+    #[tokio::test]
+    async fn stale_pane_route_index_is_named_and_the_identity_gate_bootstraps_over_it() {
+        let (host, host_root, _) = test_server();
+        let (runtime, project_root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
+        let app = AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
+        let project_scope = GlobalState::canonical_project_scope(&project_root).unwrap();
+        let candidates = test_candidates("stale-index-pane").unwrap();
+        let endpoint = candidates.tmux.as_ref().unwrap().endpoint.clone();
+
+        // The route table needs a runtime, but the target pane must stay free so
+        // the bootstrap can register a fresh provisional runtime for it.
+        let other_candidates = test_candidates("stale-index-other").unwrap();
+        let registered = handle_register_with_app_scope(
+            &runtime,
+            "stale-index-owner".into(),
+            "token-stale-index-owner".into(),
+            project_root.display().to_string(),
+            Some(app.clone()),
+            Some(other_candidates),
+        );
+        assert!(registered.ok, "{registered:?}");
+        manager.install_runtime(
+            &(app.as_str().to_owned(), project_scope.as_str().to_owned()),
+            runtime.clone(),
+            None,
+        );
+
+        // The host index keeps an entry for this pane that the runtime never had.
+        let mut ghost = RuntimeBinding::new_with_session(
+            project_scope.clone(),
+            app.clone(),
+            AgentId::new("ghost-agent").unwrap(),
+            RuntimeId::new("runtime-ghost").unwrap(),
+            BindingId::new("binding-ghost").unwrap(),
+            1,
+            Some(
+                crate::identity::SessionId::new(
+                    endpoint.codex_session_id.clone().expect("test session id"),
+                )
+                .unwrap(),
+            ),
+            Some(
+                NativeThreadId::new(endpoint.codex_thread_id.clone().expect("test thread id"))
+                    .unwrap(),
+            ),
+        )
+        .unwrap();
+        ghost.tmux_endpoint = Some(endpoint.clone());
+        host.commit_checked(&[Event::GlobalCurrentThreadRouteSet { binding: ghost }])
+            .unwrap();
+
+        let error = manager.resolve_route_by_tmux_endpoint(&endpoint).unwrap_err();
+        assert!(error.starts_with("ROUTE_RESOLVE_STALE_INDEX:"), "{error}");
+        assert!(error.contains("missing runtime binding"), "{error}");
+
+        let context = context_with_app(&project_root, crate::identity::CLI_APP_SERVER_ID);
+        let (_, response) = manager.dispatch_sync(
+            Some(context),
+            Req::IdentityContext {
+                facts: crate::proto::IdentityFacts {
+                    tmux: candidates.tmux.clone(),
+                    ..Default::default()
+                },
+            },
+        );
+        assert!(response.ok, "{response:?}");
+
+        std::fs::remove_dir_all(host_root).unwrap();
+        std::fs::remove_dir_all(project_root).unwrap();
+    }
+
+    fn write_runtime_less_identity(
+        host_paths: &HostPaths,
+        worker_id: &str,
+        token: &str,
+        project_scope: &crate::scope::ProjectScopeId,
+    ) {
+        let path = host_paths
+            .state_root()
+            .join("identities")
+            .join(worker_id)
+            .join("identity.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let identity = serde_json::json!({
+            "worker_id": worker_id,
+            "token": token,
+            "project_scope": project_scope,
+        });
+        std::fs::write(path, serde_json::to_string_pretty(&identity).unwrap()).unwrap();
+    }
+
+    fn persisted_identity_token(host_paths: &HostPaths, worker_id: &str) -> String {
+        let path = host_paths
+            .state_root()
+            .join("identities")
+            .join(worker_id)
+            .join("identity.json");
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        value["token"].as_str().unwrap().to_owned()
+    }
+
+    /// C5: a runtime-less draft must not stop the daemon from recovering the
+    /// committed credential for the proven anchor. Before the fix the guard
+    /// early-returns on "a file exists" and Register fails with TOKEN_MISMATCH.
+    #[tokio::test]
+    async fn runtime_less_draft_recovers_the_committed_credential() {
+        let (host, host_root, _) = test_server();
+        let (runtime, project_root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
+        let app = AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
+        let project_scope = GlobalState::canonical_project_scope(&project_root).unwrap();
+        let candidates = test_candidates("runtime-less-draft-committed").unwrap();
+        let endpoint = candidates.tmux.as_ref().unwrap().endpoint.clone();
+        let worker = format!("codex-{}", endpoint.pane_id);
+        let committed_token = "token-committed-runtime-less";
+        let draft_token = "token-draft-runtime-less";
+
+        let registered = handle_register_with_app_scope(
+            &runtime,
+            worker.clone(),
+            committed_token.into(),
+            project_root.display().to_string(),
+            Some(app.clone()),
+            Some(candidates.clone()),
+        );
+        assert!(registered.ok, "{registered:?}");
+        let binding_id = BindingId::new(sanitize_identifier(&format!("binding-{worker}"))).unwrap();
+        let binding = runtime
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_binding_for(
+                &crate::server::global_state::RouteScope {
+                    app_scope_id: app.clone(),
+                    project_scope_id: project_scope.clone(),
+                },
+                &binding_id,
+            )
+            .cloned()
+            .unwrap();
+        host.commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+            binding: binding.clone(),
+        }])
+        .unwrap();
+        manager.install_runtime(
+            &(app.as_str().to_owned(), project_scope.as_str().to_owned()),
+            runtime.clone(),
+            None,
+        );
+        write_runtime_less_identity(&host_paths, &worker, draft_token, &project_scope);
+
+        let context = context_with_app(&project_root, crate::identity::CLI_APP_SERVER_ID);
+        let (_, response) = manager.dispatch_sync(
+            Some(context),
+            Req::IdentityContext {
+                facts: crate::proto::IdentityFacts {
+                    tmux: candidates.tmux.clone(),
+                    ..Default::default()
+                },
+            },
+        );
+        assert!(response.ok, "{response:?}");
+        assert_eq!(
+            persisted_identity_token(&host_paths, &worker),
+            committed_token,
+            "the committed credential must replace the runtime-less draft"
+        );
+
+        std::fs::remove_dir_all(host_root).unwrap();
+        std::fs::remove_dir_all(project_root).unwrap();
+    }
+
+    /// C5 regression: without a committed record for the anchor the draft keeps
+    /// its exact token. The daemon must never remint a stored credential.
+    #[tokio::test]
+    async fn runtime_less_draft_keeps_its_token_without_a_committed_record() {
+        let (host, host_root, _) = test_server();
+        let (runtime, project_root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
+        let app = AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
+        let project_scope = GlobalState::canonical_project_scope(&project_root).unwrap();
+        let candidates = test_candidates("runtime-less-draft-fresh").unwrap();
+        let endpoint = candidates.tmux.as_ref().unwrap().endpoint.clone();
+        let worker = format!("codex-{}", endpoint.pane_id);
+        let draft_token = "token-draft-kept";
+
+        // A different peer owns a different pane route; the draft's own name has
+        // no committed record anywhere.
+        let other_candidates = test_candidates("runtime-less-draft-other").unwrap();
+        let registered = handle_register_with_app_scope(
+            &runtime,
+            "runtime-less-draft-other-owner".into(),
+            "token-runtime-less-draft-other-owner".into(),
+            project_root.display().to_string(),
+            Some(app.clone()),
+            Some(other_candidates),
+        );
+        assert!(registered.ok, "{registered:?}");
+        let other_binding_id = BindingId::new(sanitize_identifier(
+            "binding-runtime-less-draft-other-owner",
+        ))
+        .unwrap();
+        let other_binding = runtime
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_binding_for(
+                &crate::server::global_state::RouteScope {
+                    app_scope_id: app.clone(),
+                    project_scope_id: project_scope.clone(),
+                },
+                &other_binding_id,
+            )
+            .cloned()
+            .unwrap();
+        host.commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+            binding: other_binding,
+        }])
+        .unwrap();
+        manager.install_runtime(
+            &(app.as_str().to_owned(), project_scope.as_str().to_owned()),
+            runtime.clone(),
+            None,
+        );
+        write_runtime_less_identity(&host_paths, &worker, draft_token, &project_scope);
+
+        let context = context_with_app(&project_root, crate::identity::CLI_APP_SERVER_ID);
+        let (_, response) = manager.dispatch_sync(
+            Some(context),
+            Req::IdentityContext {
+                facts: crate::proto::IdentityFacts {
+                    tmux: candidates.tmux.clone(),
+                    ..Default::default()
+                },
+            },
+        );
+        assert!(response.ok, "{response:?}");
+        assert_eq!(
+            persisted_identity_token(&host_paths, &worker),
+            draft_token,
+            "a draft without a committed record must keep its exact token"
+        );
+
+        std::fs::remove_dir_all(host_root).unwrap();
+        std::fs::remove_dir_all(project_root).unwrap();
+    }
+
+    /// C4 boundary: a host index entry that disagrees with its runtime binding
+    /// is a REAL conflict, not a stale index. It must stay fatal so the identity
+    /// gate keeps failing closed instead of overwriting the committed state.
+    #[tokio::test]
+    async fn conflicting_pane_route_index_stays_fatal_for_the_identity_gate() {
+        let (host, host_root, _) = test_server();
+        let (runtime, project_root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
+        let app = AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
+        let project_scope = GlobalState::canonical_project_scope(&project_root).unwrap();
+        let candidates = test_candidates("conflicting-index-pane").unwrap();
+        let endpoint = candidates.tmux.as_ref().unwrap().endpoint.clone();
+        let worker = format!("codex-{}", endpoint.pane_id);
+
+        let registered = handle_register_with_app_scope(
+            &runtime,
+            worker.clone(),
+            "token-conflicting-index".into(),
+            project_root.display().to_string(),
+            Some(app.clone()),
+            Some(candidates.clone()),
+        );
+        assert!(registered.ok, "{registered:?}");
+        manager.install_runtime(
+            &(app.as_str().to_owned(), project_scope.as_str().to_owned()),
+            runtime.clone(),
+            None,
+        );
+        let binding_id = BindingId::new(sanitize_identifier(&format!("binding-{worker}"))).unwrap();
+        let route_scope = crate::server::global_state::RouteScope {
+            app_scope_id: app.clone(),
+            project_scope_id: project_scope.clone(),
+        };
+        let committed = runtime
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_binding_for(&route_scope, &binding_id)
+            .cloned()
+            .unwrap();
+        let mut conflicting = committed.clone();
+        conflicting.endpoint_generation += 1;
+        host.commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+            binding: conflicting,
+        }])
+        .unwrap();
+
+        let error = manager.resolve_route_by_tmux_endpoint(&endpoint).unwrap_err();
+        assert!(error.starts_with("ROUTE_RESOLVE_INVALID:"), "{error}");
+        assert!(error.contains("conflicts with its runtime binding"), "{error}");
+
+        let context = context_with_app(&project_root, crate::identity::CLI_APP_SERVER_ID);
+        let (_, response) = manager.dispatch_sync(
+            Some(context),
+            Req::IdentityContext {
+                facts: crate::proto::IdentityFacts {
+                    tmux: candidates.tmux.clone(),
+                    ..Default::default()
+                },
+            },
+        );
+        assert!(!response.ok, "{response:?}");
+        let message = response.error.clone().unwrap_or_default();
+        assert!(message.starts_with("ROUTE_RESOLVE_INVALID"), "{message}");
+
+        std::fs::remove_dir_all(host_root).unwrap();
+        std::fs::remove_dir_all(project_root).unwrap();
+    }
+
+    /// D3: an orphan host-index claim whose generation is higher than the
+    /// fresh registration must not block the identity gate.
+    ///
+    /// The host index can keep a route for a binding its reducer holds no
+    /// runtime binding for. Nothing can resolve that route, so the daemon takes
+    /// the pane by default: one `collab context` recovers, with no second
+    /// command. Before the orphan rule the write path failed with StaleBinding
+    /// and the daemon could not restart afterwards.
+    #[tokio::test]
+    async fn an_orphan_stale_index_claim_does_not_block_the_identity_gate_takeover() {
+        let (host, host_root, _) = test_server();
+        let (runtime, project_root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
+        let app = AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
+        let project_scope = GlobalState::canonical_project_scope(&project_root).unwrap();
+
+        let candidates = test_candidates("orphan-takeover").unwrap();
+        let endpoint = candidates.tmux.as_ref().unwrap().endpoint.clone();
+        let worker = format!("codex-{}", endpoint.pane_id);
+        let binding_id =
+            BindingId::new(sanitize_identifier(&format!("binding-{worker}"))).unwrap();
+
+        // The route table needs a runtime, but this pane must stay free so the
+        // bootstrap can register a fresh provisional runtime for it.
+        let other_candidates = test_candidates("orphan-takeover-other").unwrap();
+        let registered = handle_register_with_app_scope(
+            &runtime,
+            "orphan-takeover-owner".into(),
+            "token-orphan-takeover-owner".into(),
+            project_root.display().to_string(),
+            Some(app.clone()),
+            Some(other_candidates),
+        );
+        assert!(registered.ok, "{registered:?}");
+        manager.install_runtime(
+            &(app.as_str().to_owned(), project_scope.as_str().to_owned()),
+            runtime.clone(),
+            None,
+        );
+
+        // The host index claims this pane for the SAME principal the fresh
+        // registration will use, at a generation the runtime never had. The
+        // runtime holds no such binding, so this claim is an orphan.
+        let mut orphan = RuntimeBinding::new_with_session(
+            project_scope.clone(),
+            app.clone(),
+            AgentId::new(&worker).unwrap(),
+            RuntimeId::new("runtime-orphan").unwrap(),
+            binding_id.clone(),
+            7,
+            Some(
+                crate::identity::SessionId::new(
+                    endpoint.codex_session_id.clone().expect("test session id"),
+                )
+                .unwrap(),
+            ),
+            Some(
+                NativeThreadId::new(endpoint.codex_thread_id.clone().expect("test thread id"))
+                    .unwrap(),
+            ),
+        )
+        .unwrap();
+        orphan.tmux_endpoint = Some(endpoint.clone());
+        host.commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+            binding: orphan.clone(),
+        }])
+        .unwrap();
+        assert!(
+            runtime
+                .state
+                .lock()
+                .unwrap()
+                .global
+                .lookup_binding_for(&orphan.route_scope(), &binding_id)
+                .is_none(),
+            "the runtime must hold no binding for the orphan claim"
+        );
+
+        // One gate call must recover: it takes the pane instead of failing.
+        let context = context_with_app(&project_root, crate::identity::CLI_APP_SERVER_ID);
+        let (_, response) = manager.dispatch_sync(
+            Some(context),
+            Req::IdentityContext {
+                facts: crate::proto::IdentityFacts {
+                    tmux: candidates.tmux.clone(),
+                    ..Default::default()
+                },
+            },
+        );
+        assert!(
+            response.ok,
+            "an orphan stale claim must not block recovery: {response:?}"
+        );
+
+        // The pane now carries the fresh claim, and the orphan generation no
+        // longer gates anything.
+        let current = host
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_unique_tmux_pane_route(&endpoint)
+            .cloned()
+            .expect("the pane is owned after the takeover");
+        assert_eq!(current.binding_id, binding_id);
+        assert!(
+            current.endpoint_generation < orphan.endpoint_generation,
+            "the takeover legitimately regressed the orphan's generation"
+        );
+
+        // The host journal must replay: this is the durability property whose
+        // loss made the daemon unstartable.
+        let replayed = replay(&host_root).unwrap();
+        assert!(
+            replayed
+                .global
+                .lookup_unique_tmux_pane_route(&endpoint)
+                .is_some(),
+            "the takeover must replay from the host journal"
+        );
+
+        std::fs::remove_dir_all(host_root).unwrap();
+        std::fs::remove_dir_all(project_root).unwrap();
+    }

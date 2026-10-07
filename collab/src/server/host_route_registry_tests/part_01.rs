@@ -1406,7 +1406,7 @@
         let error = manager
             .resolve_route_by_native_thread("session-thread-duplicate", "thread-duplicate")
             .unwrap_err();
-        assert!(error.starts_with("ROUTE_RESOLVE_INVALID"), "{error}");
+        assert!(error.starts_with("ROUTE_RESOLVE_STALE_INDEX"), "{error}");
         assert!(error.contains("missing runtime binding"), "{error}");
 
         std::fs::remove_dir_all(root).unwrap();

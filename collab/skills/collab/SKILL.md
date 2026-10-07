@@ -518,8 +518,12 @@ actions with the CLI in the inherited project cwd:
 `collab sendmessage --to <parent> --subject <topic> "<body>"`.
 The CLI is a complete protocol path. Missing MCP is not a blocker and
 does not justify skipping receive or waiting. `collab context` is the only
-bootstrap entry; do not run `collab init` or a separate identity probe as an
-agent.
+agent bootstrap entry; do not run a separate identity, route or archive probe.
+A conflicting claim on your tmux pane (a stale claim, or one from another
+worker or project) is resolved by the daemon inside that same one call, so you
+never adjudicate a pane conflict and never need a second command for it.
+`collab init` is not the default agent entry, but it drives the same daemon
+identity gate and remains the entry for existing AppSDK init consumers.
 Child results go to the parent with
 `collab sendmessage`, not the parent-only `subagent send` action.
 No ACK loops, automatic respawn or redispatch.
@@ -1020,7 +1024,9 @@ projections that used to require separate calls, so no agent flow needs to run
 
 | Situation | Do this | Never do this |
 |---|---|---|
-| First time in a project | `collab context` | `collab init`, a separate identity probe |
+| First time in a project | `collab context` | a separate identity probe, or `collab init` used as a substitute for `collab context` |
+| Another worker or project claims your tmux pane, or the recorded pane route is stale | `collab context`; the daemon replaces the claim by default | inspect routes or archives, pick a worker id, or edit any route/identity file |
+| Master authority must move to this peer | `collab master promote --approval "<user text>"` | promote without explicit user approval |
 | Thread/session changed, or after daemon restart | `collab context` (daemon reconciles identity in place) | a manual identity recovery command, `collab down`/`up` |
 | Need peer list, master state, scheduling state, or env | read them from the single `collab context` snapshot | call `collab who`, `collab status --all`, `collab master status`, or grep the environment as a separate step |
 | `requires_identity_update` is present | read `required_fields` and `exact_error`; when the returned action is the factual supplement, run that one action with only the requested `session_id`, `thread_id`, `endpoint`, or `namespace` from their real source | select or guess a worker; run an identity selection or recovery command, or a status/route/init hunt; set an identity override or approval supplement |
@@ -1033,7 +1039,11 @@ Read-only operator diagnostics remain available for human maintenance and
 audit: `collab who`, `collab status --all`, `collab worker status`, `collab
 route resolve`, and `collab master status`. They are not agent identity
 recovery steps. `collab down`/`up` require explicit human authorization.
-`collab init` remains an internal compatibility adapter, not an agent bootstrap.
+`collab init` is not an agent bootstrap and not a second identity algorithm: it
+drives the same daemon identity gate as `collab context`, and it remains the
+documented entry for existing AppSDK init consumers. Ambiguous and
+cross-project anchor matches stay fail-closed on both entries and need human
+adjudication; no entry overrides them.
 
 ### Context 状态与终点（DAGpipe：单源单汇）
 
@@ -1049,7 +1059,8 @@ workflow，没有第二个修复入口。根解析失败和显式冲突/错误�
 | 状态/终态 | 含义 | Agent 动作 |
 | --- | --- | --- |
 | `state_snapshot` | 引导成功；含 role/operations/master/peers/peer_count/summary/master_wake/subagents/inbox/worktrees/tasks/env | 读快照执行当前角色的 `operations`；无需再跑 who/status/master status |
-| `identity_update` | daemon 需要缺失事实或报告显式身份冲突；`registered=false`，`requires_identity_update.required=true` | 只读 `required_fields`/`reason`/`action`/`exact_error`；若 action 是 factual supplement，则用一次 `collab context --provide` 提供请求的四个 scalar keys；显式冲突保留原错，不选择 worker，不跑 status/route/init 恢复 |
+| 陈旧/他人的 pane claim 已被顶掉 | 默认路径的一部分，不产生额外终态 | 无；不需要第二条命令，也不参与裁决 |
+| `identity_update` | daemon 需要缺失事实或报告显式身份冲突；`registered=false`，`requires_identity_update.required=true` | 只读 `required_fields`/`reason`/`action`/`exact_error`；若 action 是 factual supplement，则用一次 `collab context --provide` 提供请求的四个 scalar keys；显式冲突保留原错，不选择 worker，不跑 status/route 恢复，也不把 `collab init` 当第二次修复尝试 |
 | `COLLAB_CONTEXT_UNRESOLVED` | 无 route、无 baseline、无 git 根（非零退出） | 保留错误，改在 canonical main 再跑 `collab context` |
 | 拒绝在 playground 创建基线 | 在 worktree 内引导（非零退出） | 回到项目 main 根执行，不删旧身份 |
 | 默认订阅已停 | owner 显式 unsubscribe 持久生效 | 需要再收消息时用 `collab notify subscribe --event direct-message` 重订阅 |
@@ -1074,10 +1085,13 @@ The automatic state entry is always:
 collab context
 ```
 
-The daemon-owned identity context completes the bootstrap. `collab init` remains
-an internal compatibility adapter for existing consumers; it is not a second
-agent entry and agents do not run it as bootstrap. Agents do not run a separate
-identity probe or a manual subscription as part of bootstrap.
+The daemon-owned identity context completes the bootstrap. A conflicting claim
+on your tmux pane is replaced by the daemon inside this same call, so agents do
+not adjudicate pane conflicts and do not run a second command for them.
+`collab init` is not a second agent entry and not a second identity algorithm,
+but it drives the same daemon identity gate and stays the documented entry for
+existing AppSDK init consumers. Agents do not run a separate identity, route or
+archive probe, or a manual subscription, as part of bootstrap.
 
 ## AppServer runtime registration
 

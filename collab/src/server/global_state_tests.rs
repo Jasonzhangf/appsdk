@@ -1142,6 +1142,299 @@ include!("global_state_tests_part2.rs");
         state.validate().unwrap();
     }
 
+    /// Builds a route for `binding_id` at a distinct session/thread address.
+    fn route_at(
+        scope: &ProjectScopeId,
+        app: &str,
+        runtime: &str,
+        binding_id: &str,
+        generation: u64,
+        session: &str,
+        thread: &str,
+    ) -> RuntimeBinding {
+        RuntimeBinding::new_with_session(
+            scope.clone(),
+            app_scope(app),
+            AgentId::new("agent-one").unwrap(),
+            RuntimeId::new(runtime).unwrap(),
+            BindingId::new(binding_id).unwrap(),
+            generation,
+            Some(SessionId::new(session).unwrap()),
+            Some(NativeThreadId::new(thread).unwrap()),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn an_orphan_incumbent_route_does_not_block_a_lower_generation_takeover() {
+        // A host index can keep a pane route for a binding its project runtime
+        // no longer holds.  Nothing can resolve that route, so it must not gate
+        // a fresh registration: the daemon takes the pane by default.  Before
+        // this rule the takeover failed with StaleBinding and the daemon could
+        // not restart afterwards.
+        let scope = project_scope();
+        let mut state = GlobalState::default();
+        state
+            .register_project(registration(&scope, "app-one"))
+            .unwrap();
+        let orphan = route_at(
+            &scope,
+            "app-one",
+            "runtime-old",
+            "binding-orphan",
+            7,
+            "session-orphan-old",
+            "thread-orphan-old",
+        );
+        // Deliberately NOT bound into the project's runtime bindings.  This is
+        // the orphan shape the host index kept for pane %4.
+        state.set_current_thread_route(orphan).unwrap();
+
+        let takeover = route_at(
+            &scope,
+            "app-one",
+            "runtime-new",
+            "binding-orphan",
+            1,
+            "session-orphan-new",
+            "thread-orphan-new",
+        );
+        state.set_current_thread_route(takeover.clone()).unwrap();
+
+        assert_eq!(
+            state.lookup_current_thread_route(
+                takeover.session_id.as_ref().unwrap(),
+                takeover.native_thread_id.as_ref().unwrap(),
+            ),
+            Some(&takeover)
+        );
+        assert!(state
+            .lookup_current_thread_route(
+                &SessionId::new("session-orphan-old").unwrap(),
+                &NativeThreadId::new("thread-orphan-old").unwrap(),
+            )
+            .is_none());
+        assert!(state
+            .lookup_current_thread_route_tombstone(
+                &SessionId::new("session-orphan-old").unwrap(),
+                &NativeThreadId::new("thread-orphan-old").unwrap(),
+            )
+            .is_none());
+        state.validate().unwrap();
+    }
+
+    #[test]
+    fn a_live_incumbent_route_still_rejects_a_lower_generation_takeover() {
+        // The protection C8 must not weaken: when this reducer DOES hold the
+        // incumbent's runtime binding, the incumbent is live, so a lower
+        // generation still fails closed.
+        let scope = project_scope();
+        let mut state = GlobalState::default();
+        state
+            .register_project(registration(&scope, "app-one"))
+            .unwrap();
+        let live = route_at(
+            &scope,
+            "app-one",
+            "runtime-live",
+            "binding-live",
+            7,
+            "session-live-old",
+            "thread-live-old",
+        );
+        state.bind_runtime(live.clone()).unwrap();
+        state.set_current_thread_route(live).unwrap();
+
+        let takeover = route_at(
+            &scope,
+            "app-one",
+            "runtime-live-new",
+            "binding-live",
+            1,
+            "session-live-new",
+            "thread-live-new",
+        );
+        assert!(matches!(
+            state.set_current_thread_route(takeover),
+            Err(StateError::StaleBinding {
+                expected_generation: 7,
+                observed_generation: 1,
+                ..
+            })
+        ));
+        state.validate().unwrap();
+    }
+
+    #[test]
+    fn an_equal_generation_address_change_is_still_rejected_for_a_live_incumbent() {
+        // "An address change must raise the generation" is the second invariant
+        // C8 must not weaken.  Both owners enforce it: the route tombstone
+        // requires a strictly greater generation, and the runtime ledger
+        // rejects an equal generation as a different runtime at the same
+        // generation.
+        let scope = project_scope();
+        let mut state = GlobalState::default();
+        state
+            .register_project(registration(&scope, "app-one"))
+            .unwrap();
+        let live = route_at(
+            &scope,
+            "app-one",
+            "runtime-eq",
+            "binding-eq",
+            7,
+            "session-eq-old",
+            "thread-eq-old",
+        );
+        state.bind_runtime(live.clone()).unwrap();
+        state.set_current_thread_route(live).unwrap();
+
+        let equal_route = route_at(
+            &scope,
+            "app-one",
+            "runtime-eq",
+            "binding-eq",
+            7,
+            "session-eq-new",
+            "thread-eq-new",
+        );
+        assert!(matches!(
+            state.set_current_thread_route(equal_route),
+            Err(StateError::StaleBinding {
+                expected_generation: 7,
+                observed_generation: 7,
+                ..
+            })
+        ));
+        assert!(matches!(
+            state.bind_runtime(route_at(
+                &scope,
+                "app-one",
+                "runtime-eq-other",
+                "binding-eq",
+                7,
+                "session-eq-old",
+                "thread-eq-old",
+            )),
+            Err(StateError::BindingConflict(_))
+        ));
+        state.validate().unwrap();
+    }
+
+    #[test]
+    fn a_live_incumbent_route_still_tombstones_a_higher_generation_takeover() {
+        // The normal upgrade path keeps its retirement record, so a caller on
+        // the retired address still gets the explicit stale error.
+        let scope = project_scope();
+        let mut state = GlobalState::default();
+        state
+            .register_project(registration(&scope, "app-one"))
+            .unwrap();
+        let live = route_at(
+            &scope,
+            "app-one",
+            "runtime-live",
+            "binding-live",
+            7,
+            "session-upgrade-old",
+            "thread-upgrade-old",
+        );
+        state.bind_runtime(live.clone()).unwrap();
+        state.set_current_thread_route(live).unwrap();
+
+        let takeover = route_at(
+            &scope,
+            "app-one",
+            "runtime-live",
+            "binding-live",
+            8,
+            "session-upgrade-new",
+            "thread-upgrade-new",
+        );
+        state.bind_runtime(takeover.clone()).unwrap();
+        state.set_current_thread_route(takeover).unwrap();
+
+        let tombstone = state
+            .lookup_current_thread_route_tombstone(
+                &SessionId::new("session-upgrade-old").unwrap(),
+                &NativeThreadId::new("thread-upgrade-old").unwrap(),
+            )
+            .expect("a live incumbent keeps its tombstone");
+        assert_eq!(tombstone.rebound_to.endpoint_generation, 8);
+        state.validate().unwrap();
+    }
+
+    #[test]
+    fn an_unregistered_project_incumbent_is_the_declared_non_resident_boundary() {
+        // The orphan criterion asks THIS reducer's project map.  The host
+        // reducer holds no entry at all for a non-resident project, so it
+        // cannot tell a live incumbent from an orphan there and skips the
+        // tombstone.  This test pins that declared boundary rather than leaving
+        // it to inference.  Generation monotonicity for such a project is owned
+        // by bind_runtime in the owning runtime.
+        let scope = project_scope();
+        let mut state = GlobalState::default();
+        let incumbent = route_at(
+            &scope,
+            "app-one",
+            "runtime-non-resident",
+            "binding-non-resident",
+            7,
+            "session-nr-old",
+            "thread-nr-old",
+        );
+        state.set_current_thread_route(incumbent).unwrap();
+
+        let takeover = route_at(
+            &scope,
+            "app-one",
+            "runtime-non-resident-new",
+            "binding-non-resident",
+            1,
+            "session-nr-new",
+            "thread-nr-new",
+        );
+        state.set_current_thread_route(takeover).unwrap();
+        state.validate().unwrap();
+    }
+
+    #[test]
+    fn bind_runtime_still_rejects_a_lower_generation_over_a_live_binding() {
+        // The generation monotonicity owner is the owning runtime's ledger, not
+        // the route tombstone, so C8 leaves it untouched.
+        let scope = project_scope();
+        let mut state = GlobalState::default();
+        state
+            .register_project(registration(&scope, "app-one"))
+            .unwrap();
+        state
+            .bind_runtime(binding(
+                &scope,
+                "app-one",
+                "agent-one",
+                "runtime-one",
+                "binding-one",
+                7,
+            ))
+            .unwrap();
+        assert!(matches!(
+            state.bind_runtime(binding(
+                &scope,
+                "app-one",
+                "agent-one",
+                "runtime-one",
+                "binding-one",
+                1,
+            )),
+            Err(StateError::StaleBinding {
+                expected_generation: 7,
+                observed_generation: 1,
+                ..
+            })
+        ));
+        state.validate().unwrap();
+    }
+
     #[test]
     fn rebinding_an_address_after_tombstoning_drops_the_stale_tombstone() {
         let scope = project_scope();

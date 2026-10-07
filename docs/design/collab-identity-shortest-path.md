@@ -432,6 +432,49 @@ reviewer 归属自相矛盾（(n) 的 2 项 MATERIAL + 2 项 §8 行缺陷），
 §8 "真实环境"行补上可执行命令与期望结果。reviewer D 的 advisory（R1 的"冲突"仅指 pane 归属冲突，
 凭证被占用仍 fail-closed）已记入 §3.3/§3.4。
 
+### 6.1 D3/C8 编码前设计准入（rev 4）复核记录
+
+D3 属**编码前设计准入**范围。该范围共发生三轮独立复核，逐条处置如下。
+
+**review B1（对 rev 4 首版，判 PASS）**：要求把判据的权威范围写准。处置：§2 明确判据只能问**本
+reducer 自己的** `next.projects`，并把"非驻留项目无法区分活/孤儿"声明为**已知边界**；同时把代际
+单调性的 owner 明确为所属 runtime 的 `bind_runtime`，声明该不变式**不由 tombstone 承担**。
+
+**review B2（对 rev 4 中间修订，判 FAIL，3 项 blocking）**：核心指控是判据在 §4 与 §2 中被定义了
+两次，且 §4 的规范版（"仍被**所属项目 runtime** binding 支撑"）被本设计自己的样本证伪——按字面实现
+**修不好 D3**。处置：
+1. §4 第 4 条改为与 §2 一致的实际判据（**本 reducer 的 `projects` map**），并显式指向 §2 声明的
+   非驻留边界。
+2. 删除"失去的只是诊断"的表述，改为如实陈述：失去的是**旧的已退役地址上的致命围栏**，身份门在该
+   路径上由"中止"变为"按锚点重新注册"。
+3. §3.4 增加"陈旧地址（非驻留项目）"一行，使终止态表与 C8 边界一致。
+4. §8 的 C8 行补上"驻留/非驻留"限定，身份门行的对照明确为**驻留项目**的活 claim（并给出既有断言
+   位置 `host_route_registry_tests/part_02.rs:532`、`:620`）。
+5. 新增两条回归用例（见 §8）：**非驻留边界**行把该边界显式钉住；**等代际**行钉住"地址变更必须
+   升代际"（route 路径 `StaleBinding{7,7}`，ledger 路径 `BindingConflict`）。
+6. 新增 §8"残余冲突边界"行，指明读路径 `part_04.rs:300` 的真实冲突仍由 C2 保持致命，C8 不覆盖它。
+
+**review B3（对 rev 4 首版，判 FAIL，4 项 blocking）**：其中两项与 B2 同源（判据双重定义、致命
+围栏丢失），已按上条处置。另两项单独处置：
+1. **文档事实错误**：原证据行写"该 binding 在任何 runtime 中都不存在"，与同段引用的 appsdk journal
+   第 76872 行冲突（该行是**本次失败尝试之后**才写入的 gen 1 `GlobalRuntimeBound`）。已改为按
+   **host journal 普查**陈述（5 条 `GlobalProjectRegistered` 与 60 条 `GlobalRuntimeBound` 全为
+   routecodex scope，appsdk 0 条）。
+2. **准入前提被破坏**：B3 指出"C8 写码时准入未冻结"。该指控成立并已如实记入本文档状态行；补救是在
+   **冻结的最终候选**（commit `33d6ab27`）上重跑独立架构 review（§8）。
+3. **行号失效**：C8 插入使 `global_state_impl_part2.rs` 之后的行号整体 +13。已逐条重定位：
+   `:545-551`→`:558-564`、`:219-226`→`:232-239`、`:942-951`→`:955-964`、`:718-730`→`:717-729`、
+   `:756-762`→`:753-759`、`:155-241`→`:126-254`、`:156-169`→`:169-182`。
+4. **残余状态**：B3 的"residue"情形（host 索引 gen 7 于地址 A + 所属 runtime gen 1 于地址 B）**不是
+   `%4` 的当前形状**（reset 已归档 appsdk journal，appsdk runtime 中不存在 `binding-codex-_4`），
+   已在 §8 第 (6) 行写为**须实测确认的前提**，并新增"残余冲突边界"行。
+
+**被否决的替代方案（记录，避免重复讨论）**：让判据去问**所属项目 runtime**，或把 split 项目的
+binding 镜像进 host 索引。否决理由：host journal 的回放**不带**项目 runtime，判据在该函数里无法
+在回放期获得所属 runtime 的事实；镜像 binding 会引入第二真源并超出本修复边界。若将来要同时保住
+非驻留项目的诊断信号，正确做法是在**持有所属 runtime 的写者**（`commit_current_thread_route`）
+做判定并把结论**携带在事件里**，使回放保持确定性——这是独立于本修复的架构变更。
+
 ---
 
 ## 7. 代码变更清单（唯一实现，最小 diff）
@@ -509,6 +552,24 @@ tmux pane 自动返回身份"，因此容忍只加在 `identity_gate` 的 pane �
 | 安装 | 安装到实际运行位置并 `collab down`/`collab up` | health/runtime 加载新 binary |
 | 独立 review | 架构 review（非作者） | PASS |
 | 真实环境 | 按下方"真实环境收口命令与判据"执行两条命令 | 每条都有明确结论，判据见下 |
+
+**已收集证据（绑定候选 commit `33d6ab27`，base `origin/main` = `c3c0c8df`）**：
+
+| 项 | 结果 | 证据 |
+|---|---|---|
+| 定向红测（C8 守卫**缺位**时） | 2 条孤儿用例失败，报错正是生产错误：`StaleBinding { binding_id: "binding-orphan", expected_generation: 7, observed_generation: 1 }` 与 `binding-non-resident` 同形；3 条保护用例仍通过 | `~/.collab/runs/collab-identity-shortest-path-20261007/red/d3-red-tests-20261007.txt` |
+| 定向绿测（C8 守卫在位） | 7/7 通过：孤儿顶替、活 binding 低代际仍 `StaleBinding`、活 binding 升代际保留 tombstone（`reboundTo`=8）、非驻留边界显式钉住、`bind_runtime` 单调性 owner、等代际拒绝、身份门孤儿顶替集成用例 | 同上目录 `d3-green-tests-20261007.txt` |
+| 全量单测 | `cargo test --bins`：**922 passed / 3 failed / 1 ignored**；3 条失败全部属既有 `client::tests` stale-socket 家族，`--test-threads=1` 下 20/20 通过（base `c3c0c8df` 为 911/3，C8 之前为 916/2），判定为既有并行环境抖动，非本次回归 | `.../red/full-suite-postC8-20261007.txt` |
+| 图门禁 | F1 `valid DAG: appsdk-collab-context@0.8.0 (6 nodes, 5 edges, 6 waves)`；F2 `valid DAG: appsdk-collab-master-authority@0.1.0 (3 nodes, 2 edges, 3 waves)`；manifest 13 graphs；**在 `rust/` 下**跑注册表门 `cargo test --bins dagpipe` = **12 passed / 0 failed** | `dagpipe graph validate` 输出；`rust/` 注册表门 |
+| 构建 | `scripts/build-collab.sh` → `collab_build_version=0.2.0250` | 构建输出 |
+| 安装与 digest | `./scripts/install-global-collab.sh` → `version=collab 0.2.0251`，`collab_sha256=8e8d1a06a9dc62571acc67788d06797f39b8228f1ed1bcd719b6d5409f092ce4`，`collab_mcp_sha256=e0f6608b1b12b6d5101be318997d0ef6cb4850b4096ce374e20c3b5929abc195`；`shasum -a 256 ~/.cargo/bin/collab` 与之**逐位相同** | 安装输出 + 本机哈希 |
+| 真实入口黑盒 `%2`（驻留项目） | `TMUX=/private/tmp/tmux-501/default,6911,0 TMUX_PANE=%2 collab context` → **exit 0**，`agent_id=codex-%2`、`binding_id=binding-codex-_2`、`endpoint_generation=2`、`registered=true` | `/tmp/pct2b.json` |
+| **真实入口黑盒 `%4`（D3 目标形状）** | 同上形式在 appsdk pane → **exit 0**，`agent_id=codex-%4`、`binding_id=binding-codex-_4`、`endpoint_generation=1`、`registered=true`。修复前同一调用产生 `ROUTE_TRANSITION_DURABILITY_FAILED` 并使 daemon 无法启动 | `/tmp/pct4-context.json` |
+| **持久性（D3 的核心回归）** | `%4` 写入后 `collab down`/`collab up` → **干净启动**，无 `RECOVERY_RECONCILE_REQUIRED`；`~/.collab/log.txt` 中该错误仍恰好 13 条且全部 ≤ 12:20:10（早于 12:28 的 reset），**无新增**；重启后 `%4` 仍 exit 0（gen 1）、`%2` 仍 exit 0（gen 2），说明顶替可从 host journal 回放 | `~/.collab/log.txt`；`/tmp/pct4b.json`、`/tmp/pct2b.json` |
+| MCP 入口 | stdio JSON-RPC `initialize` → `serverInfo {name: collab, version: 0.2.0251}`、`protocolVersion 2024-11-05`；`tools/list` → 33 个工具 | `/tmp/mcp-init.json` |
+| master 身份 | `collab master promote --approval "<用户文本>"`（pane `%2`）→ `master=codex-%2`、`mode=user_approved_self_promotion`。`collab master status` 仍报 `status=unknown` 且 `recorded_worker_id=codex-%2`，因为 `live_master_id`（`part_07.rs:403-425`）把 `IdentityPresence::Unknown` 映射为该错误——**契约行为，非本次缺陷** | 命令输出 |
+| dsh 会话是否注册 peer | **未注册**（确定结论）：`env -u TMUX -u TMUX_PANE collab context` → `TRANSPORT_NONE: no reachable App Server, tmux or dsh candidate was supplied`；`DSH_SESSION_ID`/`DSH_PROFILE` 存在，但 `$HOME/.dsh` 下无 `*.sock`，故 dsh 锚点当前不可达 | 命令输出 |
+| 清理前状态 | 修复前的污染只存在于 `~/.collab/reset.jsonl` 与 `~/.collab/archives/**`（已被 reset 归档），**不在任何 live journal**；live `appsdk/.agent-collab/server/journal.jsonl` 中 `binding-codex-_4` 全部为 gen 1，`~/.collab/routes.jsonl` 已重新登记 appsdk 项目 | 文件核对 |
 
 **真实环境收口命令与判据**：
 

@@ -8,6 +8,9 @@ struct AnchorObservation {
     session_id: Option<String>,
     thread_id: Option<String>,
     tmux: Option<crate::proto::TmuxCandidate>,
+    /// The dsh adapter's primary anchor. Read from `DSH_SESSION_ID`, which the
+    /// DSH runtime exports for the current agent session.
+    dsh_session_id: Option<String>,
 }
 
 impl AnchorObservation {
@@ -16,6 +19,7 @@ impl AnchorObservation {
             session_id: non_empty(facts.session_id.as_deref()),
             thread_id: non_empty(facts.thread_id.as_deref()),
             tmux: facts.tmux.clone(),
+            dsh_session_id: non_empty(facts.dsh_session_id.as_deref()),
         }
     }
 
@@ -33,6 +37,7 @@ impl AnchorObservation {
             session_id: non_empty(session_env.as_deref()),
             thread_id: non_empty(thread_env.as_deref()),
             tmux,
+            dsh_session_id: non_empty(std::env::var("DSH_SESSION_ID").ok().as_deref()),
         })
     }
 
@@ -74,7 +79,10 @@ impl AnchorObservation {
     }
 
     fn has_anchor(&self) -> bool {
-        self.session_id.is_some() || self.thread_id.is_some() || self.tmux.is_some()
+        self.session_id.is_some()
+            || self.thread_id.is_some()
+            || self.tmux.is_some()
+            || self.dsh_session_id.is_some()
     }
 }
 
@@ -126,7 +134,7 @@ pub(crate) fn resolve_for_daemon_with_route_at(
     let observed = AnchorObservation::from_facts(facts);
     if !observed.has_anchor() {
         anyhow::bail!(
-            "COLLAB_IDENTITY_ANCHOR_MISSING: identity requires a Codex session/thread, a tmux pane, or a native App Server endpoint"
+            "COLLAB_IDENTITY_ANCHOR_MISSING: identity requires a Codex session/thread, a tmux pane, a dsh session, or a native App Server endpoint"
         );
     }
     // Recover only from anchors the caller actually supplied. An unrelated
@@ -166,19 +174,41 @@ fn draft_worker_id_at(observed: &AnchorObservation) -> anyhow::Result<String> {
         validate_id(&worker_id)?;
         return Ok(worker_id);
     }
+    if let Some(dsh_session) = observed.dsh_session_id.as_deref() {
+        let worker_id = format!("dsh-thread-{}", hex_encode(dsh_session));
+        // Hex output is non-empty and control-character free, so length is the
+        // only way this can fail. Name the anchor: the failure is a bad anchor,
+        // not an unknown identifier.
+        validate_id(&worker_id).map_err(|_| {
+            anyhow::anyhow!(
+                "COLLAB_IDENTITY_ANCHOR_INVALID: DSH_SESSION_ID is too long for a worker id ({MAX_ID_LENGTH} bytes)"
+            )
+        })?;
+        return Ok(worker_id);
+    }
     let thread_id = observed.thread_id.as_deref().ok_or_else(|| {
         anyhow::anyhow!(
             "COLLAB_IDENTITY_ANCHOR_MISSING: a native App Server identity requires a thread id"
         )
     })?;
-    let mut encoded = String::with_capacity(thread_id.len() * 2);
-    for byte in thread_id.as_bytes() {
+    let worker_id = format!("codex-thread-{}", hex_encode(thread_id));
+    validate_id(&worker_id).map_err(|_| {
+        anyhow::anyhow!(
+            "COLLAB_IDENTITY_ANCHOR_INVALID: CODEX_THREAD_ID is too long for a worker id ({MAX_ID_LENGTH} bytes)"
+        )
+    })?;
+    Ok(worker_id)
+}
+
+/// Hex-encode an anchor value so it is safe as a directory name without
+/// dropping characters the anchor may legitimately contain.
+fn hex_encode(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len() * 2);
+    for byte in value.as_bytes() {
         use std::fmt::Write as _;
         write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
     }
-    let worker_id = format!("codex-thread-{encoded}");
-    validate_id(&worker_id)?;
-    Ok(worker_id)
+    encoded
 }
 
 /// In-memory draft for a new verified anchor. No credential is written before

@@ -153,6 +153,13 @@ impl ProjectRuntimeManager {
         let (Some(runtime), Some(transport)) = (existing.runtime, existing.transport) else {
             return Ok(());
         };
+        // A dsh identity never reaches here: with no App Server endpoint observed,
+        // `required_fields` returns empty and this function is not called. Its
+        // gateway-owned address is not an App Server supplement the caller can
+        // provide; without a gateway the caller fails at `TRANSPORT_NONE`.
+        if transport.kind == TransportKind::Dsh {
+            return Ok(());
+        }
         if transport.kind != TransportKind::AppServer
             || facts.session_id.as_deref().is_some_and(|value| {
                 runtime.session_id.as_ref().map(identity::SessionId::as_str) != Some(value)
@@ -245,7 +252,11 @@ impl ProjectRuntimeManager {
             for binding in project.runtime_bindings.values() {
                 let anchor_matches = if let Some(tmux) = &facts.tmux {
                     binding.tmux_endpoint.as_ref().is_some_and(|bound| {
-                        crate::client::adapters::tmux::same_pane_route(bound, &tmux.endpoint)
+                        // Ownership follows the pane address, never the concrete
+                        // endpoint. A reissued shell pid in the same owned pane
+                        // is still this anchor, so this must agree with the
+                        // resolver's `same_owned_pane` arm.
+                        crate::client::adapters::tmux::same_owned_pane(bound, &tmux.endpoint)
                     })
                 } else {
                     binding.session_id.as_ref().map(identity::SessionId::as_str)
@@ -332,8 +343,19 @@ fn validate_facts(facts: &IdentityFacts) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Which facts the caller must still supply before an identity can be resolved.
+///
+/// Only the App Server path has fields the caller may have to add: its
+/// endpoint, namespace, session and thread are four separate observations that
+/// can arrive incomplete. The tmux and dsh paths each present one designed
+/// anchor that is complete on its own, so they require nothing further.
+///
+/// A tmux or dsh anchor only short-circuits the request while no App Server
+/// endpoint was observed. If an endpoint *is* present, the four App Server
+/// facts are still demanded: the endpoint selects the App Server candidate
+/// below, which reads all four fields unconditionally.
 fn required_fields(facts: &IdentityFacts) -> Vec<&'static str> {
-    if facts.endpoint.is_none() && facts.tmux.is_some() {
+    if (facts.tmux.is_some() || facts.dsh_session_id.is_some()) && facts.endpoint.is_none() {
         return Vec::new();
     }
     [
@@ -345,4 +367,81 @@ fn required_fields(facts: &IdentityFacts) -> Vec<&'static str> {
     .into_iter()
     .filter_map(|(name, value)| value.is_none().then_some(name))
     .collect()
+}
+
+#[cfg(test)]
+mod required_fields_tests {
+    use super::*;
+    use crate::proto::TmuxCandidate;
+
+    fn tmux_anchor() -> TmuxCandidate {
+        TmuxCandidate {
+            endpoint: crate::proto::TmuxEndpoint {
+                socket_path: "/tmp/tmux-test.sock".into(),
+                server_pid: 42,
+                tmux_session_id: "$7".into(),
+                pane_id: "%3".into(),
+                pane_pid: 99,
+                codex_session_id: None,
+                codex_thread_id: None,
+            },
+            cwd: "/tmp/project".into(),
+        }
+    }
+
+    /// A dsh anchor with no observed App Server endpoint is complete on its own.
+    #[test]
+    fn dsh_anchor_alone_requires_no_appserver_fields() {
+        let facts = IdentityFacts {
+            dsh_session_id: Some("session-1".into()),
+            ..IdentityFacts::default()
+        };
+        assert!(required_fields(&facts).is_empty());
+    }
+
+    /// A tmux anchor with no observed endpoint is complete on its own.
+    #[test]
+    fn tmux_anchor_alone_requires_no_appserver_fields() {
+        let facts = IdentityFacts {
+            tmux: Some(tmux_anchor()),
+            ..IdentityFacts::default()
+        };
+        assert!(required_fields(&facts).is_empty());
+    }
+
+    /// An observed App Server endpoint selects the App Server candidate, which
+    /// reads all four fields unconditionally. The anchor must not short-circuit
+    /// that request: doing so reaches `expect("complete native facts")` and
+    /// panics the daemon handler instead of asking the caller.
+    #[test]
+    fn an_observed_endpoint_still_requires_the_four_appserver_fields() {
+        let facts = IdentityFacts {
+            dsh_session_id: Some("session-1".into()),
+            endpoint: Some("unix:///tmp/appserver.sock".into()),
+            ..IdentityFacts::default()
+        };
+        assert_eq!(
+            required_fields(&facts),
+            vec!["session_id", "thread_id", "namespace"]
+        );
+        let facts = IdentityFacts {
+            tmux: Some(tmux_anchor()),
+            endpoint: Some("unix:///tmp/appserver.sock".into()),
+            ..IdentityFacts::default()
+        };
+        assert_eq!(
+            required_fields(&facts),
+            vec!["session_id", "thread_id", "namespace"]
+        );
+    }
+
+    /// With no anchor and no endpoint all four facts are requested.
+    #[test]
+    fn no_anchor_requests_all_four_fields() {
+        let facts = IdentityFacts::default();
+        assert_eq!(
+            required_fields(&facts),
+            vec!["session_id", "thread_id", "endpoint", "namespace"]
+        );
+    }
 }

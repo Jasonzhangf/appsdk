@@ -139,15 +139,35 @@ The daemon owns identity selection, creation, recovery, update, credential and
 binding persistence, route publication, and default direct-message lease
 restoration. It returns either a registered snapshot or an explicit
 missing-facts result. The active contract is
-[`docs/design/collab-identity-minimal-interaction.md`](../../../docs/design/collab-identity-minimal-interaction.md).
+[`docs/design/collab-identity-minimal-interaction.md`](../../../docs/design/collab-identity-minimal-interaction.md)
+with recovery semantics in
+[`docs/design/collab-anchor-restore-model.md`](../../../docs/design/collab-anchor-restore-model.md).
 
 ```sh
 collab context
 ```
 
+The daemon recovers identity by anchor. Each transport has one designed anchor:
+the tmux owned pane, the AppServer session/thread, or the dsh session. An anchor
+that matches a persisted identity restores it directly, with no probe, no
+runtime state and no generation requirement. An anchor with no match drafts a
+new identity. Matching is never guessed: an ambiguous anchor or a cross-project
+match fails explicitly.
+
+You observe nothing by hand. `DSH_SESSION_ID`, `CODEX_SESSION_ID`,
+`CODEX_THREAD_ID` and the tmux pane are all read by the CLI. A gateway control
+socket is not something to look for: the dsh anchor is `DSH_SESSION_ID`, which
+is observable without a gateway.
+
+That anchor settles *who* you are, not *how* you register. A dsh transport
+needs the gateway's `endpoint`, `runtime_id` and `agent_id`, which the CLI
+cannot observe. With no gateway, a dsh caller — new or already persisted —
+fails at `TRANSPORT_NONE`. That is a gateway failure, not a missing identity,
+and it never retires the peer.
+
 When the snapshot contains `requires_identity_update`, read
-`required_fields`, `reason`, and `exact_error`. Supply only the requested facts
-from their real source once:
+`required_fields`, `reason`, and `exact_error`. Only the AppServer path returns
+fields here. Supply only the requested facts from their real source once:
 
 ```sh
 collab context --provide '{"session_id":"...","thread_id":"...","endpoint":"...","namespace":"..."}'
@@ -159,12 +179,12 @@ Later calls need no repeated supplement. A caller with no current anchor must
 provide its own facts; it cannot inherit another caller's identity.
 
 The supplement accepts only the missing scalar facts `session_id`, `thread_id`,
-`endpoint`, and `namespace`. The supplement rejects any other key. An agent
-never guesses, selects, or hunts a worker, and never supplies `worker_id`,
-approval, token, generation, binding, or project scope. Invalid or unsupported
-input fails explicitly. The returned snapshot is the complete state read: role,
-operations, peers, master, scheduling, tasks, binding, and filtered environment.
-`binding` comes from the daemon ledger when the caller has a unique binding.
+`endpoint`, and `namespace`. It rejects any other key. An agent never guesses,
+selects, or hunts a worker, and never supplies `worker_id`, approval, token,
+generation, binding, or project scope. Invalid or unsupported input fails
+explicitly. The returned snapshot is the complete state read: role, operations,
+peers, master, scheduling, tasks, binding, and filtered environment. `binding`
+comes from the daemon ledger when the caller has a unique binding.
 
 If `collab context` fails explicitly, preserve the original error and affected
 scope. Do not retry automatically, edit route/identity files, copy tokens,
@@ -172,9 +192,18 @@ start another daemon, or invent a fallback. Daemon restart remains a separate
 controlled maintenance action after a verified runtime delivery. Ordinary
 identity recovery uses `collab context` only.
 
-Master authority is separate from identity. When context shows no live master,
-promotion still requires explicit user approval and the recorded master
-command. Context does not auto-promote or infer authority.
+Master authority is separate from identity, and the only recovery step that needs
+you. When the snapshot shows no master and the user wants this session to hold
+authority, run one command with their words as the approval:
+
+```sh
+collab master promote --approval '<why the user approved this>'
+```
+
+That promotion is not gated on transport liveness. A tmux pane and an AppServer
+oracle are addresses, not credentials: neither being reachable is allowed to
+strand authority. Explicit approval is the whole authority for the transition.
+Context never auto-promotes and never infers authority.
 
 ### 2. Failure
 

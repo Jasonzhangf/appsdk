@@ -97,7 +97,7 @@ pub(crate) fn context_bootstrap(
 /// client-side and replaces the manual `env | rg` probe with one snapshot
 /// field.
 const CONTEXT_ENV_KEYS: &[&str] = &["HOME", "USER", "LOGNAME", "CARGO_HOME"];
-const CONTEXT_ENV_PREFIXES: &[&str] = &["COLLAB_", "APPSDK_", "CODEX_"];
+const CONTEXT_ENV_PREFIXES: &[&str] = &["COLLAB_", "APPSDK_", "CODEX_", "DSH_"];
 
 /// Name fragments that mark a credential. `collab context` is the one place the
 /// caller's environment enters a Collab response, and `CODEX_API_KEY`-shaped
@@ -146,7 +146,9 @@ struct IdentitySupplement {
     namespace: Option<String>,
 }
 
-fn provided_string<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+fn provided_string<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
     <String as serde::Deserialize>::deserialize(deserializer).map(Some)
 }
 
@@ -187,6 +189,7 @@ fn parse_identity_supplement(raw: &str) -> anyhow::Result<IdentityFacts> {
         endpoint: supplement.endpoint,
         namespace: supplement.namespace,
         tmux: None,
+        dsh_session_id: None,
     })
 }
 

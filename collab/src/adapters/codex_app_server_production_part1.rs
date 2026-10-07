@@ -377,6 +377,14 @@ pub(crate) fn identity_facts_from_env() -> Result<IdentityFacts, AdapterError> {
             },
         )?);
     }
+    // The dsh adapter designs `DSH_SESSION_ID` as the agent's primary anchor.
+    // Only the anchor is observable here: the gateway control socket address
+    // and its runtime/agent ids belong to the gateway, which registers its own
+    // peer. A missing anchor is not an error, exactly like a missing CODEX one.
+    facts.dsh_session_id = std::env::var("DSH_SESSION_ID")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
     Ok(facts)
 }
 

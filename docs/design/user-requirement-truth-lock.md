@@ -2,7 +2,7 @@
 
 日期：2026-10-07（America/Los_Angeles）。
 
-状态：完整需求锁仍是设计与交接草案。当前 G9/T16 的 SDK review 增量已通过独立设计复审，代码与作者测试已完成；正式安装验收、实现后 review 及集成仍待完成，详见 `appsdk-authoritative-review-packet.md`。其余授权与持久锁能力尚未实现或取得独立设计准入。本文件不授予需求修改权限，也不证明防篡改能力。
+状态：完整需求锁仍是设计与交接草案。当前 G9/T16 的 SDK review 增量已通过独立设计复审、作者验证、官方安装、8 例 installed 黑盒、Codex/AGY 架构审查和 CI。源码验收候选为 `f87196ec9608c5a92e9551c5bed67d7fff83fa67`；集成与资源回执按本任务 evidence 记录核对，详见 `appsdk-authoritative-review-packet.md`。其余授权与持久锁能力尚未实现或取得独立设计准入。本文件不授予需求修改权限，也不证明防篡改能力。
 
 源码核查基线：AppSDK `main` / `c3c0c8df79e69534fe30c92db61328824473d5c0`。当前源码仓库根目录没有 `.appsdk/project.json`，不能把它视为已启用治理的业务项目。后续实现从最新 `origin/main` 建立独立外置 worktree。
 

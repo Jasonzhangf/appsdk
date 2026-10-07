@@ -1,0 +1,36 @@
+{
+  "taskId": "requirements-g9-agy-20261007-r2",
+  "state": "completed",
+  "verdict": "pass",
+  "failureClass": null,
+  "outcomeReason": "controller_no_blocking_findings",
+  "output": {
+    "contract_version": "1",
+    "findings": [],
+    "module_boundary_evidence": [
+      {
+        "edges": "Codex r1 finding -> adjudication in review-resolution.md -> runtime gate confirmed as single owner of modern PASS requirement -> public black-box test in part_23.rs asserts legacy review preservation, rejection of missing/stale ack, and admission of fresh current ack",
+        "gates": "cargo test --test cli_smoke pin_lock_preserves_review_history_and_requires_current_requirements_ack passes; full cli_smoke 340 tests pass; installed log execution/installed-migration-review-green.log.gz recorded",
+        "module": "appsdk-review-context",
+        "owner": "appsdk::review_context",
+        "paths": "docs/design/appsdk-authoritative-review-packet.md; docs/evidence/user-requirement-truth-lock-20261007/review-resolution.md; rust/tests/cli_smoke/part_23.rs; rust/tests/cli_smoke/main.rs",
+        "resources": "docs/evidence/user-requirement-truth-lock-20261007/user-input.md; docs/design/appsdk-authoritative-review-packet.md; contracts/records/review-record.schema.json; docs/evidence/user-requirement-truth-lock-20261007/review-resolution.md"
+      },
+      {
+        "edges": "pin-lock 0.1.0010-to-0.1.0011 -> preserves legacy review record bytes and records migration entry -> prevents automatic fabrication of reviewer check -> verify --review-admission rejects missing requirements_review until explicit reviewer check on current context",
+        "gates": "pin-lock succeeds with exit 0 and upgrades lock to 0.1.0011; migration record verified; migration bytes equality asserted after review admission",
+        "module": "sdk-bundle-and-migration",
+        "owner": "appsdk::delivery",
+        "paths": "docs/evidence/user-requirement-truth-lock-20261007/execution/w11-migration-adjudication.md; docs/evidence/user-requirement-truth-lock-20261007/review-resolution.md; rust/tests/cli_smoke/part_23.rs",
+        "resources": "contracts/migrations/sdk-0.1.0010-to-0.1.0011.json; contracts/records/review-record.schema.json; docs/evidence/user-requirement-truth-lock-20261007/execution/w11-migration-adjudication.md"
+      }
+    ],
+    "scope": {
+      "base": "93851a04e2fa40aaebab26b7b791fcf76a577c8a",
+      "commit": null,
+      "mode": "base"
+    }
+  },
+  "candidate_sha": "f87196ec9608c5a92e9551c5bed67d7fff83fa67",
+  "base": "93851a04e2fa40aaebab26b7b791fcf76a577c8a"
+}

@@ -1,6 +1,6 @@
 # AppSDK 权威需求 review 材料：当前实现增量
 
-Issue：592e241。基线：c3c0c8df79e69534fe30c92db61328824473d5c0。状态：独立设计复审 DESIGN_PASS；SDK 0.1.0011 的模板、公开组装及 review 绑定已实现，作者 Rust 测试全部目标合计 519 例通过；官方安装及安装后 7 例公开 CLI 验收通过。实现后独立架构 review 和集成仍待完成。证据与限制见本任务 evidence 的 `author-validation.md`。
+Issue：592e241。基线：c3c0c8df79e69534fe30c92db61328824473d5c0。源码验收候选：f87196ec9608c5a92e9551c5bed67d7fff83fa67。SDK 0.1.0011 的模板、公开组装及 review 绑定已实现；作者全部 Rust targets 合计 520 例通过，官方安装及安装后 8 例公开 CLI 验收通过，独立 Codex/AGY 架构审查和精确候选 CI 均 PASS。集成/资源收口核对 PR #14 与本任务 evidence；完整需求锁仍未完成。
 
 ## 用户要求和本增量终点
 

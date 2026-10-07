@@ -1,6 +1,6 @@
 # 用户需求真相锁 goal 提示词
 
-本文件是完整目标的可复制执行提示词。用户随后已要求使用新建 GCM worker 执行。当前实现增量见 `docs/design/appsdk-authoritative-review-packet.md`：先交付 SDK 模板分发、公开上下文组装和 review 绑定；完整需求锁的其余验收仍有效。没有创建 goal 自动订阅。
+本文件是完整目标的可复制执行提示词。用户随后已要求使用新建 GCM worker 执行。G9/T16 的 SDK 模板分发、公开上下文组装和 review 绑定已完成代码、官方安装、作者验证、Codex/AGY 独立架构 review 和 CI；集成/资源回执先读本任务 evidence，避免重复实现。当前已证明的增量见 `docs/design/appsdk-authoritative-review-packet.md`。完整 G1–G8 的授权与持久锁验收仍有效且未完成。没有创建 goal 自动订阅。
 
 ```text
 /goal

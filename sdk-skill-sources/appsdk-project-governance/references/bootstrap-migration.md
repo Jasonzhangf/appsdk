@@ -13,13 +13,19 @@ requirements + acceptance
 ```
 
 `init` is idempotent. It fills missing governance resources and preserves
-business files. In a live Codex App Server Agent it also invokes official
-`collab init` once; Collab starts/reuses its daemon, evaluates the available
-App Server capability for the current Codex sessionID, registers the current peer
-through the server-selected transport, and arms the default finite
-`direct-message` subscription. Do not run `collab init`, `collab whoami`, or
-any other registration command afterward; read `collab context` once. Use
-`new` only for an empty destination.
+business files. AppSDK project initialization remains its own owner and may
+invoke the daemon context internally when a live Codex App Server sessionID
+binding exists. The agent must not rerun AppSDK initialization or run another
+identity command to repair pending Collab. For agent-facing Collab bootstrap,
+run `collab context` once. `registered: true` ends bootstrap. If the snapshot
+returns `required_fields`, supply only those real facts once with
+`collab context --provide '<JSON>'`. The supplement may contain only requested
+`session_id`, `thread_id`, `endpoint`, or `namespace` facts; it never supplies
+a worker, approval, token, route, or binding. The daemon owns identity
+creation, selection, recovery, registration, route publication, and lease
+restoration. If AppSDK reports Collab pending or context explicitly reports
+daemon DOWN or a runtime error, preserve the exact result and stop; daemon
+maintenance is human-authorized. Use `new` only for an empty destination.
 
 `appsdk prepare` is a hard gate. First invocation writes `.appsdk-prepare.json`
 with `status: "draft"`. `appsdk init` rejects an unconfirmed preparation with
@@ -67,21 +73,22 @@ this ordinary new-project path. Use
 and keep AppSDK and Collab reset/migration in separate transactions.
 
 AppSDK preserves the launching environment and does not pass a project path to
-Collab. `collab init` resolves project scope from the exact process cwd.
-Without a live registered App Server transport, AppSDK initializes governance
-and reports Collab pending because no peer can be registered; it never
-fabricates subscription state.
+Collab. The daemon resolves project scope from the exact process cwd. Without a
+live registered App Server transport, AppSDK initializes governance and
+reports Collab pending because no peer can be registered; it never fabricates
+subscription state.
 
-Collab initialization errors are explicit warnings for AppSDK initialization.
-Automatic multi-worker registration and task/file coordination remain enabled;
-shared operations wait for reliable ownership while independent work continues.
+Collab bootstrap errors from AppSDK's internal context invocation are explicit
+warnings for AppSDK initialization. Automatic multi-worker registration and
+task/file coordination remain enabled; shared operations wait for reliable
+ownership while independent work continues.
 
 ### Master and ordinary peer bootstrap
 
 For a project that will run multiple agents, initialize the AppSDK governance
-root first, then register the current peer and explicitly assign the role.
-Registration and wake bind the current Codex sessionID to the live App Server
-native thread.
+root first, then run one `collab context`. Through that invocation the daemon
+registers/establishes the current peer and its lease; role assignment is
+human-approved and separate.
 
 Master initialization, after user approval for the exact project and peer:
 
@@ -93,6 +100,9 @@ appsdk init .
 appsdk guide status
 appsdk verify
 collab context
+# if required_fields are present, provide only those facts once
+# only when the context snapshot has no live master and the user approved
+# this exact peer:
 collab master promote --approval "<user approval text>"
 collab context
 ```
@@ -108,15 +118,13 @@ Ordinary peer initialization, after the project already has
 ```bash
 cd /abs/path/project
 collab context
-# if the project is unregistered:
-appsdk init .
-collab context
+# if required_fields are present, provide only those facts once
 ```
 
-The peer must observe its own identity, liveness, presence, transport and
-worker role. Do not run a second `collab init`, do not promote itself, do not
-register a long-horizon goal, and do not fabricate a worker role from
-`appsdk init` output.
+The peer must observe its own identity, liveness, presence, transport and peer
+role. Do not run a second identity bootstrap, do not promote itself, do
+not register a long-horizon goal, and do not fabricate a worker role from
+AppSDK initialization output.
 
 Long-horizon master scheduling is a separate, master-only step. Create the
 plan file first, then register and verify:
@@ -371,7 +379,7 @@ collab migrate apply
 # install the reviewed Collab binary, then:
 collab down
 collab up
-collab worker recover
+collab context
 collab migrate verify
 ```
 
@@ -389,7 +397,6 @@ instead of preserving it, use the single offline reset owner:
 collab down
 collab reset --discard-legacy --approval "<explicit user authorization>"
 collab up
-collab init
 collab context
 ```
 

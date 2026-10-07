@@ -72,25 +72,23 @@ maintenance window.
 
 ```sh
 cd <project-main-tree>
-collab init
-collab up
-collab whoami
-collab who
 collab context
 ```
 
-Identity registration requires a server-verified App Server candidate. The
-App Server native thread is the wake endpoint and token proves access to that
-peer's lifecycle.
+The CLI observes available runtime facts. The daemon establishes or recovers
+identity, verifies the native endpoint or tmux pane, persists the binding, and
+restores the default notification lease. It returns the complete state snapshot.
+If facts are missing, `requires_identity_update.required_fields` names them.
+Supply only those real values once with `collab context --provide '<JSON>'`.
+Allowed supplement keys are `session_id`, `thread_id`, `endpoint`, and
+`namespace`; no worker selector or recovery command is needed.
 
-`collab init` also merges the shared `collab-mcp` server into project
+The context bootstrap also merges the shared `collab-mcp` server into project
 `.mcp.json` and writes the project CLI permissions Codex and Claude Code need
 so `collab` can reach the App Server socket without a sandbox prompt. The
 `collab` CLI is a complete fallback when MCP tools are not listed.
 
-`collab role`, `collab transfer-master`, `collab task claim`, the legacy
-`collab task dispatch`, and `collab remove-worker` are deprecated and fail
-explicitly. Use `collab subagent dispatch` from the live master for a real
+Use `collab subagent dispatch` from the live master for a real
 assignment, then `collab task accept <task-id>` from the assigned peer.
 Collab master is not Codex root.
 Protocol: `collab master status`, `collab master promote --approval` when no
@@ -257,7 +255,7 @@ collab migrate inspect
 → scripts/install-global-collab.sh
 → collab down
 → collab up
-→ collab worker recover         # each live App Server peer
+→ collab context                # daemon reconciles the current runtime identity
 → collab migrate verify         # verify and resume
 ```
 

@@ -231,6 +231,7 @@ struct ProjectRuntimeManager {
     routes: Mutex<std::collections::BTreeMap<RouteKey, RuntimeRoute>>,
     project_locks: Mutex<std::collections::BTreeMap<PathBuf, std::fs::File>>,
     register_gate: Mutex<()>,
+    identity_gate: Mutex<()>,
     runtime_init_gates: Mutex<std::collections::BTreeMap<RouteKey, Arc<Mutex<()>>>>,
     #[cfg(test)]
     fail_current_thread_route_publish: std::sync::atomic::AtomicBool,

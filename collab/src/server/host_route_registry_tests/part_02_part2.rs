@@ -17,6 +17,7 @@
             Some(old_candidates.clone()),
         );
         assert!(first.ok, "{first:?}");
+        let old_transport = runtime.state.lock().unwrap().workers[worker].transport.clone().unwrap();
         let promoted = super::handle_master_promote(
             &runtime,
             worker.into(),
@@ -124,12 +125,29 @@
             session_id: old.session_id.clone(),
             native_thread_id: old.native_thread_id.clone(),
         };
+        let mut identity = crate::identity::Identity {
+            worker_id: worker.into(),
+            token: token.into(),
+            project_scope: Some(old.project_scope.clone()),
+            runtime: None,
+            transport: None,
+        };
+        crate::identity::persist_registration_at(
+            &host_paths,
+            &crate::scope::Scope { root: project_root.clone() },
+            &mut identity,
+            previous_runtime,
+            old_transport,
+        ).unwrap();
         let (_, completed) = manager.dispatch_sync(
-            Some(context_with_runtime(&project_root, crate::identity::CLI_APP_SERVER_ID, &previous_runtime)),
-            Req::register(worker.into(), token.into(), project_root.display().to_string(), Some(new_candidates)),
+            Some(context),
+            Req::IdentityContext { facts: crate::proto::IdentityFacts {
+                tmux: new_candidates.tmux,
+                ..Default::default()
+            } },
         );
         assert!(completed.ok, "{completed:?}");
-        assert_eq!(completed.data["command"]["binding"]["endpoint_generation"], old.endpoint_generation + 1);
+        assert_eq!(completed.data["snapshot"]["binding"]["endpoint_generation"], old.endpoint_generation + 1);
         assert!(manager.same_pane_master_route_ready(&runtime).is_ok());
         std::fs::remove_dir_all(host_root).unwrap();
         std::fs::remove_dir_all(project_root).unwrap();

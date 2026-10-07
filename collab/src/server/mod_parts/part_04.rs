@@ -217,13 +217,13 @@ impl ProjectRuntimeManager {
                     .is_empty()
                 {
                     return Err(format!(
-                        "ROUTE_RESOLVE_AMBIGUOUS: App Server thread {native_thread_id} already has a session-bound binding, so it is not resolvable under session {session_id}; recovery: use the thread's current session/thread pair, or explicitly rebind the intended identity with the current host session/thread pair before retrying; never guess a session or edit route state by hand"
+                        "ROUTE_RESOLVE_AMBIGUOUS: App Server thread {native_thread_id} already has a session-bound binding, so it is not resolvable under session {session_id}; run collab context with the current runtime facts; preserve the error if the daemon cannot reconcile the binding"
                     ));
                 }
                 let matches = state.global.legacy_thread_route_matches(&native_thread_id);
                 if matches.len() > 1 {
                     return Err(format!(
-                        "ROUTE_RESOLVE_AMBIGUOUS: App Server thread {native_thread_id} has {count} legacy thread-only bindings under app scope {app}; recovery: identify the intended peer from `collab status --all`, then explicitly rebind that one identity with the current host session/thread pair so it owns the strict dual key; never guess among the candidates or edit the journal",
+                        "ROUTE_RESOLVE_AMBIGUOUS: App Server thread {native_thread_id} has {count} legacy thread-only bindings under app scope {app}; run collab context with the current runtime facts; preserve unresolved conflicts for the identity owner",
                         count = matches.len(),
                         app = matches[0].app_scope_id.as_str(),
                     ));
@@ -1097,6 +1097,9 @@ impl ProjectRuntimeManager {
                 self.host.clone(),
                 Resp::err(format!("PROJECT_CONTEXT_INVALID: {error}")),
             );
+        }
+        if let Req::IdentityContext { facts } = req {
+            return self.identity_context(context, facts);
         }
         let key = Self::route_key(&context);
         let is_register = matches!(req, Req::Register { .. });

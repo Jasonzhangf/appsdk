@@ -27,18 +27,31 @@ fn identity_with_runtime(runtime: Option<RuntimeIdentity>) -> Identity {
 }
 
 #[test]
-fn init_accepts_explicit_worker_id_for_pane_free_registration() {
-    let cli = Cli::try_parse_from([
-        "collab",
-        "init",
-        "--worker-id",
-        "codex-thread-6465736b746f702d746872656164",
-    ])
-    .unwrap();
+fn removed_identity_selectors_are_rejected() {
+    for args in [
+        vec!["collab", "init", "--worker-id", "worker-1"],
+        vec!["collab", "whoami"],
+        vec!["collab", "worker", "recover"],
+        vec!["collab", "master", "recover"],
+        vec!["collab", "context", "--worker", "worker-1"],
+        vec!["collab", "recv", "--worker", "worker-1"],
+        vec!["collab", "inbox", "--worker", "worker-1"],
+        vec!["collab", "ack", "message-1", "--worker", "worker-1"],
+        vec![
+            "collab", "send", "--from", "worker-1", "--to", "worker-2", "hello",
+        ],
+    ] {
+        assert!(
+            Cli::try_parse_from(args.clone()).is_err(),
+            "removed identity selector must be rejected: {args:?}"
+        );
+    }
+
+    let cli =
+        Cli::try_parse_from(["collab", "context", "--provide", r#"{"session_id":"s"}"#]).unwrap();
     assert!(matches!(
         cli.cmd,
-        Cmd::Init { worker_id: Some(worker_id) }
-            if worker_id == "codex-thread-6465736b746f702d746872656164"
+        Cmd::Context { provide: Some(provide) } if provide == r#"{"session_id":"s"}"#
     ));
 }
 
@@ -930,308 +943,109 @@ fn context_env_view_selects_only_collab_identity_variables() {
     );
 }
 
-/// Only the closed set of identity failures enters the identity terminal. A
-/// route, runtime-binding, or transport failure is a different problem and must
-/// keep failing closed rather than being reported as an identity request.
 #[test]
-fn only_classified_identity_failures_enter_the_identity_terminal() {
-    use crate::main_context::IdentityFailure;
-
-    // The real daemon strings, not fabricated uppercase variants.
-    assert_eq!(
-        IdentityFailure::classify("token mismatch: identity does not own this worker_id"),
-        Some(IdentityFailure::TokenMismatch)
-    );
-    assert_eq!(
-        IdentityFailure::classify(
-            "IDENTITY_REBIND_UNPROVEN: no current anchor; pass --worker to explicitly recover a durable identity"
-        ),
-        Some(IdentityFailure::RebindUnproven)
-    );
-    assert_eq!(
-        IdentityFailure::classify("IDENTITY_RESTORE_CROSS_PROJECT: refused"),
-        Some(IdentityFailure::CrossProjectRestore)
-    );
-    assert_eq!(
-        IdentityFailure::classify("COLLAB_IDENTITY_ANCHOR_MISSING: identity requires a tmux pane"),
-        Some(IdentityFailure::AnchorMissing)
-    );
-
-    for unrelated in [
-        "DAEMON_UNKNOWN: failed to send request to /tmp/server.sock",
-        "DAEMON_UNAVAILABLE: no daemon at /tmp/server.sock",
-        "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: worker has no registered runtime binding",
-        "RUNTIME_BINDING_REJECTED: registered worker binding does not match the CLI route",
-        "RECOVERY_RECONCILE_REQUIRED: host route is not at project generation 22",
+fn identity_supplement_rejects_unknown_duplicate_and_invalid_fields_before_observation() {
+    let _guard = crate::scope::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for raw in [
+        r#"{"worker_id":"worker-1"}"#,
+        r#"{"session_id":"one","session_id":"two"}"#,
+        r#"{"session_id":""}"#,
+        r#"{"session_id":null}"#,
+        r#"{"namespace":"   "}"#,
+        r#"{"thread_id":"thread\none"}"#,
+        r#"{"session_id":5}"#,
+        r#"{}"#,
+        r#"not-json"#,
     ] {
-        assert_eq!(
-            IdentityFailure::classify(unrelated),
-            None,
-            "{unrelated} is not an identity failure and must propagate"
-        );
-    }
-}
-
-/// The identity terminal must name the exact failure and the one action that
-/// can restore the identity. A bare prose error would put the agent back in the
-/// status-hunt this consolidation removes.
-#[test]
-fn identity_update_view_names_the_reason_and_the_recovery_action() {
-    use crate::main_context::IdentityFailure;
-
-    let error = anyhow::anyhow!(
-        "IDENTITY_REBIND_UNPROVEN: worker codex-%3 has a reachable anchor that cannot be proven"
-    );
-    let view = crate::main_context::identity_update_view(
-        &error,
-        IdentityFailure::RebindUnproven,
-        Some("codex-%3"),
-    );
-    assert_eq!(view["required"], true);
-    assert_eq!(view["reason"], "IDENTITY_REBIND_UNPROVEN");
-    assert_eq!(view["worker_id"], "codex-%3");
-    // `worker_id` reports what the caller asked for; the action still asks the
-    // operator to name a durable identity, because re-running the invocation
-    // that just failed is the loop this field exists to prevent.
-    assert_eq!(view["action"], "collab context --worker <worker_id>");
-    assert_eq!(view["requires_approval"], true);
-    assert!(
-        view["exact_error"]
-            .as_str()
-            .unwrap()
-            .contains("IDENTITY_REBIND_UNPROVEN"),
-        "{view}"
-    );
-
-    let unnamed =
-        crate::main_context::identity_update_view(&error, IdentityFailure::RebindUnproven, None);
-    assert!(unnamed["worker_id"].is_null());
-    // The failing invocation had no `--worker`, and repeating it verbatim would
-    // loop, so the action must name the argument the identity layer documents as
-    // the recovery.
-    assert_eq!(unnamed["action"], "collab context --worker <worker_id>");
-    assert_eq!(unnamed["requires_approval"], true);
-
-    // Cross-project adjudication is the one repair that requires an operator to
-    // declare the identity, so the action must name `--worker` even when the
-    // caller supplied none, and approval must be explicit.
-    let cross = crate::main_context::identity_update_view(
-        &anyhow::anyhow!("IDENTITY_RESTORE_CROSS_PROJECT: refused without an operator declaration"),
-        IdentityFailure::CrossProjectRestore,
-        None,
-    );
-    assert_eq!(cross["requires_approval"], true);
-    assert_eq!(cross["action"], "collab context --worker <worker_id>");
-
-    // The real daemon rejection is lowercase prose; the reason must still be the
-    // stable code the skill documents, and a rejected token cannot be re-run
-    // into validity, so it escalates instead of repeating `collab context`.
-    let mismatch = crate::main_context::identity_update_view(
-        &anyhow::anyhow!("token mismatch: identity does not own this worker_id"),
-        IdentityFailure::TokenMismatch,
-        None,
-    );
-    assert_eq!(mismatch["reason"], "TOKEN_MISMATCH");
-    assert_eq!(mismatch["requires_approval"], false);
-    // Every `collab` command run as this worker authenticates through `me()`,
-    // which re-sends the rejected token, so the action must not name one.
-    let mismatch_action = mismatch["action"].as_str().unwrap();
-    assert!(
-        mismatch_action.contains("escalate out of band"),
-        "{mismatch}"
-    );
-    assert!(
-        !mismatch_action.contains("collab sendmessage"),
-        "{mismatch}"
-    );
-    assert!(!mismatch_action.contains("collab context"), "{mismatch}");
-}
-
-/// The rejected-token terminal cannot be repaired by re-authenticating: `me()`
-/// reloads the same persisted identity and re-sends the same rejected token, so
-/// any `collab` command the action names would fail exactly like the invocation
-/// that produced the terminal. The action must therefore be an out-of-band
-/// escalation that names the concrete worker, so the agent can hand it to the
-/// project owner without the rejected identity.
-#[test]
-fn token_mismatch_action_is_executable_without_the_rejected_identity() {
-    use crate::main_context::IdentityFailure;
-
-    let action = IdentityFailure::TokenMismatch.action(Some("codex-%9"));
-    assert!(action.contains("escalate out of band"), "{action}");
-    assert!(action.contains("codex-%9"), "{action}");
-    for command in ["collab context", "collab sendmessage", "COLLAB_WORKER="] {
+        let error = crate::main_context::collect_identity_facts(Some(raw))
+            .expect_err("invalid supplement must fail before observation");
         assert!(
-            !action.contains(command),
-            "the action must not name a collab invocation that reuses the rejected token: {action}"
-        );
-    }
-    assert!(
-        !action.contains("<master>") && !action.contains("<exact error"),
-        "the escalation must be concrete, not a shell template: {action}"
-    );
-}
-
-/// Every classified failure must offer an action that is not the invocation
-/// that produced it; otherwise an agent that follows the field loops forever.
-#[test]
-fn no_classified_failure_repeats_the_command_that_just_failed() {
-    use crate::main_context::IdentityFailure;
-
-    for (failure, produced_by, marker) in [
-        (
-            IdentityFailure::TokenMismatch,
-            "collab context",
-            "escalate out of band",
-        ),
-        (
-            IdentityFailure::RebindUnproven,
-            "collab context",
-            "--worker",
-        ),
-        (
-            IdentityFailure::CrossProjectRestore,
-            "collab context",
-            "--worker",
-        ),
-        (IdentityFailure::AnchorMissing, "collab context", "--worker"),
-    ] {
-        let action = failure.action(None);
-        assert_ne!(
-            action,
-            produced_by,
-            "{} must not re-emit the failing invocation",
-            failure.code()
-        );
-        assert!(
-            action.contains(marker),
-            "{} must name an executable next step, got {action}",
-            failure.code()
+            error.to_string().starts_with("IDENTITY_FACT_INVALID:"),
+            "unexpected error for {raw}: {error:#}"
         );
     }
 }
 
-/// The wiring contract of the identity terminal: a classified identity failure
-/// becomes a snapshot, and anything else keeps its original error so the CLI
-/// still exits non-zero instead of reporting an identity request.
 #[test]
-fn identity_terminal_classifies_and_otherwise_propagates() {
-    let root = test_root("context-identity-terminal-wiring");
-    let bootstrap = crate::main_context::ContextBootstrap {
-        scope: Scope { root: root.clone() },
-        project_root_resolution: "cwd",
-        baseline_created: false,
-        daemon_started: false,
-    };
+fn identity_facts_preserve_explicit_endpoint_when_namespace_is_missing() {
+    let _guard = crate::scope::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let keys = [
+        "COLLAB_APPSERVER_SOCKET",
+        "CODEX_APP_SERVER_SOCKET",
+        "COLLAB_APPSERVER_NAMESPACE",
+        "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+        "TMUX_PANE",
+        "CODEX_SESSION_ID",
+        "CODEX_THREAD_ID",
+    ];
+    let previous: Vec<_> = keys
+        .iter()
+        .map(|key| (*key, std::env::var_os(key)))
+        .collect();
+    for key in keys {
+        std::env::remove_var(key);
+    }
+    std::env::set_var("COLLAB_APPSERVER_SOCKET", "/tmp/identity-facts.sock");
 
-    let classified = crate::main_context::identity_terminal(
-        &bootstrap,
-        anyhow::anyhow!("token mismatch: identity does not own this worker_id"),
-        None,
-    )
-    .expect("a classified identity failure becomes the terminal snapshot");
-    assert_eq!(classified["registered"], false);
+    let facts = crate::client::adapters::codex_app_server::identity_facts_from_env()
+        .expect("an explicit endpoint is a partial identity fact");
+
+    for (key, value) in previous {
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
     assert_eq!(
-        classified["requires_identity_update"]["reason"],
-        "TOKEN_MISMATCH"
+        facts.endpoint.as_deref(),
+        Some("unix:///tmp/identity-facts.sock")
     );
+    assert!(facts.namespace.is_none());
+}
 
-    for unrelated in [
-        "DAEMON_UNKNOWN: failed to send request to /tmp/server.sock",
-        "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: worker has no registered runtime binding",
-        "RECOVERY_RECONCILE_REQUIRED: host route is not at project generation 22",
-    ] {
-        let error = crate::main_context::identity_terminal(
-            &bootstrap,
-            anyhow::anyhow!("{unrelated}"),
-            None,
-        )
-        .expect_err("a non-identity failure must keep failing closed");
-        assert_eq!(
-            error.to_string(),
-            unrelated,
-            "the original error must survive unchanged"
-        );
+#[test]
+fn identity_supplement_conflict_never_overrides_observed_fact() {
+    let _guard = crate::scope::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let previous_session = std::env::var_os("CODEX_SESSION_ID");
+    std::env::set_var("CODEX_SESSION_ID", "observed-session");
+
+    let error =
+        crate::main_context::collect_identity_facts(Some(r#"{"session_id":"supplied-session"}"#))
+            .expect_err("a supplied fact must not override an observed fact");
+
+    match previous_session {
+        Some(value) => std::env::set_var("CODEX_SESSION_ID", value),
+        None => std::env::remove_var("CODEX_SESSION_ID"),
     }
-
-    std::fs::remove_dir_all(root).ok();
+    assert!(
+        error.to_string().starts_with("IDENTITY_FACT_CONFLICT:"),
+        "{error:#}"
+    );
 }
 
-/// The identity terminal is an explicit snapshot, never a fabricated success:
-/// `registered` stays false, `identity` stays null, and the recovery request is
-/// present so one call still answers "what is the project state" and "what must
-/// I fix about my identity".
 #[test]
-fn identity_update_snapshot_is_explicit_and_not_a_registered_snapshot() {
-    let root = test_root("context-identity-terminal");
-    let bootstrap = crate::main_context::ContextBootstrap {
-        scope: Scope { root: root.clone() },
-        project_root_resolution: "cwd",
-        baseline_created: false,
-        daemon_started: false,
-    };
-    let error = anyhow::anyhow!("token mismatch: identity does not own this worker_id");
-    let snapshot = crate::main_context::identity_update_snapshot(
-        &bootstrap,
-        &error,
-        crate::main_context::IdentityFailure::TokenMismatch,
-        Some("codex-%9"),
-    );
-
-    assert_eq!(snapshot["registered"], false);
-    assert!(snapshot["identity"].is_null());
-    assert_eq!(snapshot["requires_identity_update"]["required"], true);
-    assert_eq!(
-        snapshot["requires_identity_update"]["reason"],
-        "TOKEN_MISMATCH"
-    );
-    assert_eq!(snapshot["bootstrap"]["identity"], "unresolved");
-    assert_eq!(snapshot["bootstrap"]["registered"], false);
-    assert!(
-        snapshot.get("env").is_some(),
-        "the identity terminal still carries the environment probe: {snapshot}"
-    );
-    assert!(
-        snapshot["requires_identity_update"]["next"]
-            .as_str()
-            .unwrap()
-            .contains("live master"),
-        "{snapshot}"
-    );
-
-    std::fs::remove_dir_all(root).ok();
-}
-
-/// The implicit `collab context` path passes no `--worker`, so the terminal must
-/// name the identity it actually loaded and had rejected. Before this, that most
-/// common bootstrap path reported `worker_id: null` and a `<worker_id>`
-/// placeholder, which is not actionable: the agent cannot run
-/// `collab context --worker <worker_id>` without knowing the id. `context_snapshot`
-/// now passes the loaded identity at both of its terminal call sites that have one.
-#[test]
-fn implicit_token_mismatch_terminal_names_the_loaded_identity() {
-    let root = test_root("context-implicit-token-mismatch");
-    let bootstrap = crate::main_context::ContextBootstrap {
-        scope: Scope { root: root.clone() },
-        project_root_resolution: "cwd",
-        baseline_created: false,
-        daemon_started: false,
-    };
-    let error = anyhow::anyhow!("token mismatch: identity does not own this worker_id");
-    let snapshot = crate::main_context::identity_update_snapshot(
-        &bootstrap,
-        &error,
-        crate::main_context::IdentityFailure::TokenMismatch,
-        Some("codex-%9"),
-    );
-
-    let update = &snapshot["requires_identity_update"];
-    assert_eq!(update["worker_id"], "codex-%9", "{snapshot}");
-    let action = update["action"].as_str().unwrap();
-    assert!(action.contains("codex-%9"), "{snapshot}");
-    assert!(!action.contains("<worker_id>"), "{snapshot}");
-
-    std::fs::remove_dir_all(root).ok();
+fn identity_context_required_forwards_the_daemon_update_exactly() {
+    let update = json!({
+        "required": true,
+        "reason": "IDENTITY_INFORMATION_REQUIRED",
+        "required_fields": ["session_id", "thread_id"],
+        "field_descriptions": {
+            "session_id": "Current runtime session identifier",
+            "thread_id": "Current native thread identifier"
+        },
+        "action": "collab context --provide '<JSON containing required_fields>'",
+        "requires_approval": false
+    });
+    let snapshot = json!({"registered": false, "identity": null, "requires_identity_update": update});
+    let error = crate::main_context::identity_context_required(&snapshot);
+    let response = &error.downcast_ref::<client::ServerResponseError>().unwrap().response;
+    assert_eq!(response.data["requires_identity_update"], snapshot["requires_identity_update"]);
 }
 
 #[test]
@@ -1280,55 +1094,6 @@ fn cli_error_decorates_route_resolve_not_found_from_current_and_legacy_daemons()
         1,
         "{current}"
     );
-}
-
-#[test]
-fn cli_error_decorates_identity_rebind_and_cross_project_with_manual_steps() {
-    for error in [
-        "IDENTITY_REBIND_UNPROVEN: existing peer codex-%4 does not match the current pane",
-        "IDENTITY_RESTORE_CROSS_PROJECT: a unique tmux/Codex anchor belongs to another project",
-    ] {
-        let formatted = format_cli_error(error);
-        assert!(formatted.starts_with(error), "{formatted}");
-        for expected in [
-            "`collab context`",
-            "canonical project main checkout",
-            "live master",
-            "out-of-band",
-        ] {
-            assert!(
-                formatted.contains(expected),
-                "missing {expected}: {formatted}"
-            );
-        }
-        if error.starts_with("IDENTITY_REBIND_UNPROVEN") {
-            for expected in ["COLLAB_WORKER=", "--subject blocker \"<exact error;"] {
-                assert!(
-                    formatted.contains(expected),
-                    "missing {expected}: {formatted}"
-                );
-            }
-        }
-        if error.starts_with("IDENTITY_RESTORE_CROSS_PROJECT") {
-            assert!(
-                formatted.contains(
-                    "do not try `collab sendmessage` through the same failing identity path"
-                ),
-                "cross-project must not reuse the failing sendmessage path: {formatted}"
-            );
-        }
-        for forbidden in ["do not edit routes", "copy tokens", "start a second daemon"] {
-            assert!(
-                formatted.contains(forbidden),
-                "missing forbidden recovery step {forbidden}: {formatted}"
-            );
-        }
-        assert_eq!(
-            format_cli_error(&formatted),
-            formatted,
-            "recovery guidance must not be duplicated"
-        );
-    }
 }
 
 #[path = "main_tests_part2.rs"]

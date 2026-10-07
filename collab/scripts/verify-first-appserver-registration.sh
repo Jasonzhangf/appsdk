@@ -255,7 +255,7 @@ fi
 
 (
   cd "$project"
-  HOME="$home" COLLAB_STATE_DIR="$state" "$collab_bin" serve
+  exec env HOME="$home" COLLAB_STATE_DIR="$state" "$collab_bin" serve
 ) \
   >"$root/collab.out" 2>"$root/collab.err" &
 daemon_pid=$!
@@ -274,28 +274,70 @@ export HOME="$home"
 export COLLAB_STATE_DIR="$state"
 export COLLAB_APPSERVER_SOCKET="$socket"
 export COLLAB_APPSERVER_NAMESPACE=codex_app
-export CODEX_THREAD_ID="$thread_id"
+unset CODEX_THREAD_ID
 export CODEX_SESSION_ID="$session_id"
 
 cd "$project"
-"$collab_bin" init >"$root/init.json"
-"$collab_bin" context >"$root/context.json"
+"$collab_bin" context >"$root/missing.json"
+"$collab_bin" context --provide "{\"thread_id\":\"$thread_id\"}" >"$root/context.json"
+"$collab_bin" context >"$root/context-replay.json"
+if [ -n "${APPSDK_BIN:-}" ]; then
+  test -x "$APPSDK_BIN"
+  cat >"$project/.appsdk-prepare.json" <<'JSON'
+{
+  "schema_version": 1,
+  "preparation_id": "collab-identity-consumer-e2e",
+  "status": "confirmed",
+  "objective": "Verify the installed AppSDK initialization consumer of daemon identity context",
+  "change_kind": "project_refactor",
+  "project_root": ".",
+  "legacy_roots": ["legacy"],
+  "new_roots": ["."],
+  "protected_roots": ["protected"],
+  "runtime_forbidden_roots": ["generated"],
+  "boundary": {
+    "allowed_paths": ["."],
+    "forbidden_paths": ["legacy/**"],
+    "payload_control_separation": "confirmed"
+  },
+  "acceptance_criteria": ["Initialization registers the verified native runtime through the single daemon identity owner"],
+  "non_goals": ["business implementation"],
+  "assumptions": [],
+  "questions": [],
+  "confirmed_by": "isolated fixture owner",
+  "confirmed_at": "2026-10-06T00:00:00Z",
+  "created_at": "2026-10-06T00:00:00Z"
+}
+JSON
+  "$APPSDK_BIN" init . >"$root/appsdk-init.out" 2>"$root/appsdk-init.err"
+  if ! rg -q '^collab-channel ' "$root/appsdk-init.out"; then
+    cat "$root/appsdk-init.out" "$root/appsdk-init.err" >&2
+    printf 'installed AppSDK init did not register the native identity\n' >&2
+    exit 1
+  fi
+  "$collab_bin" context >"$root/context-after-appsdk.json"
+fi
 "$collab_bin" task status >"$root/task-status.json"
 
-python3 - "$root/init.json" "$root/context.json" "$root/task-status.json" <<'PY'
+python3 - "$root/missing.json" "$root/context.json" "$root/context-replay.json" "$root/task-status.json" "${APPSDK_BIN:-}" <<'PY'
 import json
+from pathlib import Path
 import sys
 
-init_path, context_path, task_status_path = sys.argv[1:]
-with open(init_path, encoding="utf-8") as source:
-    init = json.load(source)
+missing_path, context_path, replay_path, task_status_path, appsdk_bin = sys.argv[1:]
+with open(missing_path, encoding="utf-8") as source:
+    missing = json.load(source)
 with open(context_path, encoding="utf-8") as source:
     context = json.load(source)
 with open(task_status_path, encoding="utf-8") as source:
     task_status = json.load(source)
+with open(replay_path, encoding="utf-8") as source:
+    replay = json.load(source)
 
-if init.get("ok") is not True:
-    raise SystemExit(f"init assertion failed: {init!r}")
+if missing.get("registered") is not False or missing.get("identity") is not None:
+    raise SystemExit(f"missing-info assertion failed: {missing!r}")
+if missing.get("requires_identity_update", {}).get("required_fields") != ["thread_id"]:
+    raise SystemExit(f"exact missing fields assertion failed: {missing!r}")
 liveness = context.get("liveness")
 if (
     context.get("registered") is not True
@@ -304,11 +346,40 @@ if (
     or liveness.get("presence") != "present"
 ):
     raise SystemExit(f"context assertion failed: {context!r}")
+if context.get("identity") != replay.get("identity") or context.get("binding") != replay.get("binding"):
+    raise SystemExit(f"same-anchor identity replay changed: {context!r} -> {replay!r}")
+if appsdk_bin:
+    with open(Path(context_path).with_name("context-after-appsdk.json"), encoding="utf-8") as source:
+        after_appsdk = json.load(source)
+    if context.get("identity") != after_appsdk.get("identity") or context.get("binding") != after_appsdk.get("binding"):
+        raise SystemExit("AppSDK initialization changed the existing native identity or binding")
+    channels = [
+        json.loads(line.removeprefix("collab-channel "))
+        for line in Path(context_path).with_name("appsdk-init.out").read_text().splitlines()
+        if line.startswith("collab-channel ")
+    ]
+    if len(channels) != 1:
+        raise SystemExit("AppSDK initialization must emit one registered channel")
+    runtime = channels[0]["runtime"]
+    receipt = channels[0]["runtime_receipt"]
+    transport = context["identity"]["transport"]
+    if runtime["endpoint"] != transport["endpoint"] or runtime["namespace"] != transport["namespace"]:
+        raise SystemExit("AppSDK runtime does not match the daemon-selected native endpoint")
+    if runtime["projectRoot"] != context["project_root"]:
+        raise SystemExit("AppSDK runtime does not match the canonical project")
+    if receipt["runtime_id"] != runtime["runtimeId"] or not Path(receipt["registry_path"]).is_file():
+        raise SystemExit("AppSDK runtime registry receipt is missing or mismatched")
+for value in (missing, context, replay):
+    if "identity_receipt" in value or "token" in (value.get("identity") or {}):
+        raise SystemExit("context displayed a private credential")
 if task_status.get("tasks") != []:
     raise SystemExit(f"task status assertion failed: {task_status!r}")
 PY
 
 printf 'isolated_appserver_first_registration=PASS\n'
+if [ -n "${APPSDK_BIN:-}" ]; then
+  printf 'installed_appsdk_init_consumer=PASS\n'
+fi
 printf 'thread_id=%s\n' "$thread_id"
 printf 'session_id=%s\n' "$session_id"
 if [ "${KEEP_GATE_ROOT:-0}" = "1" ]; then

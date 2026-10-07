@@ -1,6 +1,15 @@
 # Collab 身份认定与恢复设计
 
-**状态**：设计稿（本仓库自有设计产物）；落盘后作为实现与 review 的准入依据
+> **历史设计记录（superseded）**：本文档记录被 `collab context --worker`、
+> `COLLAB_WORKER`、`collab identity adjudicate` 等旧手动裁决路径描述的早期
+> T0/T1 设计。它们不再是当前 Agent 契约，也不可执行。当前有效契约是
+> `docs/design/collab-identity-minimal-interaction.md`：Agent 只运行一次
+> `collab context`，缺事实时用 `collab context --provide` 提供且只提供
+> `session_id`/`thread_id`/`endpoint`/`namespace`，daemon 拥有身份选择、创建、
+> 恢复、更新、credential/binding/lease 持久化。保留本文件仅作为历史证据。
+> 手工裁决图及其 manifest/operator 注册已退役；下文 F2 图映射只记录历史。
+
+**状态**：历史设计记录；不作为当前实现或 review 的准入依据
 **基线**：`c5007adc427de53c8aa8c55097daa56e2f506466`（与 origin/main 同步）
 **行号约定**：除注明外均按上述基线，仅在该提交上定位
 **关联产物**：`collab/docs/design/identity-route-ledger-maintenance-dag.md`（账本维护专项）、`docs/dagpipe/manifest.json`（图产物注册表）
@@ -114,7 +123,10 @@
 
 ### 3.1 恢复入口
 
-**唯一入口**：`collab context`（T0 只有 `--worker`；`--scope` 与独立裁决入口 `collab identity adjudicate` 属 T1，见 §3.2 T0 实现状态）。其他路径（MCP、daemon 内部、后台同步）不得成为独立入口，只能触发同一入口的既有分支。
+**唯一入口（历史 T0 设计）**：`collab context`（T0 只有 `--worker`；
+`--scope` 与独立裁决入口 `collab identity adjudicate` 属 T1，见 §3.2 T0 实现状态）。
+该 `--worker` 路径已由 `docs/design/collab-identity-minimal-interaction.md` 取代，
+本处仅保留历史证据。当前 Agent 唯一入口是 `collab context` + factual supplement。
 
 后台自动恢复（R5）走 F1（§5.2），不需要用户触发；需要额外信息时由 peer 侧在下一次 `collab context` 提供。
 
@@ -135,7 +147,7 @@
 
 **R-6 的边界（关键约束）**：手动裁决只能越过 **R-3 / R-4 / R-5**（锚点与 scope 类）。**不能越过 R-1 / R-2**（凭据撤销与声明冲突）——被撤销的凭据不能靠人声明复活，声明冲突也不能靠人声明掩盖。这一条修正了"裁决可越过一切"的宽松表述。
 
-**T0 实现状态（本设计落盘时点的真实契约）**：F2 的独立入口 `collab identity adjudicate`、`--scope` 声明（M2）与 durable receipt（M3）尚未实现；T0 期的手动裁决借用既有 `collab context --worker <id>`，其 scope 由 cwd/route 派生。因此 T0 的对外契约是：
+**T0 实现状态（历史设计，已取代）**：F2 的独立入口 `collab identity adjudicate`、`--scope` 声明（M2）与 durable receipt（M3）尚未实现；T0 期的手动裁决借用既有 `collab context --worker <id>`，其 scope 由 cwd/route 派生。这是落盘时点的历史状态，不再作为当前 Agent 契约：
 
 - **F1（无 `--worker`）不跨 scope**：跨 scope 记录一律 fail-closed 到 `IDENTITY_CROSS_PROJECT`，错误文本把用户指向 `--worker`。这与 `c5007ad` 的 ledger 契约一致（"the implicit path is unchanged: it never crosses scope"）。
 - `Req::Register.retire_cross_project_anchor` **只在显式 `--worker` 时置位**；F1 路径不得置位，否则会跳过同 scope 的 live 冲突拒绝（`retire_cross_project_anchor_candidate` 对同 scope binding 是 no-op）。

@@ -417,6 +417,7 @@ fn mutation_blocked_during_migration(req: &Req) -> bool {
         | Req::WorkerClose { .. }
         | Req::ResetBindings { .. } => true,
         Req::Register { .. }
+        | Req::IdentityContext { .. }
         | Req::RouteResolve { .. }
         | Req::RouteResolvePaneRecovery { .. }
         | Req::RouteResolveNative { .. }
@@ -585,11 +586,12 @@ fn validate_wire_runtime_binding(
                     .get(worker_id)
                     .is_some_and(|worker| worker.token != *token)
             };
-            // A CLI process may lose its persisted runtime when its App Server
-            // thread is recreated. Permit only that recovery shape or an
-            // authorized same-thread token rotation to bypass the normal actor
-            // check; same-token reconnects remain idempotent.
-            if is_provisional_cli_runtime(project_context, worker_id) || token_mismatch {
+            if token_mismatch {
+                return Err(format!("TOKEN_MISMATCH: worker {worker_id} is registered by another token"));
+            }
+            // A missing local runtime can be admitted only with the existing
+            // credential and the current transport's proven anchor.
+            if is_provisional_cli_runtime(project_context, worker_id) {
                 return validate_cli_register_rebind(
                     server,
                     project_context,
@@ -691,42 +693,6 @@ fn validate_cli_register_rebind(
         retired_tombstone = binding.native_thread_id.is_none() && binding.tmux_endpoint.is_none();
         let persisted_worker = state.workers.get(worker_id);
         orphan_recovery = persisted_worker.is_none();
-        if persisted_worker.is_some_and(|worker| worker.token != token) {
-            let Some(candidates) = candidates.as_ref() else {
-                return Err(
-                    "RUNTIME_BINDING_REJECTED: CLI rebind requires the peer's current transport candidate"
-                        .to_owned(),
-                );
-            };
-            if candidates.appserver.is_some() {
-                return Err(
-                    "TRANSPORT_UNSUPPORTED: App Server rebind is retired; register the peer's current transport instead"
-                        .to_owned(),
-                );
-            }
-            let same_runtime_thread = is_provisional_cli_runtime(project_context, worker_id)
-                || project_context
-                    .runtime_context
-                    .as_ref()
-                    .is_some_and(|runtime| {
-                        runtime.agent_id == binding.agent_id
-                            && runtime.native_thread_id == binding.native_thread_id
-                    });
-            let candidate_owner = if let Some(candidate) = candidates.tmux.as_ref() {
-                state
-                    .global
-                    .lookup_tmux_route(&candidate.endpoint)
-                    .map(|binding| binding.agent_id.as_str())
-            } else {
-                None
-            };
-            if candidate_owner != Some(worker_id) || !same_runtime_thread {
-                return Err(
-                    "RUNTIME_BINDING_REJECTED: worker token does not match the registered identity"
-                        .to_owned(),
-                );
-            }
-        }
         let worker_cwd = persisted_worker
             .map(|worker| worker.cwd.as_str())
             .unwrap_or(project_context.canonical_root.as_str());

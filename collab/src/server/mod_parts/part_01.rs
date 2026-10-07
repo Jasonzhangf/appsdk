@@ -730,6 +730,7 @@ fn request_activity(req: &Req, resp: &Resp) -> serde_json::Value {
     if let Some(obj) = request.as_object_mut() {
         obj.remove("token");
         obj.remove("launch_env");
+        obj.remove("facts");
     }
     json!({
         "op": request.get("op").cloned().unwrap_or(json!("unknown")),

@@ -32,7 +32,7 @@ source and must additionally bind:
 - exact candidate, merge, install, daemon-restart, and deployed replay gates.
 
 Use the [AppSDK migration Skill](../../appsdk-migration/SKILL.md) for the complete
-inspect/snapshot/migrate-or-reset/rebind/restart/verify procedure. Do not copy
+inspect/snapshot/migrate-or-reset/context-reconcile/restart/verify procedure. Do not copy
 that state machine into the prompt or into this reference. A prompt cannot
 register a goal or grant a role: Desktop never runs `appsdk goal subscribe`;
 only the authorized live TUI/master endpoint may register the existing plan.

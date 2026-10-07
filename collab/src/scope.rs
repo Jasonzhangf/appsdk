@@ -192,8 +192,8 @@ pub(crate) fn is_linked_worktree_root(root: &Path) -> anyhow::Result<bool> {
 /// Resolve the route bound to one registered peer identity at the exact cwd.
 ///
 /// The identity's App Server scope is authoritative. The caller's cwd may be
-/// a Git worktree, so it must be inside the route's canonical root but is not
-/// allowed to select a different project by itself.
+/// a Git worktree, so it must belong to the route's directory or verified Git
+/// main root. It cannot select a different project by itself.
 pub fn canonical_route_for_identity(
     host_paths: &HostPaths,
     cwd: &Path,
@@ -202,9 +202,7 @@ pub fn canonical_route_for_identity(
     let cwd = std::fs::canonicalize(cwd)?;
     let matches = load_route_records(host_paths)?
         .into_iter()
-        .filter(|route| {
-            &route.app_scope_id == app_scope_id && cwd.strip_prefix(&route.root).is_ok()
-        })
+        .filter(|route| &route.app_scope_id == app_scope_id)
         .collect::<Vec<_>>();
     let (mut matches, git_roots) = narrow_routes_for_git_worktree(&cwd, matches)?;
     match matches.len() {
@@ -254,10 +252,7 @@ pub fn canonical_route_for_cwd(
     cwd: &Path,
 ) -> anyhow::Result<CanonicalProjectRoute> {
     let cwd = std::fs::canonicalize(cwd)?;
-    let matches = load_route_records(host_paths)?
-        .into_iter()
-        .filter(|route| cwd.strip_prefix(&route.root).is_ok())
-        .collect::<Vec<_>>();
+    let matches = load_route_records(host_paths)?;
     let (mut matches, _) = narrow_routes_for_git_worktree(&cwd, matches)?;
     match matches.len() {
         1 => Ok(matches.pop().unwrap()),
@@ -281,6 +276,10 @@ fn narrow_routes_for_git_worktree(
     mut matches: Vec<CanonicalProjectRoute>,
 ) -> anyhow::Result<(Vec<CanonicalProjectRoute>, Option<GitWorktreeRoots>)> {
     let git_roots = git_worktree_roots_if_any(cwd)?;
+    matches.retain(|route| {
+        cwd.starts_with(&route.root)
+            || git_roots.as_ref().is_some_and(|roots| route.root == roots.main_root)
+    });
     if let Some(git_roots) = &git_roots {
         let nested_matches = matches
             .iter()
@@ -557,17 +556,6 @@ pub fn project_root() -> anyhow::Result<PathBuf> {
     Ok(Scope::resolve()?.root)
 }
 
-/// Resolve the exact current project root for identity recovery.
-///
-/// Recovery is the operation that restores a missing native-thread route, so
-/// it cannot use the route selector that it is responsible for repairing.
-pub fn resolve_for_recovery() -> anyhow::Result<Scope> {
-    let cwd = validate_project_root(std::env::current_dir()?)?;
-    let host_paths = HostPaths::resolve()?;
-    let route = canonical_route_for_cwd(&host_paths, &cwd)?;
-    Scope::from_project_root(route.root)
-}
-
 /// Resolve the project rooted at the process cwd for lifecycle commands.
 ///
 /// Daemon start/stop and configuration commands own local lifecycle state.
@@ -805,12 +793,16 @@ the installed independent binaries are `~/.cargo/bin/collab` and
 Collab checkout.
 
 The daemon is detached. Normal commands may start it when no explicit `DOWN`
-marker exists. `collab init` creates the local
-`.agent-collab/server` skeleton, so old projects need no manual repair. Use
+marker exists. `collab context` creates a missing local baseline, observes
+available runtime facts, and asks the daemon to establish or recover identity.
+If it returns `requires_identity_update.required_fields`, supply only those
+real facts once with `collab context --provide '<JSON>'`. The daemon completes
+the binding and lease; do not choose a worker or run a recovery command. Use
 `collab down` only for an explicit stop; use `collab up` to clear that stop and
 start it again. Never start a second daemon.
 Existing projects migrate through `collab migrate inspect`, `plan`, `apply`,
-controlled daemon upgrade/restart, identity rebind, and `verify`;
+controlled daemon upgrade/restart, daemon identity reconciliation through
+`collab context`, and `verify`;
 deleting `.agent-collab`, editing JSON state, clearing mailboxes, copying
 tokens, mixed runtime writes, and guessing thread identity are deprecated.
 
@@ -829,7 +821,7 @@ tokens, mixed runtime writes, and guessing thread identity are deprecated.
 
 - Every registered identity is an equal `peer`; there is no inferred master
   from first registration. Codex root is not Collab master.
-- `collab init` and peer registration never create a master. A master exists
+- Context bootstrap and peer registration never create a master. A master exists
   only when a registered peer has a live server-verified transport and was assigned by
   user-approved self-promotion or live-master delegation. A recorded identity
   with a dead App Server thread is not a live master.
@@ -1004,52 +996,36 @@ impl Scope {
         // The infallible compatibility accessors below are only used after
         // this check (or by isolated unit fixtures).
         let host_paths = HostPaths::resolve()?;
-        Self::resolve_from_cwd_with_host_paths(cwd, &host_paths, None)
+        Self::resolve_from_cwd_with_host_paths(cwd, &host_paths)
     }
 
     fn resolve_from_cwd_with_host_paths(
         cwd: &Path,
         host_paths: &HostPaths,
-        worker_id: Option<String>,
     ) -> anyhow::Result<Self> {
         // A live Codex session/thread is the authoritative route key. The
         // tmux pane is only a last-resort recovery anchor when both Codex
         // runtime IDs are absent, so a tmux-hosted TUI must not prefer the
         // pane route over its native thread.
         if std::env::var_os("CODEX_THREAD_ID").is_some() {
-            return Self::resolve_from_cwd_without_thread(cwd, host_paths, worker_id);
+            return Self::resolve_from_cwd_without_thread(cwd, host_paths);
         }
         if std::env::var_os("TMUX_PANE").is_some() {
             let route = route_for_tmux_pane(host_paths)?;
             return Ok(Scope { root: route.root });
         }
-        Self::resolve_from_cwd_without_thread(cwd, host_paths, worker_id)
+        Self::resolve_from_cwd_without_thread(cwd, host_paths)
     }
 
     fn resolve_from_cwd_without_thread(
         cwd: &Path,
         host_paths: &HostPaths,
-        worker_id: Option<String>,
     ) -> anyhow::Result<Self> {
         if Self::local_baseline_is_authoritative(cwd)? {
             return Self::from_project_root(cwd.to_path_buf());
         }
-        let identity_scope = Scope {
-            root: cwd.to_path_buf(),
-        };
-        if let Some(identity) =
-            crate::identity::load_existing_at(host_paths, &identity_scope, worker_id)?
-        {
-            let runtime = identity.runtime.as_ref().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "persisted Collab identity {} has no registered runtime",
-                    identity.worker_id
-                )
-            })?;
-            let route = canonical_route_for_identity(&host_paths, &cwd, &runtime.appserver_id)?;
-            return Ok(Scope { root: route.root });
-        }
-        anyhow::bail!("no .agent-collab found in inherited cwd {}", cwd.display())
+        let route = canonical_route_for_cwd(host_paths, cwd)?;
+        Self::from_project_root(route.root)
     }
 
     fn from_project_root(root: PathBuf) -> anyhow::Result<Self> {
@@ -1057,7 +1033,7 @@ impl Scope {
             Ok(Scope { root })
         } else {
             Err(anyhow::anyhow!(
-                "no .agent-collab found in exact project root {}; run `collab init` there first",
+                "no .agent-collab found in exact project root {}; run `collab context` there first",
                 root.display()
             ))
         }

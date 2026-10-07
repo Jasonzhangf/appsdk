@@ -1,5 +1,5 @@
 #[test]
-fn init_does_not_recover_broad_runtime_binding_rejections() {
+fn init_reports_runtime_binding_rejection_without_repair() {
     let root = temp_root("init-collab-runtime-binding-not-recoverable");
     fs::create_dir_all(&root).unwrap();
     confirm_preparation(&root, ".", "project_refactor");
@@ -17,10 +17,6 @@ case "$*" in
   "init")
     printf '%s\n' 'RUNTIME_BINDING_REJECTED: candidate App Server thread is already bound to another worker' >&2
     exit 1
-    ;;
-  "worker recover")
-    printf '%s\n' 'recover must not run for this error' >&2
-    exit 64
     ;;
   *)
     printf '%s\n' "unexpected collab command: $*" >&2

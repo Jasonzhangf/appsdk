@@ -297,7 +297,7 @@ fn ensure_graph_nodes_use_registered_operators(
 mod notification;
 use notification::{register_notification_operator, validate_notification_objects};
 
-fn embedded_graph_paths() -> [(&'static str, &'static str); 13] {
+fn embedded_graph_paths() -> [(&'static str, &'static str); 12] {
     [
         (
             "contracts/dagpipe/fix-lifecycle.graph.json",
@@ -328,10 +328,6 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 13] {
             include_str!("../../docs/dagpipe/merge-pending.graph.json"),
         ),
         (
-            "docs/dagpipe/collab-identity-adjudication.graph.json",
-            include_str!("../../docs/dagpipe/collab-identity-adjudication.graph.json"),
-        ),
-        (
             "docs/dagpipe/collab-dsh-channel.graph.json",
             include_str!("../../docs/dagpipe/collab-dsh-channel.graph.json"),
         ),
@@ -354,14 +350,13 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 13] {
     ]
 }
 
-fn design_graph_ids() -> [&'static str; 11] {
+fn design_graph_ids() -> [&'static str; 10] {
     [
         "appsdk-collab-context",
         "appsdk-collab-appserver-route-repair",
         "appsdk-collab-subscription-lifecycle",
         "appsdk-collab-notification-consumption",
         "appsdk-collab-merge-pending",
-        "appsdk-collab-identity-adjudication",
         "appsdk-collab-dsh-channel",
         "appsdk-sdk-pin-history",
         "appsdk-collab-dashboard-operation",
@@ -370,15 +365,12 @@ fn design_graph_ids() -> [&'static str; 11] {
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 63] {
+fn design_graph_operator_names() -> [&'static str; 54] {
     [
         "appsdk.collab_context.resolve_root",
         "appsdk.collab_context.ensure_baseline",
         "appsdk.collab_context.ensure_daemon",
         "appsdk.collab_context.identity_gate",
-        "appsdk.collab_context.restore_default_lease",
-        "appsdk.collab_context.find_master",
-        "appsdk.collab_context.read_only_state",
         "appsdk.collab_context.env_view",
         "appsdk.collab_context.emit_snapshot",
         "appsdk.collab_appserver_route.discover_live_thread",
@@ -399,12 +391,6 @@ fn design_graph_operator_names() -> [&'static str; 63] {
         "appsdk.collab_merge.integrate_main",
         "appsdk.collab_merge.resolve_pending",
         "appsdk.collab_merge.close_task",
-        "appsdk.collab_adjudication.parse_declaration",
-        "appsdk.collab_adjudication.load_target",
-        "appsdk.collab_adjudication.collect_inherited",
-        "appsdk.collab_adjudication.write_receipt",
-        "appsdk.collab_adjudication.rebind_identity",
-        "appsdk.collab_adjudication.emit_outcome",
         "appsdk.collab_dsh_channel.build_dsh_candidate",
         "appsdk.collab_dsh_channel.admit_dsh_transport",
         "appsdk.collab_dsh_channel.bind_and_receipt",

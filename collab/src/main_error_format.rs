@@ -14,15 +14,5 @@ fn format_cli_error(error: &str) -> String {
     } else {
         error.to_owned()
     };
-    if decorated.starts_with("IDENTITY_REBIND_UNPROVEN:")
-        && !decorated.contains(IDENTITY_REBIND_UNPROVEN_RECOVERY)
-    {
-        return format!("{decorated}; {IDENTITY_REBIND_UNPROVEN_RECOVERY}");
-    }
-    if decorated.starts_with("IDENTITY_RESTORE_CROSS_PROJECT:")
-        && !decorated.contains(IDENTITY_RESTORE_CROSS_PROJECT_RECOVERY)
-    {
-        return format!("{decorated}; {IDENTITY_RESTORE_CROSS_PROJECT_RECOVERY}");
-    }
     decorated
 }

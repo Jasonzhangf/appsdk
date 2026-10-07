@@ -20,7 +20,7 @@ collab notify unsubscribe <subscription-id>
 ```
 
 - AppSDK project initialization creates/refreshes the seven-day reusable default
-  `direct-message` lease through official `collab init`. Re-registering a peer
+  `direct-message` lease through the daemon identity context. Re-registering a peer
   follows its currently selected transport binding and replaces a persisted
   default lease whose transport or target belongs to a retired route. An explicit owner
   unsubscribe of that lease stays cancelled; later `register` / `context` /

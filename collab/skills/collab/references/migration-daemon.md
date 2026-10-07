@@ -111,7 +111,7 @@ collab migrate apply
 # install the reviewed Collab binary
 collab down
 collab up
-collab worker recover
+collab context
 collab migrate verify
 ```
 
@@ -139,7 +139,7 @@ current contract, use the single offline reset owner:
 collab down
 collab reset --discard-legacy --approval "explicit user authorization text"
 collab up
-collab init
+collab status --all
 ```
 
 `collab reset` is not `collab migrate`. It never imports history, never
@@ -192,16 +192,17 @@ collab up
 - After restart prove one PID/socket, preserved durable state, identity rebind,
   migration verify, and one real subscribed notice.
 
-### Native endpoint recovery
+### Native endpoint diagnostics
 
-When `collab context` reports a missing native route, recover the same identity
-through a unique current sessionID/threadID pair bound to the verified
-AppServer owner. If both runtime IDs are unavailable, one exact tmux
-server/session/pane/process anchor may recover identity. An unknown/error
-probe does not authorize master recovery. Notifications require the native
-AppServer route to pass self-check; do not switch that binding to tmux on
-failure. See
-[`state-paths.md`](state-paths.md#native-route-and-identity-recovery).
+`collab context` is the only agent identity entry. If it reports
+`requires_identity_update`, an agent supplies only the requested factual fields
+once through `collab context --provide`. The daemon validates the current
+session/thread or tmux anchor and owns identity selection, creation, recovery,
+update, registration, credential persistence, and binding. Read-only route and
+worker diagnostics are operator tools, not an agent recovery sequence.
+Notifications require the native AppServer route to pass self-check; do not
+switch that binding to tmux on failure. See
+[`state-paths.md`](state-paths.md#read-only-route-diagnostics).
 
 ## Deprecated commands
 

@@ -1,6 +1,7 @@
 use super::*;
 use crate::identity::{AppServerId, CommandId, OperationId};
-use crate::proto::ProjectContext;
+use crate::proto::{IdentityFacts, ProjectContext};
+use serde_json::Value;
 use std::path::Path;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -132,230 +133,133 @@ pub(crate) fn context_env_view() -> serde_json::Value {
     serde_json::to_value(selected).unwrap_or(serde_json::Value::Null)
 }
 
-/// The closed set of failures that mean this peer's identity cannot be proven,
-/// restored, or authenticated. These — and only these — are answered with the
-/// identity terminal. A route, runtime-binding, or transport failure is a
-/// different problem, so it keeps failing closed with a non-zero exit instead
-/// of being relabelled as an identity request.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum IdentityFailure {
-    TokenMismatch,
-    RebindUnproven,
-    CrossProjectRestore,
-    AnchorMissing,
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IdentitySupplement {
+    #[serde(default, deserialize_with = "provided_string")]
+    session_id: Option<String>,
+    #[serde(default, deserialize_with = "provided_string")]
+    thread_id: Option<String>,
+    #[serde(default, deserialize_with = "provided_string")]
+    endpoint: Option<String>,
+    #[serde(default, deserialize_with = "provided_string")]
+    namespace: Option<String>,
 }
 
-impl IdentityFailure {
-    /// Classify against the exact strings the identity layer and the daemon
-    /// actually produce. An unrecognised failure returns `None` on purpose: an
-    /// open-ended default would silently absorb unrelated failures.
-    pub(crate) fn classify(error: &str) -> Option<Self> {
-        if error.starts_with("token mismatch")
-            || error.starts_with("RUNTIME_BINDING_REJECTED: worker token does not match")
-        {
-            return Some(Self::TokenMismatch);
-        }
-        if error.starts_with("IDENTITY_REBIND_UNPROVEN:") {
-            return Some(Self::RebindUnproven);
-        }
-        if error.starts_with("IDENTITY_RESTORE_CROSS_PROJECT:") {
-            return Some(Self::CrossProjectRestore);
-        }
-        if error.starts_with("COLLAB_IDENTITY_ANCHOR_MISSING:") {
-            return Some(Self::AnchorMissing);
-        }
-        None
-    }
-
-    pub(crate) fn code(self) -> &'static str {
-        match self {
-            Self::TokenMismatch => "TOKEN_MISMATCH",
-            Self::RebindUnproven => "IDENTITY_REBIND_UNPROVEN",
-            Self::CrossProjectRestore => "IDENTITY_RESTORE_CROSS_PROJECT",
-            Self::AnchorMissing => "COLLAB_IDENTITY_ANCHOR_MISSING",
-        }
-    }
-
-    /// Every repair in this set needs an operator to declare which durable
-    /// identity to adopt, because `collab context` must not infer one.
-    /// `TokenMismatch` is the exception: that identity is already declared and
-    /// was rejected, so the recovery is to escalate it, not to approve a new
-    /// declaration.
-    pub(crate) fn requires_approval(self) -> bool {
-        !matches!(self, Self::TokenMismatch)
-    }
-
-    /// The action must never be the invocation that just failed, or an agent
-    /// following it loops. `IDENTITY_REBIND_UNPROVEN` and
-    /// `COLLAB_IDENTITY_ANCHOR_MISSING` are only reached without `--worker`, and
-    /// the identity layer documents `--worker` as their recovery, so the action
-    /// names the missing argument with a placeholder: the operator picks the
-    /// durable identity. A rejected token cannot be re-run into validity, and
-    /// every `collab` command run as that worker re-sends the same rejected
-    /// token through `me()`, so `TokenMismatch` escalates out of band with the
-    /// concrete worker instead of naming a command that cannot work.
-    pub(crate) fn action(self, worker: Option<&str>) -> String {
-        let named = worker.unwrap_or("<worker_id>");
-        match self {
-            Self::TokenMismatch => format!(
-                "escalate out of band to the project owner, or to the live master through a healthy peer: worker {named} is already declared and its token was rejected, so no collab command run as {named} can re-authenticate; preserve exact_error and worker_id={named} and wait for the owner to declare which durable identity to adopt; do not copy tokens, mint a new identity, or edit routes"
-            ),
-            Self::RebindUnproven | Self::CrossProjectRestore | Self::AnchorMissing => {
-                "collab context --worker <worker_id>".to_owned()
-            }
-        }
-    }
+fn provided_string<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    <String as serde::Deserialize>::deserialize(deserializer).map(Some)
 }
 
-/// The single, copyable instruction an agent needs when `collab context`
-/// cannot prove or restore its identity. The reason is the classified code so a
-/// caller can branch without parsing prose, and `requires_approval` is derived
-/// per reason so no caller has to guess whether a human gate applies.
-pub(crate) fn identity_update_view(
-    error: &anyhow::Error,
-    failure: IdentityFailure,
-    requested_worker: Option<&str>,
-) -> serde_json::Value {
-    json!({
-        "required": true,
-        "reason": failure.code(),
-        "exact_error": error.to_string(),
-        "worker_id": requested_worker,
-        "action": failure.action(requested_worker),
-        "requires_approval": failure.requires_approval(),
-        "next": "run the action from the canonical project main checkout with a live runtime anchor; if the same error persists, preserve exact_error and worker_id and report them to the live master; do not edit routes, copy tokens, or start a second daemon",
+fn validate_supplement_string(field: &str, value: &str) -> anyhow::Result<()> {
+    if value.trim().is_empty() {
+        anyhow::bail!("IDENTITY_FACT_INVALID: {field} must not be empty");
+    }
+    if value.chars().any(char::is_control) {
+        anyhow::bail!("IDENTITY_FACT_INVALID: {field} must not contain control characters");
+    }
+    Ok(())
+}
+
+fn parse_identity_supplement(raw: &str) -> anyhow::Result<IdentityFacts> {
+    let supplement: IdentitySupplement = serde_json::from_str(raw).map_err(|error| {
+        anyhow::anyhow!("IDENTITY_FACT_INVALID: invalid --provide JSON: {error}")
+    })?;
+    for (field, value) in [
+        ("session_id", supplement.session_id.as_deref()),
+        ("thread_id", supplement.thread_id.as_deref()),
+        ("endpoint", supplement.endpoint.as_deref()),
+        ("namespace", supplement.namespace.as_deref()),
+    ] {
+        if let Some(value) = value {
+            validate_supplement_string(field, value)?;
+        }
+    }
+    if supplement.session_id.is_none()
+        && supplement.thread_id.is_none()
+        && supplement.endpoint.is_none()
+        && supplement.namespace.is_none()
+    {
+        anyhow::bail!("IDENTITY_FACT_INVALID: --provide must contain at least one identity fact");
+    }
+    Ok(IdentityFacts {
+        session_id: supplement.session_id,
+        thread_id: supplement.thread_id,
+        endpoint: supplement.endpoint,
+        namespace: supplement.namespace,
+        tmux: None,
     })
 }
 
-/// The identity terminal is entered only for a classified identity failure.
-/// Everything else keeps its original error and a non-zero exit.
-pub(crate) fn identity_terminal(
-    bootstrap: &ContextBootstrap,
-    error: anyhow::Error,
-    requested_worker: Option<&str>,
-) -> anyhow::Result<serde_json::Value> {
-    match IdentityFailure::classify(&error.to_string()) {
-        Some(failure) => Ok(identity_update_snapshot(
-            bootstrap,
-            &error,
-            failure,
-            requested_worker,
-        )),
-        None => Err(error),
-    }
-}
-
-/// Read-only daemon projections that need no worker token. They stay available
-/// while the identity path fails closed, so one `collab context` still answers
-/// both questions an agent has at bootstrap: what is the durable project state,
-/// and what must I do about my identity.
-fn read_only_project_state(scope: &Scope) -> anyhow::Result<serde_json::Value> {
-    let context = Some(cli_project_context(&scope.root)?);
-    let workers: serde_json::Value =
-        client::call_with_context(&scope.sock_path(), &Req::Workers, context.clone())?;
-    let status: serde_json::Value =
-        client::call_with_context(&scope.sock_path(), &Req::StatusAll, context.clone())?;
-    let master: serde_json::Value =
-        client::call_with_context(&scope.sock_path(), &Req::MasterStatus, context)?;
-    Ok(json!({
-        "peers": workers["workers"].clone(),
-        "peer_count": workers["count"].clone(),
-        "tasks": status["tasks"].clone(),
-        "subagents": status["subagents"].clone(),
-        "master_wake": status["master_wake"].clone(),
-        "summary": status["summary"].clone(),
-        "pending_merges": status["pending_merges"].clone(),
-        "master": master["master"].clone(),
-        "recorded_unusable": master["recorded_unusable"].clone(),
-    }))
-}
-
-/// The identity terminal of the `collab context` state machine. It never
-/// fabricates a registered snapshot: `registered` stays false, `identity`
-/// stays null, and `requires_identity_update` carries the exact reason plus the
-/// one action that can restore the identity.
-pub(crate) fn identity_update_snapshot(
-    bootstrap: &ContextBootstrap,
-    error: &anyhow::Error,
-    failure: IdentityFailure,
-    requested_worker: Option<&str>,
-) -> serde_json::Value {
-    let mut snapshot = read_only_project_state(&bootstrap.scope).unwrap_or_else(|read_error| {
-        json!({
-            "read_only_state_unavailable": true,
-            "exact_error": read_error.to_string(),
-        })
-    });
-    let requires_identity_update = identity_update_view(error, failure, requested_worker);
-    if let Some(object) = snapshot.as_object_mut() {
-        object.insert("schema_version".to_owned(), json!(1));
-        object.insert("project_root".to_owned(), json!(bootstrap.scope.root));
-        object.insert("registered".to_owned(), json!(false));
-        object.insert("identity".to_owned(), serde_json::Value::Null);
-        object.insert("env".to_owned(), context_env_view());
-        object.insert(
-            "bootstrap".to_owned(),
-            json!({
-                "project_root_resolution": bootstrap.project_root_resolution,
-                "baseline_created": bootstrap.baseline_created,
-                "daemon_started": bootstrap.daemon_started,
-                "identity": "unresolved",
-                "registered": false,
-            }),
-        );
-        object.insert(
-            "requires_identity_update".to_owned(),
-            requires_identity_update,
+fn merge_supplied_fact(
+    field: &str,
+    observed: &mut Option<String>,
+    supplied: Option<String>,
+) -> anyhow::Result<()> {
+    let Some(supplied) = supplied else {
+        return Ok(());
+    };
+    if observed.as_deref().is_some_and(|value| value != supplied) {
+        anyhow::bail!(
+            "IDENTITY_FACT_CONFLICT: supplied {field} conflicts with the automatically observed value"
         );
     }
-    snapshot
+    *observed = Some(supplied);
+    Ok(())
 }
 
-pub(crate) fn context_snapshot(worker: Option<String>) -> anyhow::Result<serde_json::Value> {
+pub(crate) fn collect_identity_facts(provide: Option<&str>) -> anyhow::Result<IdentityFacts> {
+    let supplied = provide.map(parse_identity_supplement).transpose()?;
+    let mut facts = crate::client::adapters::codex_app_server::identity_facts_from_env()
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let Some(supplied) = supplied else {
+        return Ok(facts);
+    };
+    merge_supplied_fact("session_id", &mut facts.session_id, supplied.session_id)?;
+    merge_supplied_fact("thread_id", &mut facts.thread_id, supplied.thread_id)?;
+    merge_supplied_fact("endpoint", &mut facts.endpoint, supplied.endpoint)?;
+    merge_supplied_fact("namespace", &mut facts.namespace, supplied.namespace)?;
+    Ok(facts)
+}
+
+pub(crate) fn identity_context_response(
+    scope: &Scope,
+    facts: IdentityFacts,
+) -> anyhow::Result<(Value, Option<Identity>)> {
+    let response: Value = client::call_with_context(
+        &scope.sock_path(),
+        &Req::IdentityContext { facts },
+        Some(cli_project_context(&scope.root)?),
+    )?;
+    let snapshot = response
+        .get("snapshot")
+        .cloned()
+        .filter(Value::is_object)
+        .ok_or_else(|| anyhow::anyhow!("IDENTITY_CONTEXT_INVALID: response is missing snapshot"))?;
+    let receipt = response
+        .get("identity_receipt")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| {
+            anyhow::anyhow!("IDENTITY_CONTEXT_INVALID: invalid identity receipt: {error}")
+        })?;
+    Ok((snapshot, receipt))
+}
+
+pub(crate) fn identity_context_required(snapshot: &Value) -> anyhow::Error {
+    let mut response = proto::Resp::err("IDENTITY_INFORMATION_REQUIRED: provide the missing runtime facts once through collab context --provide");
+    response.data = snapshot.clone();
+    anyhow::Error::new(client::ServerResponseError { response })
+}
+
+pub(crate) fn context_snapshot(provide: Option<String>) -> anyhow::Result<serde_json::Value> {
     let host_paths = scope::HostPaths::resolve()?;
     let cwd = std::env::current_dir()?;
+    let facts = collect_identity_facts(provide.as_deref())?;
     let bootstrap = context_bootstrap(&host_paths, &cwd)?;
     let scope = bootstrap.scope.clone();
-    let requested_worker = worker.clone();
-    let requested_worker = requested_worker.as_deref();
-    let mut ident = match identity::load_or_create_for_context(&scope, worker) {
-        Ok(ident) => ident,
-        Err(error) => return identity_terminal(&bootstrap, error, requested_worker),
-    };
-    let registration = ensure_registration_with_outcome(&scope, &mut ident);
-    let (_, identity_state) = match registration {
-        Ok(outcome) => outcome,
-        // The durable identity is loaded here, so the terminal can name the
-        // concrete worker instead of leaving the caller with a placeholder.
-        Err(error) => {
-            return identity_terminal(&bootstrap, error, Some(ident.worker_id.as_str()));
-        }
-    };
-    let identity_state = match identity_state {
-        RegistrationOutcome::Created => "created",
-        RegistrationOutcome::Reused => "reused",
-        RegistrationOutcome::Recovered => "recovered",
-        RegistrationOutcome::Recreated => "recreated",
-    };
-    // A registered identity can still be rejected by the daemon when its token
-    // no longer owns the worker id. `identity_terminal` decides whether that
-    // rejection is a classified identity failure or an unrelated one that must
-    // keep failing closed. The rejected worker is the loaded identity, not the
-    // caller's optional `--worker`, so the escalation names a concrete id even
-    // on the implicit `collab context` path.
-    let mut v: serde_json::Value = match call_project(
-        &scope,
-        &ident,
-        &Req::Context {
-            worker_id: ident.worker_id.clone(),
-            token: ident.token.clone(),
-        },
-    ) {
-        Ok(value) => value,
-        Err(error) => {
-            return identity_terminal(&bootstrap, error, Some(ident.worker_id.as_str()));
-        }
-    };
+    let (mut v, _receipt) = identity_context_response(&scope, facts)?;
     if let Some(value) = v.as_object_mut() {
         value.insert(
             "bootstrap".to_string(),
@@ -363,8 +267,12 @@ pub(crate) fn context_snapshot(worker: Option<String>) -> anyhow::Result<serde_j
                 "project_root_resolution": bootstrap.project_root_resolution,
                 "baseline_created": bootstrap.baseline_created,
                 "daemon_started": bootstrap.daemon_started,
-                "identity": identity_state,
-                "registered": true,
+                "identity": if value.get("registered").and_then(Value::as_bool) == Some(true) {
+                    "daemon-owned"
+                } else {
+                    "unresolved"
+                },
+                "registered": value.get("registered").cloned().unwrap_or(json!(false)),
             }),
         );
         value.insert("env".to_string(), context_env_view());

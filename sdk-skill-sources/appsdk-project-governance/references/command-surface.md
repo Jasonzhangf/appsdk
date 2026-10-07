@@ -51,15 +51,15 @@ project-memory reentry [project] --run <run-id>
 ## Collab commands
 
 ```text
-collab init                            register this peer once through AppSDK or standalone
-collab context                         read current peer state and authority
+collab context                         single agent identity bootstrap and authority query
+collab context --provide '<JSON>'      supply only required missing facts once
+                                       (session_id/thread_id/endpoint/namespace only)
 collab sendmessage --to <peer> --subject <topic> "<body>"
                                        send one durable ordinary message
 collab recv                            consume delivered notifications
 collab inbox                           list unread messages (read-only)
 collab msg <id>                        read one message without consuming
 collab ack <id> | --all                compatibility ACK for delivered messages
-collab master status                   show live master state
 collab master promote --approval "<text>"
                                        promote this peer when user approves and no master exists
 collab master delegate <peer>          transfer live master authority
@@ -80,15 +80,14 @@ collab reset --discard-legacy --approval "<text>"
                                        retire/rebuild Collab-owned local control plane
 collab down                            controlled daemon stop
 collab up                              controlled daemon start
-collab worker recover                  rebind/recover worker identity after restart
 ```
 
-The commands below are diagnostic-only. They are not initialization steps and
-must not be chained after `collab context` during normal setup. The explicit
-stale-daemon recovery procedure in
-[`init-prompts.md`](init-prompts.md#stale-daemon-socket-or-lock) is the only
-exception: there, preserve the exact failure, then use `collab status --all`
-before the controlled `collab up` and final `collab context`.
+The commands below are read-only operator diagnostics. They are not
+initialization, route recovery, or agent bootstrap steps. Do not chain them
+after `collab context` during setup. If context explicitly reports daemon DOWN
+or a runtime error, preserve the exact failure and stop; daemon lifecycle
+maintenance is human-authorized. See
+[`init-prompts.md`](init-prompts.md#stale-daemon-socket-or-lock).
 
 ```text
 collab status --all                    server summary and worker/task state
@@ -107,3 +106,6 @@ collab notify status                   own subscriptions
 - If a command returns an error, preserve the exact error and report it.
   Never claim a route, migration, merge, install, restart, or delivery from
   command output alone.
+- Do not run AppSDK or Collab initialization or operator diagnostics to repair
+  pending identity.
+  `collab context` and its one factual supplement are the only agent bootstrap.

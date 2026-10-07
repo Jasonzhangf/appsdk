@@ -28,7 +28,7 @@
     "skills/collab/SKILL.md"
   ],
   "resources": [
-    {"id": "peer-identity", "kind": "truth", "owner": "handle_register"},
+    {"id": "peer-identity", "kind": "truth", "owner": "ProjectRuntimeManager::identity_context"},
     {"id": "task-lifecycle", "kind": "truth", "owner": "Server"},
     {"id": "durable-mailbox", "kind": "truth", "owner": "Server"},
     {"id": "notification-subscription", "kind": "control", "owner": "NotificationSubscription"},

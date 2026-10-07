@@ -42,7 +42,6 @@ collab reset --project --discard-legacy --approval "<explicit user authorization
 collab reset --host --storage-root <project root> --discard-legacy \
   --approval "<explicit user authorization>"
 collab up
-collab init
 collab status --all
 ```
 
@@ -91,29 +90,29 @@ unless the operator explicitly chooses the owner's migration or reset route.
 ## Identity and role
 
 - The current client is Codex only. The current route is bound to the verified
-  AppServer owner and exact sessionID/threadID pair. A verified tmux
-  socket/server/session/pane/process tuple is only a recovery anchor when both
-  runtime IDs are unavailable. Do not reconstruct an endpoint from a stale
-  route or manually edit route state.
+  AppServer owner and exact sessionID/threadID pair. The daemon may use a
+  verified tmux socket/server/session/pane/process tuple when both runtime IDs
+  are unavailable. Do not reconstruct an endpoint from a stale route or
+  manually edit route state.
 - A Git worktree does not inherit `.agent-collab/` and is not an identity
-  context. Resolve `collab context`, `collab master status`, registration, and
-  recovery from the canonical project main tree. The daemon first resolves
-  sessionID/threadID against the current AppServer binding; it may use one
-  exact tmux anchor only when both runtime IDs are absent;
-  historical routes are not candidates and `routes.jsonl` must not be read to
-  guess one. Never register the worktree as a second peer or create a second
-  route.
+  context. Run `collab context`; the CLI automatically observes runtime facts
+  and the daemon owns identity selection, creation, recovery, update,
+  credential/binding/lease persistence, route publication, and the complete
+  snapshot. Historical routes are not candidates and `routes.jsonl` must not
+  be read to guess one. Never register the worktree as a second peer or create
+  a second route.
 - Default role is `peer`; master is explicit and user-approved.
 - `collab context` is the single information endpoint for the current peer,
-  binding, role, transport, liveness, tasks, and peers.
-- `collab master status` is the authoritative live-master query.
-- `collab who` and `collab status --all` are peer diagnostics, not setup steps
-  and not a substitute for `collab master status`; `who` has no top-level
-  `master` field.
-- A failed `collab context`, including `token mismatch`, is a registration
-  problem, not evidence that no live master exists. Query `collab master status`
-  independently. Only a returned `master: null` with no `recorded_unusable`
-  entry permits the explicit user-approved promotion path.
+  binding, role, transport, liveness, tasks, master, and peers.
+- `collab master status`, `collab who`, `collab status --all`, and
+  `collab worker status` are read-only operator diagnostics. They are not agent
+  identity-recovery steps.
+- If `collab context` reports `requires_identity_update`, read
+  `required_fields`, `reason`, and `exact_error`. Supply only the requested
+  `session_id`, `thread_id`, `endpoint`, or `namespace` values once through
+  `collab context --provide`. The daemon completes identity selection,
+  recovery, registration, credential persistence, binding, and lease state.
+  Explicit conflicts and errors preserve their original error.
 
 ## Transport selection
 
@@ -128,53 +127,41 @@ unless the operator explicitly chooses the owner's migration or reset route.
 
 ## Registration verification
 
-Run `collab context`. If it says unregistered, run the idempotent
-`appsdk init .` (or `collab init` for a standalone project), then run
-`collab context` again. Registration must run from the canonical project main
-tree, not a `playground/` worktree. `collab context` itself is read-only and
-must be run from that same canonical root: it resolves the route from global
-state and never creates a route or identity. A worktree cwd fails closed with
-`ROUTE_RESOLVE_INVALID`; do not retry it as a second registration.
+Run `collab context`. It resolves the canonical project root, observes the
+available runtime facts, and asks the daemon to establish or recover the
+identity. If the snapshot contains `requires_identity_update`, supply only the
+requested factual fields once:
 
-`collab init` success is not delivery proof. Verify the live binding, selected
-transport, endpoint liveness, presence, and role through `collab context`.
-Never edit `routes.jsonl`, `server.pid`, journal, mailbox, or identity files to
-make a registration appear healthy.
+```sh
+collab context --provide '{"session_id":"...","thread_id":"...","endpoint":"...","namespace":"..."}'
+```
 
-If `collab context` fails with `token mismatch`, preserve the exact error and
-stop registration repair. Do not copy a global token into project state, edit
-an identity file, run a reset, or promote a peer. Check `collab master status`
-separately, report the exact context error to the live master, and use the
-migration/reset owner only when that owner explicitly decides the project-local
-control plane is unrecoverable.
+The supplement accepts only the four scalar keys `session_id`, `thread_id`,
+`endpoint`, and `namespace`. It does not accept `worker_id`, approval, token,
+generation, binding, or project scope. Do not run `appsdk init`, `collab init`,
+a manual identity recovery command, or a status/route hunt to repair identity. If
+`collab context` fails with an explicit conflict or error, preserve the exact
+error and stop. Never edit `routes.jsonl`, `server.pid`, journal, mailbox, or
+identity files to make registration appear healthy.
 
-## Native route and identity recovery
+## Read-only route diagnostics
 
 A registered AppServer route is live only when the verified owner resolves the
 exact saved session/thread and project cwd through native `thread/read`. A
 tmux-only binding uses its verified pane probe as that transport's liveness.
-A missing endpoint is absent; a failed probe is unknown and cannot authorize
-master recovery. Neither presence signal establishes message consumption.
-Tmux may be queried as an identity recovery anchor only when both runtime IDs
-are absent on an AppServer binding.
+A missing endpoint is absent; a failed probe is unknown. Neither presence signal
+establishes message consumption.
 
-Diagnose read-only from the canonical project main checkout:
+An operator may use these read-only diagnostics for audit:
 
 ```sh
-collab context
 collab route resolve --native-thread-id <thread-id> --session-id <session-id>
 collab worker status <peer-id>
+collab status --all
 ```
 
 Route resolution compares supplied runtime IDs with the current registered
-binding and never selects another thread by history. For an AppServer binding,
-if both IDs are missing, `appsdk init .` may reuse the original identity only
-when one verified tmux server/session/pane/process anchor uniquely matches it
-in the same project scope. Conflicting, ambiguous, cross-project, missing, or
-unknown evidence fails closed. Master identity recovery preserves the original
-grant and is permitted only when no live master exists. Never edit
-`routes.jsonl`, identity files, journal, or mailbox to force recovery, and
-never start a second daemon.
-
-The canonical project main checkout owns identity lookup, registration, and
-recovery. Never create a worktree-local peer to make the route appear live.
+binding and never selects another thread by history. It is read-only and returns
+no token. The daemon remains the sole owner of route selection and identity
+recovery. Never edit `routes.jsonl`, identity files, journal, or mailbox to force
+a route, and never start a second daemon.

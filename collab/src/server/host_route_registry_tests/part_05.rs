@@ -628,7 +628,7 @@
     }
 
     #[tokio::test]
-    async fn wire_cli_recover_rotates_a_lost_token_for_the_same_thread_and_route() {
+    async fn wire_cli_register_rejects_token_rotation_for_the_same_thread_and_route() {
         let (server, root, journal_path) = test_server();
         let app = crate::identity::CLI_APP_SERVER_ID;
         let worker_id = "lost-token-worker";
@@ -681,13 +681,13 @@
                  Some(recovery_candidates)),
         )
         .await;
-        assert!(recovered.ok, "{recovered:?}");
-        assert_eq!(recovered.data["recovered"], true);
+        assert!(!recovered.ok, "{recovered:?}");
+        assert!(recovered.error.as_deref().is_some_and(|error| error.starts_with("TOKEN_MISMATCH:")));
 
         let new_runtime = runtime_for_registered(&server, &root, worker_id, app);
         assert_eq!(
             new_runtime.endpoint_generation,
-            old_runtime.endpoint_generation + 1
+            old_runtime.endpoint_generation
         );
         assert_eq!(new_runtime.runtime_id, old_runtime.runtime_id);
         assert_eq!(
@@ -699,7 +699,7 @@
                 .get(worker_id)
                 .unwrap()
                 .token,
-            new_token
+            old_token
         );
         assert!(!std::fs::read(&journal_path).unwrap().is_empty());
 
@@ -707,7 +707,7 @@
     }
 
     #[tokio::test]
-    async fn wire_worker_recover_rotates_a_lost_token_with_the_persisted_runtime() {
+    async fn wire_register_rejects_token_rotation_with_the_persisted_runtime() {
         let (server, root, _) = test_server();
         let app = crate::identity::CLI_APP_SERVER_ID;
         let worker_id = "worker-recover-worker";
@@ -742,7 +742,9 @@
                  test_candidates_for_registered(&server, &root, worker_id, app)),
         )
         .await;
-        assert!(recovered.ok, "{recovered:?}");
+        assert!(!recovered.ok, "{recovered:?}");
+        assert!(recovered.error.as_deref().is_some_and(|error| error.starts_with("TOKEN_MISMATCH:")));
+        assert_eq!(runtime_for_registered(&server, &root, worker_id, app), persisted_runtime);
         assert_eq!(
             server
                 .state
@@ -752,7 +754,7 @@
                 .get(worker_id)
                 .unwrap()
                 .token,
-            new_token
+            old_token
         );
 
         std::fs::remove_dir_all(root).unwrap();
@@ -1071,7 +1073,7 @@
         assert!(wrong_token
             .error
             .as_deref()
-            .is_some_and(|error| error.starts_with("RUNTIME_BINDING_REJECTED:")));
+            .is_some_and(|error| error.starts_with("TOKEN_MISMATCH:")));
         assert_eq!(mutation_snapshot(&server), before);
         assert_eq!(std::fs::read(&journal_path).unwrap(), before_journal);
         assert_eq!(

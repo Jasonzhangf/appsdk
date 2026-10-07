@@ -10,46 +10,20 @@ The design goal is not to make route resolution guess. Strict lookup remains fai
 
 | Source | Current owner | Maintenance role |
 | --- | --- | --- |
-| `~/.collab/identities/<worker>/identity.json` | CLI identity owner | Credential and transport anchor for one principal. |
-| `~/.collab/archives/identities-retired-*/<worker>/identity.json` | CLI identity owner | Reversible history for retire/recovery. |
+| `~/.collab/identities/<worker>/identity.json` | Daemon identity owner | Credential and transport anchor for one principal. |
+| `~/.collab/archives/identities-retired-*/<worker>/identity.json` | Daemon lifecycle owner | Reversible history for retire/recovery. |
 | `~/.collab/routes.jsonl` | Host route registry | Project registration and split-journal host route index. |
 | `<project>/.agent-collab/server/journal.jsonl` | Project runtime | Typed project state for bindings, grants, tasks, mailboxes, notifications. |
 | daemon in-memory `current_thread_routes`, `runtime_bindings`, `master_grants`, worker registry | Runtime/global state | Current live projection used by route resolve and status. |
 | mailbox/notification/subscription records | Mailbox/subscription owners | Delivery state and pending consumption. |
 
-## Current graph as observed in code
+## Bootstrap owner
 
-```mermaid
-flowchart LR
-  C0[collab context request] --> A0[Extract current anchors]
-  A0 --> A1{anchor present?}
-  A1 -- no --> E0[COLLAB_IDENTITY_ANCHOR_MISSING]
-  A1 -- yes --> ID0[identity_by_current_anchors_at]
-  ID0 --> ID1{anchor resolution}
-  ID1 -- current project unique --> REG0[Register/reuse identity]
-  ID1 -- cross project unique --> CP[retire or fail by caller policy]
-  ID1 -- ambiguous/conflict --> E1[IDENTITY_RESTORE_AMBIGUOUS_OR_CONFLICT]
-  ID1 -- none --> SB[identity_for_scope_rebind_at]
-  SB --> LIVE{all same-project peers provably dead?}
-  LIVE -- yes --> AR[archive dead peers] --> NEW[mint fresh identity] --> REG0
-  LIVE -- no --> E2[IDENTITY_REBIND_UNPROVEN]
-  REG0 --> R1[register_typed]
-  R1 --> R2[commit runtime binding/grant/worker]
-  R2 --> R3[publish host route]
-  R3 --> S0[registered transport live]
+`IdentityContext` is the daemon-owned bootstrap entry. Its facts, missing-fields
+terminal, Register admission and receipt persistence are defined by the
+[minimal interaction contract](../../../docs/design/collab-identity-minimal-interaction.md)
+and the project context graph. Ledger maintenance does not replace that owner.
 
-  R0[RouteResolve request] --> RSTR[strict current route lookup]
-  RSTR --> S1[RouteResolution]
-  RSTR --> E3[ROUTE_RESOLVE_NOT_FOUND / STALE]
-
-  U[daemon/runtime startup] --> RR[replay route journals]
-  RR --> REC[reconcile_same_pane_master_routes]
-  REC --> S2[same-pane host/project generations agree]
-  REC --> E4[RECOVERY_RECONCILE_REQUIRED]
-
-  M[worker status projection] --> LIVE_P[probe endpoint]
-  LIVE_P --> P0[Present/Cold/Missing/Unknown view]
-```
 
 ## Gap analysis
 
@@ -58,11 +32,11 @@ flowchart LR
 | G1 no background ledger owner | Lost records are only seen on `collab who`, `context`, or registration. | Add one scheduled/manual ledger maintenance entry that scans identity/route/projection records. |
 | G2 no typed ledger state | Status shows boolean/live strings but has no durable lifecycle classification. | Persist `LedgerPeerState`: `live`, `cold`, `missing`, `repair_required`, `retired`. |
 | G3 pane missing cannot close peer lifecycle | A vanished tmux peer can remain registered with `TMUX_PANE_MISSING`; direct delivery has no durable fence. | If pane probe is `Missing`, transition peer to `missing`, fence further direct delivery, retain mailbox/durable notifications, and mark repair/retire eligibility. |
-| G4 cold AppServer thread is not recoverable from ledger alone | A successful `thread/read` that returns `notLoaded` is a definitive "not currently live, but resumable" answer, not a probe failure. | Classify it `cold`: preserve it (never archive), and never let it deny recovery on its own. A cold record that still overlaps the current pane/session/thread is still non-live, so it is not a conflict: the current pane adopts the deterministic non-live winner (anchor overlap, then pane-derived id, then durable recency), and only a live overlap fails closed with the explicit `--worker` override. |
+| G4 cold AppServer thread is not recoverable from ledger alone | A successful `thread/read` that returns `notLoaded` is a definitive "not currently live, but resumable" answer, not a probe failure. | Preserve cold records. Bootstrap still requires a unique compatible anchor; duplicate records cannot be selected by recency or a worker override. |
 | G5 host/project split-journal reconciliation is request/startup scoped | Existing reconciliation covers same-pane master generation mismatch, not all ledger records. | Promote reconciliation to the same ledger maintenance DAG while preserving narrow typed admission. |
 | G6 current MCP process without anchor cannot map to lost peer | `COLLAB_IDENTITY_ANCHOR_MISSING` stops before ledger repair. | A maintenance owner can classify missing peers, but must not authenticate or promote a caller that has no valid anchor/token. |
 | G7 delivery and identity recovery are conflated | A lost endpoint is reported, but notification/subscription state has no separate terminal classification. | Split endpoint state from durable delivery state; mailbox receipt remains authoritative consumption. |
-| G8 retire has no ledger-level policy owner | `archive_dead_peers` is triggered from context/rebind paths only. | Maintenance may propose/archive provably dead peers, but any credential retirement must be atomic and reversible. |
+| G8 retire needs a ledger-level policy owner | Bootstrap no longer archives records while choosing an identity. | Maintenance may propose/archive provably dead peers, but any credential retirement must be atomic and reversible. |
 | G9 success evidence has no ledger sink | Success is reported through context/message replay, but the ledger has no durable repaired/reconciled receipt. | Persist a typed maintenance receipt per transition with previous/current generation and evidence kind. |
 | G10 status projection can mislead | `identity_valid` and `endpoint_live` are display booleans, not repair commands. | Status must read ledger state plus probe result; repair commands must remain separate. |
 
@@ -123,40 +97,14 @@ Probe states do not directly become ledger states. The classification combines t
 | archived credential | no active refs | Missing or all refs retired | revoked | `retire`; archive receipt retained. |
 | no current anchor | any | any | any | caller remains unauthenticated; maintenance may classify but not promote. |
 
-## Anchor duplicate resolution (implemented)
+## Anchor duplicate resolution
 
-When several persisted records claim one current anchor, the winning peer is
-chosen by a single ordered decision, not by a per-binding generation:
+Identity bootstrap follows [the minimal interaction contract](../../../docs/design/collab-identity-minimal-interaction.md).
+The daemon accepts only a uniquely proven current anchor. Duplicate claims return
+`IDENTITY_RESTORE_AMBIGUOUS`; file recency, liveness and worker-name overrides
+cannot select an identity. Maintenance classifies ledger records independently
+and does not grant bootstrap authority.
 
-1. **Live conflict is checked first, before scope filtering.** A reachable
-   member that claims this anchor makes the anchor ambiguous regardless of the
-   project it registered under: a foreign live owner must never be hidden
-   behind a non-live current-scope duplicate. Only an *explicit user override*
-   (`--worker`) may adopt past a live conflict.
-   The override is decided before anchor resolution: a named identity is
-   recovered without a liveness probe, so anchor ambiguity, a cross-project
-   record, and a live duplicate all yield to the named identity instead of
-   blocking it. Without `--worker` the live conflict still fails closed.
-   `--worker` is the user's adjudication channel (user requirement:
-   "冲突由用户裁决，可以顶替冲突身份"), so a record whose `project_scope`
-   is another project is still recoverable by name — a moved checkout or
-   renamed project must be able to recover its own durable identity and
-   subscriptions instead of minting a new one (`explicit_worker_recovers_a_cross_project_identity_by_name`).
-2. **Then scope preference.** Restrict to records whose `project_scope` is the
-   current project. A foreign duplicate can never shadow, or be retired in
-   place of, a current-scope match.
-3. **Cold/unproven records never block.** A `cold` (`notLoaded`) or `unknown`
-   (probe error) member is not live, so it is never a conflict: whether it
-   overlaps the current pane/session/thread or not, it is a normal
-   drift/restart candidate the current pane adopts deterministically.
-4. **Provably dead records never block.** Dead members are archived before the
-   surviving candidates are considered.
-5. **Durable recency breaks ties.** Among adoptable records the winner is the
-   one this pane derives its id from (`codex-<pane>`), then the most recently
-   rewritten identity file, then the lowest `worker_id`. The identity file is
-   rewritten atomically on every registration, so its last-write time is a
-   global order (a new binding's `endpoint_generation` restarts at 1 and is
-   not).
 
 ## Repair actions
 
@@ -173,7 +121,7 @@ chosen by a single ordered decision, not by a per-binding generation:
 2. Add one maintenance owner in the daemon/runtime layer. It scans identity records, host routes, project bindings, grants, workers and delivery records.
 3. Keep `RouteResolve` strict. Do not add fallback route resolution based on partial ledger hints.
 4. Refactor same-pane master recovery to consume the maintenance/reconcile receipt, rather than becoming a second hidden ledger owner.
-5. Refactor `identity_for_scope_rebind_at` so `archive_dead_peers` delegates to the same retirement reducer/evidence path.
+5. Keep identity admission and persistence in the daemon context owner; maintenance must not create a second identity selection path.
 6. Split `collab who` display into two fields: current classification and last observed probe. A transient probe error must not erase a durable `repair_required` classification.
 7. Add explicit terminal evidence: classified record count, transitions, blocked records with reasons, receipt IDs, and unchanged mailbox counts.
 
@@ -187,9 +135,8 @@ Required tests:
 - host/project adjacent split-journal mismatch reconciles through the route registry and emits a receipt.
 - non-adjacent or cross-worker mismatch becomes `repair_required`, no mutation.
 - two stale peers with one live peer block fresh identity creation and do not archive the live peer.
-- two cold/unproven peers on the same anchor are both non-live, so neither blocks: the current pane adopts the deterministic non-live winner (anchor overlap, then pane-derived id, then durable recency) and archives nothing.
-- scope partition prefers the current-scope record over a newer foreign record on the same anchor.
-- among provably dead duplicates the durable recency order wins over a larger per-binding generation.
+- duplicate anchor claims fail explicitly, regardless of recency or liveness.
+- a foreign anchor or a derived-name collision cannot substitute an identity.
 - all peers provably dead permits retirement, then fresh registration.
 - current process without anchor cannot authenticate as any existing peer.
 - retire archive is reversible enough for the existing archived pane recovery path and preserves worker ID/token/runtime generation.

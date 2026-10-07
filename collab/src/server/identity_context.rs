@@ -153,9 +153,10 @@ impl ProjectRuntimeManager {
         let (Some(runtime), Some(transport)) = (existing.runtime, existing.transport) else {
             return Ok(());
         };
-        // A recovered dsh identity needs no App Server completion: its anchor is
-        // the gateway session id, and the gateway-owned address is supplied by
-        // the caller once through the `required_fields` request instead.
+        // A dsh identity never reaches here: with no App Server endpoint observed,
+        // `required_fields` returns empty and this function is not called. Its
+        // gateway-owned address is not an App Server supplement the caller can
+        // provide; without a gateway the caller fails at `TRANSPORT_NONE`.
         if transport.kind == TransportKind::Dsh {
             return Ok(());
         }

@@ -702,6 +702,30 @@ fn resolver_recovers_a_dsh_identity_from_its_session_anchor_alone() {
     std::fs::remove_dir_all(root).ok();
 }
 
+/// A valid but oversized `DSH_SESSION_ID` hex-doubles past `MAX_ID_LENGTH` when
+/// building the worker id. It must fail as a bad anchor, not as a generic
+/// "identifier exceeds 256 bytes", and not silently drop to the codex branch.
+#[test]
+fn resolver_rejects_an_oversized_dsh_session_anchor() {
+    let root = test_root("ci-resolver-dsh-anchor-oversized");
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    let scope = test_scope(root.clone());
+    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
+
+    let oversized = "s".repeat(MAX_ID_LENGTH);
+    let mut facts = facts(None, None, None);
+    facts.dsh_session_id = Some(oversized);
+    let error = resolve_for_daemon_at(&host_paths, &scope, &facts)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("COLLAB_IDENTITY_ANCHOR_INVALID"),
+        "{error}"
+    );
+    assert!(error.contains("DSH_SESSION_ID"), "{error}");
+    std::fs::remove_dir_all(root).ok();
+}
+
 /// Without any designed anchor the resolver still fails closed, so the new
 /// dsh arm cannot turn an anonymous caller into a peer.
 #[test]

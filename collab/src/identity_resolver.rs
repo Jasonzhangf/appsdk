@@ -176,7 +176,14 @@ fn draft_worker_id_at(observed: &AnchorObservation) -> anyhow::Result<String> {
     }
     if let Some(dsh_session) = observed.dsh_session_id.as_deref() {
         let worker_id = format!("dsh-thread-{}", hex_encode(dsh_session));
-        validate_id(&worker_id)?;
+        // Hex output is non-empty and control-character free, so length is the
+        // only way this can fail. Name the anchor: the failure is a bad anchor,
+        // not an unknown identifier.
+        validate_id(&worker_id).map_err(|_| {
+            anyhow::anyhow!(
+                "COLLAB_IDENTITY_ANCHOR_INVALID: DSH_SESSION_ID is too long for a worker id ({MAX_ID_LENGTH} bytes)"
+            )
+        })?;
         return Ok(worker_id);
     }
     let thread_id = observed.thread_id.as_deref().ok_or_else(|| {
@@ -185,7 +192,11 @@ fn draft_worker_id_at(observed: &AnchorObservation) -> anyhow::Result<String> {
         )
     })?;
     let worker_id = format!("codex-thread-{}", hex_encode(thread_id));
-    validate_id(&worker_id)?;
+    validate_id(&worker_id).map_err(|_| {
+        anyhow::anyhow!(
+            "COLLAB_IDENTITY_ANCHOR_INVALID: CODEX_THREAD_ID is too long for a worker id ({MAX_ID_LENGTH} bytes)"
+        )
+    })?;
     Ok(worker_id)
 }
 

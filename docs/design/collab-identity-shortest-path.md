@@ -1,10 +1,10 @@
 # Collab 身份报告与恢复：最短路径
 
-**状态**：设计 rev 3。rev 1 经独立 reviewer A 判 FAIL；rev 2 逐条修订并经**独立 reviewer B 判
+**状态**：设计 rev 4（当前）。**修订史**：rev 1 经独立 reviewer A 判 FAIL；rev 2 逐条修订并经**独立 reviewer B 判
 PASS**（7 项全部 resolved，5 条 advisory，0 blocking）；rev 3 采纳该 reviewer 的精确化修订，并加入
 能力确认阶段实测发现的第二根因 D2。D2 子句由**独立 reviewer C** 单独复核判 **PASS**（2 条前置条件
 已并入本设计）。rev 3 全文另经**独立 reviewer D** 按 (a)–(n) 逐项复核：实质结论 (a)–(m) 全部 PASS；
-(n) 判出 4 项**文档缺陷**（状态行过时、reviewer 归属混淆、§8 两行不完整/不可核验），已在本版逐条
+(n) 判出 4 项**文档缺陷**（状态行过时、reviewer 归属混淆、§8 两行不完整/不可核验），已在 rev 4 逐条
 修正。逐条回应见 §6。
 **当前阶段**：设计 rev 4。C1–C5 已按 rev 3 实现，定向红测先失败、绿测后通过（证据见 §8）。随后
 **真实环境黑盒回归**在 pane `%4` 上暴露第三根因 **D3**：孤儿陈旧 claim 的代际高于新注册，写路径
@@ -73,7 +73,7 @@ runtime 中）产生的是 `ROUTE_RESOLVE_INVALID:`，于是整条 bootstrap 在
 | 该 token 在 routecodex 与 appsdk 的任何 journal 中**出现 0 次** | `grep -c 7b7575c3… <journal>` = 0 |
 | routecodex runtime 的持久记录里 `codex-%2` 的 token 是 `5cbd484b…` | routecodex journal `Registered`（唯一一条） |
 | routecodex runtime **在线持有** `codex-%2`（49 个 worker），appsdk runtime 只有 1 个 | `collab who` 分别从两个项目目录运行 |
-| 生产代码只有 `persist_registration_at` 写身份文件，且它**总是**同时写 `runtime` 与 `transport` | `grep -rn "write_identity(" collab/src` |
+| 生产代码只有 `persist_registration_at` 写身份文件（唯一底层写者是 `write_identity`，生产路径只经它调用），且它**总是**同时写 `runtime` 与 `transport` | `grep -rn "write_identity(" collab/src`（3 处调用在 `identity_tests.rs`，`#[cfg(test)]`） |
 | 阶梯对无匹配锚点会**沿用草稿的 token** | `collab/src/identity_resolver.rs:152-163` |
 | 该守卫因"存在任意文件"而提前返回，于是草稿 token 被送到 Register | 修复前 `collab/src/server/identity_context.rs:209-213`（`read_persisted(..)?.is_some()`）→ 修复后 `:222-226`（`is_some_and(\|p\| p.runtime.is_some())`） |
 
@@ -87,8 +87,10 @@ rejected."）。一个没有 `runtime` 的草稿
 **不是**凭证，所以把"文件存在"当作"凭证存在"与它自己的契约不符。修复就是让守卫判断"是否已存在
 **已提交的**本地凭证"，而不是"是否存在文件"。
 
-**D2 的可见顺序与来源（review 结论）**：D2 只在 D1 修好后才可达——当前代码在
-`identity_context.rs:70-78` 就先中止于 D1 的陈旧索引错误（实测 `%2`/`%4` 均如此），根本走不到
+**D2 的可见顺序与来源（review 结论）**：D2 只在 D1 修好后才可达——修复前的 `pane_route` 块
+（`identity_context.rs:70-78`；C2 使其变长，候选为 `:70-87`）里只有 `ROUTE_RESOLVE_NOT_FOUND:` 被
+容忍，其余错误在 `Err(error) => return Err(..)`（修复前 `:74`，候选 `:83`）处先中止于 D1 的陈旧索引
+错误（实测 `%2`/`%4` 均如此），根本走不到
 `Register`。修好 D1 后，`%2` 才会用草稿 token 走到 `Register` 并命中 `TOKEN_MISMATCH`。
 **该草稿不是当前契约可产生的状态**：HEAD 上唯一的身份文件写者 `persist_registration_at`
 （`identity.rs:591-610`）总是同时写 `runtime` 与 `transport`；产生"裸草稿"的旧写者已在
@@ -111,8 +113,11 @@ rejected."）。一个没有 `runtime` 的草稿
 
 **后果（实测，必须写进契约）**：该 `GlobalRuntimeBound` 已写入 **appsdk** journal（第 76872 行），
 但 host 发布被拒；此后 daemon **每次启动**都在 reconcile 阶段
-（`runtime_manager_setup.rs:406-411`）重放同一发布并被同一守卫拒绝，报
-`RECOVERY_RECONCILE_REQUIRED: journal reducer failed: … expected generation 7, observed 1`，**daemon
+（`reconcile_started_thread_routes`，`runtime_manager_setup.rs:361`；新地址在 host 无当前 route，走
+`:403-412` 的 "无 current route" 分支重放该发布）被同一守卫拒绝，报
+`RECOVERY_RECONCILE_REQUIRED: journal reducer failed: … expected generation 7, observed 1`
+（`journal reducer failed:` 前缀由 `notification_contract.rs:40` 渲染，`RECOVERY_RECONCILE_REQUIRED:`
+前缀由 `:411` 的 `map_err` 加上），**daemon
 无法启动**。所以 D3 不只是 `%4` 的功能缺陷——它把一次普通身份命令升级成 host 级不可重放状态。
 因此 D3 属于本变更的**必做**范围：只修 D1/D2 而留 D3，会让 `collab context` 在孤儿陈旧索引的 pane 上
 把整个 host 打挂，这是不可接受的回归。

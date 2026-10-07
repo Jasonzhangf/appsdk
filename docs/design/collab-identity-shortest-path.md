@@ -75,14 +75,15 @@ runtime 中）产生的是 `ROUTE_RESOLVE_INVALID:`，于是整条 bootstrap 在
 | routecodex runtime **在线持有** `codex-%2`（49 个 worker），appsdk runtime 只有 1 个 | `collab who` 分别从两个项目目录运行 |
 | 生产代码只有 `persist_registration_at` 写身份文件，且它**总是**同时写 `runtime` 与 `transport` | `grep -rn "write_identity(" collab/src` |
 | 阶梯对无匹配锚点会**沿用草稿的 token** | `collab/src/identity_resolver.rs:152-163` |
-| 该守卫因"存在任意文件"而提前返回，于是草稿 token 被送到 Register | `collab/src/server/identity_context.rs:209-213` |
+| 该守卫因"存在任意文件"而提前返回，于是草稿 token 被送到 Register | 修复前 `collab/src/server/identity_context.rs:209-213`（`read_persisted(..)?.is_some()`）→ 修复后 `:222-226`（`is_some_and(\|p\| p.runtime.is_some())`） |
 
 因此 `Register` 命中 `validate_wire_runtime_binding` 的 `token_mismatch`
 （`collab/src/server/mod_parts/part_10.rs`）→ `TOKEN_MISMATCH`，agent 仍然被卡住。
 
-守卫的文档意图是"**已持久化的凭证**不被替换"（`:200-202`："A committed registration can outlive
-its local receipt file. Recover that same credential from the reducer only for the proven anchor.
-A persisted credential is never replaced, even when it is rejected."）。一个没有 `runtime` 的草稿
+守卫的文档意图是"**已持久化的凭证**不被替换"（修复前 `:200-202`，修复后 `:209-215`："A committed
+registration can outlive its local receipt file. Recover that same credential from the reducer only
+for the proven anchor. A **committed** persisted credential is never replaced, even when it is
+rejected."）。一个没有 `runtime` 的草稿
 **不是**凭证，所以把"文件存在"当作"凭证存在"与它自己的契约不符。修复就是让守卫判断"是否已存在
 **已提交的**本地凭证"，而不是"是否存在文件"。
 
@@ -106,7 +107,7 @@ A persisted credential is never replaced, even when it is rejected."）。一个
 | host 索引对 pane `%4` 持有 **appsdk** scope 的 `binding-codex-_4` gen 7 | routecodex journal 第 1043 行 `GlobalCurrentThreadRouteSet` |
 | 该 binding 在**本 reducer 的** `projects` map 里不存在，是**孤儿** | routecodex journal 有 5 条 `GlobalProjectRegistered` 与 60 条 `GlobalRuntimeBound`，**全部**是 routecodex scope，appsdk 均为 0 条；其中 `GlobalRuntimeBound` 提到 `binding-codex-_4` 0 次；两个 journal 的 `GlobalRuntimeBindingRollback` 均 0 次 |
 | 新注册只能给出 gen 1 | appsdk runtime 没有该 binding，代际从 1 起算 |
-| 于是 reducer 拒绝 | `set_current_thread_route`（`global_state_impl_part2.rs:126-254`）先按 principal 摘除旧 route（`:169-182`），再为它建 tombstone；`RuntimeBindingTombstone::new`（`global_state_models.rs:468-474`）要求 `rebound_to.endpoint_generation > old.endpoint_generation`，`1 ≤ 7` → `StateError::StaleBinding` |
+| 于是 reducer 拒绝 | `set_current_thread_route`（`global_state_impl_part2.rs:126-254`）先按 principal 摘除旧 route（候选文件 `:156-169` 的 filter + `retain` **未被 C8 插入影响，行号与 base 相同**；候选 `:170-183` 是 `for old in retired` 块），再为它建 tombstone；`RuntimeBindingTombstone::new`（`global_state_models.rs:468-474`）要求 `rebound_to.endpoint_generation > old.endpoint_generation`，`1 ≤ 7` → `StateError::StaleBinding` |
 
 **后果（实测，必须写进契约）**：该 `GlobalRuntimeBound` 已写入 **appsdk** journal（第 76872 行），
 但 host 发布被拒；此后 daemon **每次启动**都在 reconcile 阶段
@@ -141,8 +142,8 @@ C8 也会跳过它们的 tombstone。这是本修复的**已知边界**，不是
   显式失败，tombstone 只增加一条错误，旧 route 在两种情况下都被摘除，且地址重新变活时 tombstone
   照旧被清除（`global_state_impl_part2.rs:219-224`）。
 - **代际单调性的真正 owner 是 `bind_runtime`**（`global_state_impl_part2.rs:558-564`）：它在**所属
-  runtime** 里照旧拒绝用低代际覆盖活 binding；`validate_binding`（`:717-729`）与 `grant_master`
-  （`:753-759`）同理。也就是说，"活 binding 不被降代际覆盖"这条不变式**不由 tombstone 承担**，
+  runtime** 里照旧拒绝用低代际覆盖活 binding；`validate_binding`（`:731-743`）与 `grant_master`
+  （`:769-775`）同理。也就是说，"活 binding 不被降代际覆盖"这条不变式**不由 tombstone 承担**，
   C8 也没有把它交给任何人。
 - "一个 pane 一个 binding"由 `:232-239` 的 pane 驱逐保证，与 tombstone 无关。
 
@@ -419,8 +420,9 @@ SESE 校验通过、§9 旧契约无残留矛盾。reviewer D 的 4 项文档缺
 
 **rev 3 / D2 子句独立复核结论（reviewer C）**：判 **PASS**（Q1–Q5：Q2/Q3/Q4/Q5 PASS；Q1 判
 "按字面 FAIL、修好 D1 后 PASS"，即 D2 在 D1 修复前不可达，与本设计一致）。两条前置条件已并入本
-设计：(a) `:200-202` 的不变式措辞收紧为 "a **committed** persisted credential is never replaced"
-（C3）；(b) 保留 C5 回归用例"裸草稿 + reducer 无该锚点记录 → 草稿 token 不变"。
+设计：(a) `identity_context.rs` 的不变式措辞（修复前 `:200-202`，修复后 `:209-215`）收紧为
+"a **committed** persisted credential is never replaced"（C3）；(b) 保留 C5 回归用例"裸草稿 +
+reducer 无该锚点记录 → 草稿 token 不变"。
 reviewer C 同时指出并把 §2 的 D1 证据修正为"按 host 自己的 journal 归属"（见 §2 修正段），
 并给出替换审计风险：修复后本地裸草稿会被已提交凭证覆盖，journal 记录该 `Register`；
 `runtime` 存在的凭证仍一律不被替换。
@@ -462,9 +464,14 @@ reducer 自己的** `next.projects`，并把"非驻留项目无法区分活/孤�
    routecodex scope，appsdk 0 条）。
 2. **准入前提被破坏**：B3 指出"C8 写码时准入未冻结"。该指控成立并已如实记入本文档状态行；补救是在
    **冻结的最终候选**（commit `33d6ab27`）上重跑独立架构 review（§8）。
-3. **行号失效**：C8 插入使 `global_state_impl_part2.rs` 之后的行号整体 +13。已逐条重定位：
-   `:545-551`→`:558-564`、`:219-226`→`:232-239`、`:942-951`→`:955-964`、`:718-730`→`:717-729`、
-   `:756-762`→`:753-759`、`:155-241`→`:126-254`、`:156-169`→`:169-182`。
+3. **行号失效**：C8 插入使 `global_state_impl_part2.rs` 中插入点**之后**的行号整体 +13。已逐条重定位
+   并核对（每项都已用 base 文件与候选文件逐行比对）：
+   `:545-551`→`:558-564`、`:219-226`→`:232-239`、`:942-951`→`:955-964`、`:718-730`→`:731-743`、
+   `:756-762`→`:769-775`、`:155-241`→`:126-254`、`:200-202`→`:222-226`（`identity_context.rs`，
+   C2 的 +9 使其整体后移）。**插入点之前的行号不变**：`:156-169`（principal 摘除）与 `:155` 的
+   `mutate` 起点在 base 与候选**相同**，C8 的 13 行落在 `:194-206`，即原 `:194` 之后；因此
+   "`:156-169`→`:169-182`"曾是错的，已改正。`validate_binding`/`grant_master` 的**函数起始行**
+   （`:717`/`:753`）与**判据块**（`:731-743`/`:769-775`）是两个不同位置，引用时不得混用。
 4. **残余状态**：B3 的"residue"情形（host 索引 gen 7 于地址 A + 所属 runtime gen 1 于地址 B）**不是
    `%4` 的当前形状**（reset 已归档 appsdk journal，appsdk runtime 中不存在 `binding-codex-_4`），
    已在 §8 第 (6) 行写为**须实测确认的前提**，并新增"残余冲突边界"行。
@@ -483,7 +490,7 @@ binding 镜像进 host 索引。否决理由：host journal 的回放**不带**�
 |---|---|---|
 | C1 | `collab/src/server/mod_parts/part_04.rs` | 把 `:265`/`:270`/`:295` 三处陈旧 host 索引条件改发 `ROUTE_RESOLVE_STALE_INDEX:`；其余 `ROUTE_RESOLVE_INVALID:` 站点不动 |
 | C2 | `collab/src/server/identity_context.rs` | pane route 证据查询只容忍 `ROUTE_RESOLVE_NOT_FOUND:` 与 `ROUTE_RESOLVE_STALE_INDEX:`（视为"无可用 route 证据"）；其余错误保持致命 |
-| C3 | `collab/src/server/identity_context.rs` | 凭证守卫（`:209-213`）改为只在**已提交的本地凭证**存在时跳过恢复：`read_persisted(...)` 结果需带 `runtime`（唯一写者 `persist_registration_at` 总是一起写 `runtime` + `transport`）。不完整草稿照旧保留其 token，除非 reducer 中存在该锚点的已提交记录。**同时**把 `:200-202` 的不变式措辞收紧为 "a **committed** persisted credential is never replaced"，使注释与谓词一致（review 条件 a） |
+| C3 | `collab/src/server/identity_context.rs` | 凭证守卫（修复前 `:209-213`，修复后 `:222-226`）改为只在**已提交的本地凭证**存在时跳过恢复：`read_persisted(...)` 结果需带 `runtime`（唯一写者 `persist_registration_at` 总是一起写 `runtime` + `transport`）。不完整草稿照旧保留其 token，除非 reducer 中存在该锚点的已提交记录。**同时**把不变式措辞（修复前 `:200-202`，修复后 `:209-215`）收紧为 "a **committed** persisted credential is never replaced"，使注释与谓词一致（review 条件 a） |
 | C4 | `collab/src/server/host_route_registry_tests/part_01.rs`、`.../part_02_tail2.rs` | 更新钉住旧字符串的断言（`part_01.rs:1409-1410`），并新增两类定向用例：陈旧索引被命名且身份门可越过（`stale_pane_route_index_is_named_and_the_identity_gate_bootstraps_over_it`）与真实冲突仍致命（`conflicting_pane_route_index_stays_fatal_for_the_identity_gate`） |
 | C5 | `collab/src/server/host_route_registry_tests/part_02_tail2.rs` | 新增 D2 定向用例：不完整草稿 + reducer 中同锚点已提交 worker → 恢复已提交 token；无已提交记录 → 保留草稿 token（回归保护"never remint"） |
 | C6 | `collab/skills/collab/SKILL.md`（+ `references/`） | 按 §7.1 改写 |

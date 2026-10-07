@@ -45,6 +45,7 @@ pub(super) fn print_cli_help(command: Option<&str>) {
         Some("verify") => {
             "Usage: appsdk verify [project]\n       appsdk verify --admission [project]\n       appsdk verify --review-admission [project] --module <id>"
         }
+        Some("review-context") => "Usage: appsdk review-context [project] --module <id>",
         Some("compile") => "Usage: appsdk compile [project] [--module <id>]",
         Some("compile-module") => "Usage: appsdk compile-module [project] --module <id>",
         Some("produce-lifecycle-records") => {

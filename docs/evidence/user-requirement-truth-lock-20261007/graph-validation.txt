@@ -1,0 +1,28 @@
+Current topology evidence, 2026-10-07. Source baseline c3c0c8df79e69534fe30c92db61328824473d5c0 plus candidate design.
+Static validation only; bindings do not prove Runtime Operator registration or user authorization.
+valid DAG: appsdk-user-requirement-change@0.1.0 (5 nodes, 4 edges, 5 waves)
+operator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate
+valid DAG: appsdk-user-requirement-consumption@0.2.0 (6 nodes, 5 edges, 6 waves)
+operator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate
+Graph appsdk-user-requirement-consumption@0.2.0
+Operator bindings:
+  load_effective -> appsdk.requirements.load_effective@1
+  verify_effective -> appsdk.requirements.verify_effective@1
+  bind_task -> appsdk.requirements.bind_task@1
+  assemble_review_packet -> appsdk.requirements.assemble_review_packet@1
+  evaluate_evidence -> appsdk.requirements.evaluate_evidence@1
+  publish_admission -> appsdk.requirements.publish_admission@1
+DAG execution waves:
+  1: load_effective
+  2: verify_effective
+  3: bind_task
+  4: assemble_review_packet
+  5: evaluate_evidence
+  6: publish_admission
+Edges:
+  load_effective --effective_requirement_outcome--> verify_effective
+  verify_effective --requirement_integrity_outcome--> bind_task
+  bind_task --task_binding_outcome--> assemble_review_packet
+  assemble_review_packet --review_packet_outcome--> evaluate_evidence
+  evaluate_evidence --acceptance_outcome--> publish_admission
+Note: inspect checks DAG shape only; compile() resolves registered Operators and contracts.

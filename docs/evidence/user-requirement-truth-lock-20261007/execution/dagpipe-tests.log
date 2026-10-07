@@ -1,0 +1,77 @@
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.26
+   Compiling serde_core v1.0.229
+   Compiling zmij v1.0.23
+   Compiling serde_json v1.0.151
+   Compiling serde v1.0.229
+   Compiling memchr v2.8.3
+   Compiling itoa v1.0.18
+   Compiling syn v3.0.6
+   Compiling serde_derive v1.0.229
+   Compiling pipeline_runtime v0.1.1 (/Volumes/Intel/playground/appsdk/authoritative-review-template-20261007/dagpipe)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.93s
+     Running unittests src/lib.rs (/Volumes/Intel/playground/appsdk/.worker-runs/authoritative-review-template-20261007/dagpipe-build/debug/deps/pipeline_runtime-c3b7e9edafe01fe0)
+
+running 28 tests
+test tests::state_machine_rejects_undeclared_transition_and_allows_retry_event ... ok
+test tests::compiler_rejects_invalid_or_duplicate_operator_event_declarations ... ok
+test tests::graph_binds_exact_operator_version ... ok
+test tests::compile_rejects_missing_operator_and_cycle ... ok
+test tests::graph_topology_returns_waves_and_rejects_cycles_or_dead_nodes ... ok
+test tests::compiler_rejects_missing_arc_and_ungranted_effect ... ok
+test tests::compiler_rejects_invalid_edge_incompatible_schema_and_dead_node ... ok
+test tests::output_selector_result_is_the_value_written_to_the_declared_arc ... ok
+test tests::graph_topology_requires_a_sese_graph_per_object_source ... ok
+test tests::output_selector_failures_are_classified_as_output_errors ... ok
+test tests::effectful_operator_defaults_to_confirmation_for_replay ... ok
+test tests::runtime_executes_compiled_graph_and_records_arc_refs ... ok
+test tests::failed_execution_returns_journal_facts ... ok
+test tests::items_iterator_enforces_each_operator_output_contract ... ok
+test tests::operator_cannot_emit_undeclared_event_or_write_its_arc ... ok
+test tests::hook_failures_are_classified_and_journaled ... ok
+test tests::json_parse_rejects_invalid_graph_shape ... ok
+test tests::panicking_hook_returns_a_classified_execution_failure ... ok
+test tests::runtime_enforces_operator_contracts_when_arc_schema_is_any ... ok
+test tests::whole_node_multi_arc_contract_matches_runtime_array_bundle ... ok
+test tests::items_iterator_selects_each_record_and_enforces_nested_schema ... ok
+test tests::failed_wave_drains_siblings_and_does_not_start_dependents ... ok
+test tests::cancellation_is_checked_before_execution_and_between_parallel_waves ... ok
+test tests::concurrent_failure_selection_and_journal_are_node_id_ordered ... ok
+test tests::independent_nodes_overlap_and_journal_order_is_stable ... ok
+test tests::items_journal_records_only_actual_operator_calls ... ok
+test tests::operator_panics_are_classified_and_journaled_in_all_parallel_modes ... ok
+test tests::runtime_respects_max_parallelism_for_larger_ready_waves ... ok
+
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
+
+     Running unittests src/bin/dagpipe.rs (/Volumes/Intel/playground/appsdk/.worker-runs/authoritative-review-template-20261007/dagpipe-build/debug/deps/dagpipe-b60fd0ed664440ac)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/concurrent_pipeline.rs (/Volumes/Intel/playground/appsdk/.worker-runs/authoritative-review-template-20261007/dagpipe-build/debug/examples/concurrent_pipeline-0e4cc10ada183cfa)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/control_lifecycle.rs (/Volumes/Intel/playground/appsdk/.worker-runs/authoritative-review-template-20261007/dagpipe-build/debug/examples/control_lifecycle-c8626cbba9ad3114)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/data_pipeline.rs (/Volumes/Intel/playground/appsdk/.worker-runs/authoritative-review-template-20261007/dagpipe-build/debug/examples/data_pipeline-57b9622c4fd87155)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/effect_pipeline.rs (/Volumes/Intel/playground/appsdk/.worker-runs/authoritative-review-template-20261007/dagpipe-build/debug/examples/effect_pipeline-772d435b29a9f4ea)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

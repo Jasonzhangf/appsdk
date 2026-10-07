@@ -241,13 +241,15 @@ fn lifecycle_chain_accepts_committed_candidate_records() {
         .unwrap()
         .success());
     let input = root.join("architecture-input.json");
+    let requirements_review = real_requirements_review(&root);
     fs::write(
         &input,
         serde_json::to_string_pretty(&serde_json::json!({
             "architecture": {
                 "reviewer": {"adapter":"test","identity":"chain-reviewer"},
                 "verdict": "pass",
-                "evidence_ids": ["candidate-evidence-1","positive-1","negative-1"]
+                "evidence_ids": ["candidate-evidence-1","positive-1","negative-1"],
+                "requirements_review": requirements_review
             }
         }))
         .unwrap()
@@ -378,13 +380,15 @@ fn lifecycle_chain_accepts_candidate_descendant_of_observed_worktree_head() {
         .success());
 
     let input = root.join("architecture-input.json");
+    let requirements_review = real_requirements_review(&root);
     fs::write(
         &input,
         serde_json::to_string_pretty(&serde_json::json!({
             "architecture": {
                 "reviewer": {"adapter":"test","identity":"chain-reviewer"},
                 "verdict": "pass",
-                "evidence_ids": ["candidate-evidence-1","positive-1","negative-1"]
+                "evidence_ids": ["candidate-evidence-1","positive-1","negative-1"],
+                "requirements_review": requirements_review
             }
         }))
         .unwrap()
@@ -1000,13 +1004,15 @@ fn lifecycle_chain_accepts_committed_records_after_candidate() {
         .unwrap()
         .success());
     let architecture_input = root.join("architecture-input.json");
+    let requirements_review = real_requirements_review(&root);
     fs::write(
         &architecture_input,
         serde_json::to_string_pretty(&serde_json::json!({
             "architecture": {
                 "reviewer": {"adapter":"test","identity":"chain-reviewer"},
                 "verdict": "pass",
-                "evidence_ids": ["candidate-evidence-1","positive-1","negative-1"]
+                "evidence_ids": ["candidate-evidence-1","positive-1","negative-1"],
+                "requirements_review": requirements_review
             }
         }))
         .unwrap()
@@ -1298,6 +1304,7 @@ fn lifecycle_chain_architecture_binds_project_bindings_to_review() {
     let root = temp_root("lifecycle-chain-project-bindings");
     let root_text = root.to_str().unwrap();
     prepare_lifecycle_chain_fixture(&root);
+    let requirements_review = real_requirements_review(&root);
     let records = root.join(".appsdk/records");
     let review_file = records.join("review-record-app-core.json");
     fs::remove_file(&review_file).unwrap();
@@ -1315,7 +1322,8 @@ fn lifecycle_chain_architecture_binds_project_bindings_to_review() {
         let mut architecture = serde_json::json!({
             "reviewer": {"adapter": "test", "identity": "chain-reviewer"},
             "verdict": "pass",
-            "evidence_ids": ["candidate-evidence-1", "positive-1", "negative-1"]
+            "evidence_ids": ["candidate-evidence-1", "positive-1", "negative-1"],
+            "requirements_review": requirements_review.clone()
         });
         if let Some(bindings) = bindings {
             architecture["project_bindings"] = bindings;
@@ -1351,7 +1359,19 @@ fn lifecycle_chain_architecture_binds_project_bindings_to_review() {
     );
     let first_review: Value =
         serde_json::from_str(&fs::read_to_string(&review_file).unwrap()).unwrap();
-    assert_eq!(first_review["project_bindings"], bindings);
+    assert_eq!(
+        first_review["project_bindings"],
+        serde_json::json!({
+            "v4_product_map_root": "docs/architecture/maps",
+            "v4_product_map_hashes": {
+                "resource_map_hash": "sha256:resource",
+                "function_map_hash": "sha256:function",
+                "mainline_call_map_hash": "sha256:mainline",
+                "verification_map_hash": "sha256:verification"
+            },
+            "requirements_review": requirements_review
+        })
+    );
     let first_review_id = first_review["review_id"].as_str().unwrap().to_string();
 
     fs::remove_file(&review_file).unwrap();
@@ -1399,6 +1419,7 @@ fn lifecycle_chain_architecture_rejects_non_object_project_bindings() {
         let root = temp_root(&format!("lifecycle-chain-project-bindings-{label}"));
         let root_text = root.to_str().unwrap();
         prepare_lifecycle_chain_fixture(&root);
+        let requirements_review = real_requirements_review(&root);
         let records = root.join(".appsdk/records");
         let review_file = records.join("review-record-app-core.json");
         fs::remove_file(&review_file).unwrap();
@@ -1410,6 +1431,7 @@ fn lifecycle_chain_architecture_rejects_non_object_project_bindings() {
                     "reviewer": {"adapter": "test", "identity": "chain-reviewer"},
                     "verdict": "pass",
                     "evidence_ids": ["candidate-evidence-1", "positive-1", "negative-1"],
+                    "requirements_review": requirements_review,
                     "project_bindings": bindings
                 }
             }))

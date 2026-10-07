@@ -1,0 +1,18 @@
+Building AppSDK release from /Volumes/Intel/playground/appsdk/authoritative-review-template-20261007
+warning: unused import: `super::validation::*`
+ --> src/communication/store_runtime.rs:2:5
+  |
+2 | use super::validation::*;
+  |     ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `appsdk` (bin "appsdk") generated 1 warning (run `cargo fix --bin "appsdk" -p appsdk` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 0.16s
+Installed: /Users/fanzhang/.cargo/bin/appsdk
+Version: appsdk 0.1.0011 (rust)
+Refresh the current shell command cache with: rehash (zsh) or hash -r (bash)
+Skill installed: /Users/fanzhang/.agents/skills/appsdk-project-governance
+Skill installed: /Users/fanzhang/.agents/skills/appsdk-migration
+Skill installed: /Users/fanzhang/.agents/skills/project-memory
+Memory installed: /Users/fanzhang/.cargo/bin/project-memory (legacy PATH entry links here)

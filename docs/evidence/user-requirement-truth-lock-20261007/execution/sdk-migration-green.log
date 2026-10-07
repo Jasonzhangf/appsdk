@@ -1,0 +1,19 @@
+   Compiling appsdk v0.1.11 (/Volumes/Intel/playground/appsdk/authoritative-review-template-20261007/rust)
+warning: unused import: `super::validation::*`
+ --> src/communication/store_runtime.rs:2:5
+  |
+2 | use super::validation::*;
+  |     ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `appsdk` (bin "appsdk") generated 1 warning (run `cargo fix --bin "appsdk" -p appsdk` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.68s
+     Running tests/sdk_0009_migration.rs (/Volumes/Intel/playground/appsdk/.worker-runs/authoritative-review-template-20261007/build/debug/deps/sdk_0009_migration-1e4392f91beed09f)
+
+running 2 tests
+test pin_lock_accepts_current_0011_without_creating_migration_record ... ok
+test pin_lock_preserves_0008_maps_when_upgrading_to_0009 ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.07s
+

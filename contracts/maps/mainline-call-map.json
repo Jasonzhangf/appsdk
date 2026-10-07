@@ -2,6 +2,7 @@
   "schema_version": 1,
   "lifecycle_id": "appsdk-governance",
   "chains": [
+    {"chain_id":"authoritative-review-context-v1","scenario_condition":"author_validated_architecture_review_material_requested","entry_symbol":"review_context","terminal_symbol":"build_review_context"},
     {"chain_id":"sdk-pin-migrate-v1","scenario_condition":"project_sdk_0.1.5_or_incomplete_0.1.6","entry_symbol":"pin_lock","terminal_symbol":"write_project"},
     {"chain_id":"sdk-lock-init-v1","scenario_condition":"new_reset_or_existing_project_sdk_0.1.6_initialization","entry_symbol":"init_project","terminal_symbol":"write_current_sdk_lock"},
     {"chain_id":"single-worker-v1","scenario_condition":"parallel_pair_disabled","entry_symbol":"assert_fix_merge_gate","terminal_symbol":"assert_single_merge_gate"},
@@ -23,6 +24,8 @@
     ,{"chain_id":"optional-test-governance-admission-v1","scenario_condition":"project_test_governance_selected_and_test_admission_requested","entry_symbol":"test_governance_report","terminal_symbol":"test_governance_object_status"}
   ],
   "edges": [
+    {"chain_id":"authoritative-review-context-v1","from":"author_inputs_loaded","to":"author_readiness_verified","owner":"appsdk::review_context","caller":"review_context","callee":"assert_review_author_readiness","path":"rust/src/main/review_context.rs","input_resource_id":"pre_review_validation","output_resource_id":"pre_review_validation","error_resource_id":"lifecycle_error"},
+    {"chain_id":"authoritative-review-context-v1","from":"author_readiness_verified","to":"review_material_assembled","owner":"appsdk::review_context","caller":"review_context","callee":"build_review_context","path":"rust/src/main/review_context.rs","input_resource_id":"fix_candidate","output_resource_id":"review_context","error_resource_id":"lifecycle_error"},
     {"chain_id":"sdk-lock-init-v1","from":"project_contract_initialized","to":"sdk_resources_installed","owner":"appsdk::delivery","caller":"init_project","callee":"install_bundle_resources","path":"rust/src/main.rs","input_resource_id":"project_contract","output_resource_id":"installed_sdk_resources","error_resource_id":"lifecycle_error"},
     {"chain_id":"sdk-lock-init-v1","from":"sdk_resources_installed","to":"sdk_lock_bound","owner":"appsdk::delivery","caller":"init_project","callee":"write_current_sdk_lock","path":"rust/src/main.rs","input_resource_id":"installed_sdk_resources","output_resource_id":"sdk_lock","error_resource_id":"lifecycle_error"},
     {"chain_id":"sdk-pin-migrate-v1","from":"project_sdk_version_read","to":"bundle_identity_verified","owner":"appsdk::delivery","caller":"pin_lock","callee":"digest_bytes","path":"rust/src/main.rs","input_resource_id":"sdk_bundle","output_resource_id":"sdk_bundle","error_resource_id":"lifecycle_error"},

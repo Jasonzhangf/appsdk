@@ -251,7 +251,11 @@ impl ProjectRuntimeManager {
             for binding in project.runtime_bindings.values() {
                 let anchor_matches = if let Some(tmux) = &facts.tmux {
                     binding.tmux_endpoint.as_ref().is_some_and(|bound| {
-                        crate::client::adapters::tmux::same_pane_route(bound, &tmux.endpoint)
+                        // Ownership follows the pane address, never the concrete
+                        // endpoint. A reissued shell pid in the same owned pane
+                        // is still this anchor, so this must agree with the
+                        // resolver's `same_owned_pane` arm.
+                        crate::client::adapters::tmux::same_owned_pane(bound, &tmux.endpoint)
                     })
                 } else {
                     binding.session_id.as_ref().map(identity::SessionId::as_str)

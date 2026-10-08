@@ -1,0 +1,7 @@
+身份：新建GCM Astra实现worker，非reviewer。前序GCM已读80项并给出完整失败日志，parent停止重复审计，未计成功。你不是唯一worker，保留他人改动。
+cwd /Volumes/Intel/playground/appsdk/requirements-session-lock，base8555a74e5e46de10136fda9539ae044d3e8bdfbc。唯一写范围 rust/tests/cli_smoke/part_01.rs到part_23.rs、rust/tests/sdk_0009_migration.rs。parent拥有产品代码、part24和main.rs。
+任务：直接apply_patch修正当前SDK0012的测试期待，然后验证。不要重做身份、能力、需求、设计审计，也不要先再跑已失败的全量测试。
+现成证据：../regression/rust-test-nff.log，332 CLI通过17失败；大多数当前版本硬编码0011。rg -n 0.1.0011 rust/tests只会命中约20处。当前期望（lock/project/sdk_receipt/standard_template/unsupported目标版本/手写当前project/placeholder lock）改0012。历史输入不改。part08.install_previous_bundle_migration_record中lock.version是current版本，也须改0012。part03当前placeholder和part10当前consumer项目的sdk.version改0012。
+part21的current_record、current target tamper场景是当前迁移末步，应对11→12而非10→11；历史原始maps快照依旧保留。part23的legacy review reconciliation发生在10→11，保持该路径，只更新最终lock.version期待。sdk_0009_migration第一测试当前new0012，不应生成11→12历史记录，更新名字和期待；第二旧0008输入保留。
+parent已经修复两个产品失败：dagpipe设计责任operator白名单改submit_authorization；source registry补request schema的既有owner。pin_lock恢复旧版<0011或已有record的10→11历史步骤，0011只新增11→12，0012保持兼容。产品范围有其他问题向parent报告，不放宽断言。
+done iff 最小当前版本更新、历史输入保持、cargo test --manifest-path rust/Cargo.toml exit0、cargo test --manifest-path dagpipe/Cargo.toml --locked --all-targets exit0。每个命令重定向本regression-impl日志，notes.md记录实际exit/数量/首次失败。rustfmt只自有文件。禁批量脚本语义替换/改CI或hook/commit/push/install/restart/新建worktree/长期memory。两套测试独立可并行。完成写report.md。

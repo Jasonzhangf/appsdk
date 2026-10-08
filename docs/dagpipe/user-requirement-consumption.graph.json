@@ -1,7 +1,7 @@
 {
   "id": "appsdk-user-requirement-consumption",
-  "version": "0.2.0",
-  "description": "设计草案：任务只读加载权威需求，经版本核验、范围绑定、AppSDK 正式 review 材料组装、阶段适用审查证据，形成唯一准入结果。绑定尚未实现。",
+  "version": "0.3.0",
+  "description": "任务从唯一 ledger .appsdk/requirements.json 只读加载全部需求及历史，经版本状态核验、按版本绑定 goal.requirements_version 与候选 goal_hash、AppSDK 正式 review 材料组装、阶段适用审查证据，形成唯一准入结果。实现映射到requirements owner及既有goal/review消费边界；operator 名是设计责任映射。",
   "inputs": [{"id": "task_requirement_request", "schema": "Object"}],
   "nodes": [
     {

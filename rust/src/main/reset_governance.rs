@@ -18,6 +18,7 @@ pub(super) fn pin_lock(root: &Path, binary: &Path) {
             | "0.1.0009"
             | "0.1.0010"
             | "0.1.0011"
+            | "0.1.0012"
     ) {
         fail(format!(
             "UNSUPPORTED_SDK_MIGRATION:{}:{}",
@@ -57,6 +58,7 @@ pub(super) fn pin_lock(root: &Path, binary: &Path) {
         "0.1.0007-to-0.1.0008",
         "0.1.0008-to-0.1.0009",
         "0.1.0009-to-0.1.0010",
+        "0.1.0010-to-0.1.0011",
     ] {
         let manifest = sdk_map_migration_manifest(step);
         let source_matches = GOVERNANCE_MAP_NAMES.iter().all(|name| {
@@ -70,13 +72,15 @@ pub(super) fn pin_lock(root: &Path, binary: &Path) {
         let record_exists = sdk_map_migration_root(root, step)
             .join("record.json")
             .is_file();
-        if record_exists || source_matches {
+        let legacy_last_step = step == "0.1.0010-to-0.1.0011"
+            && !matches!(original_version.as_str(), "0.1.0011" | "0.1.0012");
+        if record_exists || source_matches || legacy_last_step {
             let current_project = read_project(root);
             migrate_governance_maps(root, &current_project, step);
         }
     }
     let current_project = read_project(root);
-    migrate_governance_maps(root, &current_project, "0.1.0010-to-0.1.0011");
+    migrate_governance_maps(root, &current_project, "0.1.0011-to-0.1.0012");
     let migrated_project = read_project(root);
     install_current_record_contracts(root);
     install_current_transition_contracts(root, &transition_contracts);

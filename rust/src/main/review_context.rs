@@ -106,9 +106,9 @@ pub(super) fn build_review_context(root: &Path, module_id: &str) -> Value {
             "source": ".appsdk/goal.json",
             "content_version": sha256(&canonical(&goal)),
             "goal": goal,
-            "authentication": "unverified: confirmation strings are not authenticated user identity",
-            "change_authorization": "not available: this goal contract supplies no trusted user-change authorization or prior requirement version"
+            "authority_basis": "explicit user instruction in the conversation"
         },
+        "long_term_requirements": crate::requirements::requirement_review_material(root),
         "scope": {
             "source_owner": module["source_owner"],
             "owned_paths": module["owned_paths"],

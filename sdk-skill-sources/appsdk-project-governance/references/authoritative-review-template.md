@@ -5,10 +5,8 @@ fixed SDK review duties and the project facts that an executing agent must
 load or provide. It is not a requirement store, an authorization service, a
 runtime command, or a second review schema.
 
-The SDK bundle owner must package and distribute this source before a consumer
-project can rely on it as an installed resource. This file does not claim that
-distribution, physical tamper protection, or user authentication has already
-been implemented.
+The SDK bundle distributes this source as an installed resource. The user's
+explicit conversation instruction authorizes the specified change.
 
 ## Authority and roles
 
@@ -17,13 +15,13 @@ been implemented.
 | Review procedure and fixed reviewer duties | AppSDK review governance owner, using this template |
 | Effective project requirement, original text, version, and change history | Project requirement owner and its declared authoritative source |
 | Candidate, scope, design, implementation, and author evidence | Task author |
-| Requirement change authorization | The user through the project's trusted authorization entry |
+| Requirement change authorization | The user's explicit instruction in the conversation, preserved with its source |
 | Review findings | Independent reviewer |
 | Final admission decision | Existing AppSDK review controller or gate, using the reviewer's evidence |
 
 An executing agent may assemble project facts and evidence references. It must
-not create requirement authority, edit this template for a task, or fill an
-authorization field on the user's behalf. A reviewer may report that
+not create a user instruction or edit this template for a task. It may transcribe
+the actual user instruction and source into the requirement change record. A reviewer may report that
 authorization is absent, invalid, or unreadable. A reviewer must not approve a
 requirement change for the user.
 
@@ -61,6 +59,15 @@ The reviewer must independently read the declared sources, compare each
 applicable item with the current version and any change authorization, and
 record the requirement version plus the item-to-design/implementation/evidence
 mapping. The reviewer cannot rely on the packet's transcription as proof.
+
+For a project with an established requirement ledger, load all effective items
+and their history from `.appsdk/requirements.json` through `appsdk requirements
+show` and `history`. The task goal's `requirements_version` is a reference to
+the ledger version. The SDK review context supplies the complete ledger under
+`long_term_requirements`; an author must not replace it with selected items.
+Compare the recorded user instruction with its conversation source and the
+previous requirement version. Conversation authorization is sufficient; do not
+require biometric authentication, signatures, or an external identity service.
 
 ## Agent-filled review packet
 
@@ -201,7 +208,7 @@ Return a blocking finding when any applicable condition is true:
 - The backend output is missing, invalid, uses a new schema, or cannot be tied
   to the existing AppSDK evidence and ReviewRecord.
 - The packet asks the reviewer to approve a requirement change, edit the
-  template, or fill an authorization for the user.
+  template, or invent a user instruction.
 
 ## Stage boundary
 

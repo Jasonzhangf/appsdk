@@ -406,6 +406,7 @@
         "contracts/records/fix-candidate-record.schema.json",
         "contracts/records/freeze-record.schema.json",
         "contracts/records/goal-clarification-record.schema.json",
+        "contracts/records/user-requirement-request.schema.json",
         "contracts/records/regression-report.schema.json",
         "contracts/records/reproduction-record.schema.json",
         "contracts/records/review-record.schema.json",

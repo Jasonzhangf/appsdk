@@ -11,6 +11,14 @@ contracts.
 - Active implementation and production entrypoints: [describe].
 - Compatibility and legacy boundaries: [describe].
 
+When persistent requirements are established, `.appsdk/requirements.json` is
+their sole source. Read it through `appsdk requirements show` and `history`.
+Requirements remain effective until the user explicitly changes or revokes
+them in the conversation. Preserve that instruction and source when applying
+a change; agent plans, task completion, review PASS and reset are not authority
+to change requirements. Bind the task goal's `requirements_version` to the
+current ledger version, and use the SDK review context for all applicable items.
+
 ## Semantic Invariants
 
 - Preserve the request, response, state, and error semantics declared by this

@@ -78,3 +78,9 @@ ReviewRecord schema 声明 requirements_review 的字段形状；它同时承载
 - 所有结果绑定精确候选与消费环境，跑适用现有 Rust测试、source gate、构建及 canonical安装后的真实 CLI消费者；独立架构review、CI与集成后收口。
 
 上述公开 CLI 场景已由作者测试 consumer 执行。它们证明模板分发、原文保持、材料绑定、陈旧拒绝和恢复；fixture 的 reviewer acknowledgement 是测试输入，不证明真实用户身份或模型遵循。正式安装后的验收、独立架构 review 与集成状态以 evidence 记录为准。两张 graph 的 operator 仅注册为不可执行设计节点；本增量的可执行入口是公开 AppSDK CLI。不得用本设计或模板文本宣称 G1–G8 强锁已完成。
+
+## 当前边界说明（会话授权信任边界）
+
+追加说明，不替换上文：用户的真实会话原文就是授权。执行 agent 按会话记录提交授权原文及 `source` 引用，独立 reviewer 对照原会话核验范围。不要求机器身份认证、签名、独立账号/daemon 或外部权限隔离作为前置条件；AppSDK 不声称能抵抗同 UID 恶意伪造整套文件。
+
+上文"不证明现有 `confirmed_by` 是真实用户认证"的含义据此收窄为：契约不接受缺实际会话授权原文/来源的裸确认字段，也不承诺机器识别角色 user 伪造或覆盖完整同权限篡改。长期需求的唯一 owner 与 ledger 见 `user-requirement-truth-lock.md` 第 5 节（`rust/src/main/requirements.rs`、`.appsdk/requirements.json`）。本增量原有的模板分发、公开 `review-context` 组装、候选/证据绑定与陈旧拒绝验收不变。

@@ -74,6 +74,7 @@ pub(super) fn historical_governance_map(version: &str, name: &str) -> &'static s
             "../../../contracts/migrations/0.1.0009/governance-maps/verification-map.json"
         ),
         ("0.1.0010", name) => canonical_map::historical_0_1_0010_map(name),
+        ("0.1.0011", name) => canonical_map::historical_0_1_0011_map(name),
         _ => fail("UNKNOWN_GOVERNANCE_MAP"),
     }
 }
@@ -98,6 +99,7 @@ pub(super) fn sdk_map_migration_manifest(step: &str) -> Value {
             "0.1.0010",
         ),
         "0.1.0010-to-0.1.0011" => (SDK_MAP_MIGRATION_0010_TO_0011, "0.1.0010", "0.1.0011"),
+        "0.1.0011-to-0.1.0012" => (SDK_MAP_MIGRATION_0011_TO_0012, "0.1.0011", "0.1.0012"),
         _ => fail("UNKNOWN_SDK_MAP_MIGRATION_STEP"),
     };
     let manifest: Value = serde_json::from_str(manifest_text)

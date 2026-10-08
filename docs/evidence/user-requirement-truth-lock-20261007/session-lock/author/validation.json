@@ -1,0 +1,31 @@
+{
+  "base": "8555a74e5e46de10136fda9539ae044d3e8bdfbc",
+  "sdk_version": "0.1.0012",
+  "installed_binary": "/Users/fanzhang/.cargo/bin/appsdk",
+  "binary_sha256": "d8470cd7ddf6ca0833b6d7a780781c9a1c0f5ec2c9809702929c9f31a7023fbb",
+  "requirements_blackbox": {
+    "passed": 11,
+    "exit": 0
+  },
+  "installed_requirements": {
+    "passed": 11,
+    "exit": 0,
+    "implementation": "requirements owner unchanged by subsequent pin history fix"
+  },
+  "installed_pin_blackbox": {
+    "passed": 37,
+    "exit": 0
+  },
+  "dagpipe_tests": {
+    "passed": 28,
+    "exit": 0
+  },
+  "collab_mechanical_split": {
+    "passed": 38,
+    "exit": 0
+  },
+  "source_registry": {
+    "status": "pass"
+  },
+  "daemon_restart": "not_applicable"
+}

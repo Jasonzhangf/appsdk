@@ -608,6 +608,24 @@ evidence location.
   failure, and memory state must not be reconstructed from Guide, debug,
   develop, or log payloads.
 
+## Persistent user requirements
+
+The project-owned `.appsdk/requirements.json` ledger retains original user
+requirements, explicit conversation change instructions, and every version.
+Read it with `appsdk requirements show [project]` or `history`. Only an explicit
+user instruction may create, replace, or revoke an item. Submit that original
+instruction and its conversation source with `appsdk requirements apply
+[project] --input <json>`; do not infer authorization from implementation work
+or a review PASS. Ambiguous changes stay pending until the user specifies them.
+No biometric, signature, or external identity check is required.
+
+Bind the task goal's `requirements_version` to the current ledger version.
+After an authorized change, update the task reference and rerun the affected
+validation. `review-context` loads all items and history for independent
+review. A task close, SDK refresh, or governance reset does not revoke or erase
+requirements. A legacy project without a ledger reports `not_established`;
+do not silently convert its old goal into an authorized requirement baseline.
+
 ## References: load only the relevant domain
 
 - Initialization or migration: [bootstrap-migration.md](references/bootstrap-migration.md).

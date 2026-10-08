@@ -1,0 +1,191 @@
+{
+  "compiled_registry": true,
+  "graphs": [
+    {
+      "id": "appsdk-fix-lifecycle",
+      "single_source_single_sink": {
+        "inputs": 1,
+        "outputs": 1
+      },
+      "version": "0.1.0"
+    },
+    {
+      "id": "appsdk-notification-object",
+      "single_source_single_sink": {
+        "inputs": 1,
+        "outputs": 1
+      },
+      "version": "0.1.0"
+    },
+    {
+      "id": "appsdk-collab-context",
+      "single_source_single_sink": {
+        "inputs": 1,
+        "outputs": 1
+      },
+      "version": "0.8.0"
+    },
+    {
+      "id": "appsdk-collab-appserver-route-repair",
+      "single_source_single_sink": {
+        "inputs": 1,
+        "outputs": 1
+      },
+      "version": "0.2.0"
+    },
+    {
+      "id": "appsdk-collab-subscription-lifecycle",
+      "single_source_single_sink": {
+        "inputs": 1,
+        "outputs": 1
+      },
+      "version": "0.2.0"
+    },
+    {
+      "id": "appsdk-collab-notification-consumption",
+      "single_source_single_sink": {
+        "inputs": 1,
+        "outputs": 1
+      },
+      "version": "0.2.0"
+    },
+    {
+      "id": "appsdk-collab-merge-pending",
+      "single_source_single_sink": {
+        "inputs": 1,
+        "outputs": 1
+      },
+      "version": "0.1.0"
+    },
+    {
+      "id": "appsdk-collab-dsh-channel",
+      "single_source_single_sink": {
+        "inputs": 1,
+        "outputs": 1
+      },
+      "version": "0.1.0"
+    },
+    {
+      "id": "appsdk-sdk-pin-history",
+      "single_source_single_sink": {
+        "inputs": 1,
+        "outputs": 1
+      },
+      "version": "0.1.0"
+    },
+    {
+      "id": "appsdk-collab-dashboard-operation",
+      "single_source_single_sink": {
+        "inputs": 1,
+        "outputs": 1
+      },
+      "version": "0.1.0"
+    },
+    {
+      "id": "appsdk-collab-control-plane-reset",
+      "single_source_single_sink": {
+        "inputs": 1,
+        "outputs": 1
+      },
+      "version": "0.3.0"
+    },
+    {
+      "id": "appsdk-collab-pane-route-reconcile",
+      "single_source_single_sink": {
+        "inputs": 1,
+        "outputs": 1
+      },
+      "version": "0.5.0"
+    },
+    {
+      "id": "appsdk-collab-master-authority",
+      "single_source_single_sink": {
+        "inputs": 1,
+        "outputs": 1
+      },
+      "version": "0.1.0"
+    },
+    {
+      "id": "appsdk-user-requirement-change",
+      "single_source_single_sink": {
+        "inputs": 1,
+        "outputs": 1
+      },
+      "version": "0.2.0"
+    },
+    {
+      "id": "appsdk-user-requirement-consumption",
+      "single_source_single_sink": {
+        "inputs": 1,
+        "outputs": 1
+      },
+      "version": "0.3.0"
+    }
+  ],
+  "manifest": {
+    "graphs": [
+      {
+        "id": "appsdk-fix-lifecycle",
+        "path": "contracts/dagpipe/fix-lifecycle.graph.json"
+      },
+      {
+        "id": "appsdk-notification-object",
+        "path": "contracts/dagpipe/notification.graph.json"
+      },
+      {
+        "id": "appsdk-collab-context",
+        "path": "docs/dagpipe/collab-context.graph.json"
+      },
+      {
+        "id": "appsdk-collab-appserver-route-repair",
+        "path": "docs/dagpipe/appserver-route-repair.graph.json"
+      },
+      {
+        "id": "appsdk-collab-subscription-lifecycle",
+        "path": "docs/dagpipe/collab-subscription-lifecycle.graph.json"
+      },
+      {
+        "id": "appsdk-collab-notification-consumption",
+        "path": "docs/dagpipe/collab-notification-consumption.graph.json"
+      },
+      {
+        "id": "appsdk-collab-merge-pending",
+        "path": "docs/dagpipe/merge-pending.graph.json"
+      },
+      {
+        "id": "appsdk-collab-dsh-channel",
+        "path": "docs/dagpipe/collab-dsh-channel.graph.json"
+      },
+      {
+        "id": "appsdk-sdk-pin-history",
+        "path": "docs/dagpipe/sdk-pin-history.graph.json"
+      },
+      {
+        "id": "appsdk-collab-dashboard-operation",
+        "path": "docs/dagpipe/collab-dashboard.graph.json"
+      },
+      {
+        "id": "appsdk-collab-control-plane-reset",
+        "path": "docs/dagpipe/collab-control-plane-reset.graph.json"
+      },
+      {
+        "id": "appsdk-collab-pane-route-reconcile",
+        "path": "docs/dagpipe/collab-pane-route-reconcile.graph.json"
+      },
+      {
+        "id": "appsdk-collab-master-authority",
+        "path": "docs/dagpipe/collab-master-authority.graph.json"
+      },
+      {
+        "id": "appsdk-user-requirement-change",
+        "path": "docs/dagpipe/user-requirement-change.graph.json"
+      },
+      {
+        "id": "appsdk-user-requirement-consumption",
+        "path": "docs/dagpipe/user-requirement-consumption.graph.json"
+      }
+    ],
+    "schema_version": 1
+  },
+  "single_source_single_sink": true
+}

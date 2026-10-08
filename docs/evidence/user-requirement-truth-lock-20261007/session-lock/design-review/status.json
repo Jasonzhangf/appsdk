@@ -1,0 +1,66 @@
+{
+  "taskId": "requirement-session-design-scoped-20261007",
+  "type": "review",
+  "state": "completed",
+  "repo": "/Volumes/Intel/playground/appsdk/requirements-session-lock",
+  "runDir": "/Volumes/Intel/playground/appsdk/requirements-session-lock/.agent-collab/agy/requirement-session-design-scoped-20261007",
+  "startedAt": "2026-10-07T23:53:35.693Z",
+  "updatedAt": "2026-10-07T23:55:59.278Z",
+  "pid": 54091,
+  "supervisorPid": 54023,
+  "pollIntervalMs": 300000,
+  "lastObservationAt": null,
+  "eventLines": 0,
+  "eventBytes": 0,
+  "lastEventAt": "2026-10-07T23:53:35.749Z",
+  "verdict": "pass",
+  "failureClass": null,
+  "outcomeReason": "controller_no_blocking_findings",
+  "exitCode": 0,
+  "error": null,
+  "attempt": 1,
+  "parentTaskId": null,
+  "handoffFromAttempt": null,
+  "retryOfTaskId": null,
+  "previousEvidence": null,
+  "mode": "uncommitted",
+  "commit": null,
+  "base": null,
+  "truthBeforeAttempt": {
+    "capturedAt": "2026-10-07T23:53:35.633Z",
+    "status": "?? docs/design/requirement-session-contract.md\n?? docs/evidence/user-requirement-truth-lock-20261007/session-lock-notes.md",
+    "diffStat": "",
+    "cachedDiffStat": ""
+  },
+  "meta": {
+    "type": "review",
+    "imageName": "agy_image",
+    "category": "general",
+    "aspectRatio": "1:1",
+    "mode": "uncommitted",
+    "commit": null,
+    "base": null,
+    "attempt": 1,
+    "parentTaskId": null
+  },
+  "signal": null,
+  "output": {
+    "contract_version": "1",
+    "findings": [],
+    "module_boundary_evidence": [
+      {
+        "edges": "Change flow: authenticate_change -> check_base -> decide_change -> commit_revision -> publish_outcome; Consumption flow: load_effective -> verify_effective -> bind_task -> assemble_review_packet -> evaluate_evidence -> publish_admission; SESE topology verified with dagpipe graph validate",
+        "gates": "dagpipe graph validate docs/dagpipe/user-requirement-change.graph.json: PASS; dagpipe graph validate docs/dagpipe/user-requirement-consumption.graph.json: PASS; git diff --check: PASS; stage notes verified in docs/evidence/user-requirement-truth-lock-20261007/session-lock-notes.md",
+        "module": "appsdk.requirements",
+        "owner": "AppSDK requirements owner (rust/src/main/requirements.rs & docs/design)",
+        "paths": "docs/design/user-requirement-truth-lock.md; docs/design/requirement-session-contract.md; docs/evidence/user-requirement-truth-lock-20261007/session-lock-notes.md; docs/dagpipe/user-requirement-change.graph.json; docs/dagpipe/user-requirement-consumption.graph.json",
+        "resources": "Authoritative user requirement: '用户可能需要输入一些需求，只能用户提出修改才能修改，否则永远作为真理存在'; User explicit boundary update: '用户在会话里提供授权就行了，你不要做无用的校验，我们不要过度校验。' (docs/design/user-requirement-truth-lock.md#L19-L23, docs/design/requirement-session-contract.md#L3-L7); Head commit: 8555a74e5e46de10136fda9539ae044d3e8bdfbc"
+      }
+    ],
+    "scope": {
+      "base": null,
+      "commit": "8555a74e5e46de10136fda9539ae044d3e8bdfbc",
+      "mode": "uncommitted"
+    }
+  }
+}

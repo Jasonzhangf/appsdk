@@ -54,6 +54,17 @@ pub(super) fn reset_transaction_build_staging(
         &staging_root.join("contracts/transitions/zone-transition-manifest.json"),
         CANONICAL_ZONE_TRANSITION_CONTRACT.as_bytes(),
     )?;
+    // Requirements are project-owned truth, not rebuildable governance state.
+    // The caller holds the same transaction lock used by requirements apply.
+    if crate::requirements::read_requirements_if_present(root).is_some() {
+        let bytes = fs::read(root.join(".appsdk/requirements.json"))
+            .map_err(|error| format!("REQUIREMENTS_PRESERVE_READ_FAILED:{error}"))?;
+        reset_transaction_write_bytes(
+            transaction_dir,
+            &staging_root.join(".appsdk/requirements.json"),
+            &bytes,
+        )?;
+    }
     let gitignore = root.join(".gitignore");
     if fs::symlink_metadata(&gitignore)
         .map(|metadata| metadata.file_type().is_symlink())
@@ -80,7 +91,7 @@ pub(super) fn reset_transaction_build_staging(
         "reset_id": transaction_id,
         "transaction_id": transaction_id,
         "mode": mode.record_mode(),
-        "preserved": ["business_source", "runtime_data", "active", "protected"],
+        "preserved": ["business_source", "runtime_data", "active", "protected", "user_requirements"],
         "removed": removed,
         "branch": branch,
         "created_at": Utc::now().to_rfc3339()

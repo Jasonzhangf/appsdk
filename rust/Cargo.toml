@@ -1,6 +1,6 @@
 [package]
 name = "appsdk"
-version = "0.1.11"
+version = "0.1.12"
 edition = "2021"
 description = "Compiled AppSDK governance CLI"
 license = "MIT"

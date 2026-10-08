@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "sdk": "appsdk",
-  "version": "0.1.0011",
+  "version": "0.1.0012",
   "runtime_entrypoint": "rust-binary",
   "resources": {
     "contracts": [
@@ -27,6 +27,11 @@
       "contracts/migrations/sdk-0.1.0008-to-0.1.0009.json",
       "contracts/migrations/sdk-0.1.0009-to-0.1.0010.json",
       "contracts/migrations/sdk-0.1.0010-to-0.1.0011.json",
+      "contracts/migrations/sdk-0.1.0011-to-0.1.0012.json",
+      "contracts/migrations/0.1.0011/governance-maps/resource-map.json",
+      "contracts/migrations/0.1.0011/governance-maps/function-map.json",
+      "contracts/migrations/0.1.0011/governance-maps/mainline-call-map.json",
+      "contracts/migrations/0.1.0011/governance-maps/verification-map.json",
       "contracts/migrations/0.1.0010/governance-maps/resource-map.json",
       "contracts/migrations/0.1.0010/governance-maps/function-map.json",
       "contracts/migrations/0.1.0010/governance-maps/mainline-call-map.json",
@@ -60,6 +65,7 @@
       "contracts/records/test-scenario-result-record.schema.json",
       "contracts/records/fix-candidate-record.schema.json",
       "contracts/records/goal-clarification-record.schema.json",
+      "contracts/records/user-requirement-request.schema.json",
       "contracts/records/review-record.schema.json",
       "contracts/records/effectiveness-record.schema.json",
       "contracts/records/pre-review-validation-record.schema.json",

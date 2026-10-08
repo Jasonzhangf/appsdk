@@ -67,6 +67,16 @@ that review; production source, tests and configuration are unchanged.
 Main integration and main runtime remain pending.
 No completed delivery is claimed by this directory.
 
+`source-registry-correction.md` records the first PR release gate failure and
+the test-only move into two targets with one shared fixture. The original
+baseline registry evidence was invalid for the added 2000-line test file.
+The current staged source registry passes. Debug and installed tmux consumers
+both passed 7+6 tests. Product source/Skill inputs remain unchanged.
+`test-layout-review.json` records independent AGY PASS, exit 0, no P0/P1, for
+the test move at tree e0f546ad2f56a6cca5c54a3670ea0d11e6eead0b. Its P2 warning
+about unused shared fixture items is retained as advisory; no post-review test
+change was made. The first review remains the product-change receipt.
+
 Archived logs retain the actual result text. Only trailing whitespace and blank
 EOF lines were normalized in repository copies for git diff --check; full raw
 worker/parent outputs remain in the external task records. No test result was

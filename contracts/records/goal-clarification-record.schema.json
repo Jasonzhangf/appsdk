@@ -5,6 +5,7 @@
   "required": ["goal_id", "raw_request", "understood_objective", "acceptance_criteria", "non_goals", "assumptions", "ambiguities", "questions", "status", "created_at"],
   "properties": {
     "goal_id": {"type": "string"},
+    "requirements_version": {"type": "integer", "minimum": 0},
     "issue_id": {"type": ["string", "null"]},
     "raw_request": {"type": "string", "minLength": 1},
     "understood_objective": {"type": "string", "minLength": 1},

@@ -675,7 +675,10 @@ pub(super) fn read_goal_if_present(root: &Path) -> Option<Value> {
         fail("GOVERNANCE_PATH_SYMLINK:goal");
     }
     let text = fs::read_to_string(file).unwrap_or_else(|_| fail("GOAL_RECORD_UNAVAILABLE"));
-    Some(serde_json::from_str(&text).unwrap_or_else(|_| fail("INVALID_GOAL_CLARIFICATION_RECORD")))
+    let goal =
+        serde_json::from_str(&text).unwrap_or_else(|_| fail("INVALID_GOAL_CLARIFICATION_RECORD"));
+    crate::requirements::assert_requirements_current(root, &goal);
+    Some(goal)
 }
 
 pub(super) fn read_goal(root: &Path) -> Value {

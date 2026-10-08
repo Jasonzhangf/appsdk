@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://appsdk.local/contracts/records/user-requirement-request.schema.json",
+  "title": "user-requirement-request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "project_id",
+    "request_id",
+    "requirement_id",
+    "base_version",
+    "operation",
+    "authorization"
+  ],
+  "properties": {
+    "project_id": {"type": "string", "minLength": 1},
+    "request_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "requirement_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "base_version": {"type": "integer", "minimum": 0},
+    "operation": {"enum": ["create", "replace", "revoke", "cancel"]},
+    "text": {"type": "string", "minLength": 1},
+    "authorization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "source", "original_text"],
+      "properties": {
+        "role": {"const": "user"},
+        "source": {"type": "string", "minLength": 1},
+        "original_text": {"type": "string", "minLength": 1}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"operation": {"enum": ["create", "replace"]}}},
+      "then": {"required": ["text"]}
+    },
+    {
+      "if": {"properties": {"operation": {"enum": ["revoke", "cancel"]}}},
+      "then": {"not": {"required": ["text"]}}
+    }
+  ]
+}

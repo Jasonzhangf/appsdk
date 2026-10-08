@@ -139,7 +139,7 @@ fn current_resource_map_owns_the_current_bundle_and_generic_migration_paths() {
     };
     assert_eq!(
         truth_store("sdk_bundle"),
-        "AppSDK 0.1.0011 embedded Bundle manifest/resources"
+        "AppSDK 0.1.0012 embedded Bundle manifest/resources"
     );
     assert_eq!(truth_store("historical_governance_maps"), ".appsdk/migrations/<source>-to-<target>/maps/** when materialized by pin-lock; absent after fresh reset");
     assert_eq!(truth_store("sdk_migration_record"), ".appsdk/migrations/<source>-to-<target>/record.json when materialized by pin-lock; absent after fresh reset");

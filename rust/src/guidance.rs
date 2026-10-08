@@ -175,7 +175,9 @@ fn read_project(root: &Path) -> Value {
 fn read_goal(root: &Path) -> Value {
     let relative = Path::new(".appsdk/goal.json");
     assert_no_symlink(root, relative, "GUIDANCE_GOAL_SYMLINK");
-    read_json(&root.join(relative), "GUIDANCE_GOAL_MISSING_OR_INVALID")
+    let goal = read_json(&root.join(relative), "GUIDANCE_GOAL_MISSING_OR_INVALID");
+    crate::requirements::assert_requirements_current(root, &goal);
+    goal
 }
 
 fn append_event(path: &Path, value: &Value) {

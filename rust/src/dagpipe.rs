@@ -439,7 +439,7 @@ fn design_graph_operator_names() -> [&'static str; 68] {
         "appsdk.collab_authority.resolve_scope",
         "appsdk.collab_authority.transfer_master",
         "appsdk.collab_authority.emit_receipt",
-        "appsdk.requirements.authenticate_change",
+        "appsdk.requirements.submit_authorization",
         "appsdk.requirements.check_base",
         "appsdk.requirements.decide_change",
         "appsdk.requirements.commit_revision",

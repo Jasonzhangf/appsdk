@@ -1,6 +1,6 @@
 # Collab master authority fix: evidence
 
-Task: `collab-master-authority-fix-20261007`. Base: `7350fbf6b020b1464d531337c7b2f6b8fa5de6f2`. Defect: `1f79966`, OPEN.
+Task: `collab-master-authority-fix-20261007`. Base: `7350fbf6b020b1464d531337c7b2f6b8fa5de6f2`. Defect: `1f79966`.
 
 The user requested a simplified master state machine, a GCM implementation worker, main integration, rebuild and restart. The author owns an isolated candidate worktree. The parent owns installation, formal runtime validation, independent architecture review and integration.
 
@@ -64,8 +64,9 @@ PASS. It also records the explicit separate Desktop control-socket failure.
 no findings, and three concrete module boundary records for reviewed tree
 515b53132888fe7e7670eabfccee0936ba1ad672. Only evidence receipts were added after
 that review; production source, tests and configuration are unchanged.
-Main integration and main runtime remain pending.
-No completed delivery is claimed by this directory.
+PR #16 merged as `bb9ce30b0efe60ab48445fcf4b3efd9c13c40fc4` after both CI runs
+passed. `main-runtime.md` records the main rebuild, official down/up and installed
+32-test replay. The separate Desktop control-socket failure remains explicit.
 
 `source-registry-correction.md` records the first PR release gate failure and
 the test-only move into two targets with one shared fixture. The original
@@ -78,8 +79,9 @@ about unused shared fixture items is retained as advisory; no post-review test
 change was made. The first review remains the product-change receipt.
 
 Archived logs retain the actual result text. Only trailing whitespace and blank
-EOF lines were normalized in repository copies for git diff --check; full raw
-worker/parent outputs remain in the external task records. No test result was
-rewritten.
+EOF lines were normalized in earlier repository copies for git diff --check.
+Final main and cleanup logs are archived losslessly as gzip files. Necessary raw
+result logs and the canonical note remain in external task records. Isolated
+worker homes were removed. No test result was rewritten.
 
 Raw agent event streams, reasoning, credential files and unrelated runtime state are not included.

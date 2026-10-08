@@ -1,0 +1,27 @@
+{
+  "removed_owned_isolated_homes": [
+    "design/home",
+    "design-review-v2/home",
+    "design-revision/home",
+    "diagnostics/home",
+    "implement/home",
+    "implementation/home",
+    "plan/home",
+    "r2-docs/home",
+    "r2-source/home",
+    "r2-tests/home",
+    "r3-blueprint/home",
+    "r3-projection/home",
+    "r3-public/home",
+    "r4-public/home",
+    "r4-public-retry/home",
+    "r5-context-diagnosis/home",
+    "r5-dsh/home",
+    "r5-mcp/home",
+    "retrospective/home",
+    "retrospective-check/home",
+    "runtime/home"
+  ],
+  "worker_processes_remaining": 0,
+  "retained": "Canonical task note, raw result logs, prompts and review receipts remain as task evidence. Credential/config symlink targets were not removed."
+}

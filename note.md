@@ -64,3 +64,12 @@
 - Global binary and versioned bundle reinstalled. Binary SHA-256: `e3c36ae25c94d0c01c81cfe084fac7de8dc577f5ba3b8f91ae18b9d0587631a5`. Global `new -> pin-lock -> verify` live sample passed.
 - DSH review `appsdk-fix-lifecycle-v2-final-20260816`: `VERDICT: PASS`, no P0/P1. Worktree and temporary branches removed only after remote verification; claim released.
 - GitHub release `v0.1.3` published from commit `7f62abe`; downloaded `appsdk-0.1.3-macos-arm64` hash exactly matches the installed/reviewed binary.
+
+## 2026-10-08 Collab Master authority delivery
+
+- User requested a GCM implementation worker, main merge, rebuild and restart. PR #16 merged as `bb9ce30b0efe60ab48445fcf4b3efd9c13c40fc4` after independent AGY PASS and six green CI jobs.
+- Master authority now has Empty/Assigned states. Typed grants are the sole authority owner. Approved clear/replacement does not probe incumbent liveness. Status/context/board/panel share the grant projection. tmux transport uncertainty does not revoke authority.
+- Main official installation produced 0.2.0257. Official down/up succeeded. New canonical daemon PID 46300 answered status. Installed public consumers passed 32 tests; real isolated native AppServer registration passed. Author suites passed 925 Collab and 18 MCP tests, with one ignored Collab test.
+- Current Desktop control socket still refuses connections. Direct Desktop identity recovery is not verified; the error remains in the receipt. Installation did not clear or replace formal Master grants. Live message-count observations changed concurrently and are not claimed unchanged.
+- Delivery index: `docs/evidence/collab-master-authority-fix-20261007/README.md`; main receipt: `main-runtime.md`; frozen contract and DAG: `docs/design/collab-master-authority-contract-20261007.md` and `docs/dagpipe/collab-master-authority.graph.json`.
+- Nine owned worktrees/branches and 21 isolated worker homes were reclaimed without force. Other task worktrees and dirty primary documents were preserved. The clean main clone's final removal and defect closure are recorded in the canonical external task note after the receipt push. Necessary raw result logs remain as task evidence.

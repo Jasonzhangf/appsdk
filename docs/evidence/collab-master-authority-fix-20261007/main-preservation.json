@@ -1,0 +1,32 @@
+{
+  "appsdk": {
+    "durable_tasks_equal": true,
+    "task_count": 0,
+    "peer_active_task_equal": true,
+    "peer_count": 1,
+    "master_control_fields_equal": true,
+    "message_observation_counts": {
+      "pre": 0,
+      "candidate": 0,
+      "main": 0
+    },
+    "task_comparison_excludes": [
+      "keepalive"
+    ]
+  },
+  "routecodex": {
+    "durable_tasks_equal": true,
+    "task_count": 113,
+    "peer_active_task_equal": true,
+    "peer_count": 48,
+    "master_control_fields_equal": true,
+    "message_observation_counts": {
+      "pre": 4,
+      "candidate": 4,
+      "main": 1
+    },
+    "task_comparison_excludes": [
+      "keepalive"
+    ]
+  }
+}

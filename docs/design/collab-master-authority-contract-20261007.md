@@ -1,6 +1,6 @@
 # Collab master authority contract (2026-10-07)
 
-状态：设计准入 PASS（2026-10-07，独立设计 reviewer）。本文冻结合同语义；实现与验证进行中，未完成交付，不宣称 DONE、live 或已合并 main。
+状态：设计准入 PASS（2026-10-07，独立设计 reviewer）。本文冻结合同语义。2026-10-08 已通过独立实现审查和 CI，PR #16 合并 main；main 重建、正式 down/up、32 项 installed 公开入口回归通过。交付证据见 evidence index。当前 Desktop 控制 socket 拒连是单列的未恢复边界。
 
 输入绑定：
 

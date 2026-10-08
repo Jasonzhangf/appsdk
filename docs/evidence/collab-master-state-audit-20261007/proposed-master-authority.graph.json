@@ -1,0 +1,16 @@
+{
+  "id": "appsdk-collab-proposed-master-authority-audit",
+  "version": "0.1.0",
+  "description": "提议的单次 master 授权变更切片。上游依赖是已有身份门提供的当前认证主体；用户明确批准赋予或替换、清除的具体范围。唯一 daemon owner 原子修改项目 master 授权及其版本并返回持久回执。旧持有人在线/未知/离线均不是准入条件。取消或失败只在对应节点终止；持久化结果未知必须按原操作身份查证，不能盲目重做。本图是待审设计，Operator 未实现，不是可执行或已通过实现准入的管线。",
+  "inputs": [{"id": "authority_request", "schema": "Object"}],
+  "nodes": [
+    {"id": "校验当前主体与用户批准范围", "operator": "proposal.collab.authorize_change", "operator_version": "1", "inputs": ["authority_request"], "output": {"id": "authorized_change", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "原子替换或清除项目授权", "operator": "proposal.collab.commit_authority", "operator_version": "1", "inputs": ["authorized_change"], "output": {"id": "authority_commit", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "返回授权版本与持久回执", "operator": "proposal.collab.return_authority", "operator_version": "1", "inputs": ["authority_commit"], "output": {"id": "authority_receipt", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"}
+  ],
+  "edges": [
+    {"from": "校验当前主体与用户批准范围", "to": "原子替换或清除项目授权", "arc_id": "authorized_change"},
+    {"from": "原子替换或清除项目授权", "to": "返回授权版本与持久回执", "arc_id": "authority_commit"}
+  ],
+  "outputs": ["authority_receipt"]
+}

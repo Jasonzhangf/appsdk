@@ -1,0 +1,20 @@
+{
+  "id": "appsdk-collab-current-master-command-audit",
+  "version": "0.1.0",
+  "description": "当前 master 权限操作的语义审计切片；对应 verify_master_actor 和 board live gate，不包含已绕过存活检查的显式 promote。失败在产出节点终止，本图唯一输出描述成功结果；不代表这些审计 Operator 已注册或可执行。",
+  "inputs": [{"id": "master_request", "schema": "Object"}],
+  "nodes": [
+    {"id": "校验当前调用者身份", "operator": "audit.collab.authenticate_actor", "operator_version": "1", "inputs": ["master_request"], "output": {"id": "actor", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "读取当前范围的授权持有人", "operator": "audit.collab.read_grant", "operator_version": "1", "inputs": ["actor"], "output": {"id": "grant", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "要求授权持有人被判定在线", "operator": "audit.collab.require_live_master", "operator_version": "1", "inputs": ["grant"], "output": {"id": "live_authority", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "校验并提交本次控制操作", "operator": "audit.collab.apply_command", "operator_version": "1", "inputs": ["live_authority"], "output": {"id": "command_result", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "返回操作回执", "operator": "audit.collab.return_result", "operator_version": "1", "inputs": ["command_result"], "output": {"id": "master_outcome", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"}
+  ],
+  "edges": [
+    {"from": "校验当前调用者身份", "to": "读取当前范围的授权持有人", "arc_id": "actor"},
+    {"from": "读取当前范围的授权持有人", "to": "要求授权持有人被判定在线", "arc_id": "grant"},
+    {"from": "要求授权持有人被判定在线", "to": "校验并提交本次控制操作", "arc_id": "live_authority"},
+    {"from": "校验并提交本次控制操作", "to": "返回操作回执", "arc_id": "command_result"}
+  ],
+  "outputs": ["master_outcome"]
+}

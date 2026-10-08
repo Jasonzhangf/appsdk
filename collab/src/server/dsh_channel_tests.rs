@@ -1205,16 +1205,11 @@ fn a_refused_dsh_wake_is_labelled_as_a_dsh_rejection() {
 
 #[test]
 fn a_dsh_master_reconnect_is_not_fenced_as_a_foreign_promotion() {
-    // The dsh-gateway change request (2026-10-04, S23) claimed
-    // `same_pane_tmux_recovery` is always false for dsh, so a reconnecting dsh
-    // master would be refused with MASTER_RECOVERY_BLOCKED_LIVE against its own
-    // grant. The premise does not hold: that fence is only reached when
-    // `same_runtime_key` is false, and a dsh binding stores `tmux_endpoint` as
-    // `None` on both sides, so its runtime key reduces to (session_id,
-    // agent_id). An identical reconnect therefore short-circuits the fence
-    // before it is evaluated. This pins the real behaviour so that a later
-    // "pane-free recovery" arm cannot quietly replace the frozen route key with
-    // a weaker anchor.
+    // The removed master-recovery live fence used to be reached on any
+    // non-idempotent rebind and refused a reconnecting dsh master as a foreign
+    // promotion. Recovery is now owned by the typed registration transaction:
+    // the token, persisted identity, scope and runtime key prove the same
+    // principal, and transport reachability never gates the reissued grant.
     let root = scratch("dsh-master-reconnect");
     let gateway = Gateway::start("dsh-master-reconnect", {
         let root = root.clone();

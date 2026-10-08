@@ -1,179 +1,4 @@
-use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::thread;
-use std::time::{Duration, Instant};
-
-struct Fixture {
-    binary: PathBuf,
-    root: PathBuf,
-    host_state: PathBuf,
-    tmux_socket: PathBuf,
-    initialized: bool,
-}
-
-impl Fixture {
-    fn command(&self, args: &[&str], pane: Option<&Pane>) -> Output {
-        self.command_with_originator(args, pane, "Codex TUI")
-    }
-
-    fn command_with_originator(
-        &self,
-        args: &[&str],
-        pane: Option<&Pane>,
-        originator: &str,
-    ) -> Output {
-        let mut command = Command::new(&self.binary);
-        command
-            .args(args)
-            .current_dir(&self.root)
-            .env("COLLAB_STATE_DIR", &self.host_state)
-            .env("CODEX_HOME", self.root.join("home"))
-            .env_remove("COLLAB_APPSERVER_SOCKET")
-            .env_remove("CODEX_APP_SERVER_SOCKET")
-            .env_remove("COLLAB_APPSERVER_NAMESPACE")
-            .env_remove("TMUX")
-            .env_remove("TMUX_PANE")
-            .env_remove("CODEX_SESSION_ID")
-            .env_remove("CODEX_THREAD_ID")
-            .env_remove("COLLAB_WORKER")
-            .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", originator);
-        if let Some(pane) = pane {
-            command
-                .env(
-                    "TMUX",
-                    format!("{},{},0", self.tmux_socket.display(), pane.server_pid),
-                )
-                .env("TMUX_PANE", &pane.pane_id)
-                .env("CODEX_SESSION_ID", &pane.session_anchor)
-                .env("CODEX_THREAD_ID", &pane.thread_anchor);
-        }
-        command.output().expect("run collab CLI")
-    }
-
-    fn run_ok(&self, args: &[&str], pane: Option<&Pane>) -> Value {
-        let output = self.command(args, pane);
-        assert!(
-            output.status.success(),
-            "collab {:?} failed: stdout={} stderr={}",
-            args,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        serde_json::from_slice(&output.stdout).expect("collab CLI emits JSON")
-    }
-
-    fn command_without_pane(&self, args: &[&str]) -> Output {
-        self.command_with_originator(args, None, "Codex TUI")
-    }
-
-    fn run_context(&self, args: &[&str], pane: Option<&Pane>) -> Value {
-        self.run_ok(args, pane)
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        if self.initialized {
-            let _ = self.command(&["down"], None);
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while Instant::now() < deadline && self.host_state.join("server.sock").exists() {
-                thread::sleep(Duration::from_millis(50));
-            }
-        }
-        let _ = Command::new("tmux")
-            .args(["-S", self.tmux_socket.to_str().unwrap(), "kill-server"])
-            .output();
-        if std::thread::panicking() {
-            eprintln!(
-                "preserving failed e2e fixture for diagnosis: root={} host_state={}",
-                self.root.display(),
-                self.host_state.display()
-            );
-        } else {
-            let _ = std::fs::remove_dir_all(&self.root);
-            let _ = std::fs::remove_dir_all(&self.host_state);
-        }
-    }
-}
-
-struct Pane {
-    server_pid: u32,
-    pane_id: String,
-    session_anchor: String,
-    thread_anchor: String,
-}
-
-fn tmux(socket: &Path, args: &[&str]) -> Output {
-    let output = Command::new("tmux")
-        .arg("-S")
-        .arg(socket)
-        .args(args)
-        .output()
-        .expect("run isolated tmux command");
-    assert!(
-        output.status.success(),
-        "tmux {:?} failed: {}",
-        args,
-        String::from_utf8_lossy(&output.stderr)
-    );
-    output
-}
-
-fn unique_root() -> PathBuf {
-    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
-    std::env::temp_dir().join(format!(
-        "ct{}-{}",
-        std::process::id(),
-        SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    ))
-}
-
-/// Seed the project baseline marker. `collab context` resolves its project root
-/// from the `.agent-collab` baseline or a git root; a temp fixture is neither,
-/// so it seeds the marker instead of reaching into daemon state.
-fn seed_baseline(root: &Path) {
-    std::fs::create_dir_all(root.join(".agent-collab")).expect("seed .agent-collab baseline");
-}
-
-/// Walk a parsed context snapshot and fail if any object key carries a secret.
-fn assert_no_secret_surface(label: &str, value: &Value) {
-    match value {
-        Value::Object(map) => {
-            for (key, child) in map {
-                assert_ne!(key, "token", "{label}: raw token key leaked");
-                assert_ne!(key, "identity_receipt", "{label}: private receipt leaked");
-                assert_no_secret_surface(label, child);
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                assert_no_secret_surface(label, item);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// The public `collab context` display must never expose the private credential
-/// or the internal identity receipt, in raw text or in any parsed object.
-fn assert_context_display_is_public(label: &str, output: &Output) {
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !stdout.contains("identity_receipt"),
-        "{label}: context printed the private identity receipt: {stdout}"
-    );
-    assert!(
-        !stdout.contains("\"token\""),
-        "{label}: context printed a token field: {stdout}"
-    );
-    let parsed: Value = serde_json::from_str(&stdout).unwrap_or_else(|error| {
-        panic!("{label}: context emits JSON: {error}: stdout={stdout} stderr={stderr}")
-    });
-    assert_no_secret_surface(label, &parsed);
-}
+include!("support/tmux_cli_fixture.rs");
 
 #[test]
 fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
@@ -184,7 +9,7 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
     std::fs::create_dir_all(&host_state).expect("create isolated host state root");
     seed_baseline(&root);
     let mut fixture = Fixture {
-        binary: PathBuf::from(env!("CARGO_BIN_EXE_collab")),
+        binary: collab_test_binary(),
         root: root.clone(),
         host_state,
         tmux_socket: tmux_socket.clone(),
@@ -386,7 +211,13 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
         "the owned task must survive the daemon restart: {restart_context}"
     );
     let preserved_recv = fixture.run_ok(
-        &["recv", "--timeout", "0", "--receive-id", "tmux-e2e-receive-2"],
+        &[
+            "recv",
+            "--timeout",
+            "0",
+            "--receive-id",
+            "tmux-e2e-receive-2",
+        ],
         Some(&receiver),
     );
     let preserved_ids = preserved_recv["messages"]
@@ -426,26 +257,33 @@ fn context_recovers_archived_master_in_the_same_live_pane() {
     std::fs::create_dir_all(&host_state).unwrap();
     seed_baseline(&root);
     let mut fixture = Fixture {
-        binary: PathBuf::from(env!("CARGO_BIN_EXE_collab")),
+        binary: collab_test_binary(),
         root: root.clone(),
         host_state,
         tmux_socket: tmux_socket.clone(),
         initialized: false,
     };
-    tmux(&tmux_socket, &["new-session", "-d", "-s", "collab-pane-recovery", "sleep 600"]);
-    let server_pid = String::from_utf8(
-        tmux(&tmux_socket, &["display-message", "-p", "#{pid}"]).stdout,
-    )
-    .unwrap()
-    .trim()
-    .parse::<u32>()
-    .unwrap();
-    let pane_id = String::from_utf8(
-        tmux(&tmux_socket, &["display-message", "-p", "#{pane_id}"]).stdout,
-    )
-    .unwrap()
-    .trim()
-    .to_owned();
+    tmux(
+        &tmux_socket,
+        &[
+            "new-session",
+            "-d",
+            "-s",
+            "collab-pane-recovery",
+            "sleep 600",
+        ],
+    );
+    let server_pid =
+        String::from_utf8(tmux(&tmux_socket, &["display-message", "-p", "#{pid}"]).stdout)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+    let pane_id =
+        String::from_utf8(tmux(&tmux_socket, &["display-message", "-p", "#{pane_id}"]).stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
     let old = Pane {
         server_pid,
         pane_id: pane_id.clone(),
@@ -461,7 +299,12 @@ fn context_recovers_archived_master_in_the_same_live_pane() {
         .expect("init receipt names the daemon-owned worker")
         .to_owned();
     fixture.run_ok(
-        &["master", "promote", "--approval", "user approved isolated master"],
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "user approved isolated master",
+        ],
         Some(&old),
     );
     let archive = fixture
@@ -491,7 +334,14 @@ fn context_recovers_archived_master_in_the_same_live_pane() {
     );
 
     let sent = fixture.run_ok(
-        &["sendmessage", "--to", &worker_id, "--subject", "recovery", "consume me"],
+        &[
+            "sendmessage",
+            "--to",
+            &worker_id,
+            "--subject",
+            "recovery",
+            "consume me",
+        ],
         Some(&new),
     );
     let message_id = sent["msg_id"]
@@ -522,7 +372,7 @@ fn implicit_context_names_the_resolved_identity_when_the_daemon_rejects_its_toke
     std::fs::create_dir_all(&host_state).expect("create isolated host state root");
     seed_baseline(&root);
     let mut fixture = Fixture {
-        binary: PathBuf::from(env!("CARGO_BIN_EXE_collab")),
+        binary: collab_test_binary(),
         root: root.clone(),
         host_state: host_state.clone(),
         tmux_socket: tmux_socket.clone(),
@@ -601,11 +451,23 @@ fn implicit_context_names_the_resolved_identity_when_the_daemon_rejects_its_toke
         "a rejected stored credential must fail: stdout={stdout} stderr={stderr}"
     );
     assert!(stderr.contains("TOKEN_MISMATCH:"), "{stderr}");
-    assert!(stderr.contains(&worker_id), "the error must name the rejected identity: {stderr}");
-    assert!(!stderr.contains("IDENTITY_INFORMATION_REQUIRED"), "{stderr}");
-    assert!(!stderr.contains("not-the-recorded-token"), "the rejected credential must not leak");
+    assert!(
+        stderr.contains(&worker_id),
+        "the error must name the rejected identity: {stderr}"
+    );
+    assert!(
+        !stderr.contains("IDENTITY_INFORMATION_REQUIRED"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("not-the-recorded-token"),
+        "the rejected credential must not leak"
+    );
     let after: Value = serde_json::from_slice(&std::fs::read(&identity_path).unwrap()).unwrap();
-    assert_eq!(after["token"], identity["token"], "the daemon must not replace a rejected credential");
+    assert_eq!(
+        after["token"], identity["token"],
+        "the daemon must not replace a rejected credential"
+    );
 }
 
 /// `collab context` is the bootstrap read, so it is also where a peer reads
@@ -621,7 +483,7 @@ fn context_returns_the_binding_receipt_that_addresses_the_route() {
     std::fs::create_dir_all(&host_state).unwrap();
     seed_baseline(&root);
     let mut fixture = Fixture {
-        binary: PathBuf::from(env!("CARGO_BIN_EXE_collab")),
+        binary: collab_test_binary(),
         root: root.clone(),
         host_state,
         tmux_socket: tmux_socket.clone(),
@@ -667,7 +529,9 @@ fn context_returns_the_binding_receipt_that_addresses_the_route() {
     assert_eq!(binding["agent_id"], worker_id);
     assert_eq!(binding["project_scope"], canonical_root);
     assert!(
-        binding["app_scope_id"].as_str().is_some_and(|scope| !scope.is_empty()),
+        binding["app_scope_id"]
+            .as_str()
+            .is_some_and(|scope| !scope.is_empty()),
         "the receipt must name its app scope: {context}"
     );
     assert_eq!(binding["session_id"], pane.session_anchor);
@@ -678,12 +542,11 @@ fn context_returns_the_binding_receipt_that_addresses_the_route() {
             .is_some_and(|runtime_id| !runtime_id.is_empty()),
         "the receipt must carry a runtime id"
     );
-    assert_eq!(
-        registered["binding"]["runtime_id"],
-        binding["runtime_id"]
-    );
+    assert_eq!(registered["binding"]["runtime_id"], binding["runtime_id"]);
     assert!(
-        binding["binding_id"].as_str().is_some_and(|id| !id.is_empty()),
+        binding["binding_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()),
         "the receipt must name its binding: {context}"
     );
     assert!(
@@ -706,7 +569,7 @@ fn context_missing_facts_and_invalid_supplement_have_no_identity_side_effect() {
     std::fs::create_dir_all(&host_state).unwrap();
     seed_baseline(&root);
     let mut fixture = Fixture {
-        binary: PathBuf::from(env!("CARGO_BIN_EXE_collab")),
+        binary: collab_test_binary(),
         root: root.clone(),
         host_state: host_state.clone(),
         tmux_socket: root.join("unused.sock"),
@@ -717,8 +580,7 @@ fn context_missing_facts_and_invalid_supplement_have_no_identity_side_effect() {
     // A caller with no anchor at all: no tmux pane, no session/thread, and an
     // unsupported originator so no namespace is observed either. The daemon
     // must name every absent factual field and must not guess a worker.
-    let no_anchor =
-        fixture.command_with_originator(&["context"], None, "Codex future host");
+    let no_anchor = fixture.command_with_originator(&["context"], None, "Codex future host");
     assert!(
         no_anchor.status.success(),
         "missing facts are a classified success terminal: stdout={} stderr={}",
@@ -769,7 +631,10 @@ fn context_missing_facts_and_invalid_supplement_have_no_identity_side_effect() {
     // creates any identity, so a bad claim can never become a registered peer.
     for (label, provide) in [
         ("unknown field", "{\"token\":\"x\"}"),
-        ("duplicate field", "{\"session_id\":\"a\",\"session_id\":\"b\"}"),
+        (
+            "duplicate field",
+            "{\"session_id\":\"a\",\"session_id\":\"b\"}",
+        ),
         ("empty value", "{\"session_id\":\"\"}"),
     ] {
         let invalid = fixture.command_without_pane(&["context", "--provide", provide]);
@@ -807,7 +672,7 @@ fn context_missing_facts_and_invalid_supplement_have_no_identity_side_effect() {
 fn removed_identity_commands_and_flags_are_rejected_by_the_cli() {
     let root = unique_root();
     std::fs::create_dir_all(&root).unwrap();
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_collab"));
+    let binary = collab_test_binary();
     let cases: &[&[&str]] = &[
         &["context", "--worker", "some-worker"],
         &["init", "--worker-id", "some-worker"],
@@ -815,7 +680,14 @@ fn removed_identity_commands_and_flags_are_rejected_by_the_cli() {
         &["worker", "recover"],
         &["recv", "--worker", "some-worker"],
         &[
-            "send", "--from", "some-worker", "--to", "x", "--subject", "y", "body",
+            "send",
+            "--from",
+            "some-worker",
+            "--to",
+            "x",
+            "--subject",
+            "y",
+            "body",
         ],
         &["inbox", "--worker", "some-worker"],
         &["ack", "m1", "--worker", "some-worker"],

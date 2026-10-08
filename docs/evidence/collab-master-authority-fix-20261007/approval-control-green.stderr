@@ -1,0 +1,2 @@
+collab: master clear approval must not contain control characters
+collab response: {"error":"master clear approval must not contain control characters","ok":false}

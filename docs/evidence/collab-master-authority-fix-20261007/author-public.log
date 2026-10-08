@@ -1,0 +1,1681 @@
+    Blocking waiting for file lock on build directory
+   Compiling collab v0.2.0 (/Volumes/Intel/playground/appsdk/collab-master-authority-fix-20261007/collab)
+warning: unused imports: `candidate_from_env` and `immediate_notify`
+  --> src/adapters/mod.rs:18:28
+   |
+18 | pub use codex_app_server::{candidate_from_env, immediate_notify, verify_candidate};
+   |                            ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `serde_json::Value`
+ --> src/server/global_state_impl.rs:3:5
+  |
+3 | use serde_json::Value;
+  |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::path::Path`
+  --> src/server/global_state_models.rs:18:5
+   |
+18 | use std::path::Path;
+   |     ^^^^^^^^^^^^^^^
+
+warning: glob import doesn't reexport anything with visibility `pub` because no imported item is public enough
+  --> src/server/global_state.rs:10:9
+   |
+10 | pub use global_state_helpers::*;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+note: the most public imported item is `pub(crate)`
+  --> src/server/global_state.rs:10:9
+   |
+10 | pub use global_state_helpers::*;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^
+   = help: reduce the glob import's visibility or increase visibility of imported items
+
+warning: unused import: `global_state_helpers::*`
+  --> src/server/global_state.rs:10:9
+   |
+10 | pub use global_state_helpers::*;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `global_state_impl::*`
+  --> src/server/global_state.rs:11:9
+   |
+11 | pub use global_state_impl::*;
+   |         ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `identity::AppServerId`
+ --> src/subagent.rs:3:5
+  |
+3 |     identity::AppServerId,
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::collections::HashSet`
+ --> src/main_live_closure.rs:2:5
+  |
+2 | use std::collections::HashSet;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `current_thread_route_journal_fault`
+   --> src/server/mod_parts/part_02.rs:843:13
+    |
+843 |         let current_thread_route_journal_fault: Option<()> = None;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_current_thread_route_journal_fault`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/server/mod_parts/part_08.rs:326:9
+    |
+326 |     let mut st = server.state.lock().unwrap();
+    |         ----^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/server/mod_parts/part_08.rs:576:9
+    |
+576 |     let mut st = server.state.lock().unwrap();
+    |         ----^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/server/mod_parts/part_08.rs:700:9
+    |
+700 |     let mut st = server.state.lock().unwrap();
+    |         ----^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `target`
+   --> src/main_live_closure.rs:509:9
+    |
+509 |     let target = workers
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_target`
+
+warning: function `call_with_runtime_identity` is never used
+   --> src/client.rs:248:8
+    |
+248 | pub fn call_with_runtime_identity<T: DeserializeOwned>(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `call_with_runtime_identity_at_root_daemon` is never used
+   --> src/client.rs:273:8
+    |
+273 | pub fn call_with_runtime_identity_at_root_daemon<T: DeserializeOwned>(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `daemon_locked` is never used
+   --> src/client.rs:283:8
+    |
+283 | pub fn daemon_locked(server_dir: &Path) -> bool {
+    |        ^^^^^^^^^^^^^
+
+warning: constant `APPSERVER_TIMEOUT_MS_ENV` is never used
+  --> src/adapters/codex_app_server_production_part1.rs:12:11
+   |
+12 | pub const APPSERVER_TIMEOUT_MS_ENV: &str = "COLLAB_APPSERVER_TIMEOUT_MS";
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `AppServerCapabilities` is never constructed
+  --> src/adapters/codex_app_server_production_part1.rs:76:12
+   |
+76 | pub struct AppServerCapabilities {
+   |            ^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `native`, `adapter`, and `names` are never used
+   --> src/adapters/codex_app_server_production_part1.rs:86:12
+    |
+ 85 | impl AppServerCapabilities {
+    | -------------------------- associated items in this implementation
+ 86 |     pub fn native() -> Self {
+    |            ^^^^^^
+...
+ 97 |     pub fn adapter(&self) -> AdapterCapabilities {
+    |            ^^^^^^^
+...
+106 |     pub fn names(&self) -> Vec<&'static str> {
+    |            ^^^^^
+
+warning: struct `LiveAppServer` is never constructed
+   --> src/adapters/codex_app_server_production_part1.rs:131:12
+    |
+131 | pub struct LiveAppServer {
+    |            ^^^^^^^^^^^^^
+
+warning: multiple associated items are never used
+   --> src/adapters/codex_app_server_production_part1.rs:140:12
+    |
+139 | impl LiveAppServer {
+    | ------------------ associated items in this implementation
+140 |     pub fn detect() -> Result<Option<Self>, AdapterError> {
+    |            ^^^^^^
+...
+209 |     pub fn socket_path(&self) -> &Path {
+    |            ^^^^^^^^^^^
+...
+213 |     pub fn namespace(&self) -> &str {
+    |            ^^^^^^^^^
+...
+217 |     pub fn thread_id(&self) -> &NativeThreadId {
+    |            ^^^^^^^^^
+...
+221 |     pub fn capabilities(&self) -> &AppServerCapabilities {
+    |            ^^^^^^^^^^^^
+...
+225 |     pub fn send(
+    |            ^^^^
+...
+249 |     pub fn status(&self, thread_id: &NativeThreadId) -> Result<Value, AdapterError> {
+    |            ^^^^^^
+...
+255 |     pub fn read_items(
+    |            ^^^^^^^^^^
+...
+273 |     pub fn as_json(&self) -> Value {
+    |            ^^^^^^^
+
+warning: function `candidate_from_env` is never used
+   --> src/adapters/codex_app_server_production_part1.rs:290:8
+    |
+290 | pub fn candidate_from_env() -> Result<Option<AppServerCandidate>, AdapterError> {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `start_thread` is never used
+   --> src/adapters/codex_app_server_production_part1.rs:890:8
+    |
+890 | pub fn start_thread(
+    |        ^^^^^^^^^^^^
+
+warning: function `archive_thread` is never used
+   --> src/adapters/codex_app_server_production_part1.rs:918:8
+    |
+918 | pub fn archive_thread(
+    |        ^^^^^^^^^^^^^^
+
+warning: function `read_thread_items` is never used
+   --> src/adapters/codex_app_server_production_part1.rs:926:8
+    |
+926 | pub fn read_thread_items(
+    |        ^^^^^^^^^^^^^^^^^
+
+warning: function `read_thread_items_page` is never used
+   --> src/adapters/codex_app_server_production_part1.rs:934:8
+    |
+934 | pub fn read_thread_items_page(
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `read_thread_turns_with_items_page` is never used
+   --> src/adapters/codex_app_server_production_part1.rs:952:8
+    |
+952 | pub fn read_thread_turns_with_items_page(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `read_turn_statuses` is never used
+   --> src/adapters/codex_app_server_production_part1.rs:978:8
+    |
+978 | pub fn read_turn_statuses(
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `read_turn_statuses_page` is never used
+   --> src/adapters/codex_app_server_production_part1.rs:985:8
+    |
+985 | pub fn read_turn_statuses_page(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `timeout` is never read
+   --> src/adapters/codex_app_server_production_part2.rs:315:5
+    |
+313 | struct Client {
+    |        ------ field in this struct
+314 |     stream: UnixStream,
+315 |     timeout: Duration,
+    |     ^^^^^^^
+
+warning: method `is_definitely_undelivered` is never used
+  --> src/adapters/dsh.rs:82:12
+   |
+59 | impl ControlError {
+   | ----------------- method in this implementation
+...
+82 |     pub fn is_definitely_undelivered(&self) -> bool {
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `APPSERVER_ENV` is never used
+  --> src/adapters/mod.rs:27:15
+   |
+27 |     pub const APPSERVER_ENV: &str = "COLLAB_APPSERVER";
+   |               ^^^^^^^^^^^^^
+
+warning: associated function `parse` is never used
+  --> src/adapters/mod.rs:44:16
+   |
+36 |     impl EndpointKind {
+   |     ----------------- associated function in this implementation
+...
+44 |         pub fn parse(value: &str) -> Result<Self, AdapterError> {
+   |                ^^^^^
+
+warning: enum `WakeMode` is never used
+  --> src/adapters/mod.rs:57:14
+   |
+57 |     pub enum WakeMode {
+   |              ^^^^^^^^
+
+warning: struct `AdapterCapabilities` is never constructed
+  --> src/adapters/mod.rs:63:16
+   |
+63 |     pub struct AdapterCapabilities {
+   |                ^^^^^^^^^^^^^^^^^^^
+
+warning: associated function `for_endpoint` is never used
+  --> src/adapters/mod.rs:74:16
+   |
+70 |     impl AdapterCapabilities {
+   |     ------------------------ associated function in this implementation
+...
+74 |         pub fn for_endpoint(endpoint: EndpointKind) -> Self {
+   |                ^^^^^^^^^^^^
+
+warning: struct `AdapterSelection` is never constructed
+  --> src/adapters/mod.rs:93:16
+   |
+93 |     pub struct AdapterSelection {
+   |                ^^^^^^^^^^^^^^^^
+
+warning: struct `EndpointBinding` is never constructed
+  --> src/adapters/mod.rs:99:16
+   |
+99 |     pub struct EndpointBinding<'a> {
+   |                ^^^^^^^^^^^^^^^
+
+warning: associated function `new` is never used
+   --> src/adapters/mod.rs:105:16
+    |
+104 |     impl<'a> EndpointBinding<'a> {
+    |     ---------------------------- associated function in this implementation
+105 |         pub fn new(endpoint: EndpointKind, identity: &'a RuntimeIdentity) -> Self {
+    |                ^^^
+
+warning: struct `SubmissionReceipt` is never constructed
+   --> src/adapters/mod.rs:111:16
+    |
+111 |     pub struct SubmissionReceipt {
+    |                ^^^^^^^^^^^^^^^^^
+
+warning: enum `InterruptStatus` is never used
+   --> src/adapters/mod.rs:120:14
+    |
+120 |     pub enum InterruptStatus {
+    |              ^^^^^^^^^^^^^^^
+
+warning: struct `InterruptReceipt` is never constructed
+   --> src/adapters/mod.rs:127:16
+    |
+127 |     pub struct InterruptReceipt {
+    |                ^^^^^^^^^^^^^^^^
+
+warning: variants `UnknownEndpoint`, `EndpointUnavailable`, `StaleBinding`, and `WrongTurn` are never constructed
+   --> src/adapters/mod.rs:136:9
+    |
+135 |     pub enum AdapterError {
+    |              ------------ variants in this enum
+136 |         UnknownEndpoint {
+    |         ^^^^^^^^^^^^^^^
+...
+139 |         EndpointUnavailable {
+    |         ^^^^^^^^^^^^^^^^^^^
+...
+159 |         StaleBinding {
+    |         ^^^^^^^^^^^^
+...
+163 |         WrongTurn {
+    |         ^^^^^^^^^
+    |
+    = note: `AdapterError` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: variant `KnownDelivered` is never constructed
+   --> src/adapters/mod.rs:186:9
+    |
+183 |     pub enum NotificationDeliveryClass {
+    |              ------------------------- variant in this enum
+...
+186 |         KnownDelivered,
+    |         ^^^^^^^^^^^^^^
+    |
+    = note: `NotificationDeliveryClass` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `notification_delivery_class` is never used
+   --> src/adapters/mod.rs:190:16
+    |
+189 |     impl AdapterError {
+    |     ----------------- method in this implementation
+190 |         pub fn notification_delivery_class(&self) -> NotificationDeliveryClass {
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `AppServerAdapter` is never used
+   --> src/adapters/mod.rs:312:15
+    |
+312 |     pub trait AppServerAdapter {
+    |               ^^^^^^^^^^^^^^^^
+
+warning: struct `UnavailableAdapter` is never constructed
+   --> src/adapters/mod.rs:329:16
+    |
+329 |     pub struct UnavailableAdapter {
+    |                ^^^^^^^^^^^^^^^^^^
+
+warning: function `require_capability` is never used
+   --> src/adapters/mod.rs:362:8
+    |
+362 |     fn require_capability(
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: struct `AdapterRegistry` is never constructed
+   --> src/adapters/mod.rs:393:16
+    |
+393 |     pub struct AdapterRegistry;
+    |                ^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `detect`, `detect_optional_env`, and `adapter` are never used
+   --> src/adapters/mod.rs:396:16
+    |
+395 |     impl AdapterRegistry {
+    |     -------------------- associated items in this implementation
+396 |         pub fn new() -> Self {
+    |                ^^^
+...
+400 |         pub fn detect(explicit: Option<EndpointKind>) -> Result<AdapterSelection, AdapterError> {
+    |                ^^^^^^
+...
+416 |         pub fn detect_optional_env() -> Result<Option<AdapterSelection>, AdapterError> {
+    |                ^^^^^^^^^^^^^^^^^^^
+...
+431 |         pub fn adapter(&self, kind: EndpointKind) -> UnavailableAdapter {
+    |                ^^^^^^^
+
+warning: function `binding_for_request` is never used
+   --> src/adapters/mod.rs:436:12
+    |
+436 |     pub fn binding_for_request<'a>(
+    |            ^^^^^^^^^^^^^^^^^^^
+
+warning: function `binding_for_explicit_env` is never used
+   --> src/adapters/mod.rs:444:12
+    |
+444 |     pub fn binding_for_explicit_env<'a>(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_endpoint_binding` is never used
+   --> src/adapters/mod.rs:455:12
+    |
+455 |     pub fn validate_endpoint_binding(binding: &EndpointBinding<'_>) -> Result<(), AdapterError> {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_turn_matches` is never used
+   --> src/adapters/mod.rs:464:12
+    |
+464 |     pub fn validate_turn_matches(
+    |            ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `submit_registered` is never used
+   --> src/adapters/mod.rs:482:12
+    |
+482 |     pub fn submit_registered(
+    |            ^^^^^^^^^^^^^^^^^
+
+warning: function `validate_registered_envelope` is never used
+   --> src/adapters/mod.rs:498:8
+    |
+498 |     fn validate_registered_envelope(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `request_command` is never used
+   --> src/adapters/mod.rs:525:8
+    |
+525 |     fn request_command(envelope: &RequestEnvelope) -> Option<&CommandEnvelope> {
+    |        ^^^^^^^^^^^^^^^
+
+warning: function `validate_command` is never used
+   --> src/adapters/mod.rs:535:8
+    |
+535 |     fn validate_command(
+    |        ^^^^^^^^^^^^^^^^
+
+warning: function `route_scope` is never used
+   --> src/adapters/mod.rs:559:8
+    |
+559 |     fn route_scope(envelope: &RequestEnvelope) -> Result<RouteScope, AdapterError> {
+    |        ^^^^^^^^^^^
+
+warning: function `request_turn` is never used
+   --> src/adapters/mod.rs:573:8
+    |
+573 |     fn request_turn(envelope: &RequestEnvelope) -> Option<&TurnId> {
+    |        ^^^^^^^^^^^^
+
+warning: function `validate_submission_receipt` is never used
+   --> src/adapters/mod.rs:577:8
+    |
+577 |     fn validate_submission_receipt(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `interrupt_registered` is never used
+   --> src/adapters/mod.rs:608:12
+    |
+608 |     pub fn interrupt_registered(
+    |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `timeout` is never used
+   --> src/adapters/mod.rs:635:12
+    |
+635 |     pub fn timeout(operation: &'static str) -> AdapterError {
+    |            ^^^^^^^
+
+warning: function `unknown` is never used
+   --> src/adapters/mod.rs:639:12
+    |
+639 |     pub fn unknown(operation: &'static str, detail: impl Into<String>) -> AdapterError {
+    |            ^^^^^^^
+
+warning: associated function `new` is never used
+  --> src/identity.rs:17:20
+   |
+16 |         impl $name {
+   |         ---------- associated function in this implementation
+17 |             pub fn new(value: impl Into<String>) -> anyhow::Result<Self> {
+   |                    ^^^
+...
+57 | string_id!(TurnId);
+   | ------------------ in this macro invocation
+   |
+   = note: this warning originates in the macro `string_id` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: associated function `new` is never used
+  --> src/identity.rs:17:20
+   |
+16 |         impl $name {
+   |         ---------- associated function in this implementation
+17 |             pub fn new(value: impl Into<String>) -> anyhow::Result<Self> {
+   |                    ^^^
+...
+58 | string_id!(MessageId);
+   | --------------------- in this macro invocation
+   |
+   = note: this warning originates in the macro `string_id` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: associated function `new` is never used
+  --> src/identity.rs:17:20
+   |
+16 |         impl $name {
+   |         ---------- associated function in this implementation
+17 |             pub fn new(value: impl Into<String>) -> anyhow::Result<Self> {
+   |                    ^^^
+...
+59 | string_id!(DispatchId);
+   | ---------------------- in this macro invocation
+   |
+   = note: this warning originates in the macro `string_id` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: function `runtime_from_registration_receipt` is never used
+   --> src/identity.rs:239:8
+    |
+239 | pub fn runtime_from_registration_receipt(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `role_brief_from_registration_receipt` is never used
+   --> src/identity.rs:313:8
+    |
+313 | pub fn role_brief_from_registration_receipt(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `resolve_for_daemon_at` is never used
+   --> src/identity_resolver.rs:115:15
+    |
+115 | pub(crate) fn resolve_for_daemon_at(
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: enum `MappingClass` is never used
+  --> src/migration.rs:28:10
+   |
+28 | pub enum MappingClass {
+   |          ^^^^^^^^^^^^
+
+warning: enum `SourceDisposition` is never used
+  --> src/migration.rs:50:10
+   |
+50 | pub enum SourceDisposition {
+   |          ^^^^^^^^^^^^^^^^^
+
+warning: associated items `from_mapping_class` and `as_str` are never used
+  --> src/migration.rs:58:12
+   |
+57 | impl SourceDisposition {
+   | ---------------------- associated items in this implementation
+58 |     pub fn from_mapping_class(classification: MappingClass) -> Self {
+   |            ^^^^^^^^^^^^^^^^^^
+...
+67 |     pub const fn as_str(self) -> &'static str {
+   |                  ^^^^^^
+
+warning: enum `ProjectAdmission` is never used
+  --> src/migration.rs:90:10
+   |
+90 | pub enum ProjectAdmission {
+   |          ^^^^^^^^^^^^^^^^
+
+warning: method `as_str` is never used
+  --> src/migration.rs:98:18
+   |
+97 | impl ProjectAdmission {
+   | --------------------- method in this implementation
+98 |     pub const fn as_str(self) -> &'static str {
+   |                  ^^^^^^
+
+warning: enum `MigrationPhase` is never used
+   --> src/migration.rs:115:10
+    |
+115 | pub enum MigrationPhase {
+    |          ^^^^^^^^^^^^^^
+
+warning: method `as_str` is never used
+   --> src/migration.rs:128:18
+    |
+127 | impl MigrationPhase {
+    | ------------------- method in this implementation
+128 |     pub const fn as_str(self) -> &'static str {
+    |                  ^^^^^^
+
+warning: enum `MigrationContractError` is never used
+   --> src/migration.rs:149:10
+    |
+149 | pub enum MigrationContractError {
+    |          ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated functions `missing`, `invalid`, and `digest_mismatch` are never used
+   --> src/migration.rs:183:8
+    |
+182 | impl MigrationContractError {
+    | --------------------------- associated functions in this implementation
+183 |     fn missing(field: &'static str) -> Self {
+    |        ^^^^^^^
+...
+187 |     fn invalid(field: &'static str, reason: impl Into<String>) -> Self {
+    |        ^^^^^^^
+...
+194 |     fn digest_mismatch(
+    |        ^^^^^^^^^^^^^^^
+
+warning: struct `ImmutableSnapshot` is never constructed
+   --> src/migration.rs:263:12
+    |
+263 | pub struct ImmutableSnapshot {
+    |            ^^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `with_source_epoch`, `validate`, and `verify_source_digest` are never used
+   --> src/migration.rs:275:12
+    |
+273 | impl ImmutableSnapshot {
+    | ---------------------- associated items in this implementation
+274 |     #[allow(clippy::too_many_arguments)]
+275 |     pub fn new(
+    |            ^^^
+...
+296 |     pub fn with_source_epoch(mut self, source_epoch: Option<u64>) -> Self {
+    |            ^^^^^^^^^^^^^^^^^
+...
+301 |     pub fn validate(&self) -> Result<(), MigrationContractError> {
+    |            ^^^^^^^^
+...
+318 |     pub fn verify_source_digest(&self, observed: &str) -> Result<(), MigrationContractError> {
+    |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: type alias `SnapshotReceipt` is never used
+   --> src/migration.rs:333:10
+    |
+333 | pub type SnapshotReceipt = ImmutableSnapshot;
+    |          ^^^^^^^^^^^^^^^
+
+warning: struct `TargetEpoch` is never constructed
+   --> src/migration.rs:338:12
+    |
+338 | pub struct TargetEpoch {
+    |            ^^^^^^^^^^^
+
+warning: associated items `new`, `validate`, `validate_against`, and `validate_committed_against` are never used
+   --> src/migration.rs:345:12
+    |
+344 | impl TargetEpoch {
+    | ---------------- associated items in this implementation
+345 |     pub fn new(
+    |            ^^^
+...
+359 |     pub fn validate(&self) -> Result<(), MigrationContractError> {
+    |            ^^^^^^^^
+...
+383 |     pub fn validate_against(
+    |            ^^^^^^^^^^^^^^^^
+...
+421 |     pub fn validate_committed_against(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type alias `EpochDescriptor` is never used
+   --> src/migration.rs:447:10
+    |
+447 | pub type EpochDescriptor = TargetEpoch;
+    |          ^^^^^^^^^^^^^^^
+
+warning: struct `VerifiedPrefixRecord` is never constructed
+   --> src/migration.rs:454:12
+    |
+454 | pub struct VerifiedPrefixRecord {
+    |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: method `validate` is never used
+   --> src/migration.rs:462:8
+    |
+461 | impl VerifiedPrefixRecord {
+    | ------------------------- method in this implementation
+462 |     fn validate(&self) -> Result<(), MigrationContractError> {
+    |        ^^^^^^^^
+
+warning: struct `VerifiedPrefix` is never constructed
+   --> src/migration.rs:483:12
+    |
+483 | pub struct VerifiedPrefix {
+    |            ^^^^^^^^^^^^^^
+
+warning: multiple associated items are never used
+   --> src/migration.rs:502:12
+    |
+498 | impl VerifiedPrefix {
+    | ------------------- associated items in this implementation
+...
+502 |     pub fn from_report(report: &InspectionReport) -> Result<Self, MigrationContractError> {
+    |            ^^^^^^^^^^^
+...
+579 |     pub fn validate(&self) -> Result<(), MigrationContractError> {
+    |            ^^^^^^^^
+...
+656 |     pub fn verify_against_report(
+    |            ^^^^^^^^^^^^^^^^^^^^^
+...
+696 |     pub fn verify_against_bytes(
+    |            ^^^^^^^^^^^^^^^^^^^^
+...
+704 |     pub fn verify_source_digest(&self, observed: &str) -> Result<(), MigrationContractError> {
+    |            ^^^^^^^^^^^^^^^^^^^^
+...
+717 |     pub fn last_sequence(&self) -> Option<u64> {
+    |            ^^^^^^^^^^^^^
+...
+721 |     pub fn record_count(&self) -> usize {
+    |            ^^^^^^^^^^^^
+
+warning: struct `MigrationApplyReceipt` is never constructed
+   --> src/migration.rs:730:12
+    |
+730 | pub struct MigrationApplyReceipt {
+    |            ^^^^^^^^^^^^^^^^^^^^^
+
+warning: enum `MigrationMappingStatus` is never used
+   --> src/migration.rs:742:10
+    |
+742 | pub enum MigrationMappingStatus {
+    |          ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `as_str` is never used
+   --> src/migration.rs:752:18
+    |
+751 | impl MigrationMappingStatus {
+    | --------------------------- method in this implementation
+752 |     pub const fn as_str(self) -> &'static str {
+    |                  ^^^^^^
+
+warning: enum `ManifestRecordStatus` is never used
+   --> src/migration.rs:767:10
+    |
+767 | pub enum ManifestRecordStatus {
+    |          ^^^^^^^^^^^^^^^^^^^^
+
+warning: method `as_str` is never used
+   --> src/migration.rs:777:18
+    |
+776 | impl ManifestRecordStatus {
+    | ------------------------- method in this implementation
+777 |     pub const fn as_str(self) -> &'static str {
+    |                  ^^^^^^
+
+warning: struct `ManifestIdentity` is never constructed
+   --> src/migration.rs:792:12
+    |
+792 | pub struct ManifestIdentity {
+    |            ^^^^^^^^^^^^^^^^
+
+warning: struct `MigrationAdmissionEvidence` is never constructed
+   --> src/migration.rs:811:12
+    |
+811 | pub struct MigrationAdmissionEvidence {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `validate` is never used
+   --> src/migration.rs:821:8
+    |
+820 | impl MigrationAdmissionEvidence {
+    | ------------------------------- method in this implementation
+821 |     fn validate(&self) -> Result<(), MigrationContractError> {
+    |        ^^^^^^^^
+
+warning: associated items `new` and `validate` are never used
+   --> src/migration.rs:837:12
+    |
+836 | impl ManifestIdentity {
+    | --------------------- associated items in this implementation
+837 |     pub fn new(
+    |            ^^^
+...
+862 |     fn validate(&self) -> Result<(), MigrationContractError> {
+    |        ^^^^^^^^
+
+warning: struct `MigrationManifestRecord` is never constructed
+   --> src/migration.rs:900:12
+    |
+900 | pub struct MigrationManifestRecord {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `from_inspection` and `validate` are never used
+   --> src/migration.rs:926:8
+    |
+925 | impl MigrationManifestRecord {
+    | ---------------------------- associated items in this implementation
+926 |     fn from_inspection(
+    |        ^^^^^^^^^^^^^^^
+...
+976 |     pub fn validate(&self) -> Result<(), MigrationContractError> {
+    |            ^^^^^^^^
+
+warning: struct `MigrationManifest` is never constructed
+    --> src/migration.rs:1044:12
+     |
+1044 | pub struct MigrationManifest {
+     |            ^^^^^^^^^^^^^^^^^
+
+warning: associated items `from_report`, `from_report_with_admission`, `validate`, and `record_idempotency_key` are never used
+    --> src/migration.rs:1071:12
+     |
+1070 | impl MigrationManifest {
+     | ---------------------- associated items in this implementation
+1071 |     pub fn from_report(
+     |            ^^^^^^^^^^^
+...
+1078 |     pub fn from_report_with_admission(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1177 |     pub fn validate(&self) -> Result<(), MigrationContractError> {
+     |            ^^^^^^^^
+...
+1274 |     pub fn record_idempotency_key(&self, record: &MigrationManifestRecord) -> String {
+     |            ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `MigrationRehearsal` is never constructed
+    --> src/migration.rs:1288:12
+     |
+1288 | pub struct MigrationRehearsal {
+     |            ^^^^^^^^^^^^^^^^^^
+
+warning: associated function `no_write` is never used
+    --> src/migration.rs:1300:12
+     |
+1299 | impl MigrationRehearsal {
+     | ----------------------- associated function in this implementation
+1300 |     pub fn no_write(
+     |            ^^^^^^^^
+
+warning: struct `MigrationTransaction` is never constructed
+ --> src/migration_tail.rs:8:12
+  |
+8 | pub struct MigrationTransaction {
+  |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `validate`, `validate_for_apply`, `apply`, and `validate_identity` are never used
+   --> src/migration_tail.rs:20:12
+    |
+ 19 | impl MigrationTransaction {
+    | ------------------------- associated items in this implementation
+ 20 |     pub fn new(
+    |            ^^^
+...
+ 38 |     pub fn validate(&self) -> Result<(), MigrationContractError> {
+    |            ^^^^^^^^
+...
+171 |     pub fn validate_for_apply(
+    |            ^^^^^^^^^^^^^^^^^^
+...
+212 |     pub fn apply(
+    |            ^^^^^
+...
+258 |     fn validate_identity(&self) -> Result<(), MigrationContractError> {
+    |        ^^^^^^^^^^^^^^^^^
+
+warning: function `validate_contract_identifier` is never used
+   --> src/migration_tail.rs:264:15
+    |
+264 | pub(crate) fn validate_contract_identifier(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_contract_reference` is never used
+   --> src/migration_tail.rs:283:15
+    |
+283 | pub(crate) fn validate_contract_reference(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_prefix_bytes_against_records` is never used
+   --> src/migration_tail.rs:302:15
+    |
+302 | pub(crate) fn validate_prefix_bytes_against_records(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `combine` is never used
+   --> src/migration_tail.rs:369:8
+    |
+368 | impl MappingClass {
+    | ----------------- method in this implementation
+369 |     fn combine(self, other: Self) -> Self {
+    |        ^^^^^^^
+
+warning: struct `InspectOptions` is never constructed
+   --> src/migration_tail.rs:377:12
+    |
+377 | pub struct InspectOptions {
+    |            ^^^^^^^^^^^^^^
+
+warning: struct `HistoryIssue` is never constructed
+   --> src/migration_tail.rs:385:12
+    |
+385 | pub struct HistoryIssue {
+    |            ^^^^^^^^^^^^
+
+warning: struct `RecordInspection` is never constructed
+   --> src/migration_tail.rs:394:12
+    |
+394 | pub struct RecordInspection {
+    |            ^^^^^^^^^^^^^^^^
+
+warning: struct `InspectionReport` is never constructed
+   --> src/migration_tail.rs:417:12
+    |
+417 | pub struct InspectionReport {
+    |            ^^^^^^^^^^^^^^^^
+
+warning: struct `DigestDrift` is never constructed
+   --> src/migration_tail.rs:434:12
+    |
+434 | pub struct DigestDrift {
+    |            ^^^^^^^^^^^
+
+warning: methods `verify_digest` and `has_error` are never used
+   --> src/migration_tail.rs:453:12
+    |
+451 | impl InspectionReport {
+    | --------------------- methods in this implementation
+452 |     /// Verify that the bytes inspected are the bytes admitted by the caller.
+453 |     pub fn verify_digest(&self, expected: &str) -> Result<(), DigestDrift> {
+    |            ^^^^^^^^^^^^^
+...
+464 |     pub fn has_error(&self, code: &str) -> bool {
+    |            ^^^^^^^^^
+
+warning: function `inspect_jsonl` is never used
+   --> src/migration_tail.rs:477:8
+    |
+477 | pub fn inspect_jsonl(bytes: &[u8]) -> InspectionReport {
+    |        ^^^^^^^^^^^^^
+
+warning: function `classify_jsonl` is never used
+   --> src/migration_tail.rs:482:8
+    |
+482 | pub fn classify_jsonl(bytes: &[u8]) -> InspectionReport {
+    |        ^^^^^^^^^^^^^^
+
+warning: function `inspect_jsonl_with_options` is never used
+   --> src/migration_tail.rs:488:8
+    |
+488 | pub fn inspect_jsonl_with_options(bytes: &[u8], options: &InspectOptions) -> InspectionReport {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `inspect_path` is never used
+   --> src/migration_tail.rs:655:8
+    |
+655 | pub fn inspect_path(path: &Path, options: &InspectOptions) -> io::Result<InspectionReport> {
+    |        ^^^^^^^^^^^^
+
+warning: function `digest_bytes` is never used
+   --> src/migration_tail.rs:663:8
+    |
+663 | pub fn digest_bytes(bytes: &[u8]) -> String {
+    |        ^^^^^^^^^^^^
+
+warning: constant `SHA256_CONSTANTS` is never used
+   --> src/migration_tail.rs:745:7
+    |
+745 | const SHA256_CONSTANTS: [u32; 64] = [
+    |       ^^^^^^^^^^^^^^^^
+
+warning: function `inspect_record` is never used
+   --> src/migration_tail.rs:756:4
+    |
+756 | fn inspect_record(
+    |    ^^^^^^^^^^^^^^
+
+warning: function `mark_duplicate_record_ids` is never used
+   --> src/migration_tail.rs:961:4
+    |
+961 | fn mark_duplicate_record_ids(records: &mut [RecordInspection], issues: &mut Vec<HistoryIssue>) {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `mark_duplicate_registrations` is never used
+   --> src/migration_tail.rs:986:4
+    |
+986 | fn mark_duplicate_registrations(records: &mut [RecordInspection], issues: &mut Vec<HistoryIssue>) {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `mark_sequence_issues` is never used
+    --> src/migration_tail.rs:1014:4
+     |
+1014 | fn mark_sequence_issues(records: &mut [RecordInspection], issues: &mut Vec<HistoryIssue>) {
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `invalid_record` is never used
+    --> src/migration_tail.rs:1088:4
+     |
+1088 | fn invalid_record(
+     |    ^^^^^^^^^^^^^^
+
+warning: function `is_parse_invalid` is never used
+    --> src/migration_tail.rs:1114:4
+     |
+1114 | fn is_parse_invalid(record: &RecordInspection) -> bool {
+     |    ^^^^^^^^^^^^^^^^
+
+warning: function `event_schema_error` is never used
+    --> src/migration_tail.rs:1121:4
+     |
+1121 | fn event_schema_error(raw_content: &[u8], value: &Value) -> Option<String> {
+     |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `duplicate_json_key_error` is never used
+    --> src/migration_tail.rs:1150:4
+     |
+1150 | fn duplicate_json_key_error(raw_content: &[u8]) -> Option<String> {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `DuplicateKeyVisitor` is never constructed
+    --> src/migration_tail.rs:1170:8
+     |
+1170 | struct DuplicateKeyVisitor;
+     |        ^^^^^^^^^^^^^^^^^^^
+
+warning: struct `DuplicateValueSeed` is never constructed
+    --> src/migration_tail.rs:1253:8
+     |
+1253 | struct DuplicateValueSeed;
+     |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `is_known_task_status` is never used
+    --> src/migration_tail.rs:1266:4
+     |
+1266 | fn is_known_task_status(status: &str) -> bool {
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `cwd_matches_project` is never used
+    --> src/migration_tail.rs:1285:4
+     |
+1285 | fn cwd_matches_project(canonical_cwd: &Path, record_cwd: &str) -> bool {
+     |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `worktree_matches_project` is never used
+    --> src/migration_tail.rs:1290:4
+     |
+1290 | fn worktree_matches_project(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `sanitize_identifier` is never used
+    --> src/migration_tail.rs:1334:4
+     |
+1334 | fn sanitize_identifier(value: &str) -> String {
+     |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `normalize_path` is never used
+    --> src/migration_tail.rs:1347:4
+     |
+1347 | fn normalize_path(path: &Path) -> PathBuf {
+     |    ^^^^^^^^^^^^^^
+
+warning: function `scope_error` is never used
+    --> src/migration_tail.rs:1361:4
+     |
+1361 | fn scope_error(kind: &str, canonical_cwd: &Path, observed: &str) -> String {
+     |    ^^^^^^^^^^^
+
+warning: function `mark_record` is never used
+    --> src/migration_tail.rs:1368:4
+     |
+1368 | fn mark_record(record: &mut RecordInspection, class: MappingClass, error: &str, boundary: &str) {
+     |    ^^^^^^^^^^^
+
+warning: function `issue` is never used
+    --> src/migration_tail.rs:1378:4
+     |
+1378 | fn issue(
+     |    ^^^^^
+
+warning: function `missing_binding_error` is never used
+    --> src/migration_tail.rs:1392:4
+     |
+1392 | fn missing_binding_error(has_worktree: bool, has_base: bool, has_cwd: bool) -> String {
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `is_active_status` is never used
+    --> src/migration_tail.rs:1406:4
+     |
+1406 | fn is_active_status(status: Option<&str>) -> bool {
+     |    ^^^^^^^^^^^^^^^^
+
+warning: function `is_terminal_status` is never used
+    --> src/migration_tail.rs:1424:4
+     |
+1424 | fn is_terminal_status(status: Option<&str>) -> bool {
+     |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `trim_line_ending` is never used
+    --> src/migration_tail.rs:1428:15
+     |
+1428 | pub(crate) fn trim_line_ending(raw_bytes: &[u8]) -> &[u8] {
+     |               ^^^^^^^^^^^^^^^^
+
+warning: function `string_at` is never used
+    --> src/migration_tail.rs:1433:4
+     |
+1433 | fn string_at(value: &Value, keys: &[&str]) -> Option<String> {
+     |    ^^^^^^^^^
+
+warning: function `integer_at` is never used
+    --> src/migration_tail.rs:1438:4
+     |
+1438 | fn integer_at(value: &Value, keys: &[&str]) -> Option<u64> {
+     |    ^^^^^^^^^^
+
+warning: function `first_nested_string` is never used
+    --> src/migration_tail.rs:1448:4
+     |
+1448 | fn first_nested_string(value: &Value, paths: &[(&[&str], &[&str])]) -> Option<String> {
+     |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `as_non_empty_string` is never used
+    --> src/migration_tail.rs:1458:4
+     |
+1458 | fn as_non_empty_string(value: &Value) -> Option<String> {
+     |    ^^^^^^^^^^^^^^^^^^^
+
+warning: associated function `for_registered_root` is never used
+   --> src/proto.rs:277:12
+    |
+272 | impl ProjectContext {
+    | ------------------- associated function in this implementation
+...
+277 |     pub fn for_registered_root(root: &std::path::Path) -> anyhow::Result<Self> {
+    |            ^^^^^^^^^^^^^^^^^^^
+
+warning: associated function `register` is never used
+   --> src/proto.rs:682:12
+    |
+679 | impl Req {
+    | -------- associated function in this implementation
+...
+682 |     pub fn register(
+    |            ^^^^^^^^
+
+warning: associated items `with_context` and `validate` are never used
+   --> src/proto.rs:718:12
+    |
+710 | impl RequestEnvelope {
+    | -------------------- associated items in this implementation
+...
+718 |     pub fn with_context(request: Req, project_context: ProjectContext) -> Self {
+    |            ^^^^^^^^^^^^
+...
+726 |     pub fn validate(&self) -> anyhow::Result<()> {
+    |            ^^^^^^^^
+
+warning: associated items `for_state_root`, `from_env`, `sock_path`, `down_path`, `events_path`, and `journal_path` are never used
+  --> src/scope.rs:41:12
+   |
+31 | impl HostPaths {
+   | -------------- associated items in this implementation
+...
+41 |     pub fn for_state_root(root: impl AsRef<Path>) -> anyhow::Result<Self> {
+   |            ^^^^^^^^^^^^^^
+...
+59 |     pub fn from_env() -> anyhow::Result<Self> {
+   |            ^^^^^^^^
+...
+83 |     pub fn sock_path(&self) -> PathBuf {
+   |            ^^^^^^^^^
+...
+91 |     pub fn down_path(&self) -> PathBuf {
+   |            ^^^^^^^^^
+...
+95 |     pub fn events_path(&self) -> PathBuf {
+   |            ^^^^^^^^^^^
+...
+99 |     pub fn journal_path(&self) -> PathBuf {
+   |            ^^^^^^^^^^^^
+
+warning: method `validate_registered_cwd` is never used
+   --> src/scope.rs:511:12
+    |
+500 | impl RouteScope {
+    | --------------- method in this implementation
+...
+511 |     pub fn validate_registered_cwd(&self, registered_cwd: &Path) -> anyhow::Result<()> {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `project_root` is never used
+   --> src/scope.rs:555:8
+    |
+555 | pub fn project_root() -> anyhow::Result<PathBuf> {
+    |        ^^^^^^^^^^^^
+
+warning: enum `NotificationDeliveryError` is never used
+   --> src/server/mod_parts/part_01.rs:469:6
+    |
+469 | enum NotificationDeliveryError {
+    |      ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `WIRE_ROUTE_MUTATION_GATES` is never used
+   --> src/server/mod_parts/part_01.rs:695:8
+    |
+695 | static WIRE_ROUTE_MUTATION_GATES: OnceLock<
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `wire_route_mutation_gate` is never used
+   --> src/server/mod_parts/part_01.rs:699:4
+    |
+699 | fn wire_route_mutation_gate(server: &Server) -> Arc<Mutex<()>> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `storage_server_dir`, `try_commit`, `commit_command`, and `commit_command_at_revision` are never used
+   --> src/server/mod_parts/part_02.rs:10:19
+    |
+  1 | impl Server {
+    | ----------- methods in this implementation
+...
+ 10 |     pub(crate) fn storage_server_dir(&self) -> PathBuf {
+    |                   ^^^^^^^^^^^^^^^^^^
+...
+514 |     pub(crate) fn try_commit(&self, evs: &[Event]) -> Result<(), String> {
+    |                   ^^^^^^^^^^
+...
+532 |     pub fn commit_command(
+    |            ^^^^^^^^^^^^^^
+...
+545 |     fn commit_command_at_revision(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_command_id` is never used
+   --> src/server/mod_parts/part_05.rs:123:4
+    |
+123 | fn validate_command_id(value: &str) -> Result<(), notification_contract::JournalError> {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `attempt_notification_with` is never used
+   --> src/server/mod_parts/part_05.rs:856:4
+    |
+856 | fn attempt_notification_with(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `handle_register_with_app_scope` is never used
+   --> src/server/mod_parts/part_06.rs:773:15
+    |
+773 | pub(crate) fn handle_register_with_app_scope(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `handle_register_with_app_scope_unfinalized` is never used
+   --> src/server/mod_parts/part_06.rs:815:15
+    |
+815 | pub(crate) fn handle_register_with_app_scope_unfinalized(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `commit_current_thread_route_for_runtime` is never used
+   --> src/server/mod_parts/part_06.rs:828:15
+    |
+828 | pub(crate) fn commit_current_thread_route_for_runtime(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `retire_runtime_binding_after_route_failure` is never used
+   --> src/server/mod_parts/part_06.rs:889:15
+    |
+889 | pub(crate) fn retire_runtime_binding_after_route_failure(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `retire_current_thread_route_after_launch_failure` is never used
+   --> src/server/mod_parts/part_06.rs:937:15
+    |
+937 | pub(crate) fn retire_current_thread_route_after_launch_failure(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `handle_register` is never used
+    --> src/server/mod_parts/part_06.rs:1087:15
+     |
+1087 | pub(crate) fn handle_register(
+     |               ^^^^^^^^^^^^^^^
+
+warning: function `live_managed_subagent_count` is never used
+   --> src/server/mod_parts/part_07.rs:402:15
+    |
+402 | pub(crate) fn live_managed_subagent_count(server: &Server, parent: &str) -> usize {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `record_scheduler_admission` is never used
+   --> src/server/mod_parts/part_07.rs:415:4
+    |
+415 | fn record_scheduler_admission(server: &Server, admission: serde_json::Value) -> Result<(), Resp> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `handle_send` is never used
+   --> src/server/mod_parts/part_08.rs:116:15
+    |
+116 | pub(crate) fn handle_send(
+    |               ^^^^^^^^^^^
+
+warning: function `handle_poll_async` is never used
+   --> src/server/mod_parts/part_10.rs:157:10
+    |
+157 | async fn handle_poll_async(server: Arc<Server>, worker_id: String, timeout_ms: u64) -> Resp {
+    |          ^^^^^^^^^^^^^^^^^
+
+warning: function `dispatch` is never used
+   --> src/server/mod_parts/part_11.rs:767:4
+    |
+767 | fn dispatch(server: &Arc<Server>, req: Req) -> Resp {
+    |    ^^^^^^^^
+
+warning: function `dispatch_wire` is never used
+  --> src/server/mod_parts/part_12.rs:32:10
+   |
+32 | async fn dispatch_wire(
+   |          ^^^^^^^^^^^^^
+
+warning: function `conn_task` is never used
+   --> src/server/mod_parts/part_12.rs:222:10
+    |
+222 | async fn conn_task(server: Arc<Server>, stream: tokio::net::UnixStream) {
+    |          ^^^^^^^^^
+
+warning: function `tmux_route_address_key` is never used
+  --> src/server/global_state_helpers.rs:63:15
+   |
+63 | pub(super) fn tmux_route_address_key(endpoint: &TmuxEndpoint) -> String {
+   |               ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_migration_epoch` is never used
+   --> src/server/global_state_helpers.rs:212:15
+    |
+212 | pub(super) fn validate_migration_epoch(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_migration_receipt_identity` is never used
+   --> src/server/global_state_helpers.rs:238:15
+    |
+238 | pub(super) fn validate_migration_receipt_identity(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_migration_context` is never used
+   --> src/server/global_state_helpers.rs:286:15
+    |
+286 | pub(super) fn validate_migration_context(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `validate_migration_receipts`, `validate_migration_commit_evidence`, and `register_project_for_route` are never used
+   --> src/server/global_state_impl.rs:189:12
+    |
+ 13 | impl GlobalState {
+    | ---------------- methods in this implementation
+...
+189 |     pub fn validate_migration_receipts(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+311 |     fn validate_migration_commit_evidence(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+433 |     pub fn register_project_for_route(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `role_for_binding`, `role_for_route`, `record_command`, and `compare_and_swap` are never used
+   --> src/server/global_state_impl_part2.rs:835:12
+    |
+  6 | impl GlobalState {
+    | ---------------- methods in this implementation
+...
+835 |     pub fn role_for_binding(
+    |            ^^^^^^^^^^^^^^^^
+...
+852 |     pub fn role_for_route(&self, route_scope: &RouteScope, binding_id: &BindingId) -> PeerRole {
+    |            ^^^^^^^^^^^^^^
+...
+861 |     pub fn record_command(
+    |            ^^^^^^^^^^^^^^
+...
+927 |     pub fn compare_and_swap<F>(
+    |            ^^^^^^^^^^^^^^^^
+
+warning: type alias `CanonicalProjectScope` is never used
+  --> src/server/global_state_models.rs:23:10
+   |
+23 | pub type CanonicalProjectScope = ProjectScopeId;
+   |          ^^^^^^^^^^^^^^^^^^^^^
+
+warning: type alias `AppScopeId` is never used
+  --> src/server/global_state_models.rs:24:10
+   |
+24 | pub type AppScopeId = AppServerId;
+   |          ^^^^^^^^^^
+
+warning: method `as_str` is never used
+  --> src/server/global_state_models.rs:37:12
+   |
+36 | impl RuntimeBindingLedgerState {
+   | ------------------------------ method in this implementation
+37 |     pub fn as_str(self) -> &'static str {
+   |            ^^^^^^
+
+warning: variant `CompareAndSwapMismatch` is never constructed
+   --> src/server/global_state_models.rs:137:5
+    |
+107 | pub enum StateError {
+    |          ---------- variant in this enum
+...
+137 |     CompareAndSwapMismatch {
+    |     ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `StateError` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: enum `PeerRole` is never used
+   --> src/server/global_state_models.rs:214:10
+    |
+214 | pub enum PeerRole {
+    |          ^^^^^^^^
+
+warning: associated function `new` is never used
+   --> src/server/global_state_models.rs:237:12
+    |
+236 | impl ProjectRegistration {
+    | ------------------------ associated function in this implementation
+237 |     pub fn new(
+    |            ^^^
+
+warning: associated function `new` is never used
+   --> src/server/global_state_models.rs:292:12
+    |
+290 | impl RuntimeBinding {
+    | ------------------- associated function in this implementation
+291 |     #[allow(clippy::too_many_arguments)]
+292 |     pub fn new(
+    |            ^^^
+
+warning: associated function `new` is never used
+   --> src/server/global_state_models.rs:636:12
+    |
+635 | impl ProjectState {
+    | ----------------- associated function in this implementation
+636 |     pub fn new(project_scope: ProjectScopeId) -> Result<Self, StateError> {
+    |            ^^^
+
+warning: associated items `new` and `with_archive_digest` are never used
+   --> src/server/global_state_models.rs:822:12
+    |
+820 | impl MigrationCommitEvidence {
+    | ---------------------------- associated items in this implementation
+821 |     #[allow(clippy::too_many_arguments)]
+822 |     pub fn new(
+    |            ^^^
+...
+849 |     pub fn with_archive_digest(mut self, archive_digest: impl Into<String>) -> Self {
+    |            ^^^^^^^^^^^^^^^^^^^
+
+warning: struct `MigrationWriterReceipt` is never constructed
+   --> src/server/global_state_models.rs:889:12
+    |
+889 | pub struct MigrationWriterReceipt {
+    |            ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `with_archive_digest`, and `validate` are never used
+   --> src/server/global_state_models.rs:909:12
+    |
+907 | impl MigrationWriterReceipt {
+    | --------------------------- associated items in this implementation
+908 |     #[allow(clippy::too_many_arguments)]
+909 |     pub fn new(
+    |            ^^^
+...
+939 |     pub fn with_archive_digest(mut self, archive_digest: impl Into<String>) -> Self {
+    |            ^^^^^^^^^^^^^^^^^^^
+...
+944 |     pub fn validate(&self) -> Result<(), StateError> {
+    |            ^^^^^^^^
+
+warning: struct `MigrationIdentityRebindReceipt` is never constructed
+   --> src/server/global_state_models.rs:978:12
+    |
+978 | pub struct MigrationIdentityRebindReceipt {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `new` and `validate` are never used
+    --> src/server/global_state_models.rs:997:12
+     |
+ 995 | impl MigrationIdentityRebindReceipt {
+     | ----------------------------------- associated items in this implementation
+ 996 |     #[allow(clippy::too_many_arguments)]
+ 997 |     pub fn new(
+     |            ^^^
+...
+1033 |     pub fn validate(&self) -> Result<(), StateError> {
+     |            ^^^^^^^^
+
+warning: struct `MigrationRuntimeRebindReceipt` is never constructed
+    --> src/server/global_state_models.rs:1058:12
+     |
+1058 | pub struct MigrationRuntimeRebindReceipt {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `new_with_session`, and `validate` are never used
+    --> src/server/global_state_models.rs:1081:12
+     |
+1079 | impl MigrationRuntimeRebindReceipt {
+     | ---------------------------------- associated items in this implementation
+1080 |     #[allow(clippy::too_many_arguments)]
+1081 |     pub fn new(
+     |            ^^^
+...
+1119 |     pub fn new_with_session(
+     |            ^^^^^^^^^^^^^^^^
+...
+1159 |     pub fn validate(&self) -> Result<(), StateError> {
+     |            ^^^^^^^^
+
+warning: struct `MigrationReceiptSet` is never constructed
+    --> src/server/global_state_models.rs:1191:12
+     |
+1191 | pub struct MigrationReceiptSet {
+     |            ^^^^^^^^^^^^^^^^^^^
+
+warning: methods `validate` and `validate_for` are never used
+    --> src/server/global_state_models.rs:1200:12
+     |
+1199 | impl MigrationReceiptSet {
+     | ------------------------ methods in this implementation
+1200 |     pub fn validate(&self) -> Result<(), StateError> {
+     |            ^^^^^^^^
+...
+1213 |     pub fn validate_for(
+     |            ^^^^^^^^^^^^
+
+warning: function `tick` is never used
+  --> src/server/keepalive.rs:83:8
+   |
+83 | pub fn tick(server: &Server) {
+   |        ^^^^
+
+warning: constant `AUTOMATIC_BATCH_WINDOW_MS` is never used
+  --> src/server/mailbox.rs:19:18
+   |
+19 | pub(super) const AUTOMATIC_BATCH_WINDOW_MS: i64 = 120_000;
+   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `max_wake_attempts` is never used
+    --> src/server/mailbox.rs:1116:8
+     |
+1116 | pub fn max_wake_attempts() -> u32 {
+     |        ^^^^^^^^^^^^^^^^^
+
+warning: struct `NotificationStateView` is never constructed
+  --> src/server/notification_contract.rs:49:12
+   |
+49 | pub struct NotificationStateView {
+   |            ^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated function `from_state` is never used
+  --> src/server/notification_contract.rs:58:12
+   |
+57 | impl NotificationStateView {
+   | -------------------------- associated function in this implementation
+58 |     pub fn from_state(state: &State) -> Self {
+   |            ^^^^^^^^^^
+
+warning: trait `NotificationStateSource` is never used
+  --> src/server/notification_contract.rs:77:11
+   |
+77 | pub trait NotificationStateSource {
+   |           ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `NotificationSink` is never used
+  --> src/server/notification_contract.rs:81:11
+   |
+81 | pub trait NotificationSink {
+   |           ^^^^^^^^^^^^^^^^
+
+warning: method `transport_kind` is never used
+  --> src/server/state.rs:59:12
+   |
+58 | impl WorkerRec {
+   | -------------- method in this implementation
+59 |     pub fn transport_kind(&self) -> Option<TransportKind> {
+   |            ^^^^^^^^^^^^^^
+
+warning: struct `TypedApplyError` is never constructed
+   --> src/server/state.rs:188:12
+    |
+188 | pub struct TypedApplyError(pub StateError);
+    |            ^^^^^^^^^^^^^^^
+
+warning: function `follow_up` is never used
+   --> src/subagent.rs:182:4
+    |
+182 | fn follow_up(record: &Record, reused: bool) -> serde_json::Value {
+    |    ^^^^^^^^^
+
+warning: function `can_reuse_existing` is never used
+   --> src/subagent.rs:188:4
+    |
+188 | fn can_reuse_existing(record: &Record) -> bool {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `valid_runtime` is never used
+   --> src/subagent.rs:199:15
+    |
+199 | pub(crate) fn valid_runtime(runtime: &str) -> bool {
+    |               ^^^^^^^^^^^^^
+
+warning: `collab` (bin "collab") generated 208 warnings (run `cargo fix --bin "collab" -p collab` to apply 12 suggestions)
+warning: method `worker_id` is never used
+   --> tests/appserver_two_tui_integration.rs:282:8
+    |
+ 96 | impl AppFixture {
+    | --------------- method in this implementation
+...
+282 |     fn worker_id(&self, thread: &str) -> String {
+    |        ^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `collab` (test "appserver_two_tui_integration") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.74s
+     Running tests/appserver_two_tui_integration.rs (collab/target/debug/deps/appserver_two_tui_integration-19ca1c6a975e3c9f)
+
+running 15 tests
+test board_cli::board_invitation_transfers_owner_only_after_peer_acceptance ... ok
+test board_cli::board_owner_update_is_versioned_and_peer_tasks_remain_independent ... ok
+test board_cli::board_publish_is_shared_but_does_not_start_execution ... ok
+test board_cli::peer_may_start_independent_work_while_an_invitation_is_pending ... ok
+test context_partial_native_facts_require_the_missing_endpoint_fields ... ok
+test desktop_managed_socket_registration_persists_and_uses_codex_app_namespace ... ok
+test external_linked_worktree_reuses_the_canonical_identity_without_recovery_calls ... ok
+test forged_appserver_endpoint_and_missing_project_context_fail_closed ... ok
+test master_authority_appserver_explicit_replacement_keeps_holder_control ... ok
+test one_full_supplement_establishes_and_then_replays_the_same_identity ... ok
+test one_thread_supplement_survives_continuously_missing_environment ... ok
+test repeated_appserver_context_reuses_the_same_identity_and_binding ... ok
+test tui_does_not_borrow_the_desktop_managed_socket ... ok
+test two_tui_appserver_receipt_flow ... ok
+test wrong_appserver_endpoint_fails_closed ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 26.54s
+
+     Running tests/dsh_master_authority_cli.rs (collab/target/debug/deps/dsh_master_authority_cli-76f241f66d759699)
+
+running 1 test
+test dsh_master_authority_public_wire_and_restart_preserve_peer_state ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.24s
+
+     Running tests/master_status_cli.rs (collab/target/debug/deps/master_status_cli-424ff232461dc7ce)
+
+running 2 tests
+test master_status_uses_registered_cwd_without_tmux ... ok
+test master_status_without_registered_cwd_fails_closed_before_daemon_call ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/mcp_master_authority_cli.rs (collab/target/debug/deps/mcp_master_authority_cli-b32386d59a15401e)
+
+running 1 test
+test mcp_tools_call_clears_authority_and_refuses_invalid_approval ... owned MCP fixture root=/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/mc32789 tmux_pid=33034 pane=%0
+owned MCP process pid=33269
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.09s
+
+     Running tests/tmux_recv_e2e.rs (collab/target/debug/deps/tmux_recv_e2e-a8d22e0c495fdbf8)
+
+running 13 tests
+test collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon ... ok
+test context_missing_facts_and_invalid_supplement_have_no_identity_side_effect ... ok
+test context_recovers_archived_master_in_the_same_live_pane ... ok
+test context_returns_the_binding_receipt_that_addresses_the_route ... ok
+test implicit_context_names_the_resolved_identity_when_the_daemon_rejects_its_token ... ok
+test master_authority_clear_removes_grant_and_preserves_business_state ... ok
+test master_authority_dashboard_get_agrees_with_status_context_and_board ... ok
+test master_authority_public_wire_rejects_bad_token_scope_and_generation_without_state_change ... ok
+test master_authority_rejects_blank_approval_without_state_change ... ok
+test master_authority_same_principal_recovery_and_new_principal_do_not_inherit ... ok
+test master_authority_scope_isolation_and_concurrent_mutations ... ok
+test master_authority_tmux_unknown_holder_keeps_control_and_projection ... ok
+test removed_identity_commands_and_flags_are_rejected_by_the_cli ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.45s

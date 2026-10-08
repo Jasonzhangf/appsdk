@@ -192,18 +192,24 @@ start another daemon, or invent a fallback. Daemon restart remains a separate
 controlled maintenance action after a verified runtime delivery. Ordinary
 identity recovery uses `collab context` only.
 
-Master authority is separate from identity, and the only recovery step that needs
-you. When the snapshot shows no master and the user wants this session to hold
-authority, run one command with their words as the approval:
+Master authority is separate from identity. The authority owner is the current
+typed grant in the exact project and app scope, with only two states: empty (no
+current grant) and assigned (one current holder). When the user explicitly
+approves this session for this exact project, run one command with their words
+as the approval:
 
 ```sh
 collab master promote --approval '<why the user approved this>'
 ```
 
-That promotion is not gated on transport liveness. A tmux pane and an AppServer
-oracle are addresses, not credentials: neither being reachable is allowed to
-strand authority. Explicit approval is the whole authority for the transition.
-Context never auto-promotes and never infers authority.
+An approved promote atomically replaces any recorded holder and is not gated on
+the incumbent's or the candidate's transport liveness. A tmux pane and an
+AppServer oracle are addresses, not credentials: neither being reachable is
+allowed to strand authority. Explicit approval is the whole authority for the
+transition. To remove the scoped authority instead, an authenticated peer with
+explicit approval runs `collab master clear --approval '<why the user approved
+this>'`; clear removes only the scoped grant and never deletes tasks, messages,
+peers, or bindings. Context never auto-promotes and never infers authority.
 
 ### 2. Failure
 
@@ -220,8 +226,14 @@ An error, timeout, `subscribed-not-sent`, `thread-lost`, `identity-mismatch`,
 `unknown`, or absent Agent is not success. Preserve the exact error and
 durable IDs; do not retry automatically, ACK for another identity, or mark a
 task delivered/closed without its required evidence. A worker reports the
-root cause and proposed fix to the live master. The master takes ownership by
+root cause and proposed fix to the current master. The master takes ownership by
 fixing, re-dispatching, or force-closing with an auditable reason.
+
+Transport observations (`unknown`, `cold`, `missing`) are separate from
+authority. They never create, replace, or clear the current master grant. Do
+not promote, clear, or regrant the master merely because a transport probe is
+unknown; the holder keeps control, and the communication error stays explicit
+and independent.
 
 ### 3. Reset
 
@@ -324,14 +336,14 @@ maintain a separate role prompt:
   schedule.
 
 The default identity is peer. Master authority is explicit and
-user-authorized: initial promotion requires the user's approval, and
-delegation is accepted only from the current live master and records that
-handoff. Registration, a process, inferred `/goal`, or `role_brief` never
-silently creates master authority.
+user-authorized: an approved `master promote` replaces the recorded holder,
+and delegation is accepted only from the current master grant holder and
+records that handoff. Registration, a process, inferred `/goal`, or
+`role_brief` never silently creates master authority.
 
-On trouble, every non-master investigates first and reports the live master:
-root cause, attempted actions, proposed fix, and exact decision needed. A role
-change via `master promote` or `master delegate` returns the new master brief;
+On trouble, every non-master investigates first and reports the current
+master: root cause, attempted actions, proposed fix, and exact decision needed.
+A role change via `master promote` or `master delegate` returns the new master brief;
 the old worker brief no longer governs that peer.
 Once task scope and the independent worktree are known, automatically follow
 [task/worktree registration](references/task-worktree-lifecycle.md): bind the
@@ -404,8 +416,8 @@ Read the board without consuming messages or changing lifecycle:
 collab board show
 ```
 
-The live project master publishes a pending task with its contract, then invites
-one live idle ordinary peer:
+The current master grant holder publishes a pending task with its contract,
+then invites one live idle ordinary peer:
 
 ```sh
 collab board publish <task-id> --title <t> --description <d> \
@@ -528,8 +540,8 @@ Child results go to the parent with
 `collab sendmessage`, not the parent-only `subagent send` action.
 No ACK loops, automatic respawn or redispatch.
 
-The live master is the sole scheduler assignment owner. Dispatch through the
-durable scheduler path with a stable request ID:
+The current master grant holder is the sole scheduler assignment owner.
+Dispatch through the durable scheduler path with a stable request ID:
 
 ```sh
 collab subagent dispatch --request-id <id> --subject <topic> "<assignment>" \
@@ -560,10 +572,11 @@ Flag and body rules:
 - `--priority` defaults to `p2`; legal values are `p0|p1|p2|p3|p4`.
 - `--next-step` is optional and tells the peer the first concrete action.
 
-Only the live registered master with `presence: present` may dispatch. The
-scheduler selects an eligible peer automatically: registered, non-requester,
-non-managed-subagent, presence present, and no active task. A peer holds only
-one active task. If no eligible peer is available the exact error is:
+Only the current master grant holder may dispatch; the holder's control does
+not depend on its own transport liveness. The scheduler selects an eligible
+peer automatically: registered, non-requester, non-managed-subagent, presence
+present, and no active task. A peer holds only one active task. If no eligible
+peer is available the exact error is:
 
 ```text
 MANAGED_SUBAGENT_UNSUPPORTED: no live registered tmux peer is available for dispatch
@@ -677,7 +690,7 @@ acts on an explicit dispatch, a bounded direct-message lease, or its own open
 task state;
 it does not need periodic activation to make progress. Unknown/absent produces
 no transport input. On each `working` -> `idle` transition, a worker sends one
-idempotent worker-idle fact to the live master and then stops; it does not keep
+idempotent worker-idle fact to the current master and then stops; it does not keep
 knocking. Idle, progress, delivery, bug, and worker-idle notices are
 auto-merged; explicit `collab sendmessage` remains immediate. Master idle
 reminders are level-triggered: within the same master idle episode, each
@@ -689,7 +702,7 @@ scheduling-turn counter or automatic rearm.
 
 Managed subagents do not get child-targeted periodic liveness ACK loops. Their
 state is persisted by the daemon; a `working` -> `idle` transition contributes
-one durable `subagent-status` fact to the live master. The master, not the
+one durable `subagent-status` fact to the current master. The master, not the
 child, owns the outcome and decides whether to re-dispatch, force-close, or
 leave the child idle. A subagent with an unfinished task is not repeatedly
 woken just because its task is not closed. `subagent status` reports durable
@@ -700,9 +713,10 @@ last-resort identity anchor, not a status observation or snapshot receipt.
 
 ## Cross-project master communication
 
-Collab communication across projects is master-only and explicit. Only a live
-master may send to the live master of another initialized project; non-master
-peers and managed subagents are rejected before any message is persisted:
+Collab communication across projects is master-only and explicit. Only the
+current master grant holder may send to the current master grant holder of
+another initialized project; non-master peers and managed subagents are
+rejected before any message is persisted:
 
 ```sh
 collab master send --project /abs/path/to/target --to <target-master> \
@@ -710,16 +724,16 @@ collab master send --project /abs/path/to/target --to <target-master> \
 ```
 
 `--project` must be the exact target project root with `.agent-collab`, and
-`--to` must be that project's live master. The target daemon also verifies the
-sender-side `assigned_by` / `approval` / `assigned_ms` from the local master
-status before accepting the message.
+`--to` must be that project's current master grant holder, whose target binding
+and address must be available. The target daemon also verifies the sender's
+current typed grant (holder, scope, approval) before accepting the message.
 
 Task liveness is an obligation, not an ACK ceremony. A worker owns its assigned
 tasks and drives them to verified cleanup/close during its working cycle. This
 is a task-bound inspect obligation, not a transport activation schedule: it
 does not wake idle workers and does not generate worker transport input. If an actionable
 task is open, continue it; if it is blocked, find a concrete solution first,
-then report it to the live master in the same activation. Do not leave a task
+then report it to the current master in the same activation. Do not leave a task
 at `assigned`, `working`, `blocked`, `waiting`, `delivered`, or
 `cleanup_pending` merely because the last direct message was acknowledged.
 After delivery or merge, perform the real cleanup and close the task; a
@@ -727,7 +741,7 @@ reminder does not create a second task or a duplicate dispatch.
 
 Escalation routing is explicit:
 
-- A managed subagent and an ordinary worker both report blockers to the live
+- A managed subagent and an ordinary worker both report blockers to the current
   Collab master immediately. Do not wait for the next liveness cycle or for
   master to invent the fix. First find a concrete solution (root cause,
   proposed change, authorization needed); escalate that, not a symptom.
@@ -736,26 +750,30 @@ Escalation routing is explicit:
   propose the missing conditions and send them to master. A subagent must
   also copy its parent when parent is not the master, and may not decline a
   master collaboration request. Independent peers may temporarily decline a
-  master collaboration invite to protect their own current task. If no live
+  master collaboration invite to protect their own current task. If no current
   master exists, report to the collaborator that initiated the task. Include
   the task ID, exact blocker, proposed solution, attempted actions, and
   requested decision.
-- A peer may promote itself to master only when no live master exists and the
-  user explicitly approves that exact peer for that exact project. Record the
-  approval with `collab master promote --approval "<user text>"` and verify the
-  promoted peer has a live registered identity/transport before treating it as
-  master. If a live master already exists, do not promote; only that master
-  may `collab master delegate <peer>`. An internal init adapter result alone
-  never proves master ownership. The `collab context` snapshot is the agent's
-  live-master authority: `master` with `endpoint_live=true` means a live
-  master exists; only `master: null` with no `recorded_unusable` entry permits
-  the explicit user-approved promotion path. A missing worktree-local
+- Master authority is the current typed grant in the exact project and app
+  scope. Only two authority states exist: empty (no current grant) and
+  assigned (one current holder). When the user explicitly approves this peer
+  for this exact project, record it with `collab master promote --approval
+  "<user text>"`; the approved promote atomically replaces any recorded holder
+  and is independent of the incumbent's or the candidate's liveness. Only the
+  current master grant holder may `collab master delegate <peer>`. An
+  authenticated peer with explicit approval may `collab master clear
+  --approval "<user text>"` to remove the scoped grant; the caller does not
+  need to be the master first. An internal init adapter result alone never
+  proves master ownership, and AppSDK init is not an implicit authority reset.
+  Read the current holder, its scope, and its approval from the `collab
+  context` snapshot and `collab master status`; agent liveness is a separate
+  transport fact and does not change authority. A missing worktree-local
   `.agent-collab/`, a failed `collab context`, a token mismatch, or a missing
-  `who.master` field never proves there is no live master and never authorizes
-  promotion. Codex root is not Collab master. Operators may use
-  `collab master status` read-only for audit.
+  `who.master` field never authorizes a mutation; promote, clear, and delegate
+  still require an authenticated current binding. Codex root is not Collab
+  master. Operators may use `collab master status` read-only for audit.
 - If a blocker or wait cannot be executed locally after a real solution is
-  found, report that solution to the live master immediately instead of
+  found, report that solution to the current master immediately instead of
   silently waiting. Keep the durable wait/task state, continue any
   independent work, and re-escalate on the next direct master communication or
   when the situation changes; do not wait for a periodic worker wake.
@@ -767,7 +785,7 @@ in the project. Once master accepts a dispatch, the master -- not the
 worker -- is the escalation target, and the master cannot hide behind the
 worker's blocker. Concretely:
 
-- A live master must close any task that cannot otherwise be closed,
+- The current master must close any task that cannot otherwise be closed,
   including stuck or merged-but-unclean tasks, with `collab task close
   <id> --force --reason "<text>"`. The reason is recorded in the cleanup
   receipt so the manual close is auditable; notification obligations for that
@@ -778,11 +796,12 @@ worker's blocker. Concretely:
   reply, mark the task blocked, and idle. If master cannot unblock the worker
   promptly, master force-closes the task with a reason so the loop stops and
   the worker's identity stays clean.
-- An ordinary peer that cannot reach a live master within one escalation
-  cycle may self-close its own task with `collab task close <id> --force
-  --reason "<text>"`. If a task owner's registered transport identity is lost and no live
-  master exists, a registered peer may close that orphaned task with the
-  same `--force --reason` command. These are the only allowed fallbacks;
+- When no master is assigned, the task owner may force-close its own task with
+  `collab task close <id> --force --reason "<text>"`. If the owner's registered
+  transport identity is missing and no master is assigned, a registered peer
+  may close that orphaned task with the same command. An unreachable or unknown
+  master remains assigned and does not permit these exceptions. These are the
+  only allowed force-close exceptions;
   the reason and cleanup receipt are mandatory so the daemon can show who
   closed what and why.
 - Master may not delegate its accountability by passing the task back to
@@ -838,7 +857,7 @@ Master operates under two prime directives:
 
 **Worker->Master idle fact and master long-horizon wake**:
 When a worker transitions from `working` to `idle`, it emits one idempotent
-worker-idle fact to the live master. The master has long-horizon wake; the
+worker-idle fact to the current master. The master has long-horizon wake; the
 worker does not. On an idle fact, master must:
 1. Check the active task graph for unblocked downstream tasks and dispatch;
 2. If the main graph is clear, pull the highest-priority open issue from the
@@ -868,12 +887,13 @@ Execute diagnostic closure immediately:
 ```sh
 collab worker status <id>
 ```
-Use durable Collab state and the selected binding's liveness/status source to
-choose the next action. For an AppServer binding, query native thread state.
-Transport status cannot establish message consumption without the receive
-receipt. A tmux screen cannot establish task completion, peer consumption, or
-Codex turn state. Do not infer those facts or restart a shared runtime from a
-pane probe.
+Use durable Collab state and the selected binding's status source to choose the
+next action. For an AppServer binding, query native thread state. A tmux pane is
+address proof only and never proves the agent is alive or `Present`; its agent
+liveness stays unknown. Transport status cannot establish message consumption
+without the receive receipt. A tmux screen cannot establish task completion,
+peer consumption, or Codex turn state. Do not infer those facts or restart a
+shared runtime from a pane probe.
 
 Master keeps architecture, dispatch, integration, critical repair, and
 final acceptance. Use registered peers and `collab sendmessage` for
@@ -883,12 +903,12 @@ scope. Independent peers may decline an invite to protect their current task.
 Wait for evidence summaries, then integrate. Chat tone is not completion.
 
 Delivery and review are not lifecycle endpoints. `task review --accept`
-registers a daemon-owned pending merge and notifies the live master; the
+registers a daemon-owned pending merge and notifies the current master; the
 obligation is durable, appears in `collab context`, `collab status --all`
 (`pending_merges`), `appsdk longhorizon show` (待合并), and master idle wake
 text, and `task close` fails with `TASK_MERGE_PENDING` until the master records
 `collab task integrated` (or, if the peer performed the verified merge itself under the conditions in the next section, that same recording step still applies). Never rely on remembering a merge from a message.
-After a delivered candidate, either the peer merges and pushes the verified candidate under the next section’s conditions, or the live master drives review, integration,
+After a delivered candidate, either the peer merges and pushes the verified candidate under the next section’s conditions, or the current master drives review, integration,
 cleanup, task close, and then the next ready assignment. Do not leave a peer
 idle merely because its last task returned `delivered`, `merged`, or a review
 verdict. Reuse the same live peer
@@ -908,7 +928,7 @@ decision that must preserve evidence, not a reason to stop dispatching.
 4. merge 后立即核对本地 main 与已验候选等价，并确认 `origin/main` 回执；
 5. 任何失败（合并冲突、push 拒绝、CI 未跑通）都必须停下并上报 master，不允许强行推进。
 
-否则 merge 的 owner 仍是 live master；review PASS 不授予流程外发布或生产变更。
+否则 merge 的 owner 仍是 current master；review PASS 不授予流程外发布或生产变更。
 
 ### Collab runtime delivery DAG（单源单汇）
 
@@ -952,7 +972,7 @@ pending_merges/worktrees 状态；任一项不匹配都不能声称交付完成�
 
 A worker or subagent executes only the approved assignment, owns that
 task's full lifecycle, and returns evidence. It has no global schedule.
-On a blocker: find a concrete solution first, then report it to the live
+On a blocker: find a concrete solution first, then report it to the current
 master immediately. Do not wait. Do not lazy-think (symptoms without a
 fix, or idle hoping master will design it). Copy parent if parent is not
 master. If delivery or test conditions are unclear, propose the missing
@@ -987,11 +1007,12 @@ is an observation, never task or control truth.
 | Inspect worker health and notification status | `collab worker status [id]` |
 | List peers (operator diagnostic; also in `collab context`) | `collab who` |
 | Check own subscriptions | `collab notify status` |
-| Inspect live master (operator diagnostic; also in `collab context`) | `collab master status` |
-| Promote this peer when no live master exists | `collab master promote --approval "<user text>"` |
-| Delegate live master to another peer | `collab master delegate <peer>` |
+| Inspect current master (operator diagnostic; also in `collab context`) | `collab master status` |
+| Replace the current master with an explicitly approved promote | `collab master promote --approval "<user text>"` |
+| Clear the current master authority with explicit approval | `collab master clear --approval "<user text>"` |
+| Delegate master authority to another peer (current master only) | `collab master delegate <peer>` |
 | Split work to a registered peer | `collab sendmessage --to <peer> --subject <topic> "<assignment with delivery and test conditions>"` |
-| Report a blocker to live master | `collab sendmessage --to <master> --subject blocker "<task_id; cause; proposed fix; decision needed>"` |
+| Report a blocker to the current master | `collab sendmessage --to <master> --subject blocker "<task_id; cause; proposed fix; decision needed>"` |
 | Cancel one of your own notification leases | `collab notify unsubscribe <subscription-id>` |
 
 After a transport preview, use its notification ID and abbreviated subject to weigh
@@ -1014,7 +1035,7 @@ projections that used to require separate calls, so no agent flow needs to run
 
 | Snapshot field | Replaces | Contents |
 |---|---|---|
-| `master`, `recorded_unusable` | `collab master status` | live master, assignment grant, approval, `master_wake` |
+| `master` | `collab master status` | current master authority projection (holder, scope, approval) and `master_wake`; transport liveness is a separate fact |
 | `peers`, `peer_count` | `collab who` | every registered peer with role and presence |
 | `summary`, `master_wake`, `subagents` | `collab status --all` | worker/message/task/subagent counts and the scheduling state |
 | `pending_merges` | `collab status --all` | durable merge obligations |
@@ -1027,6 +1048,7 @@ projections that used to require separate calls, so no agent flow needs to run
 | First time in a project | `collab context` | a separate identity probe, or `collab init` used as a substitute for `collab context` |
 | Another worker or project claims your tmux pane, or the recorded pane route is stale | `collab context`; the daemon replaces the claim by default | inspect routes or archives, pick a worker id, or edit any route/identity file |
 | Master authority must move to this peer | `collab master promote --approval "<user text>"` | promote without explicit user approval |
+| Master authority must be cleared for this project scope | `collab master clear --approval "<user text>"` | clear without explicit user approval; or expect clear to delete tasks, messages, peers, or bindings |
 | Thread/session changed, or after daemon restart | `collab context` (daemon reconciles identity in place) | a manual identity recovery command, `collab down`/`up` |
 | Need peer list, master state, scheduling state, or env | read them from the single `collab context` snapshot | call `collab who`, `collab status --all`, `collab master status`, or grep the environment as a separate step |
 | `requires_identity_update` is present | read `required_fields` and `exact_error`; when the returned action is the factual supplement, run that one action with only the requested `session_id`, `thread_id`, `endpoint`, or `namespace` from their real source | select or guess a worker; run an identity selection or recovery command, or a status/route/init hunt; set an identity override or approval supplement |
@@ -1090,8 +1112,10 @@ on your tmux pane is replaced by the daemon inside this same call, so agents do
 not adjudicate pane conflicts and do not run a second command for them.
 `collab init` is not a second agent entry and not a second identity algorithm,
 but it drives the same daemon identity gate and stays the documented entry for
-existing AppSDK init consumers. Agents do not run a separate identity, route or
-archive probe, or a manual subscription, as part of bootstrap.
+existing AppSDK init consumers. Neither `collab init` nor AppSDK init creates,
+changes, or clears master authority; init is not an implicit authority reset.
+Agents do not run a separate identity, route or archive probe, or a manual
+subscription, as part of bootstrap.
 
 ## AppServer runtime registration
 
@@ -1133,9 +1157,10 @@ recovery, update, route publication, and binding persistence. Do not create a
 worktree-local peer. External linked worktrees use the registered Git main root
 automatically for context and ordinary commands; do not switch cwd to recover
 an identity. The `collab context` snapshot is the agent's complete
-live-master and peer read. A failed context is not evidence that no master
-exists; preserve the exact error. Master promotion still requires explicit user
-approval and a live registered transport. `collab master status` remains a
+master-authority and peer read. A failed context is not evidence that no master
+exists; preserve the exact error. Master promotion requires explicit user
+approval and an authenticated current binding, not the incumbent's or the
+candidate's liveness. `collab master status` remains a
 read-only operator diagnostic.
 
 ### Native thread route resolution
@@ -1181,10 +1206,12 @@ register it.
 - Identities are equal peers by default. There is no implicit master from
   first registration, automatic process recovery, or inferred `/goal`. Collab
   master is explicit, user-approved project arbitration; it is not Codex root,
-  and it does not take ownership of another peer's task. If a
-  live registered master exists, other peers cannot promote and only that
-  master may delegate. If no live master exists, a peer may promote itself
-  only with explicit user approval and a live registered transport. Independent peers may
+  and it does not take ownership of another peer's task. The authority owner is
+  the current typed grant in the exact project and app scope, with only empty
+  or assigned states; the current holder controls independent of its transport
+  liveness. An explicitly user-approved `collab master promote` replaces the
+  recorded holder, and only the current master grant holder may
+  `collab master delegate`. Independent peers may
   decline a master collaboration invite; managed subagents must obey the
   master. Master splits by dependency then unique write scope, assigns
   subagents with unambiguous delivery and test conditions, and keeps

@@ -1,0 +1,44 @@
+{
+  "reviewed_tree": "e0f546ad2f56a6cca5c54a3670ea0d11e6eead0b",
+  "base_commit": "7edbab1d4316cc12c1fa085be9247c75fdbe8cc5",
+  "taskId": "master-authority-split-agy-20261008",
+  "backend": "agy",
+  "verdict": "pass",
+  "exitCode": 0,
+  "evidence": {
+    "contract_version": "1",
+    "findings": [
+      {
+        "evidence": "When included in collab/tests/tmux_recv_e2e.rs, support/tmux_cli_fixture.rs triggers compiler warnings for unused imports (BufReader, Read, Write, TcpStream) and unused functions (single_pane_fixture, assert_no_secret_surface, assert_context_display_is_public) because those helpers are only consumed by tmux_master_authority_cli.rs.",
+        "file": "collab/tests/support/tmux_cli_fixture.rs",
+        "line": 1,
+        "remediation": "Add #[allow(dead_code, unused_imports)] at the top of support/tmux_cli_fixture.rs or gate unused items so that both test targets compile with zero warnings.",
+        "rule": "test-fixture-clean-compilation",
+        "severity": "P2"
+      }
+    ],
+    "module_boundary_evidence": [
+      {
+        "edges": "PR #16 release gate 失败 (SDK_SOURCE_LINE_LIMIT: collab/tests/tmux_recv_e2e.rs: 2000 > 1500) -> 拆分 7 个 Master authority 测试至 collab/tests/tmux_master_authority_cli.rs -> 抽取公用 fixture 至 collab/tests/support/tmux_cli_fixture.rs -> 7 个黑盒用例无逻辑改动 -> debug (7 passed) 及 canonical installed (7 passed) 双重回归终点。",
+        "gates": "appsdk verify-sdk-source-registry . exit 0; cargo test --test tmux_master_authority_cli 7 passed exit 0; rustfmt --check collab/tests/tmux_master_authority_cli.rs exit 0; git diff --cached --check exit 0; 经验复核: 无新增知识。",
+        "module": "collab-master-authority-tests",
+        "owner": "collab/tests/tmux_master_authority_cli.rs",
+        "paths": "collab/tests/tmux_master_authority_cli.rs; collab/tests/support/tmux_cli_fixture.rs; docs/evidence/collab-master-authority-fix-20261007/source-registry-correction.md; docs/evidence/collab-master-authority-fix-20261007/split-tmux-author.log; docs/evidence/collab-master-authority-fix-20261007/split-tmux-installed.log",
+        "resources": "docs/evidence/collab-master-authority-fix-20261007/source-registry-correction.md; docs/evidence/collab-master-authority-fix-20261007/split-tmux-author.log; docs/evidence/collab-master-authority-fix-20261007/split-tmux-installed.log; HEAD commit 7edbab1d4316cc12c1fa085be9247c75fdbe8cc5"
+      },
+      {
+        "edges": "移除已迁移的 master authority 测试 -> 保留 6 个原 context/recv 用例 (726 行，满足 <1500 限制) -> 引入 support/tmux_cli_fixture.rs -> debug (6 passed) 与 canonical installed (6 passed) 双重回归终点。",
+        "gates": "appsdk verify-sdk-source-registry . exit 0; cargo test --test tmux_recv_e2e 6 passed exit 0; rustfmt --check collab/tests/tmux_recv_e2e.rs exit 0; git diff --cached --check exit 0。",
+        "module": "collab-recv-tests",
+        "owner": "collab/tests/tmux_recv_e2e.rs",
+        "paths": "collab/tests/tmux_recv_e2e.rs; collab/tests/support/tmux_cli_fixture.rs; docs/evidence/collab-master-authority-fix-20261007/source-registry-correction.md",
+        "resources": "collab/tests/tmux_recv_e2e.rs; docs/evidence/collab-master-authority-fix-20261007/source-registry-correction.md; HEAD commit 7edbab1d4316cc12c1fa085be9247c75fdbe8cc5"
+      }
+    ],
+    "scope": {
+      "base": null,
+      "commit": "7edbab1d4316cc12c1fa085be9247c75fdbe8cc5",
+      "mode": "uncommitted"
+    }
+  }
+}

@@ -1,0 +1,1652 @@
+   Compiling collab v0.2.0 (/Volumes/Intel/playground/appsdk/collab-master-authority-fix-20261007/collab)
+warning: unused imports: `candidate_from_env` and `immediate_notify`
+  --> src/adapters/mod.rs:18:28
+   |
+18 | pub use codex_app_server::{candidate_from_env, immediate_notify, verify_candidate};
+   |                            ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `std::os::unix::net::UnixListener`
+   --> src/adapters/mod.rs:650:13
+    |
+650 |         use std::os::unix::net::UnixListener;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `serde_json::Value`
+ --> src/server/global_state_impl.rs:3:5
+  |
+3 | use serde_json::Value;
+  |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::path::Path`
+  --> src/server/global_state_models.rs:18:5
+   |
+18 | use std::path::Path;
+   |     ^^^^^^^^^^^^^^^
+
+warning: glob import doesn't reexport anything with visibility `pub` because no imported item is public enough
+  --> src/server/global_state.rs:10:9
+   |
+10 | pub use global_state_helpers::*;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+note: the most public imported item is `pub(crate)`
+  --> src/server/global_state.rs:10:9
+   |
+10 | pub use global_state_helpers::*;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^
+   = help: reduce the glob import's visibility or increase visibility of imported items
+
+warning: unused import: `global_state_helpers::*`
+  --> src/server/global_state.rs:10:9
+   |
+10 | pub use global_state_helpers::*;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `global_state_impl::*`
+  --> src/server/global_state.rs:11:9
+   |
+11 | pub use global_state_impl::*;
+   |         ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::*`
+ --> src/server/state_tests_part2.rs:1:5
+  |
+1 | use super::*;
+  |     ^^^^^^^^
+
+warning: unused import: `super::*`
+ --> src/server/timers_tests_part2.rs:1:5
+  |
+1 | use super::*;
+  |     ^^^^^^^^
+
+warning: unused import: `Instant`
+  --> src/server/scheduler_admission_tests/part_01.rs:10:31
+   |
+10 |     use std::time::{Duration, Instant};
+   |                               ^^^^^^^
+
+warning: unused import: `serde_json::Value`
+ --> src/server/peer_tests.rs:5:5
+  |
+5 | use serde_json::Value;
+  |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Instant`
+  --> src/server/peer_tests.rs:11:27
+   |
+11 | use std::time::{Duration, Instant};
+   |                           ^^^^^^^
+
+warning: variable does not need to be mutable
+   --> src/server/timers_tests.rs:303:14
+    |
+303 |         let (mut server, root) = test_server();
+    |              ----^^^^^^
+    |              |
+    |              help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> src/server/timers_tests_part2.rs:1316:14
+     |
+1316 |         let (mut replayed, replay_root) = test_server();
+     |              ----^^^^^^^^
+     |              |
+     |              help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/server/notification_batch_tests.rs:527:14
+    |
+527 |         let (mut server, root) = test_server();
+    |              ----^^^^^^
+    |              |
+    |              help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/server/host_route_registry_tests/part_01.rs:402:14
+    |
+402 |         let (mut server, root, _) = test_server();
+    |              ----^^^^^^
+    |              |
+    |              help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/server/host_route_registry_tests/part_02_tail.rs:519:13
+    |
+519 |         let mut binding = runtime
+    |             ----^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/server/scheduler_admission_tests/part_01.rs:179:14
+    |
+179 |         let (mut server, root) = test_server();
+    |              ----^^^^^^
+    |              |
+    |              help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/server/dsh_channel_tests.rs:768:9
+    |
+768 |     let mut message_id = |msg_id: &str| {
+    |         ----^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: irrefutable `if let` pattern
+   --> src/server/peer_tests/part_03.rs:206:8
+    |
+206 |       if let crate::server::state::TypedCommand::RegisterWorker { binding, .. } =
+    |  ________^
+207 | |         &mut wrong_principal.command
+    | |____________________________________^
+    |
+    = note: this pattern will always match, so the `if let` is useless
+    = help: consider replacing the `if let` with a `let`
+    = note: `#[warn(irrefutable_let_patterns)]` on by default
+
+warning: irrefutable `if let` pattern
+   --> src/server/peer_tests/part_03.rs:294:8
+    |
+294 |       if let crate::server::state::TypedCommand::RegisterWorker {
+    |  ________^
+295 | |         binding, worker, ..
+296 | |     } = &mut second.command
+    | |___________________________^
+    |
+    = note: this pattern will always match, so the `if let` is useless
+    = help: consider replacing the `if let` with a `let`
+
+warning: variable does not need to be mutable
+   --> src/server/peer_tests/part_03.rs:623:10
+    |
+623 |     let (mut server, root) = test_server();
+    |          ----^^^^^^
+    |          |
+    |          help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/server/peer_tests/part_03.rs:758:14
+    |
+758 |         let (mut server, root) = test_server();
+    |              ----^^^^^^
+    |              |
+    |              help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/server/peer_tests/part_03.rs:794:14
+    |
+794 |         let (mut server, root) = test_server();
+    |              ----^^^^^^
+    |              |
+    |              help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/server/peer_tests/part_05.rs:241:10
+    |
+241 |     let (mut server, root) = test_server();
+    |          ----^^^^^^
+    |          |
+    |          help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/server/peer_tests/part_11.rs:129:9
+    |
+129 |     let mut server_arc = std::sync::Arc::new(server);
+    |         ----^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/server/mod_parts/part_05.rs:1330:13
+     |
+1330 |         let mut state = server.state.lock().unwrap();
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `same_thread`
+    --> src/server/mod_parts/part_06.rs:1047:13
+     |
+1047 |         let same_thread = existing_key
+     |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_same_thread`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `worker`
+   --> src/server/mod_parts/part_07.rs:996:18
+    |
+996 |         let Some(worker) = state.workers.get(&peer_id).cloned() else {
+    |                  ^^^^^^ help: if this is intentional, prefix it with an underscore: `_worker`
+
+warning: variable does not need to be mutable
+   --> src/server/mod_parts/part_08.rs:310:9
+    |
+310 |     let mut st = server.state.lock().unwrap();
+    |         ----^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/server/mod_parts/part_08.rs:560:9
+    |
+560 |     let mut st = server.state.lock().unwrap();
+    |         ----^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/server/mod_parts/part_08.rs:682:9
+    |
+682 |     let mut st = server.state.lock().unwrap();
+    |         ----^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `target`
+   --> src/main_live_closure.rs:509:9
+    |
+509 |     let target = workers
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_target`
+
+warning: function `call_with_runtime_identity` is never used
+   --> src/client.rs:248:8
+    |
+248 | pub fn call_with_runtime_identity<T: DeserializeOwned>(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `call_with_runtime_identity_at_root_daemon` is never used
+   --> src/client.rs:273:8
+    |
+273 | pub fn call_with_runtime_identity_at_root_daemon<T: DeserializeOwned>(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `daemon_locked` is never used
+   --> src/client.rs:283:8
+    |
+283 | pub fn daemon_locked(server_dir: &Path) -> bool {
+    |        ^^^^^^^^^^^^^
+
+warning: constant `APPSERVER_TIMEOUT_MS_ENV` is never used
+  --> src/adapters/codex_app_server_production_part1.rs:12:11
+   |
+12 | pub const APPSERVER_TIMEOUT_MS_ENV: &str = "COLLAB_APPSERVER_TIMEOUT_MS";
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `AppServerCapabilities` is never constructed
+  --> src/adapters/codex_app_server_production_part1.rs:76:12
+   |
+76 | pub struct AppServerCapabilities {
+   |            ^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `native`, `adapter`, and `names` are never used
+   --> src/adapters/codex_app_server_production_part1.rs:86:12
+    |
+ 85 | impl AppServerCapabilities {
+    | -------------------------- associated items in this implementation
+ 86 |     pub fn native() -> Self {
+    |            ^^^^^^
+...
+ 97 |     pub fn adapter(&self) -> AdapterCapabilities {
+    |            ^^^^^^^
+...
+106 |     pub fn names(&self) -> Vec<&'static str> {
+    |            ^^^^^
+
+warning: struct `LiveAppServer` is never constructed
+   --> src/adapters/codex_app_server_production_part1.rs:131:12
+    |
+131 | pub struct LiveAppServer {
+    |            ^^^^^^^^^^^^^
+
+warning: multiple associated items are never used
+   --> src/adapters/codex_app_server_production_part1.rs:140:12
+    |
+139 | impl LiveAppServer {
+    | ------------------ associated items in this implementation
+140 |     pub fn detect() -> Result<Option<Self>, AdapterError> {
+    |            ^^^^^^
+...
+209 |     pub fn socket_path(&self) -> &Path {
+    |            ^^^^^^^^^^^
+...
+213 |     pub fn namespace(&self) -> &str {
+    |            ^^^^^^^^^
+...
+217 |     pub fn thread_id(&self) -> &NativeThreadId {
+    |            ^^^^^^^^^
+...
+221 |     pub fn capabilities(&self) -> &AppServerCapabilities {
+    |            ^^^^^^^^^^^^
+...
+225 |     pub fn send(
+    |            ^^^^
+...
+249 |     pub fn status(&self, thread_id: &NativeThreadId) -> Result<Value, AdapterError> {
+    |            ^^^^^^
+...
+255 |     pub fn read_items(
+    |            ^^^^^^^^^^
+...
+273 |     pub fn as_json(&self) -> Value {
+    |            ^^^^^^^
+
+warning: function `start_thread` is never used
+   --> src/adapters/codex_app_server_production_part1.rs:890:8
+    |
+890 | pub fn start_thread(
+    |        ^^^^^^^^^^^^
+
+warning: function `read_thread_items` is never used
+   --> src/adapters/codex_app_server_production_part1.rs:926:8
+    |
+926 | pub fn read_thread_items(
+    |        ^^^^^^^^^^^^^^^^^
+
+warning: function `read_thread_items_page` is never used
+   --> src/adapters/codex_app_server_production_part1.rs:934:8
+    |
+934 | pub fn read_thread_items_page(
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `read_thread_turns_with_items_page` is never used
+   --> src/adapters/codex_app_server_production_part1.rs:952:8
+    |
+952 | pub fn read_thread_turns_with_items_page(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `read_turn_statuses` is never used
+   --> src/adapters/codex_app_server_production_part1.rs:978:8
+    |
+978 | pub fn read_turn_statuses(
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `read_turn_statuses_page` is never used
+   --> src/adapters/codex_app_server_production_part1.rs:985:8
+    |
+985 | pub fn read_turn_statuses_page(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `timeout` is never read
+   --> src/adapters/codex_app_server_production_part2.rs:315:5
+    |
+313 | struct Client {
+    |        ------ field in this struct
+314 |     stream: UnixStream,
+315 |     timeout: Duration,
+    |     ^^^^^^^
+
+warning: variant `KnownDelivered` is never constructed
+   --> src/adapters/mod.rs:186:9
+    |
+183 |     pub enum NotificationDeliveryClass {
+    |              ------------------------- variant in this enum
+...
+186 |         KnownDelivered,
+    |         ^^^^^^^^^^^^^^
+    |
+    = note: `NotificationDeliveryClass` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `notification_delivery_class` is never used
+   --> src/adapters/mod.rs:190:16
+    |
+189 |     impl AdapterError {
+    |     ----------------- method in this implementation
+190 |         pub fn notification_delivery_class(&self) -> NotificationDeliveryClass {
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated functions `detect_optional_env` and `detect_live` are never used
+   --> src/adapters/mod.rs:416:16
+    |
+395 |     impl AdapterRegistry {
+    |     -------------------- associated functions in this implementation
+...
+416 |         pub fn detect_optional_env() -> Result<Option<AdapterSelection>, AdapterError> {
+    |                ^^^^^^^^^^^^^^^^^^^
+...
+425 |         pub fn detect_live(
+    |                ^^^^^^^^^^^
+
+warning: function `binding_for_request` is never used
+   --> src/adapters/mod.rs:436:12
+    |
+436 |     pub fn binding_for_request<'a>(
+    |            ^^^^^^^^^^^^^^^^^^^
+
+warning: function `binding_for_explicit_env` is never used
+   --> src/adapters/mod.rs:444:12
+    |
+444 |     pub fn binding_for_explicit_env<'a>(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `role_brief_from_registration_receipt` is never used
+   --> src/identity.rs:313:8
+    |
+313 | pub fn role_brief_from_registration_receipt(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `persist_registration` is never used
+   --> src/identity.rs:582:8
+    |
+582 | pub fn persist_registration(
+    |        ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `load_or_create` is never used
+   --> src/identity.rs:899:8
+    |
+899 | pub fn load_or_create(
+    |        ^^^^^^^^^^^^^^
+
+warning: type alias `SnapshotReceipt` is never used
+   --> src/migration.rs:333:10
+    |
+333 | pub type SnapshotReceipt = ImmutableSnapshot;
+    |          ^^^^^^^^^^^^^^^
+
+warning: type alias `EpochDescriptor` is never used
+   --> src/migration.rs:447:10
+    |
+447 | pub type EpochDescriptor = TargetEpoch;
+    |          ^^^^^^^^^^^^^^^
+
+warning: method `record_count` is never used
+   --> src/migration.rs:721:12
+    |
+498 | impl VerifiedPrefix {
+    | ------------------- method in this implementation
+...
+721 |     pub fn record_count(&self) -> usize {
+    |            ^^^^^^^^^^^^
+
+warning: method `as_str` is never used
+   --> src/migration.rs:752:18
+    |
+751 | impl MigrationMappingStatus {
+    | --------------------------- method in this implementation
+752 |     pub const fn as_str(self) -> &'static str {
+    |                  ^^^^^^
+
+warning: method `as_str` is never used
+   --> src/migration.rs:777:18
+    |
+776 | impl ManifestRecordStatus {
+    | ------------------------- method in this implementation
+777 |     pub const fn as_str(self) -> &'static str {
+    |                  ^^^^^^
+
+warning: function `classify_jsonl` is never used
+   --> src/migration_tail.rs:482:8
+    |
+482 | pub fn classify_jsonl(bytes: &[u8]) -> InspectionReport {
+    |        ^^^^^^^^^^^^^^
+
+warning: function `inspect_path` is never used
+   --> src/migration_tail.rs:655:8
+    |
+655 | pub fn inspect_path(path: &Path, options: &InspectOptions) -> io::Result<InspectionReport> {
+    |        ^^^^^^^^^^^^
+
+warning: associated function `with_context` is never used
+   --> src/proto.rs:712:12
+    |
+704 | impl RequestEnvelope {
+    | -------------------- associated function in this implementation
+...
+712 |     pub fn with_context(request: Req, project_context: ProjectContext) -> Self {
+    |            ^^^^^^^^^^^^
+
+warning: associated items `from_env`, `sock_path`, `down_path`, `events_path`, and `journal_path` are never used
+  --> src/scope.rs:59:12
+   |
+31 | impl HostPaths {
+   | -------------- associated items in this implementation
+...
+59 |     pub fn from_env() -> anyhow::Result<Self> {
+   |            ^^^^^^^^
+...
+83 |     pub fn sock_path(&self) -> PathBuf {
+   |            ^^^^^^^^^
+...
+91 |     pub fn down_path(&self) -> PathBuf {
+   |            ^^^^^^^^^
+...
+95 |     pub fn events_path(&self) -> PathBuf {
+   |            ^^^^^^^^^^^
+...
+99 |     pub fn journal_path(&self) -> PathBuf {
+   |            ^^^^^^^^^^^^
+
+warning: function `project_root` is never used
+   --> src/scope.rs:555:8
+    |
+555 | pub fn project_root() -> anyhow::Result<PathBuf> {
+    |        ^^^^^^^^^^^^
+
+warning: variant `Append` is never constructed
+   --> src/server/mod_parts/part_01.rs:443:5
+    |
+442 | pub(crate) enum CurrentThreadRouteJournalFault {
+    |                 ------------------------------ variant in this enum
+443 |     Append,
+    |     ^^^^^^
+    |
+    = note: `CurrentThreadRouteJournalFault` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: enum `NotificationDeliveryError` is never used
+   --> src/server/mod_parts/part_01.rs:469:6
+    |
+469 | enum NotificationDeliveryError {
+    |      ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `storage_server_dir`, `try_commit`, and `commit_command_at_revision` are never used
+   --> src/server/mod_parts/part_02.rs:10:19
+    |
+  1 | impl Server {
+    | ----------- methods in this implementation
+...
+ 10 |     pub(crate) fn storage_server_dir(&self) -> PathBuf {
+    |                   ^^^^^^^^^^^^^^^^^^
+...
+514 |     pub(crate) fn try_commit(&self, evs: &[Event]) -> Result<(), String> {
+    |                   ^^^^^^^^^^
+...
+545 |     fn commit_command_at_revision(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `attempt_notification_with` is never used
+   --> src/server/mod_parts/part_05.rs:856:4
+    |
+856 | fn attempt_notification_with(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `handle_register` is never used
+    --> src/server/mod_parts/part_06.rs:1154:15
+     |
+1154 | pub(crate) fn handle_register(
+     |               ^^^^^^^^^^^^^^^
+
+warning: function `tmux_route_address_key` is never used
+  --> src/server/global_state_helpers.rs:63:15
+   |
+63 | pub(super) fn tmux_route_address_key(endpoint: &TmuxEndpoint) -> String {
+   |               ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type alias `CanonicalProjectScope` is never used
+  --> src/server/global_state_models.rs:23:10
+   |
+23 | pub type CanonicalProjectScope = ProjectScopeId;
+   |          ^^^^^^^^^^^^^^^^^^^^^
+
+warning: type alias `AppScopeId` is never used
+  --> src/server/global_state_models.rs:24:10
+   |
+24 | pub type AppScopeId = AppServerId;
+   |          ^^^^^^^^^^
+
+warning: method `as_str` is never used
+  --> src/server/global_state_models.rs:37:12
+   |
+36 | impl RuntimeBindingLedgerState {
+   | ------------------------------ method in this implementation
+37 |     pub fn as_str(self) -> &'static str {
+   |            ^^^^^^
+
+warning: associated function `new` is never used
+   --> src/server/global_state_models.rs:636:12
+    |
+635 | impl ProjectState {
+    | ----------------- associated function in this implementation
+636 |     pub fn new(project_scope: ProjectScopeId) -> Result<Self, StateError> {
+    |            ^^^
+
+warning: function `tick` is never used
+  --> src/server/keepalive.rs:83:8
+   |
+83 | pub fn tick(server: &Server) {
+   |        ^^^^
+
+warning: constant `AUTOMATIC_BATCH_WINDOW_MS` is never used
+  --> src/server/mailbox.rs:19:18
+   |
+19 | pub(super) const AUTOMATIC_BATCH_WINDOW_MS: i64 = 120_000;
+   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `max_wake_attempts` is never used
+    --> src/server/mailbox.rs:1116:8
+     |
+1116 | pub fn max_wake_attempts() -> u32 {
+     |        ^^^^^^^^^^^^^^^^^
+
+warning: fields `master_wake` and `subscriptions` are never read
+  --> src/server/notification_contract.rs:52:9
+   |
+49 | pub struct NotificationStateView {
+   |            --------------------- fields in this struct
+...
+52 |     pub master_wake: MasterWakeAccumulator,
+   |         ^^^^^^^^^^^
+53 |     pub messages: Vec<Message>,
+54 |     pub subscriptions: Vec<NotificationSubscription>,
+   |         ^^^^^^^^^^^^^
+   |
+   = note: `NotificationStateView` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `transport_kind` is never used
+  --> src/server/state.rs:59:12
+   |
+58 | impl WorkerRec {
+   | -------------- method in this implementation
+59 |     pub fn transport_kind(&self) -> Option<TransportKind> {
+   |            ^^^^^^^^^^^^^^
+
+warning: struct `TypedApplyError` is never constructed
+   --> src/server/state.rs:188:12
+    |
+188 | pub struct TypedApplyError(pub StateError);
+    |            ^^^^^^^^^^^^^^^
+
+warning: field `owner_root` is never read
+ --> src/server/peer_tests/part_01.rs:4:5
+  |
+2 | pub(crate) struct IsolatedTmux {
+  |                   ------------ field in this struct
+3 |     socket: PathBuf,
+4 |     owner_root: PathBuf,
+  |     ^^^^^^^^^^
+
+warning: function `follow_up` is never used
+   --> src/subagent.rs:182:4
+    |
+182 | fn follow_up(record: &Record, reused: bool) -> serde_json::Value {
+    |    ^^^^^^^^^
+
+warning: function `valid_runtime` is never used
+   --> src/subagent.rs:199:15
+    |
+199 | pub(crate) fn valid_runtime(runtime: &str) -> bool {
+    |               ^^^^^^^^^^^^^
+
+warning: function `child_appserver_candidate` is never used
+   --> src/subagent.rs:440:4
+    |
+440 | fn child_appserver_candidate(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `launch` is never used
+   --> src/subagent.rs:564:4
+    |
+564 | fn launch(
+    |    ^^^^^^
+
+warning: `collab` (bin "collab" test) generated 87 warnings (run `cargo fix --bin "collab" -p collab --tests` to apply 30 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 27.05s
+     Running unittests src/main.rs (collab/target/debug/deps/collab-e0ff904af86e8414)
+
+running 926 tests
+test client::adapters::codex_app_server::tests::appserver_namespace_is_detected_from_the_host_runtime ... ok
+test client::adapters::codex_app_server::tests::active_turn_selection_rejects_whitespace_containing_id ... ok
+test client::adapters::codex_app_server::tests::active_turn_selection_only_accepts_in_progress_turns ... ok
+test client::adapters::codex_app_server::tests::active_interrupted_only_and_in_progress_turn_actions_are_explicit ... ok
+test client::adapters::codex_app_server::tests::active_turn_selection_rejects_empty_id ... ok
+test client::adapters::codex_app_server::tests::active_turn_selection_rejects_missing_id ... ok
+test client::adapters::codex_app_server::tests::active_turn_selection_rejects_non_string_id ... ok
+test client::adapters::codex_app_server::tests::live_immediate_notify_accepts_loaded_thread ... ignored
+test client::adapters::codex_app_server::tests::delegated_prompt_escapes_xml_special_characters ... ok
+test client::adapters::codex_app_server::tests::active_turn_selection_handles_valid_zero_and_multiple_turns ... ok
+test client::adapters::codex_app_server::tests::notification_action_uses_turn_start_when_active_has_no_in_progress_turn ... ok
+test client::adapters::codex_app_server::tests::active_turn_selection_rejects_unknown_and_missing_status ... ok
+test client::adapters::codex_app_server::tests::immediate_receipt_requires_turn_identity_and_protocol_status ... ok
+test client::adapters::codex_app_server::tests::steer_receipt_requires_matching_turn_identity ... ok
+test client::adapters::codex_app_server::tests::thread_writer_conflict_detection_matches_only_the_writer_refusal ... ok
+test client::adapters::codex_app_server::tests::frame_round_trip_uses_masked_client_frames ... ok
+test client::adapters::codex_app_server::tests::wrapped_missing_thread_error_is_route_unavailable ... ok
+test client::adapters::legacy::tests::explicit_tui_and_desktop_detection_does_not_guess_terminal_identity ... ok
+test client::adapters::codex_app_server::tests::managed_appserver_socket_is_only_inferred_for_desktop_runtime ... ok
+test client::adapters::legacy::tests::registered_interrupt_rejects_wrong_native_turn ... ok
+test client::adapters::legacy::tests::registered_interrupt_accepts_matching_turn ... ok
+test client::adapters::codex_app_server::tests::client_rejects_oversized_appserver_rpc_response ... ok
+test client::adapters::legacy::tests::endpoint_mismatch_fails_before_adapter_execution ... ok
+test client::adapters::codex_app_server::tests::candidate_rejects_thread_session_mismatch ... ok
+test client::adapters::legacy::tests::timeout_and_unknown_are_explicit_typed_adapter_errors ... ok
+test client::adapters::codex_app_server::tests::candidate_rejects_thread_cwd_mismatch ... ok
+test client::adapters::legacy::tests::registered_submit_rejects_context_for_a_different_appserver ... ok
+test client::adapters::legacy::tests::tui_and_desktop_endpoints_have_distinct_capability_surfaces ... ok
+test client::adapters::legacy::tests::registered_submit_rejects_receipt_with_wrong_turn_after_adapter_call ... ok
+test client::adapters::tmux::tests::buffer_name_is_stable_and_does_not_copy_message_text ... ok
+test client::adapters::codex_app_server::tests::immediate_notify_attributes_turn_start_to_sender_not_recipient ... ok
+test client::adapters::codex_app_server::tests::immediate_notify_routes_idle_thread_to_turn_start ... ok
+test client::adapters::codex_app_server::tests::immediate_notify_loads_not_loaded_thread_through_turn_start ... ok
+test client::adapters::codex_app_server::tests::immediate_notify_reports_thread_writer_conflict_as_terminal ... ok
+test client::adapters::codex_app_server::tests::immediate_notify_uses_registered_codex_app_namespace ... ok
+test client::adapters::codex_app_server::tests::immediate_notify_rejects_queued_submission_as_success ... ok
+test client::adapters::codex_app_server::tests::immediate_notify_rejects_wrapped_missing_thread_without_turn_start ... ok
+test client::adapters::tmux::tests::pane_id_requires_numeric_tmux_form ... ok
+test client::adapters::codex_app_server::tests::immediate_notify_refuses_when_resumed_thread_still_reports_not_loaded ... ok
+test client::adapters::codex_app_server::tests::queued_notify_starts_idle_thread_with_turn_start ... ok
+test client::adapters::tmux::tests::pane_route_identity_includes_socket_session_and_process_generation ... ok
+test client::adapters::codex_app_server::tests::immediate_notify_rejects_multiple_in_progress_turns ... ok
+test client::adapters::codex_app_server::tests::candidate_accepts_thread_verified_by_thread_read_identity ... ok
+test client::adapters::codex_app_server::tests::immediate_notify_routes_active_thread_to_steer ... ok
+test client::adapters::codex_app_server::tests::queued_notify_routes_active_thread_to_queue_add ... ok
+test client::adapters::codex_app_server::tests::immediate_notify_starts_active_thread_with_only_interrupted_turn ... ok
+test client::adapters::legacy::tests::registered_submit_accepts_matching_runtime_binding_and_turn ... ok
+test client::adapters::codex_app_server::tests::candidate_verifies_persisted_cold_thread_through_thread_read ... ok
+test client::adapters::codex_app_server::tests::immediate_notify_materializes_missing_rollout_through_turn_start ... ok
+test client::adapters::codex_app_server::tests::candidate_does_not_require_appserver_queue_wakeup_method ... ok
+test client::adapters::legacy::tests::registered_submit_rejects_stale_generation_before_adapter_call ... ok
+test client::adapters::codex_app_server::tests::candidate_rejects_thread_whose_read_reports_not_loaded ... ok
+test client::adapters::legacy::tests::registered_submit_rejects_stale_receipt_generation ... ok
+test client::adapters::codex_app_server::tests::client_handshake_and_rpc_round_trip ... ok
+test client::adapters::tmux::tests::pane_observation_cache_stays_bounded ... ok
+test client::adapters::codex_app_server::tests::candidate_rejects_missing_appserver_thread_as_route_unavailable ... ok
+test client::adapters::codex_app_server::tests::immediate_notify_rejects_missing_thread_without_turn_start ... ok
+test client::tests::daemon_status_does_not_treat_stale_socket_with_lock_as_starting ... ok
+test client::tests::stale_socket_error_accepts_macos_eopnotsupp ... ok
+test client::tests::call_stale_socket_is_unknown_and_preserves_connect_error ... ok
+test client::tests::daemon_status_reports_lock_held_without_socket_as_starting ... ok
+test client::adapters::legacy::tests::unavailable_adapter_never_falls_back_to_another_endpoint ... ok
+test client::adapters::legacy::tests::unsupported_capabilities_fail_before_adapter_execution ... ok
+test client::adapters::legacy::tests::registered_submit_rejects_wrong_binding_before_adapter_call ... ok
+test client::tests::call_missing_socket_is_unavailable_and_does_not_spawn_or_write_state ... ok
+test config::tests::worktree_base_requires_absolute_path_without_layout_placeholders ... ok
+test config::tests::rejects_unproduced_async_result_notification_policy ... ok
+test config::tests::writes_default_runtime_into_subagent_table ... ok
+test config::tests::retired_config_migration_handles_inline_tables ... ok
+test config::tests::retired_config_migration_preserves_comments_order_and_unrelated_text ... ok
+test client::tests::daemon_status_reports_refused_stale_socket_as_unavailable ... ok
+test config::tests::legacy_defaults_and_project_override ... ok
+test config::tests::worktree_layout_renders_exactly_project_and_task_slugs ... ok
+test config::tests::removes_retired_transport_configuration_without_touching_unrelated_settings ... ok
+test client::tests::resolve_route_rejects_partial_typed_route ... ok
+test identity::tests::binding_validation_rejects_stale_generation_without_mutating_inputs ... ok
+test identity::tests::binding_validation_rejects_wrong_binding_without_mutating_inputs ... ok
+test client::tests::resolve_native_route_rejects_thread_mismatch ... ok
+test identity::tests::identifier_validation_rejects_empty_and_control_values ... ok
+test identity::tests::observation_anchors_include_tmux_codex_ids ... ok
+test identity::tests::identity_writes_use_distinct_temporary_paths ... ok
+test client::tests::call_active_socket_round_trips_without_starting_a_daemon ... ok
+test client::tests::server_error_retains_committed_outcome_in_the_error_chain ... ok
+test client::tests::ensure_server_launcher_seam_preserves_explicit_start_path ... ok
+test client::tests::ensure_server_launches_through_a_refused_stale_socket ... ok
+test config::tests::rejects_unsafe_and_unknown_policy ... ok
+test client::adapters::codex_app_server::tests::candidate_rejects_appserver_without_steer_or_turns_list_methods ... ok
+test client::route_context_tests::explicit_runtime_identity_is_project_context_source ... ok
+test client::route_context_tests::legacy_call_does_not_guess_an_app_scope ... ok
+test client::tests::resolve_route_rejects_thread_mismatch ... ok
+test identity::tests::tmux_endpoint_serde_round_trips ... ok
+test install_skills::tests::embedded_content_matches_repo_source_of_truth ... ok
+test install_skills::tests::empty_target_path_is_rejected ... ok
+test identity::tests::resolver_requires_an_anchor ... ok
+test identity::tests::resolver_mints_a_deterministic_draft_without_writing ... ok
+test identity::tests::resolver_still_refuses_a_caller_with_no_anchor ... ok
+test identity::tests::resolver_rejects_an_oversized_dsh_session_anchor ... ok
+test migration::tests::acked_without_ids_is_unknown ... ok
+test migration::tests::active_task_without_binding_is_reset ... ok
+test migration::tests::canonical_context_does_not_fill_missing_active_task_cwd ... ok
+test migration::tests::canonical_cwd_accepts_bound_worktree_context ... ok
+test migration::tests::canonical_event_without_final_newline_is_unknown ... ok
+test migration::tests::canonical_event_without_legacy_identity_is_adapted ... ok
+test migration::tests::complete_registered_payload_can_be_direct ... ok
+test migration::tests::concatenated_canonical_events_fail_jsonl_framing_closed ... ok
+test migration::tests::delivered_without_ids_is_unknown ... ok
+test migration::tests::digest_drift_is_reported_exactly ... ok
+test migration::tests::direct_inspection_alone_cannot_verify_project_admission ... ok
+test migration::tests::duplicate_canonical_event_field_is_unknown ... ok
+test migration::tests::duplicate_envelope_key_is_unknown_even_when_event_is_valid ... ok
+test migration::tests::duplicate_event_tag_is_unknown_even_when_value_collapses_it ... ok
+test migration::tests::duplicate_record_ids_fail_closed ... ok
+test migration::tests::duplicate_registration_requires_identity_reset ... ok
+test migration::tests::empty_jsonl_line_is_unknown ... ok
+test migration::tests::first_failed_record_preserves_an_empty_prefix_and_exact_stop ... ok
+test migration::tests::foreign_cwd_is_unknown_even_when_binding_fields_are_present ... ok
+test migration::tests::foreign_registered_cwd_is_not_direct ... ok
+test migration::tests::foreign_worktree_is_unknown_even_when_cwd_matches ... ok
+test migration::tests::inspection_manifest_maps_each_record_and_idempotency_key ... ok
+test migration::tests::legacy_records_are_adapted_without_inventing_sequence ... ok
+test migration::tests::malformed_middle_preserves_valid_prefix_and_suffix ... ok
+test migration::tests::malformed_records_do_not_create_replay_errors ... ok
+test migration::tests::malformed_tail_and_missing_newline_are_explicit ... ok
+test migration::tests::manifest_rejects_mapped_record_with_foreign_target_epoch ... ok
+test migration::tests::maximum_sequence_overflow_is_fail_closed ... ok
+test migration::tests::migration_apply_rejects_an_incomplete_verified_prefix ... ok
+test migration::tests::migration_apply_requires_rebound_phase_and_returns_a_pure_receipt ... ok
+test migration::tests::migration_apply_requires_snapshot_epoch_prefix_and_receipts ... ok
+test migration::tests::migration_transaction_binds_snapshot_and_target_source_epochs ... ok
+test migration::tests::migration_transaction_rejects_prefix_digest_drift ... ok
+test migration::tests::needs_operator_manifest_keeps_top_level_admission_evidence ... ok
+test migration::tests::no_write_rehearsal_replays_verified_prefix_and_rebuilds_projection ... ok
+test migration::tests::non_absolute_canonical_context_is_unknown ... ok
+test migration::tests::project_admission_names_are_stable_contract_values ... ok
+test migration::tests::registered_with_invalid_worker_object_is_unknown ... ok
+test migration::tests::registered_with_wrong_worker_type_is_unknown ... ok
+test migration::tests::registered_without_worker_payload_is_unknown ... ok
+test migration::tests::rehearsal_fails_instead_of_emitting_projection_after_reducer_rejection ... ok
+test migration::tests::reset_required_transaction_rejects_apply_before_side_effects ... ok
+test migration::tests::rework_task_without_binding_is_reset ... ok
+test migration::tests::scope_failure_survives_active_binding_reset ... ok
+test migration::tests::sent_accepts_legacy_wakeup_aliases_when_schema_is_complete ... ok
+test migration::tests::sent_rejects_wrong_type_last_wakeup_alias ... ok
+test migration::tests::sent_rejects_wrong_type_wakeup_count_alias ... ok
+test migration::tests::sent_with_incomplete_message_payload_is_unknown ... ok
+test migration::tests::sent_with_non_object_message_payload_is_unknown ... ok
+test migration::tests::sent_without_message_payload_is_unknown ... ok
+test migration::tests::sent_without_optional_reply_reference_can_be_direct ... ok
+test migration::tests::sequence_gap_is_not_replayable ... ok
+test migration::tests::serialized_prefix_requires_rebinding_to_exact_source_bytes ... ok
+test migration::tests::sha256_digest_matches_known_vector ... ok
+test migration::tests::snapshot_allows_an_independent_archive_digest ... ok
+test migration::tests::source_disposition_is_orthogonal_to_observed_mapping_class ... ok
+test migration::tests::source_epoch_zero_is_rejected_and_global_failures_keep_their_error ... ok
+test migration::tests::target_epoch_requires_strictly_new_active_epoch_when_source_is_unknown ... ok
+test migration::tests::terminal_task_without_binding_is_historical_adapt ... ok
+test migration::tests::unknown_or_missing_event_cannot_be_direct ... ok
+test migration::tests::unknown_owner_is_operator_input ... ok
+test identity::tests::resolver_uses_the_pane_naming_for_a_new_pane ... ok
+test migration::tests::unknown_schema_failure_survives_active_binding_reset ... ok
+test migration::tests::unknown_task_status_cannot_be_direct ... ok
+test migration::tests::valid_json_that_is_not_an_object_is_not_a_record ... ok
+test migration::tests::valid_sent_message_payload_can_be_direct ... ok
+test migration::tests::valid_prefix_retains_raw_bytes_and_deterministic_digest ... ok
+test migration::tests::verified_prefix_preserves_the_direct_prefix_and_first_stop ... ok
+test migration::tests::verified_admission_requires_archive_and_explicit_source_identity ... ok
+test proto::tests::command_envelope_accepts_matching_binding_and_scope ... ok
+test proto::tests::command_envelope_preserves_typed_binding_error_chain ... ok
+test proto::tests::command_envelope_rejects_invalid_wire_identifier_without_mutation ... ok
+test proto::tests::command_envelope_rejects_scope_identity_mismatch_without_mutation ... ok
+test proto::tests::command_envelope_rejects_stale_generation_without_mutation ... ok
+test proto::tests::command_envelope_rejects_wrong_app_scope_without_mutation ... ok
+test proto::tests::command_envelope_rejects_wrong_binding_without_mutation ... ok
+test proto::tests::command_envelope_round_trips_all_wire_fields ... ok
+test proto::tests::invalid_utf8_wire_context_is_rejected_before_decode ... ok
+test proto::tests::old_project_context_json_without_app_scope_fails_closed ... ok
+test proto::tests::project_context_rejects_invalid_app_scope_and_root_shapes ... ok
+test proto::tests::project_context_requires_explicit_app_scope ... ok
+test proto::tests::project_context_uses_runtime_appserver_identity ... ok
+test identity::tests::preserved_draft_token_is_not_reminted ... ok
+test proto::tests::route_resolution_rejects_malformed_identity_fields ... ok
+test proto::tests::route_resolution_round_trips_complete_typed_route ... ok
+test identity::tests::resolver_returns_the_exact_stored_token ... ok
+test identity::tests::resolver_recovers_a_dsh_identity_from_its_session_anchor_alone ... ok
+test identity::tests::deterministic_name_does_not_adopt_a_registered_identity_with_different_anchors ... ok
+test proto::tests::wire_request_carries_canonical_project_context ... ok
+test identity::tests::a_second_pane_of_the_same_tmux_session_is_not_that_identity ... ok
+test identity::tests::resolver_rejects_a_cross_project_anchor ... ok
+test identity::tests::resolver_never_adopts_an_unrelated_same_project_peer ... ok
+test reset::tests::reset_level_flags_are_gated_per_level ... ok
+test reset::tests::reset_level_requires_exactly_one_selector ... ok
+test identity::tests::archived_route_recovery_reads_without_calling_back ... ok
+test install_skills::tests::install_writes_all_files_into_target ... ok
+test install_skills::tests::second_install_without_force_skips_existing ... ok
+test identity::tests::resolver_recovers_existing_identity_by_each_unique_anchor ... ok
+test reset::tests::prune_stale_host_routes_removes_only_provably_dead_roots ... ok
+test install_skills::tests::force_removes_known_obsolete_skill_files_only ... ok
+test proto::tests::command_envelope_accepts_long_registered_cwd ... ok
+test install_skills::tests::force_overwrites_existing ... ok
+test reset::tests::reset_rejects_a_held_legacy_project_writer_lock_before_archive ... ok
+test reset::tests::reset_rejects_symlink_inside_control_root_without_archiving ... ok
+test reset::tests::reset_rejects_symlinked_control_root_without_mutating_the_target ... ok
+test reset::tests::reset_host_still_refuses_a_storage_root_that_does_not_own_the_index ... ok
+test proto::tests::route_resolution_accepts_long_registered_project_scope ... ok
+test reset::tests::source_verification_requires_the_inspected_socket_inventory ... ok
+test reset::tests::reset_rebuilds_an_uninitialized_project_root ... ok
+test reset::tests::reset_rejects_symlinked_guidance_without_mutating_the_target ... ok
+test reset::tests::tree_digest_ignores_stale_unix_socket_bytes ... ok
+test scope::tests::default_host_endpoint_uses_dot_collab_in_home ... ok
+test reset::tests::tree_digest_rejects_nested_symlinks ... ok
+test reset::tests::tree_digest_is_stable_and_content_sensitive ... ok
+test scope::tests::host_endpoint_rejects_relative_state_roots ... ok
+test scope::tests::host_endpoint_is_stable_across_project_roots ... ok
+test reset::tests::reset_requires_explicit_authorization ... ok
+test scope::tests::host_endpoint_rejects_split_lock_owner ... ok
+test scope::tests::host_endpoint_rejects_split_socket_root ... ok
+test reset::tests::retire_host_routes_preserves_unrelated_records ... ok
+test reset::tests::reset_does_not_mutate_unrelated_project_or_global_configuration ... ok
+test client::adapters::codex_app_server::tests::client_accepts_large_appserver_rpc_response ... ok
+test reset::tests::reset_host_recovers_an_unreplayable_index_and_reports_degraded ... ok
+test client::tests::ensure_server_drops_the_extended_window_once_the_start_lock_is_released ... ok
+test reset::tests::reset_project_refuses_an_unresolvable_resident_index_descriptor ... ok
+test client::tests::daemon_status_reports_active_socket_as_alive ... ok
+test scope::tests::identity_route_rejects_malformed_control_records ... ok
+test scope::tests::identity_route_ignores_missing_stale_root_and_keeps_current_route ... ok
+test scope::tests::init_scope_rejects_a_missing_process_cwd ... ok
+test scope::tests::init_scope_uses_unmarked_process_cwd ... ok
+test client::tests::ensure_server_keeps_waiting_while_the_daemon_holds_the_start_lock ... ok
+test reset::tests::reset_rolls_back_legacy_roots_when_route_rewrite_fails ... ok
+test scope::tests::non_utf8_registered_cwd_fails_closed_without_scope_collision ... ok
+test scope::tests::lifecycle_scope_uses_the_exact_cwd_without_requiring_a_baseline ... ok
+test reset::tests::reset_retires_stale_project_socket_without_copying_socket_state ... ok
+test scope::tests::route_scope_serializes_two_levels_and_does_not_mutate_paths ... ok
+test reset::tests::reset_rolls_back_legacy_roots_when_reset_record_write_fails ... ok
+test scope::tests::route_scope_uses_exact_registered_project_cwd ... ok
+test client::tests::ping_timeout_does_not_make_listening_socket_look_stopped_to_down ... ok
+test client::tests::ensure_server_still_fails_closed_when_a_start_never_becomes_reachable ... ok
+test server::board_state_tests::compact_snapshot_preserves_invitation_and_its_capacity_reservation ... ok
+test reset::tests::reset_does_not_treat_nonempty_project_state_as_empty_baseline ... ok
+test server::board_state_tests::unknown_legacy_actor_is_not_public_after_compaction ... ok
+test scope::tests::init_releases_collab_doc_only_once ... ok
+test scope::tests::exact_root_never_captures_ancestor_or_sibling_state ... ok
+test server::dsh_channel_tests::a_dsh_endpoint_must_be_an_absolute_unix_path ... ok
+test server::dsh_channel_tests::a_dsh_agent_is_never_archived_by_collab ... ok
+test server::board_state_tests::compact_snapshot_preserves_public_history_and_exact_revision ... ok
+test server::dsh_channel_tests::a_dsh_control_socket_is_only_ever_asked_for_read_only_or_enqueue_work ... ok
+test scope::tests::long_registered_cwd_has_a_valid_unbounded_project_scope ... ok
+test scope::tests::identity_route_resolves_only_for_its_app_scope_and_contains_cwd ... ok
+test server::dsh_channel_tests::a_dsh_subscription_is_armed_under_the_dsh_method ... ok
+test reset::tests::reset_retires_nonempty_runtime_files_in_current_scaffold ... ok
+test server::dsh_channel_tests::a_dsh_route_is_reverified_by_a_fresh_challenge_not_a_pane_compare ... ok
+test server::dsh_channel_tests::a_dsh_thread_status_rejects_a_different_agent_than_the_endpoint ... ok
+test server::dsh_channel_tests::a_dsh_master_reconnect_is_not_fenced_as_a_foreign_promotion ... ok
+test reset::tests::reset_project_retires_the_root_that_holds_the_live_index ... ok
+test server::dsh_channel_tests::a_dsh_rebind_is_refused_without_pointing_at_a_tmux_pane ... ok
+test server::dsh_channel_tests::a_dsh_wake_forwards_the_sink_mode_it_was_given ... ok
+test server::dsh_channel_tests::a_dsh_thread_status_reports_the_gateway_facts ... ok
+test server::dsh_channel_tests::a_dsh_unknown_runtime_stays_uncertain_and_never_retires_the_route ... ok
+test server::dsh_channel_tests::a_gateway_refusal_carries_its_stable_code ... ok
+test server::dsh_channel_tests::a_dsh_wake_never_reaches_the_tmux_sink ... ok
+test server::dsh_channel_tests::a_malformed_gateway_reply_is_unknown ... ok
+test server::dsh_channel_tests::a_replayed_dsh_wake_reuses_the_same_gateway_message_id ... ok
+test reset::tests::reset_retires_legacy_control_plane_and_rebuilds_baseline ... ok
+test server::dsh_channel_tests::a_gateway_reporting_another_runtime_is_rejected ... ok
+test server::dsh_channel_tests::a_reply_that_does_not_echo_the_challenge_nonce_is_rejected ... ok
+test server::dsh_channel_tests::an_unreachable_gateway_is_blocked_and_never_absent ... ok
+test server::dsh_channel_tests::a_dsh_peer_registers_and_is_woken_through_the_real_send_entry ... ok
+test server::dsh_channel_tests::dsh_candidate_serializes_additively_without_disturbing_pane_candidates ... ok
+test server::dsh_channel_tests::dsh_delivery_classes_separate_unreachable_from_timeout ... ok
+test server::dsh_channel_tests::a_verified_dsh_candidate_is_admitted_as_the_dsh_transport ... ok
+test server::dsh_channel_tests::dsh_presence_is_missing_only_on_an_explicit_denial ... ok
+test server::dsh_channel_tests::dsh_candidate_cwd_must_be_the_project_root ... ok
+test server::dsh_channel_tests::a_dsh_peer_returning_on_a_new_gateway_address_replaces_its_transport ... ok
+test server::dsh_channel_tests::dsh_presence_is_unknown_when_the_gateway_cannot_be_reached ... ok
+test server::dsh_channel_tests::dsh_wake_mode_covers_the_whole_sink_mode_domain ... ok
+test server::dsh_channel_tests::dsh_wake_mode_refuses_a_mode_outside_the_domain ... ok
+test server::dsh_channel_tests::dsh_must_not_be_combined_with_a_pane_candidate ... ok
+test server::dsh_channel_tests::every_transport_kind_round_trips_through_its_method_string ... ok
+test server::dsh_channel_tests::dsh_wake_enqueue_maps_the_mode_and_returns_a_queue_receipt ... ok
+test client::adapters::tmux::tests::pane_probe_distinguishes_present_missing_and_unknown ... ok
+test server::global_state::tests::a_session_bound_thread_is_reported_as_strictly_owned ... ok
+test server::global_state::tests::a_live_incumbent_route_still_rejects_a_lower_generation_takeover ... ok
+test server::global_state::tests::a_live_incumbent_route_still_tombstones_a_higher_generation_takeover ... ok
+test server::global_state::tests::an_orphan_incumbent_route_does_not_block_a_lower_generation_takeover ... ok
+test server::global_state::tests::an_equal_generation_address_change_is_still_rejected_for_a_live_incumbent ... ok
+test server::global_state::tests::an_unregistered_project_incumbent_is_the_declared_non_resident_boundary ... ok
+test server::global_state::tests::bind_runtime_still_rejects_a_lower_generation_over_a_live_binding ... ok
+test server::global_state::tests::command_receipts_are_host_wide_and_idempotent ... ok
+test server::global_state::tests::different_projects_are_stored_without_overwriting_each_other ... ok
+test server::global_state::tests::current_thread_routes_keep_distinct_sessions_for_one_native_thread ... ok
+test server::global_state::tests::legacy_thread_route_keeps_distinct_bindings_for_one_thread_as_candidates ... ok
+test server::global_state::tests::legacy_thread_route_is_indexed_read_only_and_upgraded_by_a_strict_route ... ok
+test server::global_state::tests::global_state_checks_migration_runtime_receipts_against_target_bindings ... ok
+test server::global_state::tests::legacy_thread_route_refresh_replaces_the_same_binding ... ok
+test server::global_state::tests::migration_commit_fence_rejects_a_receipt_without_an_archive_digest ... ok
+test server::global_state::tests::migration_commit_fence_rejects_a_record_only_archive_digest_edit ... ok
+test server::global_state::tests::master_grants_are_isolated_by_project_route_and_generation ... ok
+test server::global_state::tests::migration_commit_fence_rejects_an_unfenced_legacy_record_at_the_gate ... ok
+test server::global_state::tests::migration_receipts_reject_a_rebind_with_a_different_source_epoch ... ok
+test server::global_state::tests::migration_receipt_set_requires_one_writer_and_unique_rebind_pairs ... ok
+test server::global_state::tests::old_generation_is_rejected_without_mutating_state ... ok
+test server::global_state::tests::migration_receipts_require_one_source_epoch_and_a_symmetric_pairing ... ok
+test server::global_state::tests::pane_only_lookup_finds_appserver_binding_by_pane_recovery_anchor ... ok
+test server::global_state::tests::rebinding_an_address_after_tombstoning_drops_the_stale_tombstone ... ok
+test server::global_state::tests::reconnect_revokes_old_master_grant_and_explicit_revoke_is_idempotent ... ok
+test server::global_state::tests::registration_defaults_to_peer_until_an_explicit_current_grant ... ok
+test server::global_state::tests::route_lookup_rejects_unknown_project_or_app_scope ... ok
+test server::global_state::tests::route_registration_is_idempotent_and_conflicts_keep_the_original ... ok
+test server::global_state::tests::route_rejects_a_second_master_grant ... ok
+test server::global_state::tests::runtime_binding_ledger_replaces_stale_generation_for_the_same_binding ... ok
+test server::global_state::tests::runtime_binding_rollback_rejects_a_grant_that_is_not_the_failed_transaction_state ... ok
+test server::global_state::tests::runtime_binding_rollback_restores_only_the_exact_previous_generation_and_grant ... ok
+test server::global_state::tests::same_address_generation_refresh_replaces_the_route_without_a_tombstone ... ok
+test server::global_state::tests::same_binding_id_in_different_projects_is_route_scoped ... ok
+test server::global_state::tests::same_project_different_app_scopes_keep_separate_registrations_and_bindings ... ok
+test server::global_state::tests::sequence_and_revision_advance_together_and_cas_is_fenced ... ok
+test server::global_state::tests::upgrading_one_legacy_binding_keeps_the_other_candidate_resolvable ... ok
+test scope::tests::init_rejects_malformed_existing_configuration_without_overwriting_it ... ok
+test server::dsh_channel_tests::dsh_presence_is_present_while_running_and_cold_when_inactive ... ok
+test client::adapters::tmux::tests::failed_enter_is_explicit_and_does_not_report_consumption ... ok
+test server::dsh_channel_tests::every_challenge_carries_a_distinct_nonce ... ok
+test server::dsh_channel_tests::a_dsh_wake_names_the_real_mailbox_id_so_a_peer_ack_can_match_it ... ok
+test server::dsh_channel_tests::a_dsh_wake_receipt_carries_the_gateway_message_id ... ok
+test server::dsh_channel_tests::a_refused_dsh_wake_is_labelled_as_a_dsh_rejection ... ok
+test server::global_state::tests::recording_many_ledger_scan_receipts_does_not_copy_global_state_each_time ... ok
+test client::adapters::tmux::tests::candidate_from_env_resolves_the_current_isolated_tmux_pane ... ok
+Adding existing repo at 'modules/service-a' to the index
+test server::host_route_registry_tests::approved_promotion_replaces_the_incumbent_without_a_pane_taker ... ok
+test scope::tests::identity_route_preserves_a_nested_project_root ... ok
+test scope::tests::identity_route_prefers_git_main_root_when_worktree_route_is_stale ... ok
+test scope::tests::identity_route_rejects_a_worktree_only_route ... ok
+test scope::tests::identity_route_selects_canonical_main_when_worktree_route_also_exists ... ok
+test scope::tests::read_only_route_resolution_keeps_a_nested_project_inside_a_linked_worktree ... ok
+test scope::tests::read_only_route_resolution_rejects_a_worktree_only_route ... ok
+test scope::tests::read_only_route_resolution_preserves_non_cli_scope_from_a_linked_worktree ... ok
+test scope::tests::identity_route_preserves_a_submodule_root ... ok
+test server::host_route_registry_tests::appserver_subscription_is_bound_to_the_selected_thread ... ok
+test server::host_route_registry_tests::a_codex_thread_on_another_pane_stays_a_conflict ... ok
+test client::adapters::tmux::tests::stable_pane_output_remains_observation_and_does_not_claim_agent_idle ... ok
+test server::host_route_registry_tests::appserver_self_check_failure_is_explicit_and_has_no_fallback ... ok
+test server::host_route_registry_tests::appserver_registration_is_rejected_without_candidate_check ... ok
+test server::host_route_registry_tests::approved_promotion_replaces_the_incumbent_even_after_the_peer_moved_on ... ok
+test client::adapters::tmux::tests::failed_paste_is_explicit_and_does_not_report_submission ... ok
+test server::host_route_registry_tests::context_scope_spoof_is_rejected_before_route_lookup ... ok
+test server::host_route_registry_tests::dangling_symlink_storage_owner_rejects_alias_route_before_journal_write ... ok
+test server::host_route_registry_tests::a_rejected_registration_leaves_the_foreign_pane_claimant_bound ... ok
+test server::host_route_registry_tests::a_second_claim_on_the_same_pane_replaces_the_first_claimant ... ok
+test server::host_route_registry_tests::empty_registry_admits_only_exact_cli_host_operator_shutdown ... ok
+test server::host_route_registry_tests::a_forged_token_cannot_reclaim_a_retired_workers_pane ... ok
+test server::host_route_registry_tests::ambiguous_registration_route_commit_does_not_restore_stale_binding ... ok
+test client::adapters::tmux::tests::notify_pastes_text_then_sends_enter_and_never_claims_consumption ... ok
+test server::host_route_registry_tests::approved_promotion_replaces_the_master_when_a_live_peer_took_its_pane ... ok
+test client::tests::runtime_identity_request_uses_daemon_even_when_appserver_env_is_set ... ok
+test server::host_route_registry_tests::a_retired_worker_reclaims_the_pane_from_the_later_registrant ... ok
+test server::host_route_registry_tests::an_orphan_stale_index_claim_does_not_block_the_identity_gate_takeover ... ok
+test server::host_route_registry_tests::malformed_project_context_is_not_reinterpreted_as_unscoped_request ... ok
+test server::host_route_registry_tests::host_route_replay_requires_framed_unique_jsonl_records ... ok
+test server::host_route_registry_tests::cross_project_wire_request_is_rejected_without_resident_mutation ... ok
+test server::host_route_registry_tests::direct_registration_route_failure_reports_cleanup_failure ... ok
+test identity::tests::identity_files_are_written_owner_only ... ok
+test server::host_route_registry_tests::external_project_register_requires_exact_registered_root ... ok
+test server::host_route_registry_tests::first_register_accepts_the_explicit_appserver_runtime ... ok
+test server::host_route_registry_tests::delayed_second_app_register_is_rejected_without_resident_mutation ... ok
+test server::host_route_registry_tests::a_later_registration_takes_a_foreign_scope_anchor ... ok
+test server::host_route_registry_tests::first_register_uses_the_explicit_context_app_scope ... ok
+test server::host_route_registry_tests::conflicting_pane_route_index_stays_fatal_for_the_identity_gate ... ok
+test server::host_route_registry_tests::failed_tmux_notification_keeps_message_unread_without_receive_receipt ... ok
+test identity::tests::persisted_registration_records_the_current_project_scope ... ok
+test server::host_route_registry_tests::failed_first_registration_route_commit_removes_unpublished_worker ... ok
+test server::host_route_registry_tests::legacy_multiple_app_routes_fail_replay_before_opening_a_second_reducer ... ok
+test server::host_route_registry_tests::cross_scope_pane_claimant_takes_the_pane_without_fencing_the_project_route ... ok
+test server::host_route_registry_tests::malformed_resident_route_storage_is_rejected_during_replay ... ok
+test server::host_route_registry_tests::missing_route_root_is_ignored_without_rewriting_route_journal ... ok
+test server::host_route_registry_tests::authenticated_send_uses_context_app_scope_and_rejects_forged_scope ... ok
+test server::host_route_registry_tests::notification_subscription_transport_must_match_tmux_or_appserver_kind ... ok
+test server::host_route_registry_tests::closed_same_pane_peer_keeps_the_pane_ownership ... ok
+test identity::tests::resolver_rejects_an_ambiguous_anchor_without_guessing_from_recency ... ok
+test server::host_route_registry_tests::host_current_route_commit_failure_is_explicit ... ok
+test server::host_route_registry_tests::not_ready_route_does_not_mutate_state_or_primary_journal ... ok
+test scope::tests::scope_resolve_prefers_a_fresh_local_baseline_over_a_stale_identity_route ... ok
+test server::host_route_registry_tests::raw_ping_keeps_context_free_readiness ... ok
+test server::host_route_registry_tests::registered_project_without_migrated_reducer_is_explicitly_not_ready ... ok
+test server::host_route_registry_tests::live_closure_daemon_send_uses_daemon_identity_without_explicit_source_thread ... ok
+test server::host_route_registry_tests::external_project_register_is_admitted_and_replayed_from_host_journal ... ok
+test server::host_route_registry_tests::registration_fails_when_no_server_verified_candidate_exists ... ok
+test server::host_route_registry_tests::native_thread_route_resolution_ignores_history_and_fails_closed_for_invalid_state ... ok
+test server::host_route_registry_tests::live_closure_restart_replay_records_pending_contract_mode ... ok
+test server::host_route_registry_tests::pending_runtime_initialization_is_one_arc_under_concurrent_dispatch ... ok
+test server::host_route_registry_tests::live_closure_daemon_to_master_rejects_non_master_target ... ok
+test server::host_route_registry_tests::native_thread_route_resolution_ignores_the_execution_cwd ... ok
+test server::host_route_registry_tests::resident_route_repair_failure_blocks_startup ... ok
+test server::host_route_registry_tests::repeated_registry_builds_do_not_duplicate_or_replace_route_owner ... ok
+test server::host_route_registry_tests::resident_route_requires_its_registered_app_scope ... ok
+test server::host_route_registry_tests::native_thread_route_resolution_returns_one_complete_typed_route ... ok
+test server::dsh_channel_tests::a_gateway_timeout_leaves_dsh_presence_unknown_not_missing ... ok
+test server::host_route_registry_tests::live_tmux_master_rebinds_same_pane_without_new_promotion ... ok
+test server::host_route_registry_tests::resident_route_publish_failure_does_not_leave_a_replayable_route ... ok
+test server::host_route_registry_tests::registration_reuses_the_registered_tmux_pane_identity ... ok
+test server::dsh_channel_tests::a_silent_gateway_is_unknown_and_never_absent ... ok
+test server::host_route_registry_tests::resident_route_replays_from_host_journal ... ok
+test server::host_route_registry_tests::pane_takeover_plans_a_foreign_claimant_without_evicting_it ... ok
+test server::host_route_registry_tests::failed_registration_route_commit_is_explicit_and_replay_safe ... ok
+test server::host_route_registry_tests::persisted_resident_route_replays_and_admits_register ... ok
+test server::host_route_registry_tests::pane_owner_in_another_pane_does_not_supersede_master ... ok
+test server::host_route_registry_tests::non_cli_resident_route_replays_with_host_runtime_and_restores_registration ... ok
+test server::host_route_registry_tests::scheduler_runtime_list_deduplicates_routes_sharing_one_reducer ... ok
+test server::host_route_registry_tests::route_journal_failure_precedes_external_reducer_mutation ... ok
+test server::host_route_registry_tests::runtime_storage_symlink_escape_rejects_replay_before_runtime_creation ... ok
+test server::host_route_registry_tests::storage_owner_identity_resolves_dangling_symlink_with_missing_target ... ok
+test server::host_route_registry_tests::same_project_secondary_app_is_not_ready_without_a_second_reducer ... ok
+test server::host_route_registry_tests::same_pane_master_still_fences_when_no_peer_owns_the_pane ... ok
+test server::host_route_registry_tests::manager_external_register_is_durable_and_replayed_in_its_runtime ... ok
+test server::host_route_registry_tests::storage_owner_identity_resolves_symlinked_parent_with_missing_tail ... ok
+test server::host_route_registry_tests::resident_route_repairs_from_host_registration_after_crash ... ok
+test server::host_route_registry_tests::startup_publishes_a_missing_current_thread_route_from_the_project_owner ... ok
+test server::host_route_registry_tests::native_thread_route_resolution_rejects_cross_project_thread_reuse ... ok
+test server::host_route_registry_tests::runtime_less_draft_recovers_the_committed_credential ... ok
+test server::host_route_registry_tests::same_pane_master_still_fences_when_host_route_is_missing ... ok
+test server::host_route_registry_tests::startup_reconciles_a_lagged_current_thread_route_before_request_delivery ... ok
+test server::host_route_registry_tests::tmux_registration_rejects_a_cwd_that_is_not_the_server_project_root ... ok
+test server::host_route_registry_tests::nonresident_child_route_is_committed_to_host_owner ... ok
+test server::host_route_registry_tests::prospective_storage_collision_rejects_register_before_route_publish ... ok
+test server::host_route_registry_tests::startup_reconciles_a_lagged_same_pane_master_route ... ok
+test server::host_route_registry_tests::same_pane_peer_that_moved_away_still_owns_the_pane ... ok
+test server::host_route_registry_tests::unknown_project_route_fails_closed ... ok
+test server::host_route_registry_tests::same_thread_session_rotation_rebinds_tmux_generation_and_fences_old_pair ... ok
+test server::host_route_registry_tests::same_thread_reregistration_retires_the_previous_current_route ... ok
+test server::host_route_registry_tests::uninitialized_route_root_is_ignored_without_rewriting_route_journal ... ok
+test server::host_route_registry_tests::manager_routes_project_queries_mutations_and_poll_to_one_runtime ... ok
+test server::host_route_registry_tests::uninitialized_external_project_cannot_create_host_route ... ok
+test server::host_route_registry_tests::resident_storage_collision_rejects_register_before_route_publish ... ok
+test server::identity_context::required_fields_tests::an_observed_endpoint_still_requires_the_four_appserver_fields ... ok
+test server::identity_context::required_fields_tests::dsh_anchor_alone_requires_no_appserver_fields ... ok
+test server::identity_context::required_fields_tests::no_anchor_requests_all_four_fields ... ok
+test server::identity_context::required_fields_tests::tmux_anchor_alone_requires_no_appserver_fields ... ok
+test server::host_route_registry_tests::storage_owner_permission_error_rejects_register_without_mutation ... ok
+test server::host_route_registry_tests::runtime_storage_symlink_escape_rejects_register_before_journal_write ... ok
+test server::keepalive::tests::closed_subagent_and_removed_peer_leave_both_idle_lists ... ok
+test server::keepalive::tests::duplicate_idle_signal_records_once_and_does_not_rearm ... ok
+test server::host_route_registry_tests::runtime_less_draft_keeps_its_token_without_a_committed_record ... ok
+test server::host_route_registry_tests::tmux_notification_acceptance_stays_pending_and_unread ... ok
+test server::host_route_registry_tests::subagent_wire_registration_keeps_parent_app_scope ... ok
+test server::host_route_registry_tests::stale_pane_route_index_is_named_and_the_identity_gate_bootstraps_over_it ... ok
+test server::host_route_registry_tests::wire_cli_register_rejects_token_rotation_for_the_same_thread_and_route ... ok
+test server::host_route_registry_tests::superseded_same_pane_master_does_not_fence_project_route ... ok
+test server::host_route_registry_tests::tmux_route_resolution_uses_the_registered_canonical_project ... ok
+test server::mailbox::tests::batch_selection_is_bounded_and_returns_overflow_count ... ok
+test server::host_route_registry_tests::wire_route_resolution_checks_the_full_tmux_endpoint_and_is_read_only ... ok
+test server::mailbox::tests::mailbox_projection_keeps_goal_deadline_p0_only_for_internal_notification ... ok
+test server::mailbox::tests::mailbox_rejects_non_basename_recipients_before_writing ... ok
+test server::keepalive::tests::appserver_worker_without_managed_state_stays_unknown ... ok
+test server::host_route_registry_tests::tmux_routes_with_same_session_and_pane_on_different_sockets_are_distinct ... ok
+test server::host_route_registry_tests::wire_notification_mutation_requires_runtime_and_read_status_stays_compatible ... ok
+test server::mailbox::tests::mailbox_keeps_valid_recipient_projection_path ... ok
+test server::host_route_registry_tests::wire_register_orphan_recovery_rejects_a_forged_token_on_the_persisted_thread ... ok
+test server::host_route_registry_tests::wire_register_rejects_token_rotation_with_the_persisted_runtime ... ok
+test server::host_route_registry_tests::wire_cli_recover_rebinds_generation_and_fences_old_context ... ok
+test server::host_route_registry_tests::wire_poll_rechecks_generation_before_delivering_after_rebind ... ok
+test server::mailbox::tests::mailbox_repair_preserves_syntactically_valid_invalid_schema_tail ... ok
+test server::host_route_registry_tests::split_journal_same_pane_master_is_fenced_until_host_reconcile ... ok
+test server::host_route_registry_tests::wire_register_orphan_recovery_rejects_ambiguous_global_bindings ... ok
+test server::host_route_registry_tests::prospective_nested_project_collision_rejects_register_before_route_publish ... ok
+test scope::tests::scope_resolve_preserves_a_nested_project_inside_a_linked_worktree ... ok
+test server::notification_batch_tests::default_appserver_sink_does_not_fallback_to_tmux ... ok
+test server::mailbox::tests::mailbox_repair_truncates_only_syntactically_malformed_tail ... ok
+test server::mailbox::tests::mailbox_repair_removes_only_trailing_malformed_records ... ok
+test server::host_route_registry_tests::wire_register_recovers_an_orphan_binding_on_the_same_route ... ok
+test server::host_route_registry_tests::wire_register_orphan_recovery_rejects_an_unbound_replacement_thread ... ok
+test server::mailbox::tests::mailbox_events_survive_journal_replay_with_latest_state ... ok
+test server::keepalive::tests::transport_identity_is_the_only_liveness_signal ... ok
+test server::mailbox::tests::raw_mailbox_cross_field_inconsistency_fails_closed_and_blocks_rebuild ... ok
+test server::host_route_registry_tests::wire_cli_recover_rejects_a_forged_token_and_a_forged_route ... ok
+test server::mailbox::tests::latest_projection_is_idempotent_per_projection_key ... ok
+test server::peer_tests::activity_log_never_copies_launch_credentials ... ok
+test server::host_route_registry_tests::manager_cross_project_tmux_masters_send_and_reject_forged_source_evidence ... ok
+test server::mailbox::tests::malformed_latest_projection_tail_is_rebuilt_from_raw ... ok
+test server::peer_tests::appserver_notification_abbreviates_subject_and_escapes_body_controls ... ok
+test server::peer_tests::appserver_notification_classifies_priority_and_names_one_action ... ok
+test server::peer_tests::appserver_notification_long_goal_deadline_subjects_keep_the_typed_prefix ... ok
+test server::peer_tests::appserver_notification_truncates_body_without_dropping_the_action_contract ... ok
+test server::notification_contract::tests::command_idempotency_returns_recorded_outcome_and_conflict_fails_closed ... ok
+test server::notification_contract::tests::server_notification_sink_commits_and_source_reads_the_same_reducer_state ... ok
+test server::peer_tests::architecture_source_has_no_live_declared_role_or_dispatch_owner ... ok
+test client::tests::ensure_server_waits_for_readiness_past_the_previous_deadline ... ok
+test server::peer_tests::active_lifecycle_manifest_binds_every_registered_call_edge_to_source ... ok
+test server::notification_batch_tests::mailbox_status_reports_a_valid_but_incomplete_projection ... ok
+test server::notification_batch_tests::failed_reservation_is_durable_and_is_never_replayed ... ok
+test server::notification_batch_tests::explicit_notification_uses_sender_native_thread_for_delegation ... ok
+test server::host_route_registry_tests::nonresident_route_replays_full_query_mutation_and_notification_surface ... ok
+test server::notification_batch_tests::automatic_notification_uses_immediate_without_sender_thread ... ok
+test server::mailbox::tests::raw_mailbox_retains_event_kind_identity_raw_entity_and_unavailable_scope_error ... ok
+test server::peer_tests::async_result_subscription_is_rejected_without_a_producer ... ok
+test server::notification_batch_tests::queued_delivery_mode_reaches_notification_sink ... ok
+test server::keepalive::tests::managed_idle_without_actionable_task_stays_quiet ... ok
+test server::peer_tests::appserver_response_without_thread_status_is_unknown_not_present ... ok
+test server::notification_batch_tests::automatic_batch_does_not_cross_the_first_notice_window ... ok
+test server::notification_batch_tests::wake_rebinds_a_stale_default_direct_message_binding ... ok
+test server::peer_tests::appserver_response_with_a_live_thread_status_is_present ... ok
+test server::notification_batch_tests::explicit_notice_is_immediate_and_isolated_from_automatic_batching ... ok
+test server::keepalive::tests::master_idle_batch_surfaces_pending_merges ... ok
+test server::peer_tests::a_tmux_pane_id_recorded_as_the_codex_thread_is_not_liveness ... ok
+test server::notification_batch_tests::immediate_and_queued_messages_are_not_batched_into_one_mode ... ok
+test server::keepalive::tests::managed_working_stops_master_reminder_episode ... ok
+test server::host_route_registry_tests::registration_rejects_a_linked_worktree_root ... ok
+test server::notification_batch_tests::four_notice_batch_uses_the_original_window_start_after_capping ... ok
+test server::peer_tests::command_retry_returns_original_outcome_without_reapplying_events ... ok
+test server::keepalive::tests::managed_working_to_idle_reports_once_after_settle ... ok
+test server::peer_tests::command_completion_sync_failure_is_explicit_and_replayable_if_marker_was_written ... ok
+test server::peer_tests::command_completion_append_failure_leaves_incomplete_replay ... ok
+test server::peer_tests::accepted_task_can_return_to_rework_and_redeliver ... ok
+test server::keepalive::tests::master_busy_defers_managed_idle_until_one_batch ... ok
+test server::peer_tests::concatenated_journal_events_replay_and_self_heal ... ok
+test server::peer_tests::cleanup_rejects_symlink_escape_even_for_configured_worktree ... ok
+test server::peer_tests::command_start_append_and_sync_failures_fail_closed_before_business_apply ... ok
+test server::peer_tests::configured_worktree_path_rejects_expected_parent_escape ... ok
+test server::peer_tests::authenticated_send_cannot_claim_internal_goal_deadline_owner ... ok
+test server::peer_tests::authenticated_send_rejects_stale_generation ... ok
+test server::peer_tests::absent_tmux_master_allows_approved_peer_promotion ... ok
+test server::peer_tests::authenticated_send_rejects_missing_binding ... ok
+test server::host_route_registry_tests::wire_notification_mutation_rejects_stale_ambiguous_unbound_and_wrong_routes ... ok
+test server::peer_tests::closed_and_delivered_tasks_do_not_trigger_keepalives ... ok
+test server::peer_tests::authenticated_send_rejects_ambiguous_binding ... ok
+test server::peer_tests::daemon_replay_restores_default_lease_for_registered_peer ... ok
+test server::peer_tests::changed_migration_snapshot_remains_frozen ... ok
+test server::peer_tests::daemon_restart_does_not_restore_without_registered_transport ... ok
+test server::peer_tests::daemon_restart_restores_default_lease_from_registered_tmux_transport ... ok
+test server::peer_tests::cancelled_default_lease_stays_suppressed_until_explicit_subscribe ... ok
+test server::peer_tests::daemon_restart_reuses_existing_deadline_without_recreating_it ... ok
+test server::peer_tests::default_subscription_renews_matching_target_and_keeps_stale_target_visible ... ok
+test server::peer_tests::cancelling_master_idle_subscription_supersedes_pending_wake ... ok
+test server::peer_tests::authenticated_send_rejects_another_workers_binding ... ok
+test server::peer_tests::authenticated_send_uses_registered_cwd_for_authoritative_route_scope ... ok
+test server::peer_tests::authenticated_send_returns_typed_durability_failure_before_wake ... ok
+test server::peer_tests::authenticated_send_enforces_request_cooldown ... ok
+test server::peer_tests::conflict_is_durable_and_wait_targets_resource_holder ... ok
+test server::peer_tests::duplicate_daemon_rejection_preserves_authoritative_pid ... ok
+test server::peer_tests::context_does_not_project_retired_appserver_thread_or_turn_state ... ok
+test server::peer_tests::approved_promotion_supersedes_a_live_tmux_master ... ok
+test server::peer_tests::context_gives_an_idle_master_one_canonical_scheduling_action ... ok
+test server::peer_tests::context_keeps_explicit_unsubscribe_stopped ... ok
+test server::host_route_registry_tests::manager_app_scope_storage_encoding_is_collision_free_and_replayed ... ok
+test server::peer_tests::authenticated_send_supersedes_earlier_reply ... ok
+test server::peer_tests::context_rearm_never_overrides_a_concurrent_explicit_unsubscribe ... ok
+test server::peer_tests::failed_journal_cannot_apply_a_keepalive_reservation ... ok
+test server::peer_tests::context_never_returns_another_peers_binding ... ok
+test server::peer_tests::context_rearms_missing_default_lease_for_reused_registration ... ok
+test server::peer_tests::bulk_ack_with_empty_ids_acknowledges_all_inbox_messages ... ok
+test server::peer_tests::context_returns_the_callers_own_runtime_binding_receipt ... ok
+test server::peer_tests::context_returns_the_callers_binding_when_the_root_holds_several_app_scopes ... ok
+test server::peer_tests::deadline_subscription_requires_live_master_authority ... ok
+test server::peer_tests::fresh_default_does_not_skip_legacy_duplicate_cleanup ... ok
+test server::peer_tests::context_snapshot_carries_peer_status_and_scheduling_state ... ok
+test server::peer_tests::direct_two_peer_and_three_peer_wait_cycles_fail_closed ... ok
+test server::peer_tests::context_is_read_only_and_does_not_consume_notifications ... ok
+test server::peer_tests::expired_mailbox_and_journal_are_removed_and_do_not_replay ... ok
+test server::peer_tests::global_reducer_failure_is_explicit_and_rolls_back_the_unreducible_append ... ok
+test server::peer_tests::explicit_peer_notification_accepts_arbitrary_durable_body ... ok
+test server::peer_tests::explicit_retry_is_refused_for_a_decode_failure ... ok
+test server::peer_tests::external_or_operator_sender_can_send_without_registration ... ok
+test server::peer_tests::cross_project_send_requires_master_endpoints_on_both_sides ... ok
+test scope::tests::scope_resolve_reuses_identity_route_from_a_worktree ... ok
+test server::peer_tests::explicit_send_repairs_stale_default_direct_message_before_wake ... ok
+test server::peer_tests::first_and_later_registration_are_equal_peers ... ok
+test server::peer_tests::finalize_requires_a_closed_task_and_authorized_caller ... ok
+test server::peer_tests::explicit_send_reports_appserver_wake_rejection_after_durable_commit ... ok
+test server::peer_tests::explicit_retry_is_refused_for_an_unknown_original_attempt ... ok
+test server::peer_tests::explicit_retry_is_refused_for_an_accepted_original_attempt ... ok
+test server::peer_tests::explicit_send_reports_tmux_wake_rejection_after_durable_commit ... ok
+test server::peer_tests::explicit_send_duplicate_after_rejection_retries_the_same_message_once ... ok
+test server::peer_tests::goal_deadline_rejects_periodic_rearm_options ... ok
+test server::peer_tests::handoff_to_unregistered_recipient_fails_typed_before_recording ... ok
+test server::peer_tests::journal_root_assigned_rewrites_to_master_on_replay ... ok
+test server::peer_tests::context_records_peer_presence_transitions_like_status_all ... ok
+test server::peer_tests::goal_deadline_registration_deduplicates_same_deadline ... ok
+test server::peer_tests::codex_subagents_exchange_messages ... ok
+test server::peer_tests::handoff_with_dot_prefixed_missing_worktree_fails_typed ... ok
+test server::peer_tests::handoff_with_missing_worktree_path_fails_typed_before_recording ... ok
+test server::peer_tests::legacy_manual_cleanup_receipt_replays_as_unverified ... ok
+test server::peer_tests::legacy_command_record_rewrite_and_replay_preserve_checkpoint_version ... ok
+test server::peer_tests::legacy_command_record_without_outcome_is_rejected ... ok
+test server::peer_tests::init_registration_result_exposes_persisted_runtime_identity ... ok
+test server::peer_tests::handoff_with_registered_task_worktree_outside_playground_fails_typed ... ok
+test server::peer_tests::force_close_without_finalize_reports_unverified_and_does_not_release ... ok
+test server::peer_tests::legacy_accepted_candidate_can_record_merge ... ok
+test server::host_route_registry_tests::manager_isolates_app_and_project_routes_and_replays_each_runtime ... ok
+test server::peer_tests::handoff_dedup_resend_survives_a_path_that_disappeared_after_delivery ... ok
+test server::peer_tests::handoff_with_relative_missing_worktree_fails_typed ... ok
+test server::peer_tests::legacy_master_assignment_with_ambiguous_binding_fails_replay_closed ... ok
+test server::peer_tests::legacy_sent_event_replay_classifies_message_without_reply_reference ... ok
+test server::peer_tests::finalize_preserves_unread_direct_message_payloads ... ok
+test server::peer_tests::finalize_releases_a_waiter_exactly_once ... ok
+test server::peer_tests::legacy_master_assignment_without_runtime_binding_fails_replay_closed ... ok
+test server::peer_tests::first_offline_status_sets_baseline_then_online_transition_notifies_once ... ok
+test server::peer_tests::handoff_with_prose_url_worktree_segment_still_delivers ... ok
+test server::peer_tests::malformed_journal_replay_fails_fast ... ok
+test server::peer_tests::legacy_cancelled_default_lease_is_rearmed_but_explicit_unsubscribe_stays_suppressed ... ok
+test server::peer_tests::handoff_with_unrelated_playground_path_still_delivers ... ok
+test server::peer_tests::master_assigned_replays_approval_and_live_identity ... ok
+test server::peer_tests::handoff_with_unrelated_absolute_worktree_leaf_still_delivers ... ok
+test server::peer_tests::handoff_with_registered_recipient_and_existing_path_succeeds ... ok
+test server::peer_tests::legacy_master_assignment_after_runtime_binding_is_migrated ... ok
+test server::peer_tests::interior_malformed_recipient_jsonl_preserves_bad_line_and_appends_later_message ... ok
+test server::peer_tests::legacy_master_assignment_before_runtime_rebind_does_not_regrant_authority ... ok
+test server::peer_tests::legacy_master_assignment_cannot_override_typed_grant_on_replay ... ok
+test server::peer_tests::mailbox_read_all_chronological_sort_asc_and_desc ... ok
+test server::peer_tests::lifecycle_cannot_bypass_delivery_or_review ... ok
+test server::peer_tests::live_subagent_still_requires_a_snapshot_before_close ... ok
+test server::peer_tests::long_polls_do_not_starve_ping_on_the_blocking_pool ... ok
+test server::peer_tests::malformed_recipient_jsonl_does_not_block_future_append_or_journal_replay ... ok
+test server::peer_tests::merged_worktree_without_cleanup_receipt_fails_audit ... ok
+test server::peer_tests::live_tmux_subagent_still_requires_a_snapshot_before_close ... ok
+test server::peer_tests::master_promotion_allows_live_tmux_peer ... ok
+test server::peer_tests::merged_task_without_lifecycle_edges_cannot_close ... ok
+test server::peer_tests::master_promotion_is_not_blocked_by_an_unproven_candidate_transport ... ok
+test server::peer_tests::master_force_close_skips_owner_and_cleanup_requirements ... ok
+test server::peer_tests::interrupted_finalize_is_resumed_by_a_retry_not_silently_completed ... ok
+test server::peer_tests::master_working_to_idle_leaves_reminder_to_the_master_idle_timer ... ok
+test server::peer_tests::master_authority_is_generation_bound_and_replays_from_typed_grant ... ok
+test server::peer_tests::migration_verify_rejection_exposes_current_state_and_stops_retry ... ok
+test server::peer_tests::managed_subagent_working_accepts_assignment_after_probe_race_and_is_idempotent ... ok
+test server::peer_tests::master_idle_subscription_is_restricted_to_the_live_master_and_supported_intervals ... ok
+test server::peer_tests::migration_freeze_rejects_mutations_but_allows_rebind_and_reads ... ok
+test server::peer_tests::migration_transaction_lease_rejects_second_peer ... ok
+test server::peer_tests::migration_rejects_wait_without_matching_active_resource_holder ... ok
+test server::peer_tests::managed_subagent_send_reclaims_working_child_without_an_owned_task ... ok
+test server::peer_tests::master_idle_requires_live_master_armed_subscription_and_empty_backlog ... ok
+test server::peer_tests::missing_subagent_retires_without_snapshot_when_responsibilities_are_resolved ... ok
+test server::peer_tests::managed_subagent_send_binds_the_selected_child_when_multiple_children_are_assigned ... ok
+test server::peer_tests::delivery_review_and_exact_main_integration_are_durable ... ok
+test server::peer_tests::missing_subagent_with_unresolved_responsibility_still_requires_a_snapshot ... ok
+test server::peer_tests::non_master_force_close_is_rejected ... ok
+test server::peer_tests::only_owner_mutates_and_closes_task ... ok
+test server::peer_tests::managed_subagent_working_requires_existing_owned_assigned_task ... ok
+test server::peer_tests::owner_force_close_when_no_live_master_is_allowed ... ok
+test server::peer_tests::orphan_force_close_refuses_a_cold_owner_because_cold_is_not_dead ... ok
+test server::peer_tests::peer_migration_freezes_snapshot_and_resumes_after_verify ... ok
+test server::peer_tests::orphan_force_close_defers_when_owner_appserver_probe_is_unknown ... ok
+test server::peer_tests::ordinary_worker_requires_its_own_snapshot_and_closes_idempotently ... ok
+test server::peer_tests::managed_subagent_is_authenticated_persistent_and_replayable ... ok
+test server::peer_tests::receive_id_commits_the_batch_and_replays_it_after_a_lost_response ... ok
+test server::peer_tests::partial_recipient_tail_is_repaired_before_append_and_replay_preserves_assignment ... ok
+test server::peer_tests::registration_adds_default_lease_when_only_short_direct_message_lease_exists ... ok
+test server::peer_tests::presence_edge_skips_a_tmux_only_peer ... ok
+test server::peer_tests::poll_wakes_when_a_message_is_committed ... ok
+test server::peer_tests::recipient_jsonl_failure_is_logged_without_panicking ... ok
+test server::peer_tests::recipient_jsonl_accepts_legacy_bare_message_before_new_append ... ok
+test server::peer_tests::receive_id_replay_survives_a_truncated_journal_restart ... ok
+test server::peer_tests::master_promotion_requires_user_approval_and_existing_master_delegates ... ok
+test server::peer_tests::replay_removes_legacy_declared_roles ... ok
+test server::peer_tests::replay_rejects_a_checkpoint_that_regresses_real_history ... ok
+test server::peer_tests::recipient_jsonl_separates_complete_unterminated_legacy_record ... ok
+test server::peer_tests::removed_role_and_dispatch_commands_fail_fast ... ok
+test server::peer_tests::receive_id_rejects_another_actor_and_another_route ... ok
+test server::peer_tests::recovered_master_keeps_goal_deadline_scheduling ... ok
+test server::peer_tests::replay_rejects_invalid_command_completion_receipt_without_rewriting_the_journal ... ok
+test server::peer_tests::replay_rejects_business_event_persisted_without_command_completion ... ok
+test server::peer_tests::replay_rejects_invalid_command_receipt_without_rewriting_the_journal ... ok
+test server::peer_tests::registration_creates_one_finite_default_direct_message_subscription ... ok
+test server::peer_tests::replayed_command_is_idempotent_and_operation_conflict_fails_closed ... ok
+test server::peer_tests::recipient_jsonl_records_latest_delivery_and_journal_replay ... ok
+test server::peer_tests::recv_consumes_messages_without_a_follow_up_ack ... ok
+test server::peer_tests::recv_clears_keepalive_unacked_counter ... ok
+test server::peer_tests::close_refuses_pending_merge_until_task_integrated_resolves_it ... ok
+test server::peer_tests::cleanup_rejects_unmerged_then_removes_only_merged_clean_worktree ... ok
+test server::peer_tests::holder_close_persists_release_only_for_waiter ... ok
+test server::peer_tests::registered_peer_force_closes_orphaned_owner_with_no_live_master ... ok
+test server::peer_tests::retired_appserver_candidate_check_does_not_override_live_tmux_presence ... ok
+test server::peer_tests::repeated_orphan_force_close_is_idempotent_after_journal_replay ... ok
+test server::peer_tests::reregistration_replaces_a_stale_default_target_with_current_tmux_route ... ok
+test server::peer_tests::retired_appserver_route_error_leaves_a_tmux_binding_unknown_not_missing ... ok
+test server::peer_tests::sendmessage_requires_subject_before_state_mutation ... ok
+test server::peer_tests::review_accept_merge_pending_field_reflects_registered_obligation ... ok
+test server::peer_tests::retired_appserver_status_callback_leaves_a_tmux_binding_unknown ... ok
+test server::peer_tests::self_registration_cannot_duplicate_the_owners_active_task ... ok
+test server::peer_tests::scheduler_assignment_cannot_self_conflict_with_a_duplicate_registration ... ok
+test server::peer_tests::status_all_aggregates_workers_tasks_subagents_and_summary ... ok
+test server::peer_tests::retention_skips_fresh_messages_and_frozen_admission ... ok
+test server::peer_tests::send_fails_closed_when_recipient_rebound_during_presence_probe ... ok
+test server::peer_tests::review_accept_fails_closed_when_master_presence_is_unknown ... ok
+test server::peer_tests::review_accept_surfaces_failed_immediate_wake_attempt ... ok
+test server::peer_tests::tmux_notification_requests_durable_receive ... ok
+test server::peer_tests::review_accept_without_master_direct_message_subscription_surfaces_repair ... ok
+test server::peer_tests::same_runtime_registration_recovery_preserves_master_authority ... ok
+test server::peer_tests::send_to_missing_endpoint_stays_durable_and_does_not_promise_delivery ... ok
+test server::peer_tests::last_task_close_keeps_default_lease_armed_and_preserves_pending_unread_payload ... ok
+test server::peer_tests::try_commit_reports_journal_failure_without_applying_state ... ok
+test server::peer_tests::send_without_subscription_is_mailbox_only_and_deduplicated ... ok
+test server::peer_tests::subagent_close_does_not_report_success_when_transition_cannot_persist ... ok
+test server::peer_tests::subagent_start_fails_explicitly_without_creating_a_codex_thread ... ok
+test server::peer_tests::typed_dispatch_rejects_wrong_principal_and_scope ... ok
+test server::peer_tests::typed_dispatch_rejects_stale_revision_without_appending ... ok
+test server::peer_tests::stale_presence_probe_after_reregister_does_not_notify_or_mutate_new_worker ... ok
+test server::peer_tests::typed_registration_uses_global_binding_and_host_idempotency ... ok
+test server::peer_tests::typed_receipt_revision_is_the_next_cas_and_stale_after_another_mutation ... ok
+test server::peer_tests::typed_registration_generation_reaches_max_then_fails_before_journaling_overflow ... ok
+test server::peer_tests::terminal_or_delivered_task_cannot_wait ... ok
+test server::peer_tests::typed_rebinds_survive_journal_rewrite_and_replay_with_one_version_axis ... ok
+test server::peer_tests::typed_token_rotation_rejects_dual_key_session_mismatch ... ok
+test server::peer_tests::subagent_close_first_journal_failure_does_not_remove_external_manifest ... ok
+test server::peer_tests::subagent_working_journal_failure_preserves_task_and_subagent_and_poison_rejects_mutation ... ok
+test server::peer_tests::integrated_supersedes_stale_merge_pending_notice ... ok
+test server::peer_tests::subagent_close_final_journal_failure_reports_unknown_and_stays_open ... ok
+test server::peer_tests::typed_master_wake_delivery_does_not_depend_on_legacy_master_projection ... ok
+test server::peer_tests::typed_master_wake_delivery_marks_accumulator_notified ... ok
+test server::peer_tests::owner_completes_local_lifecycle_without_peer_reports ... ok
+test server::peer_tests::tmux_reregistration_replaces_a_persisted_appserver_default_wake_lease ... ok
+test server::peer_tests::role_contract_is_identical_across_context_workers_and_status ... ok
+test server::peer_tests::wire_master_recovery_is_rejected_while_master_is_live ... ok
+test server::peer_tests::worker_status_senses_registered_appserver_routes ... ok
+test server::peer_tests::finalize_refuses_a_worktree_taken_over_by_another_open_task ... ok
+test server::peer_tests::worker_status_uses_appserver_status_not_candidate_check_for_presence ... ok
+test server::peer_tests::user_approved_promotion_replaces_a_master_that_owns_its_anchor ... ok
+test server::peer_tests::configured_worktree_lifecycle_register_relocate_and_cleanup_use_configured_base ... ok
+test server::peer_tests::wire_master_recover_reissues_master_grant_for_new_generation ... ok
+test server::peer_tests::wire_master_recovery_is_rejected_when_liveness_is_unknown ... ok
+test server::peer_tests::user_approved_promotion_replaces_a_master_after_its_pane_is_taken ... ok
+test server::peer_tests::worktree_path_budget_accepts_short_slug_and_rejects_escape ... ok
+test server::reducer_binding_tests::migration_commit_evidence_survives_journal_replay_and_checkpoint ... ok
+test server::peer_tests::worker_status_keeps_tmux_liveness_unknown_despite_offline_keepalive_hint ... ok
+test server::peer_tests::worktree_path_accepts_configured_external_base_and_rejects_outside ... ok
+test server::peer_tests::worker_status_query_exposes_unknown_liveness_for_a_tmux_only_peer ... ok
+test server::peer_tests::legacy_accepted_update_to_rework_resolves_pending_merge ... ok
+test server::peer_tests::wire_peer_recover_does_not_revoke_unrelated_master ... ok
+test server::peer_tests::pending_merge_with_unbound_candidate_fails_closed_on_integrated ... ok
+test server::peer_tests::worker_snapshot_rejects_tmux_without_writing_a_receipt ... ok
+test server::peer_tests::finalize_keeps_the_owner_default_lease_armed_on_last_responsibility ... ok
+test server::peer_tests::tmux_peer_send_then_collab_recv_commits_queryable_consumption ... ok
+test server::peer_tests::worktree_claim_requires_cleanup_and_cannot_cancel ... ok
+test server::reducer_binding_tests::task_register_wires_worktree_binding_and_replays_it ... ok
+test server::peer_tests::finalize_removes_the_worktree_when_the_closed_task_still_owns_it ... ok
+test server::peer_tests::worker_close_refuses_every_unfinished_task_status ... ok
+test server::scheduler_admission_tests::admission_uses_the_appserver_answer_for_a_registered_tmux_peer ... ok
+test server::scheduler_admission_tests::no_capacity_records_explicit_create_admission ... ok
+test server::scheduler_admission_tests::managed_subagent_cap_counts_children_not_ordinary_peers ... ok
+test server::peer_tests::worker_freed_transitions_notify_live_master ... ok
+test server::scheduler_admission_tests::managed_subagent_admission_honors_configured_cap ... ok
+test server::scheduler_admission_tests::admission_audit_failure_is_explicit_and_does_not_create_child ... ok
+test server::scheduler_admission_tests::omitted_id_reuses_managed_idle_capacity_and_explicit_existing_id_is_preserved ... ok
+test server::peer_tests::worker_close_is_master_only_audited_and_refuses_to_strand_tasks ... ok
+test server::reducer_binding_tests::task_register_journal_failures_are_explicit_and_read_only_after_normal_write ... ok
+test server::scheduler_admission_tests::scheduler_admission_rejects_ambiguous_server_route_scope ... ok
+test server::scheduler_admission_tests::explicit_unknown_id_bypasses_registered_and_managed_capacity_reuse ... ok
+test server::scheduler_admission_tests::master_status_hides_closed_and_lost_idle_capacity ... ok
+test server::reducer_binding_tests::task_register_journal_failures_are_explicit_and_preserve_resource_holder ... ok
+test server::startup_tests::cleanup_preserves_a_replacement_socket_path ... ok
+test server::scheduler_admission_tests::scheduler_dispatch_audit_failure_does_not_wake_long_poll_or_recv ... ok
+test server::scheduler_admission_tests::scheduler_rejection_clears_claim_without_deadlock ... ok
+test server::scheduler_admission_tests::scheduler_dispatch_audit_failure_cannot_be_accepted_by_managed_child ... ok
+test server::scheduler_admission_tests::admission_excludes_active_unknown_and_managed_capacity ... ok
+test server::startup_tests::legacy_host_fence_is_isolated_with_a_custom_state_root ... ok
+test server::scheduler_admission_tests::scheduler_dispatch_public_peer_refusal_does_not_fall_back_to_private_child ... ok
+test server::scheduler_admission_tests::scheduler_dispatch_audit_failure_is_stable_on_request_retry ... ok
+test server::scheduler_admission_tests::scheduler_dispatch_requires_board_invitation_for_ordinary_peer ... ok
+test server::startup_tests::timer_scheduler_does_not_overlap_ticks ... ok
+test server::state::tests::ack_after_timer_consumption_does_not_double_consume ... ok
+test server::state::tests::ack_consumes_scheduled_occurrence_once_and_replay_preserves_cursor ... ok
+test server::state::tests::ack_on_reusable_direct_message_does_not_consume_subscription ... ok
+test server::state::tests::answered_detection ... ok
+test server::state::tests::cancelled_periodic_subscription_does_not_rearm_on_consume_or_replay ... ok
+test server::state::tests::command_receipt_and_worktree_binding_replay_preserve_durable_state ... ok
+test server::state::tests::delivered_master_wake_is_scoped_to_subscription_route ... ok
+test server::state::tests::delivered_master_wake_uses_current_typed_grant ... ok
+test server::state::tests::dropping_a_message_retires_its_notification_delivery_evidence ... ok
+test server::state::tests::failed_master_wake_delivery_state_replays_with_zero_generation ... ok
+test server::state::tests::goal_due_is_idempotent_per_revision_and_advances_for_new_revision ... ok
+test server::state::tests::latest_reply_supersedes_previous_replies ... ok
+test server::state::tests::legacy_bindings_are_indexed_even_when_a_strict_route_is_present ... ok
+test server::state::tests::legacy_role_field_is_ignored_on_replay ... ok
+test server::state::tests::legacy_wake_attempt_replay_is_clock_independent ... ok
+test server::state::tests::master_wake_accumulator_coalesces_generated_signals_until_decision ... ok
+test server::state::tests::message_lifecycle ... ok
+test server::state::tests::notification_delivery_failure_replays_and_compacts ... ok
+test server::state::tests::notification_subscription_is_explicit_exact_and_one_shot ... ok
+test server::state::tests::pending_merge_survives_snapshot_replay_and_resolution_removes_it ... ok
+test server::state::tests::periodic_subscription_consumes_exactly_its_repeat_count ... ok
+test server::state::tests::periodic_subscription_persists_fixed_absolute_cursor_across_replay ... ok
+test server::state::tests::request_cooldown_uses_only_recent_live_request ... ok
+test server::state::tests::resource_release_failure_does_not_poison_master_wake_delivery_state ... ok
+test server::scheduler_admission_tests::scheduler_dispatch_concurrent_same_request_reserves_once ... ok
+test server::scheduler_admission_tests::start_admits_registered_idle_peer_before_managed_child_without_duplicates ... ok
+test server::state::tests::runtime_binding_replay_keeps_a_legacy_thread_only_binding_resolvable ... ok
+test server::scheduler_admission_tests::scheduler_dispatch_notification_rejection_keeps_retryable_reservation ... ok
+test server::scheduler_admission_tests::scheduler_dispatch_without_subscription_reports_repair_terminal ... ok
+test server::state::tests::skipped_busy_master_wake_delivery_state_replays_with_zero_generation ... ok
+test server::state::tests::snapshot_events_keep_legacy_routes_alongside_a_strict_route ... ok
+test server::state::tests::wait_cycle_rejects_direct_and_transitive_cycles ... ok
+test server::state::tests::wake_binding_is_control_state_not_message_payload ... ok
+test server::state::tests::worker_close_tombstone_replays_without_deleting_re_registration ... ok
+test server::state::tests::worker_deadline_failure_does_not_poison_master_wake_delivery_state ... ok
+test server::state::tests::worker_deadline_skip_does_not_poison_master_wake_delivery_state ... ok
+test server::state::tests::runtime_binding_replay_keeps_ambiguous_legacy_thread_only_routes_as_candidates ... ok
+test server::state::tests::runtime_binding_replay_keeps_a_legacy_thread_only_route_event_resolvable ... ok
+test server::state::tests::runtime_binding_replay_rejects_ambiguous_current_thread_routes ... ok
+test server::scheduler_admission_tests::scheduler_dispatch_unknown_notification_outcome_is_not_resent ... ok
+test server::state::tests::runtime_binding_replay_restores_the_unique_current_thread_route ... ok
+test server::scheduler_admission_tests::scheduler_dispatch_recovers_pending_reservation_without_duplicates ... ok
+test server::scheduler_admission_tests::scheduler_dispatch_reuses_managed_child_and_deduplicates_request ... ok
+test server::startup_tests::daemon_exits_when_its_owned_state_root_is_removed ... ok
+test server::scheduler_admission_tests::scheduler_dispatch_success_wakes_long_poll ... ok
+test server::scheduler_admission_tests::stale_attempt_cannot_clear_newer_notification_claim ... ok
+test server::scheduler_admission_tests::stale_notifying_claim_recovers_after_cooldown ... ok
+test server::scheduler_admission_tests::scheduler_dispatch_concurrent_retry_notifies_once ... ok
+test server::peer_tests::pending_merge_binds_worktree_head_not_a_stale_branch_ref ... ok
+test server::scheduler_admission_tests::stale_unknown_notification_claim_is_not_resent_after_cooldown ... ok
+test server::peer_tests::worker_unresponsive_notifies_live_master_to_check_durable_work ... ok
+test server::timers::tests::admission_freeze_blocks_deadline_wakeup_without_appserver_probe ... ok
+test server::startup_tests::daemon_exits_when_its_owned_state_root_is_replaced ... ok
+test server::timers::tests::cancelled_goal_deadline_never_rearms_after_duplicate_ticks ... ok
+test server::timers::tests::automatic_retry_uses_bound_event_policy_window ... ok
+test server::timers::tests::batch_excludes_messages_after_first_window_and_never_replays ... ok
+test server::timers::tests::failed_direct_message_exhausts_only_the_message ... ok
+test server::timers::tests::explicit_delivery_mode_bypasses_batch_window ... ok
+test server::timers::tests::deadline_wakeup_does_not_depend_on_appserver_status_callback ... ok
+test server::startup_tests::pid_publication_failure_removes_the_owned_socket ... ok
+test server::peer_tests::live_master_closes_merged_task_with_verified_cleanup ... ok
+test server::timers::tests::deadline_delivery_failure_is_visible_without_successful_master_wake ... ok
+test server::timers::tests::deadline_subscription_emits_once_only_after_trigger ... ok
+test server::timers::tests::backlog_sends_latest_three_once_and_truncates_to_1024_chars ... ok
+test server::peer_tests::review_accept_registers_daemon_owned_pending_merge_with_master_notification ... ok
+test server::timers::tests::failed_explicit_reply_is_not_automatically_replayed ... ok
+test server::timers::tests::failed_explicit_peer_notification_is_not_automatically_replayed ... ok
+test server::timers::tests::deadline_wakeup_does_not_probe_appserver_readiness ... ok
+test server::timers::tests::failed_one_shot_notification_has_one_attempt_lifetime_cap ... ok
+test server::timers::tests::fresh_batch_waits_two_minutes_and_absent_batch_is_not_replayed ... ok
+test server::timers::tests::duplicate_goal_deadline_records_emit_one_wake_for_the_same_deadline ... ok
+test server::timers::tests::failed_explicit_request_is_not_automatically_replayed ... ok
+test server::peer_tests::owner_close_records_verified_receipt_after_prior_safe_cleanup ... ok
+test server::timers::tests::ledger_commit_drops_classifications_the_reducer_would_reject ... ok
+test server::timers::tests::ledger_maintenance_skips_routes_this_daemon_does_not_own ... ok
+test server::peer_tests::owner_close_uses_integrated_main_not_daemon_head_for_cleanup ... ok
+test server::timers::tests::configured_immediate_and_disabled_delivery_are_respected ... ok
+test server::peer_tests::pending_merge_requires_the_delivered_candidate_on_main ... ok
+test server::timers::tests::goal_deadline_never_wakes_a_non_master_subscription ... ok
+test server::timers::tests::immediate_event_policy_is_not_delayed_by_the_batch_window ... ok
+test server::startup_tests::removing_an_unrelated_directory_does_not_stop_the_daemon ... ok
+test server::timers::tests::master_idle_timer_does_not_wake_an_episode_seen_before_subscription ... ok
+test server::timers::tests::explicit_typed_messages_are_isolated_from_immediate_system_batches ... ok
+test subagent::tests::child_appserver_candidate_binds_child_session_and_thread ... ok
+test server::timers::tests::master_idle_timer_respects_keepalive_episode_notice_budget ... ok
+test server::timers::tests::ordinary_work_never_generates_periodic_continuation ... ok
+test subagent::tests::cursor_runtime_is_rejected ... ok
+test subagent::tests::failed_subagent_record_with_thread_id_is_not_reused ... ok
+test server::timers::tests::idle_periodic_deadline_sends_lightweight_wake_distinct_from_master_idle ... ok
+test subagent::tests::missing_rollout_notification_failure_preserves_route_binding ... ok
+test server::timers::tests::master_idle_subscription_accepts_60_minute_interval_and_wakes_master ... ok
+test server::timers::tests::master_idle_timer_counts_its_wake_in_keepalive_episode_gate ... ok
+test server::timers::tests::no_subscription_means_zero_wake_attempts ... ok
+test tests::cli_error_decorates_route_resolve_not_found_from_current_and_legacy_daemons ... ok
+test tests::cli_rejects_managed_subagent_start_before_resolving_collab_context ... ok
+test server::timers::tests::master_idle_wake_waits_for_actionable_tasks_to_clear ... ok
+test server::timers::tests::master_idle_wake_requires_observed_idle_state ... ok
+test tests::cli_project_context_uses_the_cli_app_and_exact_root ... ok
+test server::startup_tests::running_host_daemon_holds_legacy_writer_fence ... ok
+test server::timers::tests::master_idle_subscription_emits_at_15_minutes_only_for_live_idle_master ... ok
+test tests::default_recv_aborts_before_dispatch_when_identity_publication_fails ... ok
+test tests::default_recv_publishes_a_replayable_receive_identity_before_consuming ... ok
+test tests::default_recv_publishes_the_replay_identity_before_dispatch ... ok
+test tests::identity_context_required_forwards_the_daemon_update_exactly ... ok
+test server::timers::tests::restart_does_not_reset_exhausted_direct_message_attempts ... ok
+test server::timers::tests::cancelled_master_idle_subscription_stays_cancelled_after_read_and_replay ... ok
+test tests::context_daemon_down_marker_fails_closed_and_preserves_marker ... ok
+test tests::context_env_view_selects_only_collab_identity_variables ... ok
+test tests::context_env_view_skips_a_non_unicode_environment_entry ... ok
+test tests::live_closure_daemon_producer_paths_are_current_project_contracts ... ok
+test tests::live_closure_expected_inputs_accept_daemon_notification_message_type ... ok
+test tests::live_closure_expected_input_rejects_raw_challenge_as_native_payload ... ok
+test tests::live_closure_expected_inputs_match_single_and_batch_notification_payloads ... ok
+test tests::live_closure_full_turn_items_preserve_exact_message_turn_result_correlation ... ok
+test tests::live_closure_full_turn_items_reject_malformed_history ... ok
+test tests::live_closure_full_turn_items_reject_mismatched_history ... ok
+test tests::live_closure_item_correlation_accepts_daemon_function_output_without_source_thread ... ok
+test tests::live_closure_item_correlation_accepts_native_item_envelopes ... ok
+test tests::live_closure_item_correlation_accepts_multi_message_batch_entry ... ok
+test tests::live_closure_item_correlation_accepts_send_message_function_call_output ... ok
+test tests::live_closure_item_correlation_accepts_xml_escaped_function_call_output ... ok
+test tests::live_closure_item_correlation_rejects_mismatched_prefixed_function_call_output ... ok
+test tests::live_closure_item_correlation_rejects_malformed_or_mismatched_function_outputs ... ok
+test tests::live_closure_item_correlation_requires_the_exact_native_challenge_body ... ok
+test tests::live_closure_item_message_id_accepts_native_notification_client_id ... ok
+test tests::live_closure_item_turn_id_is_required_for_native_correlation ... ok
+test tests::live_closure_pages_follow_backwards_cursor_to_find_over_window_challenge ... ok
+test tests::live_closure_pages_use_next_cursor_and_bound_repeated_cursors ... ok
+test tests::live_closure_permanent_unsupported_turns_read_fails_closed ... ok
+test tests::live_closure_timeout_is_bounded_and_configurable ... ok
+test tests::live_closure_fresh_thread_materialization_is_bounded_pending ... ok
+test tests::live_closure_receipt_wait_rechecks_until_consume_before_deadline ... ok
+test server::timers::tests::master_idle_timer_and_keepalive_share_episode_notice_budget ... ok
+test server::peer_tests::task_integrated_accepts_a_real_merge_commit_and_the_merged_candidate has been running for over 60 seconds
+test server::peer_tests::task_integrated_accepts_the_main_tip has been running for over 60 seconds
+test server::peer_tests::task_integrated_is_correct_when_root_is_not_checked_out_on_main has been running for over 60 seconds
+test server::peer_tests::task_integrated_rejects_a_commit_not_reachable_from_main_with_an_actionable_error has been running for over 60 seconds
+test server::startup_tests::retry_after_pid_failure_succeeds_once_the_path_is_fixed has been running for over 60 seconds
+test server::startup_tests::startup_rejects_a_held_legacy_project_lock has been running for over 60 seconds
+test server::startup_tests::startup_rejects_a_reachable_legacy_project_daemon has been running for over 60 seconds
+test server::timers::tests::goal_deadline_consumes_one_occurrence_even_when_legacy_record_is_recurring has been running for over 60 seconds
+test server::timers::tests::goal_deadline_success_consumes_legacy_periodic_shape_once has been running for over 60 seconds
+test server::timers::tests::master_idle_timer_stops_after_keepalive_working_to_waiting has been running for over 60 seconds
+test server::timers::tests::overdue_master_idle_cursor_does_not_catch_up_after_consumption has been running for over 60 seconds
+test server::timers::tests::scheduler_tick_reuses_timestamp_for_expiry_and_retry has been running for over 60 seconds
+test server::timers::tests::successful_direct_messages_reuse_subscription_without_a_burst has been running for over 60 seconds
+test server::timers::tests::successful_event_notification_consumes_one_shot_subscription has been running for over 60 seconds
+test server::timers::tests::unacked_notifications_limit_pauses_wakes_and_resumes_after_ack has been running for over 60 seconds
+test server::timers::tests::wait_expiry_without_live_master_does_not_fabricate_a_recipient has been running for over 60 seconds
+test server::timers::tests::wait_timeout_reason_is_durable_and_visible_only_to_live_master has been running for over 60 seconds
+test server::timers::tests::wait_timeout_without_direct_subscription_stays_in_master_mailbox has been running for over 60 seconds
+test subagent::tests::close_reports_archive_failed_when_archiving_returns_an_unclassified_error has been running for over 60 seconds
+test subagent::tests::close_reports_named_terminal_outcome_when_archive_is_impossible has been running for over 60 seconds
+test subagent::tests::missing_rollout_notification_failure_keeps_durable_child_route_binding has been running for over 60 seconds
+test subagent::tests::other_notification_failure_retires_durable_child_route_binding has been running for over 60 seconds
+test subagent::tests::probes_are_bounded_and_require_exact_success has been running for over 60 seconds
+test tests::context_root_resolution_fails_closed_without_route_or_baseline has been running for over 60 seconds
+test tests::context_root_resolution_prefers_cwd_baseline_for_local_project has been running for over 60 seconds
+test tests::identity_facts_preserve_explicit_endpoint_when_namespace_is_missing has been running for over 60 seconds
+test tests::identity_supplement_conflict_never_overrides_observed_fact has been running for over 60 seconds
+test tests::identity_supplement_rejects_unknown_duplicate_and_invalid_fields_before_observation has been running for over 60 seconds
+test tests::part2::board_identity_rejects_a_legacy_thread_only_binding has been running for over 60 seconds
+test tests::part2::board_identity_rejects_a_retired_appserver_runtime has been running for over 60 seconds
+test tests::part2::board_identity_rejects_a_thread_bound_to_another_project has been running for over 60 seconds
+test server::timers::tests::goal_deadline_consumes_one_occurrence_even_when_legacy_record_is_recurring ... ok
+test server::timers::tests::scheduler_tick_reuses_timestamp_for_expiry_and_retry ... ok
+test server::timers::tests::goal_deadline_success_consumes_legacy_periodic_shape_once ... ok
+test tests::context_root_resolution_prefers_cwd_baseline_for_local_project ... ok
+test subagent::tests::missing_rollout_notification_failure_keeps_durable_child_route_binding ... ok
+test server::timers::tests::wait_expiry_without_live_master_does_not_fabricate_a_recipient ... ok
+test subagent::tests::other_notification_failure_retires_durable_child_route_binding ... ok
+test server::timers::tests::successful_event_notification_consumes_one_shot_subscription ... ok
+test server::timers::tests::master_idle_timer_stops_after_keepalive_working_to_waiting ... ok
+test subagent::tests::close_reports_archive_failed_when_archiving_returns_an_unclassified_error ... ok
+test subagent::tests::close_reports_named_terminal_outcome_when_archive_is_impossible ... ok
+test server::startup_tests::retry_after_pid_failure_succeeds_once_the_path_is_fixed ... ok
+test server::peer_tests::task_integrated_accepts_the_main_tip ... ok
+test server::timers::tests::successful_direct_messages_reuse_subscription_without_a_burst ... ok
+test server::startup_tests::startup_rejects_a_held_legacy_project_lock ... ok
+test server::startup_tests::startup_rejects_a_reachable_legacy_project_daemon ... ok
+test server::timers::tests::overdue_master_idle_cursor_does_not_catch_up_after_consumption ... ok
+test server::timers::tests::unacked_notifications_limit_pauses_wakes_and_resumes_after_ack ... ok
+test server::peer_tests::task_integrated_rejects_a_commit_not_reachable_from_main_with_an_actionable_error ... ok
+test server::peer_tests::task_integrated_is_correct_when_root_is_not_checked_out_on_main ... ok
+test server::timers::tests::wait_timeout_without_direct_subscription_stays_in_master_mailbox ... ok
+test server::peer_tests::task_integrated_accepts_a_real_merge_commit_and_the_merged_candidate ... ok
+test server::timers::tests::wait_timeout_reason_is_durable_and_visible_only_to_live_master ... ok
+test subagent::tests::probes_are_bounded_and_require_exact_success ... ok
+test tests::context_root_resolution_fails_closed_without_route_or_baseline ... ok
+test tests::identity_facts_preserve_explicit_endpoint_when_namespace_is_missing ... ok
+test tests::identity_supplement_conflict_never_overrides_observed_fact ... ok
+test tests::identity_supplement_rejects_unknown_duplicate_and_invalid_fields_before_observation ... ok
+test tests::part2::board_identity_rejects_a_legacy_thread_only_binding ... ok
+test tests::part2::board_identity_rejects_a_retired_appserver_runtime ... ok
+test tests::part2::board_identity_rejects_a_thread_bound_to_another_project ... ok
+test tests::part2::subagent_snapshot_uses_the_authenticated_mutation_route ... ok
+test tests::runtime_for_request_accepts_a_persisted_tui_binding ... ok
+test tests::runtime_for_request_rejects_an_unregistered_identity ... ok
+test tests::part2::command_envelope_uses_the_registered_binding_and_generation ... ok
+test tests::part2::init_runtime_projection_accepts_appserver_and_tmux_hosts ... ok
+test tests::part2::legacy_identity_without_project_scope_requires_registration ... ok
+test tests::removed_identity_selectors_are_rejected ... ok
+test tests::part2::persisted_appserver_binding_requires_live_native_route_resolution ... ok
+test tests::part2::persisted_binding_for_another_session_or_thread_is_not_reusable ... ok
+
+test result: ok. 925 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 128.84s

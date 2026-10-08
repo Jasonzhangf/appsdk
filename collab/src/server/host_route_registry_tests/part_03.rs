@@ -394,7 +394,7 @@
     }
 
     #[tokio::test]
-    async fn manager_cross_project_tmux_masters_send_and_reject_forged_source_evidence() {
+    async fn manager_cross_project_appserver_masters_send_and_reject_forged_source_evidence() {
         let (server, host_root, _) = test_server();
 
         let project_a = host_root.with_file_name(format!(
@@ -435,6 +435,12 @@
             source_registration.data["transport_selected"]["thread_id"],
             "thread-a"
         );
+        // The wire registration above creates the route and runtime. Rebind the
+        // binding to a native App Server transport through the typed path, since
+        // wire registration verifies App Server candidates by dialing a socket
+        // and this suite has no live socket. Presence then comes from the App
+        // Server status probe, not the tmux pane.
+        register_native_peer(&source_runtime, &project_a, master_a, token_a, "thread-a", app_a);
 
         let (target_runtime, target_registration) = manager.dispatch_sync(
             Some(context_with_app(&project_b, app_b)),
@@ -452,6 +458,7 @@
             target_registration.data["transport_selected"]["thread_id"],
             "thread-b"
         );
+        register_native_peer(&target_runtime, &project_b, master_b, token_b, "thread-b", app_b);
 
         let source_identity = runtime_for_registered(&source_runtime, &project_a, master_a, app_a);
         let target_identity = runtime_for_registered(&target_runtime, &project_b, master_b, app_b);
@@ -517,7 +524,7 @@
         assert_eq!(delivered.data["cross_project"], true);
         assert_eq!(delivered.data["source_master"], master_a);
         assert_eq!(delivered.data["target_master"], master_b);
-        assert_eq!(delivered.data["notification"], "tmux-input-submitted");
+        assert_eq!(delivered.data["notification"], "appserver-input-submitted");
         assert_eq!(delivered.data["consumed"], false);
         let message_id = delivered.data["msg_id"].as_str().unwrap().to_owned();
         assert!(target_runtime

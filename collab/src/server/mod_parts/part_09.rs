@@ -58,23 +58,14 @@ fn handle_task_review(
     let mut notification_missing = false;
     let mut merge_pending_registered = false;
     if accept {
-        // A merge obligation exists only when a live master owns the merge. In
+        // A merge obligation exists only when a master owns the merge. In
         // a master-less project the owner keeps the plain self-integration
         // lifecycle; registering a pending merge there would deadlock close.
-        // An unresolvable master presence is ambiguous authority: fail closed
-        // instead of silently downgrading to owner self-integration.
-        let master_id = match live_master_id(server, &st) {
+        // The master is the current grant holder; transport reachability never
+        // decides whether the obligation exists.
+        let master_id = match current_master_holder(server, &st) {
             Ok(master_id) => master_id,
-            Err(error) => {
-                return Resp::err_data(
-                    "MASTER_PRESENCE_UNKNOWN",
-                    json!({
-                        "task_id": task_id,
-                        "error": error,
-                        "rule": "cannot accept a task while master presence is unknown; probe transport and retry",
-                    }),
-                );
-            }
+            Err(error) => return Resp::err(error),
         };
         if let Some(master_id) = master_id {
             let candidate_commit = delivery_commit;
@@ -226,18 +217,18 @@ fn handle_task_integrated(
                 }),
             );
         }
-        let is_live_master = live_master_id(server, &st)
+        let is_master_holder = current_master_holder(server, &st)
             .ok()
             .flatten()
             .as_deref()
             == Some(worker_id.as_str());
-        if !is_live_master {
+        if !is_master_holder {
             return Resp::err_data(
                 "TASK_MERGE_PENDING",
                 json!({
                     "task_id": task_id,
                     "status": task.status,
-                    "rule": "an accepted task with a daemon pending merge must be integrated by the live master after the merge lands on refs/heads/main; the owner records evidence after that and closes only after master integrated",
+                    "rule": "an accepted task with a daemon pending merge must be integrated by the current master after the merge lands on refs/heads/main; the owner records evidence after that and closes only after master integrated",
                 }),
             );
         }
@@ -358,7 +349,7 @@ fn handle_task_close(
         let Some(reason) = reason else {
             return Resp::err("force close requires a non-empty --reason");
         };
-        let live_master = match live_master_id(server, &st) {
+        let master_holder = match current_master_holder(server, &st) {
             Ok(master) => master,
             Err(error) => return Resp::err(error),
         };
@@ -369,16 +360,16 @@ fn handle_task_close(
         let owner_identity_live = st.workers.get(&task.owner).is_some_and(|owner| {
             !matches!(worker_presence(server, owner), IdentityPresence::Missing)
         });
-        let authorized = live_master.as_deref() == Some(worker_id.as_str())
-            || (live_master.is_none() && (task.owner == worker_id || !owner_identity_live));
+        let authorized = master_holder.as_deref() == Some(worker_id.as_str())
+            || (master_holder.is_none() && (task.owner == worker_id || !owner_identity_live));
         if !authorized {
             return Resp::err_data(
                 "manual force close is not authorized for this caller",
                 json!({
-                    "live_master": live_master,
+                    "master_holder": master_holder,
                     "task_owner": task.owner,
                     "requester": worker_id,
-                    "rule": "live master may close any task; with no live master, the owner may close its task or a registered peer may close an orphaned task whose owner identity is no longer live",
+                    "rule": "the current master may close any task; with no master assigned, the owner may close its task or a registered peer may close an orphaned task whose owner identity is no longer live",
                     "owner_identity_live": owner_identity_live,
                 }),
             );
@@ -504,12 +495,12 @@ fn handle_task_close(
         }));
     }
     if task.owner != worker_id {
-        let live_master = match live_master_id(server, &st) {
+        let master_holder = match current_master_holder(server, &st) {
             Ok(master) => master,
             Err(error) => return Resp::err(error),
         };
-        if live_master.as_deref() != Some(worker_id.as_str()) {
-            return Resp::err("task close requires task owner or live master authority");
+        if master_holder.as_deref() != Some(worker_id.as_str()) {
+            return Resp::err("task close requires task owner or current master authority");
         }
     }
     if task.status != "merged" {
@@ -795,7 +786,7 @@ fn handle_task_finalize_cleanup(
             task_id, task.status
         ));
     }
-    let live_master = match live_master_id(server, &st) {
+    let master_holder = match current_master_holder(server, &st) {
         Ok(master) => master,
         Err(error) => return Resp::err(error),
     };
@@ -806,17 +797,17 @@ fn handle_task_finalize_cleanup(
         .get(&task.owner)
         .is_some_and(|owner| !matches!(worker_presence(server, owner), IdentityPresence::Missing));
     let authorized = task.owner == worker_id
-        || live_master.as_deref() == Some(worker_id.as_str())
-        || (live_master.is_none() && !owner_identity_live);
+        || master_holder.as_deref() == Some(worker_id.as_str())
+        || (master_holder.is_none() && !owner_identity_live);
     if !authorized {
         return Resp::err_data(
             "cleanup finalization is not authorized for this caller",
             json!({
-                "live_master": live_master,
+                "master_holder": master_holder,
                 "task_owner": task.owner,
                 "requester": worker_id,
                 "owner_identity_live": owner_identity_live,
-                "rule": "task owner, live master, or a peer closing an orphaned task may finalize cleanup",
+                "rule": "task owner, the current master, or a peer closing an orphaned task may finalize cleanup",
             }),
         );
     }
@@ -1093,8 +1084,6 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
         .unwrap_or("worker")
         .to_owned();
     let authority = current_role_brief["authority"].clone();
-    let route_scope = server_route_scope(server, &st).ok().flatten();
-    let current_master = current_master_worker_id(&st, route_scope.as_ref());
     // The caller's own runtime binding is the receipt that addresses this
     // route. `collab context` is the single bootstrap read, so it owns the
     // read-back path for a peer whose local copy of that receipt was lost.
@@ -1117,6 +1106,16 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
             let binding = matches.next()?.clone();
             matches.next().is_none().then_some(binding)
         });
+    // The authority projection is scoped to the caller's own binding when it is
+    // unambiguous; otherwise to the resolved server route scope. A route or
+    // reducer failure is an explicit error, never a silent empty authority.
+    let route_scope = match binding.as_ref().map(|binding| binding.route_scope()) {
+        Some(route_scope) => Some(route_scope),
+        None => match server_route_scope(server, &st) {
+            Ok(route_scope) => route_scope,
+            Err(error) => return Resp::err(error),
+        },
+    };
     let worktrees: Vec<serde_json::Value> = {
         let mut worktrees = st
             .worktree_bindings
@@ -1165,11 +1164,6 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
         })
         .collect();
     peer_snapshots.sort_by(|left, right| left.0.id.cmp(&right.0.id));
-    let master_worker_id = current_master;
-    let master_grant = current_master_grant(&st, route_scope.as_ref());
-    let master_assigned_by = master_grant.as_ref().map(|grant| grant.granted_by.clone());
-    let master_approval = master_grant.as_ref().map(|grant| grant.approval.clone());
-    let master_assigned_ms = master_grant.as_ref().map(|grant| grant.granted_at_ms);
     let pending_merges = pending_merge_views(&st);
     // `collab context` is the single agent bootstrap read, so the projections
     // that `collab status --all` and `collab who` expose belong to the same
@@ -1260,42 +1254,23 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
         "cwd": worker.cwd,
         "registered_at": iso(worker.registered_ms),
     });
-    let master_peer = master_worker_id
-        .as_deref()
-        .and_then(|id| peers.iter().find(|peer| peer["worker_id"] == id));
-    let master_presence = master_peer
-        .and_then(|peer| peer["presence"].as_str())
-        .unwrap_or("missing");
-    let assignment_view = |endpoint_live: bool| {
-        master_worker_id.as_ref().map(|id| {
-            json!({
-                "worker_id": id,
-                "endpoint_live": endpoint_live,
-                "assigned_by": master_assigned_by,
-                "approval": master_approval,
-                "assigned_ms": master_assigned_ms,
-                "master_wake": master_wake,
+    // The grant holder is the authority, projected by the same serializer
+    // `master status` uses. The transport peer row is an independent
+    // communication observation; unknown/cold/missing reachability never
+    // removes the holder from context.
+    let master = {
+        let st = server.state.lock().unwrap();
+        let transport_live = current_master_grant(&st, route_scope.as_ref())
+            .and_then(|grant| {
+                peers
+                    .iter()
+                    .find(|peer| peer["worker_id"] == grant.agent_id.as_str())
+                    .and_then(|peer| peer["endpoint_live"].as_bool())
             })
-        })
+            .unwrap_or(false);
+        master_authority_view(&st, route_scope.as_ref(), transport_live)
     };
-    let (master, recorded_unusable) = match (master_worker_id.as_ref(), master_presence) {
-        (None, _) => (serde_json::Value::Null, serde_json::Value::Null),
-        (Some(_), "present") => (
-            assignment_view(true).unwrap_or(serde_json::Value::Null),
-            serde_json::Value::Null,
-        ),
-        (Some(_), "unknown") => (
-            json!({
-                "status": "unknown",
-                "error": "master identity is unknown; defer authority changes until transport probes succeed",
-            }),
-            assignment_view(false).unwrap_or(serde_json::Value::Null),
-        ),
-        (Some(_), _) => (
-            serde_json::Value::Null,
-            assignment_view(false).unwrap_or(serde_json::Value::Null),
-        ),
-    };
+    let recorded_unusable = serde_json::Value::Null;
     let mut next_actions: Vec<String> = tasks
         .iter()
         .filter_map(|task| {
@@ -1336,23 +1311,23 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
             "notification_rule",
             current_role_brief["notification_rule"].as_str(),
         );
-        let live_master = master
+        let master_assigned = master
             .get("worker_id")
             .and_then(serde_json::Value::as_str)
             .is_some();
-        if live_master && !pending_merges.is_empty() {
+        if master_assigned && !pending_merges.is_empty() {
             operations.push(json!({
                 "kind": "merge_pending",
                 "action": "for each pending merge, merge the accepted candidate on refs/heads/main, then record collab task integrated before close",
                 "pending_merges": pending_merges,
             }));
         }
-        if !live_master {
+        if !master_assigned {
             operations.push(json!({
                 "kind": "promote_master",
                 "action": "collab master promote --approval \"<user authorization>\"",
                 "requires_approval": true,
-                "trigger": "no live master is bound; promotion requires explicit user approval and then auto-completes"
+                "trigger": "no master is assigned; promotion requires explicit user approval and then auto-completes"
             }));
         }
         operations
@@ -1409,6 +1384,7 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
         "daemon": daemon_context_view(server),
         "next_actions": next_actions,
         "operations": operations,
+        "scope": scope_view(route_scope.as_ref()),
         "master": master,
         "recorded_unusable": recorded_unusable,
         "authority": authority,

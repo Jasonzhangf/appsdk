@@ -410,6 +410,7 @@ fn mutation_blocked_during_migration(req: &Req) -> bool {
         | Req::MigrationPlan { .. }
         | Req::MigrationApply { .. }
         | Req::MasterPromote { .. }
+        | Req::MasterClear { .. }
         | Req::MasterDelegate { .. }
         | Req::TransferMaster { .. }
         | Req::RemoveWorker { .. }
@@ -524,6 +525,9 @@ fn wire_mutation_principal(req: &Req) -> Option<(&str, &str)> {
         | Req::MigrationApply { worker_id, token }
         | Req::MigrationVerify { worker_id, token }
         | Req::MasterPromote {
+            worker_id, token, ..
+        }
+        | Req::MasterClear {
             worker_id, token, ..
         }
         | Req::MasterDelegate {

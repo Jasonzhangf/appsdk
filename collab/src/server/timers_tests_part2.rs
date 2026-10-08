@@ -629,7 +629,7 @@ use super::*;
             state.notification_subscriptions[&subscription_id]
                 .status_reason
                 .as_deref(),
-            Some("goal-deadline-requires-live-master")
+            Some("goal-deadline-requires-current-master")
         );
         drop(state);
         std::fs::remove_dir_all(root).ok();

@@ -61,17 +61,20 @@ fn handle_notification_subscribe(
         return error;
     }
     if matches!(event.as_str(), "deadline" | "master-idle") {
-        let live_master = match live_master_id(server, &state) {
+        // Deadline and master-idle eligibility follow the current typed grant.
+        // Whether that holder is reachable is a separate communication fact and
+        // must not decide authority.
+        let holder = match current_master_holder(server, &state) {
             Ok(master) => master,
             Err(error) => return Resp::err(error),
         };
-        if live_master.as_deref() != Some(worker_id.as_str()) {
+        if holder.as_deref() != Some(worker_id.as_str()) {
             return Resp::err(if event == "master-idle" {
-                "master-idle subscription requires the live registered master"
-            } else if live_master.is_some() {
+                "master-idle subscription requires the current registered master"
+            } else if holder.is_some() {
                 "master authority required for deadline subscriptions"
             } else {
-                "no live master; deadline subscriptions require an approved live master"
+                "no master is assigned; deadline subscriptions require an approved master"
             });
         }
     }
@@ -1044,76 +1047,6 @@ fn handle_register_with_app_scope_inner(
                         && thread.as_deref() == selected.thread_id.as_deref()
                         && endpoint.as_ref() == selected.tmux_endpoint.as_ref()
                 });
-        let same_thread = existing_key
-            .as_ref()
-            .and_then(|(_, thread, _)| thread.as_deref())
-            == selected.thread_id.as_deref();
-        if !same_runtime_key {
-            let binding_id =
-                match BindingId::new(sanitize_identifier(&format!("binding-{worker_id}"))) {
-                    Ok(binding_id) => binding_id,
-                    Err(error) => return Resp::err(error.to_string()),
-                };
-            let is_master_binding = existing_route_scope.as_ref().is_some_and(|route| {
-                st.global
-                    .lookup_master_grant_for(route, &binding_id)
-                    .is_some()
-            });
-            let same_pane_tmux_recovery = existing.token == token
-                && selected.kind == TransportKind::Tmux
-                && selected.session_id.is_some()
-                && selected.thread_id.is_some()
-                && selected.tmux_endpoint.as_ref().is_some_and(|candidate| {
-                    selected_transport_for_worker(&existing).is_some_and(|old| {
-                        old.kind == TransportKind::Tmux
-                            && old.tmux_endpoint.as_ref().is_some_and(|endpoint| {
-                                crate::client::adapters::tmux::same_owned_pane(endpoint, candidate)
-                            })
-                    }) && existing_route_scope.as_ref().is_some_and(|route_scope| {
-                        // The pane query is host-wide, so the scope check that
-                        // the deleted in-scope query used to provide is now
-                        // explicit: a foreign route with the same pane-derived
-                        // worker name must not count as this worker's recovery.
-                        st.global
-                            .lookup_unique_tmux_pane_route(candidate)
-                            .is_some_and(|binding| {
-                                binding.agent_id.as_str() == worker_id
-                                    && binding.binding_id == binding_id
-                                    && binding.project_scope == route_scope.project_scope_id
-                                    && binding.app_scope_id == route_scope.app_scope_id
-                            })
-                    })
-                });
-            // A dsh peer has no pane to point at, so the tmux arm can never
-            // hold for it. Once a changed gateway address is a rebind, a dsh
-            // master that returns on a new socket would reach this fence and be
-            // refused as a foreign promotion, which would leave it unable to
-            // re-register at all. The token authenticates the principal and the
-            // agent id names it, so a dsh transport carrying the same token and
-            // the same agent is that principal recovering at a new address; the
-            // address itself is what changed and cannot be part of the test.
-            let same_dsh_agent_recovery = existing.token == token
-                && selected.kind == TransportKind::Dsh
-                && selected.thread_id.is_some()
-                && selected_transport_for_worker(&existing).is_some_and(|old| {
-                    old.kind == TransportKind::Dsh && old.thread_id == selected.thread_id
-                });
-            if is_master_binding && !same_pane_tmux_recovery && !same_dsh_agent_recovery {
-                match live_master_id(server, &st) {
-                    Ok(None) => {}
-                    Ok(Some(live_master)) => {
-                        return Resp::err(format!(
-                            "MASTER_RECOVERY_BLOCKED_LIVE: live master {live_master} exists; do not auto-recover or promote another identity"
-                        ));
-                    }
-                    Err(error) => {
-                        return Resp::err(format!(
-                            "MASTER_RECOVERY_BLOCKED_UNKNOWN: {error}; do not auto-recover or promote"
-                        ));
-                    }
-                }
-            }
-        }
         if existing.token != token {
             return Resp::err(format!(
                 "TOKEN_MISMATCH: worker {} is registered by another token",
@@ -1266,7 +1199,16 @@ fn master_authority_transfer_events(
     route_scope: &RouteScope,
     grant: crate::server::global_state::MasterGrant,
 ) -> Vec<Event> {
-    let mut events = state
+    let mut events = master_authority_revoke_events(state, route_scope);
+    events.push(Event::GlobalMasterGranted { grant });
+    events
+}
+
+/// Revoke every current typed grant in the exact route scope without issuing a
+/// replacement. `promote` reuses the same scoped revoke set and then grants, so
+/// promote, delegate and clear share one authority-change owner.
+fn master_authority_revoke_events(state: &State, route_scope: &RouteScope) -> Vec<Event> {
+    state
         .global
         .lookup_project_for_route(route_scope)
         .into_iter()
@@ -1279,9 +1221,7 @@ fn master_authority_transfer_events(
             project_scope: current.project_scope.clone(),
             binding_id: current.binding_id.clone(),
         })
-        .collect::<Vec<_>>();
-    events.push(Event::GlobalMasterGranted { grant });
-    events
+        .collect()
 }
 
 /// Finds the bindings that an incoming registration reclaims.
@@ -1382,6 +1322,31 @@ fn current_master_grant(
 fn current_master_worker_id(state: &State, route_scope: Option<&RouteScope>) -> Option<String> {
     current_master_grant(state, route_scope).map(|grant| grant.agent_id.as_str().to_owned())
 }
+
+/// The current typed grant holder for the server's route, read only from the
+/// reducer. Transport liveness is a separate observation and never gates this
+/// read, so an unreachable holder still owns the authority it was granted.
+pub(crate) fn current_master_holder(
+    server: &Server,
+    state: &State,
+) -> Result<Option<String>, &'static str> {
+    let route_scope = server_route_scope(server, state)?;
+    Ok(current_master_worker_id(state, route_scope.as_ref()))
+}
+
+/// The current grant holder's worker record. This is used where a caller needs
+/// the holder's selected transport for scheduling or notifications; it never
+/// probes that transport, so a missing probe cannot revoke authority.
+fn current_master_worker_record(
+    server: &Server,
+    state: &State,
+) -> Result<Option<WorkerRec>, &'static str> {
+    let route_scope = server_route_scope(server, state)?;
+    Ok(current_master_worker_id(state, route_scope.as_ref())
+        .and_then(|id| state.workers.get(&id).cloned()))
+}
+
+
 
 fn communication_recovery_brief() -> serde_json::Value {
     json!({

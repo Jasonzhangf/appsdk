@@ -26,8 +26,15 @@ fn unique_root() -> PathBuf {
     root
 }
 
+/// The single binary-selection seam for this consumer fixture. `cargo test`
+/// builds and runs the debug binary by default; a canonical installed binary
+/// can be substituted with `COLLAB_TEST_BINARY` so the same public entry point
+/// drives identical installed bytes. The fallback is test-only and never a
+/// product behavior.
 fn binary() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_collab"))
+    std::env::var_os("COLLAB_TEST_BINARY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_collab")))
 }
 
 /// Seed the project baseline marker. `collab context` resolves its project root
@@ -777,6 +784,176 @@ fn wrong_appserver_endpoint_fails_closed() {
         "{combined}"
     );
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// B02/B11: an explicit approved promotion replaces the recorded holder even
+/// when the incumbent is unreachable, the replaced holder loses control, and
+/// the AppServer communication path keeps working for the new holder.
+#[test]
+fn master_authority_appserver_explicit_replacement_keeps_holder_control() {
+    let mut fixture = AppFixture::new();
+    let context_a = fixture.run_public(&["context"], THREAD_A);
+    let context_b = fixture.run_public(&["context"], THREAD_B);
+    let worker_a = context_a["identity"]["worker_id"]
+        .as_str()
+        .expect("context receipt names TUI worker A")
+        .to_owned();
+    let worker_b = context_b["identity"]["worker_id"]
+        .as_str()
+        .expect("context receipt names TUI worker B")
+        .to_owned();
+    let project_scope = context_a["binding"]["project_scope"]
+        .as_str()
+        .expect("context receipt names the project scope")
+        .to_owned();
+    let app_scope_id = context_a["binding"]["app_scope_id"]
+        .as_str()
+        .expect("context receipt names the app scope")
+        .to_owned();
+    fixture.initialized = true;
+
+    let promoted_a = fixture.run_public(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "user approved TUI worker A",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(promoted_a["master"], worker_a);
+    assert_eq!(promoted_a["scope"]["project_scope"], project_scope);
+    assert_eq!(promoted_a["scope"]["app_scope_id"], app_scope_id);
+
+    let promoted_b = fixture.run_public(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "user approved TUI worker B",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(promoted_b["master"], worker_b);
+    assert_eq!(promoted_b["scope"]["project_scope"], project_scope);
+    assert_eq!(promoted_b["scope"]["app_scope_id"], app_scope_id);
+
+    let status = fixture.run_public(&["master", "status"], THREAD_B);
+    assert_eq!(status["master"]["worker_id"], worker_b);
+    assert_eq!(status["scope"]["project_scope"], project_scope);
+    assert_eq!(status["scope"]["app_scope_id"], app_scope_id);
+
+    // The replaced holder no longer controls the board; the current holder does.
+    let rejected = fixture.command_public(
+        &[
+            "board",
+            "publish",
+            "a-after-replacement",
+            "--title",
+            "t",
+            "--description",
+            "d",
+            "--delivery-condition",
+            "c",
+            "--test-condition",
+            "t",
+            "--priority",
+            "p2",
+        ],
+        THREAD_A,
+    );
+    assert!(
+        !rejected.status.success(),
+        "the replaced holder must not keep board control: stdout={} stderr={}",
+        String::from_utf8_lossy(&rejected.stdout),
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    let published = fixture.run_public(
+        &[
+            "board",
+            "publish",
+            "b-after-replacement",
+            "--title",
+            "t",
+            "--description",
+            "d",
+            "--delivery-condition",
+            "c",
+            "--test-condition",
+            "t",
+            "--priority",
+            "p2",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(published["task"]["id"], "b-after-replacement");
+
+    // The replaced holder keeps its own peer row, task and mailbox while it
+    // loses only control authority.
+    fixture.run_public(
+        &[
+            "task",
+            "register",
+            "a-preserved-task",
+            "--next",
+            "survive replacement",
+        ],
+        THREAD_A,
+    );
+    let preserved = fixture.run_public(
+        &[
+            "send",
+            "--to",
+            &worker_a,
+            "--subject",
+            "preserve replaced holder",
+            "keep the mailbox",
+        ],
+        THREAD_B,
+    );
+    let preserved_message = preserved["msg_id"]
+        .as_str()
+        .or_else(|| preserved["message_id"].as_str())
+        .expect("send names the durable message")
+        .to_owned();
+    let context_a = fixture.run_public(&["context"], THREAD_A);
+    assert_eq!(
+        context_a["identity"]["worker_id"], worker_a,
+        "replacement must preserve the replaced holder's peer identity: {context_a}"
+    );
+    assert!(
+        context_a["tasks"]
+            .as_array()
+            .expect("context lists tasks")
+            .iter()
+            .any(|task| task["id"] == "a-preserved-task"),
+        "replacement must preserve the replaced holder's task: {context_a}"
+    );
+    assert!(
+        context_a["inbox"]["messages"]
+            .as_array()
+            .expect("context lists inbox messages")
+            .iter()
+            .any(|message| message["id"].as_str() == Some(preserved_message.as_str())),
+        "replacement must preserve the replaced holder's mailbox: {context_a}"
+    );
+
+    // The AppServer delivery path still works after the authority change.
+    let sent = fixture.run_public(
+        &[
+            "send",
+            "--to",
+            &worker_a,
+            "--subject",
+            "after replacement",
+            "deliver to the replaced peer",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(sent["notification"], "appserver-input-submitted");
+    assert_eq!(sent["consumed"], false);
+
+    drop(fixture);
 }
 
 #[test]

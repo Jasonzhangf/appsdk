@@ -659,6 +659,11 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     token: ident.token.clone(),
                     approval,
                 },
+                MasterCmd::Clear { approval } => Req::MasterClear {
+                    worker_id: ident.worker_id.clone(),
+                    token: ident.token.clone(),
+                    approval,
+                },
                 MasterCmd::Delegate { target } => Req::MasterDelegate {
                     worker_id: ident.worker_id.clone(),
                     token: ident.token.clone(),
@@ -673,13 +678,12 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     let local: serde_json::Value =
                         call_project(&scope, &ident, &Req::MasterStatus)?;
                     let Some(master) = local.get("master") else {
-                        anyhow::bail!("cross-project send requires this peer to be a live master")
+                        anyhow::bail!("cross-project send requires this peer to be the project master")
                     };
                     if master.get("worker_id").and_then(|v| v.as_str())
                         != Some(ident.worker_id.as_str())
-                        || master.get("endpoint_live").and_then(|v| v.as_bool()) != Some(true)
                     {
-                        anyhow::bail!("cross-project send requires this peer to be the live master")
+                        anyhow::bail!("cross-project send requires this peer to be the project master")
                     }
                     let target = project.canonicalize()?;
                     if target == scope.root.canonicalize()? {

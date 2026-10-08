@@ -67,7 +67,19 @@ fn handle_board_show(server: &Server) -> Resp {
         Ok(route) => route,
         Err(error) => return Resp::err(error),
     };
-    let master = current_master_worker_id(&state, route.as_ref());
+    // The board's master role comes from the same typed-grant projection
+    // `status` and `context` use. The per-worker status stays a separate
+    // transport observation, so a pane address never invents a live agent.
+    let holder = current_master_worker_id(&state, route.as_ref());
+    let transport_live = holder
+        .as_deref()
+        .and_then(|id| observations.get(id))
+        .is_some_and(|status| *status == "online");
+    let authority = master_authority_view(&state, route.as_ref(), transport_live);
+    let master = authority
+        .get("worker_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
     let mut tasks: Vec<_> = state.tasks.values().filter_map(|task| board_task_view(&state, task)).collect();
     tasks.sort_by(|left, right| left.id.cmp(&right.id));
     let mut workers: Vec<_> = state.workers.values().filter(|worker| !is_managed_subagent(&state, &worker.id)).map(|worker| {
@@ -84,6 +96,8 @@ fn handle_board_show(server: &Server) -> Resp {
         "schema_version": 1,
         "project": server.root.file_name().map(|name| name.to_string_lossy()),
         "observed_at": iso(now_ms()),
+        "scope": scope_view(route.as_ref()),
+        "master": authority,
         "tasks": tasks,
         "workers": workers,
     }))
@@ -134,13 +148,6 @@ fn handle_board_command(server: &Server, actor: String, token: String, command: 
     {
         let state = server.state.lock().unwrap();
         if let Err(error) = board_check_actor(&state, &actor, &token) { return error; }
-    }
-    if matches!(command, BoardCommand::Publish { .. } | BoardCommand::Invite { .. } | BoardCommand::Withdraw { .. }) {
-        match live_master_worker_snapshot(server) {
-            Ok(Some(master)) if master.id == actor => {},
-            Ok(_) => return Resp::err("BOARD_LIVE_MASTER_REQUIRED: project master is not live"),
-            Err(error) => return Resp::err(error),
-        }
     }
     match command {
         BoardCommand::Show => handle_board_show(server),

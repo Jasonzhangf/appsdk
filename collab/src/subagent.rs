@@ -895,12 +895,12 @@ fn run(server: &Server, actor: &str, token: &str, action: Action) -> Result<serd
             bail!("only the bound subagent may report readiness or work");
         }
     } else if record.parent != actor
-        && crate::server::live_master_id(server, &state)
+        && crate::server::current_master_holder(server, &state)
             .map_err(anyhow::Error::msg)?
             .as_deref()
             != Some(actor)
     {
-        bail!("only the creating parent or live master may manage this subagent");
+        bail!("only the creating parent or current master may manage this subagent");
     }
     match action {
         Action::Snapshot { .. } => bail!("SUBAGENT_SNAPSHOT_UNSUPPORTED: tmux panes do not expose durable Codex thread history; inspect the peer's durable mailbox and task state"),

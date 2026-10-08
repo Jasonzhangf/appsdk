@@ -140,8 +140,8 @@ pub(crate) enum TaskCmd {
     /// A retry resumes the remaining release instead of double-releasing.
     FinalizeCleanup { id: String },
     /// Close a merged task and clean up its declared worktree/branch.
-    /// With --force the live master may close any task. With no live master,
-    /// the owner may close its task, or a registered peer may close an
+    /// With --force the current master may close any task. With no master
+    /// assigned, the owner may close its task, or a registered peer may close an
     /// orphaned task after the owner's App Server identity is lost. Force close
     /// stops keepalives without deleting the worktree or branch and requires
     /// a non-empty --reason.
@@ -171,12 +171,17 @@ pub enum MailboxCmd {
 
 #[derive(Subcommand)]
 pub(crate) enum MasterCmd {
-    /// Promote this peer when no live master exists; requires the user's approval text
+    /// Promote this peer, replacing any recorded holder; requires the user's approval text
     Promote {
         #[arg(long)]
         approval: String,
     },
-    /// Delegate master authority to another registered peer (live master only)
+    /// Clear the current master authority; requires the user's approval text
+    Clear {
+        #[arg(long)]
+        approval: String,
+    },
+    /// Delegate master authority to another registered peer (current master only)
     Delegate { target: String },
     /// Send a durable message to the master of another explicit project
     Send {
@@ -189,7 +194,7 @@ pub(crate) enum MasterCmd {
         #[arg(trailing_var_arg = true)]
         body: Vec<String>,
     },
-    /// Show the current live master, if any
+    /// Show the current master, if any
     Status,
 }
 
@@ -316,7 +321,7 @@ pub(crate) enum Cmd {
         cmd: MailboxCmd,
     },
     /// List registered peers and their local activity projection
-    /// (does not report live master authority; use `collab master status`)
+    /// (does not report master authority; use `collab master status`)
     Who,
     /// Inspect or explicitly assign collab master authority
     Master {

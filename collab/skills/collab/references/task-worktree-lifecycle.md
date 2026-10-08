@@ -70,15 +70,15 @@ owner-scoped lease can be cancelled with
   Run `collab context`. The CLI automatically observes runtime facts, and the
   daemon owns identity selection, creation, recovery, update, registration,
   and binding persistence. Use the same snapshot for this peer's task context,
-  peers, and live-master state. Never create a worktree-local peer, and never
+  peers, and master-authority state. Never create a worktree-local peer, and never
   infer "no master" from a missing worktree directory or a failed `context`.
 - Declare task ID, owner, feature/resource ID, worktree, branch, base commit,
   priority, status, and next step before product edits.
 - Never share/reuse a worktree. Never depend on dirty main.
 - Only the owner may update, deliver, cancel, or normally close. Review and
-  exact-main integration require the task owner or live master.
-- Force close exceptions are explicit and audited: a live master may close
-  any task; with no live master the owner may self-close, or a registered peer
+  exact-main integration require the task owner or current master.
+- Force close exceptions are explicit and audited: the current master may close
+  any task; with no current master the owner may self-close, or a registered peer
   may close a task whose owner registered transport identity is lost.
 - A bound worktree creates a mandatory cleanup obligation. Keep its exact path
   and branch bound until close.
@@ -90,7 +90,7 @@ owner-scoped lease can be cancelled with
   force-removed. Terminal state without a receipt is an audit failure.
 
 Delivery and integration are separate durable milestones. `task deliver`
-records candidate evidence; the task owner or live master uses
+records candidate evidence; the task owner or current master uses
 `task review --accept|--rework` to record the review decision; `task integrated`
 accepts only the exact current `refs/heads/main` commit and records mainline
 evidence. Direct status updates cannot bypass review or integration for current
@@ -99,11 +99,11 @@ evidence retains an owner-local `accepted→merged` compatibility path; it
 records task state only and does not create review or integration evidence.
 
 `task review --accept` also registers a daemon-owned pending merge keyed by
-task id and notifies the live master. That registration, not a chat message,
+task id and notifies the current master. That registration, not a chat message,
 is the single source for the merge obligation: the master stays busy, changes
 session, or restarts, and the obligation survives. While it exists:
 
-- `collab context` for the live master lists a `merge_pending` operation.
+- `collab context` for the current master lists a `merge_pending` operation.
 - `appsdk longhorizon show` prints a `待合并` section and includes
   `pending_merges` in `--json`.
 - master idle wake text and the idle batch body include `pending_merges`.
@@ -116,9 +116,9 @@ also resolves it. `collab task close` on a still-pending merge fails with
 `TASK_MERGE_PENDING`; the master cannot lose the merge by staying busy, and the
 task cannot close before the merge is recorded.
 
-While the pending merge exists, only the live master may record `task
+While the pending merge exists, only the current master may record `task
 integrated`; an owner that tries to self-integrate gets `TASK_MERGE_PENDING`.
-The obligation is registered only when a live master exists, so a master-less
+The obligation is registered only when a current master exists, so a master-less
 project keeps the plain owner self-integration lifecycle.
 
 ## Task liveness and escalation
@@ -133,22 +133,23 @@ cannot. ACKing a wake is not progress and does not satisfy liveness.
 
 Route escalation by worker type:
 
-- A managed subagent and an ordinary worker both report blockers to the live
+- A managed subagent and an ordinary worker both report blockers to the current
   Collab master immediately. First find a concrete solution (root cause,
   proposed change, authorization needed); send that, not a symptom. Do not
   wait. A subagent copies its parent when parent is not the master, and may
   not decline a master collaboration request. Independent peers may
   temporarily decline a master collaboration invite to protect their own
-  task. If no live master exists, report to the collaborator that initiated
+  task. If no current master exists, report to the collaborator that initiated
   the task.
 - A peer becomes master only after explicit user approval for that peer and
-  project, with a live registered transport verified. If a live master
-  exists, only that master may `collab master delegate`; if none exists, the
-  peer may `collab master promote --approval` itself. An internal init adapter
+  project; the caller must hold an authenticated current binding. An approved
+  `collab master promote --approval` replaces any recorded holder and is
+  independent of the incumbent's or the candidate's liveness. Only the current
+  master grant holder may `collab master delegate`. An internal init adapter
   result alone proves neither peer initialization nor master ownership; only
   `collab context` and the returned snapshot have that authority for the
-  current agent. A dead recorded thread is not a live master. Codex root is
-  not Collab master.
+  current agent. A dead recorded thread does not remove the current holder's
+  authority. Codex root is not Collab master.
 - Master compiles the goal into a dependency graph, then parallel unique-write
   scopes. It assigns registered peers with `collab sendmessage` only when
   delivery conditions (done-iff, artifacts, in/out of

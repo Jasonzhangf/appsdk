@@ -874,7 +874,7 @@ fn terminal_or_delivered_task_cannot_wait() {
 #[test]
 fn peer_migration_freezes_snapshot_and_resumes_after_verify() {
     let (server, root) = test_server();
-    register(&server, "peer", "%peer");
+    register_appserver_worker(&server, &root, "peer", "thread-peer");
     assert!(handle_migration_inspect(&server, "peer".into(), "token-peer".into()).ok);
     assert!(handle_migration_plan(&server, "peer".into(), "token-peer".into()).ok);
     let applied = handle_migration_apply(&server, "peer".into(), "token-peer".into());
@@ -899,8 +899,8 @@ fn peer_migration_freezes_snapshot_and_resumes_after_verify() {
 #[test]
 fn migration_transaction_lease_rejects_second_peer() {
     let (server, root) = test_server();
-    register(&server, "peer-a", "%peer-a");
-    register(&server, "peer-b", "%peer-b");
+    register_appserver_worker(&server, &root, "peer-a", "thread-peer-a");
+    register_appserver_worker(&server, &root, "peer-b", "thread-peer-b");
     assert!(handle_migration_plan(&server, "peer-a".into(), "token-peer-a".into()).ok);
     let second = handle_migration_plan(&server, "peer-b".into(), "token-peer-b".into());
     assert!(!second.ok);
@@ -976,7 +976,7 @@ fn migration_rejects_wait_without_matching_active_resource_holder() {
 #[test]
 fn changed_migration_snapshot_remains_frozen() {
     let (server, root) = test_server();
-    register(&server, "peer", "%peer");
+    register_appserver_worker(&server, &root, "peer", "thread-peer");
     assert!(handle_migration_plan(&server, "peer".into(), "token-peer".into()).ok);
     assert!(handle_migration_apply(&server, "peer".into(), "token-peer".into()).ok);
 
@@ -1013,7 +1013,7 @@ fn changed_migration_snapshot_remains_frozen() {
 #[test]
 fn migration_freeze_rejects_mutations_but_allows_rebind_and_reads() {
     let (server, root) = test_server();
-    register(&server, "peer", "%peer");
+    register_appserver_worker(&server, &root, "peer", "thread-peer");
     assert!(create_task(&server, "peer", "task", "feature").ok);
     assert!(handle_migration_plan(&server, "peer".into(), "token-peer".into()).ok);
     assert!(handle_migration_apply(&server, "peer".into(), "token-peer".into()).ok);
@@ -1076,13 +1076,13 @@ fn migration_freeze_rejects_mutations_but_allows_rebind_and_reads() {
         },
     );
     assert!(read.ok);
-    let endpoint = server.state.lock().unwrap().workers["peer"]
-        .transport
-        .as_ref()
-        .unwrap()
-        .tmux_endpoint
-        .clone()
-        .unwrap();
+    // The registered peer is a native App Server binding, so a rebind needs a
+    // fresh live tmux address. The frozen admission rule keys on the identity,
+    // not on the transport kind, so this still exercises "an existing identity
+    // may rebind".
+    let rebind_tmux = IsolatedTmux::start(&root);
+    let mut rebind_endpoints = rebind_tmux.endpoints();
+    let endpoint = rebind_endpoints.remove(0);
     let rebound = dispatch(
         &server,
         Req::register("peer".into(),
@@ -1205,8 +1205,8 @@ async fn duplicate_daemon_rejection_preserves_authoritative_pid() {
 
 /// Register a worker whose selected transport is App Server, so the App Server
 /// status probe (not the tmux pane probe) is the presence authority.
-fn register_appserver_worker(
-    server: &mut Server,
+pub(crate) fn register_appserver_worker(
+    server: &Server,
     root: &Path,
     id: &str,
     thread_id: &str,

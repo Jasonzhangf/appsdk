@@ -102,8 +102,8 @@ collab who
   ACK is not required. `collab msg`, `collab inbox`, and `collab context` are
   read-only and do not consume messages. Keep `ack` for legacy clients or
   explicit recovery of already-delivered messages.
-- `collab worker status [worker-id]` inspects real-time pane presence and worker
-  health, including `endpoint_live`, `identity_valid`, `agent_state`,
+- `collab worker status [worker-id]` inspects the selected transport's address
+  facts and worker health, including `endpoint_live`, `identity_valid`, `agent_state`,
   `unacked_notifications`, `notifications_paused`, `suspected_offline`, and
   `active_task`.
 

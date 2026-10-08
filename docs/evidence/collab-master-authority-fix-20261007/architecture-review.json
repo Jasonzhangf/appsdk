@@ -1,0 +1,44 @@
+{
+  "reviewed_tree": "515b53132888fe7e7670eabfccee0936ba1ad672",
+  "base": "7350fbf6b020b1464d531337c7b2f6b8fa5de6f2",
+  "taskId": "master-authority-final-agy-20261008",
+  "backend": "agy",
+  "verdict": "pass",
+  "exitCode": 0,
+  "outcomeReason": "controller_no_blocking_findings",
+  "evidence": {
+    "contract_version": "1",
+    "findings": [],
+    "module_boundary_evidence": [
+      {
+        "edges": "权威用户需求 2026-10-07 指令 -> docs/dagpipe/collab-master-authority.graph.json (3节点SESE拓扑) -> proto Req::MasterClear / Req::MasterPromote -> part_10 project_route_actor 准入校验 -> part_07 handle_master_clear / handle_master_promote -> part_06 master_authority_revoke_events -> server.commit_locked 持久化 -> part_08/09 master_authority_view 统一投影 -> 持久回执/显式错误终点。重启 replay 与持久化已核验。",
+        "gates": "设计准入 review PASS (docs/evidence/collab-master-authority-fix-20261007/design-review.md); dagpipe graph validate exit 0; 基线红测 p01-tmux-base-red.log; 单元/二进制测试 925 passed exit 0 (author-bins.log); 公开 E2E 测试 author-public.log exit 0; 候选安装验证 32 passed exit 0 (candidate-installed-public.log); 经验复核: 无新增知识 (未提出全局记忆修改候选).",
+        "module": "collab-master-authority",
+        "owner": "collab/src/server/mod_parts/part_06.rs, collab/src/server/mod_parts/part_07.rs, collab/src/server/global_state.rs",
+        "paths": "collab/src/proto.rs; collab/src/main_cli.rs; collab/src/main.rs; collab/src/bin/collab-mcp.rs; collab/src/server/mod_parts/part_06.rs; collab/src/server/mod_parts/part_07.rs; collab/src/server/mod_parts/part_08.rs; collab/src/server/mod_parts/part_09.rs; collab/src/server/mod_parts/part_10.rs; collab/src/server/mod_parts/part_11.rs; docs/dagpipe/collab-master-authority.graph.json; docs/design/collab-master-authority-contract-20261007.md",
+        "resources": "权威需求: 2026-10-07 用户原文指令(清除旧master状态/修复tmux存活判断/允许覆盖/重画简化状态机); 源码base 7350fbf6b020b1464d531337c7b2f6b8fa5de6f2; 候选版本 0.2.0256; 缺陷 1f79966; 契约 docs/design/collab-master-authority-contract-20261007.md"
+      },
+      {
+        "edges": "CLI/MCP context 查询 -> part_09 handle_context -> current_master_grant -> master_authority_view 投影 (区分 authority 与独立 transport facts) -> 统一上下文快照终点。同主体恢复由 part_02 注册事务承载，消融 liveness/tmux-pane 授权围栏。",
+        "gates": "dagpipe graph validate exit 0; tmux_recv_e2e master_authority_same_principal_recovery_and_new_principal_do_not_inherit PASS; candidate-installed-native.log PASS.",
+        "module": "collab-context",
+        "owner": "collab/src/server/mod_parts/part_08.rs, collab/src/server/mod_parts/part_09.rs",
+        "paths": "collab/src/server/mod_parts/part_08.rs; collab/src/server/mod_parts/part_09.rs; docs/dagpipe/collab-context.graph.json; collab/skills/collab/SKILL.md",
+        "resources": "docs/dagpipe/collab-context.graph.json; docs/design/collab-master-authority-contract-20261007.md §6, §7"
+      },
+      {
+        "edges": "HTTP GET /board 或 board show -> board_handlers handle_board_show -> master_authority_view -> JSON 数据快照 -> dashboard app.js 渲染 (独立展示 Master 授权与各 worker 传输状态)。board 指令中的 BOARD_LIVE_MASTER_REQUIRED 门禁消融。",
+        "gates": "dagpipe graph validate exit 0; tmux_recv_e2e master_authority_dashboard_get_agrees_with_status_context_and_board PASS; 保持纯 GET 只读通道。",
+        "module": "collab-dashboard",
+        "owner": "collab/src/server/board_handlers.rs, collab/src/dashboard/app.js",
+        "paths": "collab/src/server/board_handlers.rs; collab/src/dashboard/app.js; docs/dagpipe/collab-dashboard.graph.json",
+        "resources": "docs/dagpipe/collab-dashboard.graph.json; docs/design/collab-master-authority-contract-20261007.md §7, §8"
+      }
+    ],
+    "scope": {
+      "base": null,
+      "commit": "7350fbf6b020b1464d531337c7b2f6b8fa5de6f2",
+      "mode": "uncommitted"
+    }
+  }
+}

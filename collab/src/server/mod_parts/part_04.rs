@@ -972,13 +972,13 @@ impl ProjectRuntimeManager {
                 .ensure_runtime(&key, &root, &storage_root)
                 .map_err(|error| format!("CROSS_PROJECT_SOURCE_REJECTED: {error}"))?;
             let state = runtime.state.lock().unwrap();
-            let live_master = match live_master_id(&runtime, &state) {
+            let master_holder = match current_master_holder(&runtime, &state) {
                 Ok(master) => master,
                 Err(error) => {
                     return Err(format!("CROSS_PROJECT_SOURCE_REJECTED: {error}"));
                 }
             };
-            if live_master.as_deref() != Some(from) {
+            if master_holder.as_deref() != Some(from) {
                 continue;
             }
             let route_scope = match server_route_scope(&runtime, &state) {
@@ -1004,7 +1004,7 @@ impl ProjectRuntimeManager {
                 .and_then(selected_transport_for_worker)
                 .and_then(|transport| transport.thread_id)
                 .ok_or_else(|| {
-                    "CROSS_PROJECT_SOURCE_REJECTED: source master has no live App Server thread"
+                    "CROSS_PROJECT_SOURCE_REJECTED: source master has no registered route address"
                         .to_string()
                 })?;
             matches.push((key, source_thread_id));

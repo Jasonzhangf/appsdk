@@ -18,28 +18,12 @@ fn worker_identity_presence(server: &Server, worker: &WorkerRec) -> IdentityPres
                 | Ok(crate::client::adapters::tmux::PanePresence::Unknown)
                 | Err(_) => {}
             }
-            // Liveness needs an explicitly registered and queryable AppServer
-            // session and thread. A tmux registration carries them only when it
-            // recorded both ids, and the answer must come from the AppServer
-            // probe. A tmux-only binding has no such anchor, so it stays
-            // Unknown.
-            let Some(thread_id) = endpoint.codex_thread_id.as_deref() else {
-                return IdentityPresence::Unknown;
-            };
-            if endpoint.codex_session_id.is_none() || thread_id.trim().is_empty() {
-                return IdentityPresence::Unknown;
-            }
-            match (server.appserver_thread_status)(&transport, thread_id) {
-                Ok(_) => IdentityPresence::Present,
-                Err(error)
-                    if error.contains("not found")
-                        || error.contains("MISSING")
-                        || error.contains("GONE") =>
-                {
-                    IdentityPresence::Missing
-                }
-                Err(_) => IdentityPresence::Unknown,
-            }
+            // A tmux pane is an address, not a runtime. Even when the
+            // registration recorded Codex session/thread ids, a tmux transport
+            // has no AppServer endpoint to answer them, so asking the AppServer
+            // oracle is an invalid edge. The agent runtime therefore stays
+            // Unknown; only the pane address itself is known.
+            IdentityPresence::Unknown
         }
         TransportKind::AppServer => {
             let Some(thread_id) = transport.thread_id.as_deref() else {
@@ -398,51 +382,6 @@ pub(crate) fn idle_managed_subagent_for_admission(
         }
     }
     None
-}
-
-pub(crate) fn live_master_id(
-    server: &Server,
-    state: &State,
-) -> Result<Option<String>, &'static str> {
-    let route_scope = server_route_scope(server, state)?;
-    let Some(worker) = current_master_worker_id(state, route_scope.as_ref())
-        .as_ref()
-        .and_then(|id| state.workers.get(id))
-    else {
-        return Ok(None);
-    };
-    match worker_presence(server, worker) {
-        IdentityPresence::Present => Ok(Some(worker.id.clone())),
-        // Master authority requires a thread that is resident now: a cold
-        // master cannot act on a request until something loads it, so it is
-        // not treated as a live master.
-        IdentityPresence::Cold => Ok(None),
-        IdentityPresence::Missing => Ok(None),
-        IdentityPresence::Unknown => Err(
-            "master identity is unknown; defer authority changes until transport probes succeed",
-        ),
-    }
-}
-
-fn live_master_worker_snapshot(server: &Server) -> Result<Option<WorkerRec>, &'static str> {
-    let worker = {
-        let state = server.state.lock().unwrap();
-        let route_scope = server_route_scope(server, &state)?;
-        current_master_worker_id(&state, route_scope.as_ref())
-            .as_ref()
-            .and_then(|id| state.workers.get(id))
-            .cloned()
-    };
-    let Some(worker) = worker else {
-        return Ok(None);
-    };
-    match worker_presence(server, &worker) {
-        IdentityPresence::Present => Ok(Some(worker)),
-        IdentityPresence::Cold | IdentityPresence::Missing => Ok(None),
-        IdentityPresence::Unknown => Err(
-            "master identity is unknown; defer authority changes until transport probes succeed",
-        ),
-    }
 }
 
 fn is_managed_subagent(state: &State, worker_id: &str) -> bool {
@@ -887,6 +826,30 @@ fn scheduler_assignment_events(
     events
 }
 
+/// Authorize a scheduler-dispatch caller against the current typed grant for
+/// this route. The token and the resolved project/app scope are the existing
+/// admission, and transport liveness is deliberately not consulted.
+fn scheduler_dispatch_authorized(
+    server: &Server,
+    state: &State,
+    worker_id: &str,
+    token: &str,
+) -> Result<(), Resp> {
+    verify(state, worker_id, token)
+        .map_err(|_| Resp::err("scheduler dispatch authentication failed"))?;
+    let route_scope = server_route_scope(server, state).map_err(|error| {
+        Resp::err(format!(
+            "scheduler dispatch requires a unique route scope: {error}"
+        ))
+    })?;
+    if current_master_worker_id(state, route_scope.as_ref()).as_deref() != Some(worker_id) {
+        return Err(Resp::err(
+            "scheduler dispatch requires the current registered master authority",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn handle_scheduler_dispatch(
     server: &Server,
     worker_id: String,
@@ -921,38 +884,20 @@ pub(crate) fn handle_scheduler_dispatch(
         worktree_path = Some(canonical.display().to_string());
     }
 
-    let authenticated = {
-        let state = server.state.lock().unwrap();
-        verify(&state, &worker_id, &token).is_ok()
-    };
-    if !authenticated {
-        return Resp::err("scheduler dispatch authentication failed");
-    }
-    let master = {
-        let state = server.state.lock().unwrap();
-        let route_scope = match server_route_scope(server, &state) {
-            Ok(route_scope) => route_scope,
-            Err(error) => {
-                return Resp::err(format!(
-                    "scheduler dispatch requires a unique route scope: {error}"
-                ))
-            }
-        };
-        current_master_worker_id(&state, route_scope.as_ref())
-            .as_ref()
-            .and_then(|id| state.workers.get(id))
-            .cloned()
-    };
-    let Some(master) = master else {
-        return Resp::err("scheduler dispatch requires a live master");
-    };
-    if master.id != worker_id || worker_presence(server, &master) != IdentityPresence::Present {
-        return Resp::err("scheduler dispatch requires the live registered master");
-    }
-
     let message_id = format!("scheduler-{request_id}");
     let task_id = format!("task-{message_id}");
     for _ in 0..3 {
+        // Authorization is the current typed grant, not a transport probe: a
+        // tmux pane address can never answer whether the holder is live, so the
+        // recorded holder keeps control while its agent runtime stays Unknown.
+        // A retry or recovery re-enters here after releasing the lock, so the
+        // grant is re-read on every attempt.
+        {
+            let state = server.state.lock().unwrap();
+            if let Err(error) = scheduler_dispatch_authorized(server, &state, &worker_id, &token) {
+                return error;
+            }
+        }
         if let Some(response) = scheduler_dispatch_recover_pending(server, &request_id) {
             return response;
         }
@@ -993,9 +938,16 @@ pub(crate) fn handle_scheduler_dispatch(
             );
         }
         let mut state = server.state.lock().unwrap();
-        let Some(worker) = state.workers.get(&peer_id).cloned() else {
+        // Candidate probing above released the lock, so re-check the current
+        // typed grant before reserving capacity. This is the existing
+        // concurrency boundary, not a new ledger: a caller whose authority
+        // changed during admission must not commit the reservation.
+        if let Err(error) = scheduler_dispatch_authorized(server, &state, &worker_id, &token) {
+            return error;
+        }
+        if !state.workers.contains_key(&peer_id) {
             continue;
-        };
+        }
         if state
             .tasks
             .values()
@@ -1209,13 +1161,13 @@ fn verify_master_actor(
             "token mismatch: identity does not own this worker_id",
         ));
     }
-    match live_master_id(server, state) {
+    match current_master_holder(server, state) {
         Ok(Some(master)) if master == worker_id => Ok(()),
         Ok(Some(_)) => Err(Resp::err(
             "master authority required; ask the registered master to delegate",
         )),
         Ok(None) => Err(Resp::err(
-            "no live master; a peer may promote itself only with explicit user approval",
+            "no master is assigned; a peer may promote itself only with explicit user approval",
         )),
         Err(error) => Err(Resp::err(error)),
     }
@@ -1261,8 +1213,58 @@ fn handle_master_promote(
     }
     Resp::data(json!({
         "master": worker_id,
+        "scope": scope_view(Some(&route_scope)),
         "mode": "user_approved_self_promotion",
         "role_brief": role_brief(server, &state, &worker_id)
+    }))
+}
+
+/// Clear the current typed grant for this route.
+///
+/// Clear needs no incumbent probe and does not require the caller to be the
+/// current master. It runs the same authenticated admission as promote: the
+/// caller's token and current binding are already proven by
+/// `project_route_actor`, and the approval text is the human authorization. The
+/// revoke set is the same scoped owner promote uses, minus the re-grant, so a
+/// cleared route cannot be resurrected by legacy authority state.
+fn handle_master_clear(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    approval: String,
+) -> Resp {
+    let mut state = server.state.lock().unwrap();
+    let Some(worker) = state.workers.get(&worker_id) else {
+        return Resp::err(format!("worker {} not registered", worker_id));
+    };
+    if worker.token != token {
+        return Resp::err("token mismatch: identity does not own this worker_id");
+    }
+    if approval.trim().is_empty() {
+        return Resp::err("master clear requires explicit user approval");
+    }
+    if approval.chars().any(char::is_control) {
+        return Resp::err("master clear approval must not contain control characters");
+    }
+    let route_scope = match server_route_scope(server, &state) {
+        Ok(Some(route_scope)) => route_scope,
+        Ok(None) => return Resp::err("master clear requires a registered project route"),
+        Err(error) => return Resp::err(error),
+    };
+    let previous = current_master_worker_id(&state, Some(&route_scope));
+    let events = master_authority_revoke_events(&state, &route_scope);
+    let was_empty = events.is_empty();
+    if !was_empty {
+        if let Err(error) = server.commit_locked(&mut state, &events) {
+            return Resp::err(format!("MASTER_CLEAR_DURABILITY_FAILED: {error}"));
+        }
+    }
+    Resp::data(json!({
+        "master": serde_json::Value::Null,
+        "previous_worker_id": previous,
+        "was_empty": was_empty,
+        "scope": scope_view(Some(&route_scope)),
+        "mode": "user_approved_clear",
     }))
 }
 
@@ -1276,34 +1278,25 @@ fn handle_master_delegate(
     if let Err(error) = verify_master_actor(server, &state, &worker_id, &token) {
         return error;
     }
-    let Some(target) = state.workers.get(&target_id) else {
+    if !state.workers.contains_key(&target_id) {
         return Resp::err(format!("target worker {} not registered", target_id));
-    };
-    match worker_presence(server, target) {
-        IdentityPresence::Present => {}
-        // Delegation goes through the same immediate notification path that
-        // loads a cold thread, so a verified-but-cold target is acceptable.
-        IdentityPresence::Cold => {}
-        IdentityPresence::Missing => {
-            return Resp::err("master delegation requires a live target transport")
-        }
-        IdentityPresence::Unknown => {
-            return Resp::err(
-                "delegation target identity is unknown; defer delegation until transport probes succeed",
-            )
-        }
     }
     let route_scope = match server_route_scope(server, &state) {
         Ok(Some(route_scope)) => route_scope,
         Ok(None) => return Resp::err("master delegation requires a registered project route"),
         Err(error) => return Resp::err(error),
     };
+    // The target must already hold a current runtime binding in this exact
+    // scope. That binding supplies the address and endpoint generation the
+    // replacement grant records, so a registered target is sufficient. Native
+    // liveness is a separate communication fact and must not veto the transfer;
+    // a pane probe can only ever report that an address exists.
     let grant = match master_grant_for_worker(
         &state,
         &route_scope,
         &target_id,
         &worker_id,
-        "delegated by the live master",
+        "delegated by the current master",
     ) {
         Ok(grant) => grant,
         Err(error) => return Resp::err(error),
@@ -1315,6 +1308,7 @@ fn handle_master_delegate(
     }
     Resp::data(json!({
         "master": target_id,
+        "scope": scope_view(Some(&route_scope)),
         "delegated_by": worker_id,
         "role_brief": role_brief(server, &state, &target_id)
     }))

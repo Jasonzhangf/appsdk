@@ -316,6 +316,45 @@
         }
     }
 
+    /// Register a peer whose selected transport is App Server, so presence comes
+    /// from the App Server status probe rather than a tmux pane. Wire
+    /// registration would call the production candidate verifier, which dials a
+    /// real socket, so this uses the typed registration path directly.
+    fn register_native_peer(
+        server: &Server,
+        root: &Path,
+        worker_id: &str,
+        token: &str,
+        thread_id: &str,
+        app_scope: &str,
+    ) {
+        let transport = SelectedTransport {
+            kind: TransportKind::AppServer,
+            endpoint: Some("unix:///tmp/collab-test-appserver.sock".into()),
+            namespace: Some("codex_tui".into()),
+            session_id: Some(format!("session-{thread_id}")),
+            thread_id: Some(thread_id.to_owned()),
+            tmux_endpoint: None,
+            capabilities: vec!["send_message_to_thread".into()],
+            self_check: "test appserver".into(),
+        };
+        let project_scope = GlobalState::canonical_project_scope(root).unwrap();
+        let envelope = server
+            .typed_register_envelope_for_scope(
+                worker_id,
+                token,
+                &transport,
+                project_scope,
+                root.to_str().unwrap(),
+                AppServerId::new(app_scope).unwrap(),
+                false,
+            )
+            .unwrap();
+        server
+            .typed_dispatch(envelope)
+            .expect("native registration must succeed");
+    }
+
     #[test]
     fn appserver_registration_is_rejected_without_candidate_check() {
         let (mut server, root, _) = test_server();
@@ -713,15 +752,14 @@
             ("requester", "token-requester", "thread-requester"),
             ("target", "token-target", "thread-target"),
         ] {
-            let registered = handle_register_with_app_scope(
+            register_native_peer(
                 &server,
-                worker_id.into(),
-                token.into(),
-                root.display().to_string(),
-                Some(app_scope.clone()),
-                Some(test_candidates(thread_id).unwrap()),
+                &root,
+                worker_id,
+                token,
+                thread_id,
+                app_scope.as_str(),
             );
-            assert!(registered.ok, "{registered:?}");
         }
         let subscribed = handle_notification_subscribe(
             &server,
@@ -862,15 +900,14 @@
             ("requester", "token-requester", "thread-requester"),
             ("target", "token-target", "thread-target"),
         ] {
-            let registered = handle_register_with_app_scope(
+            register_native_peer(
                 &server,
-                worker_id.into(),
-                token.into(),
-                root.display().to_string(),
-                Some(app_scope.clone()),
-                Some(test_candidates(thread_id).unwrap()),
+                &root,
+                worker_id,
+                token,
+                thread_id,
+                app_scope.as_str(),
             );
-            assert!(registered.ok, "{registered:?}");
         }
         let subscribed = handle_notification_subscribe(
             &server,

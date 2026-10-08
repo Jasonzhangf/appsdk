@@ -1,17 +1,41 @@
-fn master_assignment_view(
+/// The single daemon-owned scope projection shared by `status`, `context`, the
+/// board, the panel and the authority-change receipts. It reports the exact
+/// route scope as `{ "project_scope", "app_scope_id" }`, or `null` when no
+/// route resolves. It never guesses a default app scope, so an unregistered
+/// route stays explicit instead of looking like a whole empty project.
+pub(crate) fn scope_view(route_scope: Option<&RouteScope>) -> serde_json::Value {
+    match route_scope {
+        Some(route_scope) => json!({
+            "project_scope": route_scope.project_scope_id.as_str(),
+            "app_scope_id": route_scope.app_scope_id,
+        }),
+        None => serde_json::Value::Null,
+    }
+}
+
+/// The single daemon-owned authority projection shared by `status`, `context`
+/// and the board. It reads only the current typed grant for the exact route
+/// scope and reports the holder, that scope, and the grant metadata. The
+/// transport observation is supplied by the caller and can never change the
+/// authority status: an unknown or unreachable holder stays assigned.
+pub(crate) fn master_authority_view(
     state: &State,
     route_scope: Option<&RouteScope>,
-    worker_id: &str,
-    endpoint_live: bool,
+    transport_live: bool,
 ) -> serde_json::Value {
-    let grant = current_master_grant(state, route_scope)
-        .filter(|grant| grant.agent_id.as_str() == worker_id);
+    let Some(grant) = current_master_grant(state, route_scope) else {
+        return serde_json::Value::Null;
+    };
     json!({
-        "worker_id": worker_id,
-        "endpoint_live": endpoint_live,
-        "assigned_by": grant.as_ref().map(|grant| grant.granted_by.clone()).or_else(|| state.master_assigned_by.clone()),
-        "approval": grant.as_ref().map(|grant| grant.approval.clone()).or_else(|| state.master_approval.clone()),
-        "assigned_ms": grant.as_ref().map(|grant| grant.granted_at_ms).or(state.master_assigned_ms),
+        "worker_id": grant.agent_id.as_str(),
+        "scope": scope_view(route_scope),
+        "endpoint_live": transport_live,
+        "assigned_by": grant.granted_by,
+        "approval": grant.approval,
+        "assigned_ms": grant.granted_at_ms,
+        "binding_id": grant.binding_id,
+        "endpoint_generation": grant.endpoint_generation,
+        "boundary": grant.boundary,
         "master_wake": state.master_wake,
     })
 }
@@ -71,30 +95,22 @@ fn prune_master_wake_idle_capacity(server: &Server) {
 fn handle_master_status(server: &Server) -> Resp {
     prune_master_wake_idle_capacity(server);
     let state = server.state.lock().unwrap();
-    let route_scope = server_route_scope(server, &state).ok().flatten();
-    let live = match live_master_id(server, &state) {
-        Ok(master) => master,
-        Err(error) => {
-            return Resp::err_data(
-                error,
-                json!({"status": "unknown", "recorded_worker_id": current_master_worker_id(
-                    &state,
-                    route_scope.as_ref()
-                )}),
-            )
-        }
+    // The typed grant is the only authority source. A route, reducer or scope
+    // failure is an explicit error; a transport observation is reported
+    // separately and never removes the holder.
+    let route_scope = match server_route_scope(server, &state) {
+        Ok(route_scope) => route_scope,
+        Err(error) => return Resp::err(error),
     };
-    let master = live
-        .as_ref()
-        .map(|id| master_assignment_view(&state, route_scope.as_ref(), id, true));
-    let recorded_worker = current_master_grant(&state, route_scope.as_ref())
-        .map(|grant| grant.agent_id.as_str().to_owned())
-        .or_else(|| state.master_worker_id.clone());
-    let recorded = recorded_worker
-        .as_ref()
-        .filter(|id| live.as_deref() != Some(id.as_str()))
-        .map(|id| master_assignment_view(&state, route_scope.as_ref(), id, false));
-    Resp::data(json!({"master": master, "recorded_unusable": recorded}))
+    let transport_live = current_master_grant(&state, route_scope.as_ref())
+        .and_then(|grant| state.workers.get(grant.agent_id.as_str()).cloned())
+        .is_some_and(|worker| worker_presence(server, &worker) == IdentityPresence::Present);
+    let master = master_authority_view(&state, route_scope.as_ref(), transport_live);
+    Resp::data(json!({
+        "master": master,
+        "scope": scope_view(route_scope.as_ref()),
+        "recorded_unusable": serde_json::Value::Null,
+    }))
 }
 
 pub(crate) fn handle_send(
@@ -561,15 +577,17 @@ fn handle_live_closure_daemon_send(
     if let Err(error) = verify(&st, &worker_id, &token) {
         return error;
     }
-    let live_master = match live_master_id(server, &st) {
+    // Route role is the current grant holder. Whether the recipient address is
+    // actually reachable is checked separately below and stays a send gate.
+    let master_holder = match current_master_holder(server, &st) {
         Ok(master) => master,
         Err(error) => return Resp::err(error),
     };
-    if path == "daemon_to_master" && live_master.as_deref() != Some(to.as_str()) {
+    if path == "daemon_to_master" && master_holder.as_deref() != Some(to.as_str()) {
         return Resp::err("COLLAB_LIVE_CLOSURE_MASTER_ROUTE_MISMATCH");
     }
     if matches!(path.as_str(), "daemon_to_peer" | "restart_replay")
-        && live_master.as_deref() == Some(to.as_str())
+        && master_holder.as_deref() == Some(to.as_str())
     {
         return Resp::err("COLLAB_LIVE_CLOSURE_PEER_ROUTE_MISMATCH");
     }
@@ -680,12 +698,12 @@ fn handle_cross_project_send(
         );
     }
     let mut st = server.state.lock().unwrap();
-    let live_master = match live_master_id(server, &st) {
+    let target_master = match current_master_holder(server, &st) {
         Ok(master) => master,
         Err(error) => return Resp::err(error),
     };
-    if live_master.as_deref() != Some(to.as_str()) {
-        return Resp::err("cross-project communication requires the target to be a live master");
+    if target_master.as_deref() != Some(to.as_str()) {
+        return Resp::err("cross-project communication requires the target to be the project master");
     }
     let Some(recipient) = st.workers.get(&to).cloned() else {
         return Resp::err(format!("recipient {} not registered", to));
@@ -1452,5 +1470,9 @@ fn task_integration_authorized(
     worker_id: &str,
 ) -> bool {
     task.owner == worker_id
-        || live_master_id(server, state).ok().flatten().as_deref() == Some(worker_id)
+        || current_master_holder(server, state)
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some(worker_id)
 }

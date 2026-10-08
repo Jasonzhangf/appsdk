@@ -1,5 +1,8 @@
 fn record_ordinary_peer_presence_edges(server: &Server, worker_filter: Option<&str>) {
-    let master = match live_master_worker_snapshot(server) {
+    // The wake edge belongs to the current grant holder. Reachability of that
+    // holder is not consulted: a message to an unreachable master stays
+    // durable, and the notification attempt reports its own send failure.
+    let master = match current_master_worker_record(server, &server.state.lock().unwrap()) {
         Ok(Some(master)) => master,
         _ => return,
     };

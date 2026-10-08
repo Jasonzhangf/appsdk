@@ -79,8 +79,10 @@ fn absent_tmux_master_allows_approved_peer_promotion() {
     );
     peer_tests::kill_registered_worker_pane(&server, "peer-a");
     let status = super::handle_master_status(&server);
-    assert!(status.data["master"].is_null(), "{status:?}");
-    assert_eq!(status.data["recorded_unusable"]["worker_id"], "peer-a");
+    // The recorded grant is the authority. A vanished pane address is a
+    // communication fact; it does not unseat the holder.
+    assert_eq!(status.data["master"]["worker_id"], "peer-a", "{status:?}");
+    assert!(status.data["recorded_unusable"].is_null(), "{status:?}");
     let promoted = super::handle_master_promote(
         &server,
         "peer-b".into(),
@@ -89,7 +91,7 @@ fn absent_tmux_master_allows_approved_peer_promotion() {
     );
     assert!(promoted.ok, "{}", promoted.error.unwrap_or_default());
     assert_eq!(
-        super::live_master_id(&server, &server.state.lock().unwrap()).unwrap(),
+        super::current_master_holder(&server, &server.state.lock().unwrap()).unwrap(),
         Some("peer-b".into())
     );
     let live = super::handle_master_status(&server);
@@ -118,7 +120,7 @@ fn approved_promotion_supersedes_a_live_tmux_master() {
     let status = super::handle_master_status(&server);
     assert_eq!(status.data["master"]["worker_id"], "peer-a", "{status:?}");
     assert_eq!(
-        super::live_master_id(&server, &server.state.lock().unwrap()).unwrap(),
+        super::current_master_holder(&server, &server.state.lock().unwrap()).unwrap(),
         Some("peer-a".into())
     );
     let context = handle_context(&server, "peer-b".into(), "token-peer-b".into());
@@ -133,7 +135,7 @@ fn approved_promotion_supersedes_a_live_tmux_master() {
     assert!(promoted.ok, "{promoted:?}");
     assert_eq!(promoted.data["master"], "peer-b");
     assert_eq!(
-        super::live_master_id(&server, &server.state.lock().unwrap()).unwrap(),
+        super::current_master_holder(&server, &server.state.lock().unwrap()).unwrap(),
         Some("peer-b".into())
     );
     std::fs::remove_dir_all(root).unwrap();
@@ -142,7 +144,9 @@ fn approved_promotion_supersedes_a_live_tmux_master() {
 #[test]
 fn cross_project_send_requires_master_endpoints_on_both_sides() {
     let (server, root) = test_server();
-    register(&server, "target-master", "%target-master");
+    // The target master is a native App Server peer, so its presence is a real
+    // runtime fact rather than a tmux address that can only report Unknown.
+    register_appserver_worker(&server, &root, "target-master", "thread-target-master");
     register(&server, "target-peer", "%target-peer");
     let promoted = super::handle_master_promote(
         &server,
@@ -169,7 +173,7 @@ fn cross_project_send_requires_master_endpoints_on_both_sides() {
     assert!(denied_peer
         .error
         .unwrap()
-        .contains("target to be a live master"));
+        .contains("target to be the project master"));
 
     let delivered = super::handle_cross_project_send(
         &server,
@@ -266,7 +270,7 @@ fn master_promotion_allows_live_tmux_peer() {
     );
     assert!(promoted.ok, "{}", promoted.error.unwrap_or_default());
     assert_eq!(
-        super::live_master_id(&server, &server.state.lock().unwrap()).unwrap(),
+        super::current_master_holder(&server, &server.state.lock().unwrap()).unwrap(),
         Some("peer-appserver".into())
     );
     std::fs::remove_dir_all(root).unwrap();
@@ -538,32 +542,48 @@ fn wire_master_recover_reissues_master_grant_for_new_generation() {
 }
 
 #[test]
-fn wire_master_recovery_is_rejected_while_master_is_live() {
+fn same_principal_master_recovery_keeps_grant_while_incumbent_pane_stays() {
     let (mut server, root) = test_server();
     let registered = register_appserver(&mut server, "live-master", "thread-live-master-old");
     assert!(registered.ok, "{registered:?}");
     promote_master(&server, "live-master", "user approved live-master");
     let previous = registered_binding(&server, "live-master");
+    let original_grant = server
+        .state
+        .lock()
+        .unwrap()
+        .global
+        .lookup_master_grant_for(&previous.route_scope(), &previous.binding_id)
+        .unwrap()
+        .clone();
 
     let recovered =
         recover_worker_on_new_thread(&mut server, "live-master", "thread-live-master-new");
-    assert!(!recovered.ok, "{recovered:?}");
-    assert!(recovered
-        .error
-        .as_deref()
-        .unwrap()
-        .starts_with("MASTER_RECOVERY_BLOCKED_LIVE:"));
+    assert!(
+        recovered.ok,
+        "same-principal recovery must not be fenced by the old pane: {recovered:?}"
+    );
     let state = server.state.lock().unwrap();
+    let route_scope = previous.route_scope();
     let current = state
         .global
-        .lookup_binding_for(&previous.route_scope(), &previous.binding_id)
+        .lookup_binding_for(&route_scope, &previous.binding_id)
         .unwrap();
-    assert_eq!(current.endpoint_generation, previous.endpoint_generation);
+    assert_eq!(
+        current.endpoint_generation,
+        previous.endpoint_generation + 1
+    );
+    let grant = state
+        .global
+        .lookup_master_grant_for(&route_scope, &previous.binding_id)
+        .expect("same-principal recovery must reissue the grant");
+    assert_eq!(grant.endpoint_generation, current.endpoint_generation);
+    assert_eq!(grant.approval, original_grant.approval);
     std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn wire_master_recovery_is_rejected_when_liveness_is_unknown() {
+fn same_principal_master_recovery_is_allowed_when_probe_is_unknown() {
     let (mut server, root) = test_server();
     let registered = register_appserver(&mut server, "unknown-master", "thread-unknown-master-old");
     assert!(registered.ok, "{registered:?}");
@@ -572,12 +592,12 @@ fn wire_master_recovery_is_rejected_when_liveness_is_unknown() {
 
     let recovered =
         recover_worker_on_new_thread(&mut server, "unknown-master", "thread-unknown-master-new");
-    assert!(!recovered.ok, "{recovered:?}");
-    assert!(recovered
-        .error
-        .as_deref()
-        .unwrap()
-        .starts_with("MASTER_RECOVERY_BLOCKED_UNKNOWN:"));
+    assert!(
+        recovered.ok,
+        "an unknown transport probe must not fence same-principal recovery: {recovered:?}"
+    );
+    let status = super::handle_master_status(&server);
+    assert_eq!(status.data["master"]["worker_id"], "unknown-master", "{status:?}");
     std::fs::remove_dir_all(root).unwrap();
 }
 

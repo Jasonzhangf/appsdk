@@ -1,5 +1,7 @@
     use super::*;
-    use crate::server::peer_tests::{register, test_appserver_transport, test_server};
+    use crate::server::peer_tests::{
+        register, register_appserver_worker, test_appserver_transport, test_server,
+    };
     use crate::server::state::MasterWakeSignal;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
@@ -12,7 +14,7 @@
     // Notification/recovery tests use the retained private-child dispatcher.
     // Public ordinary-peer dispatch is tested as an explicit board-only gate.
     fn register_private_dispatch_peer(server: &Server) {
-        register(server, "peer", "%peer");
+        register_appserver_worker(server, &server.root, "peer", "thread-peer");
         server.commit(&[Event::SubagentUpdated { subagent: crate::subagent::Record {
             id: "managed-peer".into(), parent: "master".into(), peer: "peer".into(),
             status: "idle".into(), thread_id: None, profile: None,
@@ -201,7 +203,7 @@
 
         let (server, root) = test_server();
         register(&server, "master", "%master");
-        register(&server, "managed-peer", "%managed-peer");
+        register_appserver_worker(&server, &root, "managed-peer", "thread-managed-peer");
         server.commit(&[Event::SubagentUpdated {
             subagent: crate::subagent::Record {
                 id: "existing-child".into(),
@@ -229,18 +231,14 @@
     }
 
     #[test]
-    fn admission_uses_the_appserver_answer_for_a_registered_tmux_peer() {
-        let (mut server, root) = test_server();
+    fn admission_uses_the_native_appserver_answer_for_a_registered_peer() {
+        // A tmux pane is an address, never a liveness credential, so a tmux
+        // registration can no longer prove presence. A natively registered
+        // App Server peer whose thread answers is the only admission-eligible
+        // peer; the pane is not consulted.
+        let (server, root) = test_server();
         register(&server, "master", "%master");
-        register(&server, "not-loaded-peer", "%not-loaded-peer");
-        // A tmux registration is live only when its explicitly registered
-        // AppServer thread answers; the pane alone is not a liveness proof.
-        server.appserver_thread_status = Arc::new(|_, thread_id| {
-            Ok(serde_json::json!({
-                "thread": {"id": thread_id, "status": {"type": "idle"}},
-                "thread_state": "idle"
-            }))
-        });
+        register_appserver_worker(&server, &root, "not-loaded-peer", "thread-not-loaded-peer");
 
         assert_eq!(
             registered_available_peer_for_admission(&server, "master")
@@ -255,7 +253,10 @@
     fn omitted_id_reuses_managed_idle_capacity_and_explicit_existing_id_is_preserved() {
         let (server, root) = test_server();
         register(&server, "master", "%master");
-        register(&server, "managed-peer", "%managed-peer");
+        // The managed peer is the dispatch recipient, so it needs a
+        // genuinely-observed native runtime; a tmux pane is only an address and
+        // cannot be admitted as a live recipient.
+        register_appserver_worker(&server, &root, "managed-peer", "thread-managed-peer");
         promote_master(&server);
         server.commit(&[Event::SubagentUpdated {
             subagent: crate::subagent::Record {
@@ -632,7 +633,7 @@
     fn scheduler_dispatch_requires_board_invitation_for_ordinary_peer() {
         let (server, root) = test_server();
         register(&server, "master", "%master");
-        register(&server, "peer", "%peer");
+        register_appserver_worker(&server, &root, "peer", "thread-peer");
         promote_master(&server);
         let server = Arc::new(server);
         let dispatch_request = |subject: &str, body: &str| {
@@ -685,8 +686,8 @@
     fn scheduler_dispatch_public_peer_refusal_does_not_fall_back_to_private_child() {
         let (server, root) = test_server();
         register(&server, "master", "%master");
-        register(&server, "idle-peer", "%idle-peer");
-        register(&server, "managed-peer", "%managed-peer");
+        register_appserver_worker(&server, &root, "idle-peer", "thread-idle-peer");
+        register_appserver_worker(&server, &root, "managed-peer", "thread-managed-peer");
         promote_master(&server);
         server.commit(&[Event::SubagentUpdated {
             subagent: crate::subagent::Record {
@@ -908,7 +909,7 @@
     fn scheduler_dispatch_reuses_managed_child_and_deduplicates_request() {
         let (server, root) = test_server();
         register(&server, "master", "%master");
-        register(&server, "managed-peer", "%managed-peer");
+        register_appserver_worker(&server, &root, "managed-peer", "thread-managed-peer");
         promote_master(&server);
         server.commit(&[Event::SubagentUpdated {
             subagent: crate::subagent::Record {
@@ -1028,7 +1029,10 @@
     fn scheduler_dispatch_audit_failure_cannot_be_accepted_by_managed_child() {
         let (server, root) = test_server();
         register(&server, "master", "%master");
-        register(&server, "managed-peer", "%managed-peer");
+        // The managed peer is the dispatch recipient, so it needs a
+        // genuinely-observed native runtime; a tmux pane is only an address and
+        // cannot be admitted as a live recipient.
+        register_appserver_worker(&server, &root, "managed-peer", "thread-managed-peer");
         promote_master(&server);
         server.commit(&[Event::SubagentUpdated {
             subagent: crate::subagent::Record {
@@ -1230,7 +1234,7 @@
         // but before the durable succeeded status commit.
         let (mut server, root) = test_server();
         register(&server, "master", "%master");
-        register(&server, "peer", "%peer");
+        register_appserver_worker(&server, &root, "peer", "thread-peer");
         server.config.notifications.enabled = true;
         promote_master(&server);
         server.commit(&[
@@ -1313,12 +1317,13 @@
             .enable_all()
             .build()
             .unwrap();
-        let (poll_result, recovered) = runtime.block_on(async {
-            let poll = handle_poll_async(Arc::clone(&server), "peer".into(), 1_000);
-            let recovery_server = Arc::clone(&server);
-            let recovery = tokio::task::spawn_blocking(move || {
-                dispatch(
-                    &recovery_server,
+        // This case recovers an already-consumed pending reservation. Complete
+        // the public poll first: racing it against recovery could instead take
+        // the native notification path, whose audit is deliberately read-only.
+        // That path correctly rejects delivery and is a different failure case.
+        let poll_result = runtime.block_on(handle_poll_async(Arc::clone(&server), "peer".into(), 1_000));
+        let recovered = dispatch(
+                    &server,
                     Req::Subagent {
                         worker_id: "master".into(),
                         token: "token-master".into(),
@@ -1335,11 +1340,7 @@
                         },
                         launch_env: Default::default(),
                     },
-                )
-            });
-            let (poll_result, recovered) = tokio::join!(poll, recovery);
-            (poll_result, recovered.unwrap())
-        });
+                );
         let mut restored = std::fs::metadata(&audit_path).unwrap().permissions();
         restored.set_mode(original_mode);
         std::fs::set_permissions(&audit_path, restored).unwrap();

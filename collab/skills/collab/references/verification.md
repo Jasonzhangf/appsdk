@@ -46,10 +46,11 @@ Before review, prove the affected subset and every changed invariant:
   loop, implicit first-register master, treating Codex root as Collab
   master, dispatch, heartbeat, or `/goal` semantics; skill-level owner checks
   run only on supported timer/wake or direct wake and then continue or escalate
-  real unfinished tasks; explicit
-  user-approved self-promotion is allowed only when no live master exists, and
-  only the live master may delegate; independent peers may decline a master
-  invite and managed subagents must obey the master.
+  real unfinished tasks; explicit user-approved `master promote` replaces the
+  current holder independent of liveness, only the current master grant holder
+  may delegate, and an authenticated peer with explicit approval may clear the
+  scoped grant; independent peers may decline a master invite and managed
+  subagents must obey the master.
 
 Review only after tests and runtime evidence pass. Post-review source/config/test
 changes invalidate review and affected runtime evidence. Integrate the reviewed

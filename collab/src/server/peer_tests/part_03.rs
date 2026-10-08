@@ -545,8 +545,8 @@ fn live_tmux_subagent_still_requires_a_snapshot_before_close() {
     let child = server.state.lock().unwrap().workers["child"].clone();
     assert_eq!(
         worker_presence(&server, &child),
-        IdentityPresence::Present,
-        "a tmux binding is live only when its registered AppServer thread answers"
+        IdentityPresence::Unknown,
+        "a tmux pane is an address, not a runtime; even a recorded Codex thread on a tmux transport is not evidence of presence"
     );
     let server = Arc::new(server);
     let response = dispatch(
@@ -620,9 +620,9 @@ fn missing_subagent_with_unresolved_responsibility_still_requires_a_snapshot() {
 
 #[test]
 fn live_subagent_still_requires_a_snapshot_before_close() {
-    let (mut server, root) = test_server();
+    let (server, root) = test_server();
     register(&server, "parent", "%parent");
-    register(&server, "child", "%child");
+    register_appserver_worker(&server, &root, "child", "thread-child");
     server.commit(&[Event::SubagentUpdated {
         subagent: subagent_record("unknown-retire", "idle", "child"),
     }]);
@@ -630,7 +630,7 @@ fn live_subagent_still_requires_a_snapshot_before_close() {
     assert_eq!(
         worker_presence(&server, &child),
         IdentityPresence::Present,
-        "the registered tmux pane is the presence authority"
+        "a natively registered App Server peer whose thread answers is the presence authority"
     );
     let server = Arc::new(server);
     let response = dispatch(

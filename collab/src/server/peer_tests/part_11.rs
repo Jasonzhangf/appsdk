@@ -1,5 +1,5 @@
 #[test]
-fn first_offline_status_sets_baseline_then_online_transition_notifies_once() {
+fn recreated_tmux_pane_reports_unknown_and_never_fabricates_online_recovery() {
     let (server, root) = test_server();
     register(&server, "master-worker", "thread-master");
     register(&server, "cold-worker", "thread-cold");
@@ -40,7 +40,13 @@ fn first_offline_status_sets_baseline_then_online_transition_notifies_once() {
         },
     );
     assert!(online.ok, "{online:?}");
-    assert_eq!(online.data["workers"][0]["endpoint_live"], true);
+    // A recreated pane is a recreated address, not a live agent. Presence stays
+    // Unknown and must never be projected as a fabricated online recovery.
+    assert_eq!(online.data["workers"][0]["presence"], "unknown");
+    assert_eq!(
+        online.data["workers"][0]["endpoint_live"],
+        serde_json::Value::Null
+    );
     assert_eq!(online.data["workers"][0]["agent_state"], "unknown");
     let repeated = dispatch(
         &server_arc,
@@ -58,10 +64,10 @@ fn first_offline_status_sets_baseline_then_online_transition_notifies_once() {
                 m.to == "master-worker" && m.subject == Some("worker-recovered: cold-worker".into())
             })
             .count(),
-        1,
-        "offline->online status edge must notify exactly once"
+        0,
+        "a recreated pane must not fabricate an online recovery notification"
     );
-    assert_eq!(state.keepalives["cold-worker"].notified_presence, "online");
+    assert_eq!(state.keepalives["cold-worker"].notified_presence, "offline");
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -103,7 +109,11 @@ fn stale_presence_probe_after_reregister_does_not_notify_or_mutate_new_worker() 
         },
     );
     assert!(status.ok, "{status:?}");
-    assert_eq!(status.data["workers"][0]["presence"], "present");
+    // The stale probe result was captured before re-registration; the current
+    // binding has a fresh tmux address whose runtime is Unknown. Neither the
+    // stale probe nor the recreated pane may flip the new worker to present, and
+    // no presence notification may be emitted for the unchanged observation.
+    assert_eq!(status.data["workers"][0]["presence"], "unknown");
     assert_eq!(status.data["workers"][0]["agent_state"], "unknown");
     let state = server_arc.state.lock().unwrap();
     assert_eq!(state.workers["edge-worker"].token, "token-edge-worker");
@@ -551,11 +561,12 @@ fn context_returns_the_callers_binding_when_the_root_holds_several_app_scopes() 
 
 /// `collab context` replaces `collab who` / `collab status --all` for agents,
 /// and `Workers` / `StatusAll` were the calls that recorded ordinary-peer
-/// presence edges. Driving the same transition through the consolidated entry
-/// must still emit the recovery notification, or the wake loop silently
-/// degrades as soon as agents stop calling the demoted commands.
+/// presence edges. A vanished tmux pane is Missing (offline); recreating a pane
+/// re-creates an address whose runtime is Unknown, which is not a recovery.
+/// `collab context` must record the offline baseline and must never fabricate
+/// an online recovery for a recreated pane.
 #[test]
-fn context_records_peer_presence_transitions_like_status_all() {
+fn context_records_tmux_offline_but_never_fabricates_online_recovery() {
     let (server, root) = test_server();
     register(&server, "master-worker", "thread-master");
     register(&server, "cold-worker", "thread-cold");
@@ -599,10 +610,10 @@ fn context_records_peer_presence_transitions_like_status_all() {
                 m.to == "master-worker" && m.subject == Some("worker-recovered: cold-worker".into())
             })
             .count(),
-        1,
-        "the offline->online edge must still notify exactly once through collab context"
+        0,
+        "a recreated tmux pane must not fabricate an online recovery through collab context"
     );
-    assert_eq!(state.keepalives["cold-worker"].notified_presence, "online");
+    assert_eq!(state.keepalives["cold-worker"].notified_presence, "offline");
     drop(state);
     std::fs::remove_dir_all(root).ok();
 }

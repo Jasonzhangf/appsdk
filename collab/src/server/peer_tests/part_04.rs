@@ -1181,7 +1181,7 @@ fn master_promotion_requires_user_approval_and_existing_master_delegates() {
     );
     assert!(!unapproved.ok, "{unapproved:?}");
     assert_eq!(
-        super::live_master_id(&server, &server.state.lock().unwrap()).unwrap(),
+        super::current_master_holder(&server, &server.state.lock().unwrap()).unwrap(),
         Some("peer-a".into())
     );
 
@@ -1202,7 +1202,7 @@ fn master_promotion_requires_user_approval_and_existing_master_delegates() {
     );
     assert!(delegated.ok, "{}", delegated.error.unwrap_or_default());
     assert_eq!(
-        super::live_master_id(&server, &server.state.lock().unwrap()).unwrap(),
+        super::current_master_holder(&server, &server.state.lock().unwrap()).unwrap(),
         Some("peer-b".into())
     );
     assert_eq!(delegated.data["role_brief"]["role"], "master");

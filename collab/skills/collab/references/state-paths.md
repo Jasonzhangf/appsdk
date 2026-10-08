@@ -152,9 +152,9 @@ healthy.
 
 A registered AppServer route is live only when the verified owner resolves the
 exact saved session/thread and project cwd through native `thread/read`. A
-tmux-only binding uses its verified pane probe as that transport's liveness.
-A missing endpoint is absent; a failed probe is unknown. Neither presence signal
-establishes message consumption.
+tmux-only binding uses its verified pane as address proof only; the pane never
+proves the agent is alive or `Present`. A missing endpoint is absent; a failed
+probe is unknown. Neither presence signal establishes message consumption.
 
 An operator may use these read-only diagnostics for audit:
 

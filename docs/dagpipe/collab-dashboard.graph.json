@@ -1,18 +1,18 @@
 {
   "id": "appsdk-collab-dashboard-operation",
-  "version": "0.1.0",
-  "description": "执行任务板一次请求：接收已认证的查看/发布/邀请/回应/进度意图，校验当前项目与权限，读取或原子提交daemon真源，投影无凭据无subworker的结果，返回明确成功/失败。设计和状态机见 docs/design/collab-dashboard-v1.md；实现位于 collab/src/server/board_handlers.rs（候选 caf598d）。每次重试是新请求，不构造跨节点回边。",
+  "version": "0.2.0",
+  "description": "执行任务板一次请求：接收已认证的查看/发布/邀请/回应/进度意图，校验当前项目、当前授权与版本，读取或原子提交 daemon 真源，投影无凭据无 subworker 的结果，返回明确成功/失败。授权节点只读当前 route 的 typed grant；通信观察是独立事实，不能把 unknown/cold/missing 解释为无授权。授权、地址事实和 agent 运行事实分开投影；holder 通信未知时仍显示为 holder。HTTP GET 只读，不新增 POST/PUT/PATCH/DELETE 授权路由。设计和状态机见 docs/design/collab-dashboard-v1.md 与 docs/design/collab-master-authority-contract-20261007.md；实现代码边当前待实现。每次重试是新请求，不构造跨节点回边。",
   "inputs": [{"id": "board_intent", "schema": "Object"}],
   "nodes": [
     {"id": "接收任务板意图", "operator": "appsdk.collab.board.admit_request", "operator_version": "1", "inputs": ["board_intent"], "output": {"id": "scoped_intent", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
-    {"id": "校验角色所有权与版本", "operator": "appsdk.collab.board.authorize", "operator_version": "1", "inputs": ["scoped_intent"], "output": {"id": "authorized_intent", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "校验授权与版本", "operator": "appsdk.collab.board.authorize", "operator_version": "1", "inputs": ["scoped_intent"], "output": {"id": "authorized_intent", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
     {"id": "读取或原子提交任务真源", "operator": "appsdk.collab.board.apply", "operator_version": "1", "inputs": ["authorized_intent"], "output": {"id": "board_receipt", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
-    {"id": "返回公共进度或明确失败", "operator": "appsdk.collab.board.project_result", "operator_version": "1", "inputs": ["board_receipt"], "output": {"id": "board_outcome", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"}
+    {"id": "投影授权与独立传输事实", "operator": "appsdk.collab.board.project_result", "operator_version": "1", "inputs": ["board_receipt"], "output": {"id": "board_outcome", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"}
   ],
   "edges": [
-    {"from": "接收任务板意图", "to": "校验角色所有权与版本", "arc_id": "scoped_intent"},
-    {"from": "校验角色所有权与版本", "to": "读取或原子提交任务真源", "arc_id": "authorized_intent"},
-    {"from": "读取或原子提交任务真源", "to": "返回公共进度或明确失败", "arc_id": "board_receipt"}
+    {"from": "接收任务板意图", "to": "校验授权与版本", "arc_id": "scoped_intent"},
+    {"from": "校验授权与版本", "to": "读取或原子提交任务真源", "arc_id": "authorized_intent"},
+    {"from": "读取或原子提交任务真源", "to": "投影授权与独立传输事实", "arc_id": "board_receipt"}
   ],
   "outputs": ["board_outcome"]
 }

@@ -1,0 +1,2 @@
+collab: APPSERVER_ENDPOINT_REJECTED: ADAPTER_ROUTE_UNAVAILABLE: /Users/fanzhang/.codex/app-server-control/app-server-control.sock: Connection refused (os error 61)
+collab response: {"error":"APPSERVER_ENDPOINT_REJECTED: ADAPTER_ROUTE_UNAVAILABLE: /Users/fanzhang/.codex/app-server-control/app-server-control.sock: Connection refused (os error 61)","ok":false}

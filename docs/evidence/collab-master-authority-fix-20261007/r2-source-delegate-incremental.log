@@ -1,0 +1,685 @@
+warning: unused imports: `candidate_from_env` and `immediate_notify`
+  --> src/adapters/mod.rs:18:28
+   |
+18 | pub use codex_app_server::{candidate_from_env, immediate_notify, verify_candidate};
+   |                            ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `std::os::unix::net::UnixListener`
+   --> src/adapters/mod.rs:650:13
+    |
+650 |         use std::os::unix::net::UnixListener;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `serde_json::Value`
+ --> src/server/global_state_impl.rs:3:5
+  |
+3 | use serde_json::Value;
+  |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::path::Path`
+  --> src/server/global_state_models.rs:18:5
+   |
+18 | use std::path::Path;
+   |     ^^^^^^^^^^^^^^^
+
+warning: glob import doesn't reexport anything with visibility `pub` because no imported item is public enough
+  --> src/server/global_state.rs:10:9
+   |
+10 | pub use global_state_helpers::*;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+note: the most public imported item is `pub(crate)`
+  --> src/server/global_state.rs:10:9
+   |
+10 | pub use global_state_helpers::*;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^
+   = help: reduce the glob import's visibility or increase visibility of imported items
+
+warning: unused import: `global_state_helpers::*`
+  --> src/server/global_state.rs:10:9
+   |
+10 | pub use global_state_helpers::*;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `global_state_impl::*`
+  --> src/server/global_state.rs:11:9
+   |
+11 | pub use global_state_impl::*;
+   |         ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::*`
+ --> src/server/state_tests_part2.rs:1:5
+  |
+1 | use super::*;
+  |     ^^^^^^^^
+
+warning: unused import: `super::*`
+ --> src/server/timers_tests_part2.rs:1:5
+  |
+1 | use super::*;
+  |     ^^^^^^^^
+
+warning: unused import: `Instant`
+  --> src/server/scheduler_admission_tests/part_01.rs:10:31
+   |
+10 |     use std::time::{Duration, Instant};
+   |                               ^^^^^^^
+
+warning: unused import: `serde_json::Value`
+ --> src/server/peer_tests.rs:5:5
+  |
+5 | use serde_json::Value;
+  |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Instant`
+  --> src/server/peer_tests.rs:11:27
+   |
+11 | use std::time::{Duration, Instant};
+   |                           ^^^^^^^
+
+warning: variable does not need to be mutable
+   --> src/server/timers_tests.rs:303:14
+    |
+303 |         let (mut server, root) = test_server();
+    |              ----^^^^^^
+    |              |
+    |              help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> src/server/timers_tests_part2.rs:1316:14
+     |
+1316 |         let (mut replayed, replay_root) = test_server();
+     |              ----^^^^^^^^
+     |              |
+     |              help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/server/notification_batch_tests.rs:527:14
+    |
+527 |         let (mut server, root) = test_server();
+    |              ----^^^^^^
+    |              |
+    |              help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/server/host_route_registry_tests/part_01.rs:402:14
+    |
+402 |         let (mut server, root, _) = test_server();
+    |              ----^^^^^^
+    |              |
+    |              help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/server/host_route_registry_tests/part_02_tail.rs:519:13
+    |
+519 |         let mut binding = runtime
+    |             ----^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/server/scheduler_admission_tests/part_01.rs:179:14
+    |
+179 |         let (mut server, root) = test_server();
+    |              ----^^^^^^
+    |              |
+    |              help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/server/dsh_channel_tests.rs:768:9
+    |
+768 |     let mut message_id = |msg_id: &str| {
+    |         ----^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: irrefutable `if let` pattern
+   --> src/server/peer_tests/part_03.rs:206:8
+    |
+206 |       if let crate::server::state::TypedCommand::RegisterWorker { binding, .. } =
+    |  ________^
+207 | |         &mut wrong_principal.command
+    | |____________________________________^
+    |
+    = note: this pattern will always match, so the `if let` is useless
+    = help: consider replacing the `if let` with a `let`
+    = note: `#[warn(irrefutable_let_patterns)]` on by default
+
+warning: irrefutable `if let` pattern
+   --> src/server/peer_tests/part_03.rs:294:8
+    |
+294 |       if let crate::server::state::TypedCommand::RegisterWorker {
+    |  ________^
+295 | |         binding, worker, ..
+296 | |     } = &mut second.command
+    | |___________________________^
+    |
+    = note: this pattern will always match, so the `if let` is useless
+    = help: consider replacing the `if let` with a `let`
+
+warning: variable does not need to be mutable
+   --> src/server/peer_tests/part_03.rs:623:10
+    |
+623 |     let (mut server, root) = test_server();
+    |          ----^^^^^^
+    |          |
+    |          help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/server/peer_tests/part_03.rs:758:14
+    |
+758 |         let (mut server, root) = test_server();
+    |              ----^^^^^^
+    |              |
+    |              help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/server/peer_tests/part_03.rs:794:14
+    |
+794 |         let (mut server, root) = test_server();
+    |              ----^^^^^^
+    |              |
+    |              help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/server/peer_tests/part_05.rs:243:10
+    |
+243 |     let (mut server, root) = test_server();
+    |          ----^^^^^^
+    |          |
+    |          help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/server/peer_tests/part_11.rs:129:9
+    |
+129 |     let mut server_arc = std::sync::Arc::new(server);
+    |         ----^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/server/mod_parts/part_05.rs:1330:13
+     |
+1330 |         let mut state = server.state.lock().unwrap();
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/server/mod_parts/part_08.rs:313:9
+    |
+313 |     let mut st = server.state.lock().unwrap();
+    |         ----^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/server/mod_parts/part_08.rs:563:9
+    |
+563 |     let mut st = server.state.lock().unwrap();
+    |         ----^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/server/mod_parts/part_08.rs:687:9
+    |
+687 |     let mut st = server.state.lock().unwrap();
+    |         ----^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `target`
+   --> src/main_live_closure.rs:509:9
+    |
+509 |     let target = workers
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_target`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `call_with_runtime_identity` is never used
+   --> src/client.rs:248:8
+    |
+248 | pub fn call_with_runtime_identity<T: DeserializeOwned>(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `call_with_runtime_identity_at_root_daemon` is never used
+   --> src/client.rs:273:8
+    |
+273 | pub fn call_with_runtime_identity_at_root_daemon<T: DeserializeOwned>(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `daemon_locked` is never used
+   --> src/client.rs:283:8
+    |
+283 | pub fn daemon_locked(server_dir: &Path) -> bool {
+    |        ^^^^^^^^^^^^^
+
+warning: constant `APPSERVER_TIMEOUT_MS_ENV` is never used
+  --> src/adapters/codex_app_server_production_part1.rs:12:11
+   |
+12 | pub const APPSERVER_TIMEOUT_MS_ENV: &str = "COLLAB_APPSERVER_TIMEOUT_MS";
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `AppServerCapabilities` is never constructed
+  --> src/adapters/codex_app_server_production_part1.rs:76:12
+   |
+76 | pub struct AppServerCapabilities {
+   |            ^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `native`, `adapter`, and `names` are never used
+   --> src/adapters/codex_app_server_production_part1.rs:86:12
+    |
+ 85 | impl AppServerCapabilities {
+    | -------------------------- associated items in this implementation
+ 86 |     pub fn native() -> Self {
+    |            ^^^^^^
+...
+ 97 |     pub fn adapter(&self) -> AdapterCapabilities {
+    |            ^^^^^^^
+...
+106 |     pub fn names(&self) -> Vec<&'static str> {
+    |            ^^^^^
+
+warning: struct `LiveAppServer` is never constructed
+   --> src/adapters/codex_app_server_production_part1.rs:131:12
+    |
+131 | pub struct LiveAppServer {
+    |            ^^^^^^^^^^^^^
+
+warning: multiple associated items are never used
+   --> src/adapters/codex_app_server_production_part1.rs:140:12
+    |
+139 | impl LiveAppServer {
+    | ------------------ associated items in this implementation
+140 |     pub fn detect() -> Result<Option<Self>, AdapterError> {
+    |            ^^^^^^
+...
+209 |     pub fn socket_path(&self) -> &Path {
+    |            ^^^^^^^^^^^
+...
+213 |     pub fn namespace(&self) -> &str {
+    |            ^^^^^^^^^
+...
+217 |     pub fn thread_id(&self) -> &NativeThreadId {
+    |            ^^^^^^^^^
+...
+221 |     pub fn capabilities(&self) -> &AppServerCapabilities {
+    |            ^^^^^^^^^^^^
+...
+225 |     pub fn send(
+    |            ^^^^
+...
+249 |     pub fn status(&self, thread_id: &NativeThreadId) -> Result<Value, AdapterError> {
+    |            ^^^^^^
+...
+255 |     pub fn read_items(
+    |            ^^^^^^^^^^
+...
+273 |     pub fn as_json(&self) -> Value {
+    |            ^^^^^^^
+
+warning: function `start_thread` is never used
+   --> src/adapters/codex_app_server_production_part1.rs:890:8
+    |
+890 | pub fn start_thread(
+    |        ^^^^^^^^^^^^
+
+warning: function `read_thread_items` is never used
+   --> src/adapters/codex_app_server_production_part1.rs:926:8
+    |
+926 | pub fn read_thread_items(
+    |        ^^^^^^^^^^^^^^^^^
+
+warning: function `read_thread_items_page` is never used
+   --> src/adapters/codex_app_server_production_part1.rs:934:8
+    |
+934 | pub fn read_thread_items_page(
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `read_thread_turns_with_items_page` is never used
+   --> src/adapters/codex_app_server_production_part1.rs:952:8
+    |
+952 | pub fn read_thread_turns_with_items_page(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `read_turn_statuses` is never used
+   --> src/adapters/codex_app_server_production_part1.rs:978:8
+    |
+978 | pub fn read_turn_statuses(
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `read_turn_statuses_page` is never used
+   --> src/adapters/codex_app_server_production_part1.rs:985:8
+    |
+985 | pub fn read_turn_statuses_page(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `timeout` is never read
+   --> src/adapters/codex_app_server_production_part2.rs:315:5
+    |
+313 | struct Client {
+    |        ------ field in this struct
+314 |     stream: UnixStream,
+315 |     timeout: Duration,
+    |     ^^^^^^^
+
+warning: variant `KnownDelivered` is never constructed
+   --> src/adapters/mod.rs:186:9
+    |
+183 |     pub enum NotificationDeliveryClass {
+    |              ------------------------- variant in this enum
+...
+186 |         KnownDelivered,
+    |         ^^^^^^^^^^^^^^
+    |
+    = note: `NotificationDeliveryClass` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `notification_delivery_class` is never used
+   --> src/adapters/mod.rs:190:16
+    |
+189 |     impl AdapterError {
+    |     ----------------- method in this implementation
+190 |         pub fn notification_delivery_class(&self) -> NotificationDeliveryClass {
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated functions `detect_optional_env` and `detect_live` are never used
+   --> src/adapters/mod.rs:416:16
+    |
+395 |     impl AdapterRegistry {
+    |     -------------------- associated functions in this implementation
+...
+416 |         pub fn detect_optional_env() -> Result<Option<AdapterSelection>, AdapterError> {
+    |                ^^^^^^^^^^^^^^^^^^^
+...
+425 |         pub fn detect_live(
+    |                ^^^^^^^^^^^
+
+warning: function `binding_for_request` is never used
+   --> src/adapters/mod.rs:436:12
+    |
+436 |     pub fn binding_for_request<'a>(
+    |            ^^^^^^^^^^^^^^^^^^^
+
+warning: function `binding_for_explicit_env` is never used
+   --> src/adapters/mod.rs:444:12
+    |
+444 |     pub fn binding_for_explicit_env<'a>(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `role_brief_from_registration_receipt` is never used
+   --> src/identity.rs:313:8
+    |
+313 | pub fn role_brief_from_registration_receipt(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `persist_registration` is never used
+   --> src/identity.rs:582:8
+    |
+582 | pub fn persist_registration(
+    |        ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `load_or_create` is never used
+   --> src/identity.rs:899:8
+    |
+899 | pub fn load_or_create(
+    |        ^^^^^^^^^^^^^^
+
+warning: type alias `SnapshotReceipt` is never used
+   --> src/migration.rs:333:10
+    |
+333 | pub type SnapshotReceipt = ImmutableSnapshot;
+    |          ^^^^^^^^^^^^^^^
+
+warning: type alias `EpochDescriptor` is never used
+   --> src/migration.rs:447:10
+    |
+447 | pub type EpochDescriptor = TargetEpoch;
+    |          ^^^^^^^^^^^^^^^
+
+warning: method `record_count` is never used
+   --> src/migration.rs:721:12
+    |
+498 | impl VerifiedPrefix {
+    | ------------------- method in this implementation
+...
+721 |     pub fn record_count(&self) -> usize {
+    |            ^^^^^^^^^^^^
+
+warning: method `as_str` is never used
+   --> src/migration.rs:752:18
+    |
+751 | impl MigrationMappingStatus {
+    | --------------------------- method in this implementation
+752 |     pub const fn as_str(self) -> &'static str {
+    |                  ^^^^^^
+
+warning: method `as_str` is never used
+   --> src/migration.rs:777:18
+    |
+776 | impl ManifestRecordStatus {
+    | ------------------------- method in this implementation
+777 |     pub const fn as_str(self) -> &'static str {
+    |                  ^^^^^^
+
+warning: function `classify_jsonl` is never used
+   --> src/migration_tail.rs:482:8
+    |
+482 | pub fn classify_jsonl(bytes: &[u8]) -> InspectionReport {
+    |        ^^^^^^^^^^^^^^
+
+warning: function `inspect_path` is never used
+   --> src/migration_tail.rs:655:8
+    |
+655 | pub fn inspect_path(path: &Path, options: &InspectOptions) -> io::Result<InspectionReport> {
+    |        ^^^^^^^^^^^^
+
+warning: associated function `with_context` is never used
+   --> src/proto.rs:718:12
+    |
+710 | impl RequestEnvelope {
+    | -------------------- associated function in this implementation
+...
+718 |     pub fn with_context(request: Req, project_context: ProjectContext) -> Self {
+    |            ^^^^^^^^^^^^
+
+warning: associated items `from_env`, `sock_path`, `down_path`, `events_path`, and `journal_path` are never used
+  --> src/scope.rs:59:12
+   |
+31 | impl HostPaths {
+   | -------------- associated items in this implementation
+...
+59 |     pub fn from_env() -> anyhow::Result<Self> {
+   |            ^^^^^^^^
+...
+83 |     pub fn sock_path(&self) -> PathBuf {
+   |            ^^^^^^^^^
+...
+91 |     pub fn down_path(&self) -> PathBuf {
+   |            ^^^^^^^^^
+...
+95 |     pub fn events_path(&self) -> PathBuf {
+   |            ^^^^^^^^^^^
+...
+99 |     pub fn journal_path(&self) -> PathBuf {
+   |            ^^^^^^^^^^^^
+
+warning: function `project_root` is never used
+   --> src/scope.rs:555:8
+    |
+555 | pub fn project_root() -> anyhow::Result<PathBuf> {
+    |        ^^^^^^^^^^^^
+
+warning: variant `Append` is never constructed
+   --> src/server/mod_parts/part_01.rs:443:5
+    |
+442 | pub(crate) enum CurrentThreadRouteJournalFault {
+    |                 ------------------------------ variant in this enum
+443 |     Append,
+    |     ^^^^^^
+    |
+    = note: `CurrentThreadRouteJournalFault` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: enum `NotificationDeliveryError` is never used
+   --> src/server/mod_parts/part_01.rs:469:6
+    |
+469 | enum NotificationDeliveryError {
+    |      ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `storage_server_dir`, `try_commit`, and `commit_command_at_revision` are never used
+   --> src/server/mod_parts/part_02.rs:10:19
+    |
+  1 | impl Server {
+    | ----------- methods in this implementation
+...
+ 10 |     pub(crate) fn storage_server_dir(&self) -> PathBuf {
+    |                   ^^^^^^^^^^^^^^^^^^
+...
+514 |     pub(crate) fn try_commit(&self, evs: &[Event]) -> Result<(), String> {
+    |                   ^^^^^^^^^^
+...
+545 |     fn commit_command_at_revision(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `attempt_notification_with` is never used
+   --> src/server/mod_parts/part_05.rs:856:4
+    |
+856 | fn attempt_notification_with(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `handle_register` is never used
+    --> src/server/mod_parts/part_06.rs:1087:15
+     |
+1087 | pub(crate) fn handle_register(
+     |               ^^^^^^^^^^^^^^^
+
+warning: function `tmux_route_address_key` is never used
+  --> src/server/global_state_helpers.rs:63:15
+   |
+63 | pub(super) fn tmux_route_address_key(endpoint: &TmuxEndpoint) -> String {
+   |               ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type alias `CanonicalProjectScope` is never used
+  --> src/server/global_state_models.rs:23:10
+   |
+23 | pub type CanonicalProjectScope = ProjectScopeId;
+   |          ^^^^^^^^^^^^^^^^^^^^^
+
+warning: type alias `AppScopeId` is never used
+  --> src/server/global_state_models.rs:24:10
+   |
+24 | pub type AppScopeId = AppServerId;
+   |          ^^^^^^^^^^
+
+warning: method `as_str` is never used
+  --> src/server/global_state_models.rs:37:12
+   |
+36 | impl RuntimeBindingLedgerState {
+   | ------------------------------ method in this implementation
+37 |     pub fn as_str(self) -> &'static str {
+   |            ^^^^^^
+
+warning: associated function `new` is never used
+   --> src/server/global_state_models.rs:636:12
+    |
+635 | impl ProjectState {
+    | ----------------- associated function in this implementation
+636 |     pub fn new(project_scope: ProjectScopeId) -> Result<Self, StateError> {
+    |            ^^^
+
+warning: function `tick` is never used
+  --> src/server/keepalive.rs:83:8
+   |
+83 | pub fn tick(server: &Server) {
+   |        ^^^^
+
+warning: constant `AUTOMATIC_BATCH_WINDOW_MS` is never used
+  --> src/server/mailbox.rs:19:18
+   |
+19 | pub(super) const AUTOMATIC_BATCH_WINDOW_MS: i64 = 120_000;
+   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `max_wake_attempts` is never used
+    --> src/server/mailbox.rs:1116:8
+     |
+1116 | pub fn max_wake_attempts() -> u32 {
+     |        ^^^^^^^^^^^^^^^^^
+
+warning: fields `master_wake` and `subscriptions` are never read
+  --> src/server/notification_contract.rs:52:9
+   |
+49 | pub struct NotificationStateView {
+   |            --------------------- fields in this struct
+...
+52 |     pub master_wake: MasterWakeAccumulator,
+   |         ^^^^^^^^^^^
+53 |     pub messages: Vec<Message>,
+54 |     pub subscriptions: Vec<NotificationSubscription>,
+   |         ^^^^^^^^^^^^^
+   |
+   = note: `NotificationStateView` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `transport_kind` is never used
+  --> src/server/state.rs:59:12
+   |
+58 | impl WorkerRec {
+   | -------------- method in this implementation
+59 |     pub fn transport_kind(&self) -> Option<TransportKind> {
+   |            ^^^^^^^^^^^^^^
+
+warning: struct `TypedApplyError` is never constructed
+   --> src/server/state.rs:188:12
+    |
+188 | pub struct TypedApplyError(pub StateError);
+    |            ^^^^^^^^^^^^^^^
+
+warning: field `owner_root` is never read
+ --> src/server/peer_tests/part_01.rs:4:5
+  |
+2 | pub(crate) struct IsolatedTmux {
+  |                   ------------ field in this struct
+3 |     socket: PathBuf,
+4 |     owner_root: PathBuf,
+  |     ^^^^^^^^^^
+
+warning: function `follow_up` is never used
+   --> src/subagent.rs:182:4
+    |
+182 | fn follow_up(record: &Record, reused: bool) -> serde_json::Value {
+    |    ^^^^^^^^^
+
+warning: function `valid_runtime` is never used
+   --> src/subagent.rs:199:15
+    |
+199 | pub(crate) fn valid_runtime(runtime: &str) -> bool {
+    |               ^^^^^^^^^^^^^
+
+warning: function `child_appserver_candidate` is never used
+   --> src/subagent.rs:440:4
+    |
+440 | fn child_appserver_candidate(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `launch` is never used
+   --> src/subagent.rs:564:4
+    |
+564 | fn launch(
+    |    ^^^^^^
+
+warning: `collab` (bin "collab" test) generated 85 warnings (run `cargo fix --bin "collab" -p collab --tests` to apply 28 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running unittests src/main.rs (collab/target/debug/deps/collab-e0ff904af86e8414)
+
+running 1 test
+collab: error: master promotion requires explicit user approval
+collab: error: master promotion requires explicit user approval
+collab: error: master authority required; ask the registered master to delegate
+test server::peer_tests::master_promotion_requires_user_approval_and_existing_master_delegates ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 925 filtered out; finished in 0.51s

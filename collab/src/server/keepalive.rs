@@ -100,7 +100,7 @@ pub(crate) fn tick_at(server: &Server, now: i64) {
     };
     let master_id = {
         let state = server.state.lock().unwrap();
-        super::live_master_id(server, &state).ok().flatten()
+        super::current_master_holder(server, &state).ok().flatten()
     };
     for worker in workers {
         // App Server transport exposes thread liveness, not the agent's
@@ -292,7 +292,7 @@ fn flush_idle_batches_if_ready(server: &Server, now: i64) {
     if state.admission_frozen() {
         return;
     }
-    let Some(master_id) = super::live_master_id(server, &state).ok().flatten() else {
+    let Some(master_id) = super::current_master_holder(server, &state).ok().flatten() else {
         return;
     };
     let master_record = state.keepalives.get(&master_id).cloned();

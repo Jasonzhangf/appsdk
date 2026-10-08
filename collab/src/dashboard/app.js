@@ -54,6 +54,22 @@ function render() {
   byId("project").textContent = snapshot.project || "";
   const members = byId("members");
   members.replaceChildren();
+  // Grant ownership is projected separately from transport reachability: the
+  // recorded holder keeps the role even when its agent runtime is unknown, and
+  // a pane address never turns into an online agent here.
+  const authority = snapshot.master;
+  // Scope comes from the top-level projection, so an empty slot still shows the
+  // exact route scope instead of an ambiguous empty project.
+  const scope = snapshot.scope || {};
+  const scopeText = scope.project_scope ? `${scope.project_scope} · ${scope.app_scope_id}` : "作用域未知";
+  if (authority && authority.worker_id) {
+    const summary = element("div", undefined, "member");
+    summary.append(element("strong", authority.worker_id), element("span", "Master 授权", "role"));
+    summary.append(element("small", `授权持有人 · ${scopeText}`));
+    members.append(summary);
+  } else {
+    members.append(element("p", `当前作用域 ${scopeText} 没有授权 Master。`, "muted"));
+  }
   for (const member of snapshot.workers) {
     const item = element("div", undefined, "member");
     const status = { online: "在线", cold: "未驻留", offline: "离线", unknown: "未知" }[member.status] || member.status;

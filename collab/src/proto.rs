@@ -606,6 +606,12 @@ pub enum Req {
         token: String,
         approval: String,
     },
+    #[serde(alias = "RootClear")]
+    MasterClear {
+        worker_id: String,
+        token: String,
+        approval: String,
+    },
     #[serde(alias = "RootDelegate")]
     MasterDelegate {
         worker_id: String,

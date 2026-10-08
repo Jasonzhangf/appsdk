@@ -462,6 +462,11 @@ fn dispatch_with_route_context(
             token,
             approval,
         } => handle_master_promote(server, worker_id, token, approval),
+        Req::MasterClear {
+            worker_id,
+            token,
+            approval,
+        } => handle_master_clear(server, worker_id, token, approval),
         Req::MasterDelegate {
             worker_id,
             token,
@@ -805,6 +810,7 @@ fn wire_route_principals(req: &Req) -> Result<Vec<WireRoutePrincipal<'_>>, Strin
         | Req::MigrationApply { worker_id, .. }
         | Req::MigrationVerify { worker_id, .. }
         | Req::MasterPromote { worker_id, .. }
+        | Req::MasterClear { worker_id, .. }
         | Req::MasterDelegate { worker_id, .. }
         | Req::WorkerClose { worker_id, .. }
         | Req::WorkerSnapshot { worker_id, .. }

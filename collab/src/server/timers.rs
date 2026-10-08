@@ -94,8 +94,9 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                 }
             }
         }
-        let live_master_probe = super::live_master_id(server, &state);
-        let live_master = live_master_probe.clone().ok().flatten();
+        // Goal-deadline eligibility is decided by the current grant holder, not
+        // by whether that holder answers a transport probe.
+        let master_holder = super::current_master_holder(server, &state);
         let mut subscriptions: Vec<_> = state.notification_subscriptions.values().collect();
         subscriptions
             .sort_by_key(|subscription| (subscription.created_ms, subscription.id.clone()));
@@ -107,21 +108,21 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
             {
                 continue;
             }
-            let Ok(live_master) = &live_master_probe else {
+            let Ok(master_holder) = &master_holder else {
                 crate::server::presence::append_log(
                     &server.log_path(),
                     &format!(
-                        "TIMER_LIVE_MASTER_UNKNOWN: {}",
-                        live_master_probe.as_ref().unwrap_err()
+                        "TIMER_MASTER_SCOPE_UNKNOWN: {}",
+                        master_holder.as_ref().unwrap_err()
                     ),
                 );
                 continue;
             };
-            if live_master.as_deref() != Some(subscription.worker_id.as_str()) {
+            if master_holder.as_deref() != Some(subscription.worker_id.as_str()) {
                 lifecycle_events.push(Event::NotificationSuppressed {
                     subscription_id: subscription.id.clone(),
                     status: "suppressed".into(),
-                    reason: "goal-deadline-requires-live-master".into(),
+                    reason: "goal-deadline-requires-current-master".into(),
                     updated_ms: now,
                 });
             } else if subscription.fired_count > 0 {
@@ -156,7 +157,7 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                 at_ms: now,
             });
 
-            if let Some(master_id) = live_master.as_ref() {
+            if let Ok(Some(master_id)) = master_holder.as_ref() {
                 let message_id = super::gen_msg_id();
                 lifecycle_events.push(Event::Sent {
                     msg: Message {
@@ -216,12 +217,12 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                 (key.2 <= now).then_some(key)
             })
             .collect::<HashSet<_>>();
-        let live_master = match super::live_master_id(server, &state) {
-            Ok(live_master) => live_master,
+        let master_holder = match super::current_master_holder(server, &state) {
+            Ok(master_holder) => master_holder,
             Err(error) => {
                 crate::server::presence::append_log(
                     &server.log_path(),
-                    &format!("TIMER_LIVE_MASTER_UNKNOWN: {error}"),
+                    &format!("TIMER_MASTER_SCOPE_UNKNOWN: {error}"),
                 );
                 None
             }
@@ -257,7 +258,7 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                 true
             };
             let master_idle_ready = if subscription.event == "master-idle" {
-                live_master.as_deref() == Some(subscription.worker_id.as_str())
+                master_holder.as_deref() == Some(subscription.worker_id.as_str())
                     && state
                         .keepalives
                         .get(&subscription.worker_id)
@@ -273,7 +274,7 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                 || !server.config.timers.enabled
                 || !matches!(subscription.event.as_str(), "deadline" | "master-idle")
                 || (is_goal_deadline(subscription)
-                    && live_master.as_deref() != Some(subscription.worker_id.as_str()))
+                    && master_holder.as_deref() != Some(subscription.worker_id.as_str()))
                 || !master_idle_ready
                 || !master_idle_gate_open
                 || next_trigger.is_none_or(|trigger| trigger > now)

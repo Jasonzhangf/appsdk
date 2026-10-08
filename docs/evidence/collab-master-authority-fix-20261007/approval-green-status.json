@@ -1,0 +1,38 @@
+{
+  "master": {
+    "approval": "user approved isolated input regression",
+    "assigned_by": "codex-%0",
+    "assigned_ms": 1791447048687,
+    "binding_id": "binding-codex-_0",
+    "boundary": "project",
+    "endpoint_generation": 1,
+    "endpoint_live": false,
+    "master_wake": {
+      "active_goal_revision": null,
+      "blocked_or_timed_out_tasks": [],
+      "completed_or_freed_tasks": [],
+      "delivery_state": "",
+      "first_pending_ms": 0,
+      "generation": 0,
+      "goal_due": false,
+      "highest_bug_revision": null,
+      "idle_workers": [],
+      "last_updated_ms": 0,
+      "newly_idle_workers": [],
+      "ready_authorized_work": false,
+      "scheduling_decision_revision": 0,
+      "unresponsive_workers": [],
+      "wake_hold": null
+    },
+    "scope": {
+      "app_scope_id": "appserver-cli",
+      "project_scope": "/private/tmp/cma-approval.Y1q1EY"
+    },
+    "worker_id": "codex-%0"
+  },
+  "recorded_unusable": null,
+  "scope": {
+    "app_scope_id": "appserver-cli",
+    "project_scope": "/private/tmp/cma-approval.Y1q1EY"
+  }
+}

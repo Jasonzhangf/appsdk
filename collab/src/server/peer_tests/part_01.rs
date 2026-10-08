@@ -745,7 +745,7 @@ fn master_idle_subscription_is_restricted_to_the_live_master_and_supported_inter
     assert!(!worker.ok);
     assert_eq!(
         worker.error.as_deref(),
-        Some("master-idle subscription requires the live registered master")
+        Some("master-idle subscription requires the current registered master")
     );
 
     let accepted = handle_notification_subscribe(
@@ -1163,7 +1163,7 @@ fn integrated_supersedes_stale_merge_pending_notice() {
 }
 
 #[test]
-fn review_accept_fails_closed_when_master_presence_is_unknown() {
+fn review_accept_succeeds_with_merge_obligation_when_master_presence_is_unknown() {
     let (server, root) = test_server();
     register(&server, "owner", "%owner");
     register(&server, "master", "%master");
@@ -1195,9 +1195,10 @@ fn review_accept_fails_closed_when_master_presence_is_unknown() {
         .ok
     );
 
-    // Dropping the tmux server makes the master's presence probe Unknown, which
-    // is ambiguous authority: accept must fail closed instead of silently
-    // downgrading to owner self-integration.
+    // Dropping the tmux server leaves the master's transport Unknown. Authority
+    // is the current typed grant, not transport reachability, so the owner's
+    // authorized review accept must still transition the task and register the
+    // master's merge obligation instead of failing closed.
     stop_registered_test_tmux_server();
 
     let response = handle_task_review(
@@ -1209,14 +1210,21 @@ fn review_accept_fails_closed_when_master_presence_is_unknown() {
         false,
         "review passed".into(),
     );
-    assert!(!response.ok);
-    assert_eq!(response.error.as_deref(), Some("MASTER_PRESENCE_UNKNOWN"));
+    assert!(response.ok, "{response:?}");
     let state = server.state.lock().unwrap();
+    let pending = state
+        .pending_merges
+        .get("task")
+        .expect("the current grant holder must own the merge obligation");
+    assert_eq!(pending.owner, "owner");
+    assert_eq!(pending.requested_by, "owner");
+    assert_eq!(state.tasks["task"].status, "accepted");
     assert!(
-        !state.pending_merges.contains_key("task"),
-        "an ambiguous master presence must not register a merge obligation"
+        state.msgs.values().any(|message| {
+            message.to == "master" && message.subject.as_deref() == Some("merge-pending:task")
+        }),
+        "the merge obligation must notify the current grant holder"
     );
-    assert_eq!(state.tasks["task"].status, "delivered");
     drop(state);
     std::fs::remove_dir_all(root).ok();
 }

@@ -1,0 +1,10 @@
+{
+  "master": null,
+  "mode": "user_approved_clear",
+  "previous_worker_id": "codex-%0",
+  "scope": {
+    "app_scope_id": "appserver-cli",
+    "project_scope": "/private/tmp/cma-approval.Y1q1EY"
+  },
+  "was_empty": false
+}

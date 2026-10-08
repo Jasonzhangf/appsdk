@@ -154,8 +154,8 @@ fn tools() -> Value {
         ),
         tool(
             "collab_master",
-            "Inspect the live Collab master, self-promote after explicit user approval when no live master exists, or delegate as the current live master. Codex root is unrelated. Init and register never create master. Independent peers may decline a master board invitation; private subworkers are not exposed on the public board.",
-            json!({"action":{"type":"string","enum":["status","promote","delegate"]},"approval":{"type":"string"},"target":{"type":"string"}}),
+            "Inspect the current Collab master, replace it with an explicitly approved promote, clear it with an explicitly approved clear, or delegate as the current master. Codex root is unrelated. Init and register never create master. Independent peers may decline a master board invitation; private subworkers are not exposed on the public board.",
+            json!({"action":{"type":"string","enum":["status","promote","clear","delegate"]},"approval":{"type":"string"},"target":{"type":"string"}}),
             &["action"]
         )
     ]);
@@ -416,6 +416,12 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
                 "promote" => argv.extend([
                     "master".into(),
                     "promote".into(),
+                    "--approval".into(),
+                    required(args, "approval")?,
+                ]),
+                "clear" => argv.extend([
+                    "master".into(),
+                    "clear".into(),
                     "--approval".into(),
                     required(args, "approval")?,
                 ]),
@@ -843,7 +849,7 @@ mod tests {
     }
 
     #[test]
-    fn master_tool_exposes_status_promote_and_delegate() {
+    fn master_tool_exposes_status_promote_clear_and_delegate() {
         let definitions = tools();
         let master = definitions
             .as_array()
@@ -854,7 +860,7 @@ mod tests {
         assert_eq!(master["inputSchema"]["required"], json!(["action"]));
         assert_eq!(
             master["inputSchema"]["properties"]["action"]["enum"],
-            json!(["status", "promote", "delegate"])
+            json!(["status", "promote", "clear", "delegate"])
         );
     }
 

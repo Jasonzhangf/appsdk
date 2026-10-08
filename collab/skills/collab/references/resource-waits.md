@@ -28,14 +28,15 @@ releases a claim. Holder close clears obsolete wait edges and creates a
 Waiting is not abandonment. On each supported timer/wake or direct wake, the
 waiter must re-read the durable conflict, try any locally available resolution,
 and escalate unresolved work. A managed subagent and an ordinary worker both
-escalate to the live Collab master immediately after finding a concrete
+escalate to the current Collab master immediately after finding a concrete
 solution; they do not wait or dump symptoms. A subagent also copies its
-parent when parent is not the master. If no live master exists, escalate to
+parent when parent is not the master. If no current master exists, escalate to
 the task-initiating collaborator. Independent peers may decline a master
 collaboration invite. Include the blocking task, responsible actor,
 deadline, proposed solution, attempted actions, and requested decision. Never
 invent a master from an internal init adapter; master promotion requires
-explicit user approval for the exact peer and project plus live identity
-verification. Use `collab context` as the agent's live-master read. If a
-live master exists, only that master may delegate; if none exists, a peer may
-promote itself after approval. Codex root is not Collab master.
+explicit user approval for the exact peer and project plus an authenticated
+current binding, and it replaces the recorded holder independent of liveness.
+Use `collab context` as the agent's master-authority read. Only the current
+master grant holder may delegate; an authenticated peer with explicit approval
+may promote or clear the scoped grant. Codex root is not Collab master.

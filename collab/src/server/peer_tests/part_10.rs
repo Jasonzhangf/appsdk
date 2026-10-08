@@ -137,7 +137,10 @@ fn context_gives_an_idle_master_one_canonical_scheduling_action() {
     assert!(context.ok, "{}", context.error.unwrap_or_default());
     assert_eq!(context.data["identity"]["role"], "master");
     assert_eq!(context.data["master"]["worker_id"], "master");
-    assert_eq!(context.data["master"]["endpoint_live"], true);
+    // The master holds the current typed grant even though its tmux transport
+    // is not live (a pane is an address, never a liveness credential). The
+    // authority projection must not fabricate a live endpoint.
+    assert_eq!(context.data["master"]["endpoint_live"], false);
     assert!(context.data["recorded_unusable"].is_null());
     assert_eq!(
         context.data["next_actions"],
@@ -256,7 +259,7 @@ fn retired_appserver_route_error_leaves_a_tmux_binding_unknown_not_missing() {
 }
 
 #[test]
-fn retired_appserver_candidate_check_does_not_override_live_tmux_presence() {
+fn tmux_presence_never_consults_the_appserver_candidate_check() {
     let (mut server, root) = test_server();
     let registration =
         register_appserver(&mut server, "timeout-identity", "thread-timeout-identity");
@@ -266,13 +269,22 @@ fn retired_appserver_candidate_check_does_not_override_live_tmux_presence() {
         registration.error.unwrap_or_default()
     );
     server.appserver_candidate_check =
-        Arc::new(|_| panic!("tmux presence must not call the retired AppServer candidate checker"));
+        Arc::new(|_| panic!("tmux presence must not call the AppServer candidate checker"));
     let server = Arc::new(server);
 
+    // A tmux pane is an address, not a runtime, so its presence is Unknown and
+    // the App Server oracle is never consulted for it. Unknown must not be
+    // projected as a live or identity-valid endpoint.
     let status = dispatch(&server, Req::WorkerStatus { worker_id: None });
-    assert_eq!(status.data["workers"][0]["presence"], "present");
-    assert_eq!(status.data["workers"][0]["endpoint_live"], true);
-    assert_eq!(status.data["workers"][0]["identity_valid"], true);
+    assert_eq!(status.data["workers"][0]["presence"], "unknown");
+    assert_eq!(
+        status.data["workers"][0]["endpoint_live"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        status.data["workers"][0]["identity_valid"],
+        serde_json::Value::Null
+    );
 
     std::fs::remove_dir_all(root).ok();
 }
@@ -1225,6 +1237,20 @@ fn worker_unresponsive_notifies_live_master_to_check_durable_work() {
     );
     assert!(promote_resp.ok);
 
+    // A tmux pane is an address, never a runtime: a live pane is `Unknown`, and
+    // the removed AppServer oracle can no longer make an ordinary tmux peer
+    // online. The durable keepalive record still carries the last reported
+    // presence, so seed the online baseline a previously-observed peer would
+    // have persisted and exercise the offline notification edge itself, without
+    // re-introducing the pane-as-agent edge.
+    server_arc.commit(&[Event::KeepaliveUpdated {
+        worker_id: "stuck-worker".into(),
+        record: crate::server::keepalive::Record {
+            notified_presence: "online".into(),
+            ..Default::default()
+        },
+    }]);
+
     let baseline = dispatch(
         &server_arc,
         Req::WorkerStatus {
@@ -1232,8 +1258,13 @@ fn worker_unresponsive_notifies_live_master_to_check_durable_work() {
         },
     );
     assert!(baseline.ok, "{baseline:?}");
-    assert_eq!(baseline.data["workers"][0]["endpoint_live"], true);
-    assert_eq!(baseline.data["workers"][0]["agent_state"], "unknown");
+    // The pane is a reachable address but not a runtime, so the peer must not
+    // be re-derived as an online agent and no notification may fire.
+    assert_eq!(baseline.data["workers"][0]["presence"], "unknown");
+    assert_eq!(
+        baseline.data["workers"][0]["endpoint_live"],
+        serde_json::Value::Null
+    );
     assert_eq!(
         server_arc.state.lock().unwrap().keepalives["stuck-worker"].notified_presence,
         "online"
@@ -1250,6 +1281,7 @@ fn worker_unresponsive_notifies_live_master_to_check_durable_work() {
         },
     );
     assert!(status.ok, "{status:?}");
+    assert_eq!(status.data["workers"][0]["presence"], "missing");
     assert_eq!(status.data["workers"][0]["status"], "lost");
 
     let state = server_arc.state.lock().unwrap();
@@ -1320,45 +1352,21 @@ fn worker_unresponsive_notifies_live_master_to_check_durable_work() {
         "unchanged offline status, status-all, workers, and ack must not duplicate"
     );
 
+    // Re-creating the pane restores an address only. The agent runtime stays
+    // unknown, so it must not fabricate an online recovery or clear the offline
+    // baseline.
     assert!(register(&server_arc, "stuck-worker", "thread-stuck").ok);
-    let recovered = dispatch(
+    let recreated = dispatch(
         &server_arc,
         Req::WorkerStatus {
             worker_id: Some("stuck-worker".into()),
         },
     );
-    assert!(recovered.ok, "{recovered:?}");
-    assert_eq!(recovered.data["workers"][0]["endpoint_live"], true);
-    assert_eq!(recovered.data["workers"][0]["agent_state"], "unknown");
-    {
-        let state = server_arc.state.lock().unwrap();
-        let recovered_alerts: Vec<_> = state
-            .msgs
-            .values()
-            .filter(|m| {
-                m.to == "master-worker"
-                    && m.subject == Some("worker-recovered: stuck-worker".into())
-            })
-            .collect();
-        assert_eq!(recovered_alerts.len(), 1);
-        assert_eq!(state.keepalives["stuck-worker"].notified_presence, "online");
-        assert!(!state
-            .master_wake
-            .unresponsive_workers
-            .contains(&"stuck-worker".into()));
-    }
-    let duplicate_recovered = dispatch(
-        &server_arc,
-        Req::WorkerStatus {
-            worker_id: Some("stuck-worker".into()),
-        },
-    );
-    assert!(duplicate_recovered.ok, "{duplicate_recovered:?}");
+    assert!(recreated.ok, "{recreated:?}");
+    assert_eq!(recreated.data["workers"][0]["presence"], "unknown");
+    let state = server_arc.state.lock().unwrap();
     assert_eq!(
-        server_arc
-            .state
-            .lock()
-            .unwrap()
+        state
             .msgs
             .values()
             .filter(|m| {
@@ -1366,32 +1374,13 @@ fn worker_unresponsive_notifies_live_master_to_check_durable_work() {
                     && m.subject == Some("worker-recovered: stuck-worker".into())
             })
             .count(),
-        1,
-        "unchanged online status must not duplicate recovery"
+        0,
+        "a recreated pane must not fabricate an online recovery notification"
     );
-
-    kill_registered_worker_pane(&server_arc, "stuck-worker");
-    let rearmed = dispatch(
-        &server_arc,
-        Req::WorkerStatus {
-            worker_id: Some("stuck-worker".into()),
-        },
-    );
-    assert!(rearmed.ok, "{rearmed:?}");
     assert_eq!(
-        server_arc
-            .state
-            .lock()
-            .unwrap()
-            .msgs
-            .values()
-            .filter(|m| {
-                m.to == "master-worker"
-                    && m.subject == Some("worker-unresponsive: stuck-worker".into())
-            })
-            .count(),
-        2,
-        "opposite recovery transition must re-arm the next offline notification"
+        state.keepalives["stuck-worker"].notified_presence,
+        "offline"
     );
+    drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }

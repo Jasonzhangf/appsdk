@@ -557,6 +557,52 @@ fn managed_subagent_working_accepts_assignment_after_probe_race_and_is_idempoten
 }
 
 #[test]
+fn worker_close_allows_definitively_missing_worker_without_snapshot() {
+    let (server, root) = test_server();
+    register(&server, "master", "thread-master");
+    register(&server, "missing-peer", "thread-missing-peer");
+    assert!(
+        super::handle_master_promote(
+            &server,
+            "master".into(),
+            "token-master".into(),
+            "user approved master".into(),
+        )
+        .ok
+    );
+
+    kill_registered_worker_pane(&server, "missing-peer");
+    let target = server.state.lock().unwrap().workers["missing-peer"].clone();
+    assert_eq!(
+        worker_presence(&server, &target),
+        IdentityPresence::Missing,
+        "the close path may only bypass snapshot evidence for a definitively Missing address"
+    );
+
+    let closed = super::handle_worker_close(
+        &server,
+        "master".into(),
+        "token-master".into(),
+        "missing-peer".into(),
+        "tmux pane confirmed missing; no live thread to snapshot".into(),
+    );
+    assert!(closed.ok, "{}", closed.error.unwrap_or_default());
+    assert!(closed.data["snapshot_captured_ms"].is_null());
+
+    let replayed = replay(&root).unwrap();
+    assert!(!replayed.workers.contains_key("missing-peer"));
+    assert_eq!(
+        replayed.worker_closures["missing-peer"].reason,
+        "tmux pane confirmed missing; no live thread to snapshot"
+    );
+    assert!(replayed.worker_closures["missing-peer"]
+        .snapshot_captured_ms
+        .is_none());
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn worker_close_is_master_only_audited_and_refuses_to_strand_tasks() {
     let (server, root) = test_server();
     register(&server, "peer-a", "%a");

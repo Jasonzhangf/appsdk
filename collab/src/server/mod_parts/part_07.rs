@@ -1360,26 +1360,34 @@ fn handle_worker_close(
         ));
     }
 
-    let Some(target_thread_id) = target
+    let target_thread_id = target
         .transport
         .as_ref()
-        .and_then(|transport| transport.thread_id.as_deref())
-    else {
-        return Resp::err(format!(
-            "worker {} has no bound App Server thread; snapshot evidence is unavailable",
-            target_id
-        ));
-    };
-    let snapshot = state
-        .worker_snapshots
-        .get(&target_id)
-        .filter(|receipt| receipt.thread_id == target_thread_id)
-        .map(|receipt| receipt.captured_ms);
-    let Some(snapshot_captured_ms) = snapshot else {
-        return Resp::err(format!(
-            "worker {} requires a successful worker snapshot for its bound App Server thread before close",
-            target_id
-        ));
+        .and_then(|transport| transport.thread_id.as_deref());
+    let snapshot_captured_ms = target_thread_id.and_then(|thread_id| {
+        state
+            .worker_snapshots
+            .get(&target_id)
+            .filter(|receipt| receipt.thread_id == thread_id)
+            .map(|receipt| receipt.captured_ms)
+    });
+    let snapshot_captured_ms = match (worker_presence(server, &target), snapshot_captured_ms) {
+        (_, Some(captured_ms)) => Some(captured_ms),
+        // A definitively Missing address has no live thread to snapshot. The
+        // master may retire the registration without fabricating evidence.
+        (IdentityPresence::Missing, None) if target.transport.is_some() => None,
+        (_, None) if target_thread_id.is_none() => {
+            return Resp::err(format!(
+                "worker {} has no bound App Server thread; snapshot evidence is unavailable",
+                target_id
+            ))
+        }
+        (_, None) => {
+            return Resp::err(format!(
+                "worker {} requires a successful worker snapshot for its bound App Server thread before close",
+                target_id
+            ))
+        }
     };
 
     let now = now_ms();
@@ -1389,7 +1397,7 @@ fn handle_worker_close(
             worker_id: target_id.clone(),
             closed_by: worker_id.clone(),
             reason: reason.clone(),
-            snapshot_captured_ms: Some(snapshot_captured_ms),
+            snapshot_captured_ms,
             at_ms: now,
         }],
     ) {

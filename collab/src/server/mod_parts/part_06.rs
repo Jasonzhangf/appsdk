@@ -671,6 +671,116 @@ fn handle_migration_verify(server: &Server, worker_id: String, token: String) ->
     }))
 }
 
+/// Prepare the exact Register envelope from one reducer snapshot without
+/// consuming it. The caller owns the following sequence: durable outer
+/// `Validating` with the returned nested IDs, then
+/// [`consume_prepared_register_typed`] with this same value.
+fn prepare_register_typed(
+    server: &Server,
+    worker_id: &str,
+    token: &str,
+    transport: &SelectedTransport,
+    cwd: &str,
+    project_scope: Option<ProjectScopeId>,
+    app_scope: Option<AppServerId>,
+    reuse_existing: bool,
+) -> Result<PreparedRegisterEnvelope, String> {
+    match (project_scope, app_scope) {
+        (Some(project_scope), Some(app_scope)) => server.prepare_register_envelope_for_scope(
+            worker_id,
+            token,
+            transport,
+            project_scope,
+            cwd,
+            app_scope,
+            reuse_existing,
+        ),
+        (Some(project_scope), None) => {
+            let app_scope = AppServerId::new("tui-default").map_err(|error| error.to_string())?;
+            server.prepare_register_envelope_for_scope(
+                worker_id,
+                token,
+                transport,
+                project_scope,
+                cwd,
+                app_scope,
+                reuse_existing,
+            )
+        }
+        (None, Some(app_scope)) => {
+            let project_scope = GlobalState::canonical_project_scope(Path::new(cwd))
+                .map_err(|error| error.to_string())?;
+            server.prepare_register_envelope_for_scope(
+                worker_id,
+                token,
+                transport,
+                project_scope,
+                cwd,
+                app_scope,
+                reuse_existing,
+            )
+        }
+        (None, None) if reuse_existing => {
+            let project_scope = GlobalState::canonical_project_scope(Path::new(cwd))
+                .map_err(|error| error.to_string())?;
+            let app_scope = AppServerId::new("tui-default").map_err(|error| error.to_string())?;
+            server.prepare_register_envelope_for_scope(
+                worker_id,
+                token,
+                transport,
+                project_scope,
+                cwd,
+                app_scope,
+                true,
+            )
+        }
+        (None, None) => {
+            Err("collab registration requires an app scope for a tmux transport".into())
+        }
+    }
+}
+
+/// Consume one prepared Register envelope and project its receipt. It never
+/// regenerates the nested identifiers.
+fn consume_prepared_register_typed(
+    server: &Server,
+    worker_id: &str,
+    transport: &SelectedTransport,
+    prepared: PreparedRegisterEnvelope,
+    approval: Option<&RegisterApprovalProof>,
+) -> Resp {
+    let registered_at = match &prepared.typed.command {
+        TypedCommand::RegisterWorker { worker, .. } => worker.registered_ms,
+    };
+    let command = prepared.typed.command.clone();
+    match server.consume_prepared_register_with_approval(prepared, approval) {
+        Ok(outcome) => {
+            let (role_brief, _) = {
+                let st = server.state.lock().unwrap();
+                (role_brief(server, &st, worker_id), ())
+            };
+            Resp::data(json!({
+                "worker_id": worker_id,
+                "identity_kind": "peer",
+                "transport_selected": transport,
+                "registered_at": iso(registered_at),
+                "role_brief": role_brief,
+                "typed": true,
+                "command_id": outcome.receipt.command_id.as_str(),
+                "operation_id": outcome.receipt.operation_id.as_str(),
+                "sequence": outcome.receipt.sequence,
+                "revision": outcome.receipt.revision,
+                "replayed": outcome.replayed,
+                "command": command,
+            }))
+        }
+        Err(error) => Resp::err(format!("typed registrar rejected registration: {error}")),
+    }
+}
+
+/// Legacy Register owner: prepare then consume with no outer observation.
+/// Every other Register path must route through the same two functions so the
+/// identifier algorithm only lives in `part_02.rs`.
 fn register_typed(
     server: &Server,
     worker_id: &str,
@@ -681,93 +791,120 @@ fn register_typed(
     app_scope: Option<AppServerId>,
     reuse_existing: bool,
 ) -> Resp {
-    let typed = match (project_scope, app_scope) {
-        (Some(project_scope), Some(app_scope)) => server.typed_register_envelope_for_scope(
-            worker_id,
-            token,
-            transport,
-            project_scope,
-            cwd,
-            app_scope,
-            reuse_existing,
-        ),
-        (Some(project_scope), None) => {
-            let app_scope = AppServerId::new("tui-default").map_err(|error| error.to_string());
-            match app_scope {
-                Ok(app_scope) => server.typed_register_envelope_for_scope(
-                    worker_id,
-                    token,
-                    transport,
-                    project_scope,
-                    cwd,
-                    app_scope,
-                    reuse_existing,
-                ),
-                Err(error) => Err(error),
-            }
-        }
-        (None, Some(app_scope)) => match GlobalState::canonical_project_scope(Path::new(cwd)) {
-            Ok(project_scope) => server.typed_register_envelope_for_scope(
-                worker_id,
-                token,
-                transport,
-                project_scope,
-                cwd,
-                app_scope,
-                reuse_existing,
-            ),
-            Err(error) => Err(error.to_string()),
-        },
-        (None, None) if reuse_existing => {
-            let project_scope = GlobalState::canonical_project_scope(Path::new(cwd))
-                .map_err(|error| error.to_string());
-            let app_scope = AppServerId::new("tui-default").map_err(|error| error.to_string());
-            match (project_scope, app_scope) {
-                (Ok(project_scope), Ok(app_scope)) => server.typed_register_envelope_for_scope(
-                    worker_id,
-                    token,
-                    transport,
-                    project_scope,
-                    cwd,
-                    app_scope,
-                    true,
-                ),
-                (Err(error), _) | (_, Err(error)) => Err(error),
-            }
-        }
-        (None, None) => {
-            Err("collab registration requires an app scope for a tmux transport".into())
+    register_typed_observed(
+        server,
+        worker_id,
+        token,
+        transport,
+        cwd,
+        project_scope,
+        app_scope,
+        reuse_existing,
+        None,
+        None,
+    )
+}
+
+/// Prepare then, before consume, hand the exact prepared envelope to
+/// `before_consume`. A hook error aborts the operation without consuming, so a
+/// failed outer durable binding can never dispatch Register.
+fn register_typed_observed(
+    server: &Server,
+    worker_id: &str,
+    token: &str,
+    transport: &SelectedTransport,
+    cwd: &str,
+    project_scope: Option<ProjectScopeId>,
+    app_scope: Option<AppServerId>,
+    reuse_existing: bool,
+    register_approval: Option<&RegisterApprovalProof>,
+    before_consume: Option<&mut dyn FnMut(&PreparedRegisterEnvelope) -> Result<(), String>>,
+) -> Resp {
+    let prepared = match prepare_register_typed(
+        server,
+        worker_id,
+        token,
+        transport,
+        cwd,
+        project_scope,
+        app_scope,
+        reuse_existing,
+    ) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return Resp::err(format!("typed registrar failed to build command: {error}"))
         }
     };
-    match typed {
-        Ok(typed) => match server.typed_dispatch(typed.clone()) {
-            Ok(outcome) => {
-                let (role_brief, registered_at) = {
-                    let st = server.state.lock().unwrap();
-                    let registered_at = match &typed.command {
-                        TypedCommand::RegisterWorker { worker, .. } => worker.registered_ms,
-                    };
-                    (role_brief(server, &st, worker_id), registered_at)
-                };
-                Resp::data(json!({
-                    "worker_id": worker_id,
-                    "identity_kind": "peer",
-                    "transport_selected": transport,
-                    "registered_at": iso(registered_at),
-                    "role_brief": role_brief,
-                    "typed": true,
-                    "command_id": outcome.receipt.command_id.as_str(),
-                    "operation_id": outcome.receipt.operation_id.as_str(),
-                    "sequence": outcome.receipt.sequence,
-                    "revision": outcome.receipt.revision,
-                    "replayed": outcome.replayed,
-                    "command": typed.command,
-                }))
-            }
-            Err(error) => Resp::err(format!("typed registrar rejected registration: {error}")),
-        },
-        Err(error) => Resp::err(format!("typed registrar failed to build command: {error}")),
+    if let Some(before_consume) = before_consume {
+        if let Err(error) = before_consume(&prepared) {
+            return Resp::err(error);
+        }
     }
+    let response =
+        consume_prepared_register_typed(server, worker_id, transport, prepared, register_approval);
+    clear_context_cancel_operation();
+    crate::server::clear_context_register_start_binding();
+    response
+}
+
+/// Ordinary Create has already reserved an exact peer id. Its execution cwd
+/// may be a linked worktree; registration and route identity remain the main.
+pub(crate) fn register_created_peer(
+    server: &Server,
+    worker_id: &str,
+    token: &str,
+    context: &ProjectContext,
+    candidate: &crate::proto::AppServerCandidate,
+) -> Resp {
+    let route = match crate::scope::canonical_route_for_identity(
+        &server.host_paths,
+        Path::new(&candidate.cwd),
+        &context.app_scope_id,
+    ) {
+        Ok(route) if route.root == PathBuf::from(context.project_scope.as_str()) => route,
+        _ => return Resp::err("PEER_LIFECYCLE_CREATE_SCOPE_MISMATCH"),
+    };
+    let selected = match crate::client::adapters::verify_candidate(candidate) {
+        Ok(selected) => selected,
+        Err(error) => return Resp::err(format!("APPSERVER_ENDPOINT_REJECTED: {error}")),
+    };
+    if server.state.lock().unwrap().workers.contains_key(worker_id) {
+        return Resp::err("PEER_LIFECYCLE_PEER_RESERVED");
+    }
+    let main = route.root.to_string_lossy().into_owned();
+    let response = register_typed_observed(
+        server,
+        worker_id,
+        token,
+        &selected,
+        &main,
+        Some(context.project_scope.clone()),
+        Some(context.app_scope_id.clone()),
+        false,
+        None,
+        None,
+    );
+    if !response.ok {
+        return response;
+    }
+    if let Err(error) = commit_current_thread_route_for_runtime(
+        server,
+        server,
+        worker_id,
+        &main,
+        Some(&context.app_scope_id),
+    ) {
+        let cleanup = retire_runtime_binding_after_route_failure(
+            server,
+            worker_id,
+            &main,
+            Some(&context.app_scope_id),
+            worker_id,
+            "Create route publication failed",
+        );
+        return Resp::err(format!("{error}; route cleanup: {cleanup:?}"));
+    }
+    response
 }
 
 pub(crate) fn handle_register_with_app_scope(
@@ -975,6 +1112,77 @@ fn handle_register_with_app_scope_inner(
     candidates: Option<TransportCandidates>,
     recover_existing: bool,
 ) -> Resp {
+    handle_register_with_app_scope_inner_bound(
+        server,
+        worker_id,
+        token,
+        cwd,
+        app_scope,
+        candidates,
+        recover_existing,
+        None,
+    )
+}
+
+/// The daemon-issued approval proof may admit the approved target's Register
+/// even when its credential is stale, but only for the exact target and route
+/// scope the proof names. The proof never substitutes for the real binding the
+/// reducer commits; it only relaxes the ordinary token-ownership check.
+fn approved_register_authorized(
+    proof: Option<&RegisterApprovalProof>,
+    worker_id: &str,
+    project_scope: Option<&ProjectScopeId>,
+    app_scope: Option<&AppServerId>,
+) -> bool {
+    match (proof, project_scope, app_scope) {
+        (Some(proof), Some(project_scope), Some(app_scope)) => {
+            proof.authorizes(worker_id, project_scope.as_str(), app_scope.as_str())
+        }
+        _ => false,
+    }
+}
+
+/// Recheck the exact approved incumbent fence at the Register owner boundary,
+/// immediately before effects. The proof records the committed incumbent the
+/// identity owner validated; if the reducer has since moved to another binding
+/// or generation, the approval is stale and must fail closed with the accepted
+/// typed conflict instead of committing an unapproved replacement.
+fn approved_register_fence_current(
+    state: &State,
+    proof: &RegisterApprovalProof,
+    project_scope: &ProjectScopeId,
+    app_scope: &AppServerId,
+) -> bool {
+    let route_scope = RouteScope {
+        app_scope_id: app_scope.clone(),
+        project_scope_id: project_scope.clone(),
+    };
+    let Ok(binding_id) = BindingId::new(proof.incumbent_binding_id.clone()) else {
+        return false;
+    };
+    state
+        .global
+        .lookup_binding_for(&route_scope, &binding_id)
+        .is_some_and(|binding| {
+            binding.agent_id.as_str() == proof.target_identity
+                && binding.binding_id.as_str() == proof.incumbent_binding_id
+                && binding.endpoint_generation == proof.incumbent_endpoint_generation
+        })
+}
+
+/// Register owner with an optional outer-operation binder. When the binder is
+/// present, the outer `Validating` phase with the exact nested IDs is synced
+/// before the same prepared envelope is consumed.
+fn handle_register_with_app_scope_inner_bound(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    cwd: String,
+    app_scope: Option<AppServerId>,
+    candidates: Option<TransportCandidates>,
+    recover_existing: bool,
+    outer_binding: Option<&RegisterOuterBinding>,
+) -> Resp {
     let candidates = candidates.unwrap_or_default();
     let selected = match validate_transport_candidates(server, &candidates, &cwd) {
         Ok(selected) => selected,
@@ -1047,15 +1255,46 @@ fn handle_register_with_app_scope_inner(
                         && thread.as_deref() == selected.thread_id.as_deref()
                         && endpoint.as_ref() == selected.tmux_endpoint.as_ref()
                 });
-        if existing.token != token {
+        let approval = outer_binding.and_then(RegisterOuterBinding::approval);
+        let approved_register = approved_register_authorized(
+            approval,
+            &worker_id,
+            existing_project_scope.as_ref(),
+            app_scope.as_ref(),
+        );
+        if existing.token != token && !approved_register {
             return Resp::err(format!(
                 "TOKEN_MISMATCH: worker {} is registered by another token",
                 worker_id
             ));
         }
-        let reuse_existing = same_runtime_key && !recover_existing;
+        // The proof only relaxes the token check. It must still name exactly
+        // the committed incumbent, or the approval is stale and the owner
+        // refuses before any prepare/consume.
+        if existing.token != token {
+            let Some(proof) = approval else {
+                return Resp::err("APPROVAL_STALE_CONFLICT");
+            };
+            let (Some(project_scope), Some(app_scope)) =
+                (existing_project_scope.as_ref(), app_scope.as_ref())
+            else {
+                return Resp::err("APPROVAL_STALE_CONFLICT");
+            };
+            if !approved_register_fence_current(&st, proof, project_scope, app_scope) {
+                return Resp::err("APPROVAL_STALE_CONFLICT");
+            }
+        }
+        let reuse_existing = same_runtime_key && !recover_existing && !approved_register;
         drop(st);
-        let mut resp = register_typed(
+        let mut before_consume = |prepared: &PreparedRegisterEnvelope| match outer_binding {
+            Some(binding) => {
+                binding.bind_validating(prepared)?;
+                binding.arbitrate_owner_start()?;
+                binding.promote_after_start()
+            }
+            None => Ok(()),
+        };
+        let mut resp = register_typed_observed(
             server,
             &worker_id,
             &token,
@@ -1064,6 +1303,8 @@ fn handle_register_with_app_scope_inner(
             existing_project_scope,
             app_scope,
             reuse_existing,
+            outer_binding.and_then(RegisterOuterBinding::approval),
+            Some(&mut before_consume),
         );
         if resp.ok {
             if reuse_existing {
@@ -1075,8 +1316,25 @@ fn handle_register_with_app_scope_inner(
         return resp;
     }
     drop(st);
-    register_typed(
-        server, &worker_id, &token, &selected, &cwd, None, app_scope, false,
+    let mut before_consume = |prepared: &PreparedRegisterEnvelope| match outer_binding {
+        Some(binding) => {
+            binding.bind_validating(prepared)?;
+            binding.arbitrate_owner_start()?;
+            binding.promote_after_start()
+        }
+        None => Ok(()),
+    };
+    register_typed_observed(
+        server,
+        &worker_id,
+        &token,
+        &selected,
+        &cwd,
+        None,
+        app_scope,
+        false,
+        outer_binding.and_then(RegisterOuterBinding::approval),
+        Some(&mut before_consume),
     )
 }
 
@@ -1144,310 +1402,5 @@ fn route_scope_for_root(root: &Path, state: &State) -> Result<Option<RouteScope>
     }))
 }
 
-fn server_route_scope(server: &Server, state: &State) -> Result<Option<RouteScope>, &'static str> {
-    route_scope_for_root(&server.root, state)
-}
 
-fn master_grant_for_worker(
-    state: &State,
-    route_scope: &RouteScope,
-    worker_id: &str,
-    granted_by: &str,
-    approval: &str,
-) -> Result<crate::server::global_state::MasterGrant, String> {
-    let project = state
-        .global
-        .lookup_project_for_route(route_scope)
-        .ok_or_else(|| {
-            format!(
-                "MASTER_AUTHORITY_REQUIRES_REGISTERED_ROUTE: {} / {}",
-                route_scope.project_scope_id.as_str(),
-                route_scope.app_scope_id
-            )
-        })?;
-    let mut bindings = project.runtime_bindings.values().filter(|binding| {
-        binding.project_scope == route_scope.project_scope_id
-            && binding.app_scope_id == route_scope.app_scope_id
-            && binding.agent_id.as_str() == worker_id
-    });
-    let Some(binding) = bindings.next() else {
-        return Err(format!(
-            "MASTER_AUTHORITY_REQUIRES_RUNTIME_BINDING: worker {worker_id} has no runtime binding"
-        ));
-    };
-    if bindings.next().is_some() {
-        return Err(format!(
-            "MASTER_AUTHORITY_AMBIGUOUS_BINDING: worker {worker_id} has multiple runtime bindings"
-        ));
-    }
-    crate::server::global_state::MasterGrant::new(
-        binding.project_scope.clone(),
-        binding.app_scope_id.clone(),
-        binding.agent_id.clone(),
-        "project",
-        granted_by,
-        approval,
-        binding.binding_id.clone(),
-        binding.endpoint_generation,
-        now_ms(),
-    )
-    .map_err(|error| error.to_string())
-}
-
-fn master_authority_transfer_events(
-    state: &State,
-    route_scope: &RouteScope,
-    grant: crate::server::global_state::MasterGrant,
-) -> Vec<Event> {
-    let mut events = master_authority_revoke_events(state, route_scope);
-    events.push(Event::GlobalMasterGranted { grant });
-    events
-}
-
-/// Revoke every current typed grant in the exact route scope without issuing a
-/// replacement. `promote` reuses the same scoped revoke set and then grants, so
-/// promote, delegate and clear share one authority-change owner.
-fn master_authority_revoke_events(state: &State, route_scope: &RouteScope) -> Vec<Event> {
-    state
-        .global
-        .lookup_project_for_route(route_scope)
-        .into_iter()
-        .flat_map(|project| project.master_grants.values())
-        .filter(|current| {
-            current.project_scope == route_scope.project_scope_id
-                && current.app_scope_id == route_scope.app_scope_id
-        })
-        .map(|current| Event::GlobalMasterRevoked {
-            project_scope: current.project_scope.clone(),
-            binding_id: current.binding_id.clone(),
-        })
-        .collect()
-}
-
-/// Finds the bindings that an incoming registration reclaims.
-///
-/// A tmux pane has one owner, and the pane id is the whole anchor a tmux
-/// registration fixes at registration time. The later registrant therefore
-/// replaces every other binding that holds the same pane on the same tmux
-/// server, in any project or app scope. Nothing is probed: a pane can never
-/// answer a liveness question.
-fn pane_claimants(
-    state: &State,
-    taker: &str,
-    route_scope: &RouteScope,
-    endpoint: &crate::proto::TmuxEndpoint,
-) -> Vec<RuntimeBinding> {
-    state
-        .global
-        .projects
-        .values()
-        .flat_map(|project| project.runtime_bindings.values())
-        .filter(|binding| {
-            binding.tmux_endpoint.as_ref().is_some_and(|previous| {
-                crate::client::adapters::tmux::same_owned_pane(previous, endpoint)
-            })
-        })
-        // The binding this registration is about to own is not a takeover:
-        // a same-scope re-registration stays idempotent.
-        .filter(|binding| {
-            !(binding.agent_id.as_str() == taker && binding.route_scope() == *route_scope)
-        })
-        .cloned()
-        .collect()
-}
-
-/// Events that hand one pane to a later registrant.
-///
-/// The previous claimant loses the pane, its current-thread route and its worker
-/// record in the same commit as the new binding, so the ledger cannot fence the
-/// new owner on the next attempt.
-fn pane_reclaim_events(taker: &str, previous: &RuntimeBinding) -> Result<Vec<Event>, String> {
-    let next_generation = previous.endpoint_generation.checked_add(1).ok_or_else(|| {
-        "RUNTIME_BINDING_REJECTED: reclaimed anchor generation overflow".to_owned()
-    })?;
-    let mut retired = previous.clone();
-    retired.endpoint_generation = next_generation;
-    retired.native_thread_id = None;
-    retired.tmux_endpoint = None;
-    let mut events = vec![
-        Event::GlobalCurrentThreadRouteRetired {
-            binding: previous.clone(),
-        },
-        Event::GlobalRuntimeBound { binding: retired },
-    ];
-    if previous.agent_id.as_str() != taker {
-        events.push(Event::WorkerClosed {
-            worker_id: previous.agent_id.as_str().to_owned(),
-            closed_by: taker.to_owned(),
-            reason: "tmux pane reclaimed by a later registration".to_owned(),
-            snapshot_captured_ms: None,
-            at_ms: now_ms(),
-        });
-    }
-    Ok(events)
-}
-
-fn current_master_grant(
-    state: &State,
-    route_scope: Option<&RouteScope>,
-) -> Option<crate::server::global_state::MasterGrant> {
-    if let Some(route_scope) = route_scope {
-        let project = state.global.lookup_project_for_route(route_scope)?;
-        let mut grants = project.master_grants.values().filter(|grant| {
-            grant.project_scope == route_scope.project_scope_id
-                && grant.app_scope_id == route_scope.app_scope_id
-                && state
-                    .global
-                    .lookup_master_grant(&grant.project_scope, &grant.binding_id)
-                    .is_some_and(|current| current == *grant)
-        });
-        let grant = grants.next()?.clone();
-        return grants.next().is_none().then_some(grant);
-    }
-    let mut grants = state
-        .global
-        .projects
-        .values()
-        .flat_map(|project| project.master_grants.values())
-        .filter(|grant| {
-            state
-                .global
-                .lookup_master_grant(&grant.project_scope, &grant.binding_id)
-                .is_some_and(|current| current == *grant)
-        });
-    let grant = grants.next()?.clone();
-    grants.next().is_none().then_some(grant)
-}
-
-fn current_master_worker_id(state: &State, route_scope: Option<&RouteScope>) -> Option<String> {
-    current_master_grant(state, route_scope).map(|grant| grant.agent_id.as_str().to_owned())
-}
-
-/// The current typed grant holder for the server's route, read only from the
-/// reducer. Transport liveness is a separate observation and never gates this
-/// read, so an unreachable holder still owns the authority it was granted.
-pub(crate) fn current_master_holder(
-    server: &Server,
-    state: &State,
-) -> Result<Option<String>, &'static str> {
-    let route_scope = server_route_scope(server, state)?;
-    Ok(current_master_worker_id(state, route_scope.as_ref()))
-}
-
-/// The current grant holder's worker record. This is used where a caller needs
-/// the holder's selected transport for scheduling or notifications; it never
-/// probes that transport, so a missing probe cannot revoke authority.
-fn current_master_worker_record(
-    server: &Server,
-    state: &State,
-) -> Result<Option<WorkerRec>, &'static str> {
-    let route_scope = server_route_scope(server, state)?;
-    Ok(current_master_worker_id(state, route_scope.as_ref())
-        .and_then(|id| state.workers.get(&id).cloned()))
-}
-
-
-
-fn communication_recovery_brief() -> serde_json::Value {
-    json!({
-        "on_error": "Preserve the exact communication error and durable IDs; an ACK, notification acceptance, daemon health, or timeout is not delivery.",
-        "steps": [
-            "Run `collab context` and inspect the named route, identity, daemon, task, and inbox state.",
-            "If context returns requires_identity_update, supply only its required_fields once through `collab context --provide '<JSON>'`; the daemon owns identity recovery and binding updates.",
-            "If context fails, preserve the exact error and report through a healthy peer or the human. TOKEN_MISMATCH and identity conflicts need owner repair; do not choose another worker, copy credentials, edit routes, or start a second daemon."
-        ],
-        "close_only_when": [
-            "the same native target produces a result item",
-            "the durable receipt for that result is consumed through the canonical receive/consume operation; read-only inspection alone does not close",
-            "the bug or feature record is updated with the full evidence"
-        ]
-    })
-}
-
-fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Value {
-    let route_scope = server_route_scope(server, state).ok().flatten();
-    if current_master_worker_id(state, route_scope.as_ref()).as_deref() == Some(worker_id) {
-        return json!({
-            "role": "master",
-            "role_task": "Orchestrate the project; implementation is not your primary job.",
-            "responsibilities": [
-                "Run `appsdk longhorizon show` to reconstruct goal, tasks, workers, blockers, and bugs.",
-                "Split work into independent scopes; assign tasks and resources; keep useful worker capacity loaded.",
-                "Before ending each scheduling turn, saturate every live present peer first, then schedule managed subagents within the configured cap; never stay idle while eligible capacity remains.",
-                "Delivery, merge, or a review verdict is not a lifecycle endpoint; drive review/integration/cleanup/close and assign the next ready P0/P1 task.",
-                "Own worker blockers: investigate, unblock, reassign, or close. Do not wait for someone else.",
-                "Drive test, verification, commit, merge, worktree cleanup, and task closure.",
-                "Continue under the standing goal without waiting for user input; hold wakes only for a true external approval or dependency gate."
-            ],
-            "communication_recovery": communication_recovery_brief(),
-            "authority": {
-                "managed_subagent": false,
-                "must_obey_master": false,
-                "may_decline_master_invite": true
-            },
-            "derivation": {
-                "kind": "project-master",
-                "parent": null
-            },
-            "blocked_boundary": "Investigate and unblock first; only pause for a true external approval or dependency gate.",
-            "completion_action": "Drive the project to verified merge, cleanup, task closure, and final acceptance.",
-            "next_action": "Run `appsdk longhorizon show`, saturate live peers first, then schedule managed subagents within the configured cap; do not end the scheduling turn while eligible capacity remains idle. Delivery or review triggers review/integration/cleanup/dispatch, not an endpoint.",
-            "notification_rule": "A notification is an interrupt, not completion. Do its P0/P1/P2 action, then resume scheduling; never stop on ACK/read/summary."
-        });
-    }
-    if is_managed_subagent(state, worker_id) {
-        let parent = state
-            .subagents
-            .values()
-            .find(|record| record.peer == worker_id)
-            .map(|record| record.parent.clone());
-        return json!({
-            "role": "managed-subagent",
-            "role_task": "Execute the assigned independent task and return evidence to parent/master.",
-            "responsibilities": [
-                "Stay inside the assigned task, worktree, file scope, delivery conditions, and tests.",
-                "Accept and execute master/parent instructions for this assignment; do not create a global schedule.",
-                "On trouble, investigate first. Send root cause, attempted actions, proposed fix, and any required decision to the live master; copy parent when different.",
-                "Complete implementation, tests, commit, delivery evidence, and resource cleanup; do not stop at code-written or ACK."
-            ],
-            "communication_recovery": communication_recovery_brief(),
-            "authority": {
-                "managed_subagent": true,
-                "must_obey_master": true,
-                "may_decline_master_invite": false
-            },
-            "derivation": {
-                "kind": "managed-subagent",
-                "parent": parent
-            },
-            "blocked_boundary": "Stay within the assigned task and report a concrete root cause, proposed fix, and required decision to parent/master.",
-            "completion_action": "Return the completed scoped task with implementation, tests, commit, delivery evidence, and resource cleanup.",
-            "next_action": "Continue the assigned task; report ready when idle.",
-            "notification_rule": "Handle the named priority action, then resume your assigned task. Reading or ACK is never task progress."
-        });
-    }
-    json!({
-        "role": "worker",
-        "role_task": "Own and complete your independent task; collaborate with the master without abandoning existing ownership.",
-        "responsibilities": [
-            "Execute your registered task end to end within its worktree and file scope: implement, test, commit, deliver evidence, and close resources.",
-            "Evaluate master collaboration requests against current ownership and capacity. Accept ready non-conflicting work; decline or negotiate conflicts explicitly instead of silently ignoring them.",
-            "On trouble, investigate first. Report root cause, attempted actions, proposed fix, and the exact decision needed to the live master.",
-            "Do not wait passively and do not stop on ACK/read/summary; after handling a notification, resume your current task."
-        ],
-        "communication_recovery": communication_recovery_brief(),
-        "authority": {
-            "managed_subagent": false,
-            "must_obey_master": false,
-            "may_decline_master_invite": true
-        },
-        "derivation": {
-            "kind": "peer",
-            "parent": null
-        },
-        "blocked_boundary": "Protect current ownership and capacity; negotiate conflicts explicitly instead of silently accepting or ignoring them.",
-        "completion_action": "Own the task through implementation, verification, delivery evidence, and resource closure.",
-        "next_action": "Resume the registered task or remain available for an explicit dispatch.",
-        "notification_rule": "P0 preempts P1, P1 preempts P2. Higher priority interrupts but does not cancel your owned task."
-    })
-}
+include!("part_06/master_recovery.rs");

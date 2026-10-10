@@ -796,10 +796,7 @@ fn reset_level_requires_exactly_one_selector() {
         ResetLevel::select(true, false).unwrap(),
         ResetLevel::Project
     );
-    assert_eq!(
-        ResetLevel::select(false, true).unwrap(),
-        ResetLevel::Host
-    );
+    assert_eq!(ResetLevel::select(false, true).unwrap(), ResetLevel::Host);
 }
 
 #[test]
@@ -858,7 +855,11 @@ fn reset_project_retires_the_root_that_holds_the_live_index() {
     )
     .unwrap();
     std::fs::write(project.join(".agent-collab/server/events.jsonl"), b"{}\n").unwrap();
-    std::fs::write(project.join(".agent-collab/server/log.txt"), b"resident log\n").unwrap();
+    std::fs::write(
+        project.join(".agent-collab/server/log.txt"),
+        b"resident log\n",
+    )
+    .unwrap();
     std::fs::write(project.join(".agent-collab/mailbox/old.jsonl"), b"{}\n").unwrap();
     std::fs::write(project.join(".agent-collab/runs/old.jsonl"), b"{}\n").unwrap();
 
@@ -975,7 +976,11 @@ fn reset_host_recovers_an_unreplayable_index_and_reports_degraded() {
     let server_dir = project.join(".agent-collab/server");
     std::fs::create_dir_all(&server_dir).unwrap();
     std::fs::create_dir_all(&state).unwrap();
-    let canonical = project.canonicalize().unwrap().to_string_lossy().to_string();
+    let canonical = project
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
 
     let mut journal = String::new();
     journal.push_str(&format!(

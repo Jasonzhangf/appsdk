@@ -478,6 +478,9 @@ fn subagent_record(id: &str, status: &str, peer: &str) -> crate::subagent::Recor
         error: None,
         probe_failures: Vec::new(),
         runtime: Some("codex".into()),
+        create_operation_id: None,
+        binding_id: None,
+        endpoint_generation: None,
     }
 }
 
@@ -973,6 +976,9 @@ fn subagent_close_does_not_report_success_when_transition_cannot_persist() {
             error: None,
             probe_failures: Vec::new(),
             runtime: None,
+            create_operation_id: None,
+            binding_id: None,
+            endpoint_generation: None,
         },
     }]);
     server.commit(&[Event::SubagentSnapshotCaptured {
@@ -1027,7 +1033,7 @@ fn managed_subagent_is_authenticated_persistent_and_replayable() {
     register(&server, "parent", "%parent");
     register(&server, "child", "%child");
     register(&server, "other", "%other");
-    let record = Record {
+    let record = bind_test_subagent_record(&server, Record {
         id: "managed".into(),
         parent: "parent".into(),
         peer: "child".into(),
@@ -1040,7 +1046,10 @@ fn managed_subagent_is_authenticated_persistent_and_replayable() {
         error: None,
         probe_failures: Vec::new(),
         runtime: None,
-    };
+        create_operation_id: None,
+        binding_id: None,
+        endpoint_generation: None,
+    });
     let event = Event::SubagentUpdated { subagent: record };
     let encoded = serde_json::to_string(&event).unwrap();
     let mut replay = State::default();

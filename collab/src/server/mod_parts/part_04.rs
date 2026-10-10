@@ -1,6 +1,37 @@
 include!("runtime_manager_setup.rs");
 
 impl ProjectRuntimeManager {
+    /// Pure readback of the exact nested Register receipt for an authorized
+    /// outer query. It only consults the route's already-loaded runtime; it
+    /// never calls `ensure_runtime`, repairs a route, or dispatches Register.
+    /// The lookup is keyed by the durable nested command id and must confirm
+    /// the nested operation id, so a mismatched inner receipt is never shown.
+    fn inner_register_receipt_readback(
+        &self,
+        context: &ProjectContext,
+        projection: &crate::proto::IdentityOperationProjection,
+    ) -> Option<serde_json::Value> {
+        let command_id = CommandId::new(projection.nested_command_id.clone()?).ok()?;
+        let expected_operation = projection.nested_operation_id.as_deref()?;
+        let key = Self::route_key(context);
+        let runtime = self
+            .routes
+            .lock()
+            .unwrap()
+            .get(&key)
+            .and_then(|route| route.runtime.clone())?;
+        let state = runtime.state.lock().unwrap();
+        let receipt = state.global.lookup_command_receipt(&command_id)?;
+        if receipt.operation_id.as_str() != expected_operation {
+            return None;
+        }
+        Some(serde_json::json!({
+            "command_id": command_id.as_str(),
+            "operation_id": receipt.operation_id.as_str(),
+            "sequence": receipt.sequence,
+            "revision": receipt.revision,
+        }))
+    }
 
     fn runtimes(&self) -> Vec<Arc<Server>> {
         let mut result = Vec::new();
@@ -49,20 +80,37 @@ impl ProjectRuntimeManager {
         token: &str,
     ) -> Result<RouteResolution, String> {
         crate::client::adapters::tmux::validate_endpoint(endpoint)?;
-        let old = self.host.state.lock().unwrap().global
-            .lookup_unique_tmux_pane_route(endpoint).cloned()
+        let old = self
+            .host
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_unique_tmux_pane_route(endpoint)
+            .cloned()
             .ok_or_else(|| "RECOVERY_RECONCILE_REQUIRED: no unique host pane route".to_owned())?;
-        if old.agent_id.as_str() != worker_id || old.tmux_endpoint.as_ref()
-            .is_none_or(|bound| !crate::client::adapters::tmux::same_pane_route(bound, endpoint))
+        if old.agent_id.as_str() != worker_id
+            || old.tmux_endpoint.as_ref().is_none_or(|bound| {
+                !crate::client::adapters::tmux::same_pane_route(bound, endpoint)
+            })
         {
             return Err("IDENTITY_RESTORE_CONFLICT: pane route belongs to another worker".into());
         }
-        let key = (old.app_scope_id.as_str().to_owned(), old.project_scope.as_str().to_owned());
+        let key = (
+            old.app_scope_id.as_str().to_owned(),
+            old.project_scope.as_str().to_owned(),
+        );
         let (runtime, storage_root) = {
             let routes = self.routes.lock().unwrap();
-            let route = routes.get(&key)
-                .ok_or_else(|| "RECOVERY_RECONCILE_REQUIRED: project route is missing".to_owned())?;
-            (route.runtime.clone().ok_or_else(|| "RECOVERY_RECONCILE_REQUIRED: project runtime is not loaded".to_owned())?, route.storage_root.clone())
+            let route = routes.get(&key).ok_or_else(|| {
+                "RECOVERY_RECONCILE_REQUIRED: project route is missing".to_owned()
+            })?;
+            (
+                route.runtime.clone().ok_or_else(|| {
+                    "RECOVERY_RECONCILE_REQUIRED: project runtime is not loaded".to_owned()
+                })?,
+                route.storage_root.clone(),
+            )
         };
         if Arc::ptr_eq(&runtime, &self.host) {
             return Err("RECOVERY_RECONCILE_REQUIRED: resident route has no split journal".into());
@@ -73,20 +121,28 @@ impl ProjectRuntimeManager {
                 && old.binding_id == binding.binding_id
                 && old.runtime_id == binding.runtime_id
                 && old.endpoint_generation.checked_add(1) == Some(binding.endpoint_generation)
-                && binding.tmux_endpoint.as_ref().is_some_and(|new_endpoint|
-                    crate::client::adapters::tmux::same_pane_route(new_endpoint, endpoint))
+                && binding.tmux_endpoint.as_ref().is_some_and(|new_endpoint| {
+                    crate::client::adapters::tmux::same_pane_route(new_endpoint, endpoint)
+                })
         });
         if !staged {
-            return Err("RECOVERY_RECONCILE_REQUIRED: no authenticated adjacent project transition".into());
+            return Err(
+                "RECOVERY_RECONCILE_REQUIRED: no authenticated adjacent project transition".into(),
+            );
         }
         if verify(&runtime.state.lock().unwrap(), worker_id, token).is_err() {
             return Err("TOKEN_MISMATCH: pane recovery credential does not own worker".into());
         }
         match crate::client::adapters::tmux::probe(endpoint)
-            .map_err(|error| format!("ROUTE_RESOLVE_UNKNOWN: {error}"))? {
+            .map_err(|error| format!("ROUTE_RESOLVE_UNKNOWN: {error}"))?
+        {
             crate::client::adapters::tmux::PanePresence::Present => {}
-            crate::client::adapters::tmux::PanePresence::Missing => return Err("ROUTE_RESOLVE_NOT_FOUND: tmux pane is gone".into()),
-            crate::client::adapters::tmux::PanePresence::Unknown => return Err("ROUTE_RESOLVE_UNKNOWN: tmux pane liveness is uncertain".into()),
+            crate::client::adapters::tmux::PanePresence::Missing => {
+                return Err("ROUTE_RESOLVE_NOT_FOUND: tmux pane is gone".into())
+            }
+            crate::client::adapters::tmux::PanePresence::Unknown => {
+                return Err("ROUTE_RESOLVE_UNKNOWN: tmux pane liveness is uncertain".into())
+            }
         }
         let route = RouteResolution {
             app_scope_id: old.app_scope_id,
@@ -96,10 +152,16 @@ impl ProjectRuntimeManager {
             agent_id: old.agent_id,
             binding_id: old.binding_id,
             endpoint_generation: old.endpoint_generation,
-            session_id: old.session_id.ok_or_else(|| "ROUTE_RESOLVE_INVALID: old route has no session".to_owned())?,
-            native_thread_id: old.native_thread_id.ok_or_else(|| "ROUTE_RESOLVE_INVALID: old route has no thread".to_owned())?,
+            session_id: old
+                .session_id
+                .ok_or_else(|| "ROUTE_RESOLVE_INVALID: old route has no session".to_owned())?,
+            native_thread_id: old
+                .native_thread_id
+                .ok_or_else(|| "ROUTE_RESOLVE_INVALID: old route has no thread".to_owned())?,
         };
-        route.validate().map_err(|error| format!("ROUTE_RESOLVE_INVALID: {error}"))?;
+        route
+            .validate()
+            .map_err(|error| format!("ROUTE_RESOLVE_INVALID: {error}"))?;
         Ok(route)
     }
 
@@ -108,12 +170,32 @@ impl ProjectRuntimeManager {
         context: &mut ProjectContext,
         req: &Req,
     ) -> Result<(), String> {
-        let (Req::Register { worker_id, token, candidates: Some(candidates), .. }, Some(previous)) =
-            (req, context.runtime_context.as_ref()) else { return Ok(()); };
-        if candidates.appserver.is_some() { return Ok(()); }
-        let Some(candidate) = candidates.tmux.as_ref() else { return Ok(()); };
+        let (
+            Req::Register {
+                worker_id,
+                token,
+                candidates: Some(candidates),
+                ..
+            },
+            Some(previous),
+        ) = (req, context.runtime_context.as_ref())
+        else {
+            return Ok(());
+        };
+        if candidates.appserver.is_some() {
+            return Ok(());
+        }
+        let Some(candidate) = candidates.tmux.as_ref() else {
+            return Ok(());
+        };
         let key = Self::route_key(context);
-        let Some(runtime) = self.routes.lock().unwrap().get(&key).and_then(|route| route.runtime.clone()) else {
+        let Some(runtime) = self
+            .routes
+            .lock()
+            .unwrap()
+            .get(&key)
+            .and_then(|route| route.runtime.clone())
+        else {
             return Ok(());
         };
         let pending = self.pending_same_pane_master_bindings(&runtime);
@@ -125,11 +207,16 @@ impl ProjectRuntimeManager {
                 && binding.runtime_id == previous.runtime_id
                 && binding.binding_id == previous.binding_id
                 && previous.endpoint_generation.checked_add(1) == Some(binding.endpoint_generation)
-                && binding.tmux_endpoint.as_ref().is_some_and(|endpoint|
-                    crate::client::adapters::tmux::same_pane_route(endpoint, &candidate.endpoint))
-        }) else { return Ok(()); };
+                && binding.tmux_endpoint.as_ref().is_some_and(|endpoint| {
+                    crate::client::adapters::tmux::same_pane_route(endpoint, &candidate.endpoint)
+                })
+        }) else {
+            return Ok(());
+        };
         if verify(&runtime.state.lock().unwrap(), worker_id, token).is_err() {
-            return Err("TOKEN_MISMATCH: pane register retry credential does not own worker".into());
+            return Err(
+                "TOKEN_MISMATCH: pane register retry credential does not own worker".into(),
+            );
         }
         let host_route = self
             .host
@@ -139,19 +226,26 @@ impl ProjectRuntimeManager {
             .global
             .lookup_unique_tmux_pane_route(&candidate.endpoint)
             .cloned();
-        let host_matches = host_route.as_ref().is_some_and(|host|
-            host == &binding ||
-            (host.same_principal(&binding)
-                && host.endpoint_generation == previous.endpoint_generation
-                && host.session_id == previous.session_id
-                && host.native_thread_id == previous.native_thread_id));
+        let host_matches = host_route.as_ref().is_some_and(|host| {
+            host == &binding
+                || (host.same_principal(&binding)
+                    && host.endpoint_generation == previous.endpoint_generation
+                    && host.session_id == previous.session_id
+                    && host.native_thread_id == previous.native_thread_id)
+        });
         if !host_matches {
-            return Err("RECOVERY_RECONCILE_REQUIRED: host pane route does not match retry transition".into());
+            return Err(
+                "RECOVERY_RECONCILE_REQUIRED: host pane route does not match retry transition"
+                    .into(),
+            );
         }
         match crate::client::adapters::tmux::probe(&candidate.endpoint)
-            .map_err(|error| format!("ROUTE_RESOLVE_UNKNOWN: {error}"))? {
+            .map_err(|error| format!("ROUTE_RESOLVE_UNKNOWN: {error}"))?
+        {
             crate::client::adapters::tmux::PanePresence::Present => {}
-            _ => return Err("ROUTE_RESOLVE_UNKNOWN: pane is not present for register retry".into()),
+            _ => {
+                return Err("ROUTE_RESOLVE_UNKNOWN: pane is not present for register retry".into())
+            }
         }
         context.runtime_context = Some(crate::identity::RuntimeIdentity {
             agent_id: binding.agent_id,
@@ -480,12 +574,9 @@ impl ProjectRuntimeManager {
             // a conflict, because two workers must never share one App Server
             // thread.
             let same_pane = binding.tmux_endpoint.as_ref().is_some_and(|candidate| {
-                existing
-                    .tmux_endpoint
-                    .as_ref()
-                    .is_some_and(|previous| {
-                        crate::client::adapters::tmux::same_owned_pane(previous, candidate)
-                    })
+                existing.tmux_endpoint.as_ref().is_some_and(|previous| {
+                    crate::client::adapters::tmux::same_owned_pane(previous, candidate)
+                })
             });
             if !same_pane
                 && (existing.agent_id != binding.agent_id
@@ -694,614 +785,6 @@ impl ProjectRuntimeManager {
         Ok(runtime)
     }
 
-    fn build_runtime(
-        &self,
-        root: &Path,
-        storage_root: &Path,
-    ) -> Result<(Arc<Server>, Option<std::fs::File>), String> {
-        let root = std::fs::canonicalize(root).map_err(|error| {
-            format!("PROJECT_ROUTE_NOT_READY/UNSUPPORTED: canonicalize project root: {error}")
-        })?;
-        if !root.join(".agent-collab").is_dir() {
-            return Err(format!(
-                "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: project {} is not initialized for Collab",
-                root.display()
-            ));
-        }
-        let storage_root = validate_runtime_storage_root(
-            &root,
-            storage_root,
-            "PROJECT_ROUTE_NOT_READY/UNSUPPORTED",
-        )?;
-        let server_dir = storage_root.join(".agent-collab").join("server");
-        std::fs::create_dir_all(&server_dir).map_err(|error| {
-            format!("PROJECT_ROUTE_NOT_READY/UNSUPPORTED: create runtime storage: {error}")
-        })?;
 
-        let project_lock = if root == self.host_root {
-            None
-        } else if self.project_locks.lock().unwrap().contains_key(&root) {
-            None
-        } else {
-            Some(
-                acquire_legacy_writer_lock(
-                    &root.join(".agent-collab/server/daemon.lock"),
-                    "project daemon",
-                )
-                .map_err(|error| format!("PROJECT_ROUTE_NOT_READY/UNSUPPORTED: {error}"))?,
-            )
-        };
-        let journal_path = server_dir.join("journal.jsonl");
-        let state = replay_from_journal(&root, &journal_path).map_err(|error| {
-            format!(
-                "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: runtime journal replay for {}: {error}",
-                root.display()
-            )
-        })?;
-        let journal_file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&journal_path)
-            .map_err(|error| {
-                format!("PROJECT_ROUTE_NOT_READY/UNSUPPORTED: open runtime journal: {error}")
-            })?;
-        let runtime = Arc::new(Server {
-            config: crate::config::load(&root).map_err(|error| {
-                format!("PROJECT_ROUTE_NOT_READY/UNSUPPORTED: load project config: {error}")
-            })?,
-            root,
-            storage_root,
-            journal_path,
-            host_paths: self.host.host_paths.clone(),
-            state: Mutex::new(state),
-            journal: Mutex::new(journal_file),
-            appserver_candidate_check: self.host.appserver_candidate_check.clone(),
-            #[cfg(not(test))]
-            tmux_notification_sink: self.host.tmux_notification_sink.clone(),
-            appserver_notification_sink: self.host.appserver_notification_sink.clone(),
-            appserver_thread_status: self.host.appserver_thread_status.clone(),
-            appserver_thread_archive: self.host.appserver_thread_archive.clone(),
-            mailbox_notify: Notify::new(),
-        });
-        restore_registered_peer_default_leases(&runtime);
-        purge_expired_storage(&runtime, now_ms());
-        Ok((runtime, project_lock))
-    }
-
-    fn install_runtime(
-        &self,
-        key: &RouteKey,
-        runtime: Arc<Server>,
-        project_lock: Option<std::fs::File>,
-    ) {
-        if let Some(lock) = project_lock {
-            self.project_locks
-                .lock()
-                .unwrap()
-                .insert(runtime.root.clone(), lock);
-        }
-        self.routes
-            .lock()
-            .unwrap()
-            .entry(key.clone())
-            .and_modify(|route| route.runtime = Some(runtime.clone()))
-            .or_insert(RuntimeRoute {
-                root: runtime.root.clone(),
-                storage_root: runtime.storage_root.clone(),
-                runtime: Some(runtime),
-            });
-    }
-
-    fn install_pending_route(&self, key: &RouteKey, root: &Path, storage_root: &Path) {
-        self.routes
-            .lock()
-            .unwrap()
-            .entry(key.clone())
-            .or_insert_with(|| RuntimeRoute {
-                root: root.to_path_buf(),
-                storage_root: storage_root.to_path_buf(),
-                runtime: None,
-            });
-    }
-
-    fn storage_owner(
-        &self,
-        storage_root: &Path,
-        records: &[HostRouteRecord],
-    ) -> Result<Option<String>, String> {
-        if storage_roots_equal(&self.host.root, storage_root)?
-            || storage_roots_equal(&self.host.storage_root, storage_root)?
-        {
-            return Ok(Some("resident host".into()));
-        }
-        let route_owner = {
-            let routes = self.routes.lock().unwrap();
-            let mut owner = None;
-            for (key, route) in routes.iter() {
-                if storage_roots_equal(&route.storage_root, storage_root)? {
-                    owner = Some(format!("route ({}, {})", key.0, key.1));
-                    break;
-                }
-            }
-            owner
-        };
-        if route_owner.is_some() {
-            return Ok(route_owner);
-        }
-        for record in records {
-            if storage_roots_equal(Path::new(&record.storage_root), storage_root)? {
-                return Ok(Some(format!(
-                    "route ({}, {})",
-                    record.app_scope_id, record.project_scope
-                )));
-            }
-        }
-        Ok(None)
-    }
-
-    fn append_route_record(
-        &self,
-        context: &ProjectContext,
-        storage_root: &Path,
-    ) -> Result<(), String> {
-        let project_root = Path::new(&context.canonical_root);
-        let storage_root = validate_runtime_storage_root(
-            project_root,
-            storage_root,
-            "HOST_ROUTE_DURABILITY_FAILED",
-        )?;
-        self.append_route_record_validated(context, &storage_root, false)
-    }
-
-    fn append_resident_route_record(&self, context: &ProjectContext) -> Result<(), String> {
-        let project_root = Path::new(&context.canonical_root);
-        if !storage_roots_equal(project_root, &self.host_root)
-            .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))?
-        {
-            return Err(
-                "HOST_ROUTE_DURABILITY_FAILED: resident route root does not match host root".into(),
-            );
-        }
-        let storage_root = storage_owner_path(&self.host.storage_root)
-            .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))?;
-        self.append_route_record_validated(context, &storage_root, true)
-    }
-
-    fn append_route_record_validated(
-        &self,
-        context: &ProjectContext,
-        storage_root: &Path,
-        allow_resident_storage: bool,
-    ) -> Result<(), String> {
-        if allow_resident_storage {
-            let project_root = Path::new(&context.canonical_root);
-            let resident_root = storage_roots_equal(project_root, &self.host_root)
-                .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))?;
-            let resident_storage = storage_roots_equal(storage_root, &self.host.storage_root)
-                .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))?;
-            if !resident_root || !resident_storage {
-                return Err(
-                    "HOST_ROUTE_DURABILITY_FAILED: resident storage exception does not match host"
-                        .into(),
-                );
-            }
-        }
-        let record = HostRouteRecord {
-            version: 1,
-            op: "register".into(),
-            app_scope_id: context.app_scope_id.as_str().into(),
-            project_scope: context.project_scope.as_str().into(),
-            canonical_root: context.canonical_root.clone(),
-            storage_root: storage_root.to_string_lossy().into_owned(),
-            registered_ms: now_ms(),
-        };
-        let existing_records = load_host_route_records(&self.route_journal).map_err(|error| {
-            format!("HOST_ROUTE_DURABILITY_FAILED: validate route journal: {error}")
-        })?;
-        if let Some(owner) = self
-            .storage_owner(&storage_root, &existing_records)
-            .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))?
-            .filter(|_| !allow_resident_storage)
-        {
-            return Err(format!(
-                "HOST_ROUTE_DURABILITY_FAILED: runtime storage root {} is already owned by {}",
-                record.storage_root, owner
-            ));
-        }
-        append_host_route_record(&self.route_journal, &record)
-    }
-
-    fn select_runtime(&self, context: &ProjectContext) -> Result<Arc<Server>, String> {
-        context
-            .validate()
-            .map_err(|error| format!("PROJECT_CONTEXT_INVALID: {error}"))?;
-        let key = Self::route_key(context);
-        let pending = {
-            let routes = self.routes.lock().unwrap();
-            let Some(route) = routes.get(&key) else {
-                return Err(format!(
-                    "PROJECT_SCOPE_UNKNOWN: no host route is registered for {}",
-                    context.canonical_root
-                ));
-            };
-            if let Some(runtime) = &route.runtime {
-                return Ok(runtime.clone());
-            }
-            (route.root.clone(), route.storage_root.clone())
-        };
-        self.ensure_runtime(&key, &pending.0, &pending.1)
-    }
-
-    fn verify_cross_project_source(
-        &self,
-        from: &str,
-        from_project: &str,
-        assigned_by: &str,
-        approval: Option<&str>,
-        assigned_ms: i64,
-    ) -> Result<String, String> {
-        let source_root = std::fs::canonicalize(from_project).map_err(|error| {
-            format!("CROSS_PROJECT_SOURCE_REJECTED: canonicalize source project: {error}")
-        })?;
-        if !source_root.join(".agent-collab").is_dir() {
-            return Err(format!(
-                "CROSS_PROJECT_SOURCE_REJECTED: source project {} is not initialized for Collab",
-                source_root.display()
-            ));
-        }
-        let source_scope = GlobalState::canonical_project_scope(&source_root)
-            .map_err(|error| format!("CROSS_PROJECT_SOURCE_REJECTED: {error}"))?;
-        let pending = self
-            .routes
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|((_, project_scope), _)| project_scope == source_scope.as_str())
-            .map(|(key, route)| (key.clone(), route.root.clone(), route.storage_root.clone()))
-            .collect::<Vec<_>>();
-        if pending.is_empty() {
-            return Err(format!(
-                "CROSS_PROJECT_SOURCE_REJECTED: no registered source route for {}",
-                source_scope.as_str()
-            ));
-        }
-
-        let mut matches = Vec::new();
-        for (key, root, storage_root) in pending {
-            let runtime = self
-                .ensure_runtime(&key, &root, &storage_root)
-                .map_err(|error| format!("CROSS_PROJECT_SOURCE_REJECTED: {error}"))?;
-            let state = runtime.state.lock().unwrap();
-            let master_holder = match current_master_holder(&runtime, &state) {
-                Ok(master) => master,
-                Err(error) => {
-                    return Err(format!("CROSS_PROJECT_SOURCE_REJECTED: {error}"));
-                }
-            };
-            if master_holder.as_deref() != Some(from) {
-                continue;
-            }
-            let route_scope = match server_route_scope(&runtime, &state) {
-                Ok(Some(route_scope)) => route_scope,
-                Ok(None) => continue,
-                Err(error) => {
-                    return Err(format!("CROSS_PROJECT_SOURCE_REJECTED: {error}"));
-                }
-            };
-            let grant = current_master_grant(&state, Some(&route_scope));
-            if grant.as_ref().map(|grant| grant.granted_by.as_str()) != Some(assigned_by)
-                || grant.as_ref().map(|grant| grant.approval.as_str()) != approval
-                || grant.as_ref().map(|grant| grant.granted_at_ms) != Some(assigned_ms)
-            {
-                return Err(
-                    "CROSS_PROJECT_SOURCE_REJECTED: source master assignment evidence does not match the source reducer"
-                        .into(),
-                );
-            }
-            let source_thread_id = state
-                .workers
-                .get(from)
-                .and_then(selected_transport_for_worker)
-                .and_then(|transport| transport.thread_id)
-                .ok_or_else(|| {
-                    "CROSS_PROJECT_SOURCE_REJECTED: source master has no registered route address"
-                        .to_string()
-                })?;
-            matches.push((key, source_thread_id));
-        }
-
-        match matches.len() {
-            1 => Ok(matches
-                .pop()
-                .expect("one source match")
-                .1),
-            0 => Err(
-                "CROSS_PROJECT_SOURCE_REJECTED: sender is not the live master of the source project"
-                    .into(),
-            ),
-            _ => Err(
-                "CROSS_PROJECT_SOURCE_REJECTED: source master route is ambiguous; use one registered source app scope"
-                    .into(),
-            ),
-        }
-    }
-
-    fn dispatch_cross_project_send(
-        &self,
-        target_context: &ProjectContext,
-        req: Req,
-    ) -> (Arc<Server>, Resp) {
-        let Req::CrossProjectSend {
-            from,
-            from_project,
-            source_master_assigned_by,
-            source_master_approval,
-            source_master_assigned_ms,
-            to,
-            subject,
-            body,
-            in_reply_to,
-        } = req
-        else {
-            unreachable!("cross-project dispatch requires CrossProjectSend");
-        };
-        let target = match self.select_runtime(target_context) {
-            Ok(runtime) => runtime,
-            Err(error) => return (self.host.clone(), Resp::err(error)),
-        };
-        let source_thread_id = match self.verify_cross_project_source(
-            &from,
-            &from_project,
-            &source_master_assigned_by,
-            source_master_approval.as_deref(),
-            source_master_assigned_ms,
-        ) {
-            Ok(source_thread_id) => source_thread_id,
-            Err(error) => return (target, Resp::err(error)),
-        };
-        let response = handle_cross_project_send(
-            &target,
-            from,
-            from_project,
-            source_thread_id,
-            source_master_assigned_by,
-            source_master_approval,
-            source_master_assigned_ms,
-            to,
-            subject,
-            body,
-            in_reply_to,
-        );
-        (target, response)
-    }
-
-    fn dispatch_sync(
-        &self,
-        project_context: Option<ProjectContext>,
-        req: Req,
-    ) -> (Arc<Server>, Resp) {
-        let Some(mut context) = project_context else {
-            if matches!(req, Req::Ping) {
-                let response = dispatch_with_route_context(&self.host, req, None);
-                return (self.host.clone(), response);
-            }
-            return (
-                self.host.clone(),
-                Resp::err(
-                    "PROJECT_CONTEXT_REQUIRED: canonical project root and scope are required",
-                ),
-            );
-        };
-        if let Err(error) = context.validate() {
-            return (
-                self.host.clone(),
-                Resp::err(format!("PROJECT_CONTEXT_INVALID: {error}")),
-            );
-        }
-        if let Req::IdentityContext { facts } = req {
-            return self.identity_context(context, facts);
-        }
-        let key = Self::route_key(&context);
-        let is_register = matches!(req, Req::Register { .. });
-        let register_worker_id = match &req {
-            Req::Register { worker_id, .. } => Some(worker_id.clone()),
-            _ => None,
-        };
-        let _register_guard = is_register.then(|| self.register_gate.lock().unwrap());
-        if let Err(error) = self.admit_committed_pane_register_retry(&mut context, &req) {
-            return (self.host.clone(), Resp::err(error));
-        }
-        let superseded = match self.validate_current_thread_candidate(&context, &req) {
-            Ok(superseded) => superseded,
-            Err(error) => return (self.host.clone(), Resp::err(error)),
-        };
-        if matches!(req, Req::CrossProjectSend { .. }) {
-            return self.dispatch_cross_project_send(&context, req);
-        }
-
-        if let Some((runtime, _)) = self.routes.lock().unwrap().get(&key).and_then(|route| {
-            route
-                .runtime
-                .as_ref()
-                .map(|runtime| (runtime.clone(), false))
-        }) {
-            if !is_register {
-                if let Err(error) = self.same_pane_master_route_ready(&runtime) {
-                    return (runtime, Resp::err(error));
-                }
-            }
-            let rollback_state = match register_worker_id.as_deref() {
-                Some(worker_id) => {
-                    match self.registration_rollback_state(&runtime, &context, worker_id) {
-                        Ok(state) => state,
-                        Err(error) => return (runtime, Resp::err(error)),
-                    }
-                }
-                None => (None, None, None, Vec::new()),
-            };
-            let response =
-                if let Err(error) = validate_request_context(&runtime, &req, Some(&context)) {
-                    Resp::err(error)
-                } else {
-                    dispatch_with_route_context(&runtime, req, Some(context.clone()))
-                };
-            let (runtime, response) = self.finalize_registration(
-                runtime,
-                &context,
-                register_worker_id.as_deref(),
-                rollback_state.0,
-                rollback_state.1,
-                rollback_state.2,
-                rollback_state.3,
-                response,
-            );
-            return (runtime, self.retire_superseded_claimants(superseded, response));
-        }
-
-        let pending_route = self
-            .routes
-            .lock()
-            .unwrap()
-            .get(&key)
-            .map(|route| (route.root.clone(), route.storage_root.clone()));
-        if let Some((root, storage_root)) = pending_route {
-            let runtime = match self.ensure_runtime(&key, &root, &storage_root) {
-                Ok(runtime) => runtime,
-                Err(error) => return (self.host.clone(), Resp::err(error)),
-            };
-            if !is_register {
-                if let Err(error) = self.same_pane_master_route_ready(&runtime) {
-                    return (runtime, Resp::err(error));
-                }
-            }
-            let rollback_state = match register_worker_id.as_deref() {
-                Some(worker_id) => {
-                    match self.registration_rollback_state(&runtime, &context, worker_id) {
-                        Ok(state) => state,
-                        Err(error) => return (runtime, Resp::err(error)),
-                    }
-                }
-                None => (None, None, None, Vec::new()),
-            };
-            let response =
-                if let Err(error) = validate_request_context(&runtime, &req, Some(&context)) {
-                    Resp::err(error)
-                } else {
-                    dispatch_with_route_context(&runtime, req, Some(context.clone()))
-                };
-            let (runtime, response) = self.finalize_registration(
-                runtime,
-                &context,
-                register_worker_id.as_deref(),
-                rollback_state.0,
-                rollback_state.1,
-                rollback_state.2,
-                rollback_state.3,
-                response,
-            );
-            return (runtime, self.retire_superseded_claimants(superseded, response));
-        }
-
-        // The first route for the daemon's resident project keeps the
-        // backwards-compatible resident reducer.  A second app scope gets a
-        // separate runtime and storage namespace just like any other route.
-        let context_root = PathBuf::from(&context.canonical_root);
-        if context_root == self.host_root
-            && !self.has_project_route(&context.project_scope.as_str())
-        {
-            if is_register {
-                if let Err(error) = self.append_resident_route_record(&context) {
-                    return (self.host.clone(), Resp::err(error));
-                }
-            }
-            let rollback_state = match register_worker_id.as_deref() {
-                Some(worker_id) => {
-                    match self.registration_rollback_state(&self.host, &context, worker_id) {
-                        Ok(state) => state,
-                        Err(error) => return (self.host.clone(), Resp::err(error)),
-                    }
-                }
-                None => (None, None, None, Vec::new()),
-            };
-            let response =
-                if let Err(error) = validate_request_context(&self.host, &req, Some(&context)) {
-                    Resp::err(error)
-                } else {
-                    dispatch_with_route_context(&self.host, req, Some(context.clone()))
-                };
-            if !response.ok {
-                return (self.host.clone(), response);
-            }
-            if is_register {
-                self.install_runtime(&key, self.host.clone(), None);
-            }
-            let (runtime, response) = self.finalize_registration(
-                self.host.clone(),
-                &context,
-                register_worker_id.as_deref(),
-                rollback_state.0,
-                rollback_state.1,
-                rollback_state.2,
-                rollback_state.3,
-                response,
-            );
-            return (runtime, self.retire_superseded_claimants(superseded, response));
-        }
-
-        let Req::Register { cwd, .. } = &req else {
-            return (
-                self.host.clone(),
-                Resp::err(format!(
-                    "PROJECT_SCOPE_UNKNOWN: no host route is registered for {}",
-                    context.canonical_root
-                )),
-            );
-        };
-        if let Err(error) = validate_project_registration_cwd(cwd, &context_root) {
-            return (self.host.clone(), Resp::err(error));
-        }
-        let storage_root = self.storage_root_for_new(
-            &context_root,
-            context.project_scope.as_str(),
-            context.app_scope_id.as_str(),
-        );
-        // Admit the project route before opening or mutating its reducer. The
-        // host journal is the durable transaction boundary: if it cannot be
-        // published, this request must not create or mutate a project
-        // journal that would be unreachable after a restart.
-        if let Err(error) = self.append_route_record(&context, &storage_root) {
-            return (self.host.clone(), Resp::err(error));
-        }
-        self.install_pending_route(&key, &context_root, &storage_root);
-        let runtime = match self.ensure_runtime(&key, &context_root, &storage_root) {
-            Ok(runtime) => runtime,
-            Err(error) => return (self.host.clone(), Resp::err(error)),
-        };
-        let rollback_state = match register_worker_id.as_deref() {
-            Some(worker_id) => {
-                match self.registration_rollback_state(&runtime, &context, worker_id) {
-                    Ok(state) => state,
-                    Err(error) => return (runtime, Resp::err(error)),
-                }
-            }
-            None => (None, None, None, Vec::new()),
-        };
-        let response = if let Err(error) = validate_request_context(&runtime, &req, Some(&context))
-        {
-            Resp::err(error)
-        } else {
-            dispatch_with_route_context(&runtime, req, Some(context.clone()))
-        };
-        let (runtime, response) = self.finalize_registration(
-            runtime,
-            &context,
-            register_worker_id.as_deref(),
-            rollback_state.0,
-            rollback_state.1,
-            rollback_state.2,
-            rollback_state.3,
-            response,
-        );
-        (runtime, self.retire_superseded_claimants(superseded, response))
-    }
 }
+include!("part_04/runtime.rs");

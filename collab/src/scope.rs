@@ -278,7 +278,9 @@ fn narrow_routes_for_git_worktree(
     let git_roots = git_worktree_roots_if_any(cwd)?;
     matches.retain(|route| {
         cwd.starts_with(&route.root)
-            || git_roots.as_ref().is_some_and(|roots| route.root == roots.main_root)
+            || git_roots
+                .as_ref()
+                .is_some_and(|roots| route.root == roots.main_root)
     });
     if let Some(git_roots) = &git_roots {
         let nested_matches = matches
@@ -1018,10 +1020,7 @@ impl Scope {
         Self::resolve_from_cwd_without_thread(cwd, host_paths)
     }
 
-    fn resolve_from_cwd_without_thread(
-        cwd: &Path,
-        host_paths: &HostPaths,
-    ) -> anyhow::Result<Self> {
+    fn resolve_from_cwd_without_thread(cwd: &Path, host_paths: &HostPaths) -> anyhow::Result<Self> {
         if Self::local_baseline_is_authoritative(cwd)? {
             return Self::from_project_root(cwd.to_path_buf());
         }

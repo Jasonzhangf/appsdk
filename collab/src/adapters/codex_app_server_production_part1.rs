@@ -881,6 +881,52 @@ fn transport_client(transport: &SelectedTransport) -> Result<Client, AdapterErro
     Ok(client)
 }
 
+#[derive(Debug, Clone)]
+pub enum ThreadSettingsUpdate {
+    Acknowledged(Value),
+    Refused(String),
+    Unknown(String),
+}
+
+/// Update only the selected thread's execution cwd. The host keeps every
+/// sandbox/policy setting because the request deliberately omits them.
+pub fn update_thread_cwd(
+    transport: &SelectedTransport,
+    thread_id: &str,
+    cwd: &str,
+) -> ThreadSettingsUpdate {
+    if transport.kind != TransportKind::AppServer {
+        return ThreadSettingsUpdate::Refused(
+            "TRANSPORT_UNSUPPORTED: thread settings update requires an App Server transport".into(),
+        );
+    }
+    let mut client = match transport_client(transport) {
+        Ok(client) => client,
+        Err(error) => return ThreadSettingsUpdate::Unknown(error.to_string()),
+    };
+    match client.call_raw(
+        "thread/settings/update",
+        json!({"threadId": thread_id, "cwd": cwd}),
+    ) {
+        Ok(Ok(value)) => ThreadSettingsUpdate::Acknowledged(value),
+        Ok(Err(error)) => ThreadSettingsUpdate::Refused(error.message),
+        Err(error) => ThreadSettingsUpdate::Unknown(error.to_string()),
+    }
+}
+
+/// Read execution history. This is the accepted readback source for cwd
+/// evidence; it never changes thread identity or registration state.
+pub fn read_thread_history(
+    transport: &SelectedTransport,
+    thread_id: &str,
+) -> Result<Value, AdapterError> {
+    let mut client = transport_client(transport)?;
+    client.call(
+        "thread/read",
+        json!({"threadId": thread_id, "includeTurns": true}),
+    )
+}
+
 pub fn start_thread(
     transport: &SelectedTransport,
     cwd: &Path,

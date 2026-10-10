@@ -253,7 +253,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --manifest-path collab/Cargo.toml --locked -- --test-threads=1
+      - run: cargo test --manifest-path collab/Cargo.toml --locked --features context-cancel-test-hooks -- --test-threads=1
 
   installer:
     name: Installer

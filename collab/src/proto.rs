@@ -107,6 +107,159 @@ pub struct IdentityFacts {
     pub dsh_session_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityOperationPhase {
+    Admitted,
+    Validating,
+    InnerDispatched,
+    EffectObserved,
+    Completed,
+    Refused,
+    Failed,
+    Unknown,
+    Partial,
+    Cancelled,
+}
+
+impl IdentityOperationPhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Admitted => "admitted",
+            Self::Validating => "validating",
+            Self::InnerDispatched => "inner_dispatched",
+            Self::EffectObserved => "effect_observed",
+            Self::Completed => "completed",
+            Self::Refused => "refused",
+            Self::Failed => "failed",
+            Self::Unknown => "unknown",
+            Self::Partial => "partial",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityContextRequest {
+    pub operation_id: String,
+    pub invocation: String,
+    pub action: String,
+    #[serde(default)]
+    pub facts: IdentityFacts,
+    #[serde(default)]
+    pub approval: Option<serde_json::Value>,
+    #[serde(default)]
+    pub grant_approval: Option<serde_json::Value>,
+    #[serde(default)]
+    pub query: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub query_capability: String,
+    /// Daemon-issued single-use reservation ticket. It is internal to the
+    /// context cancellation handshake and never exposed as a public CLI/MCP
+    /// argument.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub invocation_ticket: String,
+}
+
+impl IdentityContextRequest {
+    pub fn legacy(facts: IdentityFacts) -> Self {
+        Self {
+            operation_id: String::new(),
+            invocation: "automatic".into(),
+            action: "context".into(),
+            facts,
+            approval: None,
+            grant_approval: None,
+            query: false,
+            query_capability: String::new(),
+            invocation_ticket: String::new(),
+        }
+    }
+}
+
+/// Control acknowledgement for one context cancellation request. A
+/// pre-admission cancellation has no operation projection by design.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityContextCancelAck {
+    pub operation_id: String,
+    pub disposition: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection: Option<IdentityOperationProjection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityOperationProjection {
+    pub operation_id: String,
+    pub phase: IdentityOperationPhase,
+    pub outcome: String,
+    #[serde(default)]
+    pub committed_phases: Vec<IdentityOperationPhase>,
+    #[serde(default)]
+    pub business_receipts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nested_command_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nested_operation_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityContextQueryResult {
+    pub projection: IdentityOperationProjection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityContextResponseEnvelope {
+    pub result: IdentityOperationProjection,
+}
+
+impl IdentityContextResponseEnvelope {
+    pub fn query(projection: IdentityOperationProjection) -> Self {
+        Self { result: projection }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ContextOperationRequires {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<String>,
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub sources: serde_json::Map<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair_invocation: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextOperationResult {
+    pub operation_id: String,
+    pub invocation: String,
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    pub outcome: String,
+    #[serde(default)]
+    pub committed_phases: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_phase: Option<String>,
+    pub requires: ContextOperationRequires,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub owner_readback: serde_json::Map<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queried_operation: Option<IdentityOperationProjection>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelectedTransport {
     pub kind: TransportKind,
@@ -123,6 +276,48 @@ pub struct SelectedTransport {
     pub capabilities: Vec<String>,
     pub self_check: String,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PeerLifecycleRequest {
+    Create {
+        worker_id: String,
+        token: String,
+        operation_id: String,
+        query_capability: String,
+        peer_id: String,
+        cwd: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+    },
+    Read {
+        worker_id: String,
+        token: String,
+        target_id: Option<String>,
+    },
+    Update {
+        worker_id: String,
+        token: String,
+        operation_id: String,
+        query_capability: String,
+        target: PeerLifecycleTarget,
+        cwd: String,
+    },
+    Close {
+        worker_id: String,
+        token: String,
+        operation_id: String,
+        query_capability: String,
+        target: PeerLifecycleTarget,
+        reason: String,
+    },
+    Query {
+        operation_id: String,
+        query_capability: String,
+    },
+}
+
+include!("proto/peer_lifecycle.rs");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandEnvelope {
@@ -468,7 +663,10 @@ pub enum Req {
     /// Host-local bootstrap. Endpoint admission and credential issuance belong
     /// to the daemon, not the CLI that collected these partial facts.
     IdentityContext {
+        #[serde(default, skip_serializing_if = "identity_facts_empty")]
         facts: IdentityFacts,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identity_context: Option<IdentityContextRequest>,
     },
     /// Resolve the unique registered project route for one tmux pane. The
     /// complete endpoint prevents equal session/pane names on different tmux
@@ -624,6 +822,9 @@ pub enum Req {
         worker_id: String,
     },
     Workers,
+    PeerLifecycle {
+        request: PeerLifecycleRequest,
+    },
     WorkerStatus {
         worker_id: Option<String>,
     },
@@ -676,6 +877,10 @@ pub enum Req {
     },
 }
 
+fn identity_facts_empty(facts: &IdentityFacts) -> bool {
+    facts == &IdentityFacts::default()
+}
+
 impl Req {
     /// Registration of one worker on its current transport. A pane already
     /// claimed by another worker is reclaimed by the later registrant.
@@ -721,6 +926,21 @@ impl RequestEnvelope {
 
     pub fn into_parts(self) -> (Option<ProjectContext>, Req) {
         (self.project_context, self.request)
+    }
+
+    pub fn normalize_identity_context(&mut self) -> Result<(), &'static str> {
+        if let Req::IdentityContext {
+            identity_context,
+            facts,
+        } = &mut self.request
+        {
+            if identity_context.is_none() {
+                *identity_context = Some(IdentityContextRequest::legacy(facts.clone()));
+            } else if facts != &IdentityFacts::default() {
+                return Err("IDENTITY_CONTEXT_ENVELOPE_CONFLICT: both legacy facts and identity_context were supplied");
+            }
+        }
+        Ok(())
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {

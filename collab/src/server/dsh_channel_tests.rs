@@ -745,9 +745,15 @@ fn dsh_wake_enqueue_maps_the_mode_and_returns_a_queue_receipt() {
         .trim_start_matches("collab:")
         .split_once(':')
         .expect("messageId must be collab:<digest>:<msg_id>");
-    assert_eq!(prefix.len(), 16, "digest prefix must be 64 bits: {message_id}");
+    assert_eq!(
+        prefix.len(),
+        16,
+        "digest prefix must be 64 bits: {message_id}"
+    );
     assert!(
-        prefix.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+        prefix
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
         "digest prefix must be lowercase hex: {message_id}"
     );
     assert_eq!(digest_and_id, "m1759420000000-1");
@@ -1328,7 +1334,9 @@ fn a_dsh_wake_names_the_real_mailbox_id_so_a_peer_ack_can_match_it() {
         "the gateway messageId must end with mailbox id {mailbox_id}: {message_id}"
     );
     // The gateway's declared shape: `collab:<16 hex>:<mailbox id>`.
-    let (namespace, rest) = message_id.split_once(':').expect("shape collab:<digest>:<id>");
+    let (namespace, rest) = message_id
+        .split_once(':')
+        .expect("shape collab:<digest>:<id>");
     assert_eq!(namespace, "collab", "{message_id}");
     let (digest, tail) = rest.split_once(':').expect("shape collab:<digest>:<id>");
     assert_eq!(digest.len(), 16, "the digest is 64 bits wide: {message_id}");
@@ -1373,14 +1381,34 @@ fn a_dsh_peer_returning_on_a_new_gateway_address_replaces_its_transport() {
         server.config.notifications.enabled = true;
     }
     assert!(
-        register_dsh(&server, "dsh-sender", &old_gateway.socket, "rt-s", "ses-sender").ok,
+        register_dsh(
+            &server,
+            "dsh-sender",
+            &old_gateway.socket,
+            "rt-s",
+            "ses-sender"
+        )
+        .ok,
         "register the sender"
     );
     assert!(
-        register_dsh(&server, "dsh-moved", &old_gateway.socket, "rt-1", "ses-moved").ok,
+        register_dsh(
+            &server,
+            "dsh-moved",
+            &old_gateway.socket,
+            "rt-1",
+            "ses-moved"
+        )
+        .ok,
         "first register of the peer"
     );
-    let moved = register_dsh(&server, "dsh-moved", &new_gateway.socket, "rt-2", "ses-moved");
+    let moved = register_dsh(
+        &server,
+        "dsh-moved",
+        &new_gateway.socket,
+        "rt-2",
+        "ses-moved",
+    );
     assert!(
         moved.ok,
         "a dsh peer must re-register at its new address: {moved:?}"
@@ -1434,10 +1462,7 @@ fn a_dsh_peer_returning_on_a_new_gateway_address_replaces_its_transport() {
         "immediate".into(),
     );
     assert!(sent.ok, "send failed: {sent:?}");
-    assert_eq!(
-        sent.data["notification"], "dsh-wake-enqueued",
-        "{sent:?}"
-    );
+    assert_eq!(sent.data["notification"], "dsh-wake-enqueued", "{sent:?}");
 
     let new_requests = second_seen.lock().unwrap().clone();
     let enqueues = new_requests

@@ -3,21 +3,40 @@ fn dispatch_with_route_context(
     req: Req,
     project_context: Option<ProjectContext>,
 ) -> Resp {
+    dispatch_with_route_context_bound(server, req, project_context, None)
+}
+
+/// `dispatch_with_route_context` with an optional outer-operation binder for a
+/// Register request. Only the identity owner supplies a binder; every other
+/// caller keeps the legacy behaviour.
+fn dispatch_with_route_context_bound(
+    server: &Arc<Server>,
+    req: Req,
+    project_context: Option<ProjectContext>,
+    register_binding: Option<&RegisterOuterBinding>,
+) -> Resp {
     if mutation_blocked_during_migration(&req) && server.state.lock().unwrap().admission_frozen() {
         return Resp::err(
             "MIGRATION_ADMISSION_FROZEN: only identity rebind, read queries, daemon restart, and migration verify are allowed",
         );
     }
     let unaccepted_resource_task = match &req {
-        Req::TaskRelocate { task_id, .. } | Req::TaskWait { task_id, .. }
-        | Req::TaskDeliver { task_id, .. } | Req::TaskReview { task_id, .. }
-        | Req::TaskIntegrated { task_id, .. } | Req::TaskClose { task_id, .. }
+        Req::TaskRelocate { task_id, .. }
+        | Req::TaskWait { task_id, .. }
+        | Req::TaskDeliver { task_id, .. }
+        | Req::TaskReview { task_id, .. }
+        | Req::TaskIntegrated { task_id, .. }
+        | Req::TaskClose { task_id, .. }
         | Req::TaskFinalizeCleanup { task_id, .. } => Some(task_id),
         _ => None,
     };
     if let Some(task_id) = unaccepted_resource_task {
         let state = server.state.lock().unwrap();
-        if state.tasks.get(task_id).is_some_and(|task| matches!(task.status.as_str(), "pending" | "invited")) {
+        if state
+            .tasks
+            .get(task_id)
+            .is_some_and(|task| matches!(task.status.as_str(), "pending" | "invited"))
+        {
             return Resp::err("BOARD_ACCEPT_REQUIRED: unaccepted tasks cannot bind execution resources or lifecycle evidence");
         }
     }
@@ -25,6 +44,7 @@ fn dispatch_with_route_context(
         .as_ref()
         .map(|context| context.app_scope_id.clone());
     match req {
+        Req::PeerLifecycle { request } => peer_lifecycle::handle(server, project_context.as_ref(), request),
         Req::IdentityContext { .. } => Resp::err("IDENTITY_CONTEXT_HOST_REQUIRED: identity reconciliation belongs to the host daemon"),
         Req::BoardShow => handle_board_show(server),
         Req::Board { worker_id, token, command } => handle_board_command(server, worker_id, token, command),
@@ -70,7 +90,7 @@ fn dispatch_with_route_context(
                                 .is_some_and(|worker| worker.token != token)
                     })
             });
-            handle_register_with_app_scope_inner(
+            handle_register_with_app_scope_inner_bound(
                 server,
                 worker_id,
                 token,
@@ -78,6 +98,7 @@ fn dispatch_with_route_context(
                 app_scope,
                 candidates,
                 recover_existing,
+                register_binding,
             )
         }
         Req::Send {
@@ -771,7 +792,10 @@ fn dispatch(server: &Arc<Server>, req: Req) -> Resp {
 fn request_requires_project_context(req: &Req) -> bool {
     !matches!(
         req,
-        Req::Ping | Req::RouteResolve { .. } | Req::RouteResolvePaneRecovery { .. } | Req::RouteResolveNative { .. }
+        Req::Ping
+            | Req::RouteResolve { .. }
+            | Req::RouteResolvePaneRecovery { .. }
+            | Req::RouteResolveNative { .. }
     )
 }
 
@@ -782,6 +806,7 @@ enum WireRoutePrincipal<'a> {
 
 fn wire_route_principals(req: &Req) -> Result<Vec<WireRoutePrincipal<'_>>, String> {
     match req {
+        Req::PeerLifecycle { request: crate::proto::PeerLifecycleRequest::Read { worker_id, .. } | crate::proto::PeerLifecycleRequest::Update { worker_id, .. } | crate::proto::PeerLifecycleRequest::Close { worker_id, .. } } => Ok(vec![WireRoutePrincipal::Authenticated { worker_id }]),
         Req::Board { worker_id, .. }
         | Req::Subagent { worker_id, .. }
         | Req::Register { worker_id, .. }
@@ -947,6 +972,15 @@ pub(crate) fn validate_request_context(
     req: &Req,
     project_context: Option<&ProjectContext>,
 ) -> Result<(), String> {
+    validate_request_context_with_register_approval(server, req, project_context, None)
+}
+
+pub(crate) fn validate_request_context_with_register_approval(
+    server: &Server,
+    req: &Req,
+    project_context: Option<&ProjectContext>,
+    register_approval: Option<&RegisterApprovalProof>,
+) -> Result<(), String> {
     let Some(project_context) = project_context else {
         if request_requires_project_context(req) {
             return Err(
@@ -1012,7 +1046,7 @@ pub(crate) fn validate_request_context(
         );
     }
     validate_wire_route_principals(server, req, &route_scope)?;
-    validate_wire_runtime_binding(server, req, project_context)
+    validate_wire_runtime_binding(server, req, project_context, register_approval)
 }
 
 /// Validate the explicit project-registration boundary. The marker is the

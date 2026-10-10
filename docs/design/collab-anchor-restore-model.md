@@ -1,6 +1,6 @@
 # Collab 身份恢复：锚点阶梯（Anchor Ladder）
 
-**状态**：权威模型。与 `collab-identity-minimal-interaction.md` 配套；身份恢复的语义以本文件为准。
+**状态**：权威锚点模型。与 `collab-identity-context-recovery-contract-20261008.md` 配套；锚点阶梯以本文件为准。
 **唯一恢复代码路径**：`identity_resolver.rs::resolve_for_daemon_with_route_at`。
 
 ---
@@ -67,12 +67,39 @@ observed anchors
 
 ### 2.3 用户裁决
 
-只有 master 归属需要用户裁决，它独立于上面的身份解析。`collab master promote --approval
-<text>` 携带显式授权，以调用者自己的 worker id 授予 master，替换已记录的 incumbent。
-该命令不接受 liveness 咨询：显式授权本身就是全部依据，因此 tmux pane 是否可达、
-AppServer oracle 是否在线都不影响裁决。裁决持久化后，下一次调用走阶梯第 1 级直恢。
+自动锚点阶梯先处理身份归属。没有唯一可采纳锚点时，只有用户批准裁决可以覆盖
+身份选择，且该裁决必须精确到 project/app scope、target identity、action、
+规范化 intent digest，以及被替换的 incumbent binding/generation。
+普通 peer 注册不需要批准，它就是普通 Register 的结果；唯一锚点直恢也不需要
+额外批准。
 
-普通 peer 注册不需要裁决，它就是普通 Register 的结果。
+用户批准恢复和 master grant 是不同的控制决定，属于不同的 owner：
+
+- 批准身份恢复只授权对该精确目标和 scope 的身份/binding 裁决。它不是 token、
+  endpoint 或 scope 的所有权证明，daemon 仍必须验证当前端点。批准提交必须在
+  首个身份副作用前持久化外层 operation id；批准后 incumbent 变化时返回
+  `APPROVAL_STALE_CONFLICT`，不得把同一次批准套用到新 binding。
+- 旧 credential 或旧 binding 失效不构成自动覆盖授权。只有显式批准恢复 invocation
+  可以进入 daemon 的 approved replacement transaction；普通 Register 和普通
+  authenticated command 继续保留 token、binding、generation 与 scope 拒绝，
+  `TOKEN_MISMATCH` 只描述这些普通 admission 路径，不描述已批准的恢复事务。
+- 恢复事务的真实 binding id 由 Register owner 提交，内部 admission proof 不是
+  token，也不会伪造 `actor_binding_id`。
+- `collab master promote --approval <text>` 只变更 master authority，不隐式改变
+  身份，也不隐式 clear 或 transfer 其他授权；authority 合同见
+  `collab-master-authority-contract-20261007.md`。
+- 恢复原 master 身份不自动 grant、clear 或 replace。若同一次用户意图同时包含
+  身份恢复和 master 授权替换，设计合同要求两个 owner 的步骤分别提交并在外层
+  operation 中并列为两个 phase，而不是互相冒充。
+
+批准裁决持久化后，下一次调用走阶梯第 1 级直恢。liveness、runtime state、
+recency 和 pane 名称都不是批准依据，也不影响裁决记录是否有效。
+
+D2-B 为批准恢复冻结完整的外层 operation、phase/replay/query 和拒绝终点，
+见 `collab-identity-context-recovery-contract-20261008.md` 的
+“3. One invocation, one discriminated result”及
+“5. Approved stale-credential recovery seam”。本节的批准语义是该合同的
+恢复部分权威正文；两份文档冲突时以该合同为准。
 
 ---
 
@@ -90,14 +117,21 @@ AppServer oracle 是否在线都不影响裁决。裁决持久化后，下一次
 
 | 命令 | 作用 |
 |---|---|
-| `collab context` | 唯一入口。CLI 观察锚点 → daemon 走阶梯 → 返回 snapshot |
-| `collab context --provide '<JSON>'` | 一次补齐缺失事实；只接受 `session_id`、`thread_id`、`endpoint`、`namespace` |
-| `collab master promote --approval <text>` | 携带用户 master 裁决 |
+| `collab context --op <operation-id>` | 唯一入口的自动路径。CLI 观察锚点，daemon 走阶梯并返回判别结果 |
+| `collab context --op <operation-id> --provide '<JSON>'` | 一次补齐缺失事实；只接受 `session_id`、`thread_id`、`endpoint`、`namespace` |
+| `collab context --op <operation-id> --approve-identity '<JSON>'` | 显式批准身份恢复或 binding replacement；JSON 含 target、scope、action、incumbent binding/generation 和 intent digest |
+| `collab context --op <operation-id> --approve-grant '<JSON>'` | 显式批准 master grant replacement；与 identity approval 是不同 owner phase，不能互相替代 |
+| `collab context --op <retained-operation-id> --query` | 纯读取外层 operation 的 durable phase projection；旧 credential 失效时仍可用保留的 key 和 proof 查询，不允许 repair |
+| `collab master promote --approval <text>` | 携带用户 master authority 裁决，不是身份恢复 |
 
 `DSH_SESSION_ID` 由 CLI 自动观察，**不在 `--provide` 里**。锚点是观测事实，不是 agent 提供的
-参数。没有 `--restore-as`。`collab init` 不是第二条身份路径：它与 `collab context` 共用同一
-daemon 身份门（`identity_gate`），只是为既有 AppSDK init 消费者输出既有响应形状；歧义与跨项目
-在两条入口上都保持 fail-closed，见 `docs/design/collab-identity-shortest-path.md`。
+参数。D2-B 不新增第二个用户选择命令；批准恢复通过同一 `collab context` 入口的 typed
+invocation 提交，并由 daemon 身份门持有。CLI 仍不提供 `--restore-as` 这种直接指定并接管
+身份的旁路。`collab context --query` 不返回 token，也不修复 credential、binding、route、
+grant 或 lease；若需要 repair，必须提交带新 operation intent 的显式 `collab context`
+调用，不能把 query 当作写入口。`collab init` 不是第二条身份路径：它与 `collab context` 共用同一 daemon 身份门
+（`identity_gate`），只是为既有 AppSDK init 消费者输出既有响应形状；歧义与跨项目在两条入口
+上都保持 fail-closed，见 `docs/design/collab-identity-shortest-path.md`。
 
 ## 5. `required_fields` 语义
 
@@ -113,8 +147,8 @@ daemon 身份门（`identity_gate`），只是为既有 AppSDK init 消费者输
 
 ## 6. 与既有设计的关系
 
-- `collab-identity-minimal-interaction.md` 保留为交互契约（一条命令、无参数负担）。
-  本文件是其身份恢复部分的权威补充。
+- `collab-identity-context-recovery-contract-20261008.md` 是 D2-B 的规范契约。
+  `collab-identity-minimal-interaction.md` 保留为兼容镜像，供已有设计引用。
 - `docs/dagpipe/collab-context.graph.json` v0.7.0 的 `identity_gate` 节点是本文件的图化。
 - DSH 通道契约（gateway `agent-facts` challenge）见
   `dsh-gateway/b-stage-collab-client/docs/COLLAB-DSH-CHANNEL-DESIGN.md`。本文件只声明

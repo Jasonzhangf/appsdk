@@ -216,11 +216,12 @@ impl GlobalState {
             // become live again under a later binding generation. That live
             // route and its stale tombstone must not coexist, so clear the
             // tombstone for the exact address we are re-activating.
-            next.current_thread_route_tombstones.remove(&current_route_address_key(
-                &session_id,
-                &native_thread_id,
-                binding.tmux_endpoint.as_ref(),
-            ));
+            next.current_thread_route_tombstones
+                .remove(&current_route_address_key(
+                    &session_id,
+                    &native_thread_id,
+                    binding.tmux_endpoint.as_ref(),
+                ));
             // One tmux pane owns exactly one binding, host-wide. Installing this
             // route evicts every other claimant of the same pane, whatever its
             // project or route scope, so the later writer takes the resource.
@@ -230,12 +231,13 @@ impl GlobalState {
             // below; an entry without a pane is left alone, because it shares no
             // resource.
             if let Some(endpoint) = binding.tmux_endpoint.as_ref() {
-                next.current_thread_routes.retain(|other_address, existing| {
-                    other_address == &route_address
-                        || existing.tmux_endpoint.as_ref().is_none_or(|other| {
-                            !crate::client::adapters::tmux::same_owned_pane(other, endpoint)
-                        })
-                });
+                next.current_thread_routes
+                    .retain(|other_address, existing| {
+                        other_address == &route_address
+                            || existing.tmux_endpoint.as_ref().is_none_or(|other| {
+                                !crate::client::adapters::tmux::same_owned_pane(other, endpoint)
+                            })
+                    });
             }
             next.current_thread_routes.insert(route_address, binding);
             // Installing the strict dual-key route for a thread upgrades that
@@ -394,7 +396,10 @@ impl GlobalState {
         Ok(())
     }
 
-    pub fn record_ledger_scan_receipt(&mut self, receipt: LedgerScanReceipt) -> Result<StateVersion, StateError> {
+    pub fn record_ledger_scan_receipt(
+        &mut self,
+        receipt: LedgerScanReceipt,
+    ) -> Result<StateVersion, StateError> {
         receipt.validate()?;
         // A scan receipt only inserts one entry into a map that no GlobalState
         // invariant inspects.  The clone-then-commit mutate path would copy the
@@ -403,80 +408,94 @@ impl GlobalState {
         // counters before the insert so a counter overflow still leaves the
         // state untouched.
         let version = self.bump_counters()?;
-        self.ledger_scan_receipts.insert(receipt.scan_id.clone(), receipt);
+        self.ledger_scan_receipts
+            .insert(receipt.scan_id.clone(), receipt);
         Ok(version)
     }
 
-pub fn classify_runtime_binding_ledger(&mut self, record: RuntimeBindingLedgerRecord) -> Result<StateVersion, StateError> {
-    if let Some(error) = self.runtime_binding_ledger_rejection(&record) {
-        return Err(error);
-    }
-    self.mutate(|next| {
-        if let Some(error) = next.runtime_binding_ledger_rejection(&record) {
+    pub fn classify_runtime_binding_ledger(
+        &mut self,
+        record: RuntimeBindingLedgerRecord,
+    ) -> Result<StateVersion, StateError> {
+        if let Some(error) = self.runtime_binding_ledger_rejection(&record) {
             return Err(error);
         }
-        let project = next.projects.get_mut(record.project_scope.as_str()).ok_or_else(|| StateError::ProjectNotRegistered(record.project_scope.as_str().to_owned()))?;
-        project.runtime_binding_ledger.insert(record.key(), record);
-        Ok(())
-    })
-}
+        self.mutate(|next| {
+            if let Some(error) = next.runtime_binding_ledger_rejection(&record) {
+                return Err(error);
+            }
+            let project = next
+                .projects
+                .get_mut(record.project_scope.as_str())
+                .ok_or_else(|| {
+                    StateError::ProjectNotRegistered(record.project_scope.as_str().to_owned())
+                })?;
+            project.runtime_binding_ledger.insert(record.key(), record);
+            Ok(())
+        })
+    }
 
-/// Why [`Self::classify_runtime_binding_ledger`] rejects this record, or `None`
-/// when it accepts it.
-///
-/// The ledger is resident control state, so a record is reducible here only
-/// when it validates, its binding id names exactly one binding host-wide, the
-/// project it names holds a registration for its app scope, and that project
-/// holds a binding with its id whose principal coordinates agree. This is the
-/// single source for that decision: the reducer's pre-check, the reducer's own
-/// commit step, and any caller that must not append an unreducible record all
-/// ask this one question, so no second copy of the rule can disagree with it.
-pub fn runtime_binding_ledger_rejection(
-    &self,
-    record: &RuntimeBindingLedgerRecord,
-) -> Option<StateError> {
-    if let Err(error) = record.validate() {
-        return Some(error);
+    /// Why [`Self::classify_runtime_binding_ledger`] rejects this record, or `None`
+    /// when it accepts it.
+    ///
+    /// The ledger is resident control state, so a record is reducible here only
+    /// when it validates, its binding id names exactly one binding host-wide, the
+    /// project it names holds a registration for its app scope, and that project
+    /// holds a binding with its id whose principal coordinates agree. This is the
+    /// single source for that decision: the reducer's pre-check, the reducer's own
+    /// commit step, and any caller that must not append an unreducible record all
+    /// ask this one question, so no second copy of the rule can disagree with it.
+    pub fn runtime_binding_ledger_rejection(
+        &self,
+        record: &RuntimeBindingLedgerRecord,
+    ) -> Option<StateError> {
+        if let Err(error) = record.validate() {
+            return Some(error);
+        }
+        if self
+            .lookup_registration(&record.project_scope, &record.app_scope_id)
+            .is_none()
+        {
+            return Some(StateError::ProjectNotRegistered(format!(
+                "{} (app scope {})",
+                record.project_scope.as_str(),
+                record.app_scope_id
+            )));
+        }
+        if self.lookup_binding(&record.binding_id).is_none() {
+            return Some(StateError::BindingNotFound(
+                record.binding_id.as_str().to_owned(),
+            ));
+        }
+        let Some(project) = self.lookup_project(&record.project_scope) else {
+            return Some(StateError::ProjectNotRegistered(
+                record.project_scope.as_str().to_owned(),
+            ));
+        };
+        let Some(binding) = project.lookup_binding(&record.binding_id) else {
+            return Some(StateError::BindingNotFound(
+                record.binding_id.as_str().to_owned(),
+            ));
+        };
+        if binding.project_scope != record.project_scope
+            || binding.app_scope_id != record.app_scope_id
+            || binding.agent_id != record.agent_id
+            || binding.runtime_id != record.runtime_id
+        {
+            return Some(StateError::Invariant(format!(
+                "runtime binding ledger principal coordinates disagree for {}",
+                record.binding_id
+            )));
+        }
+        None
     }
-    if self
-        .lookup_registration(&record.project_scope, &record.app_scope_id)
-        .is_none()
-    {
-        return Some(StateError::ProjectNotRegistered(format!(
-            "{} (app scope {})",
-            record.project_scope.as_str(),
-            record.app_scope_id
-        )));
-    }
-    if self.lookup_binding(&record.binding_id).is_none() {
-        return Some(StateError::BindingNotFound(
-            record.binding_id.as_str().to_owned(),
-        ));
-    }
-    let Some(project) = self.lookup_project(&record.project_scope) else {
-        return Some(StateError::ProjectNotRegistered(
-            record.project_scope.as_str().to_owned(),
-        ));
-    };
-    let Some(binding) = project.lookup_binding(&record.binding_id) else {
-        return Some(StateError::BindingNotFound(
-            record.binding_id.as_str().to_owned(),
-        ));
-    };
-    if binding.project_scope != record.project_scope
-        || binding.app_scope_id != record.app_scope_id
-        || binding.agent_id != record.agent_id
-        || binding.runtime_id != record.runtime_id
-    {
-        return Some(StateError::Invariant(format!(
-            "runtime binding ledger principal coordinates disagree for {}",
-            record.binding_id
-        )));
-    }
-    None
-}
 
-    pub fn lookup_runtime_binding_ledger(&self, project_scope: &ProjectScopeId, app_scope_id: &AppServerId, binding_id: &BindingId) -> Option<&RuntimeBindingLedgerRecord> {
+    pub fn lookup_runtime_binding_ledger(
+        &self,
+        project_scope: &ProjectScopeId,
+        app_scope_id: &AppServerId,
+        binding_id: &BindingId,
+    ) -> Option<&RuntimeBindingLedgerRecord> {
         self.lookup_project(project_scope)
             .and_then(|project| project.lookup_registration(app_scope_id).map(|_| project))
             .and_then(|project| project.runtime_binding_ledger.get(binding_id.as_str()))
@@ -830,6 +849,90 @@ pub fn runtime_binding_ledger_rejection(
             project.master_grants.remove(binding_id.as_str());
             Ok(())
         })
+    }
+
+    /// Record one immutable grant-replacement intent. Re-recording an
+    /// identical intent is idempotent (replay); a changed intent is rejected.
+    pub fn record_master_grant_replacement_intent(
+        &mut self,
+        intent: MasterGrantReplacementIntent,
+    ) -> Result<StateVersion, StateError> {
+        intent.validate()?;
+        if let Some(existing) = self
+            .master_grant_replacement_intents
+            .get(&intent.operation_id)
+        {
+            if existing == &intent {
+                return Ok(self.version());
+            }
+            return Err(StateError::Invariant(format!(
+                "grant replacement intent for operation {} changed",
+                intent.operation_id
+            )));
+        }
+        self.mutate(|next| {
+            next.master_grant_replacement_intents
+                .insert(intent.operation_id.clone(), intent.clone());
+            Ok(())
+        })
+    }
+
+    /// Record one immutable grant-replacement completion receipt. It requires
+    /// the exact matching durable intent and is idempotent on replay.
+    pub fn record_master_grant_replacement_receipt(
+        &mut self,
+        receipt: MasterGrantReplacementReceipt,
+    ) -> Result<StateVersion, StateError> {
+        receipt.validate()?;
+        match self
+            .master_grant_replacement_intents
+            .get(&receipt.operation_id)
+        {
+            None => {
+                return Err(StateError::Invariant(format!(
+                    "grant replacement receipt for operation {} has no intent",
+                    receipt.operation_id
+                )))
+            }
+            Some(intent) if intent.intent_id != receipt.intent_id => {
+                return Err(StateError::Invariant(format!(
+                    "grant replacement receipt for operation {} does not match its intent",
+                    receipt.operation_id
+                )))
+            }
+            Some(_) => {}
+        }
+        if let Some(existing) = self
+            .master_grant_replacement_receipts
+            .get(&receipt.operation_id)
+        {
+            if existing == &receipt {
+                return Ok(self.version());
+            }
+            return Err(StateError::Invariant(format!(
+                "grant replacement receipt for operation {} changed",
+                receipt.operation_id
+            )));
+        }
+        self.mutate(|next| {
+            next.master_grant_replacement_receipts
+                .insert(receipt.operation_id.clone(), receipt.clone());
+            Ok(())
+        })
+    }
+
+    pub fn lookup_master_grant_replacement_intent(
+        &self,
+        operation_id: &str,
+    ) -> Option<&MasterGrantReplacementIntent> {
+        self.master_grant_replacement_intents.get(operation_id)
+    }
+
+    pub fn lookup_master_grant_replacement_receipt(
+        &self,
+        operation_id: &str,
+    ) -> Option<&MasterGrantReplacementReceipt> {
+        self.master_grant_replacement_receipts.get(operation_id)
     }
 
     pub fn role_for_binding(

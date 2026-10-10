@@ -521,6 +521,12 @@ fn hex(n: usize) -> String {
         .collect()
 }
 
+/// Mint one opaque replacement credential. The daemon owns credential
+/// generation; callers never supply it.
+pub(crate) fn mint_token() -> String {
+    hex(16)
+}
+
 fn identity_path_at(host_paths: &HostPaths, worker_id: &str) -> anyhow::Result<PathBuf> {
     validate_id(worker_id)?;
     Ok(host_paths

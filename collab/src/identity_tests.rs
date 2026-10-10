@@ -718,10 +718,7 @@ fn resolver_rejects_an_oversized_dsh_session_anchor() {
     let error = resolve_for_daemon_at(&host_paths, &scope, &facts)
         .unwrap_err()
         .to_string();
-    assert!(
-        error.contains("COLLAB_IDENTITY_ANCHOR_INVALID"),
-        "{error}"
-    );
+    assert!(error.contains("COLLAB_IDENTITY_ANCHOR_INVALID"), "{error}");
     assert!(error.contains("DSH_SESSION_ID"), "{error}");
     std::fs::remove_dir_all(root).ok();
 }

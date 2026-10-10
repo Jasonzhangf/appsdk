@@ -91,7 +91,12 @@ impl Fixture {
     }
 
     fn run_context(&self, args: &[&str], pane: Option<&Pane>) -> Value {
-        self.run_ok(args, pane)
+        let value = self.run_ok(args, pane);
+        value
+            .get("result")
+            .and_then(|result| result.get("snapshot"))
+            .cloned()
+            .unwrap_or(value)
     }
 }
 

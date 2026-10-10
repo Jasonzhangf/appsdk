@@ -1,3 +1,5 @@
+use crate::proto::IdentityContextRequest;
+
 fn validate_transport_candidates(
     server: &Server,
     candidates: &TransportCandidates,
@@ -228,6 +230,7 @@ struct ProjectRuntimeManager {
     host: Arc<Server>,
     host_root: PathBuf,
     route_journal: PathBuf,
+    operation_journal: Arc<crate::server::operation_journal::OperationJournal>,
     routes: Mutex<std::collections::BTreeMap<RouteKey, RuntimeRoute>>,
     project_locks: Mutex<std::collections::BTreeMap<PathBuf, std::fs::File>>,
     register_gate: Mutex<()>,

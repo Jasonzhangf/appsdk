@@ -26,6 +26,8 @@ impl GlobalState {
             command_receipts: BTreeMap::new(),
             migration_commit_evidence: BTreeMap::new(),
             ledger_scan_receipts: BTreeMap::new(),
+            master_grant_replacement_intents: BTreeMap::new(),
+            master_grant_replacement_receipts: BTreeMap::new(),
         })
     }
 
@@ -178,6 +180,32 @@ impl GlobalState {
                     "operation {} is recorded more than once",
                     evidence.operation_id
                 )));
+            }
+        }
+        for (operation_key, intent) in &self.master_grant_replacement_intents {
+            intent.validate()?;
+            if operation_key != &intent.operation_id {
+                return Err(StateError::Invariant(format!(
+                    "grant replacement intent key {operation_key} does not match operation {}",
+                    intent.operation_id
+                )));
+            }
+        }
+        for (operation_key, receipt) in &self.master_grant_replacement_receipts {
+            receipt.validate()?;
+            if operation_key != &receipt.operation_id {
+                return Err(StateError::Invariant(format!(
+                    "grant replacement receipt key {operation_key} does not match operation {}",
+                    receipt.operation_id
+                )));
+            }
+            match self.master_grant_replacement_intents.get(operation_key) {
+                Some(intent) if intent.intent_id == receipt.intent_id => {}
+                _ => {
+                    return Err(StateError::Invariant(format!(
+                        "grant replacement receipt {operation_key} has no matching intent"
+                    )))
+                }
             }
         }
         Ok(())
@@ -566,8 +594,8 @@ impl GlobalState {
         self.tmux_pane_route_claimants(endpoint)
             .into_iter()
             .find(|other| {
-                let same_claim = other.binding_id == binding.binding_id
-                    && other.same_principal(binding);
+                let same_claim =
+                    other.binding_id == binding.binding_id && other.same_principal(binding);
                 !same_claim
                     && installed_route_address_key(other).as_deref() != address_key.as_deref()
             })

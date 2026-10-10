@@ -756,20 +756,12 @@ projects = [
         let mut config = Config::default();
         config.worktree.base = Some("relative/playground".into());
         assert!(
-            config
-                .worktree
-                .canonical_base()
-                .unwrap()
-                .is_err(),
+            config.worktree.canonical_base().unwrap().is_err(),
             "relative base must be rejected"
         );
         config.worktree.base = Some("/tmp/{project-key}/playground".into());
         assert!(
-            config
-                .worktree
-                .canonical_base()
-                .unwrap()
-                .is_err(),
+            config.worktree.canonical_base().unwrap().is_err(),
             "base must not contain layout placeholders"
         );
     }

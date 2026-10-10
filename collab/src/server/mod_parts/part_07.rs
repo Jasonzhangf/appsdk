@@ -1344,6 +1344,28 @@ fn handle_worker_close(
             "reused": true,
         }));
     };
+    let route_scope = match server_route_scope(server, &state) {
+        Ok(Some(route_scope)) => route_scope,
+        Ok(None) => return Resp::err("worker close requires an exact project route"),
+        Err(error) => return Resp::err(error),
+    };
+    let binding_id = match BindingId::new(sanitize_identifier(&format!("binding-{target_id}"))) {
+        Ok(binding_id) => binding_id,
+        Err(error) => return Resp::err(format!("WORKER_CLOSE_INVALID_BINDING: {error}")),
+    };
+    let binding = match state
+        .global
+        .lookup_binding_for(&route_scope, &binding_id)
+        .filter(|binding| binding.agent_id.as_str() == target_id)
+        .cloned()
+    {
+        Some(binding) => binding,
+        None => {
+            return Resp::err(format!(
+                "worker {target_id} has no exact runtime binding in the current project route"
+            ))
+        }
+    };
     // Closing a worker that still owns live work would strand the task and its
     // worktree. The task lifecycle must be resolved first.
     let owned: Vec<String> = state
@@ -1391,16 +1413,36 @@ fn handle_worker_close(
     };
 
     let now = now_ms();
-    if let Err(error) = server.commit_locked(
-        &mut state,
-        &[Event::WorkerClosed {
+    let operation_id = format!(
+        "close-{}-{}-{}",
+        sanitize_identifier(&binding.binding_id.as_str()),
+        binding.endpoint_generation,
+        sanitize_identifier(&worker_id)
+    );
+    let fence = Event::ResponsibilityFenceSet {
+        fence: state::ResponsibilityFence {
+            operation_id: operation_id.clone(),
             worker_id: target_id.clone(),
-            closed_by: worker_id.clone(),
-            reason: reason.clone(),
-            snapshot_captured_ms,
-            at_ms: now,
-        }],
-    ) {
+            project_scope: binding.project_scope.as_str().to_owned(),
+            app_scope: binding.app_scope_id.as_str().to_owned(),
+            binding_id: binding.binding_id.as_str().to_owned(),
+            endpoint_generation: binding.endpoint_generation,
+            snapshot: state::responsibility_snapshot(&state, &target_id),
+            state: "closing".into(),
+            created_ms: now,
+        },
+    };
+    let close_event = Event::WorkerClosed {
+        worker_id: target_id.clone(),
+        closed_by: worker_id.clone(),
+        reason: reason.clone(),
+        snapshot_captured_ms,
+        at_ms: now,
+    };
+    // The fence is durable before the close record. The record itself is a
+    // safe target-owned retirement while the fence stays active for a later
+    // lifecycle owner that must prove host terminal and exact readback.
+    if let Err(error) = server.commit_locked(&mut state, &[fence, close_event]) {
         drop(state);
         return Resp::err(format!("WORKER_CLOSE_DURABILITY_FAILED: {error}"));
     }

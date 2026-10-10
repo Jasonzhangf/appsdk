@@ -20,6 +20,9 @@
             status: "idle".into(), thread_id: None, profile: None,
             created_ms: now_ms(), ready_deadline_ms: now_ms() + 60_000,
             last_message: None, error: None, probe_failures: vec![], runtime: Some("codex".into()),
+            create_operation_id: None,
+            binding_id: None,
+            endpoint_generation: None,
         } }]);
     }
 
@@ -218,6 +221,9 @@
                 error: None,
                 probe_failures: Vec::new(),
                 runtime: Some("codex".into()),
+                create_operation_id: None,
+                binding_id: None,
+                endpoint_generation: None,
             },
         }]);
         assert!(registered_available_peer_for_admission(&server, "master").is_none());
@@ -272,6 +278,9 @@
                 error: None,
                 probe_failures: Vec::new(),
                 runtime: Some("codex".into()),
+                create_operation_id: None,
+                binding_id: None,
+                endpoint_generation: None,
             },
         }]);
         let server = Arc::new(server);
@@ -364,6 +373,9 @@
                 error: None,
                 probe_failures: Vec::new(),
                 runtime: Some("codex".into()),
+                create_operation_id: None,
+                binding_id: None,
+                endpoint_generation: None,
             },
         }]);
 
@@ -454,6 +466,9 @@
                     error: None,
                     probe_failures: vec![],
                     runtime: Some("codex".into()),
+                    create_operation_id: None,
+                    binding_id: None,
+                    endpoint_generation: None,
                 },
             },
             Event::Registered {
@@ -501,6 +516,9 @@
                     error: None,
                     probe_failures: vec![],
                     runtime: Some("codex".into()),
+                    create_operation_id: None,
+                    binding_id: None,
+                    endpoint_generation: None,
                 },
             },
             Event::Registered {
@@ -551,6 +569,9 @@
                     error: None,
                     probe_failures: vec![],
                     runtime: Some("codex".into()),
+                    create_operation_id: None,
+                    binding_id: None,
+                    endpoint_generation: None,
                 },
             },
             Event::MasterWakeSignal {
@@ -588,6 +609,9 @@
                     error: None,
                     probe_failures: vec![],
                     runtime: Some("codex".into()),
+                    create_operation_id: None,
+                    binding_id: None,
+                    endpoint_generation: None,
                 },
             },
             Event::WorkerClosed {
@@ -703,6 +727,9 @@
                 error: None,
                 probe_failures: vec![],
                 runtime: Some("codex".into()),
+                create_operation_id: None,
+                binding_id: None,
+                endpoint_generation: None,
             },
         }]);
         let server = Arc::new(server);
@@ -925,6 +952,9 @@
                 error: None,
                 probe_failures: Vec::new(),
                 runtime: Some("codex".into()),
+                create_operation_id: None,
+                binding_id: None,
+                endpoint_generation: None,
             },
         }]);
         let server = Arc::new(server);
@@ -1048,6 +1078,9 @@
                 error: None,
                 probe_failures: Vec::new(),
                 runtime: Some("codex".into()),
+                create_operation_id: None,
+                binding_id: None,
+                endpoint_generation: None,
             },
         }]);
         std::fs::create_dir(root.join(".agent-collab/server/events.jsonl")).unwrap();

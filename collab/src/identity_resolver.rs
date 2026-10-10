@@ -213,7 +213,7 @@ fn hex_encode(value: &str) -> String {
 
 /// In-memory draft for a new verified anchor. No credential is written before
 /// Register succeeds; the daemon persists the committed receipt later.
-fn draft_identity_with_id(scope: &Scope, worker_id: &str) -> anyhow::Result<Identity> {
+pub(crate) fn draft_identity_with_id(scope: &Scope, worker_id: &str) -> anyhow::Result<Identity> {
     validate_id(worker_id)?;
     let project_scope = scope
         .route_scope(AppServerId::new(CLI_APP_SERVER_ID)?)?

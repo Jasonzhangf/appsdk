@@ -723,7 +723,11 @@ fn resident_index_root(host_paths: &HostPaths) -> anyhow::Result<Option<PathBuf>
     Ok(Some(canonical))
 }
 
-fn run_project(scope: &Scope, host_paths: &HostPaths, request: &ResetRequest) -> anyhow::Result<()> {
+fn run_project(
+    scope: &Scope,
+    host_paths: &HostPaths,
+    request: &ResetRequest,
+) -> anyhow::Result<()> {
     let root = std::fs::canonicalize(&scope.root)?;
 
     // Prove exclusivity before touching any control plane. Keep both the
@@ -1017,7 +1021,10 @@ fn host_control_plane_entries(
 ) -> Vec<(String, PathBuf)> {
     let server_dir = storage_root.join(".agent-collab/server");
     let mut entries = vec![
-        ("host-routes-jsonl".to_owned(), state_root.join("routes.jsonl")),
+        (
+            "host-routes-jsonl".to_owned(),
+            state_root.join("routes.jsonl"),
+        ),
         (
             "host-journal-jsonl".to_owned(),
             state_root.join("journal.jsonl"),

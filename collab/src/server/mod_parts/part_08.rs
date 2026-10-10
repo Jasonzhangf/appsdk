@@ -30,6 +30,8 @@ pub(crate) fn master_authority_view(
         "worker_id": grant.agent_id.as_str(),
         "scope": scope_view(route_scope),
         "endpoint_live": transport_live,
+        "grant_id": grant.resource_id(),
+        "grant_generation": grant.resource_generation(),
         "assigned_by": grant.granted_by,
         "approval": grant.approval,
         "assigned_ms": grant.granted_at_ms,

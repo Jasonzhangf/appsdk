@@ -1,7 +1,11 @@
-
 fn parse_wire_request(line: &str) -> Result<(Option<ProjectContext>, Req), String> {
     match serde_json::from_str::<RequestEnvelope>(line) {
-        Ok(envelope) => Ok(envelope.into_parts()),
+        Ok(mut envelope) => {
+            envelope
+                .normalize_identity_context()
+                .map_err(|error| format!("bad request: {error}"))?;
+            Ok(envelope.into_parts())
+        }
         Err(envelope_error) => {
             // An invalid project_context must not be reinterpreted as a
             // legacy unscoped request merely because serde ignores unknown
@@ -119,14 +123,21 @@ async fn dispatch_wire_routed(
             };
             (manager.host.clone(), response)
         }
-        Req::RouteResolvePaneRecovery { tmux_endpoint, worker_id, token } => {
-            let response = match manager.resolve_staged_pane_recovery(&tmux_endpoint, &worker_id, &token) {
-                Ok(route) => match serde_json::to_value(route) {
-                    Ok(value) => Resp::data(value),
-                    Err(error) => Resp::err(format!("ROUTE_RESOLVE_INVALID: serialize route: {error}")),
-                },
-                Err(error) => Resp::err(error),
-            };
+        Req::RouteResolvePaneRecovery {
+            tmux_endpoint,
+            worker_id,
+            token,
+        } => {
+            let response =
+                match manager.resolve_staged_pane_recovery(&tmux_endpoint, &worker_id, &token) {
+                    Ok(route) => match serde_json::to_value(route) {
+                        Ok(value) => Resp::data(value),
+                        Err(error) => {
+                            Resp::err(format!("ROUTE_RESOLVE_INVALID: serialize route: {error}"))
+                        }
+                    },
+                    Err(error) => Resp::err(error),
+                };
             (manager.host.clone(), response)
         }
         Req::RouteResolveNative {
@@ -277,15 +288,18 @@ async fn conn_task_routed(
         }
         let resp = match parse_wire_request(&line) {
             Ok((project_context, req)) => {
+                let query_activity = is_identity_query_intent(&req);
                 let activity_req = req.clone();
                 let (runtime, resp) =
                     dispatch_wire_routed(manager.clone(), project_context, req, shutdown.clone())
                         .await;
-                let _ = record_activity(
-                    &runtime.storage_root,
-                    "request",
-                    request_activity(&activity_req, &resp),
-                );
+                if !query_activity {
+                    let _ = record_activity(
+                        &runtime.storage_root,
+                        "request",
+                        request_activity(&activity_req, &resp),
+                    );
+                }
                 resp
             }
             Err(error) => {
@@ -297,6 +311,99 @@ async fn conn_task_routed(
                 );
                 resp
             }
+        };
+        let mut out = serde_json::to_string(&resp).expect("serialize resp");
+        out.push('\n');
+        if writer.write_all(out.as_bytes()).await.is_err() {
+            break;
+        }
+    }
+}
+
+fn is_identity_query_intent(request: &Req) -> bool {
+    matches!(
+        request,
+        Req::IdentityContext {
+            identity_context: Some(identity_context),
+            ..
+        } if is_identity_query_request(identity_context)
+    )
+}
+
+fn is_identity_query_request(request: &IdentityContextRequest) -> bool {
+    request.query || request.invocation == "query" || request.action == "query"
+}
+
+fn is_valid_identity_query_shape(request: &IdentityContextRequest) -> bool {
+    request.query && request.invocation == "query" && request.action == "query"
+}
+
+async fn conn_task_degraded(
+    operation_journal: Arc<crate::server::operation_journal::OperationJournal>,
+    project_replay_failure: Arc<str>,
+    stream: tokio::net::UnixStream,
+) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let (reader, mut writer) = stream.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let resp = match parse_wire_request(&line) {
+            Ok((_, Req::Ping)) => Resp::data(json!({
+                "degraded": true,
+                "now": iso(now_ms()),
+            })),
+            Ok((
+                Some(project_context),
+                Req::IdentityContext {
+                    facts,
+                    identity_context,
+                },
+            )) => {
+                let request =
+                    identity_context.unwrap_or_else(|| IdentityContextRequest::legacy(facts));
+                if is_identity_query_request(&request) {
+                    if !is_valid_identity_query_shape(&request) {
+                        Resp::err("IDENTITY_OPERATION_QUERY_SHAPE_INVALID")
+                    } else {
+                        match operation_journal.query(
+                            &request,
+                            project_context.project_scope.as_str(),
+                            project_context.app_scope_id.as_str(),
+                        ) {
+                            Ok(result) => {
+                                let mut result =
+                                    serde_json::to_value(result).unwrap_or(serde_json::Value::Null);
+                                if let Some(projection) =
+                                    result.get_mut("result").and_then(|value| value.as_object_mut())
+                                {
+                                    if projection.contains_key("nested_command_id")
+                                        || projection.contains_key("nested_operation_id")
+                                    {
+                                        projection.insert(
+                                            "nested_receipt".into(),
+                                            json!({
+                                                "state": "unavailable",
+                                                "error": format!(
+                                                    "PROJECT_OWNER_READBACK_UNAVAILABLE: {project_replay_failure}"
+                                                ),
+                                            }),
+                                        );
+                                    }
+                                }
+                                Resp::data(result)
+                            }
+                            Err(error) => Resp::err(error),
+                        }
+                    }
+                } else {
+                    Resp::err("PROJECT_RUNTIME_UNAVAILABLE: project replay failed")
+                }
+            }
+            Ok(_) => Resp::err("PROJECT_RUNTIME_UNAVAILABLE: project replay failed"),
+            Err(error) => Resp::err(error),
         };
         let mut out = serde_json::to_string(&resp).expect("serialize resp");
         out.push('\n');
@@ -324,6 +431,83 @@ fn apply_replayed_event(st: &mut State, event: &Event, line: usize) -> anyhow::R
             .advance_version()
             .map_err(|error| anyhow::anyhow!("journal replay failed at line {line}: {error}")),
     }
+}
+
+fn apply_replayed_snapshot_event(st: &mut State, event: &Event, line: usize) -> anyhow::Result<()> {
+    match event {
+        Event::ReducerSnapshot { .. } | Event::ReducerCheckpoint { .. } => {
+            anyhow::bail!(
+                "journal replay failed at line {line}: reducer snapshot contains metadata record"
+            );
+        }
+        _ => st
+            .apply_checked(event)
+            .map_err(|error| anyhow::anyhow!("journal replay failed at line {line}: {error}")),
+    }
+}
+
+fn validate_snapshot_command_frames(
+    events: &[Event],
+    line: usize,
+    seen_command_ids: &mut std::collections::HashSet<String>,
+    seen_operation_ids: &mut std::collections::HashMap<String, String>,
+) -> anyhow::Result<()> {
+    let mut pending_command: Option<(String, String)> = None;
+    for event in events {
+        if let Event::CommandStarted {
+            command_id,
+            operation_id,
+        } = event
+        {
+            if !seen_command_ids.insert(command_id.clone()) {
+                anyhow::bail!(
+                    "journal replay failed at line {line}: duplicate command {command_id}"
+                );
+            }
+            if let Some(existing_command_id) =
+                seen_operation_ids.insert(operation_id.clone(), command_id.clone())
+            {
+                anyhow::bail!(
+                    "journal replay failed at line {line}: operation {operation_id} already belongs to command {existing_command_id}"
+                );
+            }
+            if pending_command.is_some() {
+                anyhow::bail!("journal replay failed at line {line}: nested command {command_id}");
+            }
+            pending_command = Some((command_id.clone(), operation_id.clone()));
+            continue;
+        }
+        if let Some((command_id, operation_id)) = pending_command.as_ref() {
+            if let Event::CommandCompleted {
+                command_id: completed_id,
+                operation_id: completed_operation,
+                receipt,
+            } = event
+            {
+                if completed_id != command_id || completed_operation != operation_id {
+                    anyhow::bail!(
+                        "journal replay failed at line {line}: command completion does not match start"
+                    );
+                }
+                if receipt.operation_id != *operation_id {
+                    anyhow::bail!(
+                        "journal replay failed at line {line}: command receipt operation does not match start"
+                    );
+                }
+                pending_command = None;
+            }
+            continue;
+        }
+        if matches!(event, Event::CommandCompleted { .. }) {
+            anyhow::bail!("journal replay failed at line {line}: command completion without start");
+        }
+    }
+    if let Some((command_id, _)) = pending_command {
+        anyhow::bail!(
+            "journal replay failed: incomplete command {command_id}; completion marker missing"
+        );
+    }
+    Ok(())
 }
 
 fn track_legacy_master_authority(
@@ -381,6 +565,8 @@ fn replay_from_journal(root: &Path, journal: &Path) -> anyhow::Result<State> {
     let mut saw_current_thread_route = false;
     let mut legacy_master_is_current = false;
     let mut saw_typed_master_authority = false;
+    let mut saw_snapshot_baseline = false;
+    let mut saw_real_event = false;
     for (index, line) in content.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -401,6 +587,64 @@ fn replay_from_journal(root: &Path, journal: &Path) -> anyhow::Result<State> {
             convert_root = true;
         }
         for event in line_events {
+            if let Event::ReducerSnapshot {
+                sequence,
+                revision,
+                events: snapshot_events,
+            } = &event
+            {
+                if saw_snapshot_baseline {
+                    anyhow::bail!(
+                        "journal replay failed at line {}: duplicate reducer snapshot",
+                        index + 1
+                    );
+                }
+                if saw_real_event || saw_current_thread_route {
+                    anyhow::bail!(
+                        "journal replay failed at line {}: reducer snapshot is not the initial baseline",
+                        index + 1
+                    );
+                }
+                if pending_command.is_some() {
+                    anyhow::bail!(
+                        "journal replay failed at line {}: reducer snapshot nested in command",
+                        index + 1
+                    );
+                }
+                saw_snapshot_baseline = true;
+                validate_snapshot_command_frames(
+                    snapshot_events,
+                    index + 1,
+                    &mut seen_command_ids,
+                    &mut seen_operation_ids,
+                )?;
+                for nested in snapshot_events {
+                    if matches!(nested, Event::ReducerSnapshot { .. })
+                        || matches!(nested, Event::ReducerCheckpoint { .. })
+                    {
+                        anyhow::bail!(
+                            "journal replay failed at line {}: reducer snapshot contains metadata record",
+                            index + 1
+                        );
+                    }
+                    if matches!(nested, Event::GlobalCurrentThreadRouteSet { .. }) {
+                        saw_current_thread_route = true;
+                    }
+                    apply_replayed_snapshot_event(&mut st, nested, index + 1)?;
+                    track_legacy_master_authority(
+                        nested,
+                        &mut legacy_master_is_current,
+                        &mut saw_typed_master_authority,
+                    );
+                    events.push(nested.clone());
+                }
+                st.set_checkpoint_version(*sequence, *revision)
+                    .map_err(|error| {
+                        anyhow::anyhow!("journal replay failed at line {}: {error}", index + 1)
+                    })?;
+                continue;
+            }
+            saw_real_event = true;
             if matches!(event, Event::GlobalCurrentThreadRouteSet { .. }) {
                 saw_current_thread_route = true;
             }
@@ -878,7 +1122,95 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
 
     prepare_socket_path(&sock_path)?;
 
-    let state = replay(&scope.root)?;
+    let operation_journal = Arc::new(
+        crate::server::operation_journal::OperationJournal::open(host_paths.journal_path())
+            .map_err(|error| anyhow::anyhow!("OPERATION_JOURNAL_REPLAY_FAILED: {error}"))?,
+    );
+    let state = match replay(&scope.root) {
+        Ok(state) => state,
+        Err(error) => {
+            let project_replay_failure = format!("{error:#}");
+            append_log(
+                &host_paths.log_path(),
+                &format!("project replay failed; entering query-only degraded mode: {project_replay_failure}"),
+            );
+            let listener = UnixListener::bind(&sock_path)?;
+            let socket_metadata = std::fs::symlink_metadata(&sock_path)?;
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(error) =
+                std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600))
+            {
+                let cleanup = remove_listener_socket(&sock_path, &socket_metadata);
+                return match cleanup {
+                    Ok(()) => Err(error.into()),
+                    Err(cleanup_error) => Err(anyhow::Error::new(error).context(format!(
+                        "failed to clean up startup socket: {cleanup_error}"
+                    ))),
+                };
+            }
+            let pid_path = host_paths.pid_path();
+            std::fs::write(&pid_path, std::process::id().to_string()).map_err(|error| {
+                match remove_listener_socket(&sock_path, &socket_metadata) {
+                    Ok(()) => anyhow::Error::new(error),
+                    Err(cleanup_error) => anyhow::Error::new(error).context(format!(
+                        "failed to clean up startup socket: {cleanup_error}"
+                    )),
+                }
+            })?;
+            let pid_metadata = std::fs::symlink_metadata(&pid_path)?;
+            let state_root_metadata = std::fs::symlink_metadata(host_paths.state_root())?;
+            let mut interrupt = Box::pin(tokio::signal::ctrl_c());
+            let mut terminate = Box::pin(async {
+                let mut signal =
+                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+                signal.recv().await;
+                Ok::<(), std::io::Error>(())
+            });
+            let mut state_root_removed = Box::pin(async {
+                let mut interval = tokio::time::interval(Duration::from_millis(250));
+                interval.tick().await;
+                loop {
+                    interval.tick().await;
+                    if !std::fs::symlink_metadata(host_paths.state_root())
+                        .is_ok_and(|current| same_inode(&state_root_metadata, &current))
+                    {
+                        return;
+                    }
+                }
+            });
+            let mut connection_tasks = tokio::task::JoinSet::new();
+            tokio::select! {
+                _ = interrupt.as_mut() => {}
+                _ = terminate.as_mut() => {}
+                _ = state_root_removed.as_mut() => {}
+                result = async {
+                    loop {
+                        match listener.accept().await {
+                            Ok((stream, _)) => {
+                                connection_tasks.spawn(conn_task_degraded(
+                                    operation_journal.clone(),
+                                    Arc::from(project_replay_failure.as_str()),
+                                    stream,
+                                ));
+                            }
+                            Err(error) => append_log(
+                                &host_paths.log_path(),
+                                &format!("accept error: {}", error),
+                            ),
+                        }
+                    }
+                } => result,
+            }
+            while connection_tasks.join_next().await.is_some() {}
+            let _ = remove_listener_socket(&sock_path, &socket_metadata);
+            if std::fs::symlink_metadata(&pid_path)
+                .is_ok_and(|current| same_inode(&pid_metadata, &current))
+            {
+                let _ = std::fs::remove_file(&pid_path);
+            }
+            return Ok(());
+        }
+    };
     let journal_file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -904,8 +1236,12 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
     });
     restore_registered_peer_default_leases(&server);
     purge_expired_storage(&server, now_ms());
-    let runtime_manager = ProjectRuntimeManager::new(server.clone(), &host_paths)
-        .map_err(|error| anyhow::anyhow!(error))?;
+    let runtime_manager = ProjectRuntimeManager::new_with_operation_journal(
+        server.clone(),
+        &host_paths,
+        operation_journal,
+    )
+    .map_err(|error| anyhow::anyhow!(error))?;
     let listener = UnixListener::bind(&sock_path)?;
     let socket_metadata = std::fs::symlink_metadata(&sock_path)?;
     use std::os::unix::fs::PermissionsExt;

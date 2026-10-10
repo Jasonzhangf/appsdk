@@ -1,5 +1,12 @@
 include!("support/tmux_cli_fixture.rs");
 
+fn context_snapshot(value: &Value) -> &Value {
+    value
+        .get("result")
+        .and_then(|result| result.get("snapshot"))
+        .unwrap_or(value)
+}
+
 #[test]
 fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
     let root = unique_root();
@@ -68,7 +75,7 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
     let unknown_host_registration: Value =
         serde_json::from_slice(&unknown_host.stdout).expect("collab CLI emits JSON");
     assert_eq!(
-        unknown_host_registration["identity"]["transport"]["kind"],
+        context_snapshot(&unknown_host_registration)["identity"]["transport"]["kind"],
         "tmux"
     );
     let receiver_context = fixture.run_context(&["context"], Some(&receiver));
@@ -322,11 +329,11 @@ fn context_recovers_archived_master_in_the_same_live_pane() {
         thread_anchor: "thread-after-restart".into(),
         ..old
     };
-    let recovered = fixture.run_ok(&["context"], Some(&new));
+    let recovered = fixture.run_context(&["context"], Some(&new));
     assert_eq!(recovered["identity"]["worker_id"], worker_id);
     assert_eq!(recovered["identity"]["role"], "master");
     assert_eq!(recovered["registered"], true);
-    let again = fixture.run_ok(&["context"], Some(&new));
+    let again = fixture.run_context(&["context"], Some(&new));
     assert_eq!(again["identity"]["worker_id"], worker_id);
     assert_eq!(
         again["binding"]["endpoint_generation"],
@@ -361,10 +368,10 @@ fn context_recovers_archived_master_in_the_same_live_pane() {
 /// `--worker` and no `COLLAB_WORKER` — resolves its durable identity from the
 /// live anchor and can then be rejected by the daemon. The terminal must name
 /// that resolved identity: before, it echoed the caller's optional `--worker`,
-/// which is absent on this path, so the agent got `worker_id: null` plus a
-/// `<worker_id>` placeholder and could not run the repair it was handed.
+/// Context must return an explicit approval object for that identity before
+/// it replaces the rejected credential or binding.
 #[test]
-fn implicit_context_names_the_resolved_identity_when_the_daemon_rejects_its_token() {
+fn implicit_context_requires_approval_to_replace_a_rejected_credential() {
     let root = unique_root();
     let host_state = root.join("h");
     let tmux_socket = root.join("t.sock");
@@ -414,8 +421,9 @@ fn implicit_context_names_the_resolved_identity_when_the_daemon_rejects_its_toke
         .expect("init receipt names the daemon-owned worker")
         .to_owned();
 
-    // Durable identity exists and is registered; now make its token unusable so
-    // the daemon rejects the first authenticated call.
+    // Durable identity exists and is registered; now make its token unusable.
+    // Context must identify the exact recovery target and request approval
+    // before replacing the rejected credential.
     let identity_path = host_state
         .join("identities")
         .join(&worker_id)
@@ -446,22 +454,29 @@ fn implicit_context_names_the_resolved_identity_when_the_daemon_rejects_its_toke
         .expect("run implicit collab context");
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let public_error = format!("{stdout}{stderr}");
     assert!(
         !output.status.success(),
         "a rejected stored credential must fail: stdout={stdout} stderr={stderr}"
     );
-    assert!(stderr.contains("TOKEN_MISMATCH:"), "{stderr}");
-    assert!(
-        stderr.contains(&worker_id),
-        "the error must name the rejected identity: {stderr}"
+    let denied: Value = serde_json::from_slice(&output.stdout).expect("typed context JSON");
+    assert_eq!(denied["result"]["outcome"], "denied", "{denied}");
+    assert_eq!(denied["result"]["requires"]["kind"], "approval", "{denied}");
+    assert_eq!(
+        denied["result"]["requires"]["approval"]["target_identity"], worker_id,
+        "the approval must identify the recovery target: {denied}"
+    );
+    assert_eq!(
+        denied["result"]["requires"]["approval"]["action"], "replace_binding",
+        "the daemon must identify the required recovery action: {denied}"
+    );
+    assert_eq!(
+        denied["result"]["requires"]["repair_invocation"],
+        "collab context --approve-identity '<exact approval object from requires.approval>'"
     );
     assert!(
-        !stderr.contains("IDENTITY_INFORMATION_REQUIRED"),
-        "{stderr}"
-    );
-    assert!(
-        !stderr.contains("not-the-recorded-token"),
-        "the rejected credential must not leak"
+        !public_error.contains("not-the-recorded-token"),
+        "the rejected credential must not leak: {public_error}"
     );
     let after: Value = serde_json::from_slice(&std::fs::read(&identity_path).unwrap()).unwrap();
     assert_eq!(
@@ -517,13 +532,13 @@ fn context_returns_the_binding_receipt_that_addresses_the_route() {
         thread_anchor: "thread-binding".into(),
     };
     fixture.initialized = true;
-    let registered = fixture.run_ok(&["context"], Some(&pane));
+    let registered = fixture.run_context(&["context"], Some(&pane));
     let worker_id = registered["identity"]["worker_id"]
         .as_str()
         .expect("daemon receipt names the registered worker")
         .to_owned();
 
-    let context = fixture.run_ok(&["context"], Some(&pane));
+    let context = fixture.run_context(&["context"], Some(&pane));
     let binding = &context["binding"];
     let canonical_root = root.canonicalize().unwrap().to_string_lossy().into_owned();
     assert_eq!(binding["agent_id"], worker_id);
@@ -558,7 +573,7 @@ fn context_returns_the_binding_receipt_that_addresses_the_route() {
 
     // The receipt is the daemon's record, not a copy of the caller's local
     // state: reading it again returns the same binding.
-    let again = fixture.run_ok(&["context"], Some(&pane));
+    let again = fixture.run_context(&["context"], Some(&pane));
     assert_eq!(again["binding"], *binding);
 }
 
@@ -582,27 +597,28 @@ fn context_missing_facts_and_invalid_supplement_have_no_identity_side_effect() {
     // must name every absent factual field and must not guess a worker.
     let no_anchor = fixture.command_with_originator(&["context"], None, "Codex future host");
     assert!(
-        no_anchor.status.success(),
-        "missing facts are a classified success terminal: stdout={} stderr={}",
+        !no_anchor.status.success(),
+        "missing facts are a typed incomplete terminal: stdout={} stderr={}",
         String::from_utf8_lossy(&no_anchor.stdout),
         String::from_utf8_lossy(&no_anchor.stderr)
     );
-    let no_anchor_snapshot: Value = serde_json::from_slice(&no_anchor.stdout).unwrap();
-    assert_eq!(no_anchor_snapshot["registered"], false);
-    let update = &no_anchor_snapshot["requires_identity_update"];
-    assert_eq!(update["reason"], "IDENTITY_INFORMATION_REQUIRED");
+    let no_anchor_result: Value = serde_json::from_slice(&no_anchor.stdout).unwrap();
+    assert_eq!(no_anchor_result["ok"], false);
+    assert_eq!(no_anchor_result["result"]["outcome"], "missing_facts");
+    let update = &no_anchor_result["result"]["requires"];
+    assert_eq!(update["kind"], "identity_facts");
     assert_eq!(
-        update["required_fields"],
+        update["fields"],
         json!(["session_id", "thread_id", "endpoint", "namespace"]),
-        "no-anchor context returns every exact missing native fact: {no_anchor_snapshot}"
+        "no-anchor context returns every exact missing native fact: {no_anchor_result}"
     );
     assert!(
         update["worker_id"].is_null(),
         "missing-facts terminal must not guess a worker"
     );
     assert_eq!(
-        update["action"],
-        json!("collab context --provide '<JSON containing required_fields>'")
+        update["repair_invocation"],
+        "collab context --provide '<JSON containing required_fields>'"
     );
 
     // A partial anchor: the runtime is a recognized TUI, so namespace is
@@ -610,21 +626,21 @@ fn context_missing_facts_and_invalid_supplement_have_no_identity_side_effect() {
     // facts; it asks only for the session, thread and endpoint it still lacks.
     let partial = fixture.command(&["context"], None);
     assert!(
-        partial.status.success(),
-        "partial native facts are a classified success terminal: stdout={} stderr={}",
+        !partial.status.success(),
+        "partial native facts are a typed incomplete terminal: stdout={} stderr={}",
         String::from_utf8_lossy(&partial.stdout),
         String::from_utf8_lossy(&partial.stderr)
     );
-    let partial_snapshot: Value = serde_json::from_slice(&partial.stdout).unwrap();
-    assert_eq!(partial_snapshot["registered"], false);
+    let partial_result: Value = serde_json::from_slice(&partial.stdout).unwrap();
+    assert_eq!(partial_result["result"]["outcome"], "missing_facts");
     assert_eq!(
-        partial_snapshot["requires_identity_update"]["required_fields"],
+        partial_result["result"]["requires"]["fields"],
         json!(["session_id", "thread_id", "endpoint"]),
-        "observed namespace must not be re-requested: {partial_snapshot}"
+        "observed namespace must not be re-requested: {partial_result}"
     );
     assert!(
-        partial_snapshot["requires_identity_update"]["worker_id"].is_null(),
-        "partial terminal must not guess a worker: {partial_snapshot}"
+        partial_result["result"]["requires"]["worker_id"].is_null(),
+        "partial terminal must not guess a worker: {partial_result}"
     );
 
     // Unknown, duplicate and empty supplements are rejected before the daemon

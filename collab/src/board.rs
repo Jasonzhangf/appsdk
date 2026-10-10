@@ -108,7 +108,12 @@ pub struct BoardTaskDetails {
 
 impl BoardTaskDetails {
     pub fn legacy(id: &str, public_visibility: bool) -> Self {
-        Self { title: id.into(), revision: 1, public_visibility, ..Self::default() }
+        Self {
+            title: id.into(),
+            revision: 1,
+            public_visibility,
+            ..Self::default()
+        }
     }
 }
 

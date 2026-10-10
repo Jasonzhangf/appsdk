@@ -406,6 +406,9 @@ mod tests {
             error: None,
             probe_failures: Vec::new(),
             runtime: Some("codex".into()),
+            create_operation_id: None,
+            binding_id: None,
+            endpoint_generation: None,
         }
     }
 
@@ -611,6 +614,9 @@ mod tests {
                 error: None,
                 probe_failures: Vec::new(),
                 runtime: Some("codex".into()),
+                create_operation_id: None,
+                binding_id: None,
+                endpoint_generation: None,
             },
         });
 
@@ -769,12 +775,7 @@ mod tests {
         let batch = state
             .msgs
             .values()
-            .find(|message| {
-                message.to == "master"
-                    && message
-                        .body
-                        .contains("Scheduling continues")
-            })
+            .find(|message| message.to == "master" && message.body.contains("Scheduling continues"))
             .expect("master idle batch");
         assert!(
             batch.body.contains("pending_merges=task-merge"),

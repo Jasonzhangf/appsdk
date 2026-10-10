@@ -1,5 +1,6 @@
 //! Read-only loopback observer. It never registers peers, promotes a master,
 //! consumes a message, or starts the coordination daemon.
+use crate::proto::{ProjectContext, Req};
 use axum::{
     extract::State,
     http::{header, HeaderMap, StatusCode},
@@ -9,7 +10,6 @@ use axum::{
 };
 use rand::RngCore;
 use std::{net::Ipv4Addr, path::PathBuf, sync::Arc};
-use crate::proto::{ProjectContext, Req};
 
 #[derive(Clone)]
 struct Observer {
@@ -30,28 +30,64 @@ fn secured(mut response: Response) -> Response {
 }
 
 async fn snapshot(State(observer): State<Arc<Observer>>, headers: HeaderMap) -> Response {
-    if headers.get(header::HOST).and_then(|value| value.to_str().ok()) != Some(observer.authority.as_str()) {
-        return secured((StatusCode::FORBIDDEN, Json(serde_json::json!({"error":"DASHBOARD_HOST_REJECTED"}))).into_response());
+    if headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        != Some(observer.authority.as_str())
+    {
+        return secured(
+            (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error":"DASHBOARD_HOST_REJECTED"})),
+            )
+                .into_response(),
+        );
     }
     let expected = format!("Bearer {}", observer.capability);
-    if headers.get(header::AUTHORIZATION).and_then(|value| value.to_str().ok()) != Some(expected.as_str()) {
-        return secured((StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error":"DASHBOARD_CAPABILITY_REQUIRED"}))).into_response());
+    if headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        != Some(expected.as_str())
+    {
+        return secured(
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error":"DASHBOARD_CAPABILITY_REQUIRED"})),
+            )
+                .into_response(),
+        );
     }
     let result = tokio::task::spawn_blocking(move || {
         crate::client::call_with_context::<serde_json::Value>(
-            &observer.socket, &Req::BoardShow, Some(observer.context.clone()),
+            &observer.socket,
+            &Req::BoardShow,
+            Some(observer.context.clone()),
         )
-    }).await;
+    })
+    .await;
     match result {
         Ok(Ok(value)) => secured(Json(value).into_response()),
-        Ok(Err(error)) => secured((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error":error.to_string()}))).into_response()),
-        Err(error) => secured((StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":error.to_string()}))).into_response()),
+        Ok(Err(error)) => secured(
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error":error.to_string()})),
+            )
+                .into_response(),
+        ),
+        Err(error) => secured(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error":error.to_string()})),
+            )
+                .into_response(),
+        ),
     }
 }
 
 pub fn run(socket: PathBuf, context: ProjectContext, port: u16) -> anyhow::Result<()> {
     // Fail before exposing a URL if the exact project route is unavailable.
-    let _: serde_json::Value = crate::client::call_with_context(&socket, &Req::BoardShow, Some(context.clone()))?;
+    let _: serde_json::Value =
+        crate::client::call_with_context(&socket, &Req::BoardShow, Some(context.clone()))?;
     tokio::runtime::Runtime::new()?.block_on(async move {
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await?;
         let authority = listener.local_addr()?.to_string();

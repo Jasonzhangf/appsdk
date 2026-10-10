@@ -18,6 +18,10 @@ toml_edit = "0.22"
 libc = "0.2"
 axum = { version = "0.8.8", default-features = false, features = ["http1", "json", "tokio"] }
 
+[features]
+default = []
+context-cancel-test-hooks = []
+
 [dev-dependencies]
 serde_json = "1"
 

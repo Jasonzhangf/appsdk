@@ -21,6 +21,9 @@ fn role_contract_is_identical_across_context_workers_and_status() {
             error: None,
             probe_failures: Vec::new(),
             runtime: None,
+            create_operation_id: None,
+            binding_id: None,
+            endpoint_generation: None,
         },
     }]);
     let server = Arc::new(server);

@@ -8,7 +8,7 @@ fn managed_subagent_send_binds_the_selected_child_when_multiple_children_are_ass
     let now = now_ms();
     server.commit(&[
         Event::SubagentUpdated {
-            subagent: Record {
+            subagent: bind_test_subagent_record(&server, Record {
                 id: "managed-a".into(),
                 parent: "parent".into(),
                 peer: "child-a".into(),
@@ -21,10 +21,13 @@ fn managed_subagent_send_binds_the_selected_child_when_multiple_children_are_ass
                 error: None,
                 probe_failures: Vec::new(),
                 runtime: None,
-            },
+                create_operation_id: None,
+                binding_id: None,
+                endpoint_generation: None,
+            }),
         },
         Event::SubagentUpdated {
-            subagent: Record {
+            subagent: bind_test_subagent_record(&server, Record {
                 id: "managed-b".into(),
                 parent: "parent".into(),
                 peer: "child-b".into(),
@@ -37,7 +40,10 @@ fn managed_subagent_send_binds_the_selected_child_when_multiple_children_are_ass
                 error: None,
                 probe_failures: Vec::new(),
                 runtime: None,
-            },
+                create_operation_id: None,
+                binding_id: None,
+                endpoint_generation: None,
+            }),
         },
     ]);
 
@@ -185,7 +191,7 @@ fn managed_subagent_send_reclaims_working_child_without_an_owned_task() {
     register(&server, "child", "%child");
     let now = now_ms();
     server.commit(&[Event::SubagentUpdated {
-        subagent: Record {
+        subagent: bind_test_subagent_record(&server, Record {
             id: "managed".into(),
             parent: "parent".into(),
             peer: "child".into(),
@@ -200,7 +206,10 @@ fn managed_subagent_send_reclaims_working_child_without_an_owned_task() {
             error: None,
             probe_failures: Vec::new(),
             runtime: None,
-        },
+            create_operation_id: None,
+            binding_id: None,
+            endpoint_generation: None,
+        }),
     }]);
 
     let assigned = crate::subagent::handle(
@@ -312,6 +321,9 @@ fn managed_subagent_working_requires_existing_owned_assigned_task() {
                 error: None,
                 probe_failures: Vec::new(),
                 runtime: None,
+                create_operation_id: None,
+                binding_id: None,
+                endpoint_generation: None,
             },
         }]);
         let result = crate::subagent::handle(
@@ -354,6 +366,9 @@ fn managed_subagent_working_requires_existing_owned_assigned_task() {
                     error: None,
                     probe_failures: Vec::new(),
                     runtime: None,
+                    create_operation_id: None,
+                    binding_id: None,
+                    endpoint_generation: None,
                 },
             },
             Event::TaskCreated {
@@ -414,6 +429,9 @@ fn managed_subagent_working_requires_existing_owned_assigned_task() {
                     error: None,
                     probe_failures: Vec::new(),
                     runtime: None,
+                    create_operation_id: None,
+                    binding_id: None,
+                    endpoint_generation: None,
                 },
             },
             Event::TaskCreated {
@@ -462,7 +480,7 @@ fn managed_subagent_working_accepts_assignment_after_probe_race_and_is_idempoten
     register(&server, "child", "%child");
     let now = now_ms();
     server.commit(&[Event::SubagentUpdated {
-        subagent: Record {
+        subagent: bind_test_subagent_record(&server, Record {
             id: "managed".into(),
             parent: "parent".into(),
             peer: "child".into(),
@@ -475,7 +493,10 @@ fn managed_subagent_working_accepts_assignment_after_probe_race_and_is_idempoten
             error: None,
             probe_failures: Vec::new(),
             runtime: None,
-        },
+            create_operation_id: None,
+            binding_id: None,
+            endpoint_generation: None,
+        }),
     }]);
 
     let sent = crate::subagent::handle(

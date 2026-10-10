@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-context",
-  "version": "0.9.0",
-  "description": "一次 context 请求到一次结果。CLI 解析项目与服务事实，daemon identity_gate 负责身份选择、创建、恢复、现有 host transaction 注册、默认 lease 和项目快照。身份恢复继续使用 docs/design/collab-anchor-restore-model.md 的锚点阶梯：一个设计锚点对应持久化锚点值，不以 liveness、runtime state 或 generation 作为通用恢复门；无匹配创建新身份，歧义或跨项目匹配显式失败。第一轮授权修订固定：同主体恢复键为现有 (project_scope, app_scope_id, agent_id)，由 token、持久化身份与 binding 锚点证明；旧 grant 只在该 grant 匹配旧 binding、agent、scope 和 generation 时延续，并由 part_02 在同一 typed 注册事务中提交 GlobalRuntimeBound 与重签发的 GlobalMasterGranted。pane 存在、pane 名称相同或新主体占用地址都不是主体连续性证明；新主体不继承旧 grant。删除 identity_gate 中把 unknown liveness 一律当作身份恢复阻断的授权围栏及传输专属授权例外，保留身份歧义、跨项目、endpoint 验证和真实冲突拒绝。context 的授权投影只读当前 typed grant，通信观察独立输出；授权流程仍属于 docs/dagpipe/collab-master-authority.graph.json。实现代码边当前待实现。",
+  "version": "0.11.0",
+  "description": "一次 context 请求到一次判别结果。CLI/MCP 只收集真实事实、保留 caller 生成的稳定 operation key，并提交 typed intent；daemon identity_gate 是唯一身份决策、approved recovery admission、外层 operation record 和 pure read query owner。四类互斥 invocation 共用本图：automatic context/recovery、fact supplement、approved identity recovery、operation query。只有 approved invocation 可携带精确 project/app scope、target identity、action、intent_digest 与 expected incumbent binding/generation 的批准；批准不是 token、endpoint 或 scope 所有权证明。approved replacement 在普通 Register token admission 前进入 daemon-owned transaction：从 project reducer/worker/credential owner 读取权威事实，本地 identity receipt 只作 cache；验证端点后只退役精确 incumbent，并由既有 Register owner 提交真实 binding。内部 admission proof 不是 token，也不伪造 actor_binding_id。普通 Register 与 authenticated command 仍保留 token/binding/generation/scope 校验，TOKEN_MISMATCH 只描述这些非批准路径。stable operation key 在首个身份副作用前持久化，绑定 project_scope、app_scope_id、target_identity、action、intent_digest；同 key 同意图复用，同 key 不同意图拒绝。phase 为 admitted、approval_decision、nested_register、route、credential、grant（仅显式 grant approval）、lease、context_complete；nested Register 的 command_id/operation_id 在 dispatch 前写入外层记录。nested receipt 只证明内层注册；route、credential、grant、lease、snapshot 各自仍由原 owner 提交。结果使用同一 discriminated schema，区分 missing_facts、approval_required、denied、partial、unknown、failed、completed、cancelled；automatic/supplement 在提交后阶段未完成时必须可返回 partial，终态失败保留 committed_phases，cancelled 只在安全边界出现。query 只读 durable phase projection 与 owner readback，需保留的 operation key 和完整 proof/read capability，不要求失效旧 token，永不 repair 或续写 credential、binding、route、grant、lease。repair 是单独显式 context invocation，新 key 与新 intent。identity/binding/route/credential/grant/lease owner 不合并；恢复 master identity 不隐式 grant/clear/promote，authority 流程仍属于 docs/dagpipe/collab-master-authority.graph.json。歧义、跨项目、伪造端点和真实冲突继续 fail closed。Cancellation is governed by this same identity operation owner: a context-only prepare_invocation reservation binds the operation key, canonical project/app scope, intent digest, and retained capability before mutation dispatch; admission and pre-admission cancellation arbitrate the pending ticket, and a winning cancellation leaves no durable operation. After admission, CLI SIGINT and the exact active MCP tools/call cancellation reach this owner without acquiring the identity_gate execution mutex. Cancellation may commit only at safe boundaries before a durable owner start or between completed owners; once Register CommandStarted or the authority journal grant-start event is synced, the invocation never claims cancelled. The context operation owner and its short arbitration lock govern cancellation; identity_gate only serializes identity execution. Register-start and grant-start evidence each remain owned by their existing durable journal. Implementation mapping (S23-B03 delta accepted 2026-10-09): outer admission/phase sync and authorized query remain owned by operation_journal.rs and its existing B23 dispatch; identity_context.rs binds the prepared Register envelope's nested IDs before consume and performs exact receipt readback; part_02.rs prepares the typed envelope from one consistent reducer snapshot; part_06.rs and part_11.rs route legacy and internal Register callers through the same prepare/consume owner; part_04.rs coordinates durable outer Validating (including nested IDs) before consuming that same envelope and queries the exact already-loaded runtime receipt. No operator topology or business semantics change. This is an implementation map, not evidence that the behavior is complete.",
   "inputs": [{"id": "context_request", "schema": "Object"}],
   "nodes": [
     {
@@ -23,19 +23,19 @@
       "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"
     },
     {
-      "id": "identity_gate", "operator": "appsdk.collab_context.identity_gate", "operator_version": "1",
-      "inputs": ["daemon_ready"], "output": {"id": "identity_result", "schema": "Object"},
+      "id": "identity_gate", "operator": "appsdk.collab_context.identity_gate", "operator_version": "2",
+      "inputs": ["daemon_ready"], "output": {"id": "identity_operation_result", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
       "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"
     },
     {
-      "id": "env_view", "operator": "appsdk.collab_context.env_view", "operator_version": "1",
-      "inputs": ["identity_result"], "output": {"id": "env_projection", "schema": "Object"},
+      "id": "env_view", "operator": "appsdk.collab_context.env_view", "operator_version": "2",
+      "inputs": ["identity_operation_result"], "output": {"id": "env_projection", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
       "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"
     },
     {
-      "id": "emit_snapshot", "operator": "appsdk.collab_context.emit_snapshot", "operator_version": "1",
+      "id": "emit_snapshot", "operator": "appsdk.collab_context.emit_snapshot", "operator_version": "2",
       "inputs": ["env_projection"], "output": {"id": "state_snapshot", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
       "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"
@@ -45,7 +45,7 @@
     {"from": "resolve_context_root", "to": "ensure_baseline", "arc_id": "resolved_scope"},
     {"from": "ensure_baseline", "to": "ensure_daemon", "arc_id": "baseline_ready"},
     {"from": "ensure_daemon", "to": "identity_gate", "arc_id": "daemon_ready"},
-    {"from": "identity_gate", "to": "env_view", "arc_id": "identity_result"},
+    {"from": "identity_gate", "to": "env_view", "arc_id": "identity_operation_result"},
     {"from": "env_view", "to": "emit_snapshot", "arc_id": "env_projection"}
   ],
   "outputs": ["state_snapshot"]

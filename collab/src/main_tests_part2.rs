@@ -1,4 +1,15 @@
 use super::*;
+
+/// Build the exact `Resp` wire the daemon emits for a typed operation result:
+/// outer `ok` owns success and the flattened payload holds one `result` object.
+fn typed_operation_wire(ok: bool, result: Value) -> Resp {
+    Resp {
+        ok,
+        error: None,
+        data: json!({"result": result}),
+    }
+}
+
 #[test]
 fn board_identity_rejects_a_retired_appserver_runtime() {
     let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
@@ -297,6 +308,50 @@ fn subagent_snapshot_uses_the_authenticated_mutation_route() {
 }
 
 #[test]
+fn subagent_action_routing_sends_only_list_and_status_to_observe() {
+    let actions = [
+        subagent::Action::Dispatch {
+            request_id: "request".into(),
+            subject: "subject".into(),
+            body: "body".into(),
+            feature_id: None,
+            worktree_path: None,
+            branch: None,
+            base_commit: None,
+            priority: "p2".into(),
+            next_step: None,
+        },
+        subagent::Action::List,
+        subagent::Action::Status { id: "child".into() },
+        subagent::Action::Snapshot {
+            id: "child".into(),
+            lines: 40,
+        },
+        subagent::Action::Rearm { id: "child".into() },
+        subagent::Action::Send {
+            id: "child".into(),
+            subject: "subject".into(),
+            body: "body".into(),
+        },
+        subagent::Action::Ready { id: "child".into() },
+        subagent::Action::Working { id: "child".into() },
+        subagent::Action::Close { id: "child".into() },
+    ];
+
+    for action in &actions {
+        let observe_query = subagent_observe_query(action);
+        assert_eq!(
+            observe_query.is_some(),
+            matches!(
+                action,
+                subagent::Action::List | subagent::Action::Status { .. }
+            ),
+            "unexpected observe routing for {action:?}"
+        );
+    }
+}
+
+#[test]
 fn persisted_appserver_binding_requires_live_native_route_resolution() {
     let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
     let root = test_root("registration-appserver-live");
@@ -388,6 +443,160 @@ fn persisted_appserver_binding_requires_live_native_route_resolution() {
     clear_current_session_thread();
     std::env::remove_var(crate::scope::COLLAB_STATE_DIR_ENV);
     std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn context_query_uses_read_only_bootstrap_and_preserves_typed_error_data() {
+    let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+    let root = test_root("context-query-pure");
+    let state_root = std::env::temp_dir().join(format!(
+        "cq-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&state_root).unwrap();
+    let host_paths = scope::HostPaths::from_state_root(&state_root).unwrap();
+    let canonical_root = root.canonicalize().unwrap();
+    let route = json!({
+        "version": 1,
+        "op": "register",
+        "app_scope_id": identity::CLI_APP_SERVER_ID,
+        "project_scope": canonical_root,
+        "canonical_root": canonical_root,
+        "storage_root": canonical_root,
+        "registered_ms": 1
+    });
+    std::fs::write(state_root.join("routes.jsonl"), format!("{route}\n")).unwrap();
+    let project_context = crate::context_operation::cli_project_context_for_root(
+        &root,
+        &identity::AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap(),
+    )
+    .unwrap();
+    crate::context_operation::prepare_test_proof(&host_paths, &project_context, "ctxop-pure-query")
+        .unwrap();
+    let previous = std::env::current_dir().unwrap();
+    std::env::set_current_dir(&root).unwrap();
+    std::env::set_var(crate::scope::COLLAB_STATE_DIR_ENV, &state_root);
+    let result = context_operation(Some("ctxop-pure-query".into()), None, true, Some(&root));
+    std::env::remove_var(crate::scope::COLLAB_STATE_DIR_ENV);
+    std::env::set_current_dir(previous).unwrap();
+    let error = result.expect_err("query without a route or baseline must fail closed");
+    assert!(
+        error.to_string().starts_with("COLLAB_CONTEXT_UNRESOLVED"),
+        "{error:#}"
+    );
+    assert!(!root.join(".agent-collab").exists());
+    assert!(!state_root.join("server.pid").exists());
+    assert!(!state_root.join("events.jsonl").exists());
+
+    // The daemon carries a typed incomplete result as outer `ok:false` with a
+    // single flattened `result` object. Round-trip it through the real wire
+    // serde path: an inner `ok` would collapse into `Resp.ok` and lose the
+    // typed payload, so exactly one `ok` survives serialization.
+    // A committed nested Register with an incomplete later phase projects as
+    // `partial`, never as success: the daemon reports outer `ok:false` with a
+    // single flattened `result` object. Round-trip it through the real wire
+    // serde path; an inner `ok` would collapse into `Resp.ok` and lose the
+    // typed payload, so exactly one `ok` must survive serialization.
+    let typed_incomplete = typed_operation_wire(
+        false,
+        json!({
+            "operation_id": "ctxop-pure-query",
+            "invocation": "automatic",
+            "action": "context",
+            "phase": "inner_dispatched",
+            "outcome": "partial",
+            "committed_phases": ["validating", "inner_dispatched"],
+            "failed_phase": "route",
+            "requires": {
+                "kind": "repair",
+                "fields": [],
+                "sources": {},
+                "approval": null,
+                "repair_invocation": null
+            },
+            "snapshot": null,
+            "owner_readback": {"route": {"state": "unknown"}},
+            "queried_operation": null
+        }),
+    );
+    let wire = serde_json::to_string(&typed_incomplete).unwrap();
+    let error = client::ServerResponseError {
+        response: serde_json::from_str(&wire).unwrap(),
+    };
+    assert_eq!(
+        wire.matches("\"ok\"").count(),
+        1,
+        "the flattened wire must keep exactly one ok: {wire}"
+    );
+    assert_eq!(error.response.data.get("ok"), None);
+    assert_eq!(error.response.ok, false);
+    assert_eq!(error.response.data["result"]["outcome"], "partial");
+    // The public mutation projection keeps the typed incomplete payload and
+    // reports `ok:false` so the CLI exit/MCP isError mapping stays honest.
+    let projected =
+        main_context::public_context_response(error.response, false, "ctxop-pure-query").unwrap();
+    assert_eq!(projected["ok"], false);
+    assert_eq!(projected["result"]["operation_id"], "ctxop-pure-query");
+    assert_eq!(projected["result"]["outcome"], "partial");
+    assert_eq!(projected["result"]["phase"], "inner_dispatched");
+    assert_eq!(
+        projected["result"]["committed_phases"],
+        json!(["validating", "inner_dispatched"])
+    );
+
+    // A completed operation projects as outer `ok:true` with the same
+    // collision-free shape.
+    let typed_complete = typed_operation_wire(
+        true,
+        json!({
+            "operation_id": "ctxop-pure-query",
+            "invocation": "automatic",
+            "action": "context",
+            "phase": "completed",
+            "outcome": "completed",
+            "committed_phases": ["validating", "inner_dispatched", "effect_observed", "completed"],
+            "failed_phase": null,
+            "requires": {
+                "kind": null,
+                "fields": [],
+                "sources": {},
+                "approval": null,
+                "repair_invocation": null
+            },
+            "snapshot": {"registered": true},
+            "owner_readback": {},
+            "queried_operation": null
+        }),
+    );
+    let wire = serde_json::to_string(&typed_complete).unwrap();
+    assert_eq!(wire.matches("\"ok\"").count(), 1, "{wire}");
+    let projected = main_context::public_context_response(
+        serde_json::from_str(&wire).unwrap(),
+        false,
+        "ctxop-pure-query",
+    )
+    .unwrap();
+    assert_eq!(projected["ok"], true);
+    assert_eq!(projected["result"]["outcome"], "completed");
+    // A transport/protocol failure carries no typed `result` and stays an
+    // error rather than a projected payload.
+    let transport = Resp::err("IDENTITY_OPERATION_UNKNOWN: no durable operation");
+    let wire = serde_json::to_string(&transport).unwrap();
+    let transport_error = client::ServerResponseError {
+        response: serde_json::from_str(&wire).unwrap(),
+    };
+    assert!(main_context::public_context_response(
+        transport_error.response,
+        false,
+        "ctxop-pure-query"
+    )
+    .is_err());
+    std::fs::remove_dir_all(root).ok();
+    std::fs::remove_dir_all(state_root).ok();
 }
 
 #[test]

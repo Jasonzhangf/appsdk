@@ -51,7 +51,10 @@ fn removed_identity_selectors_are_rejected() {
         Cli::try_parse_from(["collab", "context", "--provide", r#"{"session_id":"s"}"#]).unwrap();
     assert!(matches!(
         cli.cmd,
-        Cmd::Context { provide: Some(provide) } if provide == r#"{"session_id":"s"}"#
+        Cmd::Context {
+            provide: Some(provide),
+            ..
+        } if provide == r#"{"session_id":"s"}"#
     ));
 }
 
@@ -1042,10 +1045,17 @@ fn identity_context_required_forwards_the_daemon_update_exactly() {
         "action": "collab context --provide '<JSON containing required_fields>'",
         "requires_approval": false
     });
-    let snapshot = json!({"registered": false, "identity": null, "requires_identity_update": update});
+    let snapshot =
+        json!({"registered": false, "identity": null, "requires_identity_update": update});
     let error = crate::main_context::identity_context_required(&snapshot);
-    let response = &error.downcast_ref::<client::ServerResponseError>().unwrap().response;
-    assert_eq!(response.data["requires_identity_update"], snapshot["requires_identity_update"]);
+    let response = &error
+        .downcast_ref::<client::ServerResponseError>()
+        .unwrap()
+        .response;
+    assert_eq!(
+        response.data["requires_identity_update"],
+        snapshot["requires_identity_update"]
+    );
 }
 
 #[test]

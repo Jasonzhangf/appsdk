@@ -1066,6 +1066,33 @@ projections that used to require separate calls, so no agent flow needs to run
 | Notification arrived | `collab msg <id>`, then act; `collab recv` consumes | ACK-only, or treat submission as consumption |
 | Master has a pending merge | `collab context` → `pending_merges`, merge the candidate, then `collab task integrated` | rely on a remembered message, or try to close first |
 
+### Master peer CRUD
+
+`collab context` returns a `peer_lifecycle` operation card only to the current
+master. It contains the exact commands, scope rule, success receipt, and failure
+handling. Use it as the command contract. A peer with no current master grant
+does not manage other peers.
+
+All targets must belong to the same registered canonical project `main` and app
+scope as the master. The requested `cwd` may be the main checkout or any
+existing directory/linked worktree in that same project. Collab resolves the
+worktree to its registered `main`; directory nesting or a matching path prefix
+does not establish project identity.
+
+| When | Command | Required result |
+|---|---|---|
+| Create a peer | `collab worker create <peer-id> --cwd <existing-project-dir-or-linked-worktree> --op <stable-operation-id> [--model <model>]` | `outcome=complete`; response identifies the real thread, route, registration, and verified ready turn. Reuse the same operation ID to recover a retry; never create a replacement ID after an unknown result. |
+| Inspect a peer | `collab worker read <peer-id>` | `outcome=ok` with the exact peer lifecycle projection. `collab worker read` with no ID reads the caller. |
+| Move a peer's AppServer cwd | `collab worker update <peer-id> --cwd <existing-project-dir-or-linked-worktree>` | First call omits `--op`. `outcome=complete` requires settings update and cwd readback. Supply `--op <returned-operation-id>` only to retry/query that retained update after an uncertain result. |
+| Close a peer | `collab worker close <peer-id> --reason "<auditable reason>"` | First call omits `--op`. `outcome=complete` requires verified runtime archive and peer, binding, route, lease, and subscription retirement. Open responsibilities are refused. Use `--op <returned-operation-id>` only for its retained retry/query. |
+| Read an uncertain operation | `collab worker query --op <returned-operation-id>` | Reads the retained outcome without repeating a host effect. Do not start a replacement operation while the result is unknown. |
+
+For `refused`, `partial`, or `unknown`, keep the typed response and its
+operation ID. A responsibility or project-scope refusal has no lifecycle
+success; fix the named condition before a new operation. An unknown or partial
+result is not success: query that operation and do not claim the peer was
+created, updated, or closed until its verified terminal receipt says so.
+
 Read-only operator diagnostics remain available for human maintenance and
 audit: `collab who`, `collab status --all`, `collab worker status`, `collab
 route resolve`, and `collab master status`. They are not agent identity
@@ -1174,12 +1201,14 @@ switch transports after an RPC error.
 ## Worktree identity
 
 A Git worktree is a task execution directory, not a second identity or a
-substitute for the canonical project root. `collab context` resolves the
+substitute for the canonical project root. A peer and its master are related
+through the same registered canonical project `main` and app scope. Their
+worktrees may be in different directories. `collab context` resolves the
 canonical root automatically and the daemon owns identity selection, creation,
 recovery, update, route publication, and binding persistence. Do not create a
-worktree-local peer. External linked worktrees use the registered Git main root
-automatically for context and ordinary commands; do not switch cwd to recover
-an identity. The `collab context` snapshot is the agent's complete
+worktree-local peer. External linked worktrees resolve to their registered Git
+main root for context and ordinary commands; path containment does not establish
+project identity. Do not switch cwd to recover an identity. The `collab context` snapshot is the agent's complete
 master-authority and peer read. A failed context is not evidence that no master
 exists; preserve the exact error. Master promotion requires explicit user
 approval and an authenticated current binding, not the incumbent's or the

@@ -14,6 +14,10 @@
       "path": "docs/dagpipe/collab-context.graph.json"
     },
     {
+      "id": "appsdk-collab-subagent-command",
+      "path": "docs/dagpipe/collab-subagent-command.graph.json"
+    },
+    {
       "id": "appsdk-collab-appserver-route-repair",
       "path": "docs/dagpipe/appserver-route-repair.graph.json"
     },
@@ -52,6 +56,10 @@
     {
       "id": "appsdk-collab-master-authority",
       "path": "docs/dagpipe/collab-master-authority.graph.json"
+    },
+    {
+      "id": "appsdk-collab-peer-lifecycle",
+      "path": "docs/dagpipe/collab-peer-lifecycle.graph.json"
     },
     {
       "id": "appsdk-user-requirement-change",

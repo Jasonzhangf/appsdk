@@ -245,6 +245,16 @@ pub(crate) enum LiveClosureCmd {
 
 #[derive(Subcommand)]
 pub(crate) enum WorkerCmd {
+    /// Master creates an ordinary peer with durable native-thread receipts
+    Create {
+        target_id: String,
+        #[arg(long)]
+        cwd: String,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long = "op")]
+        operation_id: Option<String>,
+    },
     /// Inspect worker status (liveness, identity, agent state, unacked notifications)
     Status {
         /// Optional worker ID to inspect (defaults to all registered workers)
@@ -258,13 +268,38 @@ pub(crate) enum WorkerCmd {
         #[arg(long, default_value_t = 40)]
         lines: usize,
     },
-    /// Live master retires a worker registration
+    /// Read one exact peer lifecycle target (defaults to the caller)
+    Read {
+        /// Exact worker ID to read; omit for the authenticated caller
+        target_id: Option<String>,
+    },
+    /// Change only the selected worker's App Server cwd through the lifecycle owner
+    Update {
+        /// Exact worker ID whose cwd changes
+        target_id: String,
+        /// New canonical working directory
+        #[arg(long)]
+        cwd: String,
+        /// Retained operation ID from an earlier attempt
+        #[arg(long = "op")]
+        operation_id: Option<String>,
+    },
+    /// Retire one exact peer through the lifecycle owner
     Close {
-        /// Worker ID to close
-        id: String,
+        /// Exact worker ID to close
+        target_id: String,
         /// Why this worker is being closed; recorded for audit
         #[arg(long)]
         reason: String,
+        /// Retained operation ID from an earlier attempt
+        #[arg(long = "op")]
+        operation_id: Option<String>,
+    },
+    /// Read one retained lifecycle operation without producing a host effect
+    Query {
+        /// Retained lifecycle operation ID
+        #[arg(long = "op")]
+        operation_id: String,
     },
 }
 
@@ -407,8 +442,20 @@ pub(crate) enum Cmd {
     /// Single agent bootstrap: resolve root, start daemon, restore identity and
     /// registration, re-arm default notify, then return the authoritative snapshot
     Context {
+        #[arg(long = "op")]
+        operation_id: Option<String>,
+        #[arg(long)]
+        project: Option<std::path::PathBuf>,
+        #[arg(long = "app-scope")]
+        app_scope: Option<String>,
+        #[arg(long = "approve-identity")]
+        approve_identity: Option<String>,
+        #[arg(long = "approve-grant")]
+        approve_grant: Option<String>,
         #[arg(long)]
         provide: Option<String>,
+        #[arg(long)]
+        query: bool,
     },
     /// Mark messages as read
     Ack {

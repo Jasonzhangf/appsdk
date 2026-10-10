@@ -7,8 +7,6 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-#[cfg(unix)]
-use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -908,18 +906,15 @@ impl CommunicationLock {
                 )
             })?;
 
-        #[cfg(unix)]
-        {
-            let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-            if result != 0 {
-                let error = std::io::Error::last_os_error();
-                let code = error.raw_os_error();
-                if matches!(code, Some(libc::EAGAIN) | Some(libc::EACCES)) {
-                    return Err(CommError::new(
-                        "communication_busy",
-                        format!("communication mailbox is locked: {}", lock_path.display()),
-                    ));
-                }
+        match crate::platform::try_lock_exclusive(&file) {
+            Ok(()) => {}
+            Err(crate::platform::LockAttemptError::WouldBlock) => {
+                return Err(CommError::new(
+                    "communication_busy",
+                    format!("communication mailbox is locked: {}", lock_path.display()),
+                ));
+            }
+            Err(crate::platform::LockAttemptError::Io(error)) => {
                 return Err(CommError::new(
                     "communication_lock_failed",
                     format!("{}: {error}", lock_path.display()),
@@ -1056,4 +1051,60 @@ pub fn capabilities() -> Value {
             "loop": ["gate", "verification"]
         }
     })
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+
+    fn temp_root(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "appsdk-communication-lock-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn store_lock_is_exclusive_for_store_lifetime() {
+        let root = temp_root("lifetime");
+        let store = CommunicationStore::open(&root).unwrap();
+
+        // The store keeps the lock File alive, so a second open on the same
+        // mailbox must fail on the real OS lock.
+        let blocked = match CommunicationStore::open(&root) {
+            Ok(_) => panic!("second store unexpectedly acquired the mailbox lock"),
+            Err(error) => error,
+        };
+        assert_eq!(blocked.code, "communication_busy");
+
+        drop(store);
+        let reopened = CommunicationStore::open(&root).unwrap();
+        drop(reopened);
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn acquire_reports_lock_open_failure() {
+        let root = temp_root("open-failure");
+        let mailbox_path = root.join(".appsdk-control/communication/mailbox.jsonl");
+        // A directory occupying the lock path makes the open step fail before
+        // any locking is attempted.
+        let lock_path = mailbox_path.with_extension("jsonl.lock");
+        fs::create_dir_all(&lock_path).unwrap();
+
+        let error = match CommunicationLock::acquire(&mailbox_path) {
+            Ok(_) => panic!("lock acquire unexpectedly succeeded on a directory path"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, "communication_lock_open_failed");
+
+        fs::remove_dir_all(root).ok();
+    }
 }

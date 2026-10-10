@@ -6,10 +6,6 @@ use std::env;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{ErrorKind, Write};
-#[cfg(unix)]
-use std::os::raw::c_int;
-#[cfg(unix)]
-use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::thread;

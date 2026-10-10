@@ -676,6 +676,30 @@ pub(crate) fn register(server: &Server, id: &str, thread_id: &str) -> Resp {
     register_tmux(server, id, endpoint)
 }
 
+/// Model the provenance committed by an explicit managed-child Bind after
+/// the child has already been registered in this test server.
+pub(crate) fn bind_test_subagent_record(
+    server: &Server,
+    mut record: crate::subagent::Record,
+) -> crate::subagent::Record {
+    let state = server.state.lock().unwrap();
+    let binding = state
+        .global
+        .projects
+        .values()
+        .flat_map(|project| project.runtime_bindings.values())
+        .find(|binding| {
+            binding.agent_id.as_str() == record.peer
+                && binding.native_thread_id.as_ref().map(|thread| thread.as_str())
+                    == record.thread_id.as_deref()
+        })
+        .unwrap_or_else(|| panic!("registered child binding missing for {}", record.peer));
+    record.create_operation_id = Some(format!("test-create-{}", record.id));
+    record.binding_id = Some(binding.binding_id.as_str().to_owned());
+    record.endpoint_generation = Some(binding.endpoint_generation);
+    record
+}
+
 fn promote_master(server: &Server, worker_id: &str, approval: &str) {
     let response = handle_master_promote(
         server,

@@ -721,7 +721,7 @@
         let (server, root, _) = test_server();
         register_known_project_with_app(&server, &root, crate::identity::CLI_APP_SERVER_ID);
         let blocker = root.join("route-journal-state-root");
-        std::fs::write(&blocker, b"not a directory").unwrap();
+        std::fs::create_dir_all(blocker.join("routes.jsonl")).unwrap();
         let blocked_host_paths = HostPaths::for_state_root(blocker).unwrap();
 
         let error = match ProjectRuntimeManager::new(server, &blocked_host_paths) {

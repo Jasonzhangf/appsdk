@@ -3498,10 +3498,7 @@ mod required_fields_tests {
             response.error, response.data
         );
         assert_eq!(response.data["result"]["outcome"], "completed");
-        assert_eq!(
-            response.data["result"]["phase"],
-            json!(crate::proto::IdentityOperationPhase::Completed)
-        );
+        assert_eq!(response.data["result"]["phase"], "context_complete");
         let new_generation = binding_generation_for(&server, &context, &binding_id);
         assert!(
             new_generation > incumbent_generation,
@@ -3570,7 +3567,11 @@ mod required_fields_tests {
         };
         let (_, response) = manager.identity_context(context.clone(), request.clone());
         assert!(!response.ok);
-        assert_eq!(response.error.as_deref(), Some("APPROVAL_STALE_CONFLICT"));
+        assert_eq!(response.data["result"]["outcome"], "denied");
+        assert_eq!(
+            response.data["result"]["owner_readback"]["error"],
+            "APPROVAL_STALE_CONFLICT"
+        );
         {
             let state = server.state.lock().unwrap();
             let binding = state

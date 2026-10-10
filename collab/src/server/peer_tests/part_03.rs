@@ -1033,7 +1033,7 @@ fn managed_subagent_is_authenticated_persistent_and_replayable() {
     register(&server, "parent", "%parent");
     register(&server, "child", "%child");
     register(&server, "other", "%other");
-    let record = Record {
+    let record = bind_test_subagent_record(&server, Record {
         id: "managed".into(),
         parent: "parent".into(),
         peer: "child".into(),
@@ -1049,7 +1049,7 @@ fn managed_subagent_is_authenticated_persistent_and_replayable() {
         create_operation_id: None,
         binding_id: None,
         endpoint_generation: None,
-    };
+    });
     let event = Event::SubagentUpdated { subagent: record };
     let encoded = serde_json::to_string(&event).unwrap();
     let mut replay = State::default();

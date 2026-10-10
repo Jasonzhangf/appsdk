@@ -455,7 +455,7 @@ fn codex_subagents_exchange_messages() {
     register(&server, "first-peer", "%first");
     register(&server, "codex-peer", "%codex");
     let now = now_ms();
-    let first = Record {
+    let first = bind_test_subagent_record(&server, Record {
         id: "first-rt".into(),
         parent: "parent".into(),
         peer: "first-peer".into(),
@@ -471,8 +471,8 @@ fn codex_subagents_exchange_messages() {
         create_operation_id: None,
         binding_id: None,
         endpoint_generation: None,
-    };
-    let codex = Record {
+    });
+    let codex = bind_test_subagent_record(&server, Record {
         id: "codex-rt".into(),
         parent: "parent".into(),
         peer: "codex-peer".into(),
@@ -488,7 +488,7 @@ fn codex_subagents_exchange_messages() {
         create_operation_id: None,
         binding_id: None,
         endpoint_generation: None,
-    };
+    });
     server.commit(&[
         Event::SubagentUpdated {
             subagent: first.clone(),

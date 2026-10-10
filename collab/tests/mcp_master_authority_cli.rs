@@ -109,7 +109,12 @@ impl Fixture {
         self.environment(&mut command);
         let output = command.args(args).output().expect("run actual CLI");
         assert!(output.status.success(), "CLI {args:?}: {output:?}");
-        serde_json::from_slice(&output.stdout).expect("CLI JSON response")
+        let value: Value = serde_json::from_slice(&output.stdout).expect("CLI JSON response");
+        value
+            .get("result")
+            .and_then(|result| result.get("snapshot"))
+            .cloned()
+            .unwrap_or(value)
     }
 
     fn start_mcp(&self) -> Mcp {

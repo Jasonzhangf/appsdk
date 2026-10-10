@@ -32,11 +32,21 @@ AppSDK 在源码中以 path dependency 使用 DAGPipe；普通 `appsdk init` 不
 
 ## 安装 AppSDK
 
-当前正式安装入口从公开 release 的源码 tag 构建，适用于具备 Unix 工具链的
-macOS/Linux 环境。需要 Git、Rust/Cargo 和本机 C 编译工具链；平台证据范围见下表。
+AppSDK npm 主包 `0.1.15` 已公开发布，支持 macOS ARM64、Linux x64 GNU 和原生
+Windows x64 MSVC。需要 Node.js 24 或更新版本：
 
 ```bash
-git clone --branch v0.1.0014 --depth 1 https://github.com/Jasonzhangf/appsdk.git
+npm install --global @jsonstudio/appsdk@0.1.15
+appsdk version
+```
+
+npm 安装提供 `appsdk` 与 `project-memory` 命令；它不会初始化项目、启动 daemon，
+也不会覆盖共享 Skill 目录。npm 包内含随 SDK 发布的 Skill 文件。
+
+源码安装供 macOS/Linux 开发者使用，需要 Git、Rust/Cargo 与本机 C 工具链：
+
+```bash
+git clone --branch v0.1.0015 --depth 1 https://github.com/Jasonzhangf/appsdk.git
 cd appsdk
 scripts/install-global-appsdk.sh
 appsdk version
@@ -47,9 +57,10 @@ installer 将 `appsdk`、`project-memory` 安装到当前 Cargo executable 所�
 `~/.agents/skills/`。将 binary 目录加入 PATH；已有 shell 可执行 `rehash`（zsh）
 或 `hash -r`（bash）刷新命令缓存。
 
-当前最新公开版本为 `v0.1.0014`；[公开 release](https://github.com/Jasonzhangf/appsdk/releases/latest) 的下载资产
-用于核对版本和哈希；正式安装仍使用上述源码 installer。原生 Windows 安装和
-npm 安装尚未提供，不将 Git Bash 或 WSL 视为原生 Windows 支持。
+当前最新公开源码版本为 [`v0.1.0015`](https://github.com/Jasonzhangf/appsdk/releases/tag/v0.1.0015)；
+npm 主包版本为 [`@jsonstudio/appsdk@0.1.15`](https://www.npmjs.com/package/@jsonstudio/appsdk)。
+源码 installer 仍用于将 Skills 安装到 `~/.agents/skills/`；Windows 用户可通过 npm
+安装 CLI，但本仓库的 Bash 源码 installer 不支持原生 Windows。WSL 按 Linux 环境验收。
 
 ## 如何开始治理
 
@@ -139,24 +150,20 @@ installer 不重启已有 daemon，升级运行态须在已授权维护窗口按
 
 ## 平台与渠道状态
 
-下表只记录截至公开版 `v0.1.0014` 的证据，按产品和 CPU 架构区分：
+下表按产品和 CPU 架构区分，并只标记已有原生构建与消费者证据的范围：
 
 | 平台 | AppSDK | DAGPipe | Collab | 下载/渠道 |
 |---|---|---|---|---|
-| macOS ARM64 | 已有安装、消费者和公开产物证据 | 随 AppSDK 构建使用库；独立 CLI 不在此 AppSDK release 资产中 | 已有独立安装/live [交付记录](docs/evidence/collab-master-authority-fix-20261007/README.md) | GitHub 源码与 AppSDK ARM64 资产 |
-| Linux x64 | Ubuntu release 门禁、安装器与消费者 smoke 通过 | Ubuntu release 门禁测试通过 | 有独立 Ubuntu CI job；具体 live 能力依宿主环境验收 | 可使用源码安装；尚无该 release 的 Linux 二进制 |
-| macOS x64 / Linux ARM64 | 尚未建立对应架构的完整发布证据 | 同左 | 同左 | 未提供对应平台的该 release 资产 |
-| 原生 Windows | 公开版未支持 | 公开版未支持 | 未支持：Unix socket 与宿主 transport 不可用 | 尚无原生 installer 或 release 资产 |
+| macOS ARM64 | v0.1.0015 原生 release 与 npm consumer 通过 | 随 AppSDK 构建依赖；独立 CLI 未单独发布 | Unix daemon/transport，单独安装与测试 | [GitHub release](https://github.com/Jasonzhangf/appsdk/releases/tag/v0.1.0015)、npm |
+| Linux x64 GNU | v0.1.0015 原生 release 与 npm consumer 通过 | release 测试及 AppSDK consumer 通过 | Unix daemon/transport，Collab CI 通过 | [GitHub release](https://github.com/Jasonzhangf/appsdk/releases/tag/v0.1.0015)、npm |
+| Windows x64 MSVC | 原生 MSVC、reset/junction 和 npm consumer 通过 | 原生安装/升级与 Cargo consumer 通过 | 不支持：Unix socket 与宿主 transport 未实现 | [GitHub release](https://github.com/Jasonzhangf/appsdk/releases/tag/v0.1.0015)、npm |
+| macOS x64 / Linux ARM64 / Windows ARM64 | 未提供对应架构产物与完整消费者验收 | 未提供对应架构矩阵 | 未提供对应架构矩阵 | 当前不支持声明 |
 
-AppSDK `0.1.0015` / npm `0.1.15` 的三平台候选已完成构建与 consumer smoke；
-完整矩阵绑定候选 SHA `0917ffa4` 的 run `38060743040` 通过。但该候选的独立整体
-Review 发现迁移记录完整性问题，以及 Windows reset 缺少原生验收；该 run 与更早的
-`a3f58b8b` run `38059365783` 均为历史候选证据，不能作为最终发布准入。修复后的
-最终候选须用最新完整 release run 的 `head_sha` 与包内 `sourceCommit` 对齐，并通过
-整体 Review。GitHub/npm 尚未发布，当前公开支持仍以 `v0.1.0014` 为准。
-`jasonzhangf` 已核实为 `@jsonstudio` org owner；目标包仍返回 E404，实际新包创建
-能力以发布及 registry read-back 为准。
-三平台产物、npm 包边界、版本映射与交付顺序见
+本次发布的完整三平台 release matrix 为 [run 38067264460](https://github.com/Jasonzhangf/appsdk/actions/runs/38067264460)，
+PR 集成矩阵为 [run 38067143144](https://github.com/Jasonzhangf/appsdk/actions/runs/38067143144)。
+归档 manifest 绑定源提交 `ab6e57501316b92f4e84247924ea13cbc809dd06`。Collab
+有独立源码、版本与 daemon 发布生命周期，不随 AppSDK 的 npm 包发布。三平台产物、
+npm 包边界、版本映射与交付顺序见
 [跨平台与发布渠道方案](docs/design/release-distribution.md)。新增平台和渠道
 完成对应验收后更新本表；编译成功不等于该平台的完整运行支持。
 
@@ -181,8 +188,9 @@ Review 发现迁移记录完整性问题，以及 Windows reset 缺少原生验�
 [verify.yml](.github/workflows/verify.yml) 按实际变更选择组件。部分未细分 Rust
 路径、共享合同/版本与未知路径仍扩大到整个 AppSDK 包；该限制在开发 Skill
 中记录。版本 tag 或 `workflow_dispatch` 执行完整 AppSDK release 候选门禁：
-AppSDK/DAGPipe 完整测试、合同/版本一致性、两个 release binary、installer、
-source registry 与真实消费者 smoke。Collab 使用独立门禁和产品安装流程。
+AppSDK/DAGPipe 完整测试、合同/版本一致性、Linux/Windows/macOS release binaries、
+installer、source registry 与三个原生 npm consumer smoke。Collab 使用独立门禁和
+产品安装流程。
 
 此仓库的根级规则和开发 Skill 管理 SDK 源码开发。消费者项目的
 Playground/Active/Protected 分区和治理合同在相应设计中定义；根仓库

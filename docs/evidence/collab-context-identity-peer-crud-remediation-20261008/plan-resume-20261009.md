@@ -476,4 +476,3 @@ parent 独占候选、汇总、registry、安装维护、Git 集成和资源生�
 | 空列表能排除未知创建 | 原 Native receipts 与 schema 已反证 | 保留 A6 BLOCKED；无新证据不重复观察 |
 
 这些候选归本任务合同、计划和源 Collab 文档。现有全局规则已覆盖独立角色、证据复用、精确资源回收和 unknown 不重放。本轮不新增全局规则或长期 memory。经验候选交独立 reviewer 复核，parent 按授权更新唯一正文。**本轮没有更新任何规则或记忆。**
-

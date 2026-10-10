@@ -1,8 +1,8 @@
 # Collab context、批准身份恢复与 peer CRUD 修复任务
 
-任务 ID：collab-context-identity-peer-crud-remediation-20261008  
+任务 ID：collab-context-identity-peer-crud-remediation-20261008
 状态：Goal active / INCOMPLETE；AppSDK issue `86b6e8b`。**9 个节点：完成 7（T0–T5、T7）、进行中 1（T8）、未开始 1（T6）。**候选 worktree `/Volumes/Intel/playground/appsdk/collab-context-identity-peer-crud-20261008`，HEAD `3dfdaf8503b7a6f6a76651a1e282c038b6648c3a`；所有原 tracked/untracked 改动均保留。r3 milestone Review PASS（0 findings），候选绑定 HEAD 加全部 dirty/untracked 改动；回执 `.agent-collab/review/collab-context-identity-peer-crud-milestone-20261010-r3/review.final.md`。T8 已按 accepted 顺序启动：刷新 `origin/main` 为 `b76326b88baec9ea2b1b7e60c37727fc990bbe97`，旧候选落后 27 个提交，候选与上游只共同修改 6 个文件，正在准备隔离 mainline 集成。peer 与 master 必须解析到同一个 registered canonical project `main` 和 app scope；worktree 可在不同目录，路径包含关系不参与身份判定。尚未提交、集成或安装，也未改变正式 daemon/身份/peer；T6 installed/live 验收未开始。T7/T8 执行记录：`.worker-runs/collab-context-identity-peer-crud-20261008/planner-review-findings-20261010/`。
-项目主树：`/Users/fanzhang/Documents/github/appsdk`。  
+项目主树：`/Users/fanzhang/Documents/github/appsdk`。
 任务依据：[四项能力审计](../evidence/collab-capability-audit-20261008/audit.md)、[公开入口观测回执](../evidence/collab-capability-audit-20261008/public-entry-observations.json)。
 
 本文件是修复目标、验收、执行状态与证据索引的唯一任务入口。审计报告保存历史观察，不替代执行时的最新证据。独立 planner 的计划、worker 笔记、review 与回执引用到本文件，不另建竞争的目标清单。

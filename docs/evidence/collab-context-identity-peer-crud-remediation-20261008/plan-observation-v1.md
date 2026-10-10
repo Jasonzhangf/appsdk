@@ -79,25 +79,25 @@ codex app-server generate-json-schema --out <DIR>
 
 没有旧 accepted plan。以下校正针对历史审计和父判断。
 
-1. **撤回“所有 worker close 都依赖无法产出的 snapshot”。**  
+1. **撤回“所有 worker close 都依赖无法产出的 snapshot”。**
    PR17 已补 Missing 路径。保留 no-self-close、非空 reason、master 权限、unfinished task 和重复关闭回执合同。
 
-2. **撤回“生产通知整体 tmux-only”。**  
+2. **撤回“生产通知整体 tmux-only”。**
    已有正式 transport 分支。后续只修真实缺口，不另建通知实现。
 
-3. **保留“Native launch 未进入生产”的判断。**  
+3. **保留“Native launch 未进入生产”的判断。**
    不能把测试 launch 解除条件编译后直接交付。它还包含 profile probing、多次 cleanup 和跨 owner 持久化步骤。必须先证明选定链可工作。
 
-4. **不把当前失败 probe 当宿主能力结论。**  
+4. **不把当前失败 probe 当宿主能力结论。**
    首个错误发生在命令参数解析，尚未到 RPC。
 
-5. **调整“立即修 F1”为“先完成短能力观测，再冻结 F1 增量”。**  
+5. **调整“立即修 F1”为“先完成短能力观测，再冻结 F1 增量”。**
    F1 是首个可用产品增量的合理候选。但当前 CLI/MCP 与后续生命周期合同共享入口。短观测必须先明确真实支持项和失败边界，避免接通记录关闭后误称 CRUD 完成。
 
-6. **不以 unsupported 或 record-only 缩减 CRUD。**  
+6. **不以 unsupported 或 record-only 缩减 CRUD。**
    这些状态可以作为真实失败或局部历史记录回执。它们不能通过 A6–A8。
 
-7. **批准身份恢复与 master 授权继续分离。**  
+7. **批准身份恢复与 master 授权继续分离。**
    恢复原 master 身份不能隐式 promote/clear。显式替换 grant 才进入授权 owner。离线或 Unknown incumbent 不决定 grant 是否存在。
 
 ## 4. DAG 与终点合同
@@ -272,10 +272,10 @@ E = W/docs/evidence/collab-context-identity-peer-crud-remediation-20261008
 
 ### O1 — 真实 runtime 能力观测
 
-**依赖：**父任务接收本 BLOCKED 计划。  
-**唯一 owner：**一个 runtime 观察者。  
-**允许写入：**`R/native-capability/` 的探针、独占 home、schema、consumer、原始回执和节点笔记。  
-**产品目录：**只读。  
+**依赖：**父任务接收本 BLOCKED 计划。
+**唯一 owner：**一个 runtime 观察者。
+**允许写入：**`R/native-capability/` 的探针、独占 home、schema、consumer、原始回执和节点笔记。
+**产品目录：**只读。
 **禁止：**生产 Collab 状态、当前 Desktop thread、既有 tmux pane、共享 AppServer、全局配置、凭据正文、其他任务资源。
 
 操作步骤：
@@ -332,10 +332,10 @@ provider/model 使用实时声明配置。未核对前不填猜测值。turn/upd
 
 ### O2 — 批准恢复与现有持久化能力核对
 
-**依赖：**父任务接收计划；可与 O1并行。  
-**唯一 owner：**一个 identity/control观察者。  
-**允许写入：**`R/identity-capability/` 的事实表、合同草案和笔记。  
-**产品目录：**只读。  
+**依赖：**父任务接收计划；可与 O1并行。
+**唯一 owner：**一个 identity/control观察者。
+**允许写入：**`R/identity-capability/` 的事实表、合同草案和笔记。
+**产品目录：**只读。
 **禁止：**修改 identity、token、journal、route、grant；调用正式 promote/clear；构造生产 takeover；修改全局规则。
 
 操作步骤：
@@ -372,9 +372,9 @@ cwd为 W，输入 SHA固定。命中后逐段读完整 owner，不以搜索结�
 
 ### O3 — 图与设计准入准备
 
-**依赖：**O1和O2有效结果；关键事实仍缺则停止受影响设计。  
-**唯一 owner：**设计文档 owner。  
-**允许写入：**受影响 `docs/design/`、列出的 `docs/dagpipe/`、必要 manifest登记、E；独占笔记 `R/design/notes.md`。  
+**依赖：**O1和O2有效结果；关键事实仍缺则停止受影响设计。
+**唯一 owner：**设计文档 owner。
+**允许写入：**受影响 `docs/design/`、列出的 `docs/dagpipe/`、必要 manifest登记、E；独占笔记 `R/design/notes.md`。
 **禁止：**产品源码、全局 Skill、无关图、主树 dirty文档、其他任务 evidence。
 
 操作步骤：
@@ -386,7 +386,7 @@ cwd为 W，输入 SHA固定。命中后逐段读完整 owner，不以搜索结�
 5. 交独立设计 reviewer。输入绑定精确设计版本、能力回执和图。
 6. 父任务补 observation并交本独立 planner更新实施计划。
 
-**必交产物：**设计合同、图、validate回执、支持矩阵、独立设计review结论、未解决项。  
+**必交产物：**设计合同、图、validate回执、支持矩阵、独立设计review结论、未解决项。
 **合格条件：**完整SESE及适用终点；没有无 owner副作用；没有未知创建重放；没有用 unsupported删目标。
 
 ## 7. 后续增量及真实依赖

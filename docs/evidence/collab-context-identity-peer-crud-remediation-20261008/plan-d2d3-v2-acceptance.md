@@ -1,9 +1,9 @@
 # D2/D3 v2 planning acceptance
 
-Date: 2026-10-08 America/Los_Angeles  
-Task: `collab-context-identity-peer-crud-remediation-20261008`  
-Planner output: `/Volumes/Intel/playground/appsdk/.worker-runs/collab-context-identity-peer-crud-20261008/planner-d2d3-v2/plan.md`  
-Input: current observation addendum and the v4/F2-F3/O2/O5 evidence listed by the plan.  
+Date: 2026-10-08 America/Los_Angeles
+Task: `collab-context-identity-peer-crud-remediation-20261008`
+Planner output: `/Volumes/Intel/playground/appsdk/.worker-runs/collab-context-identity-peer-crud-20261008/planner-d2d3-v2/plan.md`
+Input: current observation addendum and the v4/F2-F3/O2/O5 evidence listed by the plan.
 Planner invocation: fresh `/opt/homebrew/bin/codex exec --profile oauth --model gpt-6.1-sol --sandbox read-only --ephemeral`; startup and completion are recorded in sibling `events.jsonl`, with MCP startup warnings in `stderr.log`.
 
 ## Decision

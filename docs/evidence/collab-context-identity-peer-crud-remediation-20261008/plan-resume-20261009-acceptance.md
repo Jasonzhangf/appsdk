@@ -1,9 +1,9 @@
 # Fresh-plan acceptance — 2026-10-09
 
-Task: `collab-context-identity-peer-crud-remediation-20261008`  
-Planner: fresh Codex `oauth` profile with explicit `gpt-6.1-sol`; thread `01a11f15-181c-7e01-a9e1-4224da8f5897`; CLI session `95906`; wrapper PID `5607`; Codex PID `5611`; process exit `0`; final event `turn.completed`.  
-Plan: [`plan-resume-20261009.md`](plan-resume-20261009.md)  
-SHA-256: `e8ce1907a6b63eb5fb9dea4cca1177cd6da214dec4bf6939fe2e5be3b5e3f5a4`  
+Task: `collab-context-identity-peer-crud-remediation-20261008`
+Planner: fresh Codex `oauth` profile with explicit `gpt-6.1-sol`; thread `01a11f15-181c-7e01-a9e1-4224da8f5897`; CLI session `95906`; wrapper PID `5607`; Codex PID `5611`; process exit `0`; final event `turn.completed`.
+Plan: [`plan-resume-20261009.md`](plan-resume-20261009.md)
+SHA-256: `e8ce1907a6b63eb5fb9dea4cca1177cd6da214dec4bf6939fe2e5be3b5e3f5a4`
 Input: [`latest-observation-20261009.md`](/Volumes/Intel/playground/appsdk/.worker-runs/collab-context-identity-peer-crud-20261008/latest-observation-20261009.md), candidate HEAD `3dfdaf8503b7a6f6a76651a1e282c038b6648c3a`. `git ls-remote origin refs/heads/main` returned the same SHA during acceptance.
 
 ## Decision

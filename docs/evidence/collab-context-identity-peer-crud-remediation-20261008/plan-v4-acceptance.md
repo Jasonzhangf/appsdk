@@ -1,8 +1,8 @@
 # Planner v4 acceptance
 
-Task: `collab-context-identity-peer-crud-remediation-20261008`  
-Planner run: fresh `codex exec --profile oauth --model gpt-6.1-sol --sandbox read-only --ephemeral`; session `53821`, completed exit `0`.  
-Plan: [plan-v4.md](plan-v4.md).  
+Task: `collab-context-identity-peer-crud-remediation-20261008`
+Planner run: fresh `codex exec --profile oauth --model gpt-6.1-sol --sandbox read-only --ephemeral`; session `53821`, completed exit `0`.
+Plan: [plan-v4.md](plan-v4.md).
 Observation: [o4-managed-fixture-observation.md](o4-managed-fixture-observation.md).
 
 ## Decision

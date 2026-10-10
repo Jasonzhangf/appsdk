@@ -1,7 +1,7 @@
 # O4 — F1 managed fixture support observation
 
-Task: `collab-context-identity-peer-crud-remediation-20261008`  
-Base: `3dfdaf8503b7a6f6a76651a1e282c038b6648c3a` plus the task's uncommitted design artifacts.  
+Task: `collab-context-identity-peer-crud-remediation-20261008`
+Base: `3dfdaf8503b7a6f6a76651a1e282c038b6648c3a` plus the task's uncommitted design artifacts.
 Method: read-only source and test-fixture inspection. No daemon, identity, route, grant, subscription, peer, journal, mailbox, or runtime state was changed. No fixture was executed; runtime reachability remains `UNVERIFIED`.
 
 ## Typed result

@@ -1,9 +1,9 @@
 # D2-A admission/receipt/query map acceptance — 2026-10-09
 
-Task: `collab-context-identity-peer-crud-remediation-20261008`  
-Candidate: `/Volumes/Intel/playground/appsdk/collab-context-identity-peer-crud-20261008`, HEAD `3dfdaf8503b7a6f6a76651a1e282c038b6648c3a`  
-Worker: fresh GCM Codex thread `01a11f1d-23ff-78e1-be43-87d21abe4233`, session `35112`; final event `turn.completed`. The worker ran with `--sandbox read-only`; process handles have exited. No public product/daemon commands or identity writes were run.  
-Report: [`d2-admission-receipt-map-20261009.md`](d2-admission-receipt-map-20261009.md)  
+Task: `collab-context-identity-peer-crud-remediation-20261008`
+Candidate: `/Volumes/Intel/playground/appsdk/collab-context-identity-peer-crud-20261008`, HEAD `3dfdaf8503b7a6f6a76651a1e282c038b6648c3a`
+Worker: fresh GCM Codex thread `01a11f1d-23ff-78e1-be43-87d21abe4233`, session `35112`; final event `turn.completed`. The worker ran with `--sandbox read-only`; process handles have exited. No public product/daemon commands or identity writes were run.
+Report: [`d2-admission-receipt-map-20261009.md`](d2-admission-receipt-map-20261009.md)
 SHA-256: `d708e33e3e4573987fc09ae71280c98c7649f33499b7ddd6c764ce02f2a45918`
 
 ## Decision

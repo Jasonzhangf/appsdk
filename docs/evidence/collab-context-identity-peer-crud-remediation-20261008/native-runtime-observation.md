@@ -1,9 +1,9 @@
 # Native Runtime 能力观察
 
-任务：`collab-context-identity-peer-crud-remediation-20261008`  
-产品输入：`3dfdaf8503b7a6f6a76651a1e282c038b6648c3a`  
-执行时间：2026-10-08 America/Los_Angeles  
-执行入口：`/opt/homebrew/bin/codex` 版本 `0.161.0`。隔离 GCM provider `gpt-5.5`, medium。  
+任务：`collab-context-identity-peer-crud-remediation-20261008`
+产品输入：`3dfdaf8503b7a6f6a76651a1e282c038b6648c3a`
+执行时间：2026-10-08 America/Los_Angeles
+执行入口：`/opt/homebrew/bin/codex` 版本 `0.161.0`。隔离 GCM provider `gpt-5.5`, medium。
 产品文件：只读。未接触现行 Collab daemon、master、credential、route 或其他 worker。
 
 ## 结论

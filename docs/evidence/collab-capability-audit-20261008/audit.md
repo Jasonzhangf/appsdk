@@ -91,4 +91,3 @@ Skill 说明了只跑 context、按 required_fields 补 --provide，却仍要求
 未验证：生产身份创建/恢复的成功行为、生产 master grant 替换、真实 peer 创建/关闭、daemon live 版本与源码等价性。本轮未跑作者全套测试或做独立实现 review；这些不作为本次只读审计结论的 PASS 依据。
 
 原始公开入口结果：`public-entry-observations.json`。只新增审计文件，保留主树已有修改与他人资源。
-

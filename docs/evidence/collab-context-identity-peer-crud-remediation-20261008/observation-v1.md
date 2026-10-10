@@ -56,4 +56,3 @@ MCPX/native thread tools 未加载，采用宿主工具记录证据；不为缺�
 本轮 lsof+多读命令被自动审查误判为 process-kill chain，未执行；已用 ps 和 Python socket 读观测完成该部分，不重试该链。
 
 下一步：独立 planner 依据此观察及引用原证据给出整体目标/首个可用增量计划、真实能力确认步骤、owner/接口/图/黑盒/交付依赖。没有独立实施计划或实现。
-

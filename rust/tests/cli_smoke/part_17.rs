@@ -541,6 +541,28 @@ fn goal_stale_lock_is_recovered_after_owner_exit() {
     let payload: Value = serde_json::from_slice(&status.stdout).unwrap();
     assert_eq!(payload["error"], "GOAL_RECORD_NOT_FOUND");
     assert!(!lock_path.exists());
+    let stale_metadata = format!("pid={} owner=crashed-goal-worker\n", stale_pid);
+    let valid_receipt = fs::read_dir(&control_dir)
+        .unwrap()
+        .flatten()
+        .find_map(|entry| {
+            if !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("long-task-goal.lock.recovery.")
+            {
+                return None;
+            }
+            let receipt: Value = serde_json::from_slice(&fs::read(entry.path()).ok()?).ok()?;
+            (receipt["reason"] == "advisory lock released with stale metadata").then_some(receipt)
+        })
+        .expect("valid lock recovery receipt");
+    assert_eq!(valid_receipt["status"], "recovered");
+    assert_eq!(valid_receipt["original_metadata"], stale_metadata);
+    assert_eq!(
+        valid_receipt["reason"],
+        "advisory lock released with stale metadata"
+    );
 
     fs::write(&lock_path, "").unwrap();
     let empty_lock = run_in(&root, &["goal", "status", "--json"]);
@@ -575,6 +597,27 @@ fn goal_stale_lock_is_recovered_after_owner_exit() {
     let truncated_payload: Value = serde_json::from_slice(&truncated_lock.stdout).unwrap();
     assert_eq!(truncated_payload["error"], "GOAL_RECORD_NOT_FOUND");
     assert!(!lock_path.exists());
+    let truncated_receipt = fs::read_dir(&control_dir)
+        .unwrap()
+        .flatten()
+        .find_map(|entry| {
+            if !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("long-task-goal.lock.recovery.")
+            {
+                return None;
+            }
+            let receipt: Value = serde_json::from_slice(&fs::read(entry.path()).ok()?).ok()?;
+            (receipt["reason"] == "invalid or truncated metadata").then_some(receipt)
+        })
+        .expect("truncated lock recovery receipt");
+    assert_eq!(truncated_receipt["status"], "recovered");
+    assert_eq!(truncated_receipt["original_metadata"], "pid=");
+    assert_eq!(
+        truncated_receipt["reason"],
+        "invalid or truncated metadata"
+    );
 
     let mut live_owner = Command::new("/bin/sh")
         .args(["-c", "sleep 2"])

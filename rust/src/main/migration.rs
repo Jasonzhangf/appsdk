@@ -1,4 +1,6 @@
 use super::*;
+#[path = "migration/record_bindings.rs"]
+mod record_bindings;
 
 pub(super) fn init_collab_control_project(root: &Path) {
     assert_ordinary_init_canonical_project_main_tree(root, false);
@@ -412,14 +414,11 @@ pub(super) fn valid_bundle_digest(digest: &str) -> bool {
 fn sdk_map_migration_historical_target_authorized(
     declared: &Value,
     bundle_digest: &str,
-    target_digest: &Value,
+    target_digest: &str,
 ) -> bool {
-    let Some(target_digest) = target_digest
-        .as_str()
-        .filter(|digest| valid_bundle_digest(digest))
-    else {
+    if !valid_bundle_digest(target_digest) {
         return false;
-    };
+    }
     declared
         .get("historical_target_digests")
         .and_then(Value::as_array)
@@ -693,6 +692,16 @@ pub(super) fn assert_sdk_migration_record(
         .and_then(Value::as_str)
         .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
     let bundle_transition = migration_bundle_transition_digest(root, &record).is_some();
+    record_bindings::preflight_record_map_bindings(
+        &manifest,
+        maps,
+        step,
+        record_bundle,
+        bundle_transition,
+    );
+    if record_bundle != sdk_bundle_digest() && !bundle_transition {
+        fail("SDK_MIGRATION_BUNDLE_WITNESS_REQUIRED");
+    }
     for name in GOVERNANCE_MAP_NAMES {
         let declared = sdk_map_migration_entry(&manifest, name);
         let entry = maps
@@ -714,6 +723,17 @@ pub(super) fn assert_sdk_migration_record(
         let explicit_custom_target = entry
             .get("canonical_target_digest")
             .is_some_and(|value| !value.is_null());
+        let actual_source = entry
+            .get("source_digest")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
+        let actual_target = entry
+            .get("target_digest")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
+        if explicit_custom_source && Some(canonical_source) != declared.get("source_digest") {
+            fail("INVALID_SDK_MIGRATION_RECORD");
+        }
         let historical_target_authorized = bundle_transition
             && !sdk_map_migration_checks_live_target(step)
             && explicit_custom_source
@@ -722,8 +742,42 @@ pub(super) fn assert_sdk_migration_record(
             && sdk_map_migration_historical_target_authorized(
                 declared,
                 record_bundle,
-                canonical_target,
+                canonical_target.as_str().unwrap_or_default(),
             );
+        let historical_actual_target_authorized = bundle_transition
+            && !sdk_map_migration_checks_live_target(step)
+            && explicit_custom_source
+            && explicit_custom_target
+            && Some(canonical_source) == declared.get("source_digest")
+            && sdk_map_migration_historical_target_authorized(
+                declared,
+                record_bundle,
+                actual_target,
+            );
+        let historical_live_target_bound = bundle_transition
+            && explicit_custom_source
+            && explicit_custom_target
+            && Some(canonical_source) == declared.get("source_digest")
+            && {
+                let live_map = root.join(".appsdk/maps").join(name);
+                assert_no_symlink_components(root, &live_map, "governance_map");
+                live_map.is_file() && file_sha256(&live_map, "governance_map") == actual_target
+            };
+        let actual_target_bound = if explicit_custom_target {
+            actual_target == actual_source
+                || historical_actual_target_authorized
+                || historical_live_target_bound
+                || (bundle_transition
+                    && explicit_custom_source
+                    && Some(canonical_source) == declared.get("source_digest")
+                    && canonical_target.as_str().is_some_and(valid_bundle_digest)
+                    && canonical_target.as_str() == Some(actual_target))
+        } else {
+            declared.get("target_digest").and_then(Value::as_str) == Some(actual_target)
+        };
+        if !actual_target_bound {
+            fail(format!("SDK_MIGRATION_TARGET_MAP_MISMATCH:{}", name));
+        }
         if entry
             .get("canonical_source_digest")
             .is_some_and(|value| !value.is_null() && Some(value) != declared.get("source_digest"))

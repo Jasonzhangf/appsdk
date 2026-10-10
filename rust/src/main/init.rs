@@ -91,6 +91,23 @@ fn assert_current_sdk_pin(project: &Value) {
     }
 }
 
+fn is_recognized_historical_placeholder_lock(lock: &Value, project: &Value) -> bool {
+    lock.as_object().is_some_and(|object| {
+        object.len() == 7
+            && lock.get("sdk").and_then(Value::as_str) == Some("appsdk")
+            && lock.get("version").and_then(Value::as_str) == Some("0.1.0014")
+            && lock.get("contract_schema") == project.get("schema_version")
+            && lock.get("digest").and_then(Value::as_str)
+                == Some("sha256:replace-with-compiled-sdk-digest")
+            && lock.get("compiler_digest").and_then(Value::as_str)
+                == Some("sha256:replace-with-compiler-digest")
+            && lock.get("bundle_digest").and_then(Value::as_str)
+                == Some("sha256:replace-with-sdk-bundle-digest")
+            && lock.get("bundle_manifest_digest").and_then(Value::as_str)
+                == Some("sha256:replace-with-bundle-manifest-digest")
+    })
+}
+
 pub(super) fn write_current_sdk_lock(root: &Path) {
     let project = read_project(root);
     assert_current_sdk_pin(&project);
@@ -105,13 +122,17 @@ pub(super) fn write_current_sdk_lock(root: &Path) {
         let text = fs::read_to_string(&target).unwrap_or_else(|_| fail("INVALID_SDK_LOCK"));
         let value =
             serde_json::from_str::<Value>(&text).unwrap_or_else(|_| fail("INVALID_SDK_LOCK"));
-        if value.get("sdk").and_then(Value::as_str) != Some("appsdk")
-            || value.get("version").and_then(Value::as_str) != Some(SDK_VERSION)
-            || value.get("contract_schema") != project.get("schema_version")
-        {
-            fail("INVALID_SDK_LOCK");
+        if is_recognized_historical_placeholder_lock(&value, &project) {
+            None
+        } else {
+            if value.get("sdk").and_then(Value::as_str) != Some("appsdk")
+                || value.get("version").and_then(Value::as_str) != Some(SDK_VERSION)
+                || value.get("contract_schema") != project.get("schema_version")
+            {
+                fail("INVALID_SDK_LOCK");
+            }
+            Some(value)
         }
-        Some(value)
     } else {
         None
     };
@@ -205,7 +226,7 @@ pub(super) fn write_project_scaffold(root: &Path) {
         r#"{
   "schema_version": 1,
   "project_id": "change-me",
-  "sdk": {"name": "appsdk", "version": "0.1.0014", "bundle_manifest": ".appsdk/contracts/sdk-bundle.manifest.json", "resource_record": ".appsdk/sdk-resources.json"},
+  "sdk": {"name": "appsdk", "version": "0.1.0015", "bundle_manifest": ".appsdk/contracts/sdk-bundle.manifest.json", "resource_record": ".appsdk/sdk-resources.json"},
   "lifecycle": {"stage": "draft"},
   "access": {"protected_paths": [".appsdk/**", "generated/**", "protected/source/**"]},
   "development_scenarios": {"manifest": ".appsdk/contracts/development-scenarios.manifest.json", "enabled": []},

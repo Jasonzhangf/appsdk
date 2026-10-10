@@ -1,0 +1,25 @@
+{
+  "name": "@jsonstudio/appsdk-linux-x64-gnu",
+  "version": "0.1.15",
+  "description": "Linux x64 glibc runtime package for AppSDK; populated from verified release artifacts.",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "libc": [
+    "glibc"
+  ],
+  "files": [
+    "bin/appsdk",
+    "bin/project-memory",
+    "skills/appsdk-project-governance/**",
+    "skills/appsdk-migration/**",
+    "skills/project-memory/**"
+  ],
+  "appsdk": {
+    "targetTriple": "x86_64-unknown-linux-gnu"
+  },
+  "license": "MIT"
+}

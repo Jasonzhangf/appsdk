@@ -392,27 +392,12 @@ pub(super) fn producer_baseline_git_value(
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-#[cfg(unix)]
 pub(super) fn producer_try_advisory_lock(file: &fs::File) -> Result<(), &'static str> {
-    const LOCK_EX: c_int = 2;
-    const LOCK_NB: c_int = 4;
-    unsafe extern "C" {
-        fn flock(fd: c_int, operation: c_int) -> c_int;
+    match crate::platform::try_lock_exclusive(file) {
+        Ok(()) => Ok(()),
+        Err(crate::platform::LockAttemptError::WouldBlock) => Err("PRODUCER_BUSY"),
+        Err(crate::platform::LockAttemptError::Io(_)) => Err("PRODUCER_LOCK_FAILED"),
     }
-    let result = unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
-    if result == 0 {
-        return Ok(());
-    }
-    if std::io::Error::last_os_error().kind() == ErrorKind::WouldBlock {
-        Err("PRODUCER_BUSY")
-    } else {
-        Err("PRODUCER_LOCK_FAILED")
-    }
-}
-
-#[cfg(not(unix))]
-pub(super) fn producer_try_advisory_lock(_file: &fs::File) -> Result<(), &'static str> {
-    Ok(())
 }
 
 pub(super) fn producer_lock(root: &Path) -> fs::File {
@@ -914,4 +899,43 @@ pub(super) fn producer_transaction_dir(root: &Path, module_id: &str) -> PathBuf 
     root.join(".appsdk")
         .join("transactions")
         .join(format!("producer-{}", module_id))
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+
+    fn temp_root(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "appsdk-producer-lock-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn producer_lock_is_exclusive_until_returned_file_drops() {
+        let root = temp_root("lifetime");
+        // The File returned by the owner holds the real OS lock for as long as
+        // the caller keeps it alive.
+        let held = producer_lock(&root);
+        let path = root.join(".appsdk-control/lifecycle-record-producer.lock");
+        let contender = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+
+        assert_eq!(producer_try_advisory_lock(&contender), Err("PRODUCER_BUSY"));
+
+        drop(held);
+        assert_eq!(producer_try_advisory_lock(&contender), Ok(()));
+
+        fs::remove_dir_all(root).ok();
+    }
 }

@@ -2,6 +2,7 @@ use super::{assert_id, assert_no_symlink, canonical, fail};
 use serde_json::Value;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -27,11 +28,11 @@ pub(super) fn lock_task(root: &Path, task: &str, op: &str) -> TaskLock {
         .unwrap_or_else(|_| fail("GUIDANCE_CLOCK_FAILED", "repair the host clock"))
         .as_nanos();
     let open_lock = || {
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        options.open(&path)
     };
     let mut file = match open_lock() {
         Ok(file) => file,

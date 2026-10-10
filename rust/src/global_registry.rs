@@ -13,10 +13,10 @@ use sha2::{Digest, Sha256};
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
-#[cfg(unix)]
-use std::os::fd::AsRawFd;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::platform;
 
 const REGISTRY_DIR: &str = ".appsdk";
 const REGISTRY_FILE: &str = "projects.jsonl";
@@ -205,8 +205,19 @@ fn registry_root() -> Result<PathBuf, String> {
     let root = env::var_os("APPSDK_HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(REGISTRY_DIR)))
-        .ok_or_else(|| "GLOBAL_APPSDK_HOME_UNAVAILABLE: set HOME or APPSDK_HOME".to_string())?;
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(REGISTRY_DIR)));
+    #[cfg(windows)]
+    let root = root.or_else(|| {
+        env::var_os("USERPROFILE")
+            .filter(|value| !value.is_empty())
+            .map(|home| PathBuf::from(home).join(REGISTRY_DIR))
+    });
+    let unavailable = if cfg!(windows) {
+        "GLOBAL_APPSDK_HOME_UNAVAILABLE: set HOME, USERPROFILE, or APPSDK_HOME"
+    } else {
+        "GLOBAL_APPSDK_HOME_UNAVAILABLE: set HOME or APPSDK_HOME"
+    };
+    let root = root.ok_or_else(|| unavailable.to_string())?;
     if !root.is_absolute() {
         return Err(format!(
             "GLOBAL_APPSDK_HOME_INVALID: path must be absolute: {}",
@@ -306,7 +317,10 @@ fn canonicalize_missing_root(path: &Path) -> Result<PathBuf, String> {
     loop {
         match fs::symlink_metadata(&current) {
             Ok(metadata) => {
-                if !metadata.is_dir() {
+                let link_or_reparse = platform::is_link_or_reparse(&metadata);
+                if (link_or_reparse && !platform::is_platform_root_alias(&current))
+                    || (!metadata.is_dir() && !link_or_reparse)
+                {
                     return Err("project root existing ancestor is not a directory".into());
                 }
                 let mut canonical = fs::canonicalize(&current)
@@ -335,32 +349,23 @@ fn canonicalize_missing_root(path: &Path) -> Result<PathBuf, String> {
 }
 
 fn ensure_no_symlink(path: &Path, label: &str) -> Result<(), String> {
-    if fs::symlink_metadata(path)
-        .map(|metadata| metadata.file_type().is_symlink())
-        .unwrap_or(false)
-    {
-        return Err(format!(
-            "GLOBAL_REGISTRY_SYMLINK:{label}:{}",
-            path.display()
-        ));
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if platform::is_link_or_reparse(&metadata) => {
+            return Err(format!(
+                "GLOBAL_REGISTRY_SYMLINK:{label}:{}",
+                path.display()
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "GLOBAL_REGISTRY_STAT_FAILED:{label}:{}:{error}",
+                path.display()
+            ));
+        }
     }
     Ok(())
-}
-
-fn is_platform_root_alias(path: &Path) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        let Some(relative) = path.strip_prefix("/").ok() else {
-            return false;
-        };
-        let expected = Path::new("/private").join(relative);
-        return fs::canonicalize(path).is_ok_and(|canonical| canonical == expected);
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = path;
-        false
-    }
 }
 
 fn lock_registry(lock_path: &Path) -> Result<File, String> {
@@ -370,16 +375,12 @@ fn lock_registry(lock_path: &Path) -> Result<File, String> {
         .write(true)
         .open(lock_path)
         .map_err(|error| format!("GLOBAL_REGISTRY_LOCK_OPEN_FAILED:{error}"))?;
-    #[cfg(unix)]
-    {
-        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if result != 0 {
-            let error = std::io::Error::last_os_error();
-            if matches!(error.kind(), ErrorKind::WouldBlock) {
-                return Err(
-                    "GLOBAL_REGISTRY_BUSY: another AppSDK registration is in progress".into(),
-                );
-            }
+    match platform::try_lock_exclusive(&file) {
+        Ok(()) => {}
+        Err(platform::LockAttemptError::WouldBlock) => {
+            return Err("GLOBAL_REGISTRY_BUSY: another AppSDK registration is in progress".into());
+        }
+        Err(platform::LockAttemptError::Io(error)) => {
             return Err(format!("GLOBAL_REGISTRY_LOCK_FAILED:{error}"));
         }
     }
@@ -415,8 +416,8 @@ fn validate_registry_root(root: &Path) -> Result<(), String> {
         current.push(component.as_os_str());
         match fs::symlink_metadata(&current) {
             Ok(metadata) => {
-                if metadata.file_type().is_symlink() {
-                    if !is_platform_root_alias(&current)
+                if platform::is_link_or_reparse(&metadata) {
+                    if !platform::is_platform_root_alias(&current)
                         || !fs::metadata(&current).is_ok_and(|target| target.is_dir())
                     {
                         return Err(format!(
@@ -450,8 +451,8 @@ fn ensure_registry_root(root: &Path) -> Result<PathBuf, String> {
         current.push(component.as_os_str());
         match fs::symlink_metadata(&current) {
             Ok(metadata) => {
-                if metadata.file_type().is_symlink() {
-                    if !is_platform_root_alias(&current)
+                if platform::is_link_or_reparse(&metadata) {
+                    if !platform::is_platform_root_alias(&current)
                         || !fs::metadata(&current).is_ok_and(|target| target.is_dir())
                     {
                         return Err(format!(
@@ -483,7 +484,7 @@ fn ensure_registry_root(root: &Path) -> Result<PathBuf, String> {
                         current.display()
                     )
                 })?;
-                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                if platform::is_link_or_reparse(&metadata) || !metadata.is_dir() {
                     return Err(format!(
                         "GLOBAL_REGISTRY_ROOT_INVALID:not a directory:{}",
                         current.display()
@@ -750,10 +751,10 @@ fn archived_runtime_records(registry_root: &Path) -> Result<Vec<RuntimeRecord>, 
         .map_err(|error| format!("GLOBAL_RUNTIME_ARCHIVE_READ_FAILED:{error}"))?
     {
         let entry = entry.map_err(|error| format!("GLOBAL_RUNTIME_ARCHIVE_READ_FAILED:{error}"))?;
-        let file_type = entry
-            .file_type()
+        let metadata = entry
+            .metadata()
             .map_err(|error| format!("GLOBAL_RUNTIME_ARCHIVE_READ_FAILED:{error}"))?;
-        if !file_type.is_dir() || file_type.is_symlink() {
+        if !metadata.is_dir() || platform::is_link_or_reparse(&metadata) {
             continue;
         }
         // Archives are audit/provenance inputs, not the active registry.

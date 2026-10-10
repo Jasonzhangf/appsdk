@@ -554,7 +554,7 @@ fn init_fresh_normalizes_sdk_owned_contract_fields_without_losing_project_fields
         let after: Value =
             serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
         assert_eq!(after["sdk"]["name"], "appsdk");
-        assert_eq!(after["sdk"]["version"], "0.1.0014");
+        assert_eq!(after["sdk"]["version"], "0.1.0015");
         assert_eq!(
             after["sdk"]["bundle_manifest"],
             ".appsdk/contracts/sdk-bundle.manifest.json"

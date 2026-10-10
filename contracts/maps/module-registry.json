@@ -144,6 +144,7 @@
         "rust/src/long_horizon_policy.rs",
         "rust/src/long_horizon_role.rs",
         "rust/src/main.rs",
+        "rust/src/platform.rs",
         "rust/src/main/**"
       ],
       "symbol_owners": {
@@ -506,6 +507,9 @@
       "status": "active",
       "owner": "appsdk::delivery",
       "owned_paths": [
+        "AGENTS.md",
+        ".agents/skills/appsdk-dev/**",
+        ".gitattributes",
         ".github/workflows/**",
         ".gitignore",
         "MEMORY.md",
@@ -516,6 +520,7 @@
         "rust/Cargo.toml",
         "rust/build.rs",
         "rust/release-version",
+        "npm/**",
         "scripts/**",
         "sdk-skill-sources/**",
         "templates/**"

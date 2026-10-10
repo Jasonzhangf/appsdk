@@ -16,34 +16,39 @@ pub(super) fn print_reset_result(mode: ResetMode) {
     );
 }
 
-#[cfg(unix)]
 pub(super) fn reset_transaction_symlink_components(base: &Path, path: &Path) -> Result<(), String> {
-    if fs::symlink_metadata(base)
-        .map(|metadata| metadata.file_type().is_symlink())
-        .unwrap_or(false)
-    {
-        return Err(format!(
+    platform::validate_contained_path(base, path).map_err(|error| match error {
+        platform::PathBoundaryError::BaseLink(path) => format!(
             "GOVERNANCE_RESET_RECOVERY_REQUIRED:symlink base {}",
-            base.display()
-        ));
-    }
-    let relative = path
-        .strip_prefix(base)
-        .map_err(|_| "GOVERNANCE_RESET_RECOVERY_REQUIRED:path escape".to_string())?;
-    let mut current = base.to_path_buf();
-    for component in relative.components() {
-        current.push(component.as_os_str());
-        if fs::symlink_metadata(&current)
-            .map(|metadata| metadata.file_type().is_symlink())
-            .unwrap_or(false)
-        {
-            return Err(format!(
-                "GOVERNANCE_RESET_RECOVERY_REQUIRED:symlink component {}",
-                current.display()
-            ));
+            path.display()
+        ),
+        platform::PathBoundaryError::BaseNotDirectory(path) => format!(
+            "GOVERNANCE_RESET_RECOVERY_REQUIRED:invalid base {}",
+            path.display()
+        ),
+        platform::PathBoundaryError::Escape => {
+            "GOVERNANCE_RESET_RECOVERY_REQUIRED:path escape".to_string()
+        }
+        platform::PathBoundaryError::ComponentLink(path) => format!(
+            "GOVERNANCE_RESET_RECOVERY_REQUIRED:symlink component {}",
+            path.display()
+        ),
+        platform::PathBoundaryError::Inspection(path, error) => format!(
+            "GOVERNANCE_RESET_RECOVERY_REQUIRED:path inspection failed {}:{error}",
+            path.display()
+        ),
+    })
+}
+
+fn reset_transaction_lock_error(error: platform::LockAttemptError, lock_path: &Path) -> String {
+    match error {
+        platform::LockAttemptError::WouldBlock => {
+            format!("GOVERNANCE_RESET_BUSY:{}", lock_path.display())
+        }
+        platform::LockAttemptError::Io(error) => {
+            format!("GOVERNANCE_RESET_LOCK_FAILED:{error}")
         }
     }
-    Ok(())
 }
 
 pub(super) fn reset_transaction_lock_path(root: &Path) -> PathBuf {
@@ -71,22 +76,13 @@ pub(super) fn reset_transaction_acquire_lock(root: &Path) -> Result<fs::File, St
         .write(true)
         .open(&lock_path)
         .map_err(|error| format!("GOVERNANCE_RESET_LOCK_FAILED:{error}"))?;
-    #[cfg(unix)]
-    {
-        if unsafe {
-            flock(
-                file.as_raw_fd(),
-                RESET_TRANSACTION_LOCK_EX | RESET_TRANSACTION_LOCK_NB,
-            )
-        } != 0
-        {
-            return Err(format!("GOVERNANCE_RESET_BUSY:{}", lock_path.display()));
-        }
+    if let Err(error) = platform::try_lock_exclusive(&file) {
+        return Err(reset_transaction_lock_error(error, &lock_path));
     }
-    // Keep the pathname stable for the lifetime of the project. `flock`
-    // releases the kernel lock when this descriptor closes, including after a
-    // crash; unlinking here would let a contender that opened the old inode
-    // race a new contender on a replacement inode.
+    // Keep the pathname stable for the lifetime of the project. The kernel lock
+    // releases when this descriptor closes, including after a crash; unlinking
+    // here would let a contender that opened the old file race a new contender
+    // on a replacement file.
     Ok(file)
 }
 
@@ -855,4 +851,88 @@ pub(super) fn reset_transaction_validate_marker(
         return Err("GOVERNANCE_RESET_RECOVERY_REQUIRED:missing committed reset record".into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_root(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "appsdk-reset-transaction-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn reset_lock_is_nonblocking_and_released_on_close() {
+        let root = temp_root("lock-release");
+        fs::create_dir_all(&root).unwrap();
+
+        let first = reset_transaction_acquire_lock(&root).unwrap();
+        let error = reset_transaction_acquire_lock(&root).unwrap_err();
+        assert!(error.starts_with("GOVERNANCE_RESET_BUSY:"));
+        drop(first);
+        let second = reset_transaction_acquire_lock(&root).unwrap();
+
+        drop(second);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn reset_path_guard_accepts_missing_paths_and_rejects_escape() {
+        let root = temp_root("path");
+        let base = root.join("base");
+        fs::create_dir_all(&base).unwrap();
+
+        reset_transaction_symlink_components(&base, &base.join("missing").join("leaf")).unwrap();
+        let error = reset_transaction_symlink_components(&base, &base.join("..").join("outside"))
+            .unwrap_err();
+        assert_eq!(error, "GOVERNANCE_RESET_RECOVERY_REQUIRED:path escape");
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reset_path_guard_rejects_symlink_components() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_root("symlink");
+        let base = root.join("base");
+        let outside = root.join("outside");
+        fs::create_dir_all(&base).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, base.join("link")).unwrap();
+
+        let error = reset_transaction_symlink_components(&base, &base.join("link").join("leaf"))
+            .unwrap_err();
+        assert!(error.starts_with("GOVERNANCE_RESET_RECOVERY_REQUIRED:symlink component "));
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reset_path_guard_rejects_reparse_components() {
+        use std::os::windows::fs::symlink_dir;
+
+        let root = temp_root("reparse");
+        let base = root.join("base");
+        let outside = root.join("outside");
+        fs::create_dir_all(&base).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink_dir(&outside, base.join("link")).unwrap();
+
+        let error = reset_transaction_symlink_components(&base, &base.join("link").join("leaf"))
+            .unwrap_err();
+        assert!(error.starts_with("GOVERNANCE_RESET_RECOVERY_REQUIRED:symlink component "));
+
+        fs::remove_dir_all(root).ok();
+    }
 }

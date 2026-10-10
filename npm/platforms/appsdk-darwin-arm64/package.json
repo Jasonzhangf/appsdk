@@ -1,0 +1,22 @@
+{
+  "name": "@jsonstudio/appsdk-darwin-arm64",
+  "version": "0.1.15",
+  "description": "macOS ARM64 runtime package for AppSDK; populated from verified release artifacts.",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "bin/appsdk",
+    "bin/project-memory",
+    "skills/appsdk-project-governance/**",
+    "skills/appsdk-migration/**",
+    "skills/project-memory/**"
+  ],
+  "appsdk": {
+    "targetTriple": "aarch64-apple-darwin"
+  },
+  "license": "MIT"
+}

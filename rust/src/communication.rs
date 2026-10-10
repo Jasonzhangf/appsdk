@@ -7,8 +7,6 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-#[cfg(unix)]
-use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -908,18 +906,15 @@ impl CommunicationLock {
                 )
             })?;
 
-        #[cfg(unix)]
-        {
-            let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-            if result != 0 {
-                let error = std::io::Error::last_os_error();
-                let code = error.raw_os_error();
-                if matches!(code, Some(libc::EAGAIN) | Some(libc::EACCES)) {
-                    return Err(CommError::new(
-                        "communication_busy",
-                        format!("communication mailbox is locked: {}", lock_path.display()),
-                    ));
-                }
+        match crate::platform::try_lock_exclusive(&file) {
+            Ok(()) => {}
+            Err(crate::platform::LockAttemptError::WouldBlock) => {
+                return Err(CommError::new(
+                    "communication_busy",
+                    format!("communication mailbox is locked: {}", lock_path.display()),
+                ));
+            }
+            Err(crate::platform::LockAttemptError::Io(error)) => {
                 return Err(CommError::new(
                     "communication_lock_failed",
                     format!("{}: {error}", lock_path.display()),
@@ -1056,4 +1051,147 @@ pub fn capabilities() -> Value {
             "loop": ["gate", "verification"]
         }
     })
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+
+    fn temp_root(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "appsdk-communication-lock-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        // Communication enforces an absolute canonical project root. The OS
+        // temp dir is not canonical on every platform (macOS `/var` alias,
+        // Windows 8.3 short names), so resolve it once for the fixture.
+        root.canonicalize().unwrap()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn canonical_native_prefix_root_passes_lexical_check() {
+        let root = temp_root("native-prefix");
+        let canonical = root.canonicalize().unwrap();
+        let text = canonical.to_str().unwrap();
+        assert!(
+            text.starts_with(r"\\?\"),
+            "expected a native verbatim prefix: {text}"
+        );
+        assert!(
+            is_lexically_canonical_absolute(&canonical),
+            "canonical native prefix root must pass the lexical check: {text}"
+        );
+        // Redundant separators, embedded dot/parent segments and trailing
+        // separators stay rejected on the same canonical prefix root.
+        for variant in [
+            format!("{text}\\"),
+            format!("{text}\\\\child"),
+            format!("{text}\\.\\child"),
+            format!("{text}\\..\\child"),
+        ] {
+            assert!(
+                !is_lexically_canonical_absolute(Path::new(&variant)),
+                "non-canonical variant must be rejected: {variant}"
+            );
+        }
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_prefix_path_stat_preserves_symlink_refusal() {
+        use std::path::Component;
+
+        // Drive, verbatim drive, UNC and verbatim UNC roots all expose a
+        // leading `Prefix` followed by an explicit `RootDir`. These are pure
+        // component shapes; no network share is touched.
+        for raw in [
+            r"C:\dir",
+            r"\\?\C:\dir",
+            r"\\server\share\dir",
+            r"\\?\UNC\server\share\dir",
+        ] {
+            let mut parts = Path::new(raw).components();
+            assert!(
+                matches!(parts.next(), Some(Component::Prefix(_))),
+                "expected a leading prefix for {raw}"
+            );
+            assert!(
+                matches!(parts.next(), Some(Component::RootDir)),
+                "expected a root dir after the prefix for {raw}"
+            );
+        }
+
+        // The canonical temp root carries a real verbatim prefix and must now
+        // pass the component stat instead of failing on the bare `\\?\C:`.
+        let root = temp_root("native-prefix-stat");
+        let canonical = root.canonicalize().unwrap();
+        validate_communication_root_input(&canonical)
+            .expect("canonical native prefix root must pass component stat");
+
+        // A trailing component that does not exist still ends the walk via the
+        // existing NotFound behavior rather than a stat failure.
+        validate_communication_root_input(&canonical.join("does-not-exist"))
+            .expect("missing trailing component must keep the NotFound behavior");
+
+        // Real directory symlinks as a trailing and an intermediate component
+        // must still be refused.
+        let target = root.join("real-dir");
+        fs::create_dir_all(&target).unwrap();
+        let link = root.join("link");
+        std::os::windows::fs::symlink_dir(&target, &link)
+            .expect("creating a Windows directory symlink must succeed, not skip");
+        let error = validate_communication_root_input(&link)
+            .expect_err("trailing symlink component must be refused");
+        assert_eq!(error.code, "communication_path_symlink");
+        let error = validate_communication_root_input(&link.join("child"))
+            .expect_err("intermediate symlink component must be refused");
+        assert_eq!(error.code, "communication_path_symlink");
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn store_lock_is_exclusive_for_store_lifetime() {
+        let root = temp_root("lifetime");
+        let store = CommunicationStore::open(&root).unwrap();
+
+        // The store keeps the lock File alive, so a second open on the same
+        // mailbox must fail on the real OS lock.
+        let blocked = match CommunicationStore::open(&root) {
+            Ok(_) => panic!("second store unexpectedly acquired the mailbox lock"),
+            Err(error) => error,
+        };
+        assert_eq!(blocked.code, "communication_busy");
+
+        drop(store);
+        let reopened = CommunicationStore::open(&root).unwrap();
+        drop(reopened);
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn acquire_reports_lock_open_failure() {
+        let root = temp_root("open-failure");
+        let mailbox_path = root.join(".appsdk-control/communication/mailbox.jsonl");
+        // A directory occupying the lock path makes the open step fail before
+        // any locking is attempted.
+        let lock_path = mailbox_path.with_extension("jsonl.lock");
+        fs::create_dir_all(&lock_path).unwrap();
+
+        let error = match CommunicationLock::acquire(&mailbox_path) {
+            Ok(_) => panic!("lock acquire unexpectedly succeeded on a directory path"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, "communication_lock_open_failed");
+
+        fs::remove_dir_all(root).ok();
+    }
 }

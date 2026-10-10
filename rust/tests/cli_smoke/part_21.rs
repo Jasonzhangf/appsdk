@@ -170,6 +170,25 @@ fn pin_lock_rejects_unlisted_historical_agentteams_target_tuple() {
 }
 
 #[test]
+fn pin_lock_rejects_tampered_actual_historical_agentteams_target_with_valid_witness() {
+    let root = extract_agentteams_baseline("pin-lock-agentteams-tampered-actual-target");
+    let record_path = root.join(".appsdk/migrations/0.1.5-to-0.1.6/record.json");
+    let mut record: Value = serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+    record["maps"][0]["target_digest"] = Value::String(format!("sha256:{}", "f".repeat(64)));
+    fs::write(
+        &record_path,
+        serde_json::to_string_pretty(&record).unwrap() + "\n",
+    )
+    .unwrap();
+
+    assert_agentteams_pin_rejected(
+        &root,
+        "SDK_MIGRATION_TARGET_MAP_MISMATCH:resource-map.json",
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn pin_lock_rejects_absent_historical_agentteams_bundle_witness() {
     let root = extract_agentteams_baseline("pin-lock-agentteams-absent-witness");
     let lock_path = root.join(".appsdk/sdk.lock");
@@ -235,6 +254,23 @@ fn pin_lock_rejects_changed_live_agentteams_map_after_current_record() {
 fn pin_lock_rejects_current_agentteams_target_live_mismatch() {
     let root = pinned_agentteams_fixture("pin-lock-agentteams-current-target-mismatch");
     let record_path = root.join(".appsdk/migrations/0.1.0013-to-0.1.0014/record.json");
+    let mut record: Value = serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+    record["maps"][0]["target_digest"] = Value::String(format!("sha256:{}", "e".repeat(64)));
+    let tampered_record = serde_json::to_string_pretty(&record).unwrap() + "\n";
+    fs::write(&record_path, &tampered_record).unwrap();
+    let live = root.join(".appsdk/maps/resource-map.json");
+    let live_before = fs::read(&live).unwrap();
+
+    assert_agentteams_pin_rejected(&root, "SDK_MIGRATION_TARGET_MAP_MISMATCH:resource-map.json");
+    assert_eq!(fs::read_to_string(&record_path).unwrap(), tampered_record);
+    assert_eq!(fs::read(&live).unwrap(), live_before);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pin_lock_rejects_current_0015_agentteams_target_live_mismatch() {
+    let root = pinned_agentteams_fixture("pin-lock-agentteams-0015-target-mismatch");
+    let record_path = root.join(".appsdk/migrations/0.1.0014-to-0.1.0015/record.json");
     let mut record: Value = serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
     record["maps"][0]["target_digest"] = Value::String(format!("sha256:{}", "e".repeat(64)));
     let tampered_record = serde_json::to_string_pretty(&record).unwrap() + "\n";

@@ -92,8 +92,19 @@ pub(super) fn reject_symlink_components(path: &Path, label: &str) -> CommResult<
         ));
     }
     let mut current = PathBuf::new();
-    for component in path.components() {
+    let mut components = path.components().peekable();
+    while let Some(component) = components.next() {
         current.push(component.as_os_str());
+        // A Windows `Prefix` is structural syntax, not an independently
+        // stat-able path: statting `\\?\C:` on its own fails with "Incorrect
+        // function". When a `RootDir` follows, defer the prefix so the
+        // complete root (for example `\\?\C:\`) is statted on the next step.
+        // Every other component keeps the original per-component check.
+        if matches!(component, std::path::Component::Prefix(_))
+            && matches!(components.peek(), Some(std::path::Component::RootDir))
+        {
+            continue;
+        }
         match fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 let canonical = fs::canonicalize(&current).ok();
@@ -146,22 +157,32 @@ pub(super) fn is_lexically_canonical_absolute(path: &Path) -> bool {
     if raw.len() > separator.len() && raw.ends_with(separator) {
         return false;
     }
-    let mut raw_components = raw.split(separator);
-    raw_components.next();
-    if raw_components.any(|component| component.is_empty() || component == "." || component == "..")
-    {
-        return false;
-    }
     let mut normalized = PathBuf::new();
+    // Byte length of the leading prefix and root. On Windows the native
+    // canonical prefix (`\\?\C:`) carries its own separator, so the
+    // redundant-separator scan below must start after it instead of treating
+    // that structural separator as an empty component.
+    let mut prefix_root_bytes = 0;
     for component in path.components() {
         match component {
-            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::Prefix(prefix) => {
+                prefix_root_bytes += prefix.as_os_str().len();
+                normalized.push(prefix.as_os_str());
+            }
             std::path::Component::RootDir => {
-                normalized.push(Path::new(std::path::MAIN_SEPARATOR_STR))
+                prefix_root_bytes += separator.len();
+                normalized.push(Path::new(separator));
             }
             std::path::Component::Normal(part) => normalized.push(part),
             std::path::Component::CurDir | std::path::Component::ParentDir => return false,
         }
+    }
+    let remainder = raw.get(prefix_root_bytes..).unwrap_or("");
+    if remainder
+        .split(separator)
+        .any(|component| component.is_empty() || component == "." || component == "..")
+    {
+        return false;
     }
     normalized == path
 }

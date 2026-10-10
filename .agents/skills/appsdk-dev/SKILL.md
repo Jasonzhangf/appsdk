@@ -35,8 +35,9 @@ description: "开发、调试、重构和发布 AppSDK 源码仓库；提供模�
 | 变更范围 | 相关验证入口 |
 |---|---|
 | 根级规则、项目开发 Skill、普通文档 | 检查语义、引用路径、Skill frontmatter 和 diff；不执行 Rust 测试 |
+| producer / 锁 | `--bin appsdk producer::lock_tests`、`--test platform_lock_cli`；producer 或共享生命周期/记录消费者变化再跑完整 `--test cli_smoke` |
 | Guidance | `cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke guidance_`；涉及 setup/init 再选对应消费者用例 |
-| Communication | `cargo test --manifest-path rust/Cargo.toml --locked --test communication_cli`；schema 变化再测 `communication_request_schema` / `communication_event_schema` |
+| Communication | `cargo test --manifest-path rust/Cargo.toml --locked --test communication_cli`；schema 变化再测 `communication_request_schema` / `communication_event_schema`；锁行为变化再测 `--bin appsdk communication::lock_tests` |
 | Memory | `cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke project_memory`；涉及独立 binary 再验证其公开入口 |
 | Registry | `cargo test --manifest-path rust/Cargo.toml --locked --bin appsdk registr`；再选 registration/init 和受影响 Communication 消费者 |
 | 初始化、迁移、pin、编译、生命周期 | 在 `rust/tests/cli_smoke/` 和 `rust/tests/sdk_*_migration.rs` 找实际受影响用例，选择 target/精确名称；跨模块时扩大消费者覆盖 |
@@ -53,16 +54,43 @@ Rust 格式检查使用对应 manifest 的 `cargo fmt -- --check`。
 
 ### 当前 CI 的实际范围
 
-[verify.yml](../../../.github/workflows/verify.yml) 是自动选测与 release 门禁的执行入口：
+[verify.yml](../../../.github/workflows/verify.yml) 是自动选测与 release 门禁的执行入口。
+选择逻辑单源在 [scripts/ci/select-verify-scope.sh](../../../scripts/ci/select-verify-scope.sh)，
+其契约由 [scripts/tests/test-verify-selector.sh](../../../scripts/tests/test-verify-selector.sh)
+用固定 fixture 驱动验证；workflow 只调用该脚本。
 
-- 日常 push/PR 对 Guidance、Communication、Memory、Registry、资源、安装器、
-  DAGPipe、Collab 和文档分别选择 job。
-- 其余 `rust/src/*` / `rust/tests/*`、共享合同、版本/依赖及未知路径目前仍可能
-  选择整个 AppSDK 包；workflow 变化或基线缺失会进一步扩大检查。
+- 日常 push/PR 对 Guidance、Communication、Memory、Registry、producer、资源、
+  registry home CLI target、安装器、DAGPipe、Collab、npm 和文档分别选择 job。
+- producer 变化选择完整 `cli_smoke` target（覆盖 records/chain/retire 与 review
+  消费者）、`--bin appsdk producer::lock_tests` 和 `--test platform_lock_cli`；
+  Communication 变化在既有 `communication_cli`/schema 之外增加
+  `--bin appsdk communication::lock_tests`。完整 `cli_smoke` 运行时，其覆盖的
+  Guidance/Memory/Registry/资源 `cli_smoke` 分组步骤不再重复执行。
+- `rust/tests/registry_home_cli.rs` 使用单独选择器：Ubuntu 运行两个通用 home
+  用例，Windows AppSDK job 运行并要求精确三个用例（包括 USERPROFILE-only 注册
+  消费者）；过滤不到或实际数不符均失败。其余 `rust/src/*` / `rust/tests/*`、
+  共享合同、版本/依赖及未知路径目前仍可能选择整个 AppSDK 包；基线缺失仍扩大检查。
+- workflow 或 selector 变化只选择 `workflow-contract` gate（选择器语法与契约），
+  不再触发 AppSDK full、DAGPipe、Collab、installer 或 Windows 产品 job；同一 diff
+  中的产品路径仍各自选测。`npm/**` 变化只选择 `npm` job（launcher/metadata 与
+  artifact scripts 的 Node 测试），不扩大为 AppSDK full。
 - 这是一项现存粒度限制。局部开发选测遵循上面的风险依据；修改 CI 选择器时，
   必须证明受影响消费者被覆盖，不能以空选择或绕 gate 缩短时间。
-- 版本 tag 和 `workflow_dispatch` 触发完整 AppSDK release job。
-  手动 dispatch 当前等同于请求完整发布候选检查。
+- 两个原生 Windows job 复用同一 selector：`windows_appsdk` 在 AppSDK 源码/测试、
+  共享资源或 DAGPipe 库变化时运行 MSVC 构建、共享锁与公开入口定向测试（包括三例
+  Windows `registry_home_cli`）及公开 consumer smoke；`windows_dagpipe` 在 DAGPipe
+  源码、安装脚本或 PowerShell harness 变化时运行包测试、release 构建和安装黑盒。
+  文档与 Collab-only 变化不触发它们。release run 的结果只绑定其 `head_sha`；
+  任一适用 Review finding 修复后，须以修复候选重新执行受影响 job 和最终完整
+  release matrix，不能将祖先 SHA 的产物当作当前发布证据。
+- release（`v*` tag 或 `workflow_dispatch`）触发完整 release 产物图：Linux `release`
+  完整门禁、Windows AppSDK MSVC 门禁与新增 macOS ARM64 native 门禁（断言 arm64
+  host）各自构建并 stage/upload 一个 `appsdk-<version>-<triple>.tar.gz`（retention
+  30 天）；三个 target 全部成功后 `package-appsdk` 用
+  `npm/scripts/release-artifacts.js package` 校验并打包主包、三个平台包与
+  `SHA256SUMS`；`npm-consumers` 在 Linux GNU x64、Windows MSVC x64、macOS ARM64
+  三个原生 runner 上消费同一组最终 tarball。该图只在 release 运行，普通 push/PR
+  不产出可发布包。手动 dispatch 等同于请求完整发布候选检查。
 
 ## 规则与 Skill 升级
 

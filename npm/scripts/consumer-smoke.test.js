@@ -320,7 +320,7 @@ test("selects npm-cli.js under the node installation on Windows without npm_exec
   }
 });
 
-test("routes Windows npm shims through cmd.exe with quoted arguments", () => {
+test("routes Windows npm shims through cmd.exe with verbatim command arguments", () => {
   const projectDir = win32.join("C:\\", "tmp", "consumer project");
   const invocation = localShimInvocation(
     projectDir,
@@ -331,6 +331,7 @@ test("routes Windows npm shims through cmd.exe with quoted arguments", () => {
   assert.equal(invocation.command, "cmd.exe");
   assert.deepEqual(invocation.args.slice(0, 3), ["/d", "/s", "/c"]);
   assert.equal(invocation.args.length, 4);
+  assert.equal(invocation.windowsVerbatimArguments, true);
   assert.match(invocation.args[3], /appsdk\.cmd/);
   assert.match(invocation.args[3], /governed project/);
   assert.match(invocation.args[3], /^".*"$/);

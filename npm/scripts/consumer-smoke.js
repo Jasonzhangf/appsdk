@@ -331,6 +331,7 @@ export function localShimInvocation(
   return {
     command: comspec,
     args: ["/d", "/s", "/c", `"${commandLine}"`],
+    windowsVerbatimArguments: true,
   };
 }
 
@@ -425,12 +426,17 @@ function assertEnvUnderRoot(root, env) {
   }
 }
 
-export function runCommand(command, args, { cwd, env } = {}) {
+export function runCommand(command, args, {
+  cwd,
+  env,
+  windowsVerbatimArguments = false,
+} = {}) {
   return spawnSync(command, args, {
     cwd,
     env,
     encoding: "utf8",
     shell: false,
+    windowsVerbatimArguments,
   });
 }
 
@@ -486,7 +492,11 @@ function assertCommandFailedWith(result, expectedCode, code, label) {
 
 function runLocalShim(projectDir, name, args, env) {
   const invocation = localShimInvocation(projectDir, name, args);
-  return runCommand(invocation.command, invocation.args, { cwd: projectDir, env });
+  return runCommand(invocation.command, invocation.args, {
+    cwd: projectDir,
+    env,
+    windowsVerbatimArguments: invocation.windowsVerbatimArguments ?? false,
+  });
 }
 
 function installSpecs(npm, projectDir, env, specs) {

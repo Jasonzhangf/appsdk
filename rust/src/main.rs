@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::fs::OpenOptions;
-use std::io::{ErrorKind, Read, Write};
+use std::io::{ErrorKind, Write};
 #[cfg(unix)]
 use std::os::raw::c_int;
 #[cfg(unix)]
@@ -20,6 +20,7 @@ mod guidance;
 mod long_horizon_policy;
 mod long_horizon_role;
 mod memory;
+mod platform;
 
 use long_horizon_policy::{generate_long_horizon_master_prompt, ExecutionRole, POLICY};
 use long_horizon_role::execution_role;
@@ -791,16 +792,6 @@ impl ResetMode {
     }
 }
 
-#[cfg(unix)]
-const RESET_TRANSACTION_LOCK_EX: c_int = 2;
-#[cfg(unix)]
-const RESET_TRANSACTION_LOCK_NB: c_int = 4;
-
-#[cfg(unix)]
-unsafe extern "C" {
-    fn flock(fd: i32, operation: i32) -> i32;
-}
-
 #[cfg(test)]
 mod bug_triage_tests {
     use super::*;
@@ -955,26 +946,28 @@ impl GoalLock {
                     lock
                 }
                 Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-                    let existing = OpenOptions::new()
+                    let mut existing = OpenOptions::new()
                         .read(true)
                         .write(true)
                         .open(&path)
                         .map_err(|open_error| format!("GOAL_LOCK_ACQUIRE_FAILED:{}", open_error))?;
                     if let Err(error) = goal_try_advisory_lock(&existing) {
                         if error == "GOAL_LOCK_BUSY" {
-                            let metadata = fs::read_to_string(&path).unwrap_or_default();
-                            return Err(if metadata.trim().is_empty() {
-                                "GOAL_LOCK_BUSY: an active goal lifecycle operation holds the advisory lock; metadata is empty".into()
-                            } else {
-                                format!(
-                                    "GOAL_LOCK_BUSY: an active goal lifecycle operation holds the advisory lock ({})",
-                                    metadata.trim()
-                                )
-                            });
+                            let detail = match goal_lock_metadata_from_file(&mut existing) {
+                                Ok(metadata) if metadata.trim().is_empty() => {
+                                    "metadata is empty".to_string()
+                                }
+                                Ok(metadata) => format!("metadata: {}", metadata.trim()),
+                                Err(read_error) => format!("metadata unavailable: {read_error}"),
+                            };
+                            return Err(format!(
+                                "GOAL_LOCK_BUSY: an active goal lifecycle operation holds the advisory lock; {detail}"
+                            ));
                         }
                         return Err(error);
                     }
-                    let original = fs::read_to_string(&path).unwrap_or_default();
+                    let original = goal_lock_metadata_from_file(&mut existing)?;
+                    let recovery_reason = goal_lock_recovery_reason(&original);
                     let quarantined = control_dir.join(format!(
                         "long-task-goal.lock.recovered.{}.{}",
                         std::process::id(),
@@ -986,13 +979,7 @@ impl GoalLock {
                                 &control_dir,
                                 &quarantined,
                                 &original,
-                                if original.trim().is_empty() {
-                                    "empty metadata"
-                                } else if goal_lock_metadata(&quarantined).is_err() {
-                                    "invalid or truncated metadata"
-                                } else {
-                                    "advisory lock released with stale metadata"
-                                },
+                                recovery_reason,
                             ) {
                                 return Err(receipt_error);
                             }

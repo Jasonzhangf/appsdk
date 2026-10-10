@@ -82,6 +82,29 @@ fn concurrent_first_registrations_share_new_registry_root() {
 }
 
 #[test]
+fn registry_lock_is_nonblocking_and_released_on_close() {
+    let root = std::env::temp_dir().join(format!(
+        "appsdk-global-registry-lock-{}-{}",
+        std::process::id(),
+        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let lock_path = root.join(REGISTRY_LOCK);
+
+    let first = lock_registry(&lock_path).unwrap();
+    let error = lock_registry(&lock_path).unwrap_err();
+    assert_eq!(
+        error,
+        "GLOBAL_REGISTRY_BUSY: another AppSDK registration is in progress"
+    );
+    drop(first);
+    let second = lock_registry(&lock_path).unwrap();
+
+    drop(second);
+    fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn malformed_registry_fails_closed() {
     let root = std::env::temp_dir().join(format!(
         "appsdk-global-registry-invalid-{}-{}",
@@ -302,6 +325,30 @@ fn symlinked_registry_ancestor_fails_closed_before_creation() {
     fs::create_dir_all(&project).unwrap();
     fs::create_dir_all(&real_parent).unwrap();
     symlink(&real_parent, &linked_parent).unwrap();
+    let requested = linked_parent.join("new-registry");
+
+    let error = register_project_at(&project, &requested, "0.1.6").unwrap_err();
+    assert!(error.starts_with("GLOBAL_REGISTRY_SYMLINK:registry_root:"));
+    assert!(!real_parent.join("new-registry").exists());
+    fs::remove_dir_all(root).ok();
+}
+
+#[cfg(windows)]
+#[test]
+fn reparse_registry_ancestor_fails_closed_before_creation() {
+    use std::os::windows::fs::symlink_dir;
+
+    let root = std::env::temp_dir().join(format!(
+        "appsdk-global-registry-reparse-{}-{}",
+        std::process::id(),
+        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    let project = root.join("project");
+    let real_parent = root.join("real");
+    let linked_parent = root.join("linked");
+    fs::create_dir_all(&project).unwrap();
+    fs::create_dir_all(&real_parent).unwrap();
+    symlink_dir(&real_parent, &linked_parent).unwrap();
     let requested = linked_parent.join("new-registry");
 
     let error = register_project_at(&project, &requested, "0.1.6").unwrap_err();

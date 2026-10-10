@@ -1,9 +1,11 @@
 # AppSDK 跨平台与发布渠道方案
 
-状态：发布要求与实施记录。公开版仍是 `v0.1.0014`。当前本地 `0.1.0015`
-候选已加入 Windows/AppSDK 与 DAGPipe 安装实现、npm launcher、平台包及 release
-workflow；最终三平台产物、consumer receipts、整体 review 与发布尚未完成。本文
-区分公开支持、候选实现和未完成验收，不以源码存在或合成包测试宣称平台支持。
+状态：发布要求与实施记录。公开版仍是 `v0.1.0014`。候选
+`0.1.0015` / npm `0.1.15`，source commit
+`a3f58b8b59ea607ee9e1d6be9abedeec2428a360`，已通过完整三平台 release run
+`38059365783`，包括 native archives、npm packages 与三平台 consumers。当前仍待
+独立整体 Review、正式安装规则升级与公开发布/read-back。本文区分公开支持、已验候选
+和未完成验收，不以源码存在或合成包测试宣称平台支持。
 
 ## 发布目标与产品边界
 
@@ -23,8 +25,8 @@ CLI、Rust SDK 与运行 Skill；Collab 分发两个 binary 与协作 Skill。
 | Linux x64 | `v0.1.0014` Ubuntu release job 完成 AppSDK/DAGPipe 测试、构建、安装器和消费者 smoke；没有该 release 的 Linux 二进制资产 |
 | macOS ARM64 | AppSDK canonical installer/消费者及公开下载资产已有证据；Collab 的独立安装/live 记录不属于 AppSDK release 产品 |
 | 其他 CPU 架构 | 当前发布未提供独立平台资产及完整验收；不能从同 OS 的另一架构推广支持结论 |
-| Windows | 公开版未支持；本地候选已实现 AppSDK/DAGPipe 适配并有增量 Windows runner 证据，但最终候选的原生构建、安装和 consumers 尚未验收；Collab Unix socket/宿主 transport 仍未支持 |
-| npm | 本地候选包含 `@jsonstudio/appsdk@0.1.15`、三个平台包与发布 workflow；四个 tgz 尚未基于最终 native binaries 生成并消费，registry 发布与新包创建权限未验证 |
+| Windows | `v0.1.0014` 公开版未支持；`a3f58b8b` 候选的 AppSDK MSVC 与 DAGPipe native build/install/consumer 均通过；Collab Unix socket/宿主 transport 仍未支持 |
+| npm | `@jsonstudio/appsdk@0.1.15` 与 macOS ARM64/Linux x64 GNU/Windows x64 MSVC 三个平台包已用候选 native binaries 打包，并在三原生 runners 消费通过；registry 尚未发布。当前账号是 `@jsonstudio` owner，目标包 E404，最终创建能力以 publish/read-back 确认 |
 
 2026-10-10 对公开 npm registry 查询 `@jsonstudio/appsdk` 返回 `E404 Not Found`。
 这只表明本次未取得公开包元数据，不证明 scope 归属、账号写权限或名称可注册。
@@ -37,17 +39,20 @@ CLI、Rust SDK 与运行 Skill；Collab 分发两个 binary 与协作 Skill。
 MSVC 构建、共享锁与公开入口定向测试及公开 consumer smoke；`windows_dagpipe`
 执行 DAGPipe 包测试、release 构建与 PowerShell 安装黑盒（安装/升级、真实 Cargo
 consumer、junction/reparse 拒绝、in-use 替换）。增量 run `38045199787`
-验证了 M1b Windows AppSDK 锁/入口；`38040962158` 验证了 DAGPipe Windows
-installer/consumer。它们分别绑定此前的 ancestor SHA，不代表本地 `0.1.0015`
-候选完成完整 release graph。M5 新图还没有在最终候选 SHA 上运行；Linux/Windows/
-macOS archives、四个 npm tarballs 和三平台最终 consumers 均为 UNVERIFIED。
+`38059365783` 在最终候选 SHA 完整通过：Linux AppSDK/DAGPipe full suites 与
+release build/install/consumer/archive，macOS ARM64 build/install/consumer/archive，
+Windows AppSDK MSVC build/shared checks/public consumer/archive，Windows DAGPipe
+native install black-box，统一 package job，以及同一主包 tarball 的 Windows/Linux/
+macOS consumers。候选 archives 和四个 npm tgz 已下载；`SHA256SUMS` 通过，所有
+manifest 绑定同一 source commit `a3f58b8b` 与 AppSDK source version `0.1.0015`。
+这些仍是候选证据；未发布前不得表述为当前公开资产。
 源码审计证据来自下列 owner，静态检查不宣称 Windows 运行失败已复现或已修复。
 
 ## 首轮源码差距与候选处理
 
 以下是起始源码基线的差距及其保留约束。当前候选状态以上表为准：AppSDK
-已实现 Windows 锁、路径、Reset 事务和 installer owner；DAGPipe 已实现 Windows
-installer/consumer；两者仍需在最终 SHA 完成全矩阵。Collab daemon 和宿主 transport
+Windows 锁、路径、Reset 事务、installer 与 public consumer，以及 DAGPipe Windows
+installer/consumer 均在上述准确候选完成验收。Collab daemon 和宿主 transport
 仍依赖 Unix socket、文件锁及进程语义，尚无原生 Windows 实现或验收。
 
 ## 平台适配的最小范围
@@ -119,8 +124,8 @@ Collab 当前正式构建从 host build counter 分配版本。多 target 发布
 
 用户已确定 npm 主包为 **`@jsonstudio/appsdk`**。首发先交付 AppSDK 产品，
 DAGPipe 与 Collab 是否增加独立 npm 包按后续需求确定，保持三模块 owner 边界。
-候选仓库已有可执行 npm launcher。由于正式 native artifacts、三平台最终包
-consumer 验收和公开发布尚未完成，当前用户不能从 npm registry 安装该候选。
+候选仓库已有可执行 npm launcher。正式 native artifacts 与三平台包 consumer
+验收已通过，但公开发布尚未完成，当前用户仍不能从 npm registry 安装该候选。
 pnpm/yarn 可消费同一 npm registry 产物，无需另建一套发布实现。
 
 - AppSDK 候选主包提供小型 Node launcher 和 `appsdk`/`project-memory` bin；
@@ -136,10 +141,11 @@ pnpm/yarn 可消费同一 npm registry 产物，无需另建一套发布实现�
 - `0.1.0014` 等源版本含前导零，不能直接作为 npm SemVer。保留已发布映射
   `0.1.0014` → `0.1.14`；本地候选新增 `0.1.0015` → `0.1.15`，均保留源版本
   与 commit 关联。Collab 使用自己的版本 owner；发布前先检查目标版本唯一性。
-- 发布前验收 npm pack 内容与本地 tarball 安装、全局 bin、npx、路径含空格、
-  升级/卸载和真实消费者。从 registry 下载的包再核对完整性与版本回执。
-- npm 账号权限、包名、2FA/可信发布与 provenance 在实际 publishing workflow
-  设计时核对；不保存 token 到仓库或任务笔记。
+- 候选的 npm pack、Windows/Linux/macOS 本地 tgz 安装、全局 bin、路径含空格、
+  升级与真实消费者已在 run `38059365783` 验收；公开 registry 下载、完整性与
+  版本回执仍待 publish 后核对。
+- 当前 npm 身份 `jasonzhangf` 是 `@jsonstudio` org owner。发布通过后以目标包
+  的 publish 和 read-back 回执确认创建权限；不保存 token 到仓库或任务笔记。
 
 GitHub Releases 继续作为源码 tag、平台下载与哈希入口。Homebrew、winget、
 Scoop、apt 等后续按用户需求加入，只消费已验产物；当前不建立全部渠道。

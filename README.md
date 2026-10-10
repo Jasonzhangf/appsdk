@@ -148,10 +148,13 @@ installer 不重启已有 daemon，升级运行态须在已授权维护窗口按
 | macOS x64 / Linux ARM64 | 尚未建立对应架构的完整发布证据 | 同左 | 同左 | 未提供对应平台的该 release 资产 |
 | 原生 Windows | 公开版未支持 | 公开版未支持 | 未支持：Unix socket 与宿主 transport 不可用 | 尚无原生 installer 或 release 资产 |
 
-当前本地候选已加入 AppSDK Windows 路径/锁/事务/安装适配、DAGPipe Windows installer，
-以及 `@jsonstudio/appsdk@0.1.15` 和三个平台包。候选尚无最终 commit、三平台
-release archives 或最终 tarball consumer receipts，因此这些实现不构成新平台支持。
-此前 registry 查询未取得本次包的公开可用版本；新包创建权限仍需发布时核实。
+当前 release 候选为 AppSDK `0.1.0015` / npm `0.1.15`，source commit
+`a3f58b8b59ea607ee9e1d6be9abedeec2428a360`。完整 release run
+`38059365783` 已通过 Linux、macOS ARM64、原生 Windows AppSDK/DAGPipe 构建与
+消费者验收；三个平台的 npm tarballs 均通过同包 consumer smoke。独立整体 Review
+与公开 GitHub/npm 发布仍待完成，因此当前公开支持仍以 `v0.1.0014` 为准。
+`jasonzhangf` 已核实为 `@jsonstudio` org owner；目标包仍返回 E404，实际新包创建
+能力以发布及 registry read-back 为准。
 三平台产物、npm 包边界、版本映射与交付顺序见
 [跨平台与发布渠道方案](docs/design/release-distribution.md)。新增平台和渠道
 完成对应验收后更新本表；编译成功不等于该平台的完整运行支持。

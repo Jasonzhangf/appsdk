@@ -218,6 +218,9 @@ while IFS= read -r path; do
     collab/*)
       collab=true
       ;;
+    .agents/skills/appsdk-dev/*)
+      docs=true
+      ;;
     sdk-skill-sources/project-memory/*)
       resources=true
       rust_memory=true

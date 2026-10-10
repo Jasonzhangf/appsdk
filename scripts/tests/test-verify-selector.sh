@@ -201,6 +201,10 @@ expect_true "npm"
 run_scenario "docs-only" "push" "branch" "1" "README.md"
 expect_only "docs"
 
+# Project development Skill edits are documentation, not unknown product paths.
+run_scenario "appsdk-dev-skill-only" "push" "branch" "1" ".agents/skills/appsdk-dev/SKILL.md"
+expect_only "docs"
+
 # 14. Workflow-only change on a pull_request event also selects the contract gate.
 run_scenario "pr-workflow" "pull_request" "branch" "1" ".github/workflows/verify.yml"
 expect_only "workflow_contract"

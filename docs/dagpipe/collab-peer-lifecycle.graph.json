@@ -1,0 +1,181 @@
+{
+  "id": "appsdk-collab-peer-lifecycle",
+  "version": "0.1.0",
+  "description": "一次 Collab peer Read/Update/Close 生命周期请求到一次生命周期结果。图中只建模请求分类、责任准入、一个互斥分支调度、阶段读回和唯一结果出口；Read、Update、Close 由分支调度选择其一，Create 只保留阻断守卫，不执行创建。唯一结果统一分类为成功、拒绝、缺事实、partial、unknown、cancelled（仅真实安全边界）或 cleanup-open。图不建模自动重试、fallback、第二状态 owner、宿主进程或实现准入。",
+  "inputs": [
+    {
+      "id": "peer_lifecycle_request",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "接收生命周期请求",
+      "operator": "appsdk.collab_peer_lifecycle.receive_request",
+      "operator_version": "1",
+      "inputs": [
+        "peer_lifecycle_request"
+      ],
+      "output": {
+        "id": "已接收生命周期请求",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "解析目标范围与操作意图",
+      "operator": "appsdk.collab_peer_lifecycle.parse_intent",
+      "operator_version": "1",
+      "inputs": [
+        "已接收生命周期请求"
+      ],
+      "output": {
+        "id": "已解析生命周期意图",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "准入身份授权与责任边界",
+      "operator": "appsdk.collab_peer_lifecycle.admit_request",
+      "operator_version": "1",
+      "inputs": [
+        "已解析生命周期意图"
+      ],
+      "output": {
+        "id": "已准入生命周期意图",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "执行读、更新、关闭或创建阻断分支",
+      "operator": "appsdk.collab_peer_lifecycle.execute_lifecycle_branch",
+      "operator_version": "1",
+      "inputs": [
+        "已准入生命周期意图"
+      ],
+      "output": {
+        "id": "生命周期分支阶段结果",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "读回并分类生命周期结果",
+      "operator": "appsdk.collab_peer_lifecycle.readback",
+      "operator_version": "1",
+      "inputs": [
+        "生命周期分支阶段结果"
+      ],
+      "output": {
+        "id": "生命周期阶段结果汇总",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "输出唯一生命周期结果",
+      "operator": "appsdk.collab_peer_lifecycle.emit_result",
+      "operator_version": "1",
+      "inputs": [
+        "生命周期阶段结果汇总"
+      ],
+      "output": {
+        "id": "peer_lifecycle_result",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {
+      "from": "接收生命周期请求",
+      "to": "解析目标范围与操作意图",
+      "arc_id": "已接收生命周期请求"
+    },
+    {
+      "from": "解析目标范围与操作意图",
+      "to": "准入身份授权与责任边界",
+      "arc_id": "已解析生命周期意图"
+    },
+    {
+      "from": "准入身份授权与责任边界",
+      "to": "执行读、更新、关闭或创建阻断分支",
+      "arc_id": "已准入生命周期意图"
+    },
+    {
+      "from": "执行读、更新、关闭或创建阻断分支",
+      "to": "读回并分类生命周期结果",
+      "arc_id": "生命周期分支阶段结果"
+    },
+    {
+      "from": "读回并分类生命周期结果",
+      "to": "输出唯一生命周期结果",
+      "arc_id": "生命周期阶段结果汇总"
+    }
+  ],
+  "outputs": [
+    "peer_lifecycle_result"
+  ]
+}

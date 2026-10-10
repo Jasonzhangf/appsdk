@@ -432,8 +432,13 @@ fn tick_ledger_maintenance_at(server: &Arc<Server>, now: i64) {
                 Some("transport probe returned unknown; preserving route and identity records"),
             ),
         };
-        let operation_id = crate::identity::OperationId::new(format!("ledger-{now}-{}", binding.binding_id)).ok();
-        let receipt_id = crate::identity::OperationId::new(format!("ledger-receipt-{now}-{}", binding.binding_id)).ok();
+        let operation_id =
+            crate::identity::OperationId::new(format!("ledger-{now}-{}", binding.binding_id)).ok();
+        let receipt_id = crate::identity::OperationId::new(format!(
+            "ledger-receipt-{now}-{}",
+            binding.binding_id
+        ))
+        .ok();
         let (operation_id, receipt_id) = match (operation_id, receipt_id) {
             (Some(operation_id), Some(receipt_id)) => (operation_id, receipt_id),
             _ => {
@@ -484,8 +489,10 @@ fn tick_ledger_maintenance_at(server: &Arc<Server>, now: i64) {
     }
     if classified > 0 || blocked > 0 {
         let scan_id = format!("ledger-scan-{now}");
-        let scan_operation_id = crate::identity::OperationId::new(format!("ledger-scan-op-{now}")).ok();
-        let scan_receipt_id = crate::identity::OperationId::new(format!("ledger-scan-receipt-{now}")).ok();
+        let scan_operation_id =
+            crate::identity::OperationId::new(format!("ledger-scan-op-{now}")).ok();
+        let scan_receipt_id =
+            crate::identity::OperationId::new(format!("ledger-scan-receipt-{now}")).ok();
         if scan_operation_id.is_some() && scan_receipt_id.is_some() {
             // Scan receipts are evidence, not delivery truth. The mailbox is not
             // changed by classification, so the durable message count is unchanged.
@@ -543,9 +550,10 @@ fn drop_unowned_ledger_classifications(
 ) -> u32 {
     let before = events.len();
     events.retain(|event| match event {
-        Event::GlobalRuntimeBindingLedgerClassified { record } => {
-            state.global.runtime_binding_ledger_rejection(record).is_none()
-        }
+        Event::GlobalRuntimeBindingLedgerClassified { record } => state
+            .global
+            .runtime_binding_ledger_rejection(record)
+            .is_none(),
         _ => true,
     });
     let dropped = (before - events.len()) as u32;

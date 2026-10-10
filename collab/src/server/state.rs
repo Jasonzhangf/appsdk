@@ -2,7 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 use super::global_state::{GlobalState, ProjectRegistration, RuntimeBinding, StateError};
-use crate::proto::{CommandEnvelope, SelectedTransport, TransportKind};
+use crate::proto::{
+    CommandEnvelope, PeerLifecycleAction, PeerLifecycleClose, PeerLifecycleCreate,
+    PeerLifecyclePhase, PeerLifecycleTarget, PeerLifecycleUpdate, SelectedTransport, TransportKind,
+};
 
 pub fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
@@ -118,6 +121,12 @@ pub enum GlobalEvent {
     LedgerScanReceiptRecorded {
         receipt: super::global_state::LedgerScanReceipt,
     },
+    MasterGrantReplacementStarted {
+        intent: super::global_state::MasterGrantReplacementIntent,
+    },
+    MasterGrantReplacementCompleted {
+        receipt: super::global_state::MasterGrantReplacementReceipt,
+    },
 }
 
 impl GlobalEvent {
@@ -143,6 +152,12 @@ impl GlobalEvent {
             Self::LedgerScanReceiptRecorded { receipt } => {
                 global.record_ledger_scan_receipt(receipt).map(|_| ())
             }
+            Self::MasterGrantReplacementStarted { intent } => global
+                .record_master_grant_replacement_intent(intent)
+                .map(|_| ()),
+            Self::MasterGrantReplacementCompleted { receipt } => global
+                .record_master_grant_replacement_receipt(receipt)
+                .map(|_| ()),
         }
     }
 }
@@ -322,6 +337,671 @@ pub struct WorkerCloseReceipt {
     pub snapshot_captured_ms: Option<i64>,
     pub at_ms: i64,
 }
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResponsibilitySnapshot {
+    #[serde(default)]
+    pub task_ids: Vec<String>,
+    #[serde(default)]
+    pub scheduler_request_ids: Vec<String>,
+    #[serde(default)]
+    pub managed_subagent_ids: Vec<String>,
+    #[serde(default)]
+    pub worktree_binding_ids: Vec<String>,
+    #[serde(default)]
+    pub subscription_ids: Vec<String>,
+    #[serde(default)]
+    pub unread_message_ids: Vec<String>,
+}
+
+/// Durable close-admission fence for one exact peer generation.
+///
+/// The snapshot records only responsibility identities. It deliberately does
+/// not carry message bodies, credentials, or host payloads.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResponsibilityFence {
+    pub operation_id: String,
+    pub worker_id: String,
+    pub project_scope: String,
+    pub app_scope: String,
+    pub binding_id: String,
+    pub endpoint_generation: u64,
+    pub snapshot: ResponsibilitySnapshot,
+    pub state: String,
+    pub created_ms: i64,
+}
+
+impl ResponsibilityFence {
+    /// Any durable fence blocks new responsibility for its exact target.
+    /// B23-F has no release path; `partial` and `unknown` lifecycle phases stay
+    /// fenced until a later lifecycle owner adds a proof-backed release.
+    pub fn is_active(&self) -> bool {
+        matches!(self.state.as_str(), "closing" | "partial" | "unknown")
+    }
+
+    pub fn matches_binding(
+        &self,
+        worker_id: &str,
+        project_scope: &str,
+        app_scope: &str,
+        binding_id: &str,
+        endpoint_generation: u64,
+    ) -> bool {
+        self.worker_id == worker_id
+            && self.project_scope == project_scope
+            && self.app_scope == app_scope
+            && self.binding_id == binding_id
+            && self.endpoint_generation == endpoint_generation
+    }
+}
+
+/// Durable lifecycle operation projection.
+///
+/// The immutable intent is written before any host effect. Later events may
+/// advance only the mutable phase and owner readback; replay rejects any
+/// attempt to change the frozen target, actor, capability hash, or digest.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PeerLifecycleOperationRecord {
+    pub operation_id: String,
+    pub action: PeerLifecycleAction,
+    pub actor_id: String,
+    pub project_scope: crate::scope::ProjectScopeId,
+    pub app_scope_id: crate::identity::AppServerId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<PeerLifecycleTarget>,
+    pub intent_digest: String,
+    pub query_capability_hash: String,
+    /// Close captures the exact responsibility set with the operation event.
+    /// The reducer installs the matching fence from this same record so a
+    /// restart can never recover one without the other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub responsibility_snapshot: Option<ResponsibilitySnapshot>,
+    pub phase: PeerLifecyclePhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update: Option<PeerLifecycleUpdate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close: Option<PeerLifecycleClose>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create: Option<PeerLifecycleCreate>,
+    pub created_ms: i64,
+    pub updated_ms: i64,
+}
+
+impl PeerLifecycleOperationRecord {
+    // Only R/U/C callers use this accessor; the reducer requires their target.
+    pub fn exact_target(&self) -> &PeerLifecycleTarget {
+        self.target
+            .as_ref()
+            .expect("validated non-Create lifecycle target")
+    }
+}
+
+fn close_fence_state(phase: &PeerLifecyclePhase) -> Option<&'static str> {
+    match phase {
+        PeerLifecyclePhase::IntentPersisted
+        | PeerLifecyclePhase::HostDispatchClaimed
+        | PeerLifecyclePhase::HostDispatched
+        | PeerLifecyclePhase::ReadbackPending => Some("closing"),
+        PeerLifecyclePhase::Partial | PeerLifecyclePhase::CleanupOpen => Some("partial"),
+        PeerLifecyclePhase::Unknown => Some("unknown"),
+        PeerLifecyclePhase::Complete
+        | PeerLifecyclePhase::Refused
+        | PeerLifecyclePhase::Cancelled => None,
+    }
+}
+
+/// Build the exact fence represented by a Close lifecycle operation.
+pub fn close_fence_for_operation(
+    operation: &PeerLifecycleOperationRecord,
+) -> Option<ResponsibilityFence> {
+    let snapshot = operation.responsibility_snapshot.as_ref()?;
+    let state = close_fence_state(&operation.phase)?;
+    Some(ResponsibilityFence {
+        operation_id: operation.operation_id.clone(),
+        worker_id: operation.exact_target().worker_id.clone(),
+        project_scope: operation.exact_target().project_scope.as_str().to_owned(),
+        app_scope: operation.exact_target().app_scope_id.as_str().to_owned(),
+        binding_id: operation.exact_target().binding_id.as_str().to_owned(),
+        endpoint_generation: operation.exact_target().endpoint_generation,
+        snapshot: snapshot.clone(),
+        state: state.to_owned(),
+        created_ms: operation.created_ms,
+    })
+}
+
+fn sorted_unique(mut values: Vec<String>) -> Vec<String> {
+    values.sort();
+    values.dedup();
+    values
+}
+
+/// Responsibility snapshot captured atomically with a close admission.
+///
+/// Only identities are persisted. `TaskRec`, messages, subscriptions and
+/// worktree records remain the original owners of their payloads.
+pub fn responsibility_snapshot(state: &State, worker_id: &str) -> ResponsibilitySnapshot {
+    let task_ids = sorted_unique(
+        state
+            .tasks
+            .values()
+            .filter(|task| {
+                task.owner == worker_id && !matches!(task.status.as_str(), "closed" | "cancelled")
+            })
+            .map(|task| task.id.clone())
+            .collect(),
+    );
+    let scheduler_request_ids = sorted_unique(
+        state
+            .scheduler_admissions
+            .values()
+            .filter(|admission| {
+                admission.worker_id == worker_id
+                    && matches!(admission.status.as_str(), "pending" | "notifying")
+            })
+            .map(|admission| admission.request_id.clone())
+            .collect(),
+    );
+    let managed_subagent_ids = sorted_unique(
+        state
+            .subagents
+            .values()
+            .filter(|subagent| {
+                subagent.peer == worker_id
+                    && !matches!(subagent.status.as_str(), "closed" | "failed")
+            })
+            .map(|subagent| subagent.id.clone())
+            .collect(),
+    );
+    let worktree_binding_ids = sorted_unique(
+        state
+            .worktree_bindings
+            .values()
+            .filter(|binding| {
+                binding.owner_agent_id == worker_id
+                    && state
+                        .tasks
+                        .get(&binding.task_id)
+                        .is_none_or(|task| !matches!(task.status.as_str(), "closed" | "cancelled"))
+            })
+            .map(|binding| binding.binding_id.clone())
+            .collect(),
+    );
+    let subscription_ids = sorted_unique(
+        state
+            .notification_subscriptions
+            .values()
+            .filter(|subscription| {
+                subscription.worker_id == worker_id
+                    && matches!(subscription.status.as_str(), "armed" | "notifying")
+            })
+            .map(|subscription| subscription.id.clone())
+            .collect(),
+    );
+    let unread_message_ids = sorted_unique(
+        state
+            .msgs
+            .values()
+            .filter(|message| {
+                message.to == worker_id && matches!(message.state.as_str(), "pending" | "delivered")
+            })
+            .map(|message| message.id.clone())
+            .collect(),
+    );
+    ResponsibilitySnapshot {
+        task_ids,
+        scheduler_request_ids,
+        managed_subagent_ids,
+        worktree_binding_ids,
+        subscription_ids,
+        unread_message_ids,
+    }
+}
+
+/// A task status that no longer carries responsibility for its owner. This
+/// matches [`responsibility_snapshot`], which keeps every other status.
+fn task_status_is_terminal(status: &str) -> bool {
+    matches!(status, "closed" | "cancelled")
+}
+
+/// A subscription status that still binds an obligation to its owner.
+fn subscription_status_is_active(status: &str) -> bool {
+    matches!(status, "armed" | "notifying")
+}
+
+/// A subscription status that only retires or consumes the obligation. These
+/// are safe under an active fence because they reduce rather than add
+/// responsibility. `rebound` is deliberately not here: it re-points a wake and
+/// is treated as a mutation.
+fn subscription_status_retires(status: &str) -> bool {
+    matches!(
+        status,
+        "cancelled" | "consumed" | "expired" | "transport-lost" | "suppressed"
+    )
+}
+
+/// The fence-relevant decision for one event.
+///
+/// `Mutates` means the event adds or changes responsibility owned by the
+/// named target; `Safe` covers retirement, consumption, history, and unrelated
+/// events. The distinction is drawn from the same statuses as the snapshot so
+/// a fence cannot be bypassed by a writer whose event shape was not listed.
+enum ResponsibilityEffect<'a> {
+    Mutates(&'a str),
+    Safe,
+}
+
+#[derive(Clone, Copy)]
+enum SubscriptionConsumptionStatus {
+    Unchanged,
+    Consumed,
+    Armed,
+}
+
+#[derive(Clone, Copy)]
+struct SubscriptionConsumption {
+    fired_count: u32,
+    status: SubscriptionConsumptionStatus,
+}
+
+/// A retired runtime binding carries no live native thread or tmux pane, so it
+/// is an exact control-plane retirement record rather than a new
+/// responsibility. The session id is intentionally not required to be absent:
+/// the route owners retain it across retirement.
+fn runtime_endpoint_is_retired(binding: &crate::server::global_state::RuntimeBinding) -> bool {
+    binding.native_thread_id.is_none() && binding.tmux_endpoint.is_none()
+}
+
+fn subscription_consumption_total(subscription: &NotificationSubscription) -> u32 {
+    if subscription.interval_ms.is_some() {
+        subscription.repeat_count
+    } else {
+        subscription.trigger_times_ms.len().max(1) as u32
+    }
+}
+
+fn consume_subscription_for_preflight(
+    subscription: &NotificationSubscription,
+    consumed_ms: Option<i64>,
+) -> SubscriptionConsumption {
+    if subscription.status == "cancelled" {
+        return SubscriptionConsumption {
+            fired_count: subscription.fired_count,
+            status: SubscriptionConsumptionStatus::Unchanged,
+        };
+    }
+
+    let fired_count = subscription.fired_count.saturating_add(1);
+    if is_goal_deadline(subscription) {
+        let _ = consumed_ms;
+        return SubscriptionConsumption {
+            fired_count,
+            status: SubscriptionConsumptionStatus::Consumed,
+        };
+    }
+    if fired_count >= subscription_consumption_total(subscription) {
+        return SubscriptionConsumption {
+            fired_count,
+            status: SubscriptionConsumptionStatus::Consumed,
+        };
+    }
+    let _ = consumed_ms;
+    SubscriptionConsumption {
+        fired_count,
+        status: SubscriptionConsumptionStatus::Armed,
+    }
+}
+
+/// Classify how one event relates to responsibility for a closing peer.
+///
+/// This is intentionally a single table over every durable event shape used by
+/// the responsibility writers. New events default to [`Safe`] only when they
+/// cannot add or change an owner; every event this call cannot prove safe is
+/// classified as a mutation for its exact target.
+fn responsibility_effect<'a>(state: &'a State, event: &'a Event) -> ResponsibilityEffect<'a> {
+    match event {
+        Event::TaskCreated { task } => ResponsibilityEffect::Mutates(task.owner.as_str()),
+        Event::TaskUpdated { task } => {
+            if task_status_is_terminal(&task.status) {
+                ResponsibilityEffect::Safe
+            } else {
+                ResponsibilityEffect::Mutates(task.owner.as_str())
+            }
+        }
+        Event::SchedulerAdmission { admission } => {
+            if matches!(admission.status.as_str(), "pending" | "notifying") {
+                ResponsibilityEffect::Mutates(admission.worker_id.as_str())
+            } else {
+                ResponsibilityEffect::Safe
+            }
+        }
+        Event::SchedulerAdmissionStatus {
+            request_id, status, ..
+        } => match state
+            .scheduler_admissions
+            .get(request_id)
+            .map(|admission| admission.worker_id.as_str())
+        {
+            Some(worker_id) => match status.as_str() {
+                "pending" | "notifying" | "succeeded" => ResponsibilityEffect::Mutates(worker_id),
+                _ => ResponsibilityEffect::Safe,
+            },
+            None => ResponsibilityEffect::Safe,
+        },
+        Event::SubagentUpdated { subagent } => match subagent.status.as_str() {
+            "closed" | "failed" => ResponsibilityEffect::Safe,
+            _ => ResponsibilityEffect::Mutates(subagent.peer.as_str()),
+        },
+        Event::WorktreeBound { binding } => {
+            ResponsibilityEffect::Mutates(binding.owner_agent_id.as_str())
+        }
+        Event::NotificationSubscribed { subscription } => {
+            if subscription_status_is_active(&subscription.status) {
+                ResponsibilityEffect::Mutates(subscription.worker_id.as_str())
+            } else {
+                ResponsibilityEffect::Safe
+            }
+        }
+        Event::NotificationStatus {
+            subscription_id,
+            status,
+            ..
+        } => match state.notification_subscriptions.get(subscription_id) {
+            Some(subscription) => {
+                if subscription_status_retires(status) {
+                    ResponsibilityEffect::Safe
+                } else {
+                    ResponsibilityEffect::Mutates(subscription.worker_id.as_str())
+                }
+            }
+            None => ResponsibilityEffect::Safe,
+        },
+        Event::NotificationRebound {
+            subscription_id, ..
+        } => match state.notification_subscriptions.get(subscription_id) {
+            Some(subscription) => ResponsibilityEffect::Mutates(subscription.worker_id.as_str()),
+            None => ResponsibilityEffect::Safe,
+        },
+        Event::NotificationSuppressed {
+            subscription_id,
+            status,
+            ..
+        } => match state.notification_subscriptions.get(subscription_id) {
+            Some(subscription) => {
+                if subscription_status_retires(status) {
+                    ResponsibilityEffect::Safe
+                } else {
+                    ResponsibilityEffect::Mutates(subscription.worker_id.as_str())
+                }
+            }
+            None => ResponsibilityEffect::Safe,
+        },
+        Event::NotificationSkipped {
+            subscription_id, ..
+        } => match state.notification_subscriptions.get(subscription_id) {
+            Some(subscription) => ResponsibilityEffect::Mutates(subscription.worker_id.as_str()),
+            None => ResponsibilityEffect::Safe,
+        },
+        Event::NotificationConsumed {
+            subscription_id, ..
+        } => match state.notification_subscriptions.get(subscription_id) {
+            Some(subscription) if subscription_status_is_active(&subscription.status) => {
+                ResponsibilityEffect::Mutates(subscription.worker_id.as_str())
+            }
+            Some(_) | None => ResponsibilityEffect::Safe,
+        },
+        Event::Acked { .. } | Event::ReceiveCommitted { .. } => ResponsibilityEffect::Safe,
+        // Any `Sent` to the target adds an unread message, and
+        // `responsibility_snapshot` counts unread messages as responsibility.
+        // Replies, acks, and system notifications still land in the target's
+        // mailbox, so all of them are additions for the receiving peer.
+        Event::Sent { msg } => ResponsibilityEffect::Mutates(msg.to.as_str()),
+        Event::WakeBound { message_id, .. } => match state.msgs.get(message_id) {
+            Some(msg) => ResponsibilityEffect::Mutates(msg.to.as_str()),
+            None => ResponsibilityEffect::Safe,
+        },
+        Event::Registered { worker } => ResponsibilityEffect::Mutates(worker.id.as_str()),
+        Event::MergeRequested { request } => ResponsibilityEffect::Mutates(request.owner.as_str()),
+        Event::MasterAssigned { worker_id, .. } => {
+            ResponsibilityEffect::Mutates(worker_id.as_str())
+        }
+        Event::GlobalCurrentThreadRouteSet { binding } => {
+            ResponsibilityEffect::Mutates(binding.agent_id.as_str())
+        }
+        // A `GlobalRuntimeBound` that no longer carries a live endpoint is the
+        // control-plane retirement record for the retired generation; it must
+        // stay committable while the fence holds.
+        Event::GlobalRuntimeBound { binding } => {
+            if runtime_endpoint_is_retired(binding) {
+                ResponsibilityEffect::Safe
+            } else {
+                ResponsibilityEffect::Mutates(binding.agent_id.as_str())
+            }
+        }
+        Event::GlobalMasterGranted { grant } => {
+            ResponsibilityEffect::Mutates(grant.agent_id.as_str())
+        }
+        // A rollback can restore a worker, its route, and its subscriptions.
+        // Refuse it while the exact failed target is fenced.
+        Event::GlobalRuntimeBindingRollback { failed, .. } => {
+            ResponsibilityEffect::Mutates(failed.agent_id.as_str())
+        }
+        Event::PeerLifecycleOperationRecorded { operation }
+            if operation.action == PeerLifecycleAction::Update
+                && operation.phase.is_in_flight() =>
+        {
+            ResponsibilityEffect::Mutates(operation.exact_target().worker_id.as_str())
+        }
+        Event::ReducerSnapshot { .. } => ResponsibilityEffect::Safe,
+        _ => ResponsibilityEffect::Safe,
+    }
+}
+
+/// Batch-level preflight used before any journal bytes are written.
+///
+/// The fence is evaluated against the fence set as it stands before the batch
+/// plus any fence set earlier in the same batch, so a close admission
+/// that writes its own fence can never be combined with a responsibility
+/// addition for the same target. Safe retirement events owned by the exact
+/// closing target stay allowed.
+pub fn responsibility_preflight(st: &State, evs: &[Event]) -> Result<(), String> {
+    let mut fences = st.responsibility_fences.clone();
+    let mut simulated_msgs = st.msgs.clone();
+    let mut simulated_subscriptions = st.notification_subscriptions.clone();
+    let mut simulated_wake_bindings = st.wake_bindings.clone();
+    for event in evs {
+        match event {
+            Event::ReducerSnapshot { .. } => {
+                return Err("reducer snapshot is replay-only".into());
+            }
+            Event::ResponsibilityFenceSet { fence } => {
+                fences.insert(fence.operation_id.clone(), fence.clone());
+            }
+            Event::PeerLifecycleOperationRecorded { operation } => {
+                if operation.action == PeerLifecycleAction::Close {
+                    if operation.phase == PeerLifecyclePhase::IntentPersisted
+                        && st.peer_lifecycle_operations.values().any(|existing| {
+                            existing.action == PeerLifecycleAction::Update
+                                && existing.phase.is_in_flight()
+                                && existing.exact_target().worker_id
+                                    == operation.exact_target().worker_id
+                        })
+                    {
+                        return Err(format!(
+                            "target_updating: close for {} is excluded by an in-flight update",
+                            operation.exact_target().worker_id
+                        ));
+                    }
+                    match close_fence_for_operation(operation) {
+                        Some(fence) => {
+                            fences.insert(fence.operation_id.clone(), fence);
+                        }
+                        None => {
+                            fences.remove(&operation.operation_id);
+                        }
+                    }
+                }
+            }
+            Event::Sent { msg } => {
+                simulated_msgs.insert(msg.id.clone(), msg.clone());
+            }
+            Event::Delivered { ids } => {
+                for id in ids {
+                    if let Some(message) = simulated_msgs.get_mut(id) {
+                        if message.state == "pending" {
+                            message.state = "delivered".into();
+                        }
+                    }
+                }
+            }
+            Event::Acked { ids } | Event::ReceiveCommitted { ids, .. } => {
+                for id in ids {
+                    if let Some(message) = simulated_msgs.get_mut(id) {
+                        message.state = "read".into();
+                    }
+                    let Some(subscription_id) = simulated_wake_bindings.get(id).cloned() else {
+                        continue;
+                    };
+                    let Some(subscription) = simulated_subscriptions.get(&subscription_id).cloned()
+                    else {
+                        continue;
+                    };
+                    let consumes_on_read = subscription.event != "direct-message"
+                        || subscription.trigger_ms.is_some()
+                        || !subscription.trigger_times_ms.is_empty()
+                        || subscription.interval_ms.is_some();
+                    if !consumes_on_read {
+                        continue;
+                    }
+                    let read_count = simulated_wake_bindings
+                        .iter()
+                        .filter(|(_, bound)| *bound == &subscription_id)
+                        .filter(|(message_id, _)| {
+                            simulated_msgs
+                                .get(*message_id)
+                                .is_some_and(|message| message.state == "read")
+                        })
+                        .count() as u32;
+                    if read_count > subscription.fired_count {
+                        let consumed = consume_subscription_for_preflight(
+                            &subscription,
+                            if subscription.event == "master-idle" {
+                                simulated_msgs.get(id).and_then(|message| {
+                                    [message.last_wake_attempt_ms, message.created_ms]
+                                        .into_iter()
+                                        .find(|timestamp| *timestamp > 0)
+                                })
+                            } else {
+                                None
+                            },
+                        );
+                        if let Some(subscription) =
+                            simulated_subscriptions.get_mut(&subscription_id)
+                        {
+                            subscription.fired_count = consumed.fired_count;
+                            subscription.status = match consumed.status {
+                                SubscriptionConsumptionStatus::Unchanged => {
+                                    subscription.status.clone()
+                                }
+                                SubscriptionConsumptionStatus::Consumed => "consumed".into(),
+                                SubscriptionConsumptionStatus::Armed => "armed".into(),
+                            };
+                        }
+                    }
+                }
+            }
+            Event::NotificationConsumed {
+                subscription_id,
+                consumed_ms,
+                ..
+            } => {
+                if let Some(subscription) = simulated_subscriptions.get(subscription_id).cloned() {
+                    let consumed =
+                        consume_subscription_for_preflight(&subscription, Some(*consumed_ms));
+                    if let Some(subscription) = simulated_subscriptions.get_mut(subscription_id) {
+                        subscription.fired_count = consumed.fired_count;
+                        subscription.status = match consumed.status {
+                            SubscriptionConsumptionStatus::Unchanged => subscription.status.clone(),
+                            SubscriptionConsumptionStatus::Consumed => "consumed".into(),
+                            SubscriptionConsumptionStatus::Armed => "armed".into(),
+                        };
+                    }
+                }
+            }
+            Event::NotificationStatus {
+                subscription_id,
+                status,
+                ..
+            }
+            | Event::NotificationSuppressed {
+                subscription_id,
+                status,
+                ..
+            } => {
+                if let Some(subscription) = simulated_subscriptions.get_mut(subscription_id) {
+                    subscription.status = status.clone();
+                }
+            }
+            _ => {}
+        }
+
+        let ResponsibilityEffect::Mutates(target) = responsibility_effect(st, event) else {
+            continue;
+        };
+        if let Some(fence) = fences
+            .values()
+            .find(|fence| fence.is_active() && fence.worker_id == target)
+        {
+            return Err(format!(
+                "target_closing: responsibility for {} is fenced by operation {}",
+                fence.worker_id, fence.operation_id
+            ));
+        }
+        let current_update_operation_id = match event {
+            Event::PeerLifecycleOperationRecorded { operation }
+                if operation.action == PeerLifecycleAction::Update =>
+            {
+                Some(operation.operation_id.as_str())
+            }
+            _ => None,
+        };
+        if let Some(operation) = st.peer_lifecycle_operations.values().find(|operation| {
+            operation.action == PeerLifecycleAction::Update
+                && operation.phase.is_in_flight()
+                && operation.exact_target().worker_id == target
+                && Some(operation.operation_id.as_str()) != current_update_operation_id
+        }) {
+            return Err(format!(
+                "target_updating: responsibility for {} is excluded by operation {}",
+                target, operation.operation_id
+            ));
+        }
+    }
+
+    for fence in fences.values().filter(|fence| fence.is_active()) {
+        for (id, subscription) in &simulated_subscriptions {
+            if subscription.worker_id != fence.worker_id
+                || !subscription_status_is_active(&subscription.status)
+                || fence.snapshot.subscription_ids.contains(id)
+            {
+                continue;
+            }
+            let was_active = st
+                .notification_subscriptions
+                .get(id)
+                .is_some_and(|existing| subscription_status_is_active(&existing.status));
+            if !was_active {
+                return Err(format!(
+                    "target_closing: responsibility for {} is fenced by operation {}",
+                    fence.worker_id, fence.operation_id
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchedulerAdmissionRecord {
     pub request_id: String,
@@ -508,7 +1188,10 @@ impl CleanupVerification {
 }
 
 pub fn task_resource_active(status: &str) -> bool {
-    !matches!(status, "pending" | "invited" | "waiting" | "merged" | "closed" | "cancelled")
+    !matches!(
+        status,
+        "pending" | "invited" | "waiting" | "merged" | "closed" | "cancelled"
+    )
 }
 
 pub fn wait_cycle(tasks: &HashMap<String, TaskRec>, task_id: &str, waiting_for: &str) -> bool {
@@ -574,6 +1257,16 @@ pub enum Event {
         #[serde(default)]
         snapshot_captured_ms: Option<i64>,
         at_ms: i64,
+    },
+    /// Durable close-admission fence. The fence and the exact responsibility
+    /// snapshot commit together before any close effect is attempted.
+    ResponsibilityFenceSet {
+        fence: ResponsibilityFence,
+    },
+    /// Durable peer lifecycle operation projection. The immutable intent is
+    /// committed before any selected-host effect.
+    PeerLifecycleOperationRecorded {
+        operation: PeerLifecycleOperationRecord,
     },
     #[serde(rename = "MasterTransferred")]
     LegacyMasterTransferred {
@@ -669,6 +1362,14 @@ pub enum Event {
     BoardDetailsChanged {
         task_id: String,
         details: crate::board::BoardTaskDetails,
+    },
+    /// Compacted journal baseline. The payload is the existing snapshot event
+    /// set, and `sequence`/`revision` are the exact pre-compaction counters.
+    /// This record is generated only by the journal rewrite owner.
+    ReducerSnapshot {
+        sequence: u64,
+        revision: u64,
+        events: Vec<Event>,
     },
     TaskCreated {
         task: TaskRec,
@@ -772,6 +1473,12 @@ pub enum Event {
     GlobalLedgerScanReceiptRecorded {
         receipt: super::global_state::LedgerScanReceipt,
     },
+    GlobalMasterGrantReplacementStarted {
+        intent: super::global_state::MasterGrantReplacementIntent,
+    },
+    GlobalMasterGrantReplacementCompleted {
+        receipt: super::global_state::MasterGrantReplacementReceipt,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -789,6 +1496,8 @@ pub struct State {
     pub subagent_snapshots: HashMap<String, SubagentSnapshotReceipt>,
     pub worker_snapshots: HashMap<String, WorkerSnapshotReceipt>,
     pub worker_closures: HashMap<String, WorkerCloseReceipt>,
+    pub responsibility_fences: HashMap<String, ResponsibilityFence>,
+    pub peer_lifecycle_operations: HashMap<String, PeerLifecycleOperationRecord>,
     pub workers: HashMap<String, WorkerRec>,
     pub msgs: HashMap<String, Message>,
     pub notification_delivery_failures: HashMap<String, NotificationDeliveryFailure>,

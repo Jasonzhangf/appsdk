@@ -1322,6 +1322,49 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
                 "pending_merges": pending_merges,
             }));
         }
+        if master
+            .get("worker_id")
+            .and_then(serde_json::Value::as_str)
+            == Some(worker_id.as_str())
+        {
+            operations.push(json!({
+                "kind": "peer_lifecycle",
+                "trigger": "the current peer master needs to create, inspect, update, or close a registered peer",
+                "scope_rule": "the actor, target, and requested cwd must resolve to the same registered canonical project main and app scope; cwd may be any existing directory or linked worktree in that project",
+                "operations": [
+                    {
+                        "action": "create",
+                        "command": "collab worker create <peer-id> --cwd <existing-project-dir-or-linked-worktree> --op <stable-operation-id> [--model <model>]",
+                        "success": "outcome=complete with the created thread, route, registration, and verified ready turn",
+                        "failure": "keep the returned operation id; query that operation after an unknown result and never submit a second create id"
+                    },
+                    {
+                        "action": "read",
+                        "command": "collab worker read <peer-id>",
+                        "success": "outcome=ok with the exact peer lifecycle projection",
+                        "failure": "preserve the typed error; do not infer another peer from a path or partial match"
+                    },
+                    {
+                        "action": "update",
+                        "command": "collab worker update <peer-id> --cwd <existing-project-dir-or-linked-worktree>",
+                        "success": "outcome=complete after settings update and cwd readback are verified",
+                        "failure": "preserve the operation id; query an unknown result before any retry; responsibility or scope refusal has no host side effect"
+                    },
+                    {
+                        "action": "close",
+                        "command": "collab worker close <peer-id> --reason \"<auditable reason>\"",
+                        "success": "outcome=complete after runtime archive and peer, binding, route, lease, and subscription retirement are verified",
+                        "failure": "an open responsibility is refused; unknown cleanup remains queryable and must not be reported as closed"
+                    },
+                    {
+                        "action": "query",
+                        "command": "collab worker query --op <returned-operation-id>",
+                        "success": "read the retained outcome without repeating a host effect",
+                        "failure": "preserve the typed error and do not start a replacement operation"
+                    }
+                ]
+            }));
+        }
         if !master_assigned {
             operations.push(json!({
                 "kind": "promote_master",

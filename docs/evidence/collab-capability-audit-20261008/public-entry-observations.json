@@ -1,0 +1,106 @@
+{
+  "source_head": "2cac9e935944bddcb98fb6e7af4beb95966dcff9",
+  "cli": {
+    "path": "/Users/fanzhang/.cargo/bin/collab",
+    "version": "0.2.0258",
+    "sha256": "eb46eeb2adc714ab0f7f8abd77365d00515efcbb4a1bce3622ed5ed60a6a3ebe"
+  },
+  "mcp": {
+    "path": "/Users/fanzhang/.cargo/bin/collab-mcp",
+    "version": "0.2.0258",
+    "sha256": "c5410c01aef43d02c2d39af649e21efb81e944943d264a4791f08a73966047d7"
+  },
+  "skill": {
+    "source": "collab/skills/collab/SKILL.md",
+    "installed": "/Users/fanzhang/.agents/skills/collab/SKILL.md",
+    "same_sha256": "3eb18e427656f67c8419c1c4e577917ab45e438b325c2d02206cb3a1e7f7bf70"
+  },
+  "observations": [
+    {
+      "argv": [
+        "collab",
+        "context",
+        "--provide",
+        "{\"approval\":\"audit-only\"}"
+      ],
+      "exit": 1,
+      "stderr": "collab: IDENTITY_FACT_INVALID: invalid --provide JSON: unknown field `approval`, expected one of `session_id`, `thread_id`, `endpoint`, `namespace` at line 1 column 11\n"
+    },
+    {
+      "argv": [
+        "collab",
+        "context",
+        "--provide",
+        "{\"worker_id\":\"audit-only\"}"
+      ],
+      "exit": 1,
+      "stderr": "collab: IDENTITY_FACT_INVALID: invalid --provide JSON: unknown field `worker_id`, expected one of `session_id`, `thread_id`, `endpoint`, `namespace` at line 1 column 12\n"
+    },
+    {
+      "argv": [
+        "collab",
+        "context",
+        "--approval",
+        "audit-only"
+      ],
+      "exit": 2,
+      "stderr": "error: unexpected argument '--approval' found\n\nUsage: collab context [OPTIONS]\n\nFor more information, try '--help'.\n"
+    },
+    {
+      "argv": [
+        "collab",
+        "subagent",
+        "start"
+      ],
+      "exit": 1,
+      "stderr": "collab: MANAGED_SUBAGENT_UNSUPPORTED: tmux cannot create a Codex thread; start the peer in its own tmux pane and register that pane\n"
+    },
+    {
+      "argv": [
+        "collab",
+        "subagent",
+        "close",
+        "audit-nonexistent-01a11e24"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "mcp_request": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+          "name": "collab_subagent",
+          "arguments": {
+            "action": "close",
+            "id": "audit-nonexistent-01a11e24"
+          }
+        }
+      },
+      "mcp_response": {
+        "id": 2,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "",
+              "type": "text"
+            }
+          ],
+          "isError": false
+        }
+      },
+      "process_exit": 0
+    }
+  ],
+  "boundaries": [
+    "No production identity registration or recovery was attempted.",
+    "No master authority was mutated.",
+    "No installation or daemon restart was performed.",
+    "Successful context identity recovery and production peer closure were not live-verified.",
+    "Source findings are tied to source_head; installed observations are tied to binary digests. Binary source equivalence was not independently established."
+  ]
+}
+

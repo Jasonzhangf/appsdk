@@ -217,7 +217,11 @@ impl State {
                 self.master_wake = accumulator.clone();
             }
             Event::SubagentUpdated { subagent } => {
-                for task in self.tasks.values().filter(|task| task.owner == subagent.peer || task.created_by == subagent.peer) {
+                for task in self
+                    .tasks
+                    .values()
+                    .filter(|task| task.owner == subagent.peer || task.created_by == subagent.peer)
+                {
                     if let Some(details) = self.board_details.get_mut(&task.id) {
                         details.public_visibility = false;
                     }
@@ -294,6 +298,146 @@ impl State {
                 self.master_wake
                     .newly_idle_workers
                     .retain(|id| id != worker_id);
+            }
+            Event::ResponsibilityFenceSet { fence } => {
+                // `closing` is the only phase B23-F writes. `partial` and
+                // `unknown` are accepted so a later lifecycle owner can record
+                // an unresolved close phase that must stay fenced across
+                // replay; none of them release the fence.
+                if !fence.is_active() {
+                    return Err(format!(
+                        "responsibility fence {} has invalid initial state {}",
+                        fence.operation_id, fence.state
+                    ));
+                }
+                if fence.worker_id.trim().is_empty()
+                    || fence.project_scope.trim().is_empty()
+                    || fence.app_scope.trim().is_empty()
+                    || fence.binding_id.trim().is_empty()
+                    || fence.endpoint_generation == 0
+                {
+                    return Err(format!(
+                        "responsibility fence {} has incomplete exact target identity",
+                        fence.operation_id
+                    ));
+                }
+                self.responsibility_fences
+                    .insert(fence.operation_id.clone(), fence.clone());
+            }
+            Event::PeerLifecycleOperationRecorded { operation } => {
+                if operation.operation_id.trim().is_empty()
+                    || operation.actor_id.trim().is_empty()
+                    || operation.project_scope.as_str().trim().is_empty()
+                    || operation.app_scope_id.as_str().trim().is_empty()
+                    || operation.target.as_ref().is_some_and(|target| {
+                        target.worker_id.trim().is_empty()
+                            || target.binding_id.as_str().trim().is_empty()
+                            || target.endpoint_generation == 0
+                            || target.project_scope != operation.project_scope
+                            || target.app_scope_id != operation.app_scope_id
+                    })
+                    || (operation.action != PeerLifecycleAction::Create
+                        && operation.target.is_none())
+                {
+                    return Err(format!(
+                        "peer lifecycle operation {} has incomplete exact target identity",
+                        operation.operation_id
+                    ));
+                }
+                if let Some(existing) = self.peer_lifecycle_operations.get(&operation.operation_id)
+                {
+                    if existing.action != operation.action
+                        || existing.actor_id != operation.actor_id
+                        || existing.project_scope != operation.project_scope
+                        || existing.app_scope_id != operation.app_scope_id
+                        || (existing.target.is_some() && existing.target != operation.target)
+                        || (existing.target.is_none()
+                            && operation.target.is_some()
+                            && operation.action != PeerLifecycleAction::Create)
+                        || existing.intent_digest != operation.intent_digest
+                        || existing.query_capability_hash != operation.query_capability_hash
+                        || existing.created_ms != operation.created_ms
+                    {
+                        return Err(format!(
+                            "peer lifecycle operation {} changed immutable intent",
+                            operation.operation_id
+                        ));
+                    }
+                    if existing.responsibility_snapshot.is_some()
+                        && operation.responsibility_snapshot.is_none()
+                    {
+                        return Err(format!(
+                            "peer lifecycle operation {} dropped its responsibility snapshot",
+                            operation.operation_id
+                        ));
+                    }
+                }
+                if operation.action == PeerLifecycleAction::Create {
+                    let Some(create) = operation.create.as_ref() else {
+                        return Err("Create requires a frozen intent receipt".into());
+                    };
+                    crate::identity::validate_id_for_protocol(&create.peer_id)
+                        .map_err(|error| error.to_string())?;
+                    if create.cwd.is_empty()
+                        || operation.target.as_ref().is_some_and(|target| {
+                            target.worker_id != create.peer_id
+                                || target.transport.thread_id != create.thread_id
+                        })
+                        || (operation.phase == crate::proto::PeerLifecyclePhase::Complete
+                            && (operation.target.is_none()
+                                || create.thread_id.is_none()
+                                || create.readiness.state
+                                    != crate::proto::PeerLifecycleStage::Verified))
+                    {
+                        return Err("Create has inconsistent exact receipt".into());
+                    }
+                    if let Some(existing) =
+                        self.peer_lifecycle_operations.get(&operation.operation_id)
+                    {
+                        let old = existing.create.as_ref().ok_or("Create lost its intent")?;
+                        if old.peer_id != create.peer_id
+                            || old.cwd != create.cwd
+                            || old.model != create.model
+                            || (old.thread_id.is_some() && old.thread_id != create.thread_id)
+                            || (existing.phase != crate::proto::PeerLifecyclePhase::IntentPersisted
+                                && matches!(
+                                    operation.phase,
+                                    crate::proto::PeerLifecyclePhase::IntentPersisted
+                                        | crate::proto::PeerLifecyclePhase::HostDispatchClaimed
+                                )
+                                && existing.phase != operation.phase)
+                        {
+                            return Err(
+                                "Create changed frozen intent or consumed dispatch claim".into()
+                            );
+                        }
+                    } else if self.peer_lifecycle_operations.values().any(|other| {
+                        other.action == PeerLifecycleAction::Create
+                            && other.project_scope == operation.project_scope
+                            && other.app_scope_id == operation.app_scope_id
+                            && other
+                                .create
+                                .as_ref()
+                                .is_some_and(|receipt| receipt.peer_id == create.peer_id)
+                            && other.phase != crate::proto::PeerLifecyclePhase::Complete
+                            && other.phase != crate::proto::PeerLifecyclePhase::Refused
+                    }) {
+                        return Err("Create peer id is reserved by an unresolved operation".into());
+                    }
+                } else if operation.create.is_some() {
+                    return Err("non-Create operation contains Create receipt".into());
+                }
+                if operation.action == PeerLifecycleAction::Close {
+                    if let Some(fence) = crate::server::state::close_fence_for_operation(&operation)
+                    {
+                        self.responsibility_fences
+                            .insert(fence.operation_id.clone(), fence);
+                    } else {
+                        self.responsibility_fences.remove(&operation.operation_id);
+                    }
+                }
+                self.peer_lifecycle_operations
+                    .insert(operation.operation_id.clone(), operation.clone());
             }
             Event::LegacyMasterTransferred { .. } => {}
             Event::Sent { msg } => {
@@ -426,7 +570,9 @@ impl State {
                     return Ok(());
                 };
                 if affects_master_wake {
-                    crate::server::notification_state::mark_master_wake_skipped_busy(&mut self.master_wake);
+                    crate::server::notification_state::mark_master_wake_skipped_busy(
+                        &mut self.master_wake,
+                    );
                 }
                 if is_goal_deadline(subscription) {
                     let revision = u64::try_from(*due_ms).unwrap_or(0);
@@ -435,7 +581,9 @@ impl State {
                         &MasterWakeSignal::GoalDue { revision },
                         *skipped_ms,
                     );
-                    crate::server::notification_state::mark_master_wake_skipped_busy(&mut self.master_wake);
+                    crate::server::notification_state::mark_master_wake_skipped_busy(
+                        &mut self.master_wake,
+                    );
                     subscription.status_reason = Some(reason.clone());
                     subscription.updated_ms = *skipped_ms;
                     return Ok(());
@@ -513,7 +661,9 @@ impl State {
                             })
                     })
                 }) {
-                    crate::server::notification_state::mark_master_wake_delivered(&mut self.master_wake);
+                    crate::server::notification_state::mark_master_wake_delivered(
+                        &mut self.master_wake,
+                    );
                 }
             }
             Event::Acked { ids } => {
@@ -580,13 +730,22 @@ impl State {
             Event::BoardDetailsChanged { task_id, details } => {
                 self.board_details.insert(task_id.clone(), details.clone());
             }
+            Event::ReducerSnapshot { .. } => {
+                return Err("reducer snapshot is replay-only".into());
+            }
             Event::TaskCreated { task } | Event::TaskUpdated { task } => {
                 let known_public = self.workers.contains_key(&task.owner)
-                    && !self.subagents.values().any(|child| child.peer == task.owner);
+                    && !self
+                        .subagents
+                        .values()
+                        .any(|child| child.peer == task.owner);
                 match self.board_details.get_mut(&task.id) {
                     Some(details) => details.revision += 1,
                     None => {
-                        self.board_details.insert(task.id.clone(), crate::board::BoardTaskDetails::legacy(&task.id, known_public));
+                        self.board_details.insert(
+                            task.id.clone(),
+                            crate::board::BoardTaskDetails::legacy(&task.id, known_public),
+                        );
                     }
                 }
                 self.tasks.insert(task.id.clone(), task.clone());
@@ -715,18 +874,23 @@ impl State {
                     previous_grant.clone(),
                 )
                 .map_err(|error| format!("global reducer rejected event: {error}"))?;
-                let failed_is_local_route = failed.session_id.as_ref().zip(
-                    failed.native_thread_id.as_ref(),
-                ).is_some_and(|(session, thread)| {
-                    next.lookup_current_thread_route(session, thread) == Some(failed)
-                });
+                let failed_is_local_route = failed
+                    .session_id
+                    .as_ref()
+                    .zip(failed.native_thread_id.as_ref())
+                    .is_some_and(|(session, thread)| {
+                        next.lookup_current_thread_route(session, thread) == Some(failed)
+                    });
                 if failed_is_local_route {
                     next.retire_current_thread_route(failed.clone())
-                        .map_err(|error| format!("global reducer rejected route rollback: {error}"))?;
-                    if let Some(previous) = previous.as_ref() {
-                        next.set_current_thread_route(previous.clone()).map_err(|error| {
-                            format!("global reducer rejected route restoration: {error}")
+                        .map_err(|error| {
+                            format!("global reducer rejected route rollback: {error}")
                         })?;
+                    if let Some(previous) = previous.as_ref() {
+                        next.set_current_thread_route(previous.clone())
+                            .map_err(|error| {
+                                format!("global reducer rejected route restoration: {error}")
+                            })?;
                     }
                 }
                 next.set_counters(self.sequence, self.revision);
@@ -782,10 +946,24 @@ impl State {
                 })?;
             }
             Event::GlobalRuntimeBindingLedgerClassified { record } => {
-                self.apply_global_event(&GlobalEvent::RuntimeBindingLedgerClassified { record: record.clone() })?;
+                self.apply_global_event(&GlobalEvent::RuntimeBindingLedgerClassified {
+                    record: record.clone(),
+                })?;
             }
             Event::GlobalLedgerScanReceiptRecorded { receipt } => {
-                self.apply_global_event(&GlobalEvent::LedgerScanReceiptRecorded { receipt: receipt.clone() })?;
+                self.apply_global_event(&GlobalEvent::LedgerScanReceiptRecorded {
+                    receipt: receipt.clone(),
+                })?;
+            }
+            Event::GlobalMasterGrantReplacementStarted { intent } => {
+                self.apply_global_event(&GlobalEvent::MasterGrantReplacementStarted {
+                    intent: intent.clone(),
+                })?;
+            }
+            Event::GlobalMasterGrantReplacementCompleted { receipt } => {
+                self.apply_global_event(&GlobalEvent::MasterGrantReplacementCompleted {
+                    receipt: receipt.clone(),
+                })?;
             }
         }
         Ok(())
@@ -838,12 +1016,34 @@ impl State {
     }
 
     pub fn snapshot_events(&self) -> Vec<Event> {
+        let (sequence, revision, mut events) = self.snapshot_contents();
+        events.push(Event::ReducerCheckpoint { sequence, revision });
+        events
+    }
+
+    /// Produce the restoration payload for a compacted journal baseline.
+    /// The caller stores the counters in the replay-only envelope.
+    pub fn snapshot_contents(&self) -> (u64, u64, Vec<Event>) {
         let mut events = Vec::new();
         if master_wake_snapshot_required(&self.master_wake) {
             events.push(Event::MasterWakeUpdated {
                 accumulator: self.master_wake.clone(),
             });
         }
+        let mut fences: Vec<_> = self.responsibility_fences.values().cloned().collect();
+        fences.sort_by(|a, b| a.operation_id.cmp(&b.operation_id));
+        events.extend(
+            fences
+                .into_iter()
+                .map(|fence| Event::ResponsibilityFenceSet { fence }),
+        );
+        let mut operations: Vec<_> = self.peer_lifecycle_operations.values().cloned().collect();
+        operations.sort_by(|a, b| a.operation_id.cmp(&b.operation_id));
+        events.extend(
+            operations
+                .into_iter()
+                .map(|operation| Event::PeerLifecycleOperationRecorded { operation }),
+        );
         let mut closures: Vec<_> = self.worker_closures.values().cloned().collect();
         closures.sort_by(|a, b| a.worker_id.cmp(&b.worker_id));
         events.extend(closures.into_iter().map(|receipt| Event::WorkerClosed {
@@ -1041,6 +1241,16 @@ impl State {
                 });
             }
         }
+        for intent in self.global.master_grant_replacement_intents.values() {
+            events.push(Event::GlobalMasterGrantReplacementStarted {
+                intent: intent.clone(),
+            });
+        }
+        for receipt in self.global.master_grant_replacement_receipts.values() {
+            events.push(Event::GlobalMasterGrantReplacementCompleted {
+                receipt: receipt.clone(),
+            });
+        }
         events.extend(
             self.global
                 .current_thread_routes
@@ -1098,15 +1308,15 @@ impl State {
         // snapshots above. Snapshot TaskCreated is not an additional update.
         let mut details: Vec<_> = self.board_details.iter().collect();
         details.sort_by(|left, right| left.0.cmp(right.0));
-        events.extend(details.into_iter().map(|(task_id, details)| Event::BoardDetailsChanged {
-            task_id: task_id.clone(),
-            details: details.clone(),
-        }));
-        events.push(Event::ReducerCheckpoint {
-            sequence: self.sequence,
-            revision: self.revision,
-        });
-        events
+        events.extend(
+            details
+                .into_iter()
+                .map(|(task_id, details)| Event::BoardDetailsChanged {
+                    task_id: task_id.clone(),
+                    details: details.clone(),
+                }),
+        );
+        (self.sequence, self.revision, events)
     }
 
     pub fn admission_frozen(&self) -> bool {

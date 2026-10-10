@@ -249,7 +249,10 @@ fn validate_graph_registry(graph: &Graph) -> Result<(), String> {
     register_notification_operator(&mut registry)?;
     for name in &design_operators {
         registry
-            .register(DesignGraphOperator { name })
+            .register(DesignGraphOperator {
+                name,
+                version: design_graph_operator_version(name),
+            })
             .map_err(|error| format!("DAGPIPE_OPERATOR_REGISTER_FAILED:{error}"))?;
     }
     ensure_graph_nodes_use_registered_operators(
@@ -297,7 +300,7 @@ fn ensure_graph_nodes_use_registered_operators(
 mod notification;
 use notification::{register_notification_operator, validate_notification_objects};
 
-fn embedded_graph_paths() -> [(&'static str, &'static str); 15] {
+fn embedded_graph_paths() -> [(&'static str, &'static str); 17] {
     [
         (
             "contracts/dagpipe/fix-lifecycle.graph.json",
@@ -310,6 +313,10 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 15] {
         (
             "docs/dagpipe/collab-context.graph.json",
             include_str!("../../docs/dagpipe/collab-context.graph.json"),
+        ),
+        (
+            "docs/dagpipe/collab-subagent-command.graph.json",
+            include_str!("../../docs/dagpipe/collab-subagent-command.graph.json"),
         ),
         (
             "docs/dagpipe/appserver-route-repair.graph.json",
@@ -352,6 +359,10 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 15] {
             include_str!("../../docs/dagpipe/collab-master-authority.graph.json"),
         ),
         (
+            "docs/dagpipe/collab-peer-lifecycle.graph.json",
+            include_str!("../../docs/dagpipe/collab-peer-lifecycle.graph.json"),
+        ),
+        (
             "docs/dagpipe/user-requirement-change.graph.json",
             include_str!("../../docs/dagpipe/user-requirement-change.graph.json"),
         ),
@@ -362,9 +373,10 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 15] {
     ]
 }
 
-fn design_graph_ids() -> [&'static str; 13] {
+fn design_graph_ids() -> [&'static str; 15] {
     [
         "appsdk-collab-context",
+        "appsdk-collab-subagent-command",
         "appsdk-collab-appserver-route-repair",
         "appsdk-collab-subscription-lifecycle",
         "appsdk-collab-notification-consumption",
@@ -375,12 +387,13 @@ fn design_graph_ids() -> [&'static str; 13] {
         "appsdk-collab-control-plane-reset",
         "appsdk-collab-pane-route-reconcile",
         "appsdk-collab-master-authority",
+        "appsdk-collab-peer-lifecycle",
         "appsdk-user-requirement-change",
         "appsdk-user-requirement-consumption",
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 68] {
+fn design_graph_operator_names() -> [&'static str; 79] {
     [
         "appsdk.collab_context.resolve_root",
         "appsdk.collab_context.ensure_baseline",
@@ -388,6 +401,11 @@ fn design_graph_operator_names() -> [&'static str; 68] {
         "appsdk.collab_context.identity_gate",
         "appsdk.collab_context.env_view",
         "appsdk.collab_context.emit_snapshot",
+        "appsdk.collab_subagent.parse_request",
+        "appsdk.collab_subagent.reconcile_identity",
+        "appsdk.collab_subagent.admit_request",
+        "appsdk.collab_subagent.apply_action",
+        "appsdk.collab_subagent.emit_result",
         "appsdk.collab_appserver_route.discover_live_thread",
         "appsdk.collab_appserver_route.rebind_current_route",
         "appsdk.collab_appserver_route.refresh_worker_transport_lease",
@@ -439,6 +457,12 @@ fn design_graph_operator_names() -> [&'static str; 68] {
         "appsdk.collab_authority.resolve_scope",
         "appsdk.collab_authority.transfer_master",
         "appsdk.collab_authority.emit_receipt",
+        "appsdk.collab_peer_lifecycle.receive_request",
+        "appsdk.collab_peer_lifecycle.parse_intent",
+        "appsdk.collab_peer_lifecycle.admit_request",
+        "appsdk.collab_peer_lifecycle.execute_lifecycle_branch",
+        "appsdk.collab_peer_lifecycle.readback",
+        "appsdk.collab_peer_lifecycle.emit_result",
         "appsdk.requirements.submit_authorization",
         "appsdk.requirements.check_base",
         "appsdk.requirements.decide_change",
@@ -453,8 +477,18 @@ fn design_graph_operator_names() -> [&'static str; 68] {
     ]
 }
 
+fn design_graph_operator_version(name: &str) -> &'static str {
+    match name {
+        "appsdk.collab_context.identity_gate"
+        | "appsdk.collab_context.env_view"
+        | "appsdk.collab_context.emit_snapshot" => "2",
+        _ => "1",
+    }
+}
+
 struct DesignGraphOperator {
     name: &'static str,
+    version: &'static str,
 }
 
 impl Operator for DesignGraphOperator {
@@ -463,7 +497,7 @@ impl Operator for DesignGraphOperator {
     }
 
     fn version(&self) -> &'static str {
-        "1"
+        self.version
     }
 
     fn input_type(&self) -> ValueType {

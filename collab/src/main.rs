@@ -1,6 +1,7 @@
 mod board;
 mod client;
 mod config;
+mod context_operation;
 mod dashboard;
 mod identity;
 mod install_skills;
@@ -16,16 +17,19 @@ use identity::{Identity, RuntimeIdentity};
 use proto::{Req, Resp, TransportKind};
 use scope::Scope;
 use serde::de::DeserializeOwned;
-use serde_json::json;
+use serde_json::{json, Value};
 
 mod main_live_closure;
 use main_live_closure::*;
 
-mod main_cli;
+pub mod main_cli;
 use main_cli::*;
 
 mod main_context;
 use main_context::*;
+
+#[cfg(feature = "context-cancel-test-hooks")]
+mod context_cancel_test_hooks;
 
 #[derive(Parser)]
 #[command(
@@ -165,7 +169,7 @@ fn persisted_runtime_matches_scope(scope: &Scope, ident: &Identity) -> anyhow::R
     })
 }
 
-fn runtime_for_request<'a>(ident: &'a Identity) -> anyhow::Result<&'a RuntimeIdentity> {
+pub(crate) fn runtime_for_request<'a>(ident: &'a Identity) -> anyhow::Result<&'a RuntimeIdentity> {
     let runtime = ident.runtime.as_ref().ok_or_else(|| {
         anyhow::anyhow!(
             "identity has no registered runtime binding; register the current peer before making a project request"
@@ -328,6 +332,18 @@ fn call_project<T: DeserializeOwned>(
     client::call_with_runtime_identity_at_root(&scope.sock_path(), request, &scope.root, runtime)
 }
 
+/// Emit one peer lifecycle `Resp` exactly as the daemon serialized it. A typed
+/// non-success result stays a payload and exits 2, matching `collab context`;
+/// a transport failure has no `result` and remains an error.
+fn emit_lifecycle_response(response: proto::Resp) -> anyhow::Result<()> {
+    let typed = response.data.get("result").is_some();
+    out(&response);
+    if !response.ok && typed {
+        std::process::exit(2);
+    }
+    Ok(())
+}
+
 fn main() {
     let cli = Cli::parse();
     if let Err(e) = run(cli.cmd) {
@@ -368,6 +384,15 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 out(&value);
                 return Ok(());
             }
+            let ident = me(&scope)?;
+            let request = Req::Subagent {
+                worker_id: ident.worker_id.clone(),
+                token: ident.token.clone(),
+                command,
+                launch_env: std::collections::BTreeMap::new(),
+            };
+            let value: serde_json::Value = call_project(&scope, &ident, &request)?;
+            out(&value);
             Ok(())
         }
         Cmd::Who => {
@@ -678,12 +703,16 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     let local: serde_json::Value =
                         call_project(&scope, &ident, &Req::MasterStatus)?;
                     let Some(master) = local.get("master") else {
-                        anyhow::bail!("cross-project send requires this peer to be the project master")
+                        anyhow::bail!(
+                            "cross-project send requires this peer to be the project master"
+                        )
                     };
                     if master.get("worker_id").and_then(|v| v.as_str())
                         != Some(ident.worker_id.as_str())
                     {
-                        anyhow::bail!("cross-project send requires this peer to be the project master")
+                        anyhow::bail!(
+                            "cross-project send requires this peer to be the project master"
+                        )
                     }
                     let target = project.canonicalize()?;
                     if target == scope.root.canonicalize()? {
@@ -752,20 +781,57 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     out(&v);
                     Ok(())
                 }
-                WorkerCmd::Close { id, reason } => {
-                    let ident = me(&scope)?;
-                    let v: serde_json::Value = call_project(
+                WorkerCmd::Create {
+                    target_id,
+                    cwd,
+                    model,
+                    operation_id,
+                } => {
+                    let ident = lifecycle_identity(&scope)?;
+                    emit_lifecycle_response(peer_lifecycle_create(
                         &scope,
                         &ident,
-                        &Req::WorkerClose {
-                            worker_id: ident.worker_id.clone(),
-                            token: ident.token.clone(),
-                            target_id: id,
-                            reason,
-                        },
-                    )?;
-                    out(&v);
-                    Ok(())
+                        target_id,
+                        cwd,
+                        model,
+                        operation_id,
+                    )?)
+                }
+                WorkerCmd::Read { target_id } => {
+                    let ident = lifecycle_identity(&scope)?;
+                    emit_lifecycle_response(peer_lifecycle_read(&scope, &ident, target_id)?)
+                }
+                WorkerCmd::Update {
+                    target_id,
+                    cwd,
+                    operation_id,
+                } => {
+                    let ident = lifecycle_identity(&scope)?;
+                    emit_lifecycle_response(peer_lifecycle_update(
+                        &scope,
+                        &ident,
+                        &target_id,
+                        &cwd,
+                        operation_id,
+                    )?)
+                }
+                WorkerCmd::Close {
+                    target_id,
+                    reason,
+                    operation_id,
+                } => {
+                    let ident = lifecycle_identity(&scope)?;
+                    emit_lifecycle_response(peer_lifecycle_close(
+                        &scope,
+                        &ident,
+                        &target_id,
+                        &reason,
+                        operation_id,
+                    )?)
+                }
+                WorkerCmd::Query { operation_id } => {
+                    let ident = lifecycle_identity(&scope)?;
+                    emit_lifecycle_response(peer_lifecycle_query(&scope, &ident, &operation_id)?)
                 }
             }
         }
@@ -905,8 +971,46 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             out(&v);
             Ok(())
         }
-        Cmd::Context { provide } => {
-            out(&context_snapshot(provide)?);
+        Cmd::Context {
+            operation_id,
+            project,
+            app_scope,
+            approve_identity,
+            approve_grant,
+            provide,
+            query,
+        } => {
+            match context_operation_with_options(
+                operation_id,
+                project.as_deref(),
+                app_scope.as_deref(),
+                approve_identity.as_deref(),
+                approve_grant.as_deref(),
+                provide.as_deref(),
+                query,
+            ) {
+                Ok(value) => {
+                    if value.get("ok") == Some(&Value::Bool(false)) && value.get("result").is_some()
+                    {
+                        out(&value);
+                        std::process::exit(2);
+                    }
+                    out(&value);
+                }
+                Err(error) => {
+                    if let Some(server_error) = error.downcast_ref::<client::ServerResponseError>()
+                    {
+                        let payload = &server_error.response.data;
+                        if payload.get("ok") == Some(&Value::Bool(false))
+                            && payload.get("result").is_some()
+                        {
+                            out(payload);
+                            std::process::exit(2);
+                        }
+                    }
+                    return Err(error);
+                }
+            }
             Ok(())
         }
         Cmd::Ack { ids, all } => {

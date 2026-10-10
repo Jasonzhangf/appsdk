@@ -208,11 +208,7 @@ impl AppFixture {
             .expect("run Desktop collab CLI")
     }
 
-    fn command_tui_without_explicit_endpoint(
-        &self,
-        args: &[&str],
-        thread: &str,
-    ) -> Output {
+    fn command_tui_without_explicit_endpoint(&self, args: &[&str], thread: &str) -> Output {
         Command::new(binary())
             .args(args)
             .current_dir(&self.project)
@@ -735,10 +731,7 @@ fn tui_does_not_borrow_the_desktop_managed_socket() {
     let mut fixture = AppFixture::new_desktop_managed();
     fixture.initialized = true;
 
-    let output = fixture.command_tui_without_explicit_endpoint(
-        &["init"],
-        THREAD_A,
-    );
+    let output = fixture.command_tui_without_explicit_endpoint(&["init"], THREAD_A);
     assert!(
         !output.status.success(),
         "TUI init must not synthesize a managed Desktop endpoint: stdout={} stderr={}",
@@ -966,9 +959,18 @@ fn repeated_appserver_context_reuses_the_same_identity_and_binding() {
     );
     fixture.initialized = true;
     let repeated = fixture.run_public(&["context"], THREAD_A);
-    assert_eq!(repeated["identity"]["worker_id"], context_a["identity"]["worker_id"]);
+    assert_eq!(
+        repeated["identity"]["worker_id"],
+        context_a["identity"]["worker_id"]
+    );
     assert_eq!(repeated["binding"], context_a["binding"]);
-    assert_eq!(fixture.run_public(&["who"], THREAD_A)["workers"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        fixture.run_public(&["who"], THREAD_A)["workers"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
     drop(fixture);
 }
 
@@ -1058,11 +1060,7 @@ fn one_full_supplement_establishes_and_then_replays_the_same_identity() {
     let supplement = format!(
         "{{\"session_id\":\"{THREAD_A}\",\"thread_id\":\"{THREAD_A}\",\"endpoint\":\"{endpoint}\",\"namespace\":\"codex_tui\"}}"
     );
-    let registered = fixture.command_without_native_facts(&[
-        "context",
-        "--provide",
-        &supplement,
-    ]);
+    let registered = fixture.command_without_native_facts(&["context", "--provide", &supplement]);
     assert_context_display_is_public("full-supplement context", &registered);
     assert!(
         registered.status.success(),
@@ -1084,7 +1082,8 @@ fn one_full_supplement_establishes_and_then_replays_the_same_identity() {
         "the verified endpoint must be the selected transport: {registered}"
     );
     assert_eq!(
-        registered["identity"]["transport"]["namespace"], "codex_tui"
+        registered["identity"]["transport"]["namespace"],
+        "codex_tui"
     );
     let generation = registered["binding"]["endpoint_generation"].clone();
     let binding = registered["binding"].clone();
@@ -1115,16 +1114,29 @@ fn one_thread_supplement_survives_continuously_missing_environment() {
     let missing = fixture.command_without_thread(&["context"], THREAD_A);
     assert!(missing.status.success());
     let missing: Value = serde_json::from_slice(&missing.stdout).unwrap();
-    assert_eq!(missing["requires_identity_update"]["required_fields"], json!(["thread_id"]));
+    assert_eq!(
+        missing["requires_identity_update"]["required_fields"],
+        json!(["thread_id"])
+    );
     let supplement = format!("{{\"thread_id\":\"{THREAD_A}\"}}");
-    let registered = fixture.command_without_thread(&["context", "--provide", &supplement], THREAD_A);
+    let registered =
+        fixture.command_without_thread(&["context", "--provide", &supplement], THREAD_A);
     assert_context_display_is_public("thread supplement", &registered);
-    assert!(registered.status.success(), "{}", String::from_utf8_lossy(&registered.stderr));
+    assert!(
+        registered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&registered.stderr)
+    );
     let registered: Value = serde_json::from_slice(&registered.stdout).unwrap();
     assert_eq!(registered["registered"], true);
     for args in [vec!["context"], vec!["task", "status"]] {
         let output = fixture.command_without_thread(&args, THREAD_A);
-        assert!(output.status.success(), "{args:?}: {}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "{args:?}: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         let value: Value = serde_json::from_slice(&output.stdout).unwrap();
         if args == ["context"] {
             assert_eq!(value["registered"], true);
@@ -1138,7 +1150,10 @@ fn one_thread_supplement_survives_continuously_missing_environment() {
     assert!(anonymous.status.success());
     let anonymous: Value = serde_json::from_slice(&anonymous.stdout).unwrap();
     assert_eq!(anonymous["registered"], false);
-    assert_eq!(anonymous["requires_identity_update"]["required_fields"], json!(["session_id", "thread_id", "endpoint", "namespace"]));
+    assert_eq!(
+        anonymous["requires_identity_update"]["required_fields"],
+        json!(["session_id", "thread_id", "endpoint", "namespace"])
+    );
     fixture.initialized = true;
     drop(fixture);
 }
@@ -1149,14 +1164,41 @@ fn external_linked_worktree_reuses_the_canonical_identity_without_recovery_calls
     let canonical = fixture.project.clone();
     for args in [
         vec!["init", "-q", "-b", "main"],
-        vec!["-c", "user.name=Collab Test", "-c", "user.email=collab-test@example.invalid", "commit", "--allow-empty", "-q", "-m", "initial"],
+        vec![
+            "-c",
+            "user.name=Collab Test",
+            "-c",
+            "user.email=collab-test@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-q",
+            "-m",
+            "initial",
+        ],
     ] {
-        assert!(Command::new("git").args(args).current_dir(&canonical).status().unwrap().success());
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(&canonical)
+            .status()
+            .unwrap()
+            .success());
     }
     let context = fixture.run_public(&["context"], THREAD_A);
     fixture.initialized = true;
     let linked = fixture.root.join("external-linked");
-    assert!(Command::new("git").args(["worktree", "add", "-q", "-b", "linked", linked.to_str().unwrap()]).current_dir(&canonical).status().unwrap().success());
+    assert!(Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "linked",
+            linked.to_str().unwrap()
+        ])
+        .current_dir(&canonical)
+        .status()
+        .unwrap()
+        .success());
     fixture.project = linked;
     let replay = fixture.command_public(&["context"], THREAD_A);
     let tasks = fixture.command_without_thread(&["task", "status"], THREAD_A);
@@ -1164,15 +1206,28 @@ fn external_linked_worktree_reuses_the_canonical_identity_without_recovery_calls
     // Restore the daemon's lifecycle cwd before assertions so a failing
     // regression still stops its own isolated daemon in Fixture::drop.
     fixture.project = canonical;
-    assert!(replay.status.success(), "{}{}", String::from_utf8_lossy(&replay.stdout), String::from_utf8_lossy(&replay.stderr));
+    assert!(
+        replay.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&replay.stdout),
+        String::from_utf8_lossy(&replay.stderr)
+    );
     let replay: Value = serde_json::from_slice(&replay.stdout).unwrap();
     assert_eq!(replay["project_root"], context["project_root"]);
     assert_eq!(replay["identity"], context["identity"]);
     assert_eq!(replay["binding"], context["binding"]);
-    assert!(tasks.status.success(), "{}{}", String::from_utf8_lossy(&tasks.stdout), String::from_utf8_lossy(&tasks.stderr));
+    assert!(
+        tasks.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&tasks.stdout),
+        String::from_utf8_lossy(&tasks.stderr)
+    );
     let tasks: Value = serde_json::from_slice(&tasks.stdout).unwrap();
     assert_eq!(tasks["tasks"], json!([]));
-    assert!(!worktree_baseline, "a worktree must not create a second identity baseline");
+    assert!(
+        !worktree_baseline,
+        "a worktree must not create a second identity baseline"
+    );
     drop(fixture);
 }
 

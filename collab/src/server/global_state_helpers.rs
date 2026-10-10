@@ -193,7 +193,10 @@ pub(super) fn validate_non_empty_text(field: &'static str, value: &str) -> Resul
     Ok(())
 }
 
-pub(super) fn validate_migration_identifier(field: &'static str, value: &str) -> Result<(), StateError> {
+pub(super) fn validate_migration_identifier(
+    field: &'static str,
+    value: &str,
+) -> Result<(), StateError> {
     if value.trim().is_empty() {
         return Err(StateError::invalid(field, "must not be empty"));
     }

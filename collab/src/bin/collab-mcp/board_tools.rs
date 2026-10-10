@@ -16,7 +16,10 @@ pub fn tools() -> Vec<Value> {
 }
 
 fn revision(argv: &mut Vec<String>, args: &Value) -> Result<(), String> {
-    let value = args.get("expected_revision").and_then(Value::as_u64).filter(|value| *value > 0)
+    let value = args
+        .get("expected_revision")
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
         .ok_or("expected_revision must be a positive integer")?;
     argv.extend(["--expected-revision".into(), value.to_string()]);
     Ok(())
@@ -25,7 +28,9 @@ fn revision(argv: &mut Vec<String>, args: &Value) -> Result<(), String> {
 fn boolean(args: &Value, key: &str) -> Result<bool, String> {
     match args.get(key) {
         None => Ok(false),
-        Some(value) => value.as_bool().ok_or_else(|| format!("{key} must be a boolean")),
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| format!("{key} must be a boolean")),
     }
 }
 
@@ -41,33 +46,58 @@ pub fn argv(name: &str, args: &Value) -> Result<Option<Vec<String>>, String> {
         "collab_task_decline" => "decline",
         _ => return Ok(None),
     };
-    let mut argv = vec![if name == "collab_task_decline" { "task" } else { "board" }.into(), action.into()];
-    if action == "show" { return Ok(Some(argv)); }
+    let mut argv = vec![
+        if name == "collab_task_decline" {
+            "task"
+        } else {
+            "board"
+        }
+        .into(),
+        action.into(),
+    ];
+    if action == "show" {
+        return Ok(Some(argv));
+    }
     argv.push(required(args, "id")?);
-    if action != "publish" { revision(&mut argv, args)?; }
+    if action != "publish" {
+        revision(&mut argv, args)?;
+    }
     match action {
         "publish" | "describe" => {
-            for (key, flag) in [("title","--title"),("description","--description"),("delivery_condition","--delivery-condition"),("test_condition","--test-condition")] {
+            for (key, flag) in [
+                ("title", "--title"),
+                ("description", "--description"),
+                ("delivery_condition", "--delivery-condition"),
+                ("test_condition", "--test-condition"),
+            ] {
                 argv.extend([flag.into(), required(args, key)?]);
             }
-            if action == "publish" { optional_flag(&mut argv, args, "priority", "--priority")?; }
-        },
+            if action == "publish" {
+                optional_flag(&mut argv, args, "priority", "--priority")?;
+            }
+        }
         "invite" => argv.extend(["--to".into(), required(args, "to")?]),
         "respond" => {
             let accept = boolean(args, "accept")?;
             let decline = boolean(args, "decline")?;
-            if accept == decline { return Err("choose exactly one of accept or decline".into()); }
+            if accept == decline {
+                return Err("choose exactly one of accept or decline".into());
+            }
             argv.push(if accept { "--accept" } else { "--decline" }.into());
-            if decline { argv.extend(["--reason".into(), required(args, "reason")?]); }
-        },
+            if decline {
+                argv.extend(["--reason".into(), required(args, "reason")?]);
+            }
+        }
         "withdraw" | "decline" => {
             argv.extend(["--reason".into(), required(args, "reason")?]);
-            if action == "decline" && boolean(args, "legacy_assignment")? { argv.push("--legacy-assignment".into()); }
-        },
+            if action == "decline" && boolean(args, "legacy_assignment")? {
+                argv.push("--legacy-assignment".into());
+            }
+        }
         "update" => {
             optional_flag(&mut argv, args, "status", "--status")?;
             optional_flag(&mut argv, args, "next", "--next")?;
-        },
+        }
         _ => unreachable!("known board action"),
     }
     Ok(Some(argv))
@@ -80,11 +110,25 @@ mod tests {
     #[test]
     fn public_tools_have_unique_names_and_typed_revision_constraints() {
         let tools = tools();
-        let names: std::collections::HashSet<_> = tools.iter().map(|tool| tool["name"].as_str().unwrap()).collect();
+        let names: std::collections::HashSet<_> = tools
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
         assert_eq!(names.len(), 8);
-        for tool in tools.iter().filter(|tool| !matches!(tool["name"].as_str(), Some("collab_board_show" | "collab_board_publish"))) {
-            assert_eq!(tool["inputSchema"]["properties"]["expected_revision"]["type"], "integer");
-            assert_eq!(tool["inputSchema"]["properties"]["expected_revision"]["minimum"], 1);
+        for tool in tools.iter().filter(|tool| {
+            !matches!(
+                tool["name"].as_str(),
+                Some("collab_board_show" | "collab_board_publish")
+            )
+        }) {
+            assert_eq!(
+                tool["inputSchema"]["properties"]["expected_revision"]["type"],
+                "integer"
+            );
+            assert_eq!(
+                tool["inputSchema"]["properties"]["expected_revision"]["minimum"],
+                1
+            );
         }
     }
 
@@ -92,17 +136,48 @@ mod tests {
     fn publish_preserves_multiline_business_text_as_single_cli_arguments() {
         let text = "first line\n第二行 'quoted' ; not a shell command";
         let arguments = argv("collab_board_publish", &json!({"id":"t","title":"标题","description":text,"delivery_condition":"交付","test_condition":"验证","priority":"p4"})).unwrap().unwrap();
-        let index = arguments.iter().position(|argument| argument == "--description").unwrap();
+        let index = arguments
+            .iter()
+            .position(|argument| argument == "--description")
+            .unwrap();
         assert_eq!(arguments[index + 1], text);
-        assert!(arguments.windows(2).any(|pair| pair == ["--priority", "p4"]));
+        assert!(arguments
+            .windows(2)
+            .any(|pair| pair == ["--priority", "p4"]));
     }
 
     #[test]
     fn responding_requires_one_action_and_an_observed_positive_revision() {
-        for args in [json!({"id":"t","expected_revision":2}), json!({"id":"t","expected_revision":2,"accept":true,"decline":true}), json!({"id":"t","expected_revision":2,"accept":"true"}), json!({"id":"t","expected_revision":0,"accept":true}), json!({"id":"t","expected_revision":2,"decline":true})] {
-            assert!(argv("collab_board_respond", &args).is_err(), "invalid input was accepted: {args}");
+        for args in [
+            json!({"id":"t","expected_revision":2}),
+            json!({"id":"t","expected_revision":2,"accept":true,"decline":true}),
+            json!({"id":"t","expected_revision":2,"accept":"true"}),
+            json!({"id":"t","expected_revision":0,"accept":true}),
+            json!({"id":"t","expected_revision":2,"decline":true}),
+        ] {
+            assert!(
+                argv("collab_board_respond", &args).is_err(),
+                "invalid input was accepted: {args}"
+            );
         }
-        assert_eq!(argv("collab_board_respond", &json!({"id":"t","expected_revision":2,"decline":true,"reason":"保护已有工作"})).unwrap().unwrap(), ["board", "respond", "t", "--expected-revision", "2", "--decline", "--reason", "保护已有工作"]);
+        assert_eq!(
+            argv(
+                "collab_board_respond",
+                &json!({"id":"t","expected_revision":2,"decline":true,"reason":"保护已有工作"})
+            )
+            .unwrap()
+            .unwrap(),
+            [
+                "board",
+                "respond",
+                "t",
+                "--expected-revision",
+                "2",
+                "--decline",
+                "--reason",
+                "保护已有工作"
+            ]
+        );
     }
 
     #[test]

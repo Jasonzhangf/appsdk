@@ -671,6 +671,116 @@ fn handle_migration_verify(server: &Server, worker_id: String, token: String) ->
     }))
 }
 
+/// Prepare the exact Register envelope from one reducer snapshot without
+/// consuming it. The caller owns the following sequence: durable outer
+/// `Validating` with the returned nested IDs, then
+/// [`consume_prepared_register_typed`] with this same value.
+fn prepare_register_typed(
+    server: &Server,
+    worker_id: &str,
+    token: &str,
+    transport: &SelectedTransport,
+    cwd: &str,
+    project_scope: Option<ProjectScopeId>,
+    app_scope: Option<AppServerId>,
+    reuse_existing: bool,
+) -> Result<PreparedRegisterEnvelope, String> {
+    match (project_scope, app_scope) {
+        (Some(project_scope), Some(app_scope)) => server.prepare_register_envelope_for_scope(
+            worker_id,
+            token,
+            transport,
+            project_scope,
+            cwd,
+            app_scope,
+            reuse_existing,
+        ),
+        (Some(project_scope), None) => {
+            let app_scope = AppServerId::new("tui-default").map_err(|error| error.to_string())?;
+            server.prepare_register_envelope_for_scope(
+                worker_id,
+                token,
+                transport,
+                project_scope,
+                cwd,
+                app_scope,
+                reuse_existing,
+            )
+        }
+        (None, Some(app_scope)) => {
+            let project_scope = GlobalState::canonical_project_scope(Path::new(cwd))
+                .map_err(|error| error.to_string())?;
+            server.prepare_register_envelope_for_scope(
+                worker_id,
+                token,
+                transport,
+                project_scope,
+                cwd,
+                app_scope,
+                reuse_existing,
+            )
+        }
+        (None, None) if reuse_existing => {
+            let project_scope = GlobalState::canonical_project_scope(Path::new(cwd))
+                .map_err(|error| error.to_string())?;
+            let app_scope = AppServerId::new("tui-default").map_err(|error| error.to_string())?;
+            server.prepare_register_envelope_for_scope(
+                worker_id,
+                token,
+                transport,
+                project_scope,
+                cwd,
+                app_scope,
+                true,
+            )
+        }
+        (None, None) => {
+            Err("collab registration requires an app scope for a tmux transport".into())
+        }
+    }
+}
+
+/// Consume one prepared Register envelope and project its receipt. It never
+/// regenerates the nested identifiers.
+fn consume_prepared_register_typed(
+    server: &Server,
+    worker_id: &str,
+    transport: &SelectedTransport,
+    prepared: PreparedRegisterEnvelope,
+    approval: Option<&RegisterApprovalProof>,
+) -> Resp {
+    let registered_at = match &prepared.typed.command {
+        TypedCommand::RegisterWorker { worker, .. } => worker.registered_ms,
+    };
+    let command = prepared.typed.command.clone();
+    match server.consume_prepared_register_with_approval(prepared, approval) {
+        Ok(outcome) => {
+            let (role_brief, _) = {
+                let st = server.state.lock().unwrap();
+                (role_brief(server, &st, worker_id), ())
+            };
+            Resp::data(json!({
+                "worker_id": worker_id,
+                "identity_kind": "peer",
+                "transport_selected": transport,
+                "registered_at": iso(registered_at),
+                "role_brief": role_brief,
+                "typed": true,
+                "command_id": outcome.receipt.command_id.as_str(),
+                "operation_id": outcome.receipt.operation_id.as_str(),
+                "sequence": outcome.receipt.sequence,
+                "revision": outcome.receipt.revision,
+                "replayed": outcome.replayed,
+                "command": command,
+            }))
+        }
+        Err(error) => Resp::err(format!("typed registrar rejected registration: {error}")),
+    }
+}
+
+/// Legacy Register owner: prepare then consume with no outer observation.
+/// Every other Register path must route through the same two functions so the
+/// identifier algorithm only lives in `part_02.rs`.
 fn register_typed(
     server: &Server,
     worker_id: &str,
@@ -681,93 +791,120 @@ fn register_typed(
     app_scope: Option<AppServerId>,
     reuse_existing: bool,
 ) -> Resp {
-    let typed = match (project_scope, app_scope) {
-        (Some(project_scope), Some(app_scope)) => server.typed_register_envelope_for_scope(
-            worker_id,
-            token,
-            transport,
-            project_scope,
-            cwd,
-            app_scope,
-            reuse_existing,
-        ),
-        (Some(project_scope), None) => {
-            let app_scope = AppServerId::new("tui-default").map_err(|error| error.to_string());
-            match app_scope {
-                Ok(app_scope) => server.typed_register_envelope_for_scope(
-                    worker_id,
-                    token,
-                    transport,
-                    project_scope,
-                    cwd,
-                    app_scope,
-                    reuse_existing,
-                ),
-                Err(error) => Err(error),
-            }
-        }
-        (None, Some(app_scope)) => match GlobalState::canonical_project_scope(Path::new(cwd)) {
-            Ok(project_scope) => server.typed_register_envelope_for_scope(
-                worker_id,
-                token,
-                transport,
-                project_scope,
-                cwd,
-                app_scope,
-                reuse_existing,
-            ),
-            Err(error) => Err(error.to_string()),
-        },
-        (None, None) if reuse_existing => {
-            let project_scope = GlobalState::canonical_project_scope(Path::new(cwd))
-                .map_err(|error| error.to_string());
-            let app_scope = AppServerId::new("tui-default").map_err(|error| error.to_string());
-            match (project_scope, app_scope) {
-                (Ok(project_scope), Ok(app_scope)) => server.typed_register_envelope_for_scope(
-                    worker_id,
-                    token,
-                    transport,
-                    project_scope,
-                    cwd,
-                    app_scope,
-                    true,
-                ),
-                (Err(error), _) | (_, Err(error)) => Err(error),
-            }
-        }
-        (None, None) => {
-            Err("collab registration requires an app scope for a tmux transport".into())
+    register_typed_observed(
+        server,
+        worker_id,
+        token,
+        transport,
+        cwd,
+        project_scope,
+        app_scope,
+        reuse_existing,
+        None,
+        None,
+    )
+}
+
+/// Prepare then, before consume, hand the exact prepared envelope to
+/// `before_consume`. A hook error aborts the operation without consuming, so a
+/// failed outer durable binding can never dispatch Register.
+fn register_typed_observed(
+    server: &Server,
+    worker_id: &str,
+    token: &str,
+    transport: &SelectedTransport,
+    cwd: &str,
+    project_scope: Option<ProjectScopeId>,
+    app_scope: Option<AppServerId>,
+    reuse_existing: bool,
+    register_approval: Option<&RegisterApprovalProof>,
+    before_consume: Option<&mut dyn FnMut(&PreparedRegisterEnvelope) -> Result<(), String>>,
+) -> Resp {
+    let prepared = match prepare_register_typed(
+        server,
+        worker_id,
+        token,
+        transport,
+        cwd,
+        project_scope,
+        app_scope,
+        reuse_existing,
+    ) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return Resp::err(format!("typed registrar failed to build command: {error}"))
         }
     };
-    match typed {
-        Ok(typed) => match server.typed_dispatch(typed.clone()) {
-            Ok(outcome) => {
-                let (role_brief, registered_at) = {
-                    let st = server.state.lock().unwrap();
-                    let registered_at = match &typed.command {
-                        TypedCommand::RegisterWorker { worker, .. } => worker.registered_ms,
-                    };
-                    (role_brief(server, &st, worker_id), registered_at)
-                };
-                Resp::data(json!({
-                    "worker_id": worker_id,
-                    "identity_kind": "peer",
-                    "transport_selected": transport,
-                    "registered_at": iso(registered_at),
-                    "role_brief": role_brief,
-                    "typed": true,
-                    "command_id": outcome.receipt.command_id.as_str(),
-                    "operation_id": outcome.receipt.operation_id.as_str(),
-                    "sequence": outcome.receipt.sequence,
-                    "revision": outcome.receipt.revision,
-                    "replayed": outcome.replayed,
-                    "command": typed.command,
-                }))
-            }
-            Err(error) => Resp::err(format!("typed registrar rejected registration: {error}")),
-        },
-        Err(error) => Resp::err(format!("typed registrar failed to build command: {error}")),
+    if let Some(before_consume) = before_consume {
+        if let Err(error) = before_consume(&prepared) {
+            return Resp::err(error);
+        }
     }
+    let response =
+        consume_prepared_register_typed(server, worker_id, transport, prepared, register_approval);
+    clear_context_cancel_operation();
+    crate::server::clear_context_register_start_binding();
+    response
+}
+
+/// Ordinary Create has already reserved an exact peer id. Its execution cwd
+/// may be a linked worktree; registration and route identity remain the main.
+pub(crate) fn register_created_peer(
+    server: &Server,
+    worker_id: &str,
+    token: &str,
+    context: &ProjectContext,
+    candidate: &crate::proto::AppServerCandidate,
+) -> Resp {
+    let route = match crate::scope::canonical_route_for_identity(
+        &server.host_paths,
+        Path::new(&candidate.cwd),
+        &context.app_scope_id,
+    ) {
+        Ok(route) if route.root == PathBuf::from(context.project_scope.as_str()) => route,
+        _ => return Resp::err("PEER_LIFECYCLE_CREATE_SCOPE_MISMATCH"),
+    };
+    let selected = match crate::client::adapters::verify_candidate(candidate) {
+        Ok(selected) => selected,
+        Err(error) => return Resp::err(format!("APPSERVER_ENDPOINT_REJECTED: {error}")),
+    };
+    if server.state.lock().unwrap().workers.contains_key(worker_id) {
+        return Resp::err("PEER_LIFECYCLE_PEER_RESERVED");
+    }
+    let main = route.root.to_string_lossy().into_owned();
+    let response = register_typed_observed(
+        server,
+        worker_id,
+        token,
+        &selected,
+        &main,
+        Some(context.project_scope.clone()),
+        Some(context.app_scope_id.clone()),
+        false,
+        None,
+        None,
+    );
+    if !response.ok {
+        return response;
+    }
+    if let Err(error) = commit_current_thread_route_for_runtime(
+        server,
+        server,
+        worker_id,
+        &main,
+        Some(&context.app_scope_id),
+    ) {
+        let cleanup = retire_runtime_binding_after_route_failure(
+            server,
+            worker_id,
+            &main,
+            Some(&context.app_scope_id),
+            worker_id,
+            "Create route publication failed",
+        );
+        return Resp::err(format!("{error}; route cleanup: {cleanup:?}"));
+    }
+    response
 }
 
 pub(crate) fn handle_register_with_app_scope(
@@ -975,6 +1112,77 @@ fn handle_register_with_app_scope_inner(
     candidates: Option<TransportCandidates>,
     recover_existing: bool,
 ) -> Resp {
+    handle_register_with_app_scope_inner_bound(
+        server,
+        worker_id,
+        token,
+        cwd,
+        app_scope,
+        candidates,
+        recover_existing,
+        None,
+    )
+}
+
+/// The daemon-issued approval proof may admit the approved target's Register
+/// even when its credential is stale, but only for the exact target and route
+/// scope the proof names. The proof never substitutes for the real binding the
+/// reducer commits; it only relaxes the ordinary token-ownership check.
+fn approved_register_authorized(
+    proof: Option<&RegisterApprovalProof>,
+    worker_id: &str,
+    project_scope: Option<&ProjectScopeId>,
+    app_scope: Option<&AppServerId>,
+) -> bool {
+    match (proof, project_scope, app_scope) {
+        (Some(proof), Some(project_scope), Some(app_scope)) => {
+            proof.authorizes(worker_id, project_scope.as_str(), app_scope.as_str())
+        }
+        _ => false,
+    }
+}
+
+/// Recheck the exact approved incumbent fence at the Register owner boundary,
+/// immediately before effects. The proof records the committed incumbent the
+/// identity owner validated; if the reducer has since moved to another binding
+/// or generation, the approval is stale and must fail closed with the accepted
+/// typed conflict instead of committing an unapproved replacement.
+fn approved_register_fence_current(
+    state: &State,
+    proof: &RegisterApprovalProof,
+    project_scope: &ProjectScopeId,
+    app_scope: &AppServerId,
+) -> bool {
+    let route_scope = RouteScope {
+        app_scope_id: app_scope.clone(),
+        project_scope_id: project_scope.clone(),
+    };
+    let Ok(binding_id) = BindingId::new(proof.incumbent_binding_id.clone()) else {
+        return false;
+    };
+    state
+        .global
+        .lookup_binding_for(&route_scope, &binding_id)
+        .is_some_and(|binding| {
+            binding.agent_id.as_str() == proof.target_identity
+                && binding.binding_id.as_str() == proof.incumbent_binding_id
+                && binding.endpoint_generation == proof.incumbent_endpoint_generation
+        })
+}
+
+/// Register owner with an optional outer-operation binder. When the binder is
+/// present, the outer `Validating` phase with the exact nested IDs is synced
+/// before the same prepared envelope is consumed.
+fn handle_register_with_app_scope_inner_bound(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    cwd: String,
+    app_scope: Option<AppServerId>,
+    candidates: Option<TransportCandidates>,
+    recover_existing: bool,
+    outer_binding: Option<&RegisterOuterBinding>,
+) -> Resp {
     let candidates = candidates.unwrap_or_default();
     let selected = match validate_transport_candidates(server, &candidates, &cwd) {
         Ok(selected) => selected,
@@ -1047,15 +1255,46 @@ fn handle_register_with_app_scope_inner(
                         && thread.as_deref() == selected.thread_id.as_deref()
                         && endpoint.as_ref() == selected.tmux_endpoint.as_ref()
                 });
-        if existing.token != token {
+        let approval = outer_binding.and_then(RegisterOuterBinding::approval);
+        let approved_register = approved_register_authorized(
+            approval,
+            &worker_id,
+            existing_project_scope.as_ref(),
+            app_scope.as_ref(),
+        );
+        if existing.token != token && !approved_register {
             return Resp::err(format!(
                 "TOKEN_MISMATCH: worker {} is registered by another token",
                 worker_id
             ));
         }
-        let reuse_existing = same_runtime_key && !recover_existing;
+        // The proof only relaxes the token check. It must still name exactly
+        // the committed incumbent, or the approval is stale and the owner
+        // refuses before any prepare/consume.
+        if existing.token != token {
+            let Some(proof) = approval else {
+                return Resp::err("APPROVAL_STALE_CONFLICT");
+            };
+            let (Some(project_scope), Some(app_scope)) =
+                (existing_project_scope.as_ref(), app_scope.as_ref())
+            else {
+                return Resp::err("APPROVAL_STALE_CONFLICT");
+            };
+            if !approved_register_fence_current(&st, proof, project_scope, app_scope) {
+                return Resp::err("APPROVAL_STALE_CONFLICT");
+            }
+        }
+        let reuse_existing = same_runtime_key && !recover_existing && !approved_register;
         drop(st);
-        let mut resp = register_typed(
+        let mut before_consume = |prepared: &PreparedRegisterEnvelope| match outer_binding {
+            Some(binding) => {
+                binding.bind_validating(prepared)?;
+                binding.arbitrate_owner_start()?;
+                binding.promote_after_start()
+            }
+            None => Ok(()),
+        };
+        let mut resp = register_typed_observed(
             server,
             &worker_id,
             &token,
@@ -1064,6 +1303,8 @@ fn handle_register_with_app_scope_inner(
             existing_project_scope,
             app_scope,
             reuse_existing,
+            outer_binding.and_then(RegisterOuterBinding::approval),
+            Some(&mut before_consume),
         );
         if resp.ok {
             if reuse_existing {
@@ -1075,8 +1316,25 @@ fn handle_register_with_app_scope_inner(
         return resp;
     }
     drop(st);
-    register_typed(
-        server, &worker_id, &token, &selected, &cwd, None, app_scope, false,
+    let mut before_consume = |prepared: &PreparedRegisterEnvelope| match outer_binding {
+        Some(binding) => {
+            binding.bind_validating(prepared)?;
+            binding.arbitrate_owner_start()?;
+            binding.promote_after_start()
+        }
+        None => Ok(()),
+    };
+    register_typed_observed(
+        server,
+        &worker_id,
+        &token,
+        &selected,
+        &cwd,
+        None,
+        app_scope,
+        false,
+        outer_binding.and_then(RegisterOuterBinding::approval),
+        Some(&mut before_consume),
     )
 }
 
@@ -1345,8 +1603,6 @@ fn current_master_worker_record(
     Ok(current_master_worker_id(state, route_scope.as_ref())
         .and_then(|id| state.workers.get(&id).cloned()))
 }
-
-
 
 fn communication_recovery_brief() -> serde_json::Value {
     json!({

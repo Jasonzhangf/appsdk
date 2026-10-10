@@ -20,6 +20,59 @@ fn collab_context_design_graph_is_single_source_single_sink_and_registered() {
 }
 
 #[test]
+fn collab_subagent_command_design_graph_is_single_source_single_sink_and_registered() {
+    let (_, source) = embedded_graph_paths()
+        .into_iter()
+        .find(|(path, _)| *path == "docs/dagpipe/collab-subagent-command.graph.json")
+        .expect("the collab subagent command graph is embedded");
+    let graph = parse_graph_json(source).unwrap();
+    ensure_single_source_single_sink(&graph).unwrap();
+    validate_graph_registry(&graph).unwrap();
+    assert_eq!(graph.id, "appsdk-collab-subagent-command");
+    assert_eq!(
+        graph
+            .nodes
+            .iter()
+            .map(|node| node.operator.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "appsdk.collab_subagent.parse_request",
+            "appsdk.collab_subagent.reconcile_identity",
+            "appsdk.collab_subagent.admit_request",
+            "appsdk.collab_subagent.apply_action",
+            "appsdk.collab_subagent.emit_result",
+        ]
+    );
+}
+
+#[test]
+fn collab_peer_lifecycle_design_graph_is_single_source_single_sink_and_registered() {
+    let (_, source) = embedded_graph_paths()
+        .into_iter()
+        .find(|(path, _)| *path == "docs/dagpipe/collab-peer-lifecycle.graph.json")
+        .expect("the collab peer lifecycle graph is embedded");
+    let graph = parse_graph_json(source).unwrap();
+    ensure_single_source_single_sink(&graph).unwrap();
+    validate_graph_registry(&graph).unwrap();
+    assert_eq!(graph.id, "appsdk-collab-peer-lifecycle");
+    assert_eq!(
+        graph
+            .nodes
+            .iter()
+            .map(|node| node.operator.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "appsdk.collab_peer_lifecycle.receive_request",
+            "appsdk.collab_peer_lifecycle.parse_intent",
+            "appsdk.collab_peer_lifecycle.admit_request",
+            "appsdk.collab_peer_lifecycle.execute_lifecycle_branch",
+            "appsdk.collab_peer_lifecycle.readback",
+            "appsdk.collab_peer_lifecycle.emit_result",
+        ]
+    );
+}
+
+#[test]
 fn graph_manifest_covers_every_embedded_graph_and_validate_reports_contracted_designs() {
     let result = validate_graph_contracts().unwrap();
     let graph_ids = result["graphs"]
@@ -30,6 +83,8 @@ fn graph_manifest_covers_every_embedded_graph_and_validate_reports_contracted_de
         .collect::<Vec<_>>();
     assert!(graph_ids.contains(&"appsdk-fix-lifecycle"));
     assert!(graph_ids.contains(&"appsdk-notification-object"));
+    assert!(graph_ids.contains(&"appsdk-collab-subagent-command"));
+    assert!(graph_ids.contains(&"appsdk-collab-peer-lifecycle"));
     assert!(graph_ids.contains(&"appsdk-collab-appserver-route-repair"));
     assert!(graph_ids.contains(&"appsdk-collab-subscription-lifecycle"));
     assert!(graph_ids.contains(&"appsdk-collab-notification-consumption"));

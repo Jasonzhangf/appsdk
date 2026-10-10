@@ -36,9 +36,14 @@ const READINESS_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[derive(Debug, serde::Deserialize)]
 struct PingReadiness {
-    workers: u64,
-    messages: u64,
-    tasks: u64,
+    #[serde(default)]
+    workers: Option<u64>,
+    #[serde(default)]
+    messages: Option<u64>,
+    #[serde(default)]
+    tasks: Option<u64>,
+    #[serde(default)]
+    degraded: Option<bool>,
     now: String,
 }
 
@@ -187,6 +192,17 @@ pub fn call_with_context<T: DeserializeOwned>(
     call_with_stream(sock, stream, req, project_context)
 }
 
+/// Return the daemon's complete response for context operations that can carry
+/// a valid typed `ok: false` result inside `Resp::data`.
+pub fn call_with_context_response(
+    sock: &Path,
+    req: &Req,
+    project_context: Option<ProjectContext>,
+) -> anyhow::Result<Resp> {
+    let stream = connect(sock).map_err(|error| connection_error(sock, error))?;
+    call_with_stream_response(sock, stream, req, project_context)
+}
+
 pub fn call_with_stream<T: DeserializeOwned>(
     sock: &Path,
     mut stream: UnixStream,
@@ -240,6 +256,51 @@ pub fn call_with_stream<T: DeserializeOwned>(
             sock.display()
         )
     })
+}
+
+pub fn call_with_stream_response(
+    sock: &Path,
+    mut stream: UnixStream,
+    req: &Req,
+    project_context: Option<ProjectContext>,
+) -> anyhow::Result<Resp> {
+    if let Some(project_context) = project_context.as_ref() {
+        project_context.validate()?;
+    }
+    let line = serde_json::to_string(&RequestEnvelope::new(req.clone(), project_context))?;
+    stream.write_all(line.as_bytes()).with_context(|| {
+        format!(
+            "DAEMON_UNKNOWN: failed to send request to {}",
+            sock.display()
+        )
+    })?;
+    stream.write_all(b"\n").with_context(|| {
+        format!(
+            "DAEMON_UNKNOWN: failed to send request to {}",
+            sock.display()
+        )
+    })?;
+    stream.flush().with_context(|| {
+        format!(
+            "DAEMON_UNKNOWN: failed to flush request to {}",
+            sock.display()
+        )
+    })?;
+    let mut reader = std::io::BufReader::new(stream);
+    let mut buf = String::new();
+    let bytes_read = reader.read_line(&mut buf).with_context(|| {
+        format!(
+            "DAEMON_UNKNOWN: failed to read response from {}",
+            sock.display()
+        )
+    })?;
+    if bytes_read == 0 {
+        anyhow::bail!(
+            "DAEMON_UNKNOWN: daemon closed the connection before replying at {}",
+            sock.display()
+        );
+    }
+    serde_json::from_str(buf.trim()).context("DAEMON_UNKNOWN: malformed response from server")
 }
 
 /// Round-trip a request using the appserver identity registered by the
@@ -733,7 +794,9 @@ mod tests {
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = String::new();
-            BufReader::new(stream.try_clone().unwrap()).read_line(&mut request).unwrap();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
             // The daemon flattens `Resp::data` into the response object, so the
             // outcome fields sit at the top level with no `data` key. This is the
             // real shape observed from the running daemon: a stale board invite
@@ -756,7 +819,10 @@ mod tests {
         let server_error = error
             .downcast_ref::<ServerResponseError>()
             .expect("the typed response error must stay in the chain");
-        assert_eq!(server_error.response.data["message_id"], "committed-message");
+        assert_eq!(
+            server_error.response.data["message_id"],
+            "committed-message"
+        );
         assert_eq!(server_error.response.data["repair_required"], true);
         assert_eq!(server_error.response.data["current_revision"], 4);
         // Serializing the retained response keeps the flattened wire shape, so
@@ -767,8 +833,14 @@ mod tests {
         assert_eq!(rendered["message_id"], "committed-message");
         assert_eq!(rendered["repair_required"], true);
         let diagnostic = format!("{:?}", error.root_cause());
-        assert!(diagnostic.contains("repair_required"), "response data was lost: {diagnostic}");
-        assert!(diagnostic.contains("committed-message"), "durable message id was lost: {diagnostic}");
+        assert!(
+            diagnostic.contains("repair_required"),
+            "response data was lost: {diagnostic}"
+        );
+        assert!(
+            diagnostic.contains("committed-message"),
+            "durable message id was lost: {diagnostic}"
+        );
     }
 
     #[test]
@@ -1125,7 +1197,10 @@ mod tests {
     fn ensure_server_drops_the_extended_window_once_the_start_lock_is_released() {
         let fixture = TempServerDir::new("abandoned-daemon");
         let lock = hold_start_lock(&fixture);
-        assert_eq!(daemon_status(&fixture.socket()), DaemonAvailability::Starting);
+        assert_eq!(
+            daemon_status(&fixture.socket()),
+            DaemonAvailability::Starting
+        );
 
         // The daemon gives up and releases the start lock without ever binding
         // its socket. The waiter must fall back to the short window instead of

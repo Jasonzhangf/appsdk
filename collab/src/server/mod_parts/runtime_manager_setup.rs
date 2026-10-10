@@ -1,5 +1,17 @@
 impl ProjectRuntimeManager {
     fn new(host: Arc<Server>, host_paths: &crate::scope::HostPaths) -> Result<Arc<Self>, String> {
+        let operation_journal = Arc::new(
+            crate::server::operation_journal::OperationJournal::open(host_paths.journal_path())
+                .map_err(|error| format!("OPERATION_JOURNAL_REPLAY_FAILED: {error}"))?,
+        );
+        Self::new_with_operation_journal(host, host_paths, operation_journal)
+    }
+
+    fn new_with_operation_journal(
+        host: Arc<Server>,
+        host_paths: &crate::scope::HostPaths,
+        operation_journal: Arc<crate::server::operation_journal::OperationJournal>,
+    ) -> Result<Arc<Self>, String> {
         let host_root = GlobalState::canonical_project_scope(&host.root)
             .map_err(|error| format!("PROJECT_SCOPE_UNKNOWN: {error}"))?;
         let route_journal = host_paths.state_root().join("routes.jsonl");
@@ -165,6 +177,7 @@ impl ProjectRuntimeManager {
             host,
             host_root: PathBuf::from(host_root.as_str()),
             route_journal,
+            operation_journal,
             routes: Mutex::new(routes),
             project_locks: Mutex::new(std::collections::BTreeMap::new()),
             register_gate: Mutex::new(()),
@@ -217,14 +230,10 @@ impl ProjectRuntimeManager {
                     return false;
                 }
                 let binding_text = binding.binding_id.as_str();
-                let command_prefix = format!(
-                    "register-{binding_text}-{}",
-                    binding.endpoint_generation
-                );
-                let operation_prefix = format!(
-                    "register-op-{binding_text}-{}",
-                    binding.endpoint_generation
-                );
+                let command_prefix =
+                    format!("register-{binding_text}-{}", binding.endpoint_generation);
+                let operation_prefix =
+                    format!("register-op-{binding_text}-{}", binding.endpoint_generation);
                 let recorded_operation = state.global.command_receipts.values().any(|receipt| {
                     let command = receipt.command_id.as_str();
                     let operation = receipt.operation_id.as_str();
@@ -235,15 +244,19 @@ impl ProjectRuntimeManager {
                     })
                 });
                 recorded_operation
-                    &&
-                state
-                    .global
-                    .lookup_master_grant_for(&binding.route_scope(), &binding.binding_id)
-                    .is_some_and(|grant| grant.endpoint_generation == binding.endpoint_generation)
-                    && state.workers.get(binding.agent_id.as_str()).is_some_and(|worker| {
-                        selected_transport_for_worker(worker)
-                            .is_some_and(|transport| transport.kind == TransportKind::Tmux)
-                    })
+                    && state
+                        .global
+                        .lookup_master_grant_for(&binding.route_scope(), &binding.binding_id)
+                        .is_some_and(|grant| {
+                            grant.endpoint_generation == binding.endpoint_generation
+                        })
+                    && state
+                        .workers
+                        .get(binding.agent_id.as_str())
+                        .is_some_and(|worker| {
+                            selected_transport_for_worker(worker)
+                                .is_some_and(|transport| transport.kind == TransportKind::Tmux)
+                        })
             })
             .cloned()
             .collect()
@@ -541,10 +554,7 @@ impl ProjectRuntimeManager {
                     crate::client::adapters::tmux::same_owned_pane(previous, endpoint)
                 });
                 if same_tmux_pane {
-                    if !pane_claims
-                        .iter()
-                        .any(|(_, existing)| existing == binding)
-                    {
+                    if !pane_claims.iter().any(|(_, existing)| existing == binding) {
                         pane_claims.push((runtime.clone(), binding.clone()));
                     }
                     continue;

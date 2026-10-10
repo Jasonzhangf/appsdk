@@ -5,12 +5,12 @@
 //! project-local [`super::state::State`] data model; the daemon reducer imports
 //! these types without creating a second journal or notification store.
 
+use super::global_state_helpers::*;
 pub use crate::identity::{
     AgentId, AppServerId, BindingId, CommandId, NativeThreadId, OperationId, RuntimeId, SessionId,
 };
 pub use crate::proto::TmuxEndpoint;
 pub use crate::scope::{ProjectScopeId, RouteScope};
-use super::global_state_helpers::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -74,13 +74,22 @@ impl RuntimeBindingLedgerRecord {
         validate_binding_id(&self.binding_id)?;
         validate_operation_id(&self.operation_id)?;
         if self.endpoint_generation == 0 {
-            return Err(StateError::invalid("runtime binding ledger endpoint_generation", "must be non-zero"));
+            return Err(StateError::invalid(
+                "runtime binding ledger endpoint_generation",
+                "must be non-zero",
+            ));
         }
         if self.classified_ms < 0 {
-            return Err(StateError::invalid("runtime binding ledger classified_ms", "must be non-negative"));
+            return Err(StateError::invalid(
+                "runtime binding ledger classified_ms",
+                "must be non-negative",
+            ));
         }
         if self.receipt_id.trim().is_empty() || self.receipt_id.len() > 128 {
-            return Err(StateError::invalid("runtime binding ledger receipt_id", "must be a non-empty short identifier"));
+            return Err(StateError::invalid(
+                "runtime binding ledger receipt_id",
+                "must be a non-empty short identifier",
+            ));
         }
         Ok(())
     }
@@ -549,8 +558,6 @@ impl RuntimeBindingTombstone {
     }
 }
 
-
-
 /// A master capability is an explicit grant bound to one live runtime
 /// generation.  A registration has no role field: absence of this record is
 /// the durable default `Peer` role.
@@ -562,6 +569,10 @@ pub struct MasterGrant {
     pub boundary: String,
     pub granted_by: String,
     pub approval: String,
+    #[serde(default)]
+    pub grant_id: String,
+    #[serde(default)]
+    pub grant_generation: u64,
     pub binding_id: BindingId,
     pub endpoint_generation: u64,
     pub granted_at_ms: i64,
@@ -587,6 +598,8 @@ impl MasterGrant {
             boundary: boundary.into(),
             granted_by: granted_by.into(),
             approval: approval.into(),
+            grant_id: binding_id.as_str().to_owned(),
+            grant_generation: 1,
             binding_id,
             endpoint_generation,
             granted_at_ms,
@@ -595,11 +608,70 @@ impl MasterGrant {
         Ok(grant)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_resource(
+        project_scope: ProjectScopeId,
+        app_scope_id: AppServerId,
+        agent_id: AgentId,
+        boundary: impl Into<String>,
+        granted_by: impl Into<String>,
+        approval: impl Into<String>,
+        grant_id: impl Into<String>,
+        grant_generation: u64,
+        binding_id: BindingId,
+        endpoint_generation: u64,
+        granted_at_ms: i64,
+    ) -> Result<Self, StateError> {
+        let grant = Self {
+            project_scope,
+            app_scope_id,
+            agent_id,
+            boundary: boundary.into(),
+            granted_by: granted_by.into(),
+            approval: approval.into(),
+            grant_id: grant_id.into(),
+            grant_generation,
+            binding_id,
+            endpoint_generation,
+            granted_at_ms,
+        };
+        grant.validate()?;
+        Ok(grant)
+    }
+
+    pub fn resource_id(&self) -> &str {
+        if self.grant_id.is_empty() {
+            self.binding_id.as_str()
+        } else {
+            self.grant_id.as_str()
+        }
+    }
+
+    pub fn resource_generation(&self) -> u64 {
+        if self.grant_generation == 0 {
+            self.endpoint_generation
+        } else {
+            self.grant_generation
+        }
+    }
+
     pub fn validate(&self) -> Result<(), StateError> {
         validate_project_scope(&self.project_scope)?;
         validate_app_scope(&self.app_scope_id)?;
         validate_agent_id(&self.agent_id)?;
         validate_binding_id(&self.binding_id)?;
+        if self.grant_id.chars().any(char::is_control) {
+            return Err(StateError::invalid(
+                "master grant id",
+                "must not contain control characters",
+            ));
+        }
+        if self.grant_generation == 0 && self.endpoint_generation == 0 {
+            return Err(StateError::invalid(
+                "master grant generation",
+                "must be non-zero",
+            ));
+        }
         validate_non_empty_text("master grant boundary", &self.boundary)?;
         validate_non_empty_text("master grant actor", &self.granted_by)?;
         if self.approval.trim().is_empty() {
@@ -609,6 +681,95 @@ impl MasterGrant {
             return Err(StateError::invalid(
                 "master grant approval",
                 "must not contain control characters",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Project-local state owned by this model.  It contains only registrations,
+/// runtime bindings and capability grants.  Tasks, messages and legacy
+/// notification records are intentionally absent so this module cannot become
+/// a second copy of `server::state::State`.
+/// One durable, immutable intent for an approved master-grant replacement.
+/// It is written to the existing resident authority journal before the first
+/// grant effect so a started grant owner is provable across restart without
+/// replaying that effect. It carries no token or cancellation capability.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MasterGrantReplacementIntent {
+    pub operation_id: String,
+    pub intent_id: String,
+    pub project_scope: ProjectScopeId,
+    pub app_scope_id: AppServerId,
+    pub target_identity: AgentId,
+    pub incumbent_grant_id: String,
+    pub incumbent_grant_generation: u64,
+    pub binding_id: BindingId,
+    pub endpoint_generation: u64,
+    pub expected_grant_id: String,
+    pub expected_grant_generation: u64,
+    pub approval_digest: String,
+    pub started_at_ms: i64,
+}
+
+impl MasterGrantReplacementIntent {
+    pub fn validate(&self) -> Result<(), StateError> {
+        validate_non_empty_text("grant replacement operation id", &self.operation_id)?;
+        validate_non_empty_text("grant replacement intent id", &self.intent_id)?;
+        validate_project_scope(&self.project_scope)?;
+        validate_app_scope(&self.app_scope_id)?;
+        validate_agent_id(&self.target_identity)?;
+        validate_binding_id(&self.binding_id)?;
+        if self.expected_grant_generation == 0 {
+            return Err(StateError::invalid(
+                "grant replacement expected generation",
+                "must be non-zero",
+            ));
+        }
+        if self.started_at_ms < 0 {
+            return Err(StateError::invalid(
+                "grant replacement started_at_ms",
+                "must be non-negative",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// One immutable completion receipt for a grant replacement. It requires a
+/// matching durable intent and binds the exact resulting grant resource.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MasterGrantReplacementReceipt {
+    pub operation_id: String,
+    pub intent_id: String,
+    pub project_scope: ProjectScopeId,
+    pub app_scope_id: AppServerId,
+    pub grant_id: String,
+    pub grant_generation: u64,
+    pub binding_id: BindingId,
+    pub endpoint_generation: u64,
+    pub completed_at_ms: i64,
+}
+
+impl MasterGrantReplacementReceipt {
+    pub fn validate(&self) -> Result<(), StateError> {
+        validate_non_empty_text("grant replacement operation id", &self.operation_id)?;
+        validate_non_empty_text("grant replacement intent id", &self.intent_id)?;
+        validate_project_scope(&self.project_scope)?;
+        validate_app_scope(&self.app_scope_id)?;
+        validate_binding_id(&self.binding_id)?;
+        if self.grant_generation == 0 {
+            return Err(StateError::invalid(
+                "grant replacement receipt generation",
+                "must be non-zero",
+            ));
+        }
+        if self.completed_at_ms < 0 {
+            return Err(StateError::invalid(
+                "grant replacement completed_at_ms",
+                "must be non-negative",
             ));
         }
         Ok(())
@@ -726,10 +887,15 @@ impl ProjectState {
         for (ledger_key, ledger) in &self.runtime_binding_ledger {
             ledger.validate()?;
             if *ledger_key != ledger.key() {
-                return Err(StateError::Invariant(format!("runtime binding ledger key does not match record")));
+                return Err(StateError::Invariant(format!(
+                    "runtime binding ledger key does not match record"
+                )));
             }
             let Some(binding) = self.runtime_bindings.get(ledger.binding_id.as_str()) else {
-                return Err(StateError::Invariant(format!("runtime binding ledger references missing binding {}", ledger.binding_id)));
+                return Err(StateError::Invariant(format!(
+                    "runtime binding ledger references missing binding {}",
+                    ledger.binding_id
+                )));
             };
             if binding.project_scope != ledger.project_scope
                 || binding.app_scope_id != ledger.app_scope_id
@@ -737,7 +903,10 @@ impl ProjectState {
                 || binding.runtime_id != ledger.runtime_id
                 || binding.binding_id != ledger.binding_id
             {
-                return Err(StateError::Invariant(format!("runtime binding ledger coordinates disagree for {}", ledger.binding_id)));
+                return Err(StateError::Invariant(format!(
+                    "runtime binding ledger coordinates disagree for {}",
+                    ledger.binding_id
+                )));
             }
         }
         Ok(())
@@ -1393,6 +1562,13 @@ pub struct GlobalState {
     pub migration_commit_evidence: BTreeMap<String, MigrationCommitEvidence>,
     #[serde(default)]
     pub ledger_scan_receipts: BTreeMap<String, LedgerScanReceipt>,
+    /// Durable, immutable grant-replacement intents and completion receipts.
+    /// Keyed by the outer operation id; the intent is written before the first
+    /// grant effect so an unresolved start survives restart without replay.
+    #[serde(default)]
+    pub master_grant_replacement_intents: BTreeMap<String, MasterGrantReplacementIntent>,
+    #[serde(default)]
+    pub master_grant_replacement_receipts: BTreeMap<String, MasterGrantReplacementReceipt>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1410,10 +1586,16 @@ pub struct LedgerScanReceipt {
 impl LedgerScanReceipt {
     pub fn validate(&self) -> Result<(), StateError> {
         if self.scan_id.trim().is_empty() || self.scan_id.len() > 128 {
-            return Err(StateError::invalid("ledger scan receipt scan_id", "must be a non-empty short identifier"));
+            return Err(StateError::invalid(
+                "ledger scan receipt scan_id",
+                "must be a non-empty short identifier",
+            ));
         }
         if self.scanned_ms < 0 {
-            return Err(StateError::invalid("ledger scan receipt scanned_ms", "must be non-negative"));
+            return Err(StateError::invalid(
+                "ledger scan receipt scanned_ms",
+                "must be non-negative",
+            ));
         }
         Ok(())
     }

@@ -107,6 +107,159 @@ pub struct IdentityFacts {
     pub dsh_session_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityOperationPhase {
+    Admitted,
+    Validating,
+    InnerDispatched,
+    EffectObserved,
+    Completed,
+    Refused,
+    Failed,
+    Unknown,
+    Partial,
+    Cancelled,
+}
+
+impl IdentityOperationPhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Admitted => "admitted",
+            Self::Validating => "validating",
+            Self::InnerDispatched => "inner_dispatched",
+            Self::EffectObserved => "effect_observed",
+            Self::Completed => "completed",
+            Self::Refused => "refused",
+            Self::Failed => "failed",
+            Self::Unknown => "unknown",
+            Self::Partial => "partial",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityContextRequest {
+    pub operation_id: String,
+    pub invocation: String,
+    pub action: String,
+    #[serde(default)]
+    pub facts: IdentityFacts,
+    #[serde(default)]
+    pub approval: Option<serde_json::Value>,
+    #[serde(default)]
+    pub grant_approval: Option<serde_json::Value>,
+    #[serde(default)]
+    pub query: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub query_capability: String,
+    /// Daemon-issued single-use reservation ticket. It is internal to the
+    /// context cancellation handshake and never exposed as a public CLI/MCP
+    /// argument.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub invocation_ticket: String,
+}
+
+impl IdentityContextRequest {
+    pub fn legacy(facts: IdentityFacts) -> Self {
+        Self {
+            operation_id: String::new(),
+            invocation: "automatic".into(),
+            action: "context".into(),
+            facts,
+            approval: None,
+            grant_approval: None,
+            query: false,
+            query_capability: String::new(),
+            invocation_ticket: String::new(),
+        }
+    }
+}
+
+/// Control acknowledgement for one context cancellation request. A
+/// pre-admission cancellation has no operation projection by design.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityContextCancelAck {
+    pub operation_id: String,
+    pub disposition: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection: Option<IdentityOperationProjection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityOperationProjection {
+    pub operation_id: String,
+    pub phase: IdentityOperationPhase,
+    pub outcome: String,
+    #[serde(default)]
+    pub committed_phases: Vec<IdentityOperationPhase>,
+    #[serde(default)]
+    pub business_receipts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nested_command_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nested_operation_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityContextQueryResult {
+    pub projection: IdentityOperationProjection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityContextResponseEnvelope {
+    pub result: IdentityOperationProjection,
+}
+
+impl IdentityContextResponseEnvelope {
+    pub fn query(projection: IdentityOperationProjection) -> Self {
+        Self { result: projection }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ContextOperationRequires {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<String>,
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub sources: serde_json::Map<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair_invocation: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextOperationResult {
+    pub operation_id: String,
+    pub invocation: String,
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    pub outcome: String,
+    #[serde(default)]
+    pub committed_phases: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_phase: Option<String>,
+    pub requires: ContextOperationRequires,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub owner_readback: serde_json::Map<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queried_operation: Option<IdentityOperationProjection>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelectedTransport {
     pub kind: TransportKind,
@@ -122,6 +275,264 @@ pub struct SelectedTransport {
     pub tmux_endpoint: Option<TmuxEndpoint>,
     pub capabilities: Vec<String>,
     pub self_check: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PeerLifecycleRequest {
+    Create {
+        worker_id: String,
+        token: String,
+        operation_id: String,
+        query_capability: String,
+        peer_id: String,
+        cwd: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+    },
+    Read {
+        worker_id: String,
+        token: String,
+        target_id: Option<String>,
+    },
+    Update {
+        worker_id: String,
+        token: String,
+        operation_id: String,
+        query_capability: String,
+        target: PeerLifecycleTarget,
+        cwd: String,
+    },
+    Close {
+        worker_id: String,
+        token: String,
+        operation_id: String,
+        query_capability: String,
+        target: PeerLifecycleTarget,
+        reason: String,
+    },
+    Query {
+        operation_id: String,
+        query_capability: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerLifecycleTarget {
+    pub worker_id: String,
+    pub project_scope: ProjectScopeId,
+    pub app_scope_id: AppServerId,
+    pub binding_id: BindingId,
+    pub endpoint_generation: u64,
+    pub transport: PeerLifecycleTransport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerLifecycleTransport {
+    pub kind: TransportKind,
+    pub endpoint: Option<String>,
+    pub namespace: Option<String>,
+    pub session_id: Option<String>,
+    pub thread_id: Option<String>,
+    pub tmux_endpoint: Option<TmuxEndpoint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerLifecycleAction {
+    Create,
+    Read,
+    Update,
+    Close,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PeerLifecycleOutcome {
+    Ok,
+    Refused,
+    Missing,
+    Unknown,
+    Closed,
+    CleanupOpen,
+    Complete,
+    Partial,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerLifecycleSource {
+    CommittedProjection,
+    ExactHostObservation,
+    LifecycleOperation,
+    LegacyCloseReceipt,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerLifecyclePhase {
+    IntentPersisted,
+    HostDispatched,
+    HostDispatchClaimed,
+    ReadbackPending,
+    Complete,
+    Refused,
+    Partial,
+    Unknown,
+    Cancelled,
+    #[serde(rename = "cleanup-open")]
+    CleanupOpen,
+}
+
+impl PeerLifecyclePhase {
+    /// True while a mutating lifecycle operation still excludes new
+    /// responsibility for its exact target. Terminal phases release it.
+    pub fn is_in_flight(&self) -> bool {
+        matches!(
+            self,
+            Self::IntentPersisted
+                | Self::HostDispatchClaimed
+                | Self::HostDispatched
+                | Self::ReadbackPending
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PeerLifecycleStage {
+    NotAttempted,
+    Pending,
+    Verified,
+    Missing,
+    NotApplicable,
+    Refused,
+    Failed,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PeerSettingsState {
+    NotAttempted,
+    Acknowledged,
+    Refused,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PeerEffectiveCwd {
+    Unproven,
+    Verified {
+        cwd: String,
+        thread_id: Option<String>,
+        turn_id: Option<String>,
+    },
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerLifecycleSettings {
+    pub state: PeerSettingsState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerLifecycleUpdate {
+    pub previous_cwd: String,
+    pub intended_cwd: String,
+    pub settings: PeerLifecycleSettings,
+    pub effective_cwd: PeerEffectiveCwd,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub challenge: Option<PeerLifecycleChallenge>,
+}
+
+/// One operation-owned execution challenge.
+///
+/// The marker file name and content hash are persisted before the challenge
+/// turn is dispatched; the returned turn id is persisted before any
+/// completion can be accepted. The marker content itself never appears in the
+/// prompt, so only a peer that actually read the file can produce the exact
+/// result envelope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerLifecycleChallenge {
+    pub marker_file: String,
+    pub marker_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    pub dispatched_ms: i64,
+    pub state: PeerLifecycleStage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup: Option<PeerLifecycleStage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerLifecycleStageReadback {
+    pub state: PeerLifecycleStage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub challenge: Option<PeerLifecycleChallenge>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerLifecycleClose {
+    pub close_outcome: String,
+    pub runtime_archive: PeerLifecycleStageReadback,
+    pub worker_retirement: PeerLifecycleStageReadback,
+    pub binding_retirement: PeerLifecycleStageReadback,
+    pub route_retirement: PeerLifecycleStageReadback,
+    pub lease_retirement: PeerLifecycleStageReadback,
+    pub subscription_retirement: PeerLifecycleStageReadback,
+}
+
+/// Durable receipt for a Create operation. It captures the frozen request
+/// intent and, once the native host answers, the exact returned thread id and
+/// the observed lifecycle stages. Nothing here is inferred from cwd or a
+/// notification; a lost response leaves `thread_id` absent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerLifecycleCreate {
+    pub peer_id: String,
+    pub cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    pub stages: Vec<String>,
+    pub readiness: PeerLifecycleStageReadback,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerLifecycleResult {
+    pub action: PeerLifecycleAction,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<PeerLifecycleTarget>,
+    pub outcome: PeerLifecycleOutcome,
+    pub source: PeerLifecycleSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<PeerLifecyclePhase>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub projection: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update: Option<PeerLifecycleUpdate>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub close: Option<PeerLifecycleClose>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub create: Option<PeerLifecycleCreate>,
+    pub requires: ContextOperationRequires,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -468,7 +879,10 @@ pub enum Req {
     /// Host-local bootstrap. Endpoint admission and credential issuance belong
     /// to the daemon, not the CLI that collected these partial facts.
     IdentityContext {
+        #[serde(default, skip_serializing_if = "identity_facts_empty")]
         facts: IdentityFacts,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identity_context: Option<IdentityContextRequest>,
     },
     /// Resolve the unique registered project route for one tmux pane. The
     /// complete endpoint prevents equal session/pane names on different tmux
@@ -624,6 +1038,9 @@ pub enum Req {
         worker_id: String,
     },
     Workers,
+    PeerLifecycle {
+        request: PeerLifecycleRequest,
+    },
     WorkerStatus {
         worker_id: Option<String>,
     },
@@ -676,6 +1093,10 @@ pub enum Req {
     },
 }
 
+fn identity_facts_empty(facts: &IdentityFacts) -> bool {
+    facts == &IdentityFacts::default()
+}
+
 impl Req {
     /// Registration of one worker on its current transport. A pane already
     /// claimed by another worker is reclaimed by the later registrant.
@@ -721,6 +1142,21 @@ impl RequestEnvelope {
 
     pub fn into_parts(self) -> (Option<ProjectContext>, Req) {
         (self.project_context, self.request)
+    }
+
+    pub fn normalize_identity_context(&mut self) -> Result<(), &'static str> {
+        if let Req::IdentityContext {
+            identity_context,
+            facts,
+        } = &mut self.request
+        {
+            if identity_context.is_none() {
+                *identity_context = Some(IdentityContextRequest::legacy(facts.clone()));
+            } else if facts != &IdentityFacts::default() {
+                return Err("IDENTITY_CONTEXT_ENVELOPE_CONFLICT: both legacy facts and identity_context were supplied");
+            }
+        }
+        Ok(())
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {

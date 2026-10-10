@@ -1,0 +1,161 @@
+{
+  "pid": 78429,
+  "entry": "/opt/homebrew/bin/codex",
+  "endpoint": "/tmp/collab-cap-7fvtrq5a/native.sock",
+  "socket_dir": "/tmp/collab-cap-7fvtrq5a",
+  "calls": [
+    {
+      "method": "initialize",
+      "response": {
+        "id": 1,
+        "result": {
+          "userAgent": "collab-capability-probe/0.161.0 (Mac OS 26.6.2; arm64) dumb (collab-capability-probe; 1)",
+          "codexHome": "/Volumes/Intel/playground/appsdk/.worker-runs/collab-context-identity-peer-crud-20261008/native-capability/home",
+          "platformFamily": "unix",
+          "platformOs": "macos"
+        }
+      }
+    },
+    {
+      "method": "thread/start",
+      "response": {
+        "id": 2,
+        "result": {
+          "thread": {
+            "id": "01a11e3f-fa57-7160-8687-2b9c65acb22b",
+            "environments": [
+              {
+                "environmentId": "local",
+                "cwd": "/Volumes/Intel/playground/appsdk/.worker-runs/collab-context-identity-peer-crud-20261008/native-capability/consumer",
+                "runtimeWorkspaceRoots": [
+                  "/Volumes/Intel/playground/appsdk/.worker-runs/collab-context-identity-peer-crud-20261008/native-capability/consumer",
+                  "/Users/fanzhang/Library/Application Support/codex-with-chatgpt"
+                ]
+              }
+            ],
+            "extra": null,
+            "sessionId": "01a11e3f-fa57-7160-8687-2b9c65acb22b",
+            "forkedFromId": null,
+            "parentThreadId": null,
+            "preview": "",
+            "ephemeral": false,
+            "section": null,
+            "sectionEnteredAt": null,
+            "projectId": null,
+            "historyMode": "paginated",
+            "modelProvider": "openai-https",
+            "model": "gpt-6-luna",
+            "reasoningEffort": "high",
+            "createdAt": 1791508873,
+            "updatedAt": 1791508873,
+            "recencyAt": 1791508873,
+            "status": {
+              "type": "idle"
+            },
+            "path": "/Volumes/Intel/playground/appsdk/.worker-runs/collab-context-identity-peer-crud-20261008/native-capability/home/sessions/2026/10/08/rollout-2026-10-08T18-21-13-01a11e3f-fa57-7160-8687-2b9c65acb22b.jsonl",
+            "cwd": "/Volumes/Intel/playground/appsdk/.worker-runs/collab-context-identity-peer-crud-20261008/native-capability/consumer",
+            "cliVersion": "0.161.0",
+            "originator": "collab-capability-probe",
+            "source": "vscode",
+            "canAcceptDirectInput": true,
+            "threadSource": null,
+            "agentNickname": null,
+            "agentRole": null,
+            "gitInfo": null,
+            "name": null,
+            "daybreakEnabled": null,
+            "turns": []
+          },
+          "model": "gpt-6-luna",
+          "modelProvider": "openai-https",
+          "serviceTier": "default",
+          "disabledPluginIds": [],
+          "cwd": "/Volumes/Intel/playground/appsdk/.worker-runs/collab-context-identity-peer-crud-20261008/native-capability/consumer",
+          "runtimeWorkspaceRoots": [
+            "/Volumes/Intel/playground/appsdk/.worker-runs/collab-context-identity-peer-crud-20261008/native-capability/consumer",
+            "/Users/fanzhang/Library/Application Support/codex-with-chatgpt"
+          ],
+          "instructionSources": [],
+          "approvalPolicy": "never",
+          "approvalsReviewer": "user",
+          "sandbox": {
+            "type": "workspaceWrite",
+            "writableRoots": [
+              "/Users/fanzhang/Library/Application Support/codex-with-chatgpt"
+            ],
+            "networkAccess": false,
+            "excludeTmpdirEnvVar": false,
+            "excludeSlashTmp": false
+          },
+          "activePermissionProfile": null,
+          "reasoningEffort": "high",
+          "multiAgentMode": "explicitRequestOnly"
+        }
+      }
+    },
+    {
+      "method": "thread/read",
+      "response": {
+        "id": 3,
+        "result": {
+          "thread": {
+            "id": "01a11e3f-fa57-7160-8687-2b9c65acb22b",
+            "environments": [
+              {
+                "environmentId": "local",
+                "cwd": "/Volumes/Intel/playground/appsdk/.worker-runs/collab-context-identity-peer-crud-20261008/native-capability/consumer",
+                "runtimeWorkspaceRoots": [
+                  "/Volumes/Intel/playground/appsdk/.worker-runs/collab-context-identity-peer-crud-20261008/native-capability/consumer",
+                  "/Users/fanzhang/Library/Application Support/codex-with-chatgpt"
+                ]
+              }
+            ],
+            "extra": null,
+            "sessionId": "01a11e3f-fa57-7160-8687-2b9c65acb22b",
+            "forkedFromId": null,
+            "parentThreadId": null,
+            "preview": "",
+            "ephemeral": false,
+            "section": null,
+            "sectionEnteredAt": null,
+            "projectId": null,
+            "historyMode": "paginated",
+            "modelProvider": "openai-https",
+            "model": "gpt-6-luna",
+            "reasoningEffort": "high",
+            "createdAt": 1791508874,
+            "updatedAt": 1791508874,
+            "recencyAt": 1791508874,
+            "status": {
+              "type": "idle"
+            },
+            "path": "/Volumes/Intel/playground/appsdk/.worker-runs/collab-context-identity-peer-crud-20261008/native-capability/home/sessions/2026/10/08/rollout-2026-10-08T18-21-13-01a11e3f-fa57-7160-8687-2b9c65acb22b.jsonl",
+            "cwd": "/Volumes/Intel/playground/appsdk/.worker-runs/collab-context-identity-peer-crud-20261008/native-capability/consumer",
+            "cliVersion": "0.161.0",
+            "originator": "collab-capability-probe",
+            "source": "vscode",
+            "canAcceptDirectInput": true,
+            "threadSource": null,
+            "agentNickname": null,
+            "agentRole": null,
+            "gitInfo": null,
+            "name": null,
+            "daybreakEnabled": null,
+            "turns": []
+          }
+        }
+      }
+    },
+    {
+      "method": "thread/archive",
+      "response": {
+        "id": 4,
+        "result": {}
+      }
+    }
+  ],
+  "inference_tested": false,
+  "thread_id": "01a11e3f-fa57-7160-8687-2b9c65acb22b",
+  "status": "API_CREATE_READ_ARCHIVE_VERIFIED",
+  "process_exit": 0
+}

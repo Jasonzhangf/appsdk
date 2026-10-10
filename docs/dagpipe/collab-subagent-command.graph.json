@@ -1,0 +1,153 @@
+{
+  "id": "appsdk-collab-subagent-command",
+  "version": "0.2.0",
+  "description": "一次 collab subagent 命令到一次完整结果。public CLI/MCP dispatcher 先解析 Action 或 argv；适用动作再进入 daemon-owned IdentityContext 身份协调，该阶段可能提交 identity/Register/receipt/Context，不能被描述为只读。身份协调后，请求进入 project/route/mutation admission 和既有 handler；动作分别提交 durable message、状态、wake/repair 和未知边界。唯一结果出口保留完整 ok/error/data，区分成功、typed refusal、identity committed/action not executed、partial、repair、unknown 与取消/清理边界。Start 提前拒绝，List/Status 保持观察，Snapshot 明确 unsupported，Close 的 closed_record_only 不代表 runtime archive 或 peer CRUD 完成。图中不画自动 retry、fallback、rollback、第二账本或第二身份 gate。",
+  "inputs": [
+    {
+      "id": "subagent_command",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "parse_subagent_command",
+      "operator": "appsdk.collab_subagent.parse_request",
+      "operator_version": "1",
+      "inputs": [
+        "subagent_command"
+      ],
+      "output": {
+        "id": "parsed_subagent_command",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "reconcile_subagent_identity",
+      "operator": "appsdk.collab_subagent.reconcile_identity",
+      "operator_version": "1",
+      "inputs": [
+        "parsed_subagent_command"
+      ],
+      "output": {
+        "id": "reconciled_subagent_command",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "admit_subagent_request",
+      "operator": "appsdk.collab_subagent.admit_request",
+      "operator_version": "1",
+      "inputs": [
+        "reconciled_subagent_command"
+      ],
+      "output": {
+        "id": "admitted_subagent_command",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "apply_subagent_action",
+      "operator": "appsdk.collab_subagent.apply_action",
+      "operator_version": "1",
+      "inputs": [
+        "admitted_subagent_command"
+      ],
+      "output": {
+        "id": "subagent_action_outcome",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "emit_subagent_result",
+      "operator": "appsdk.collab_subagent.emit_result",
+      "operator_version": "1",
+      "inputs": [
+        "subagent_action_outcome"
+      ],
+      "output": {
+        "id": "subagent_command_result",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {
+      "from": "parse_subagent_command",
+      "to": "reconcile_subagent_identity",
+      "arc_id": "parsed_subagent_command"
+    },
+    {
+      "from": "reconcile_subagent_identity",
+      "to": "admit_subagent_request",
+      "arc_id": "reconciled_subagent_command"
+    },
+    {
+      "from": "admit_subagent_request",
+      "to": "apply_subagent_action",
+      "arc_id": "admitted_subagent_command"
+    },
+    {
+      "from": "apply_subagent_action",
+      "to": "emit_subagent_result",
+      "arc_id": "subagent_action_outcome"
+    }
+  ],
+  "outputs": [
+    "subagent_command_result"
+  ]
+}

@@ -4,6 +4,8 @@ pub(crate) mod keepalive;
 pub mod mailbox;
 pub mod notification_contract;
 pub mod notification_state;
+pub(crate) mod operation_journal;
+mod peer_lifecycle;
 pub mod presence;
 pub mod state;
 pub mod timers;
@@ -49,6 +51,10 @@ use tokio::sync::Notify;
 #[cfg(test)]
 #[path = "notification_batch_tests.rs"]
 mod notification_batch_tests;
+
+#[cfg(test)]
+#[path = "operation_contract_tests.rs"]
+mod operation_contract_tests;
 
 #[cfg(test)]
 #[path = "host_route_registry_tests.rs"]

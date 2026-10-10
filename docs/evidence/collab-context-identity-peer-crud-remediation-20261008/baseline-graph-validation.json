@@ -1,0 +1,67 @@
+[
+  {
+    "graph": "collab-context",
+    "result": {
+      "status": "fulfilled",
+      "value": {
+        "chunk_id": "d7aac4",
+        "wall_time_seconds": 0.000005125,
+        "exit_code": 0,
+        "original_token_count": 46,
+        "output": "valid DAG: appsdk-collab-context@0.9.0 (6 nodes, 5 edges, 6 waves)\noperator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate\n"
+      }
+    }
+  },
+  {
+    "graph": "collab-master-authority",
+    "result": {
+      "status": "fulfilled",
+      "value": {
+        "chunk_id": "94208c",
+        "wall_time_seconds": 0.0000055,
+        "exit_code": 0,
+        "original_token_count": 49,
+        "output": "valid DAG: appsdk-collab-master-authority@0.2.0 (3 nodes, 2 edges, 3 waves)\noperator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate\n"
+      }
+    }
+  },
+  {
+    "graph": "collab-pane-route-reconcile",
+    "result": {
+      "status": "fulfilled",
+      "value": {
+        "chunk_id": "bcd89d",
+        "wall_time_seconds": 0.000007042,
+        "exit_code": 0,
+        "original_token_count": 50,
+        "output": "valid DAG: appsdk-collab-pane-route-reconcile@0.5.0 (5 nodes, 4 edges, 5 waves)\noperator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate\n"
+      }
+    }
+  },
+  {
+    "graph": "collab-subscription-lifecycle",
+    "result": {
+      "status": "fulfilled",
+      "value": {
+        "chunk_id": "47c0e3",
+        "wall_time_seconds": 0.000004584,
+        "exit_code": 0,
+        "original_token_count": 50,
+        "output": "valid DAG: appsdk-collab-subscription-lifecycle@0.2.0 (4 nodes, 3 edges, 4 waves)\noperator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate\n"
+      }
+    }
+  },
+  {
+    "graph": "collab-notification-consumption",
+    "result": {
+      "status": "fulfilled",
+      "value": {
+        "chunk_id": "8b6e36",
+        "wall_time_seconds": 0.000005791,
+        "exit_code": 0,
+        "original_token_count": 51,
+        "output": "valid DAG: appsdk-collab-notification-consumption@0.2.0 (3 nodes, 2 edges, 3 waves)\noperator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate\n"
+      }
+    }
+  }
+]

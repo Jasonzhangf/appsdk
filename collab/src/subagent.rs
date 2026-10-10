@@ -1,9 +1,11 @@
 use crate::{
     config,
-    identity::AppServerId,
-    proto::Resp,
+    identity::{AppServerId, BindingId},
+    proto::{PeerLifecycleAction, PeerLifecyclePhase, PeerLifecycleStage, Resp},
+    scope::RouteScope,
     server::{
-        state::{now_ms, Event},
+        global_state::MasterGrant,
+        state::{now_ms, Event, State},
         Server,
     },
 };
@@ -74,6 +76,16 @@ pub enum Action {
     Close {
         id: String,
     },
+    /// Bind a completed, verified ordinary Create result as this master's
+    /// managed child. All association facts (parent, child thread, binding,
+    /// generation, scope) are derived from authenticated daemon state and the
+    /// retained Create operation; the caller only supplies the managed id and
+    /// the retained Create operation id.
+    Bind {
+        id: String,
+        #[arg(long = "create-op")]
+        create_operation_id: String,
+    },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Record {
@@ -92,6 +104,20 @@ pub struct Record {
     pub probe_failures: Vec<String>,
     #[serde(default)]
     pub runtime: Option<String>,
+    /// Provenance for a managed child committed by explicit `subagent bind`.
+    ///
+    /// These pin the retained Create operation and the child's exact binding
+    /// and endpoint generation observed at bind time. They are committed
+    /// durably in the same `SubagentUpdated` record. Records created before
+    /// explicit Bind deserialize with absent provenance; they remain
+    /// observable, but Send/Ready refuse to mutate them because they never
+    /// gain binding authority by inference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_operation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_generation: Option<u64>,
 }
 
 /// How a managed child was finalized. Archiving is the preferred outcome, but
@@ -431,9 +457,61 @@ fn notify(
         managed_subagent_id,
     );
     if !response.ok {
-        bail!("{}", response.error.unwrap_or_default());
+        return Err(crate::client::ServerResponseError { response }.into());
     }
     Ok(response.data)
+}
+
+#[derive(Debug)]
+struct SubagentOutcomeError {
+    response: Resp,
+    action: serde_json::Value,
+    follow_up_error: Option<String>,
+}
+
+impl std::fmt::Display for SubagentOutcomeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = self
+            .response
+            .error
+            .as_deref()
+            .unwrap_or("subagent notification failed");
+        if let Some(follow_up) = &self.follow_up_error {
+            write!(
+                formatter,
+                "{message}; follow-up state commit failed: {follow_up}"
+            )
+        } else {
+            formatter.write_str(message)
+        }
+    }
+}
+
+impl std::error::Error for SubagentOutcomeError {}
+
+fn failure_response(error: anyhow::Error) -> Resp {
+    if let Some(outcome) = error.downcast_ref::<SubagentOutcomeError>() {
+        let mut data = outcome.response.data.clone();
+        if !data.is_object() {
+            data = json!({"notification_response_data": data});
+        }
+        data["subagent_action"] = outcome.action.clone();
+        if let Some(follow_up_error) = &outcome.follow_up_error {
+            data["subagent_action"]["follow_up_error"] = json!(follow_up_error);
+        }
+        return Resp::err_data(error.to_string(), data);
+    }
+    if let Some(response) = error.downcast_ref::<crate::client::ServerResponseError>() {
+        return Resp::err_data(
+            response
+                .response
+                .error
+                .clone()
+                .unwrap_or_else(|| error.to_string()),
+            response.response.data.clone(),
+        );
+    }
+    Resp::err(error.to_string())
 }
 
 #[cfg(test)]
@@ -856,7 +934,7 @@ pub fn handle_with_env(
     }
     match run(server, actor, token, action) {
         Ok(value) => Resp::data(value),
-        Err(e) => Resp::err(e.to_string()),
+        Err(error) => failure_response(error),
     }
 }
 fn run(server: &Server, actor: &str, token: &str, action: Action) -> Result<serde_json::Value> {
@@ -871,6 +949,13 @@ fn run(server: &Server, actor: &str, token: &str, action: Action) -> Result<serd
         return Ok(
             json!({"subagents": state.subagents.values().filter(|s| s.parent == actor).collect::<Vec<_>>() }),
         );
+    }
+    if let Action::Bind {
+        id,
+        create_operation_id,
+    } = &action
+    {
+        return bind(server, actor, id, create_operation_id);
     }
     let id = match &action {
         Action::Status { id }
@@ -902,6 +987,14 @@ fn run(server: &Server, actor: &str, token: &str, action: Action) -> Result<serd
     {
         bail!("only the creating parent or current master may manage this subagent");
     }
+    // A managed mutation requires the record's committed provenance to match
+    // the child's exact current binding. Records without provenance stay
+    // observable but never gain mutation authority by inference.
+    if matches!(action, Action::Send { .. } | Action::Ready { .. })
+        && !record_provenance_matches_current_binding(&state, &record)
+    {
+        bail!("managed subagent provenance is absent or stale; re-bind before mutating");
+    }
     match action {
         Action::Snapshot { .. } => bail!("SUBAGENT_SNAPSHOT_UNSUPPORTED: tmux panes do not expose durable Codex thread history; inspect the peer's durable mailbox and task state"),
         Action::Rearm { .. } => {
@@ -931,7 +1024,18 @@ fn run(server: &Server, actor: &str, token: &str, action: Action) -> Result<serd
                 bail!("subagent is not running");
             }
             if ready && record.status == "idle" {
-                return Ok(json!({"subagent": record, "reused": true}));
+                return Ok(json!({
+                    "subagent": record,
+                    "reused": true,
+                    "notification": "not-resent",
+                    "subagent_action": {
+                        "subagent_id": record.id,
+                        "action": "ready",
+                        "state_commit": "reused",
+                        "status": "idle",
+                        "reused": true
+                    }
+                }));
             }
             if ready && record.status == "assigned" {
                 bail!("accept the assigned task before reporting completion");
@@ -1005,7 +1109,9 @@ fn run(server: &Server, actor: &str, token: &str, action: Action) -> Result<serd
                     subagent: record.clone(),
                 });
             }
-            if !events.is_empty() {
+            let state_commit = if events.is_empty() {
+                "unchanged"
+            } else {
                 // Persist the task and managed-record transition together so
                 // replay cannot observe a half-claimed assignment.
                 server
@@ -1013,10 +1119,11 @@ fn run(server: &Server, actor: &str, token: &str, action: Action) -> Result<serd
                     .map_err(|error| {
                         anyhow::anyhow!("subagent working journal failure: {error}")
                     })?;
-            }
+                "committed"
+            };
             drop(state);
-            if ready {
-                notify(
+            let notification = if ready {
+                match notify(
                     server,
                     actor,
                     &record.parent,
@@ -1024,8 +1131,39 @@ fn run(server: &Server, actor: &str, token: &str, action: Action) -> Result<serd
                     format!("subagent={} is idle and available", record.id),
                     false,
                     None,
-                )?;
-            }
+                ) {
+                    Ok(value) => Some(value),
+                    Err(error) => {
+                        match error.downcast::<crate::client::ServerResponseError>() {
+                            Ok(response) => return Err(SubagentOutcomeError {
+                                response: response.response,
+                                action: json!({
+                                    "subagent_id": record.id,
+                                    "action": "ready",
+                                    "state_commit": state_commit,
+                                    "status": record.status,
+                                    "reused": false
+                                }),
+                                follow_up_error: None,
+                            }.into()),
+                            Err(error) => return Err(error),
+                        }
+                    }
+                }
+            } else {
+                None
+            };
+            return Ok(json!({
+                "subagent": record,
+                "notification": notification,
+                "subagent_action": {
+                    "subagent_id": record.id,
+                    "action": if ready { "ready" } else { "working" },
+                    "state_commit": state_commit,
+                    "status": record.status,
+                    "reused": false
+                }
+            }));
         }
         Action::Send { subject, body, .. } => {
             if subject.trim().is_empty() || body.trim().is_empty() {
@@ -1057,6 +1195,11 @@ fn run(server: &Server, actor: &str, token: &str, action: Action) -> Result<serd
                     )
                     .map_err(|error| anyhow::anyhow!("subagent send journal failure: {error}"))?;
             }
+            let pre_notification_state_commit = if stale_working_without_task {
+                "committed"
+            } else {
+                "not-needed"
+            };
             drop(state);
             let result = match notify(
                 server,
@@ -1069,24 +1212,63 @@ fn run(server: &Server, actor: &str, token: &str, action: Action) -> Result<serd
             ) {
                 Ok(value) => value,
                 Err(error) => {
+                    let error_text = error.to_string();
+                    let response = match error.downcast::<crate::client::ServerResponseError>() {
+                        Ok(response) => response.response,
+                        Err(error) => return Err(error),
+                    };
                     let mut state = server.state.lock().unwrap();
+                    let mut error_state_commit = "not-attempted";
+                    let mut follow_up_error = None;
+                    let mut current_status = "unknown".to_owned();
                     if let Some(mut current) = state.subagents.get(&record.id).cloned() {
+                        current_status = current.status.clone();
                         if current.status == "idle" {
-                            current.error = Some(error.to_string());
+                            current.error = Some(error_text);
                             if let Err(journal_error) = server.commit_locked_checked(
                                 &mut state,
                                 &[Event::SubagentUpdated { subagent: current }],
                             ) {
-                                return Err(anyhow::anyhow!(
+                                error_state_commit = "failed";
+                                follow_up_error = Some(format!(
                                     "subagent send outcome unknown: notification failed and journal commit failed: {journal_error}"
                                 ));
+                            } else {
+                                error_state_commit = "committed";
                             }
                         }
+                    } else {
+                        error_state_commit = "unknown";
                     }
-                    return Err(error);
+                    return Err(SubagentOutcomeError {
+                        action: json!({
+                            "subagent_id": record.id,
+                            "action": "send",
+                            "state_commit": pre_notification_state_commit,
+                            "error_state_commit": error_state_commit,
+                            "status": current_status,
+                            "durable_msg_id": response.data.get("msg_id").cloned(),
+                            "reused": false
+                        }),
+                        response,
+                        follow_up_error,
+                    }
+                    .into());
                 }
             };
-            return Ok(json!({"subagent_id": record.id, "message": result}));
+            return Ok(json!({
+                "subagent_id": record.id,
+                "message": result,
+                "subagent_action": {
+                    "subagent_id": record.id,
+                "action": "send",
+                    "state_commit": pre_notification_state_commit,
+                    "error_state_commit": "not-applicable",
+                    "status": record.status,
+                    "durable_msg_id": result.get("msg_id").cloned(),
+                    "reused": false
+                }
+            }));
         }
         Action::Close { .. } => {
             if record.status == "closed" {
@@ -1179,6 +1361,278 @@ fn close_result(
         "snapshot_captured_ms": snapshot_captured_ms,
         "close_outcome": close_outcome,
     }))
+}
+
+/// Bind one completed, verified ordinary Create result as this master's managed
+/// child.
+///
+/// Every association fact comes from authenticated daemon state and the
+/// retained Create operation; the caller supplies only the managed id and the
+/// retained Create operation id. The association is committed as the single
+/// canonical `subagent::Record` through the existing checked reducer/fence, so
+/// Close and Bind cannot race past responsibility fencing.
+fn bind(
+    server: &Server,
+    actor: &str,
+    id: &str,
+    create_operation_id: &str,
+) -> Result<serde_json::Value> {
+    if !valid_id(id) {
+        bail!("BIND_INVALID_ID: managed id is invalid");
+    }
+    if create_operation_id.trim().is_empty() {
+        bail!("BIND_CREATE_UNKNOWN: create operation id must not be empty");
+    }
+    let mut state = server.state.lock().unwrap();
+
+    if crate::server::current_master_holder(server, &state)
+        .map_err(anyhow::Error::msg)?
+        .as_deref()
+        != Some(actor)
+    {
+        bail!("BIND_REQUIRES_MASTER: only the current registered master may bind a managed child");
+    }
+    let grant = current_master_grant_for_actor(&state, actor).ok_or_else(|| {
+        anyhow::anyhow!("BIND_REQUIRES_MASTER_BINDING: current master has no exact runtime binding")
+    })?;
+
+    let operation = state
+        .peer_lifecycle_operations
+        .get(create_operation_id)
+        .cloned()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "BIND_CREATE_UNKNOWN: no retained Create operation {create_operation_id}"
+            )
+        })?;
+    if operation.action != PeerLifecycleAction::Create {
+        bail!("BIND_CREATE_NOT_CREATE: {create_operation_id} is not a Create operation");
+    }
+    if operation.actor_id != actor {
+        bail!("BIND_CREATE_FOREIGN: {create_operation_id} belongs to another caller");
+    }
+    if operation.phase != PeerLifecyclePhase::Complete {
+        bail!("BIND_CREATE_INCOMPLETE: {create_operation_id} is not complete");
+    }
+    let create = operation.create.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("BIND_CREATE_INCOMPLETE: {create_operation_id} has no verified receipt")
+    })?;
+    if create.readiness.state != PeerLifecycleStage::Verified {
+        bail!("BIND_CREATE_UNVERIFIED: {create_operation_id} readiness is not verified");
+    }
+    let child_thread = create.thread_id.clone().ok_or_else(|| {
+        anyhow::anyhow!("BIND_CREATE_INCOMPLETE: {create_operation_id} has no verified thread id")
+    })?;
+    let target = operation.target.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("BIND_CREATE_INCOMPLETE: {create_operation_id} has no exact target")
+    })?;
+
+    // Parent and child must resolve to the same registered canonical main and
+    // app scope. Different worktree directories are allowed; only the
+    // registered scope is identity evidence.
+    if operation.project_scope != grant.project_scope
+        || operation.app_scope_id != grant.app_scope_id
+    {
+        bail!("BIND_SCOPE_MISMATCH: Create operation is outside the master's registered main/app scope");
+    }
+    let route_scope = RouteScope {
+        app_scope_id: operation.app_scope_id.clone(),
+        project_scope_id: operation.project_scope.clone(),
+    };
+    if state
+        .global
+        .lookup_project_for_route(&route_scope)
+        .is_none()
+    {
+        bail!("BIND_SCOPE_UNREGISTERED: Create operation scope is not a registered route");
+    }
+
+    let child_peer = create.peer_id.clone();
+    if child_peer == actor {
+        bail!("BIND_SELF: parent and child must be distinct");
+    }
+    if target.worker_id != child_peer {
+        bail!("BIND_TARGET_MISMATCH: Create target does not match the retained child");
+    }
+    if target.project_scope != operation.project_scope
+        || target.app_scope_id != operation.app_scope_id
+    {
+        bail!("BIND_TARGET_SCOPE_MISMATCH: Create target scope does not match the operation");
+    }
+    if target.transport.thread_id.as_deref() != Some(child_thread.as_str()) {
+        bail!("BIND_THREAD_MISMATCH: Create target thread does not match the retained thread");
+    }
+    if target.endpoint_generation == 0 {
+        bail!("BIND_GENERATION_INVALID: child endpoint generation is zero");
+    }
+
+    // The child must still be registered with the exact retained thread.
+    let worker = state.workers.get(&child_peer).cloned().ok_or_else(|| {
+        anyhow::anyhow!("BIND_CHILD_UNREGISTERED: child {child_peer} is not currently registered")
+    })?;
+    let registered_thread = worker
+        .transport
+        .as_ref()
+        .and_then(|transport| transport.thread_id.as_deref());
+    if registered_thread != Some(child_thread.as_str()) {
+        bail!("BIND_CHILD_THREAD_MISMATCH: current child registration does not match the retained thread");
+    }
+
+    // The child's exact current runtime binding must match the Create result.
+    let binding = state
+        .global
+        .lookup_project(&operation.project_scope)
+        .and_then(|project| project.lookup_binding(&target.binding_id))
+        .ok_or_else(|| {
+            anyhow::anyhow!("BIND_CHILD_BINDING_MISSING: child binding is not registered")
+        })?;
+    if binding.agent_id.as_str() != child_peer
+        || binding.app_scope_id != operation.app_scope_id
+        || binding.endpoint_generation != target.endpoint_generation
+        || binding
+            .native_thread_id
+            .as_ref()
+            .map(|thread| thread.as_str())
+            != Some(child_thread.as_str())
+    {
+        bail!(
+            "BIND_CHILD_BINDING_MISMATCH: child binding does not match the retained Create result"
+        );
+    }
+
+    // No active responsibility fence or in-flight lifecycle operation may own
+    // the exact child.
+    if state
+        .responsibility_fences
+        .values()
+        .any(|fence| fence.is_active() && fence.worker_id == child_peer)
+    {
+        bail!("BIND_CHILD_FENCED: child {child_peer} is under an active responsibility fence");
+    }
+    if state.peer_lifecycle_operations.values().any(|other| {
+        other.action != PeerLifecycleAction::Create
+            && other.phase.is_in_flight()
+            && other
+                .target
+                .as_ref()
+                .is_some_and(|target| target.worker_id == child_peer)
+    }) {
+        bail!("BIND_CHILD_LIFECYCLE_IN_FLIGHT: child {child_peer} has an in-flight lifecycle operation");
+    }
+
+    // An exact repeated Bind is reused; any other existing record is a conflict.
+    if let Some(existing) = state.subagents.get(id).cloned() {
+        if existing.parent == actor
+            && existing.peer == child_peer
+            && existing.thread_id.as_deref() == Some(child_thread.as_str())
+            && existing.create_operation_id.as_deref() == Some(create_operation_id)
+            && existing.binding_id.as_deref() == Some(target.binding_id.as_str())
+            && existing.endpoint_generation == Some(target.endpoint_generation)
+        {
+            return Ok(json!({
+                "subagent": existing,
+                "create_operation_id": create_operation_id,
+                "association_commit": "reused",
+                "reused": true,
+                "next_action": format!("child must report ready: collab subagent ready {id}"),
+            }));
+        }
+        bail!("BIND_CONFLICT: managed id {id} already exists with different provenance");
+    }
+    if state
+        .subagents
+        .values()
+        .any(|other| other.peer == child_peer)
+    {
+        bail!("BIND_CONFLICT: child {child_peer} is already a managed subagent");
+    }
+
+    // Recheck the exact facts at the checked commit boundary. The lock is held
+    // across this build and the checked reducer re-validates the fence, so the
+    // durable transition cannot observe a different child binding.
+    let now = now_ms();
+    let record = Record {
+        id: id.to_owned(),
+        parent: actor.to_owned(),
+        peer: child_peer.clone(),
+        status: "starting".into(),
+        thread_id: Some(child_thread.clone()),
+        profile: None,
+        created_ms: now,
+        ready_deadline_ms: now + server.config.subagent.startup.ready_timeout_seconds as i64 * 1000,
+        last_message: None,
+        error: None,
+        probe_failures: Vec::new(),
+        runtime: Some(server.config.subagent.runtime.clone()),
+        create_operation_id: Some(create_operation_id.to_owned()),
+        binding_id: Some(target.binding_id.as_str().to_owned()),
+        endpoint_generation: Some(target.endpoint_generation),
+    };
+    server
+        .commit_locked_checked(
+            &mut state,
+            &[Event::SubagentUpdated {
+                subagent: record.clone(),
+            }],
+        )
+        .map_err(|error| anyhow::anyhow!("BIND_DURABILITY_FAILED: {error}"))?;
+    Ok(json!({
+        "subagent": record,
+        "create_operation_id": create_operation_id,
+        "association_commit": "committed",
+        "reused": false,
+        "next_action": format!("child must report ready: collab subagent ready {id}"),
+    }))
+}
+
+/// The current typed master grant held by `actor`, read only from the reducer.
+fn current_master_grant_for_actor(state: &State, actor: &str) -> Option<MasterGrant> {
+    let mut grants = state
+        .global
+        .projects
+        .values()
+        .flat_map(|project| project.master_grants.values())
+        .filter(|grant| {
+            grant.agent_id.as_str() == actor
+                && state
+                    .global
+                    .lookup_master_grant(&grant.project_scope, &grant.binding_id)
+                    .is_some_and(|current| current == *grant)
+        });
+    let grant = grants.next()?.clone();
+    grants.next().is_none().then_some(grant)
+}
+
+/// The record's committed provenance must match the child's exact current
+/// binding before a managed mutation. Legacy records carry no provenance and
+/// never gain mutation authority by inference.
+fn record_provenance_matches_current_binding(state: &State, record: &Record) -> bool {
+    let (Some(create_operation_id), Some(binding_id), Some(endpoint_generation)) = (
+        record.create_operation_id.as_deref(),
+        record.binding_id.as_deref(),
+        record.endpoint_generation,
+    ) else {
+        return false;
+    };
+    if create_operation_id.trim().is_empty()
+        || binding_id.trim().is_empty()
+        || endpoint_generation == 0
+    {
+        return false;
+    }
+    let Ok(binding_id) = BindingId::new(binding_id.to_owned()) else {
+        return false;
+    };
+    let Some(binding) = state.global.lookup_binding(&binding_id) else {
+        return false;
+    };
+    binding.agent_id.as_str() == record.peer
+        && binding.endpoint_generation == endpoint_generation
+        && binding
+            .native_thread_id
+            .as_ref()
+            .map(|thread| thread.as_str())
+            == record.thread_id.as_deref()
 }
 
 #[cfg(test)]

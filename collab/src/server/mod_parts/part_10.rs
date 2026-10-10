@@ -381,6 +381,7 @@ fn worker_status_summary_with_maps(
 
 fn mutation_blocked_during_migration(req: &Req) -> bool {
     match req {
+        Req::PeerLifecycle { request } => matches!(request, crate::proto::PeerLifecycleRequest::Update { .. } | crate::proto::PeerLifecycleRequest::Close { .. }),
         Req::BoardShow => false,
         Req::Board { command, .. } => !matches!(command, crate::board::BoardCommand::Show),
         Req::SubagentObserve { .. } => false,
@@ -457,6 +458,7 @@ fn subagent_action_mutates(action: &crate::subagent::Action) -> bool {
 /// place that requires the actor's current runtime binding.
 fn wire_mutation_principal(req: &Req) -> Option<(&str, &str)> {
     match req {
+        Req::PeerLifecycle { request: crate::proto::PeerLifecycleRequest::Update { worker_id, token, .. } | crate::proto::PeerLifecycleRequest::Close { worker_id, token, .. } } => Some((worker_id, token)),
         Req::Subagent {
             worker_id,
             token,
@@ -553,6 +555,7 @@ fn validate_wire_runtime_binding(
     server: &Server,
     req: &Req,
     project_context: &ProjectContext,
+    register_approval: Option<&RegisterApprovalProof>,
 ) -> Result<(), String> {
     if let Req::Register { worker_id, .. } = req {
         let state = server.state.lock().unwrap();
@@ -590,7 +593,20 @@ fn validate_wire_runtime_binding(
                     .get(worker_id)
                     .is_some_and(|worker| worker.token != *token)
             };
+            let approved_register = register_approval.is_some_and(|proof| {
+                proof.authorizes(
+                    worker_id,
+                    project_context.project_scope.as_str(),
+                    project_context.app_scope_id.as_str(),
+                )
+            });
             if token_mismatch {
+                if approved_register {
+                    // This private proof may bypass only the wire preflight
+                    // credential check. The Register owner rechecks the exact
+                    // incumbent fence in the reducer immediately before commit.
+                    return Ok(());
+                }
                 return Err(format!("TOKEN_MISMATCH: worker {worker_id} is registered by another token"));
             }
             // A missing local runtime can be admitted only with the existing

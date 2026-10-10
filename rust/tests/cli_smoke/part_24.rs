@@ -303,7 +303,7 @@ fn requirement_lock_previous_official_sdk_pin_upgrade_retains_history() {
     assert_eq!(
         serde_json::from_slice::<Value>(&fs::read(f.0.join(".appsdk/sdk.lock")).unwrap()).unwrap()
             ["version"],
-        "0.1.0012"
+        "0.1.0013"
     );
     assert!(f
         .0

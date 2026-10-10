@@ -4,6 +4,36 @@
 
 AppSDK 不包含任何业务协议、provider、项目 pipeline 或运行时实现。新项目拥有业务语义；AppSDK 只提供机制。
 
+## 验证与发布边界
+
+`.github/workflows/verify.yml` 按变更路径选择组件，不把全量构建作为日常
+push/PR 的默认动作。Rust 共享入口、版本、bundle、迁移或 workflow 变化会扩大到
+完整 AppSDK Rust 包；DAGPipe 变化运行完整 DAGPipe 目标及必要 AppSDK consumer；
+Collab 变化使用独立 job，不进入 AppSDK release 产品。选择器缺少基线或遇到未知
+共享路径时扩大对应包范围，不让空选择通过。
+
+完整 release 候选只在 `workflow_dispatch` 或版本 tag 上运行。该 job 执行 Rust
+与 DAGPipe 完整测试、合同和版本一致性检查、`appsdk` 与 `project-memory` 两个
+release binary 构建、installer 测试、source registry 检查和 consumer smoke。
+日常 push/PR 不无条件执行 release build 或 smoke。
+
+AppSDK release 的最小产品边界是 `appsdk`、`project-memory` 和
+`appsdk-project-governance`、`appsdk-migration`、`project-memory` 三个
+SDK-managed Skills。DAGPipe 是发布门禁的一部分，但不由 AppSDK installer 安装；
+Collab 使用自己的 source、installer 和 daemon 生命周期。
+
+独立用户应从公开 release 对应的 source tag 运行正式 installer：
+
+```bash
+git clone --branch <release-tag> --depth 1 https://github.com/Jasonzhangf/appsdk.git
+cd appsdk
+scripts/install-global-appsdk.sh
+```
+
+该命令从 source 构建并安装两个 binary 和三个 Skills。release assets 是发布回执，
+不是替代 source tag 的第二安装入口。Skill 正文仍只维护在
+`sdk-skill-sources/`。
+
 ## Collab runtime
 
 本仓库同时维护 `collab/` 下的独立 Collab runtime。它保留自己的 Cargo

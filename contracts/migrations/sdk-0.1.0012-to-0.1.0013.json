@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "migration_id": "appsdk-0.1.0012-to-0.1.0013",
+  "source_version": "0.1.0012",
+  "target_version": "0.1.0013",
+  "materialization": "pin_lock_when_migrating",
+  "snapshot_root": ".appsdk/migrations/0.1.0012-to-0.1.0013/maps",
+  "record_path": ".appsdk/migrations/0.1.0012-to-0.1.0013/record.json",
+  "maps": [
+    {
+      "name": "resource-map.json",
+      "review_hash_field": "resource_map_hash",
+      "source": "contracts/migrations/0.1.0012/governance-maps/resource-map.json",
+      "source_digest": "sha256:0c1cb507efc42b30b66f0d53de590df7b662f6e00e32ff86aca2680eee659a89",
+      "target": "contracts/maps/resource-map.json",
+      "target_digest": "sha256:b493940feebd3319c1e952548915660eef82877faf4cad9f9657f213ec9a2cf0"
+    },
+    {
+      "name": "function-map.json",
+      "review_hash_field": "function_map_hash",
+      "source": "contracts/migrations/0.1.0012/governance-maps/function-map.json",
+      "source_digest": "sha256:27a744a16b13c5d4a1966d91a43495bdf756830851f81a62b192dd1e4525e6a8",
+      "target": "contracts/maps/function-map.json",
+      "target_digest": "sha256:27a744a16b13c5d4a1966d91a43495bdf756830851f81a62b192dd1e4525e6a8"
+    },
+    {
+      "name": "mainline-call-map.json",
+      "review_hash_field": "mainline_call_map_hash",
+      "source": "contracts/migrations/0.1.0012/governance-maps/mainline-call-map.json",
+      "source_digest": "sha256:1fa26a50e5966751838c8209bd14a581203c46d74a283e4207520b48b515002f",
+      "target": "contracts/maps/mainline-call-map.json",
+      "target_digest": "sha256:1fa26a50e5966751838c8209bd14a581203c46d74a283e4207520b48b515002f"
+    },
+    {
+      "name": "verification-map.json",
+      "review_hash_field": "verification_map_hash",
+      "source": "contracts/migrations/0.1.0012/governance-maps/verification-map.json",
+      "source_digest": "sha256:d2fe634510e4326114a8fc2d77850846e743db7c245a409d88f619d8b2ae3847",
+      "target": "contracts/maps/verification-map.json",
+      "target_digest": "sha256:518630726f1140baaa1d4530dfb92ac9b90bd96f79b6a043769d3a19e9196327"
+    }
+  ]
+}

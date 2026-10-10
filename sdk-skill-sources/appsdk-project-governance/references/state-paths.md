@@ -80,12 +80,12 @@ appsdk prepare                 -> create/confirm scope and boundaries
 appsdk init .                  -> scaffold/refresh governance and register project
 appsdk guide compile           -> compile declared guidance after binding the contract
 appsdk verify                  -> verify the current contract/baseline
-appsdk reset-governance --discard-legacy
+appsdk reset-governance <project> --discard-legacy
                                -> AppSDK control-plane reset
 appsdk init --fresh --discard-legacy
                                -> preferred single transaction for old AppSDK control plane
 collab down
-collab reset --discard-legacy --approval "<user text>"
+collab reset --project --discard-legacy --approval "<user text>"
 collab up
 collab context
                                -> Collab-owned project control-plane reset
@@ -100,7 +100,7 @@ When the user explicitly asks to start fresh instead of migrating legacy
 state, keep the owners separate:
 
 1. Use `collab migrate` when the project journal is replayable; otherwise use
-   the explicitly authorized `collab reset --discard-legacy` sequence above
+   the explicitly authorized `collab reset --project --discard-legacy` sequence above
    for Collab-owned state. Do not manually remove `.agent-collab/`.
 2. From a clean non-`main` owner worktree, use `appsdk init --fresh
    --discard-legacy` for `.appsdk/` and `.appsdk-control/`. Do not manually

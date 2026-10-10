@@ -1,12 +1,12 @@
 ---
 name: project-memory
-description: "本地记忆: L1锚点+L2/L3入口+tag+相对路径; SQLite 搜 raw memory。"
+description: "本地记忆: L1锚点+L2/L3入口+tag+相对路径; SQLite 搜 raw memory; 不是开发或规则升级门禁。"
 ---
 
 # Project memory
 
 Use the independent `project-memory` command for memory only. It is available
-at any time and is not a debug/develop gate.
+at any time and is not a debug/develop or AppSDK rule-upgrade gate.
 
 `memory/index.md` is the generated local index and curation source. It includes
 short titles, tags, relative detail paths, and a fixed-size Skill description

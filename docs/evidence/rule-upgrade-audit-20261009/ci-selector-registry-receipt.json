@@ -1,0 +1,28 @@
+{
+  "case": "registry",
+  "base": "fbe57a9f5cb960e0b9f290a2e53c413d97821300",
+  "head": "2014724122a2095bf2a27d49efd0ed72a0554ef4",
+  "expected": {
+    "rust_registry": "true",
+    "rust_communication": "true",
+    "app_sdk_full": "false",
+    "release": "false",
+    "dagpipe": "false",
+    "collab": "false"
+  },
+  "actual": {
+    "app_sdk_full": "false",
+    "rust_guidance": "false",
+    "rust_communication": "true",
+    "rust_memory": "false",
+    "rust_registry": "true",
+    "resources": "false",
+    "dagpipe": "false",
+    "collab": "false",
+    "installer": "false",
+    "docs": "false",
+    "release": "false",
+    "base_sha": "fbe57a9f5cb960e0b9f290a2e53c413d97821300",
+    "head_sha": "2014724122a2095bf2a27d49efd0ed72a0554ef4"
+  }
+}

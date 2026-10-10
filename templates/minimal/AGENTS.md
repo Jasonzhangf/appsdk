@@ -62,6 +62,15 @@ current ledger version, and use the SDK review context for all applicable items.
   default. Select persistent Guidance when it helps the task.
 - When using Guidance, bind plans to current goal, task, module, owner, scope,
   declared rule sources, source commit, and tree.
+- After an SDK or template upgrade, read the effective upstream rules, project
+  AGENTS and Skills, actual test commands, and CI/hook entrypoints before
+  comparing the advisory template. Record each difference with location, owner,
+  delete/merge/narrow/add action, basis, retained safeguard, and entrypoint
+  impact. Reuse session authorization that already covers a difference; seek
+  approval only for uncovered changes.
+- Guidance is optional for this audit. Repeated initialization and unrelated
+  version refreshes do not trigger a whole-project rule audit. Run checks
+  affected by ordinary changes; run the declared complete gate for release.
 - Within a selected workflow execute declared transitions. Optional nodes use an
   explicit bypass edge, never an undeclared jump.
 - Append observations and evidence to the active step. Revise the plan when

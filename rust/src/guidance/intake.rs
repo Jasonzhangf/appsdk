@@ -257,6 +257,46 @@ fn bootstrap_setup(root: &Path, project: &Value, selected_module: &Value, task: 
         })
         .cloned()
         .collect::<Vec<_>>();
+    let proposal_schema = serde_json::json!({
+        "schema_version": 1,
+        "proposal_type": "GuidanceSetupProposal",
+        "setup_kind": setup_kind,
+        "task_id": task,
+        "project_id": project["project_id"],
+        "module_id": module_id,
+        "objective": "Describe the reusable project development process to standardize.",
+        "standard_template": standard_template,
+        "current_sources": current_sources,
+        "recommended_changes": [],
+        "recommended_change_required_fields": [
+            "path",
+            "owner",
+            "action",
+            "basis",
+            "retained_safeguards",
+            "affected_entrypoints"
+        ],
+        "retained_project_rules": [],
+        "declined_template_items": [],
+        "approval_required": "uncovered_durable_changes_only",
+        "authorization_reuse": "existing_session_authorization",
+        "approval_evidence": "conversation_authorization_or_explicit_user_approval",
+        "rule_sources": [],
+        "workflows": [],
+        "project_commands": [],
+        "rule_classification": {
+            "advisory": [],
+            "warning": [],
+            "forbidden": []
+        },
+        "unresolved_questions": [],
+        "target_writes": {
+            "project_facts": "AGENTS.md",
+            "agent_procedures": ["<project-local-skill>/SKILL.md"],
+            "machine_contracts": ["<project-local-skill>/appsdk-guidance.json"],
+            "source_declaration": ".appsdk/project.json#/guidance"
+        }
+    });
     serde_json::json!({
         "harness": "appsdk-development-process-control",
         "guide_flow_required": flow_required,
@@ -271,7 +311,7 @@ fn bootstrap_setup(root: &Path, project: &Value, selected_module: &Value, task: 
             "owned_paths": selected_module["owned_paths"],
             "contract_paths": selected_module["contract_paths"]
         },
-        "readiness": "needs_user_approval",
+        "readiness": "needs_conditional_authorization",
         "reason_code": reason_code,
         "writes_state": false,
         "standard_template": standard_template,
@@ -291,7 +331,7 @@ fn bootstrap_setup(root: &Path, project: &Value, selected_module: &Value, task: 
         "questions": [
             {
                 "question_id": "standard_template_comparison",
-                "prompt": "Read current project rules first, then compare them with the installed AppSDK standard template. Recommend only useful differences; retain project decisions and record declined template items without forcing adoption.",
+                "prompt": "Read the effective upper-level rules, local AGENTS and Skills, actual test commands, and CI/hook behavior first. Compare the actual entrypoints with the installed AppSDK standard template. Audit each difference for deletion, merge, scope reduction, or necessary addition; retain project decisions and record declined template items. Reuse valid audit evidence when no relevant resource changed.",
                 "required": true
             },
             {
@@ -301,66 +341,40 @@ fn bootstrap_setup(root: &Path, project: &Value, selected_module: &Value, task: 
             },
             {
                 "question_id": "project_commands",
-                "prompt": "Confirm the project-owned test, build, install, restart, deployed-entrypoint replay, review, merge, and cleanup commands and the evidence each command produces.",
+                "prompt": "Confirm the project-owned test, build, install, restart, deployed-entrypoint replay, review, merge, and cleanup commands, their evidence, the risk-based selection for ordinary changes, and the full release gate.",
                 "required": true
             },
             {
                 "question_id": "rule_ownership",
-                "prompt": "Confirm which facts remain in AGENTS.md, which reusable procedures belong in project-local Skills, and which nodes, edges, gates, severities, commands, and evidence contracts belong in machine guidance.",
+                "prompt": "Confirm which facts remain in AGENTS.md, which reusable procedures belong in project-local Skills, and which nodes, edges, gates, severities, commands, and evidence contracts belong in machine guidance. Keep one owner per rule and remove confirmed duplication or unnecessary structure.",
                 "required": true
             },
             {
                 "question_id": "approval_boundary",
-                "prompt": "Present the GuidanceSetupProposal and obtain explicit user approval before modifying durable project rule sources or compiling guidance.",
+                "prompt": "Compare recommended durable changes with the existing conversation authorization. Reuse authorization that already covers a difference, and ask the user only about uncovered durable changes. Guidance compilation is optional and is not required when Guidance is not selected.",
                 "required": true
             }
         ],
-        "proposal_schema": {
-            "schema_version": 1,
-            "proposal_type": "GuidanceSetupProposal",
-            "setup_kind": setup_kind,
-            "task_id": task,
-            "project_id": project["project_id"],
-            "module_id": module_id,
-            "objective": "Describe the reusable project development process to standardize.",
-            "standard_template": standard_template,
-            "current_sources": current_sources,
-            "recommended_changes": [],
-            "retained_project_rules": [],
-            "declined_template_items": [],
-            "approval_required": true,
-            "rule_sources": [],
-            "workflows": [],
-            "project_commands": [],
-            "rule_classification": {
-                "advisory": [],
-                "warning": [],
-                "forbidden": []
-            },
-            "unresolved_questions": [],
-            "target_writes": {
-                "project_facts": "AGENTS.md",
-                "agent_procedures": ["<project-local-skill>/SKILL.md"],
-                "machine_contracts": ["<project-local-skill>/appsdk-guidance.json"],
-                "source_declaration": ".appsdk/project.json#/guidance"
-            }
-        },
-        "agent_instruction": "Read current project AGENTS and Skills before the AppSDK standard template. Treat the template as an advisory versioned reference, compare differences, retain project decisions, and recommend only useful upgrades. Ask only unresolved questions, then present one GuidanceSetupProposal. Do not modify AGENTS.md, Skills, machine contracts, project.json, lifecycle records, Active, Protected, compiled guidance, or task state before explicit user approval.",
+        "proposal_schema": proposal_schema,
+        "agent_instruction": "Read the effective upper-level rules, local AGENTS and Skills, actual test commands, and CI/hook behavior before the AppSDK standard template. Treat the template as an advisory versioned reference. For each difference, record its path, owner, delete/merge/narrow/add action, basis, retained safeguards, and affected entrypoints. Reuse existing conversation authorization when it covers a difference, and obtain explicit user approval only for uncovered durable changes. When no relevant SDK resource changed, reuse valid audit evidence instead of repeating a whole-repository audit. Do not require Guidance compilation when Guidance is not selected. Do not modify AGENTS.md, Skills, machine contracts, project.json, lifecycle records, Active, Protected, compiled guidance, or task state before the required authorization.",
         "after_user_approval": {
+            "condition": "only for uncovered durable changes; reuse existing session authorization when it covers the change",
             "actions": [
                 "Use a clean owner worktree from latest origin/main.",
-                "Apply only user-approved differences while preserving retained project rules; update project facts in AGENTS.md, reusable agent procedure in project-local Skills, and nodes, edges, gates, severities, commands, and evidence contracts in machine guidance as needed.",
-                "Declare only the approved sources in .appsdk/project.json#/guidance/rule_sources."
+                "Apply only authorized differences while preserving retained project rules; update project facts in AGENTS.md, reusable agent procedures in project-local Skills, and machine guidance only when those owners are in scope.",
+                "When Guidance is selected, declare only the authorized sources in .appsdk/project.json#/guidance/rule_sources.",
+                "When Guidance is not selected, apply the authorized rule, CI, or hook changes without declaring Guidance or compiling it."
             ],
             "commands": [
                 "appsdk guide compile",
                 "appsdk verify",
                 format!("appsdk guide init --task <task-id> --mode <develop|debug> --module {}", module_id)
-            ]
+            ],
+            "compile_condition": "only when Guidance is selected and its rule sources are authorized"
         },
         "next": {
-            "action": "agent_reads_context_and_presents_guidance_setup_proposal",
-            "requires": "explicit_user_approval",
+            "action": "agent_reads_effective_rules_and_presents_guidance_setup_proposal",
+            "requires": "authorization_check_for_uncovered_durable_changes",
             "writes_state": false
         }
     })

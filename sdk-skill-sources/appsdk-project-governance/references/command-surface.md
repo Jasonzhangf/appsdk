@@ -76,7 +76,7 @@ collab migrate inspect                 read-only migration/retirement inspection
 collab migrate plan                    prepare migration/retirement snapshot
 collab migrate apply                   freeze admission and persist snapshot
 collab migrate verify                  verify migration/retirement continuity
-collab reset --discard-legacy --approval "<text>"
+collab reset --project --discard-legacy --approval "<text>"
                                        retire/rebuild Collab-owned local control plane
 collab down                            controlled daemon stop
 collab up                              controlled daemon start

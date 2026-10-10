@@ -29,29 +29,6 @@ mod dagpipe;
 
 const SDK_BUNDLE_MANIFEST: &str = include_str!("../../contracts/sdk-bundle.manifest.json");
 const SDK_VERSION: &str = env!("APPSDK_VERSION");
-const SDK_MAP_MIGRATION_0_1_5_TO_0_1_6: &str =
-    include_str!("../../contracts/migrations/sdk-0.1.5-to-0.1.6.json");
-const SDK_MAP_MIGRATION_0_1_6_TO_0_1_0007: &str =
-    include_str!("../../contracts/migrations/sdk-0.1.6-to-0.1.0007.json");
-const SDK_MAP_MIGRATION_0_1_0007_TO_0_1_0008: &str =
-    include_str!("../../contracts/migrations/sdk-0.1.0007-to-0.1.0008.json");
-const SDK_MAP_MIGRATION_0_1_0008_TO_0_1_0009: &str =
-    include_str!("../../contracts/migrations/sdk-0.1.0008-to-0.1.0009.json");
-const SDK_MAP_MIGRATION_0_1_0009_TO_0_1_0010: &str =
-    include_str!("../../contracts/migrations/sdk-0.1.0009-to-0.1.0010.json");
-const SDK_MAP_MIGRATION_0010_TO_0011: &str =
-    include_str!("../../contracts/migrations/sdk-0.1.0010-to-0.1.0011.json");
-const SDK_MAP_MIGRATION_0011_TO_0012: &str =
-    include_str!("../../contracts/migrations/sdk-0.1.0011-to-0.1.0012.json");
-const SDK_MAP_MIGRATION_STEPS: [&str; 7] = [
-    "0.1.5-to-0.1.6",
-    "0.1.6-to-0.1.0007",
-    "0.1.0007-to-0.1.0008",
-    "0.1.0008-to-0.1.0009",
-    "0.1.0009-to-0.1.0010",
-    "0.1.0010-to-0.1.0011",
-    "0.1.0011-to-0.1.0012",
-];
 const PROJECT_AGENTS_TEMPLATE: &str = include_str!("../../templates/minimal/AGENTS.md");
 const CANONICAL_ZONE_TRANSITION_CONTRACT: &str =
     include_str!("../../contracts/transitions/zone-transition.manifest.json");
@@ -208,6 +185,31 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         "contracts/migrations/sdk-0.1.0011-to-0.1.0012.json",
         "contracts",
         SDK_MAP_MIGRATION_0011_TO_0012,
+    ),
+    (
+        "contracts/migrations/sdk-0.1.0012-to-0.1.0013.json",
+        "contracts",
+        SDK_MAP_MIGRATION_0012_TO_0013,
+    ),
+    (
+        "contracts/migrations/0.1.0012/governance-maps/resource-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.0012/governance-maps/resource-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.0012/governance-maps/function-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.0012/governance-maps/function-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.0012/governance-maps/mainline-call-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.0012/governance-maps/mainline-call-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.0012/governance-maps/verification-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.0012/governance-maps/verification-map.json"),
     ),
     (
         "contracts/migrations/0.1.0011/governance-maps/resource-map.json",
@@ -620,6 +622,7 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
 
 #[path = "main/governance.rs"]
 mod governance;
+use governance::canonical_map::*;
 use governance::*;
 #[path = "main/registry.rs"]
 mod registry;

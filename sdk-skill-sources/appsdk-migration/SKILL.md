@@ -1,14 +1,18 @@
 ---
 name: appsdk-migration
-description: "AppSDK+Collab 迁移/升级/身份上下文恢复/授权重置。owner 全程记录证据; worker 只可查候选, 不可删状态/重启/改身份/未授权删除。"
+description: "AppSDK/Collab 控制面迁移、身份上下文恢复或授权重置; 仅状态、daemon、身份或 reset 实际变化时使用。owner 全程记录证据; worker 只可查候选, 不可删状态/重启/改身份/未授权删除。"
 ---
 
 # AppSDK migration
 
-Use this Skill when an existing AppSDK or its Collab runtime must move to a
-reviewed version, when peer identity must be reconciled after a reviewed
-migration, or when the operator has explicitly authorized discarding a named
-legacy control plane.
+Use this Skill only when an existing AppSDK or its Collab runtime control plane
+must move to a reviewed version, when peer identity or route binding must be
+reconciled after a reviewed migration, or when the operator has explicitly
+authorized discarding a named legacy control plane. SDK-only rule, Skill,
+template, binary, or installer upgrades and ordinary `appsdk init` do not invoke
+this state machine unless control-plane state, daemon, identity, or reset is
+actually changing.
+
 The migration owner runs the whole operation and records its evidence. A
 worker may inspect or prepare a candidate, but may not independently delete
 state, restart the daemon, change identity, or resume admissions.
@@ -22,18 +26,18 @@ prepare -> inspect -> classify -> snapshot -> freeze
 
 The installed `collab` Skill owns transport, daemon, route, and identity
 semantics. The AppSDK project-governance Skill owns AppSDK quality gates and
-the canonical `appsdk reset-governance --discard-legacy` operation. Read those
-Skills before acting; do not copy their state machines into this one. For the
-project-level preserve/reset choices, also read
+the canonical `appsdk reset-governance <project> --discard-legacy` operation.
+Read those Skills before acting; do not copy their state machines into this
+one. For the project-level preserve/reset choices, also read
 [`bootstrap-migration.md`](../appsdk-project-governance/references/bootstrap-migration.md).
 
 The two clean-epoch owners are independent. Use `collab migrate` when the
-Collab journal is replayable; use `collab reset --discard-legacy --approval
-"<user text>"` only when the operator authorizes abandoning the old Collab
-epoch. Use `appsdk init <project> --fresh --discard-legacy` or the lower-level
-`appsdk reset-governance <project> --discard-legacy` only for the AppSDK-owned
-project control plane. A reset record proves reset only; it never proves
-delivery, review, install, restart, or live communication.
+Collab journal is replayable; use `collab reset --project --discard-legacy
+--approval "<user text>"` only when the operator authorizes abandoning the
+project Collab epoch. Use `appsdk init <project> --fresh --discard-legacy` or
+the lower-level `appsdk reset-governance <project> --discard-legacy` only for
+the AppSDK-owned project control plane. A reset record proves reset only; it
+never proves delivery, review, install, restart, or live communication.
 
 ## Invariants
 
@@ -95,8 +99,11 @@ existing contract plus explicit `--fresh --discard-legacy` authorization.
 
 All code, Skill, or contract changes are made in a clean non-`main` worktree
 created from the latest `origin/main`. Merge and verify the candidate on the
-intended mainline before installing it. Do not develop in a dirty root or in
-the worktree that owns the live daemon.
+intended mainline before installing it when installation changes shared
+production or a daemon runtime. An explicitly authorized SDK-only client
+candidate may be installed for pre-commit acceptance when the exact candidate is
+recorded and no mainline, release, or daemon-migration status is claimed. Do not
+develop in a dirty root or in the worktree that owns the live daemon.
 
 ## Inspect
 
@@ -150,7 +157,7 @@ For the idempotent reset route that discards the named legacy control plane,
 the exact command is:
 
 ```sh
-appsdk reset-governance --discard-legacy
+appsdk reset-governance <project> --discard-legacy
 ```
 
 Run it once, only in the clean non-`main` owner worktree after the named
@@ -182,7 +189,7 @@ The Collab-owned project control plane uses a separate reset owner:
 
 ```sh
 collab down
-collab reset --discard-legacy --approval "<explicit user authorization>"
+collab reset --project --discard-legacy --approval "<explicit user authorization>"
 collab up
 collab context
 ```

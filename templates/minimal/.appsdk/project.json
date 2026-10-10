@@ -3,7 +3,7 @@
   "project_id": "change-me",
   "sdk": {
     "name": "appsdk",
-    "version": "0.1.0012"
+    "version": "0.1.0013"
   },
   "lifecycle": {
     "stage": "draft"
@@ -71,7 +71,6 @@
       "contracts/records/record-graph.contract.json"
     ],
     "zone_transition_contract": "contracts/transitions/zone-transition.manifest.json",
-    "zone_transition_manifest": "contracts/transitions/zone-transition-manifest.json",
     "playground_retention": "archive_then_remove",
     "debug_merge_comment_required": true
   },

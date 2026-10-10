@@ -1,0 +1,18 @@
+{
+  "release-rust": {
+    "passed": 533,
+    "failed": 0,
+    "ignored": 0,
+    "filtered": 0,
+    "suite_summaries": 10,
+    "exit_code": 0
+  },
+  "release-dagpipe": {
+    "passed": 28,
+    "failed": 0,
+    "ignored": 0,
+    "filtered": 0,
+    "suite_summaries": 6,
+    "exit_code": 0
+  }
+}

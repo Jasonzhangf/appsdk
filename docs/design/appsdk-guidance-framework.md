@@ -118,19 +118,25 @@ It discovers only root `AGENTS.md`, the installed versioned standard template,
 the bundled AppSDK Skill, and direct Skill children under `skills/`,
 `.agents/skills/`, and `.codex/skills/`. Existing declared sources are included
 first. Symlinked, missing, nested, and unrelated files are not ingested. Every
-project source remains a candidate until user approval and explicit declaration
-in the project contract. The standard template is advisory comparison material
-and is never an active rule source.
+project source remains a candidate until explicit user authorization and
+declaration in the project contract. The standard template is advisory
+comparison material and is never an active rule source.
 
 Bootstrap output includes existing project/module state, candidate source paths
 and digests, Skill invocation suggestions, unresolved workflow/command/rule
 ownership questions, a `GuidanceSetupProposal` schema, and the post-approval
 compile/verify commands. It writes neither durable rules nor
-`.appsdk-control`. The Agent reads the files, reconciles project commands and
-procedures, asks only unresolved questions, and presents the proposal. After
-explicit approval, the Agent edits project-owned AGENTS, local Skills, machine
-contracts, and the source declaration in a clean owner worktree; only then does
-`guide compile` create committed rule context.
+`.appsdk-control`. The Agent reads effective upstream rules, project AGENTS and
+Skills, actual test commands, and CI/hook entrypoints; records each difference
+with owner, delete/merge/narrow/add action, basis, retained safeguard, and
+entrypoint impact; reuses session authorization that already covers a
+difference; and asks only for uncovered changes.
+
+After the authorized changes, the Agent edits project-owned AGENTS, local
+Skills, machine contracts, and the source declaration in a clean owner worktree;
+only then does `guide compile` create committed rule context. Guidance is
+optional: without it, the same audit and CI/hook updates proceed without a
+compile step.
 
 Repeated `appsdk init` refreshes `.appsdk/templates/minimal/AGENTS.md` from the
 current Bundle without overwriting the project-owned root `AGENTS.md`. A
@@ -139,9 +145,10 @@ The output uses `setup_kind=template_upgrade_review`, binds the reference path,
 version, and digest, and asks the Agent to read current rules first. The
 proposal separates recommended changes, retained project rules, and declined
 template items. It writes no project, lifecycle, or task state before approval.
-The advisory reference is outside the strict SDK resource-integrity set, so its
-absence cannot block ordinary verification or unrelated delivery. `init`
-restores it on demand.
+Repeated initialization and unrelated version refreshes do not trigger a
+whole-project rule audit. The advisory reference is outside the strict SDK
+resource-integrity set, so its absence cannot block ordinary verification or
+unrelated delivery. `init` restores it on demand.
 
 `GuidanceSetupProposal` is project-level. `PlanProposal` remains task-level and
 cannot automatically modify AGENTS, Skills, machine contracts, or memory.

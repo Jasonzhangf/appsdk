@@ -2,18 +2,287 @@ name: appsdk-verify
 
 on:
   push:
+    branches: ["**"]
+    tags: ["v*"]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  format:
+  changes:
+    name: Select affected components
+    runs-on: ubuntu-latest
+    outputs:
+      app_sdk_full: ${{ steps.scope.outputs.app_sdk_full }}
+      rust_guidance: ${{ steps.scope.outputs.rust_guidance }}
+      rust_communication: ${{ steps.scope.outputs.rust_communication }}
+      rust_memory: ${{ steps.scope.outputs.rust_memory }}
+      rust_registry: ${{ steps.scope.outputs.rust_registry }}
+      resources: ${{ steps.scope.outputs.resources }}
+      dagpipe: ${{ steps.scope.outputs.dagpipe }}
+      collab: ${{ steps.scope.outputs.collab }}
+      installer: ${{ steps.scope.outputs.installer }}
+      docs: ${{ steps.scope.outputs.docs }}
+      release: ${{ steps.scope.outputs.release }}
+      base_sha: ${{ steps.scope.outputs.base_sha }}
+      head_sha: ${{ steps.scope.outputs.head_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Select component scope
+        id: scope
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          HEAD_SHA: ${{ github.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+
+          emit() {
+            printf '%s=%s\n' "$1" "$2" >> "$GITHUB_OUTPUT"
+          }
+
+          release=false
+          if [[ "$EVENT_NAME" == "workflow_dispatch" || "$REF_TYPE" == "tag" ]]; then
+            release=true
+          fi
+
+          base=""
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            base="$PR_BASE"
+          elif [[ "$EVENT_NAME" == "push" ]]; then
+            base="$PUSH_BEFORE"
+          fi
+
+          app_sdk_full=false
+          rust_guidance=false
+          rust_communication=false
+          rust_memory=false
+          rust_registry=false
+          resources=false
+          dagpipe=false
+          collab=false
+          installer=false
+          docs=false
+
+          if [[ "$release" == true ]]; then
+            app_sdk_full=true
+            resources=true
+            installer=true
+            dagpipe=true
+          fi
+
+          baseline_ok=false
+          if [[ -n "$base" && ! "$base" =~ ^0+$ ]] && git cat-file -e "$base^{commit}" 2>/dev/null; then
+            baseline_ok=true
+          fi
+
+          changed=""
+          if [[ "$baseline_ok" == true ]]; then
+            changed="$(git diff --name-only "$base" "$HEAD_SHA")"
+          elif [[ "$release" == true ]]; then
+            base=""
+          else
+            app_sdk_full=true
+            resources=true
+            dagpipe=true
+            collab=true
+            installer=true
+            docs=true
+            base=""
+          fi
+
+          if [[ -z "$changed" && "$release" != true ]]; then
+            app_sdk_full=true
+            resources=true
+            dagpipe=true
+            collab=true
+            installer=true
+            docs=true
+          fi
+
+          while IFS= read -r path; do
+            [[ -n "$path" ]] || continue
+            case "$path" in
+              .github/workflows/verify.yml)
+                app_sdk_full=true
+                resources=true
+                dagpipe=true
+                collab=true
+                installer=true
+                docs=true
+                ;;
+              scripts/install-global-appsdk.sh)
+                resources=true
+                installer=true
+                ;;
+              scripts/tests/test-install-global-appsdk.sh)
+                installer=true
+                ;;
+              scripts/*collab*|scripts/build-collab.sh|scripts/install-global-collab.sh)
+                collab=true
+                ;;
+              scripts/install-global-dagpipe.sh)
+                dagpipe=true
+                ;;
+              rust/release-version|rust/Cargo.toml|rust/Cargo.lock|rust/build.rs|contracts/sdk-bundle.manifest.json|contracts/migrations/*|templates/minimal/.appsdk/project.json|templates/minimal/.appsdk/sdk.lock)
+                app_sdk_full=true
+                resources=true
+                ;;
+              rust/src/guidance.rs|rust/src/guidance/*)
+                rust_guidance=true
+                ;;
+              rust/src/communication.rs|rust/src/communication/*)
+                rust_communication=true
+                ;;
+              rust/src/memory.rs|rust/src/memory_cli.rs|rust/src/bin/project-memory.rs)
+                rust_memory=true
+                ;;
+              rust/src/global_registry.rs|rust/src/global_registry_communication.rs|rust/src/global_registry_tests.rs)
+                rust_registry=true
+                rust_communication=true
+                ;;
+              rust/src/*|rust/tests/*)
+                app_sdk_full=true
+                ;;
+              dagpipe/docs/*|dagpipe/*.md)
+                docs=true
+                ;;
+              dagpipe/*)
+                dagpipe=true
+                ;;
+              collab/docs/*|collab/*.md)
+                docs=true
+                ;;
+              collab/*)
+                collab=true
+                ;;
+              sdk-skill-sources/project-memory/*)
+                resources=true
+                rust_memory=true
+                installer=true
+                ;;
+              sdk-skill-sources/*)
+                resources=true
+                rust_guidance=true
+                installer=true
+                ;;
+              templates/*)
+                resources=true
+                rust_guidance=true
+                ;;
+              contracts/*)
+                app_sdk_full=true
+                resources=true
+                ;;
+              docs/*|README.md|MEMORY.md|*.md)
+                docs=true
+                ;;
+              *)
+                app_sdk_full=true
+                ;;
+            esac
+          done <<< "$changed"
+
+          emit app_sdk_full "$app_sdk_full"
+          emit rust_guidance "$rust_guidance"
+          emit rust_communication "$rust_communication"
+          emit rust_memory "$rust_memory"
+          emit rust_registry "$rust_registry"
+          emit resources "$resources"
+          emit dagpipe "$dagpipe"
+          emit collab "$collab"
+          emit installer "$installer"
+          emit docs "$docs"
+          emit release "$release"
+          emit base_sha "$base"
+          emit head_sha "$HEAD_SHA"
+
+  app-sdk-targeted:
+    name: AppSDK targeted
+    needs: changes
+    if: |
+      needs.changes.outputs.app_sdk_full != 'true' &&
+      (needs.changes.outputs.rust_guidance == 'true' ||
+       needs.changes.outputs.rust_communication == 'true' ||
+       needs.changes.outputs.rust_memory == 'true' ||
+       needs.changes.outputs.rust_registry == 'true' ||
+       needs.changes.outputs.resources == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo fmt --manifest-path rust/Cargo.toml -- --check
-      - run: cargo fmt --manifest-path dagpipe/Cargo.toml -- --check
+      - name: Install git-bug
+        if: |
+          needs.changes.outputs.rust_guidance == 'true' ||
+          needs.changes.outputs.rust_memory == 'true'
+        run: |
+          curl -fsSL -o /tmp/git-bug \
+            https://github.com/git-bug/git-bug/releases/download/v0.10.1/git-bug_linux_amd64
+          sudo install -m 0755 /tmp/git-bug /usr/local/bin/git-bug
+          git-bug version
+      - name: Check Rust formatting
+        if: |
+          needs.changes.outputs.rust_guidance == 'true' ||
+          needs.changes.outputs.rust_communication == 'true' ||
+          needs.changes.outputs.rust_memory == 'true' ||
+          needs.changes.outputs.rust_registry == 'true'
+        run: cargo fmt --manifest-path rust/Cargo.toml -- --check
+      - name: Validate resource contracts and versions
+        if: needs.changes.outputs.resources == 'true'
+        run: |
+          find contracts -name '*.json' -print0 | xargs -0 -n1 jq empty
+          release_version="$(tr -d '\n' < rust/release-version)"
+          test "$(jq -r '.version' contracts/sdk-bundle.manifest.json)" = "$release_version"
+          test "$(jq -r '.sdk.version' templates/minimal/.appsdk/project.json)" = "$release_version"
+          test "$(jq -r '.version' templates/minimal/.appsdk/sdk.lock)" = "$release_version"
+      - name: Guidance tests
+        if: needs.changes.outputs.rust_guidance == 'true'
+        run: |
+          cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke -- --list \
+            | grep -E 'guidance_' > /dev/null
+          cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke guidance_
+          cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke existing_governance_without_guide_gets_read_only_setup_proposal -- --exact
+          cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke repeated_init_
+      - name: Resource consumer tests
+        if: needs.changes.outputs.resources == 'true'
+        run: |
+          cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke project_agent_contract_is_created_for_new_projects_but_never_overwrites_project_rules -- --exact
+          cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke install_bundle_resources_projects_declared_record_contract_sources -- --exact
+      - name: Communication tests
+        if: needs.changes.outputs.rust_communication == 'true'
+        run: |
+          cargo test --manifest-path rust/Cargo.toml --locked --test communication_cli -- --list \
+            | grep -E ': test' > /dev/null
+          cargo test --manifest-path rust/Cargo.toml --locked --test communication_cli
+          cargo test --manifest-path rust/Cargo.toml --locked --test communication_event_schema
+          cargo test --manifest-path rust/Cargo.toml --locked --test communication_request_schema
+      - name: Memory tests
+        if: needs.changes.outputs.rust_memory == 'true'
+        run: |
+          cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke -- --list \
+            | grep -E 'project_memory' > /dev/null
+          cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke project_memory
+      - name: Registry tests
+        if: needs.changes.outputs.rust_registry == 'true'
+        run: |
+          cargo test --manifest-path rust/Cargo.toml --locked --bin appsdk -- --list \
+            | grep -E 'registry|registration' > /dev/null
+          cargo test --manifest-path rust/Cargo.toml --locked --bin appsdk registr
+          cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke -- registration init_ --list \
+            | grep -E ': test' > /dev/null
+          cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke -- registration init_
 
-  test:
+  app-sdk-full:
+    name: AppSDK full
+    needs: changes
+    if: needs.changes.outputs.app_sdk_full == 'true' && needs.changes.outputs.release != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,24 +293,116 @@ jobs:
             https://github.com/git-bug/git-bug/releases/download/v0.10.1/git-bug_linux_amd64
           sudo install -m 0755 /tmp/git-bug /usr/local/bin/git-bug
           git-bug version
-      - run: find contracts -name '*.json' -print0 | xargs -0 -n1 jq empty
-      - run: test "$(jq -r '.sdk.version' templates/minimal/.appsdk/project.json)" = "$(jq -r '.version' contracts/sdk-bundle.manifest.json)"
-      - run: test "$(jq -r '.version' templates/minimal/.appsdk/sdk.lock)" = "$(jq -r '.version' contracts/sdk-bundle.manifest.json)"
-      - run: cargo test --manifest-path rust/Cargo.toml
-      - run: cargo test --manifest-path dagpipe/Cargo.toml --locked --all-targets
+      - run: cargo fmt --manifest-path rust/Cargo.toml -- --check
+      - name: Validate resource contracts and versions
+        run: |
+          find contracts -name '*.json' -print0 | xargs -0 -n1 jq empty
+          release_version="$(tr -d '\n' < rust/release-version)"
+          test "$(jq -r '.version' contracts/sdk-bundle.manifest.json)" = "$release_version"
+          test "$(jq -r '.sdk.version' templates/minimal/.appsdk/project.json)" = "$release_version"
+          test "$(jq -r '.version' templates/minimal/.appsdk/sdk.lock)" = "$release_version"
+      - run: cargo test --manifest-path rust/Cargo.toml --locked
 
-  release:
+  dagpipe:
+    name: DAGPipe
+    needs: changes
+    if: needs.changes.outputs.dagpipe == 'true' && needs.changes.outputs.release != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: find contracts -name '*.json' -print0 | xargs -0 -n1 jq empty
-      - run: test "$(jq -r '.sdk.version' templates/minimal/.appsdk/project.json)" = "$(jq -r '.version' contracts/sdk-bundle.manifest.json)"
-      - run: test "$(jq -r '.version' templates/minimal/.appsdk/sdk.lock)" = "$(jq -r '.version' contracts/sdk-bundle.manifest.json)"
-      - run: cargo build --release --manifest-path rust/Cargo.toml
+      - run: cargo fmt --manifest-path dagpipe/Cargo.toml -- --check
+      - run: cargo test --manifest-path dagpipe/Cargo.toml --locked --all-targets
+      - name: AppSDK DAGPipe consumer tests
+        run: |
+          cargo test --manifest-path rust/Cargo.toml --locked --bin appsdk -- --list \
+            | grep -E 'dagpipe' > /dev/null
+          cargo test --manifest-path rust/Cargo.toml --locked --bin appsdk dagpipe
+          cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke -- --list \
+            | grep -E 'dagpipe_' > /dev/null
+          cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke dagpipe_
+
+  collab:
+    name: Collab
+    needs: changes
+    if: needs.changes.outputs.collab == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --manifest-path collab/Cargo.toml --locked -- --test-threads=1
+
+  installer:
+    name: Installer
+    needs: changes
+    if: needs.changes.outputs.installer == 'true' && needs.changes.outputs.release != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --manifest-path rust/Cargo.toml --locked
+      - name: Check release binaries
+        run: |
+          test -x rust/target/release/appsdk
+          test -x rust/target/release/project-memory
+      - run: bash scripts/tests/test-install-global-appsdk.sh
+
+  docs:
+    name: Docs
+    needs: changes
+    if: needs.changes.outputs.docs == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check changed text
+        env:
+          BASE_SHA: ${{ needs.changes.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.changes.outputs.head_sha }}
+        run: |
+          if [[ -n "$BASE_SHA" && "$BASE_SHA" != "$HEAD_SHA" ]]; then
+            git diff --check "$BASE_SHA" "$HEAD_SHA"
+          else
+            git show --check --oneline --format= "$HEAD_SHA"
+          fi
+
+  release:
+    name: Release candidate
+    needs: changes
+    if: needs.changes.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install git-bug
+        run: |
+          curl -fsSL -o /tmp/git-bug \
+            https://github.com/git-bug/git-bug/releases/download/v0.10.1/git-bug_linux_amd64
+          sudo install -m 0755 /tmp/git-bug /usr/local/bin/git-bug
+          git-bug version
+      - run: cargo fmt --manifest-path rust/Cargo.toml -- --check
+      - run: cargo fmt --manifest-path dagpipe/Cargo.toml -- --check
+      - name: Validate resource contracts and versions
+        run: |
+          find contracts -name '*.json' -print0 | xargs -0 -n1 jq empty
+          release_version="$(tr -d '\n' < rust/release-version)"
+          test "$(jq -r '.version' contracts/sdk-bundle.manifest.json)" = "$release_version"
+          test "$(jq -r '.sdk.version' templates/minimal/.appsdk/project.json)" = "$release_version"
+          test "$(jq -r '.version' templates/minimal/.appsdk/sdk.lock)" = "$release_version"
+      - run: cargo test --manifest-path rust/Cargo.toml --locked
+      - run: cargo test --manifest-path dagpipe/Cargo.toml --locked --all-targets
+      - run: cargo build --release --manifest-path rust/Cargo.toml --locked
+      - name: Check release binaries
+        run: |
+          test -x rust/target/release/appsdk
+          test -x rust/target/release/project-memory
+      - run: bash scripts/tests/test-install-global-appsdk.sh
       - run: rust/target/release/appsdk verify-sdk-source-registry .
-      - run: |
+      - name: Consumer smoke
+        run: |
           tmp="$(mktemp -d)"
+          trap 'rm -rf -- "$tmp"' EXIT
           rust/target/release/appsdk new "$tmp/project"
           rust/target/release/appsdk verify "$tmp/project"
           test -d "$tmp/project/playground"

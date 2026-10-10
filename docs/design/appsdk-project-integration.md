@@ -315,7 +315,7 @@ runtime、`active/`、`protected/` 与人类文档继续保留，随后重建当
 fresh 初始化不会复制旧 migration witness、reset receipt、PASS、hash、review 或
 lifecycle record；新的 `verify`、`guide compile`、`compile` 和下游 candidate evidence
 必须从当前版本重新产生。重复执行仍然是一次新的、明确授权的 reset，普通 `init` 和
-`reset-governance --discard-legacy` 的既有幂等语义不变。
+`reset-governance <project> --discard-legacy` 的既有幂等语义不变。
 
 对已有工作区，confirmed preparation 后必须先进入旧状态迁移预检：
 

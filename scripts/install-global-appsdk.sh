@@ -133,6 +133,11 @@ if [[ ! "$release_version" =~ ^appsdk[[:space:]][0-9]+\.[0-9]+\.[0-9]+[[:space:]
   echo "error: release binary returned an invalid version: $release_version" >&2
   exit 1
 fi
+expected_release_version="appsdk $(tr -d '\r\n' < "$repo_root/rust/release-version") (rust)"
+if [[ "$release_version" != "$expected_release_version" ]]; then
+  echo "error: release binary version does not match rust/release-version: $release_version != $expected_release_version" >&2
+  exit 1
+fi
 
 mkdir -p "$cargo_bin_dir"
 stage_file="$(mktemp "$cargo_bin_dir/.appsdk-install.XXXXXX")"

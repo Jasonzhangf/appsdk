@@ -22,6 +22,8 @@ if [[ ! -x "$fixture" ]]; then
   echo "build the release binary before running installer tests" >&2
   exit 1
 fi
+source_version="$(tr -d '\r\n' < "$repo_root/rust/release-version")"
+expected_version="appsdk $source_version (rust)"
 
 assert_file_absent() {
   [[ ! -e "$1" && ! -L "$1" ]] || {
@@ -87,7 +89,7 @@ FAKE_CARGO
     echo 'migration Skill dependency missing' >&2
     exit 1
   }
-  [[ "$($fake_bin/appsdk version)" == 'appsdk 0.1.0010 (rust)' ]] || {
+  [[ "$($fake_bin/appsdk version)" == "$expected_version" ]] || {
     echo 'canonical version mismatch' >&2
     exit 1
   }

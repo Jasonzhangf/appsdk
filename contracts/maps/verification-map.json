@@ -74,5 +74,6 @@
     {"gate_id":"memory_markdown_export","command":"cargo test --manifest-path rust/Cargo.toml --test cli_smoke project_memory_migration_and_reentry_are_resumable_and_source_preserving","required_for":["memory_index","memory_migration"]},
     {"gate_id":"memory_markdown_import","command":"cargo test --manifest-path rust/Cargo.toml --test cli_smoke project_memory_markdown_round_trip_import_is_idempotent","required_for":["memory_index","memory_import"]},
     {"gate_id":"memory_global_promotion_explicit","command":"cargo test --manifest-path rust/Cargo.toml --test cli_smoke project_memory_index_query_review_and_compact_are_layered","required_for":["memory_review","memory_global"]}
+    ,{"gate_id":"sdk_init_pin_preflight","command":"cargo test --manifest-path rust/Cargo.toml --test cli_smoke ordinary_init_rejects_previous_sdk_pin_before_any_write -- --exact","human_contract":"ordinary init refuses a stale SDK pin before creating or refreshing any project resources; pin-lock is the upgrade owner","required_for":["governance_init","sdk_upgrade","release"]}
   ]
 }

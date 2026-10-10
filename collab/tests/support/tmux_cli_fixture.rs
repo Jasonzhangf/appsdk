@@ -83,7 +83,12 @@ impl Fixture {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        serde_json::from_slice(&output.stdout).expect("collab CLI emits JSON")
+        let value: Value = serde_json::from_slice(&output.stdout).expect("collab CLI emits JSON");
+        value
+            .get("result")
+            .and_then(|result| result.get("snapshot"))
+            .cloned()
+            .unwrap_or(value)
     }
 
     fn command_without_pane(&self, args: &[&str]) -> Output {

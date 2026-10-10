@@ -49,6 +49,31 @@ pub(crate) const SDK_MAP_MIGRATION_0013_TO_0014: &str =
     include_str!("../../../contracts/migrations/sdk-0.1.0013-to-0.1.0014.json");
 pub(crate) const SDK_MAP_MIGRATION_0014_TO_0015: &str =
     include_str!("../../../contracts/migrations/sdk-0.1.0014-to-0.1.0015.json");
+pub(crate) const SDK_RESOURCE_MIGRATION_0014_TO_0015: (&str, &str, &str) = (
+    "contracts/migrations/sdk-0.1.0014-to-0.1.0015.json",
+    "contracts",
+    SDK_MAP_MIGRATION_0014_TO_0015,
+);
+pub(crate) const SDK_HISTORICAL_0014_RESOURCE_MAP: (&str, &str, &str) = (
+    "contracts/migrations/0.1.0014/governance-maps/resource-map.json",
+    "contracts",
+    include_str!("../../../contracts/migrations/0.1.0014/governance-maps/resource-map.json"),
+);
+pub(crate) const SDK_HISTORICAL_0014_FUNCTION_MAP: (&str, &str, &str) = (
+    "contracts/migrations/0.1.0014/governance-maps/function-map.json",
+    "contracts",
+    include_str!("../../../contracts/migrations/0.1.0014/governance-maps/function-map.json"),
+);
+pub(crate) const SDK_HISTORICAL_0014_MAINLINE_MAP: (&str, &str, &str) = (
+    "contracts/migrations/0.1.0014/governance-maps/mainline-call-map.json",
+    "contracts",
+    include_str!("../../../contracts/migrations/0.1.0014/governance-maps/mainline-call-map.json"),
+);
+pub(crate) const SDK_HISTORICAL_0014_VERIFICATION_MAP: (&str, &str, &str) = (
+    "contracts/migrations/0.1.0014/governance-maps/verification-map.json",
+    "contracts",
+    include_str!("../../../contracts/migrations/0.1.0014/governance-maps/verification-map.json"),
+);
 pub(crate) const SDK_MAP_MIGRATION_STEPS: [&str; 10] = [
     "0.1.5-to-0.1.6",
     "0.1.6-to-0.1.0007",

@@ -472,7 +472,6 @@ fn install_previous_bundle_migration_record(root: &Path) -> (String, String) {
 
     let lock_path = root.join(".appsdk/sdk.lock");
     let mut lock: Value = serde_json::from_str(&fs::read_to_string(&lock_path).unwrap()).unwrap();
-    lock["version"] = Value::String("0.1.0014".into());
     lock["bundle_digest"] = Value::String(previous_bundle_digest.clone());
     lock["bundle_manifest_digest"] = Value::String(previous_manifest_digest);
     fs::write(
@@ -611,6 +610,8 @@ fn pin_lock_accepts_all_materialized_migration_bundle_witnesses() {
             "name": name,
             "source_digest": digest(source),
             "target_digest": digest(target),
+            "canonical_source_digest": digest(source),
+            "canonical_target_digest": digest(target),
             "snapshot_path": format!(".appsdk/migrations/0.1.6-to-0.1.0007/maps/{}", name)
         }));
     }

@@ -519,6 +519,7 @@
         "rust/Cargo.toml",
         "rust/build.rs",
         "rust/release-version",
+        "npm/**",
         "scripts/**",
         "sdk-skill-sources/**",
         "templates/**"

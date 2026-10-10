@@ -70,7 +70,7 @@ run_scenario() {
   local name="$1" event="$2" ref_type="$3" baseline="$4" changed="$5"
   SCENARIO="$name"
   printf '%s' "$changed" > "$changed_file"
-  if ! OUT="$(SELECTOR_TEST_BASELINE="$baseline" SELECTOR_TEST_CHANGED="$changed_file" \
+  if ! OUT="$(GITHUB_OUTPUT="" SELECTOR_TEST_BASELINE="$baseline" SELECTOR_TEST_CHANGED="$changed_file" \
     PATH="$stub_dir:$PATH" \
     EVENT_NAME="$event" REF_TYPE="$ref_type" HEAD_SHA="deadbeef" \
     PUSH_BEFORE="cafebabe" PR_BASE="cafebabe" \

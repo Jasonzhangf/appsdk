@@ -46,11 +46,12 @@ export function detectGlibcVersionRuntime() {
   }
 }
 
-export function selectTarget({
-  platform = process.platform,
-  arch = process.arch,
-  glibcVersionRuntime = detectGlibcVersionRuntime(),
-} = {}) {
+export function selectTarget(options = {}) {
+  const { platform = process.platform, arch = process.arch } = options;
+  const glibcVersionRuntime = Object.hasOwn(options, "glibcVersionRuntime")
+    ? options.glibcVersionRuntime
+    : detectGlibcVersionRuntime();
+
   if (platform === "linux" && arch === "x64") {
     if (!glibcVersionRuntime) {
       throw new LauncherError(

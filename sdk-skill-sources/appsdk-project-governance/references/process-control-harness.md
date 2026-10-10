@@ -44,11 +44,12 @@ appsdk guide init --task guidance-setup --mode bootstrap --module <module-id>
 ```
 
 Read the returned candidate sources, produce the requested
-`GuidanceSetupProposal`, and obtain explicit user approval. The Agent then
-updates project-owned human and machine rule sources in a clean owner worktree,
-declares them in `.appsdk/project.json`, and runs `appsdk guide compile` plus
-`appsdk verify`. If status is only `GUIDANCE_NOT_COMPILED`, approved sources are
-already declared and compile is the next command.
+`GuidanceSetupProposal`, reuse session authorization that already covers a
+difference, and obtain explicit approval only for uncovered changes. The Agent
+then updates project-owned human and machine rule sources in a clean owner
+worktree, declares them in `.appsdk/project.json`, and runs `appsdk guide
+compile` plus `appsdk verify`. If status is only `GUIDANCE_NOT_COMPILED`,
+approved sources are already declared and compile is the next command.
 
 After an AppSDK update, or for an explicit rules refresh, a configured project
 uses the same read-only bootstrap intake:
@@ -59,10 +60,16 @@ appsdk guide init --task guidance-upgrade --mode bootstrap --module <module-id>
 ```
 
 Read current project sources before the returned standard template reference.
-The resulting `template_upgrade_review` proposal may recommend changes, retain
-project rules, or decline template items. It does not write state or activate
-the template. Apply only user-approved differences in a clean owner worktree,
-then compile and verify.
+Read actual test commands and CI/hook entrypoints as well as the rules. The
+resulting `template_upgrade_review` proposal may recommend changes, retain
+project rules, or decline template items. Record owner, action, basis, retained
+safeguard, and entrypoint impact for each difference; reuse session
+authorization that already covers a difference and ask only for uncovered
+changes. It does not write state or activate the template. Guidance is optional:
+without it, apply the same authorized audit and CI/hook changes without
+compile. Repeated init or unrelated version changes do not trigger a
+whole-project audit. Apply authorized differences in a clean owner worktree,
+then compile and verify when Guidance is selected.
 
 Use `--mode debug` for a bug, regression, or incident. Use another declared
 domain when appropriate. `guide init` is read-only and returns:

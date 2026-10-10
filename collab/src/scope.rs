@@ -832,8 +832,9 @@ tokens, mixed runtime writes, and guessing thread identity are deprecated.
   `collab master promote --approval "<user text>"` itself after explicit user
   approval. Master authority is arbitration only; it does not take another
   peer's task. Independent peers may temporarily decline a master
-  collaboration invite to protect their own task; managed subagents must obey
-  the master.
+  collaboration invite to protect their own task. A delegated subagent follows
+  its task contract; it follows Collab protocol only if it is itself a
+  registered peer.
 - Each peer self-registers one task and owns its full worktree, test,
   integration, main verification, push, cleanup, and resource lifecycle.
 - Task owner, resource holder, integration lease, and daemon operator are

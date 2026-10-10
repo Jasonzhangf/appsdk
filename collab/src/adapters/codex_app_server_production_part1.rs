@@ -149,7 +149,7 @@ impl LiveAppServer {
                 detail: format!("CODEX_THREAD_ID is invalid: {error}"),
             })?;
         let namespace = appserver_namespace_from_env()?;
-        let Some(socket_path) = socket_candidate(namespace) else {
+        let Some(socket_path) = socket_candidate() else {
             return Ok(None);
         };
         if !socket_path.is_absolute() || !socket_path.exists() {
@@ -284,9 +284,10 @@ impl LiveAppServer {
 }
 
 /// Collect an App Server endpoint/thread candidate from the current process
-/// environment without probing it. The daemon owns candidate self-check and
-/// transport selection; a client-side probe must not be able to suppress a
-/// candidate that the server could otherwise validate.
+/// environment without probing it. Only an endpoint explicitly supplied by
+/// the current runtime is eligible; host-managed socket paths are not proof of
+/// which AppServer this client uses. The daemon owns candidate self-check and
+/// transport selection.
 pub fn candidate_from_env() -> Result<Option<AppServerCandidate>, AdapterError> {
     let Some(thread_id) = std::env::var("CODEX_THREAD_ID")
         .ok()
@@ -312,7 +313,7 @@ pub fn candidate_from_env() -> Result<Option<AppServerCandidate>, AdapterError> 
         Err(error) if explicit_endpoint => return Err(error),
         Err(_) => return Ok(None),
     };
-    let Some(socket_path) = socket_candidate(namespace) else {
+    let Some(socket_path) = socket_candidate() else {
         return Ok(None);
     };
     let cwd = std::env::current_dir()
@@ -358,14 +359,7 @@ pub(crate) fn identity_facts_from_env() -> Result<IdentityFacts, AdapterError> {
         .ok()
         .filter(|value| !value.trim().is_empty());
     match appserver_namespace_from_env() {
-        Ok(namespace) => {
-            facts.namespace = Some(namespace.to_owned());
-            if facts.endpoint.is_none() {
-                if let Some(socket_path) = socket_candidate(namespace) {
-                    facts.endpoint = Some(format!("unix://{}", socket_path.display()));
-                }
-            }
-        }
+        Ok(namespace) => facts.namespace = Some(namespace.to_owned()),
         Err(error) if explicit_namespace.is_some() => return Err(error),
         Err(_) => {}
     }

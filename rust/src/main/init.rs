@@ -79,11 +79,38 @@ pub(super) fn write_project_agent_contract(root: &Path) {
     write_if_missing(root, "AGENTS.md", PROJECT_AGENTS_TEMPLATE);
 }
 
+fn assert_current_sdk_pin(project: &Value) {
+    let observed = project
+        .pointer("/sdk/version")
+        .and_then(Value::as_str)
+        .unwrap_or("<missing>");
+    if observed != SDK_VERSION {
+        fail(format!(
+            "SDK_VERSION_MIGRATION_REQUIRED:{observed}:{SDK_VERSION}:run=appsdk pin-lock <project> --binary <path>"
+        ));
+    }
+}
+
+fn is_recognized_historical_placeholder_lock(lock: &Value, project: &Value) -> bool {
+    lock.as_object().is_some_and(|object| {
+        object.len() == 7
+            && lock.get("sdk").and_then(Value::as_str) == Some("appsdk")
+            && lock.get("version").and_then(Value::as_str) == Some("0.1.0014")
+            && lock.get("contract_schema") == project.get("schema_version")
+            && lock.get("digest").and_then(Value::as_str)
+                == Some("sha256:replace-with-compiled-sdk-digest")
+            && lock.get("compiler_digest").and_then(Value::as_str)
+                == Some("sha256:replace-with-compiler-digest")
+            && lock.get("bundle_digest").and_then(Value::as_str)
+                == Some("sha256:replace-with-sdk-bundle-digest")
+            && lock.get("bundle_manifest_digest").and_then(Value::as_str)
+                == Some("sha256:replace-with-bundle-manifest-digest")
+    })
+}
+
 pub(super) fn write_current_sdk_lock(root: &Path) {
     let project = read_project(root);
-    if project.pointer("/sdk/version").and_then(Value::as_str) != Some(SDK_VERSION) {
-        return;
-    }
+    assert_current_sdk_pin(&project);
     let target = root.join(".appsdk/sdk.lock");
     if fs::symlink_metadata(&target)
         .map(|metadata| metadata.file_type().is_symlink())
@@ -95,13 +122,17 @@ pub(super) fn write_current_sdk_lock(root: &Path) {
         let text = fs::read_to_string(&target).unwrap_or_else(|_| fail("INVALID_SDK_LOCK"));
         let value =
             serde_json::from_str::<Value>(&text).unwrap_or_else(|_| fail("INVALID_SDK_LOCK"));
-        if value.get("sdk").and_then(Value::as_str) != Some("appsdk")
-            || value.get("version").and_then(Value::as_str) != Some(SDK_VERSION)
-            || value.get("contract_schema") != project.get("schema_version")
-        {
-            fail("INVALID_SDK_LOCK");
+        if is_recognized_historical_placeholder_lock(&value, &project) {
+            None
+        } else {
+            if value.get("sdk").and_then(Value::as_str) != Some("appsdk")
+                || value.get("version").and_then(Value::as_str) != Some(SDK_VERSION)
+                || value.get("contract_schema") != project.get("schema_version")
+            {
+                fail("INVALID_SDK_LOCK");
+            }
+            Some(value)
         }
-        Some(value)
     } else {
         None
     };
@@ -195,7 +226,7 @@ pub(super) fn write_project_scaffold(root: &Path) {
         r#"{
   "schema_version": 1,
   "project_id": "change-me",
-  "sdk": {"name": "appsdk", "version": "0.1.0012", "bundle_manifest": ".appsdk/contracts/sdk-bundle.manifest.json", "resource_record": ".appsdk/sdk-resources.json"},
+  "sdk": {"name": "appsdk", "version": "0.1.0015", "bundle_manifest": ".appsdk/contracts/sdk-bundle.manifest.json", "resource_record": ".appsdk/sdk-resources.json"},
   "lifecycle": {"stage": "draft"},
   "access": {"protected_paths": [".appsdk/**", "generated/**", "protected/source/**"]},
   "development_scenarios": {"manifest": ".appsdk/contracts/development-scenarios.manifest.json", "enabled": []},
@@ -858,6 +889,9 @@ pub(super) fn init_project(root: &Path, fresh: bool, discard_legacy: bool) {
             fail("INIT_FRESH_REQUIRES_EXISTING_PROJECT");
         }
     }
+    if !fresh && root.join(".appsdk/project.json").is_file() {
+        assert_current_sdk_pin(&read_project(root));
+    }
     fs::create_dir_all(root).unwrap_or_else(|_| fail("PROJECT_CREATE_FAILED"));
     if fresh {
         reset_governance_internal(root, true, ResetMode::FreshInit)
@@ -905,13 +939,15 @@ pub(super) fn init_project(root: &Path, fresh: bool, discard_legacy: bool) {
         println!(
             "next appsdk guide init --task guidance-setup --mode bootstrap --module <module-id>"
         );
-        println!("then read project documents and present GuidanceSetupProposal for user approval");
+        println!(
+            "then read effective upper-level rules, local Skills, tests, and CI/hook; present a conditional GuidanceSetupProposal and ask only about uncovered durable changes"
+        );
     } else if !fresh_governance {
         println!(
             "next appsdk guide init --task guidance-upgrade --mode bootstrap --module <module-id>"
         );
         println!(
-            "then compare current project rules with the installed standard template and present a non-destructive GuidanceSetupProposal for user approval"
+            "then compare current project rules with the installed standard template; reuse valid audit evidence when no relevant SDK resource changed and present a non-destructive conditional GuidanceSetupProposal"
         );
     } else {
         println!("next appsdk guide compile");

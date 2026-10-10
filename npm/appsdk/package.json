@@ -1,0 +1,31 @@
+{
+  "name": "@jsonstudio/appsdk",
+  "version": "0.1.15",
+  "description": "npm launcher for AppSDK; runtime binaries and Skills are provided by the exact optional platform package.",
+  "type": "module",
+  "bin": {
+    "appsdk": "bin/appsdk.js",
+    "project-memory": "bin/project-memory.js"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "optionalDependencies": {
+    "@jsonstudio/appsdk-darwin-arm64": "0.1.15",
+    "@jsonstudio/appsdk-linux-x64-gnu": "0.1.15",
+    "@jsonstudio/appsdk-win32-x64-msvc": "0.1.15"
+  },
+  "appsdk": {
+    "sourceVersion": "0.1.0015",
+    "npmVersion": "0.1.15"
+  },
+  "scripts": {
+    "test": "node --test test/metadata.test.js test/target.test.js test/version.test.js test/launcher.test.js"
+  },
+  "license": "MIT"
+}

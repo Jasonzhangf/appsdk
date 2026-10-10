@@ -13,4 +13,4 @@
 
 Protected source is historical input, not runtime input. Active library is the current consumption surface.
 
-The machine source is `contracts/transitions/zone-transition-manifest.json`. It must enumerate all 16 ordered pairs across the four zones, including forbidden pairs. Every allowed edge declares requirements, owner adapter, runtime policy, artifact requirement, and record types. Forbidden runtime edges cannot be overridden by a project record.
+The machine source is `contracts/transitions/zone-transition.manifest.json`. It must enumerate all 16 ordered pairs across the four zones, including forbidden pairs. Every allowed edge declares requirements, owner adapter, runtime policy, artifact requirement, and record types. Forbidden runtime edges cannot be overridden by a project record.

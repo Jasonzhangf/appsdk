@@ -1,13 +1,15 @@
 ---
 name: collab
-description: "已启用并注册 Collab 的 peer/master 通信、任务、claim、共享任务板与资源协作；明确要求注册时也用本 Skill。未注册独立完成，不寻找 Master；普通开发、worktree 与 goal 不自动启用 Collab。只跑 collab context 一条命令，由 CLI 自动观察运行事实、daemon 选择或恢复身份并返回 peers/master/scheduling/env 快照；缺事实时返回 requires_identity_update.required_fields，Agent 用 collab context --provide '<JSON>' 一次补充。高频: sendmessage, recv, task accept/update/deliver/review/close, collab board publish/invite/respond/update, collab dashboard, master 派单 collab subagent dispatch。review --accept 会登记 daemon pending merge, task integrated 才能 close (TASK_MERGE_PENDING)。"
+description: "仅约束已成功注册 Collab 的 peer；master 权限需另行授权。未注册、注册失败或无法注册时独立完成，不适用协作协议。用户明确要求注册时才初始化。"
 ---
 
 # Collab
 
 ## 适用身份
 
-只有本任务明确启用 Collab、当前执行者已注册且具有有效通信 route，才适用后文 master/peer/subworker 协议。未注册 Collab 就独立完成任务，不寻找、等待或服从 Master，不为普通任务自动注册、晋升或接管他人身份。用户明确要求注册时才执行初始化。
+只有当前执行者已在本项目成功注册为 Collab peer，后文的协作规则才适用；各角色规则只约束该角色。master 规则还要求当前 peer 持有经明确授权的 master 权限。未注册的 subworker 不因受托而成为 Collab peer，也不适用本 Skill 的协作协议。加载本 Skill、任务提到 Collab、看到 master 名称或启动多个 worker，都不代表已注册或取得 master 权限。
+
+当前项目没有注册身份、状态为 `registered=false`，或初始化无法完成时，不需要遵从本 Skill 的协作协议：独立完成用户任务，不寻找、等待或服从 Collab master，也不因注册失败而阻塞。只有用户明确要求注册时才执行初始化；失败保留原错，并继续独立工作。成功注册后的通信故障按对应故障规则处理，不抹除已有身份或职责。
 
 独立开发使用全局规定的外置独占 worktree。注意共享资源冲突，不改动、回收或覆盖他人的 worktree、文件、进程与 claim；能隔离就继续，不能隔离只报告受影响操作。没有 Collab 不阻断独立任务，也不要求建立一套协作生命周期。
 
@@ -316,11 +318,14 @@ commands, and live replay result in the bug system. A test pass without
 latest-main merge, installed-binary verification, or applicable live replay
 does not close the bug.
 
-## Automatic multi-worker collaboration
+## Registered multi-worker collaboration
 
-Keep Collab enabled. At multi-worker startup, run `collab context` once
-in the inherited live peer environment. This lets the daemon establish or
-recover the peer and the default finite direct-message subscription.
+Only successfully registered participants use this collaboration protocol.
+Multiple workers alone do not enable Collab. For an existing registered peer,
+run `collab context` once in its own live environment to recover current state
+and the default finite direct-message subscription. Initial registration is
+performed only when explicitly requested by the user; if it cannot complete,
+preserve the error and continue independent work without this protocol.
 Registration returns `role_brief`. Read it as the active operating contract.
 It is the registration-time projection; `collab context` returns the current
 brief, and promotion or delegation returns the replacement brief. Do not
@@ -520,8 +525,8 @@ fails explicitly. Registered peer status and thread state use the owning
 AppServer RPC. Use registered peers for concurrent work. Existing subagent
 records may be inspected with `status`, `send <id> --subject <topic> "<task>"`,
 and explicit `close <id>`.
-`collab-mcp` is the shared Collab MCP for every agent. Use `collab_*`
-tools when this session lists them. The `collab` CLI is also valid.
+For registered participants, `collab-mcp` and the `collab` CLI expose the same
+collaboration protocol. Listed `collab_*` tools alone do not prove registration.
 If MCP is missing, unsupported, aborted, or unknown, run the same
 actions with the CLI in the inherited project cwd:
 `collab context`, `collab recv`, `collab ack <id>` / `collab ack --all`,
@@ -1023,6 +1028,10 @@ persists.
 
 ### Situation -> action (one entry)
 
+This table applies to registered participants recovering state, or to initial
+registration explicitly requested by the user. It does not activate Collab
+merely because an agent enters a project.
+
 `collab context` is the single agent entry. It resolves the canonical root,
 creates a missing baseline, starts a stopped daemon, restores identity and
 registration, re-arms the default direct-message lease, and returns the
@@ -1045,14 +1054,14 @@ projections that used to require separate calls, so no agent flow needs to run
 
 | Situation | Do this | Never do this |
 |---|---|---|
-| First time in a project | `collab context` | a separate identity probe, or `collab init` used as a substitute for `collab context` |
+| User explicitly requests first registration | `collab context` | automatic registration merely on entering a project; a separate identity probe, or `collab init` used as a substitute for `collab context` |
 | Another worker or project claims your tmux pane, or the recorded pane route is stale | `collab context`; the daemon replaces the claim by default | inspect routes or archives, pick a worker id, or edit any route/identity file |
 | Master authority must move to this peer | `collab master promote --approval "<user text>"` | promote without explicit user approval |
 | Master authority must be cleared for this project scope | `collab master clear --approval "<user text>"` | clear without explicit user approval; or expect clear to delete tasks, messages, peers, or bindings |
 | Thread/session changed, or after daemon restart | `collab context` (daemon reconciles identity in place) | a manual identity recovery command, `collab down`/`up` |
 | Need peer list, master state, scheduling state, or env | read them from the single `collab context` snapshot | call `collab who`, `collab status --all`, `collab master status`, or grep the environment as a separate step |
 | `requires_identity_update` is present | read `required_fields` and `exact_error`; when the returned action is the factual supplement, run that one action with only the requested `session_id`, `thread_id`, `endpoint`, or `namespace` from their real source | select or guess a worker; run an identity selection or recovery command, or a status/route/init hunt; set an identity override or approval supplement |
-| `collab context` exits non-zero with `COLLAB_CONTEXT_UNRESOLVED` | preserve the error, run `collab context` from the canonical main tree | edit routes/token state, copy identity, reset the project |
+| `collab context` exits non-zero with `COLLAB_CONTEXT_UNRESOLVED` | preserve the error; failed initial registration continues independently; existing registered participants report the affected coordination without clearing owned tasks/claims | automatically retry from another cwd; edit routes/token state, copy identity, reset the project |
 | Default lease looks stopped | `collab context` re-arms it unless the owner explicitly unsubscribed | probe sockets, call a transport directly |
 | Notification arrived | `collab msg <id>`, then act; `collab recv` consumes | ACK-only, or treat submission as consumption |
 | Master has a pending merge | `collab context` → `pending_merges`, merge the candidate, then `collab task integrated` | rely on a remembered message, or try to close first |
@@ -1107,11 +1116,11 @@ workflow，没有第二个修复入口。根解析失败和显式冲突/错误�
 
 | 状态/终态 | 含义 | Agent 动作 |
 | --- | --- | --- |
-| `state_snapshot` | 引导成功；含 role/operations/master/peers/peer_count/summary/master_wake/subagents/inbox/worktrees/tasks/env | 读快照执行当前角色的 `operations`；无需再跑 who/status/master status |
+| `state_snapshot` 且 `registered=true` | 注册成功；含 role/operations/master/peers/peer_count/summary/master_wake/subagents/inbox/worktrees/tasks/env | 读快照执行已注册角色的 `operations`；无需再跑 who/status/master status |
 | 陈旧/他人的 pane claim 已被顶掉 | 默认路径的一部分，不产生额外终态 | 无；不需要第二条命令，也不参与裁决 |
-| `identity_update` | daemon 需要缺失事实或报告显式身份冲突；`registered=false`，`requires_identity_update.required=true` | 只读 `required_fields`/`reason`/`action`/`exact_error`；若 action 是 factual supplement，则用一次 `collab context --provide` 提供请求的四个 scalar keys；显式冲突保留原错，不选择 worker，不跑 status/route 恢复，也不把 `collab init` 当第二次修复尝试 |
-| `COLLAB_CONTEXT_UNRESOLVED` | 无 route、无 baseline、无 git 根（非零退出） | 保留错误，改在 canonical main 再跑 `collab context` |
-| 拒绝在 playground 创建基线 | 在 worktree 内引导（非零退出） | 回到项目 main 根执行，不删旧身份 |
+| `identity_update` | daemon 需要缺失事实或报告显式身份冲突；`registered=false`，`requires_identity_update.required=true` | 只读 `required_fields`/`reason`/`action`/`exact_error`；已授权初始化或已注册身份恢复中，若 action 是 factual supplement，可用一次 `collab context --provide` 补真实事实。成功注册前不执行角色协议；显式冲突保留原错，不选择 worker，不把 `collab init` 当第二次修复尝试 |
+| `COLLAB_CONTEXT_UNRESOLVED` | 无 route、无 baseline、无 git 根（非零退出） | 保留原错，不自动换 cwd 重试；首次注册失败则独立继续，已注册者报告受影响协作，保留已领任务/claim |
+| 拒绝在 playground 创建基线 | 在 worktree 内引导（非零退出） | 保留原错，不改主树或删除旧身份；首次注册失败则独立继续，已注册者保留已有职责并报告协作缺口 |
 | 默认订阅已停 | owner 显式 unsubscribe 持久生效 | 需要再收消息时用 `collab notify subscribe --event direct-message` 重订阅 |
 
 `requires_identity_update.reason` is a typed code. It is not prose and it is not
@@ -1128,7 +1137,8 @@ pending workflow conceals them.
 
 ## Initialize once
 
-The automatic state entry is always:
+Only for an existing registered participant or an explicit user request to
+register, the single state entry is:
 
 ```sh
 collab context
@@ -1146,6 +1156,13 @@ subscription, as part of bootstrap.
 
 ## AppServer runtime registration
 
+Register only the AppServer that serves the current caller's active session and
+thread. The endpoint, session ID, and thread ID must come from that caller's
+own runtime; never submit another agent's or worker's AppServer, session, or
+thread, even if it is reachable. If ownership of the exact endpoint and tuple
+cannot be established, fail registration rather than borrowing another
+runtime's identity.
+
 Registration derives the host namespace from the active runtime. The exact
 `CODEX_INTERNAL_ORIGINATOR_OVERRIDE=Codex Desktop` marker selects `codex_app`;
 `Codex CLI` or `Codex TUI` selects `codex_tui`, and `TMUX_PANE` selects
@@ -1157,16 +1174,22 @@ adapter returns no AppServer candidate and may continue through another
 existing transport only after that transport's normal verification. Never
 default an unidentified session to `codex_tui`.
 
-Endpoint discovery is host-specific and performed by the Collab client adapter
-before registration. `COLLAB_APPSERVER_SOCKET` and
-`CODEX_APP_SERVER_SOCKET` are explicit endpoints. For Desktop only, the client
-adapter may discover the managed endpoint at
-`$CODEX_HOME/app-server-control/app-server-control.sock`, or
-`$HOME/.codex/app-server-control/app-server-control.sock` when `CODEX_HOME` is
-unset. A TUI must supply its own reachable AppServer endpoint; never borrow the
-Desktop managed socket for a private embedded TUI. `CODEX_APP_TOOLS_PIPE_PATH`
+The Collab client accepts only `COLLAB_APPSERVER_SOCKET` or
+`CODEX_APP_SERVER_SOCKET` supplied by the current runtime as the endpoint for
+the current session. In particular, never derive
+`$CODEX_HOME/app-server-control/app-server-control.sock` or
+`$HOME/.codex/app-server-control/app-server-control.sock`: those are
+host-managed paths, and their existence, owning daemon PID, or ability to list
+the thread does not prove that the registering client uses that AppServer.
+Never copy a parent agent's, another process's, or a merely host-managed
+endpoint into registration or `collab context --provide`. A matching
+`thread/read` result proves that an endpoint can access the thread; it does not
+prove that the current client uses that AppServer. If the current runtime does
+not provide its endpoint, do not register an AppServer route or guess one; use
+another already verified transport only when it belongs to this peer, otherwise
+report that registration lacks a current-session endpoint. `CODEX_APP_TOOLS_PIPE_PATH`
 is a tool pipe, not an AppServer endpoint. The daemon still verifies the exact
-thread/session/project tuple before committing the route.
+thread/session/project tuple before committing a supplied route.
 
 The selected namespace is persisted with the recipient route. `turn/start`
 notifications use that stored recipient namespace (`codex_app` or
@@ -1241,8 +1264,9 @@ register it.
   liveness. An explicitly user-approved `collab master promote` replaces the
   recorded holder, and only the current master grant holder may
   `collab master delegate`. Independent peers may
-  decline a master collaboration invite; managed subagents must obey the
-  master. Master splits by dependency then unique write scope, assigns
+  decline a master collaboration invite. A delegated subagent follows its
+  task contract; it follows this Skill's Collab protocol only if it is itself a
+  registered peer. Master splits by dependency then unique write scope, assigns
   subagents with unambiguous delivery and test conditions, and keeps
   architecture/integration/acceptance; it does not take another peer's
   task. Workers and subagents find a solution first, then report blockers

@@ -123,6 +123,9 @@ fn subagent(peer: &str, id: &str, status: &str) -> crate::subagent::Record {
         error: None,
         probe_failures: Vec::new(),
         runtime: None,
+        create_operation_id: None,
+        binding_id: None,
+        endpoint_generation: None,
     }
 }
 

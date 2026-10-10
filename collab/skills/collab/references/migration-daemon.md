@@ -221,8 +221,10 @@ approval may `collab master clear` the scoped grant.
 Journal `RootAssigned` events become `MasterAssigned` on daemon replay.
 Hidden `collab root ...` commands run the same master protocol. AppSDK init and
 fresh governance init never clear master authority and are not an implicit
-authority reset. Independent peers may decline a master collaboration invite;
-managed subagents must obey the master:
+authority reset. Independent peers may decline a master collaboration invite.
+A delegated subagent follows its task contract and this Skill's Collab protocol
+only when it is itself a registered peer; master-only rules also require an
+explicitly authorized master grant:
 
 ```text
 collab master status

@@ -41,7 +41,7 @@ fn pin_lock_preserves_review_history_and_requires_current_requirements_ack() {
     );
     let lock: Value =
         serde_json::from_slice(&fs::read(root.join(".appsdk/sdk.lock")).unwrap()).unwrap();
-    assert_eq!(lock["version"], "0.1.0012");
+    assert_eq!(lock["version"], "0.1.0015");
     assert_eq!(fs::read(&review_path).unwrap(), legacy_bytes);
     let migration_path = root.join(".appsdk/migrations/0.1.0010-to-0.1.0011/record.json");
     let migration_bytes = fs::read(&migration_path).unwrap();

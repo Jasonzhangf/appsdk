@@ -19,6 +19,9 @@ pub(super) fn pin_lock(root: &Path, binary: &Path) {
             | "0.1.0010"
             | "0.1.0011"
             | "0.1.0012"
+            | "0.1.0013"
+            | "0.1.0014"
+            | "0.1.0015"
     ) {
         fail(format!(
             "UNSUPPORTED_SDK_MIGRATION:{}:{}",
@@ -59,6 +62,9 @@ pub(super) fn pin_lock(root: &Path, binary: &Path) {
         "0.1.0008-to-0.1.0009",
         "0.1.0009-to-0.1.0010",
         "0.1.0010-to-0.1.0011",
+        "0.1.0011-to-0.1.0012",
+        "0.1.0012-to-0.1.0013",
+        "0.1.0013-to-0.1.0014",
     ] {
         let manifest = sdk_map_migration_manifest(step);
         let source_matches = GOVERNANCE_MAP_NAMES.iter().all(|name| {
@@ -73,14 +79,38 @@ pub(super) fn pin_lock(root: &Path, binary: &Path) {
             .join("record.json")
             .is_file();
         let legacy_last_step = step == "0.1.0010-to-0.1.0011"
-            && !matches!(original_version.as_str(), "0.1.0011" | "0.1.0012");
-        if record_exists || source_matches || legacy_last_step {
+            && !matches!(
+                original_version.as_str(),
+                "0.1.0011" | "0.1.0012" | "0.1.0013" | "0.1.0014" | "0.1.0015"
+            );
+        let previous_last_step = step == "0.1.0011-to-0.1.0012"
+            && !matches!(
+                original_version.as_str(),
+                "0.1.0012" | "0.1.0013" | "0.1.0014" | "0.1.0015"
+            );
+        let latest_historical_step = step == "0.1.0012-to-0.1.0013"
+            && !matches!(
+                original_version.as_str(),
+                "0.1.0013" | "0.1.0014" | "0.1.0015"
+            );
+        // `0.1.0013-to-0.1.0014` was the live step before `0.1.0015`. Keep it
+        // materialized only for projects that still need it, and let the new
+        // final step take over the current live binding below.
+        let previous_live_step = step == "0.1.0013-to-0.1.0014"
+            && !matches!(original_version.as_str(), "0.1.0014" | "0.1.0015");
+        if record_exists
+            || source_matches
+            || legacy_last_step
+            || previous_last_step
+            || latest_historical_step
+            || previous_live_step
+        {
             let current_project = read_project(root);
             migrate_governance_maps(root, &current_project, step);
         }
     }
     let current_project = read_project(root);
-    migrate_governance_maps(root, &current_project, "0.1.0011-to-0.1.0012");
+    migrate_governance_maps(root, &current_project, "0.1.0014-to-0.1.0015");
     let migrated_project = read_project(root);
     install_current_record_contracts(root);
     install_current_transition_contracts(root, &transition_contracts);
@@ -145,6 +175,10 @@ pub(super) fn pin_lock(root: &Path, binary: &Path) {
     atomic_write_json(&lock_path, &Value::Object(lock), "SDK_LOCK_WRITE_FAILED");
     write_project(root, &project);
     println!("pinned {}", binary.display());
+    if original_version != SDK_VERSION {
+        println!("next appsdk init <project> to refresh the standard template reference");
+        println!("then audit effective rules and CI/hooks; reuse covered authorization and keep Guidance optional");
+    }
 }
 
 pub(super) fn reset_root_first_segment(relative: &str) -> &str {

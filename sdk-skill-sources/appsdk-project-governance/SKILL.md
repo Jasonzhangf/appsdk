@@ -1,6 +1,6 @@
 ---
 name: appsdk-project-governance
-description: "AppSDK 质量门禁+defect 追踪; 协作与质量准入分开。"
+description: "AppSDK 质量门禁、规则/Skill 升级审计与 defect 追踪; 协作与质量准入分开。"
 ---
 
 # AppSDK Project Governance
@@ -10,6 +10,9 @@ description: "AppSDK 质量门禁+defect 追踪; 协作与质量准入分开。"
 AppSDK verifies engineering quality. Collab supports automatic multi-worker
 registration, communication and task/file ownership. Memory and Guidance help
 when useful. Missing auxiliary state does not fail independent development.
+Collab transport, daemon, identity, and migration/reset state machines have
+separate owners; an SDK-only rule, Skill, or template upgrade does not require
+them.
 
 Default flow: understand goal/scope → implement → relevant verification →
 review → authorized delivery. Require applicable quality, safety and evidence
@@ -114,6 +117,29 @@ does not grant authority over the SDK source repository. Keep source/release
 evidence, project governance truth, and Collab runtime state in their
 respective owners.
 
+## Rule and Skill upgrade audit
+
+An SDK-only rules, Skills, or template upgrade starts with the project owner
+reading effective upstream rules, project `AGENTS.md`, project Skills, actual
+test commands, and CI/hook entrypoints. Compare them with the installed
+`.appsdk/templates/minimal/AGENTS.md`; that template is advisory reference, not
+an active rule source.
+
+For each difference, record location, owner, action (`delete`, `merge`,
+`narrow`, or `add`), basis, retained safeguard, and actual entrypoint impact.
+Reuse session authorization that already covers the difference; seek approval
+only for uncovered changes. Guidance is optional: a project may perform the
+same audit and update CI/hooks without declaring or compiling Guidance.
+
+Repeated `appsdk init` and unrelated version refreshes do not trigger a
+whole-project rule audit. Run checks affected by the changed rules or
+entrypoints during development; run the declared complete release gate only for
+release scope.
+
+SDK-only upgrades do not require Collab daemon freeze, restart, identity
+migration, or reset. Follow the installed `collab` Skill only when Collab-owned
+state or transport actually changes.
+
 ## One global AppSDK binary
 
 Do not copy or select AppSDK binaries by hand. The AppSDK repository's only
@@ -164,12 +190,9 @@ appsdk init <project> --fresh --discard-legacy
 # Same transactional reset owner, lower-level entry:
 appsdk reset-governance <project> --discard-legacy
 
-# Collab-owned project control plane; explicit authorization and a controlled
-# daemon maintenance window are required.
-collab down
-collab reset --discard-legacy --approval "<explicit user authorization>"
-collab up
-collab context
+# Collab-owned project control plane: use the installed collab Skill's
+# `collab reset --project --discard-legacy --approval ...` during an authorized
+# maintenance window.
 ```
 
 `collab reset` archives the exact `.agent-collab/` and `.agent-collab-v2/`
@@ -207,9 +230,9 @@ Choose exactly one of these routes for a managed business project:
   and protection boundaries are carried forward. It must not replace those
   boundaries with the generic `change-me/app-core` scaffold. After the old
   control plane is removed, validation runs only against the new staging
-  baseline. The lower-level `appsdk reset-governance --discard-legacy` uses the
-  same transactional reset owner. Neither route inherits delivery, review,
-  freeze, or deployment claims.
+  baseline. The lower-level `appsdk reset-governance <project>
+  --discard-legacy` uses the same transactional reset owner. Neither route
+  inherits delivery, review, freeze, or deployment claims.
 
 Reset may remove the old `.appsdk/` records/transactions and declared
 rebuildable generated projections, plus local `.appsdk-control/` state owned by
@@ -335,9 +358,9 @@ owned by the Collab Skill. A fresh reset record proves reset only; it never
 imports old PASS, review, install, restart, delivery, or live communication.
 
 For the Collab half, use `collab migrate` when the journal is replayable. Use
-the explicit `collab reset --discard-legacy --approval "<user text>"` path only
-when the operator authorizes abandoning the old Collab epoch. The two reset
-commands are independent; neither one can claim the other's cleanup or
+the explicit `collab reset --project --discard-legacy --approval "<user text>"`
+path only when the operator authorizes abandoning the old Collab epoch. The two
+reset commands are independent; neither one can claim the other's cleanup or
 delivery result.
 
 ### Upstream AppSDK defect report

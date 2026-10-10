@@ -643,28 +643,26 @@ fn verified_public_create_can_be_bound_and_read_back_as_managed() {
     let failed_send_response: Value = serde_json::from_str(failed_send_response_json)
         .expect("failed Send daemon response is structured JSON");
     assert!(
-        failed_send_response["error"]
-            .as_str()
-            .is_some_and(|error| {
-                error.starts_with("APPSERVER_NOTIFICATION_REJECTED:")
-                    && error.contains("fixture refused generic notification")
-            }),
-        "{failed_send_response}"
-    );
-    assert_eq!(failed_send_response["durable"], true, "{failed_send_response}");
-    assert_eq!(
-        failed_send_response["failure"],
-        "notification_delivery_failed",
+        failed_send_response["error"].as_str().is_some_and(|error| {
+            error.starts_with("APPSERVER_NOTIFICATION_REJECTED:")
+                && error.contains("fixture refused generic notification")
+        }),
         "{failed_send_response}"
     );
     assert_eq!(
-        failed_send_response["notification"],
-        "subscribed-not-sent",
+        failed_send_response["durable"], true,
         "{failed_send_response}"
     );
     assert_eq!(
-        failed_send_response["repair_required"],
-        true,
+        failed_send_response["failure"], "notification_delivery_failed",
+        "{failed_send_response}"
+    );
+    assert_eq!(
+        failed_send_response["notification"], "subscribed-not-sent",
+        "{failed_send_response}"
+    );
+    assert_eq!(
+        failed_send_response["repair_required"], true,
         "{failed_send_response}"
     );
     assert_eq!(
@@ -708,8 +706,8 @@ fn verified_public_create_can_be_bound_and_read_back_as_managed() {
         failed_message["body"],
         "Preserve the durable message and repair signal."
     );
-    let mut failed_message_status = fixture
-        .configured_command(&["msg", failed_send_msg_id.as_str()], None);
+    let mut failed_message_status =
+        fixture.configured_command(&["msg", failed_send_msg_id.as_str()], None);
     configure_runtime(&mut failed_message_status);
     let failed_message_status = failed_message_status
         .output()

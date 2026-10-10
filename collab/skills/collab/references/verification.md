@@ -49,8 +49,10 @@ Before review, prove the affected subset and every changed invariant:
   real unfinished tasks; explicit user-approved `master promote` replaces the
   current holder independent of liveness, only the current master grant holder
   may delegate, and an authenticated peer with explicit approval may clear the
-  scoped grant; independent peers may decline a master invite and managed
-  subagents must obey the master.
+  scoped grant; independent peers may decline a master invite. Delegated
+  subagents follow their task contract and this Collab protocol only when they
+  are themselves registered peers; master-only rules require an explicitly
+  authorized master grant.
 
 Review only after tests and runtime evidence pass. Post-review source/config/test
 changes invalidate review and affected runtime evidence. Integrate the reviewed

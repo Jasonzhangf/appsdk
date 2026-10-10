@@ -5,11 +5,7 @@ use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::fs::OpenOptions;
-use std::io::{ErrorKind, Read, Write};
-#[cfg(unix)]
-use std::os::raw::c_int;
-#[cfg(unix)]
-use std::os::unix::io::AsRawFd;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::thread;
@@ -20,6 +16,7 @@ mod guidance;
 mod long_horizon_policy;
 mod long_horizon_role;
 mod memory;
+mod platform;
 
 use long_horizon_policy::{generate_long_horizon_master_prompt, ExecutionRole, POLICY};
 use long_horizon_role::execution_role;
@@ -29,60 +26,9 @@ mod dagpipe;
 
 const SDK_BUNDLE_MANIFEST: &str = include_str!("../../contracts/sdk-bundle.manifest.json");
 const SDK_VERSION: &str = env!("APPSDK_VERSION");
-const SDK_MAP_MIGRATION_0_1_5_TO_0_1_6: &str =
-    include_str!("../../contracts/migrations/sdk-0.1.5-to-0.1.6.json");
-const SDK_MAP_MIGRATION_0_1_6_TO_0_1_0007: &str =
-    include_str!("../../contracts/migrations/sdk-0.1.6-to-0.1.0007.json");
-const SDK_MAP_MIGRATION_0_1_0007_TO_0_1_0008: &str =
-    include_str!("../../contracts/migrations/sdk-0.1.0007-to-0.1.0008.json");
-const SDK_MAP_MIGRATION_0_1_0008_TO_0_1_0009: &str =
-    include_str!("../../contracts/migrations/sdk-0.1.0008-to-0.1.0009.json");
-const SDK_MAP_MIGRATION_0_1_0009_TO_0_1_0010: &str =
-    include_str!("../../contracts/migrations/sdk-0.1.0009-to-0.1.0010.json");
-const SDK_MAP_MIGRATION_0010_TO_0011: &str =
-    include_str!("../../contracts/migrations/sdk-0.1.0010-to-0.1.0011.json");
-const SDK_MAP_MIGRATION_0011_TO_0012: &str =
-    include_str!("../../contracts/migrations/sdk-0.1.0011-to-0.1.0012.json");
-const SDK_MAP_MIGRATION_STEPS: [&str; 7] = [
-    "0.1.5-to-0.1.6",
-    "0.1.6-to-0.1.0007",
-    "0.1.0007-to-0.1.0008",
-    "0.1.0008-to-0.1.0009",
-    "0.1.0009-to-0.1.0010",
-    "0.1.0010-to-0.1.0011",
-    "0.1.0011-to-0.1.0012",
-];
 const PROJECT_AGENTS_TEMPLATE: &str = include_str!("../../templates/minimal/AGENTS.md");
 const CANONICAL_ZONE_TRANSITION_CONTRACT: &str =
     include_str!("../../contracts/transitions/zone-transition.manifest.json");
-const GOVERNANCE_MAP_NAMES: [&str; 4] = [
-    "resource-map.json",
-    "function-map.json",
-    "mainline-call-map.json",
-    "verification-map.json",
-];
-const CANONICAL_RECORD_CONTRACTS: [&str; 20] = [
-    "contracts/records/worktree-record.schema.json",
-    "contracts/records/reproduction-record.schema.json",
-    "contracts/records/evidence-record.schema.json",
-    "contracts/records/fix-candidate-record.schema.json",
-    "contracts/records/goal-clarification-record.schema.json",
-    "contracts/records/review-record.schema.json",
-    "contracts/records/effectiveness-record.schema.json",
-    "contracts/records/pre-review-validation-record.schema.json",
-    "contracts/records/collaboration-record.schema.json",
-    "contracts/records/collaboration-index.schema.json",
-    "contracts/records/merge-queue-record.schema.json",
-    "contracts/records/merge-queue-state.schema.json",
-    "contracts/records/integration-record.schema.json",
-    "contracts/records/mainline-receipt-record.schema.json",
-    "contracts/records/collab-live-closure-record.schema.json",
-    "contracts/records/merge-record.schema.json",
-    "contracts/records/promotion-record.schema.json",
-    "contracts/records/regression-report.schema.json",
-    "contracts/records/freeze-record.schema.json",
-    "contracts/records/record-graph.contract.json",
-];
 const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
     (
         "contracts/sdk-bundle.manifest.json",
@@ -208,6 +154,61 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         "contracts/migrations/sdk-0.1.0011-to-0.1.0012.json",
         "contracts",
         SDK_MAP_MIGRATION_0011_TO_0012,
+    ),
+    (
+        "contracts/migrations/sdk-0.1.0012-to-0.1.0013.json",
+        "contracts",
+        SDK_MAP_MIGRATION_0012_TO_0013,
+    ),
+    (
+        "contracts/migrations/sdk-0.1.0013-to-0.1.0014.json",
+        "contracts",
+        SDK_MAP_MIGRATION_0013_TO_0014,
+    ),
+    SDK_RESOURCE_MIGRATION_0014_TO_0015,
+    (
+        "contracts/migrations/0.1.0013/governance-maps/resource-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.0013/governance-maps/resource-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.0013/governance-maps/function-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.0013/governance-maps/function-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.0013/governance-maps/mainline-call-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.0013/governance-maps/mainline-call-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.0013/governance-maps/verification-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.0013/governance-maps/verification-map.json"),
+    ),
+    SDK_HISTORICAL_0014_RESOURCE_MAP,
+    SDK_HISTORICAL_0014_FUNCTION_MAP,
+    SDK_HISTORICAL_0014_MAINLINE_MAP,
+    SDK_HISTORICAL_0014_VERIFICATION_MAP,
+    (
+        "contracts/migrations/0.1.0012/governance-maps/resource-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.0012/governance-maps/resource-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.0012/governance-maps/function-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.0012/governance-maps/function-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.0012/governance-maps/mainline-call-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.0012/governance-maps/mainline-call-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.0012/governance-maps/verification-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.0012/governance-maps/verification-map.json"),
     ),
     (
         "contracts/migrations/0.1.0011/governance-maps/resource-map.json",
@@ -620,6 +621,7 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
 
 #[path = "main/governance.rs"]
 mod governance;
+use governance::canonical_map::*;
 use governance::*;
 #[path = "main/registry.rs"]
 mod registry;
@@ -791,16 +793,6 @@ impl ResetMode {
     }
 }
 
-#[cfg(unix)]
-const RESET_TRANSACTION_LOCK_EX: c_int = 2;
-#[cfg(unix)]
-const RESET_TRANSACTION_LOCK_NB: c_int = 4;
-
-#[cfg(unix)]
-unsafe extern "C" {
-    fn flock(fd: i32, operation: i32) -> i32;
-}
-
 #[cfg(test)]
 mod bug_triage_tests {
     use super::*;
@@ -955,26 +947,28 @@ impl GoalLock {
                     lock
                 }
                 Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-                    let existing = OpenOptions::new()
+                    let mut existing = OpenOptions::new()
                         .read(true)
                         .write(true)
                         .open(&path)
                         .map_err(|open_error| format!("GOAL_LOCK_ACQUIRE_FAILED:{}", open_error))?;
                     if let Err(error) = goal_try_advisory_lock(&existing) {
                         if error == "GOAL_LOCK_BUSY" {
-                            let metadata = fs::read_to_string(&path).unwrap_or_default();
-                            return Err(if metadata.trim().is_empty() {
-                                "GOAL_LOCK_BUSY: an active goal lifecycle operation holds the advisory lock; metadata is empty".into()
-                            } else {
-                                format!(
-                                    "GOAL_LOCK_BUSY: an active goal lifecycle operation holds the advisory lock ({})",
-                                    metadata.trim()
-                                )
-                            });
+                            let detail = match goal_lock_metadata_from_file(&mut existing) {
+                                Ok(metadata) if metadata.trim().is_empty() => {
+                                    "metadata is empty".to_string()
+                                }
+                                Ok(metadata) => format!("metadata: {}", metadata.trim()),
+                                Err(read_error) => format!("metadata unavailable: {read_error}"),
+                            };
+                            return Err(format!(
+                                "GOAL_LOCK_BUSY: an active goal lifecycle operation holds the advisory lock; {detail}"
+                            ));
                         }
                         return Err(error);
                     }
-                    let original = fs::read_to_string(&path).unwrap_or_default();
+                    let original = goal_lock_metadata_from_file(&mut existing)?;
+                    let recovery_reason = goal_lock_recovery_reason(&original);
                     let quarantined = control_dir.join(format!(
                         "long-task-goal.lock.recovered.{}.{}",
                         std::process::id(),
@@ -986,13 +980,7 @@ impl GoalLock {
                                 &control_dir,
                                 &quarantined,
                                 &original,
-                                if original.trim().is_empty() {
-                                    "empty metadata"
-                                } else if goal_lock_metadata(&quarantined).is_err() {
-                                    "invalid or truncated metadata"
-                                } else {
-                                    "advisory lock released with stale metadata"
-                                },
+                                recovery_reason,
                             ) {
                                 return Err(receipt_error);
                             }

@@ -95,7 +95,9 @@ Protocol: `collab master status`, `collab master promote --approval` when no
 live master exists, and `collab master delegate` by the current live master.
 Init and register never create a master; a recorded identity without a live
 App Server thread is not a live master. Independent peers may decline a master
-collaboration invite; managed subagents must obey the master.
+collaboration invite. A delegated subagent follows its task contract and this
+Collab protocol only when it is itself a registered peer; master-only rules
+also require an explicitly authorized master grant.
 
 ## Independent task lifecycle
 

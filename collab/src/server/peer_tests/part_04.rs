@@ -21,6 +21,9 @@ fn managed_subagent_send_binds_the_selected_child_when_multiple_children_are_ass
                 error: None,
                 probe_failures: Vec::new(),
                 runtime: None,
+                create_operation_id: None,
+                binding_id: None,
+                endpoint_generation: None,
             },
         },
         Event::SubagentUpdated {
@@ -37,6 +40,9 @@ fn managed_subagent_send_binds_the_selected_child_when_multiple_children_are_ass
                 error: None,
                 probe_failures: Vec::new(),
                 runtime: None,
+                create_operation_id: None,
+                binding_id: None,
+                endpoint_generation: None,
             },
         },
     ]);
@@ -200,6 +206,9 @@ fn managed_subagent_send_reclaims_working_child_without_an_owned_task() {
             error: None,
             probe_failures: Vec::new(),
             runtime: None,
+            create_operation_id: None,
+            binding_id: None,
+            endpoint_generation: None,
         },
     }]);
 
@@ -312,6 +321,9 @@ fn managed_subagent_working_requires_existing_owned_assigned_task() {
                 error: None,
                 probe_failures: Vec::new(),
                 runtime: None,
+                create_operation_id: None,
+                binding_id: None,
+                endpoint_generation: None,
             },
         }]);
         let result = crate::subagent::handle(
@@ -354,6 +366,9 @@ fn managed_subagent_working_requires_existing_owned_assigned_task() {
                     error: None,
                     probe_failures: Vec::new(),
                     runtime: None,
+                    create_operation_id: None,
+                    binding_id: None,
+                    endpoint_generation: None,
                 },
             },
             Event::TaskCreated {
@@ -414,6 +429,9 @@ fn managed_subagent_working_requires_existing_owned_assigned_task() {
                     error: None,
                     probe_failures: Vec::new(),
                     runtime: None,
+                    create_operation_id: None,
+                    binding_id: None,
+                    endpoint_generation: None,
                 },
             },
             Event::TaskCreated {
@@ -475,6 +493,9 @@ fn managed_subagent_working_accepts_assignment_after_probe_race_and_is_idempoten
             error: None,
             probe_failures: Vec::new(),
             runtime: None,
+            create_operation_id: None,
+            binding_id: None,
+            endpoint_generation: None,
         },
     }]);
 

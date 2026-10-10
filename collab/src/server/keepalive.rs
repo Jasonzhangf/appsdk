@@ -406,6 +406,9 @@ mod tests {
             error: None,
             probe_failures: Vec::new(),
             runtime: Some("codex".into()),
+            create_operation_id: None,
+            binding_id: None,
+            endpoint_generation: None,
         }
     }
 
@@ -611,6 +614,9 @@ mod tests {
                 error: None,
                 probe_failures: Vec::new(),
                 runtime: Some("codex".into()),
+                create_operation_id: None,
+                binding_id: None,
+                endpoint_generation: None,
             },
         });
 

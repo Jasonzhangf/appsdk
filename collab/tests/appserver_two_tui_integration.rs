@@ -194,7 +194,7 @@ impl AppFixture {
             .args(args)
             .current_dir(&self.project)
             .env("COLLAB_STATE_DIR", &self.host_state)
-            .env_remove("COLLAB_APPSERVER_SOCKET")
+            .env("COLLAB_APPSERVER_SOCKET", &self.app_socket)
             .env_remove("CODEX_APP_SERVER_SOCKET")
             .env_remove("COLLAB_APPSERVER_NAMESPACE")
             .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop")
@@ -206,6 +206,25 @@ impl AppFixture {
             .env("CODEX_HOME", self.root.join("home"))
             .output()
             .expect("run Desktop collab CLI")
+    }
+
+    fn command_desktop_without_explicit_endpoint(&self, args: &[&str], thread: &str) -> Output {
+        Command::new(binary())
+            .args(args)
+            .current_dir(&self.project)
+            .env("COLLAB_STATE_DIR", &self.host_state)
+            .env_remove("COLLAB_APPSERVER_SOCKET")
+            .env_remove("CODEX_APP_SERVER_SOCKET")
+            .env_remove("COLLAB_APPSERVER_NAMESPACE")
+            .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop")
+            .env("CODEX_SESSION_ID", thread)
+            .env("CODEX_THREAD_ID", thread)
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .env_remove("COLLAB_WORKER")
+            .env("CODEX_HOME", self.root.join("home"))
+            .output()
+            .expect("run Desktop collab CLI without an explicit endpoint")
     }
 
     fn command_tui_without_explicit_endpoint(&self, args: &[&str], thread: &str) -> Output {
@@ -258,7 +277,12 @@ impl AppFixture {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        serde_json::from_slice(&output.stdout).expect("collab CLI emits JSON")
+        let value: Value = serde_json::from_slice(&output.stdout).expect("collab CLI emits JSON");
+        value
+            .get("result")
+            .and_then(|result| result.get("snapshot"))
+            .cloned()
+            .unwrap_or(value)
     }
 
     fn run_ok_desktop(&self, args: &[&str], thread: &str) -> Value {
@@ -270,7 +294,12 @@ impl AppFixture {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        serde_json::from_slice(&output.stdout).expect("collab CLI emits JSON")
+        let value: Value = serde_json::from_slice(&output.stdout).expect("collab CLI emits JSON");
+        value
+            .get("result")
+            .and_then(|result| result.get("snapshot"))
+            .cloned()
+            .unwrap_or(value)
     }
 
     /// The daemon owns the worker id. Fixtures must read it back from the
@@ -654,7 +683,7 @@ fn two_tui_appserver_receipt_flow() {
 }
 
 #[test]
-fn desktop_managed_socket_registration_persists_and_uses_codex_app_namespace() {
+fn desktop_registration_uses_explicit_endpoint_and_codex_app_namespace() {
     let mut fixture = AppFixture::new_desktop_managed();
 
     let context_a = fixture.run_ok_desktop(&["context"], THREAD_A);
@@ -724,6 +753,27 @@ fn desktop_managed_socket_registration_persists_and_uses_codex_app_namespace() {
         replay_context["identity"]["transport"]["namespace"],
         "codex_app"
     );
+}
+
+#[test]
+fn desktop_managed_socket_is_not_inferred_without_explicit_endpoint() {
+    let fixture = AppFixture::new_desktop_managed();
+
+    let output = fixture.command_desktop_without_explicit_endpoint(&["context"], THREAD_A);
+    assert!(
+        !output.status.success(),
+        "missing endpoint is an actionable typed result"
+    );
+    let context: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(context["ok"], false);
+    assert_eq!(context["result"]["outcome"], "missing_facts");
+    assert_eq!(context["result"]["requires"]["fields"], json!(["endpoint"]));
+    assert_eq!(
+        fixture.appserver_connections.load(Ordering::Relaxed),
+        0,
+        "the managed Desktop socket must not be probed without a current-runtime endpoint"
+    );
+    assert!(!fixture.host_state.join("bindings").exists());
 }
 
 #[test]
@@ -984,21 +1034,16 @@ fn context_partial_native_facts_require_the_missing_endpoint_fields() {
     // re-requested.
     let partial = fixture.command_tui_without_explicit_endpoint(&["context"], THREAD_A);
     assert!(
-        partial.status.success(),
-        "partial native facts are a classified success terminal: stdout={} stderr={}",
-        String::from_utf8_lossy(&partial.stdout),
-        String::from_utf8_lossy(&partial.stderr)
+        !partial.status.success(),
+        "missing endpoint returns a typed result"
     );
     let partial: Value = serde_json::from_slice(&partial.stdout).unwrap();
-    assert_eq!(partial["registered"], false);
-    let update = &partial["requires_identity_update"];
-    assert_eq!(update["reason"], "IDENTITY_INFORMATION_REQUIRED");
     assert_eq!(
-        update["required_fields"],
+        partial["result"]["requires"]["fields"],
         json!(["endpoint"]),
         "observed session/thread facts must not be re-requested: {partial}"
     );
-    assert!(update["worker_id"].is_null());
+    assert_eq!(partial["result"]["outcome"], "missing_facts");
 
     // Supplying a conflicting session/thread must be rejected before the daemon
     // creates any identity: a supplement may fill gaps, never override the
@@ -1045,14 +1090,13 @@ fn one_full_supplement_establishes_and_then_replays_the_same_identity() {
 
     let missing = fixture.command_without_native_facts(&["context"]);
     assert!(
-        missing.status.success(),
-        "no-anchor context is a classified success terminal: stdout={} stderr={}",
-        String::from_utf8_lossy(&missing.stdout),
-        String::from_utf8_lossy(&missing.stderr)
+        !missing.status.success(),
+        "no-anchor context returns a typed missing-facts result"
     );
     let missing: Value = serde_json::from_slice(&missing.stdout).unwrap();
+    assert_eq!(missing["result"]["outcome"], "missing_facts");
     assert_eq!(
-        missing["requires_identity_update"]["required_fields"],
+        missing["result"]["requires"]["fields"],
         json!(["session_id", "thread_id", "endpoint", "namespace"])
     );
 
@@ -1068,7 +1112,8 @@ fn one_full_supplement_establishes_and_then_replays_the_same_identity() {
         String::from_utf8_lossy(&registered.stdout),
         String::from_utf8_lossy(&registered.stderr)
     );
-    let registered: Value = serde_json::from_slice(&registered.stdout).unwrap();
+    let registered_response: Value = serde_json::from_slice(&registered.stdout).unwrap();
+    let registered = registered_response["result"]["snapshot"].clone();
     assert_eq!(
         registered["registered"], true,
         "complete supplement must register: {registered}"
@@ -1112,10 +1157,10 @@ fn one_full_supplement_establishes_and_then_replays_the_same_identity() {
 fn one_thread_supplement_survives_continuously_missing_environment() {
     let mut fixture = AppFixture::new();
     let missing = fixture.command_without_thread(&["context"], THREAD_A);
-    assert!(missing.status.success());
+    assert!(!missing.status.success());
     let missing: Value = serde_json::from_slice(&missing.stdout).unwrap();
     assert_eq!(
-        missing["requires_identity_update"]["required_fields"],
+        missing["result"]["requires"]["fields"],
         json!(["thread_id"])
     );
     let supplement = format!("{{\"thread_id\":\"{THREAD_A}\"}}");
@@ -1127,7 +1172,8 @@ fn one_thread_supplement_survives_continuously_missing_environment() {
         "{}",
         String::from_utf8_lossy(&registered.stderr)
     );
-    let registered: Value = serde_json::from_slice(&registered.stdout).unwrap();
+    let registered_response: Value = serde_json::from_slice(&registered.stdout).unwrap();
+    let registered = registered_response["result"]["snapshot"].clone();
     assert_eq!(registered["registered"], true);
     for args in [vec!["context"], vec!["task", "status"]] {
         let output = fixture.command_without_thread(&args, THREAD_A);
@@ -1139,6 +1185,7 @@ fn one_thread_supplement_survives_continuously_missing_environment() {
         );
         let value: Value = serde_json::from_slice(&output.stdout).unwrap();
         if args == ["context"] {
+            let value = value["result"]["snapshot"].clone();
             assert_eq!(value["registered"], true);
             assert_eq!(value["identity"], registered["identity"]);
             assert_eq!(value["binding"], registered["binding"]);
@@ -1147,11 +1194,10 @@ fn one_thread_supplement_survives_continuously_missing_environment() {
         }
     }
     let anonymous = fixture.command_without_native_facts(&["context"]);
-    assert!(anonymous.status.success());
+    assert!(!anonymous.status.success());
     let anonymous: Value = serde_json::from_slice(&anonymous.stdout).unwrap();
-    assert_eq!(anonymous["registered"], false);
     assert_eq!(
-        anonymous["requires_identity_update"]["required_fields"],
+        anonymous["result"]["requires"]["fields"],
         json!(["session_id", "thread_id", "endpoint", "namespace"])
     );
     fixture.initialized = true;
@@ -1212,7 +1258,8 @@ fn external_linked_worktree_reuses_the_canonical_identity_without_recovery_calls
         String::from_utf8_lossy(&replay.stdout),
         String::from_utf8_lossy(&replay.stderr)
     );
-    let replay: Value = serde_json::from_slice(&replay.stdout).unwrap();
+    let replay_response: Value = serde_json::from_slice(&replay.stdout).unwrap();
+    let replay = replay_response["result"]["snapshot"].clone();
     assert_eq!(replay["project_root"], context["project_root"]);
     assert_eq!(replay["identity"], context["identity"]);
     assert_eq!(replay["binding"], context["binding"]);

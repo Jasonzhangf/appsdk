@@ -1,0 +1,221 @@
+{
+  "version": "0.1.0013",
+  "entrypoint": "/Users/fanzhang/.cargo/bin/appsdk",
+  "checks": [
+    {
+      "label": "version",
+      "entrypoint": "/Users/fanzhang/.cargo/bin/appsdk",
+      "args": [
+        "version"
+      ],
+      "cwd": "/Volumes/Intel/playground/appsdk/.worker-runs/rule-upgrade-audit-20261009/validation",
+      "exit_code": 0,
+      "stdout": "canonical-version.stdout",
+      "stderr": "canonical-version.stderr"
+    },
+    {
+      "label": "source-registry",
+      "entrypoint": "/Users/fanzhang/.cargo/bin/appsdk",
+      "args": [
+        "verify-sdk-source-registry",
+        "/Volumes/Intel/playground/appsdk/rule-upgrade-audit-20261009"
+      ],
+      "cwd": "/Volumes/Intel/playground/appsdk/rule-upgrade-audit-20261009",
+      "exit_code": 0,
+      "stdout": "canonical-source-registry.stdout",
+      "stderr": "canonical-source-registry.stderr"
+    },
+    {
+      "label": "old-init-rejected",
+      "entrypoint": "/Users/fanzhang/.cargo/bin/appsdk",
+      "args": [
+        "init",
+        "/Volumes/Intel/playground/appsdk/.worker-runs/rule-upgrade-audit-20261009/validation/consumer-0012"
+      ],
+      "cwd": "/Volumes/Intel/playground/appsdk/.worker-runs/rule-upgrade-audit-20261009/validation",
+      "exit_code": 1,
+      "stdout": "canonical-old-init-rejected.stdout",
+      "stderr": "canonical-old-init-rejected.stderr"
+    },
+    {
+      "label": "old-pin-lock",
+      "entrypoint": "/Users/fanzhang/.cargo/bin/appsdk",
+      "args": [
+        "pin-lock",
+        "/Volumes/Intel/playground/appsdk/.worker-runs/rule-upgrade-audit-20261009/validation/consumer-0012",
+        "--binary",
+        "/Users/fanzhang/.cargo/bin/appsdk"
+      ],
+      "cwd": "/Volumes/Intel/playground/appsdk/.worker-runs/rule-upgrade-audit-20261009/validation",
+      "exit_code": 0,
+      "stdout": "canonical-old-pin-lock.stdout",
+      "stderr": "canonical-old-pin-lock.stderr"
+    },
+    {
+      "label": "old-verify",
+      "entrypoint": "/Users/fanzhang/.cargo/bin/appsdk",
+      "args": [
+        "verify",
+        "/Volumes/Intel/playground/appsdk/.worker-runs/rule-upgrade-audit-20261009/validation/consumer-0012"
+      ],
+      "cwd": "/Volumes/Intel/playground/appsdk/.worker-runs/rule-upgrade-audit-20261009/validation",
+      "exit_code": 0,
+      "stdout": "canonical-old-verify.stdout",
+      "stderr": "canonical-old-verify.stderr"
+    },
+    {
+      "label": "old-current-init",
+      "entrypoint": "/Users/fanzhang/.cargo/bin/appsdk",
+      "args": [
+        "init",
+        "/Volumes/Intel/playground/appsdk/.worker-runs/rule-upgrade-audit-20261009/validation/consumer-0012"
+      ],
+      "cwd": "/Volumes/Intel/playground/appsdk/.worker-runs/rule-upgrade-audit-20261009/validation",
+      "exit_code": 0,
+      "stdout": "canonical-old-current-init.stdout",
+      "stderr": "canonical-old-current-init.stderr"
+    },
+    {
+      "label": "old-current-verify",
+      "entrypoint": "/Users/fanzhang/.cargo/bin/appsdk",
+      "args": [
+        "verify",
+        "/Volumes/Intel/playground/appsdk/.worker-runs/rule-upgrade-audit-20261009/validation/consumer-0012"
+      ],
+      "cwd": "/Volumes/Intel/playground/appsdk/.worker-runs/rule-upgrade-audit-20261009/validation",
+      "exit_code": 0,
+      "stdout": "canonical-old-current-verify.stdout",
+      "stderr": "canonical-old-current-verify.stderr"
+    },
+    {
+      "label": "old-repeat-init",
+      "entrypoint": "/Users/fanzhang/.cargo/bin/appsdk",
+      "args": [
+        "init",
+        "/Volumes/Intel/playground/appsdk/.worker-runs/rule-upgrade-audit-20261009/validation/consumer-0012"
+      ],
+      "cwd": "/Volumes/Intel/playground/appsdk/.worker-runs/rule-upgrade-audit-20261009/validation",
+      "exit_code": 0,
+      "stdout": "canonical-old-repeat-init.stdout",
+      "stderr": "canonical-old-repeat-init.stderr"
+    },
+    {
+      "label": "0011-pin-lock",
+      "entrypoint": "/Users/fanzhang/.cargo/bin/appsdk",
+      "args": [
+        "pin-lock",
+        "/Volumes/Intel/playground/appsdk/.worker-runs/rule-upgrade-audit-20261009/validation/consumer-0011",
+        "--binary",
+        "/Users/fanzhang/.cargo/bin/appsdk"
+      ],
+      "cwd": "/Volumes/Intel/playground/appsdk/.worker-runs/rule-upgrade-audit-20261009/validation",
+      "exit_code": 0,
+      "stdout": "canonical-0011-pin-lock.stdout",
+      "stderr": "canonical-0011-pin-lock.stderr"
+    },
+    {
+      "label": "0011-verify",
+      "entrypoint": "/Users/fanzhang/.cargo/bin/appsdk",
+      "args": [
+        "verify",
+        "/Volumes/Intel/playground/appsdk/.worker-runs/rule-upgrade-audit-20261009/validation/consumer-0011"
+      ],
+      "cwd": "/Volumes/Intel/playground/appsdk/.worker-runs/rule-upgrade-audit-20261009/validation",
+      "exit_code": 0,
+      "stdout": "canonical-0011-verify.stdout",
+      "stderr": "canonical-0011-verify.stderr"
+    },
+    {
+      "label": "new",
+      "entrypoint": "/Users/fanzhang/.cargo/bin/appsdk",
+      "args": [
+        "new",
+        "/Volumes/Intel/playground/appsdk/.worker-runs/rule-upgrade-audit-20261009/validation/consumer-current"
+      ],
+      "cwd": "/Volumes/Intel/playground/appsdk/.worker-runs/rule-upgrade-audit-20261009/validation",
+      "exit_code": 0,
+      "stdout": "canonical-new.stdout",
+      "stderr": "canonical-new.stderr"
+    },
+    {
+      "label": "new-verify",
+      "entrypoint": "/Users/fanzhang/.cargo/bin/appsdk",
+      "args": [
+        "verify",
+        "/Volumes/Intel/playground/appsdk/.worker-runs/rule-upgrade-audit-20261009/validation/consumer-current"
+      ],
+      "cwd": "/Volumes/Intel/playground/appsdk/.worker-runs/rule-upgrade-audit-20261009/validation",
+      "exit_code": 0,
+      "stdout": "canonical-new-verify.stdout",
+      "stderr": "canonical-new-verify.stderr"
+    },
+    {
+      "label": "bootstrap",
+      "entrypoint": "/Users/fanzhang/.cargo/bin/appsdk",
+      "args": [
+        "guide",
+        "init",
+        "/Volumes/Intel/playground/appsdk/.worker-runs/rule-upgrade-audit-20261009/validation/consumer-current",
+        "--task",
+        "guidance-upgrade",
+        "--mode",
+        "bootstrap",
+        "--module",
+        "app-core"
+      ],
+      "cwd": "/Volumes/Intel/playground/appsdk/.worker-runs/rule-upgrade-audit-20261009/validation",
+      "exit_code": 0,
+      "stdout": "canonical-bootstrap.stdout",
+      "stderr": "canonical-bootstrap.stderr"
+    },
+    {
+      "label": "no-guidance-bootstrap",
+      "entrypoint": "/Users/fanzhang/.cargo/bin/appsdk",
+      "args": [
+        "guide",
+        "init",
+        "/Volumes/Intel/playground/appsdk/.worker-runs/rule-upgrade-audit-20261009/validation/consumer-current",
+        "--task",
+        "guidance-setup",
+        "--mode",
+        "bootstrap",
+        "--module",
+        "app-core"
+      ],
+      "cwd": "/Volumes/Intel/playground/appsdk/.worker-runs/rule-upgrade-audit-20261009/validation",
+      "exit_code": 0,
+      "stdout": "canonical-no-guidance-bootstrap.stdout",
+      "stderr": "canonical-no-guidance-bootstrap.stderr"
+    },
+    {
+      "label": "no-guidance-verify",
+      "entrypoint": "/Users/fanzhang/.cargo/bin/appsdk",
+      "args": [
+        "verify",
+        "/Volumes/Intel/playground/appsdk/.worker-runs/rule-upgrade-audit-20261009/validation/consumer-current"
+      ],
+      "cwd": "/Volumes/Intel/playground/appsdk/.worker-runs/rule-upgrade-audit-20261009/validation",
+      "exit_code": 0,
+      "stdout": "canonical-no-guidance-verify.stdout",
+      "stderr": "canonical-no-guidance-verify.stderr"
+    }
+  ],
+  "stale_init_project_tree_unchanged": true,
+  "stale_init_isolated_state_unchanged": true,
+  "owned_files_preserved": [
+    "AGENTS.md",
+    "skills/project-owned/SKILL.md",
+    "active/lib/project-owned.txt",
+    "protected/history/project-owned.txt",
+    ".appsdk/records/project-owned.txt"
+  ],
+  "chained_steps": [
+    "0.1.0011-to-0.1.0012",
+    "0.1.0012-to-0.1.0013"
+  ],
+  "historical_files_preserved": [],
+  "legacy_requirement_ledger_present": false,
+  "guidance_selected_and_unselected_bootstrap_read_only": true,
+  "binary_and_skill_source_matches": true,
+  "collab": "not present on isolated PATH; no Collab runtime acceptance claimed"
+}

@@ -183,7 +183,7 @@ appsdk init <project> --fresh --discard-legacy
 
 # Collab-owned project control plane, during a controlled maintenance window
 collab down
-collab reset --discard-legacy --approval "<user authorization>"
+collab reset --project --discard-legacy --approval "<user authorization>"
 collab up
 collab context
 ```

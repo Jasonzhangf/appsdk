@@ -41,10 +41,12 @@ supported migration route or an authorized reset/reinitialize route; it must
 not trap development behind repeated byte-identity checks.
 
 `GUIDANCE_SETUP_REQUIRED` is not a lifecycle failure. It means existing
-governance has no approved Guide declaration. Only when Guidance is selected, run the returned read-only
-bootstrap intake, present `GuidanceSetupProposal`, obtain explicit user
-approval, then update and compile project-owned rule sources. Do not report an
-external AppSDK blocker or retry compile against an undeclared rule set.
+governance has no approved Guide declaration. Only when Guidance is selected,
+run the returned read-only bootstrap intake, present `GuidanceSetupProposal`,
+reuse session authorization that covers a difference, and obtain explicit
+approval only for uncovered changes. Then update and compile project-owned rule
+sources. Do not report an external AppSDK blocker or retry compile against an
+undeclared rule set.
 
 ## Failure output
 

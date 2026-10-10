@@ -1,0 +1,242 @@
+[
+  {
+    "case": "docs",
+    "base": "ee679188d31797a202dd6e2e1867076260c86321",
+    "head": "dbdd3ce1fb5d51aca27acf298b8dc007571e90cf",
+    "expected": {
+      "docs": "true",
+      "app_sdk_full": "false",
+      "release": "false"
+    },
+    "actual": {
+      "app_sdk_full": "false",
+      "rust_guidance": "false",
+      "rust_communication": "false",
+      "rust_memory": "false",
+      "rust_registry": "false",
+      "resources": "false",
+      "dagpipe": "false",
+      "collab": "false",
+      "installer": "false",
+      "docs": "true",
+      "release": "false",
+      "base_sha": "ee679188d31797a202dd6e2e1867076260c86321",
+      "head_sha": "dbdd3ce1fb5d51aca27acf298b8dc007571e90cf"
+    }
+  },
+  {
+    "case": "guidance",
+    "base": "dbdd3ce1fb5d51aca27acf298b8dc007571e90cf",
+    "head": "c9ff38ef8dec6bea6d10a4e6a9f04fa020993ad7",
+    "expected": {
+      "rust_guidance": "true",
+      "app_sdk_full": "false"
+    },
+    "actual": {
+      "app_sdk_full": "false",
+      "rust_guidance": "true",
+      "rust_communication": "false",
+      "rust_memory": "false",
+      "rust_registry": "false",
+      "resources": "false",
+      "dagpipe": "false",
+      "collab": "false",
+      "installer": "false",
+      "docs": "false",
+      "release": "false",
+      "base_sha": "dbdd3ce1fb5d51aca27acf298b8dc007571e90cf",
+      "head_sha": "c9ff38ef8dec6bea6d10a4e6a9f04fa020993ad7"
+    }
+  },
+  {
+    "case": "skill",
+    "base": "c9ff38ef8dec6bea6d10a4e6a9f04fa020993ad7",
+    "head": "89de5907fc8bdc9e090ce14cb01a1bc99e37b2b5",
+    "expected": {
+      "resources": "true",
+      "rust_guidance": "true",
+      "installer": "true",
+      "app_sdk_full": "false"
+    },
+    "actual": {
+      "app_sdk_full": "false",
+      "rust_guidance": "true",
+      "rust_communication": "false",
+      "rust_memory": "false",
+      "rust_registry": "false",
+      "resources": "true",
+      "dagpipe": "false",
+      "collab": "false",
+      "installer": "true",
+      "docs": "false",
+      "release": "false",
+      "base_sha": "c9ff38ef8dec6bea6d10a4e6a9f04fa020993ad7",
+      "head_sha": "89de5907fc8bdc9e090ce14cb01a1bc99e37b2b5"
+    }
+  },
+  {
+    "case": "communication",
+    "base": "89de5907fc8bdc9e090ce14cb01a1bc99e37b2b5",
+    "head": "ec09bd911f1ed407b7a55a199c4238f658f858e6",
+    "expected": {
+      "rust_communication": "true",
+      "app_sdk_full": "false"
+    },
+    "actual": {
+      "app_sdk_full": "false",
+      "rust_guidance": "false",
+      "rust_communication": "true",
+      "rust_memory": "false",
+      "rust_registry": "false",
+      "resources": "false",
+      "dagpipe": "false",
+      "collab": "false",
+      "installer": "false",
+      "docs": "false",
+      "release": "false",
+      "base_sha": "89de5907fc8bdc9e090ce14cb01a1bc99e37b2b5",
+      "head_sha": "ec09bd911f1ed407b7a55a199c4238f658f858e6"
+    }
+  },
+  {
+    "case": "dagpipe",
+    "base": "ec09bd911f1ed407b7a55a199c4238f658f858e6",
+    "head": "8e9d96090ac3c75a8951a2a9baabfec2373b5aa3",
+    "expected": {
+      "dagpipe": "true",
+      "app_sdk_full": "false",
+      "collab": "false"
+    },
+    "actual": {
+      "app_sdk_full": "false",
+      "rust_guidance": "false",
+      "rust_communication": "false",
+      "rust_memory": "false",
+      "rust_registry": "false",
+      "resources": "false",
+      "dagpipe": "true",
+      "collab": "false",
+      "installer": "false",
+      "docs": "false",
+      "release": "false",
+      "base_sha": "ec09bd911f1ed407b7a55a199c4238f658f858e6",
+      "head_sha": "8e9d96090ac3c75a8951a2a9baabfec2373b5aa3"
+    }
+  },
+  {
+    "case": "collab",
+    "base": "8e9d96090ac3c75a8951a2a9baabfec2373b5aa3",
+    "head": "ace9beba8f64dc31094ca6b6568cece2d7defa66",
+    "expected": {
+      "collab": "true",
+      "app_sdk_full": "false",
+      "dagpipe": "false"
+    },
+    "actual": {
+      "app_sdk_full": "false",
+      "rust_guidance": "false",
+      "rust_communication": "false",
+      "rust_memory": "false",
+      "rust_registry": "false",
+      "resources": "false",
+      "dagpipe": "false",
+      "collab": "true",
+      "installer": "false",
+      "docs": "false",
+      "release": "false",
+      "base_sha": "8e9d96090ac3c75a8951a2a9baabfec2373b5aa3",
+      "head_sha": "ace9beba8f64dc31094ca6b6568cece2d7defa66"
+    }
+  },
+  {
+    "case": "version",
+    "base": "ace9beba8f64dc31094ca6b6568cece2d7defa66",
+    "head": "532f2bcfca2ae347df708158d7ec1349698cc8ac",
+    "expected": {
+      "app_sdk_full": "true",
+      "resources": "true"
+    },
+    "actual": {
+      "app_sdk_full": "true",
+      "rust_guidance": "false",
+      "rust_communication": "false",
+      "rust_memory": "false",
+      "rust_registry": "false",
+      "resources": "true",
+      "dagpipe": "false",
+      "collab": "false",
+      "installer": "false",
+      "docs": "false",
+      "release": "false",
+      "base_sha": "ace9beba8f64dc31094ca6b6568cece2d7defa66",
+      "head_sha": "532f2bcfca2ae347df708158d7ec1349698cc8ac"
+    }
+  },
+  {
+    "case": "unknown",
+    "base": "532f2bcfca2ae347df708158d7ec1349698cc8ac",
+    "head": "04727e52e8ea4c8d71668079c5955be5d7ad1776",
+    "expected": {
+      "app_sdk_full": "true"
+    },
+    "actual": {
+      "app_sdk_full": "true",
+      "rust_guidance": "false",
+      "rust_communication": "false",
+      "rust_memory": "false",
+      "rust_registry": "false",
+      "resources": "false",
+      "dagpipe": "false",
+      "collab": "false",
+      "installer": "false",
+      "docs": "false",
+      "release": "false",
+      "base_sha": "532f2bcfca2ae347df708158d7ec1349698cc8ac",
+      "head_sha": "04727e52e8ea4c8d71668079c5955be5d7ad1776"
+    }
+  },
+  {
+    "case": "release",
+    "base": "04727e52e8ea4c8d71668079c5955be5d7ad1776",
+    "head": "fbe57a9f5cb960e0b9f290a2e53c413d97821300",
+    "expected": {
+      "release": "true",
+      "app_sdk_full": "true",
+      "dagpipe": "true",
+      "installer": "true"
+    },
+    "actual": {
+      "app_sdk_full": "true",
+      "rust_guidance": "false",
+      "rust_communication": "false",
+      "rust_memory": "false",
+      "rust_registry": "false",
+      "resources": "true",
+      "dagpipe": "true",
+      "collab": "false",
+      "installer": "true",
+      "docs": "true",
+      "release": "true",
+      "base_sha": "04727e52e8ea4c8d71668079c5955be5d7ad1776",
+      "head_sha": "fbe57a9f5cb960e0b9f290a2e53c413d97821300"
+    }
+  },
+  {
+    "case": "missing-base",
+    "actual": {
+      "app_sdk_full": "true",
+      "rust_guidance": "false",
+      "rust_communication": "false",
+      "rust_memory": "false",
+      "rust_registry": "false",
+      "resources": "true",
+      "dagpipe": "true",
+      "collab": "true",
+      "installer": "true",
+      "docs": "true",
+      "release": "false",
+      "base_sha": "",
+      "head_sha": "fbe57a9f5cb960e0b9f290a2e53c413d97821300"
+    }
+  }
+]

@@ -1,4 +1,5 @@
 use super::*;
+use std::io::{Read, Seek, SeekFrom};
 
 pub(super) fn parse_duration_to_ms(s: &str) -> Result<u64, String> {
     let s = s.trim();
@@ -143,33 +144,26 @@ pub(super) fn goal_subscribe_failure_allows_no_subscription_recovery(error: &str
         )
 }
 
-#[cfg(unix)]
 pub(super) fn goal_try_advisory_lock(file: &fs::File) -> Result<(), String> {
-    const LOCK_EX: c_int = 2;
-    const LOCK_NB: c_int = 4;
-    unsafe extern "C" {
-        fn flock(fd: c_int, operation: c_int) -> c_int;
-    }
-    let result = unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
-    if result == 0 {
-        return Ok(());
-    }
-    let error = std::io::Error::last_os_error();
-    if error.kind() == ErrorKind::WouldBlock {
-        Err("GOAL_LOCK_BUSY".into())
-    } else {
-        Err(format!("GOAL_LOCK_ADVISORY_FAILED:{}", error))
+    match platform::try_lock_exclusive(file) {
+        Ok(()) => Ok(()),
+        Err(platform::LockAttemptError::WouldBlock) => Err("GOAL_LOCK_BUSY".into()),
+        Err(platform::LockAttemptError::Io(error)) => {
+            Err(format!("GOAL_LOCK_ADVISORY_FAILED:{error}"))
+        }
     }
 }
 
-#[cfg(not(unix))]
-pub(super) fn goal_try_advisory_lock(_file: &fs::File) -> Result<(), String> {
-    Ok(())
-}
-
-pub(super) fn goal_lock_metadata(path: &Path) -> Result<String, String> {
-    let contents = fs::read_to_string(path)
+pub(super) fn goal_lock_metadata_from_file(file: &mut fs::File) -> Result<String, String> {
+    file.seek(SeekFrom::Start(0))
         .map_err(|error| format!("GOAL_LOCK_METADATA_READ_FAILED:{}", error))?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)
+        .map_err(|error| format!("GOAL_LOCK_METADATA_READ_FAILED:{}", error))?;
+    Ok(contents)
+}
+
+pub(super) fn goal_lock_metadata(contents: &str) -> Result<String, String> {
     let pid = contents
         .split_whitespace()
         .find_map(|field| field.strip_prefix("pid="))
@@ -182,6 +176,16 @@ pub(super) fn goal_lock_metadata(path: &Path) -> Result<String, String> {
         .filter(|owner| !owner.trim().is_empty())
         .ok_or_else(|| "GOAL_LOCK_METADATA_INVALID:owner missing".to_string())?;
     Ok(format!("pid={} owner={}", pid, owner))
+}
+
+pub(super) fn goal_lock_recovery_reason(original: &str) -> &'static str {
+    if original.trim().is_empty() {
+        "empty metadata"
+    } else if goal_lock_metadata(original).is_ok() {
+        "advisory lock released with stale metadata"
+    } else {
+        "invalid or truncated metadata"
+    }
 }
 
 pub(super) fn goal_lock_recovery_receipt(
@@ -799,4 +803,86 @@ pub(super) fn goal_objective_excerpt(
         excerpt = excerpt.chars().take(max_chars).collect::<String>() + " …";
     }
     excerpt
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn goal_lock_captures_locked_metadata_for_recovery() {
+        let root = std::env::temp_dir().join(format!(
+            "appsdk-goal-lock-recovery-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("long-task-goal.lock");
+        let mut file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        writeln!(file, "pid=123 owner=crashed-goal-worker").unwrap();
+        file.sync_all().unwrap();
+        goal_try_advisory_lock(&file).unwrap();
+
+        let captured = goal_lock_metadata_from_file(&mut file).unwrap();
+        assert_eq!(captured, "pid=123 owner=crashed-goal-worker\n");
+        assert_eq!(
+            goal_lock_recovery_reason(&captured),
+            "advisory lock released with stale metadata"
+        );
+        assert_eq!(goal_lock_recovery_reason(""), "empty metadata");
+        assert_eq!(
+            goal_lock_recovery_reason("pid="),
+            "invalid or truncated metadata"
+        );
+
+        drop(file);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn goal_lock_is_nonblocking_and_released_on_close() {
+        let root = std::env::temp_dir().join(format!(
+            "appsdk-goal-lock-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("goal.lock");
+        let first = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        goal_try_advisory_lock(&first).unwrap();
+
+        let second = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        assert_eq!(
+            goal_try_advisory_lock(&second).unwrap_err(),
+            "GOAL_LOCK_BUSY"
+        );
+        drop(first);
+        goal_try_advisory_lock(&second).unwrap();
+
+        drop(second);
+        fs::remove_dir_all(root).ok();
+    }
 }

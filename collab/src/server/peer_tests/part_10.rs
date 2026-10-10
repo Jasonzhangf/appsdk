@@ -409,7 +409,9 @@ fn cleanup_rejects_unmerged_then_removes_only_merged_clean_worktree() {
             .output()
             .unwrap()
     };
-    assert!(git(&["init", "-q"]).status.success());
+    assert!(git(&["init", "-q", "--initial-branch=main"])
+        .status
+        .success());
     assert!(git(&["config", "user.email", "test@example.com"])
         .status
         .success());
@@ -466,6 +468,9 @@ fn codex_subagents_exchange_messages() {
         error: None,
         probe_failures: Vec::new(),
         runtime: Some("codex".into()),
+        create_operation_id: None,
+        binding_id: None,
+        endpoint_generation: None,
     };
     let codex = Record {
         id: "codex-rt".into(),
@@ -480,6 +485,9 @@ fn codex_subagents_exchange_messages() {
         error: None,
         probe_failures: Vec::new(),
         runtime: Some("codex".into()),
+        create_operation_id: None,
+        binding_id: None,
+        endpoint_generation: None,
     };
     server.commit(&[
         Event::SubagentUpdated {

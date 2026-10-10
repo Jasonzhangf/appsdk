@@ -96,7 +96,11 @@ commands such as `prepare`, `init`, `pin-lock`, `verify`, `compile`,
 Bootstrap mode always discovers a bounded set of current project-document
 candidates plus the installed versioned standard template, projects existing
 project/module state, and asks the Agent to present a `GuidanceSetupProposal`
-for user approval. With compiled Guidance it returns a
+for approval. The Agent reads effective project rules and actual CI/hook
+entrypoints, records owner/action/basis for each difference, and reuses existing
+session authorization before requesting approval only for uncovered changes.
+Guidance is optional; the same audit and entrypoint updates can proceed without
+it. With compiled Guidance it returns a
 `template_upgrade_review`; otherwise it returns an initial setup. It does not
 write project or task state, and the template is not activated as a rule
 source. After approval and compile, task intake

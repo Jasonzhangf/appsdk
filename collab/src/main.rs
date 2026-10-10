@@ -493,32 +493,36 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             );
             let pid_path = server_dir.join("server.pid");
             if client::alive(&scope.sock_path()) {
-                let mut pids = Vec::new();
+                let mut socket_pids = Vec::new();
                 let output = std::process::Command::new("lsof")
                     .args(["-t", scope.sock_path().to_str().unwrap_or_default()])
                     .output()?;
                 for line in String::from_utf8_lossy(&output.stdout).lines() {
                     if let Ok(pid) = line.trim().parse::<i32>() {
-                        pids.push(pid);
+                        socket_pids.push(pid);
                     }
                 }
-                if pids.is_empty() {
-                    if let Ok(pid_text) = std::fs::read_to_string(&pid_path) {
-                        if let Ok(pid) = pid_text.trim().parse::<i32>() {
-                            pids.push(pid);
-                        }
+                let daemon_pid = std::fs::read_to_string(&pid_path)
+                    .ok()
+                    .and_then(|pid| pid.trim().parse::<i32>().ok());
+                let pid = match (socket_pids.is_empty(), daemon_pid) {
+                    (true, Some(pid)) => Some(pid),
+                    (false, Some(pid)) if socket_pids.contains(&pid) => Some(pid),
+                    (false, Some(pid)) => {
+                        anyhow::bail!(
+                            "recorded collab daemon pid {} does not own socket {}",
+                            pid,
+                            scope.sock_path().display()
+                        );
                     }
-                }
-                pids.sort_unstable();
-                pids.dedup();
-                for pid in pids {
-                    if pid > 1 && pid != std::process::id() as i32 {
-                        let status = std::process::Command::new("kill")
-                            .args(["-TERM", &pid.to_string()])
-                            .status()?;
-                        if !status.success() {
-                            anyhow::bail!("failed to stop collab daemon pid {}", pid);
-                        }
+                    (_, None) => None,
+                };
+                if let Some(pid) = pid.filter(|pid| *pid > 1 && *pid != std::process::id() as i32) {
+                    let status = std::process::Command::new("kill")
+                        .args(["-TERM", &pid.to_string()])
+                        .status()?;
+                    if !status.success() {
+                        anyhow::bail!("failed to stop collab daemon pid {}", pid);
                     }
                 }
                 for _ in 0..40 {

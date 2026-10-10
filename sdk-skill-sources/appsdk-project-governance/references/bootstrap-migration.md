@@ -163,15 +163,17 @@ Protected state.
 
 ```text
 appsdk init
--> appsdk guide init --task guidance-upgrade --mode bootstrap --module <id>
--> Agent reads current AGENTS/Skills/Guidance first
--> Agent reads the versioned standard template reference
--> compare retained rules and useful differences
--> GuidanceSetupProposal
--> explicit user approval
+-> Agent reads effective upstream rules, project AGENTS/Skills, test commands,
+   and CI/hook entrypoints
+-> when Guidance is selected:
+   appsdk guide init --task guidance-upgrade --mode bootstrap --module <id>
+   compare retained rules and useful differences
+   GuidanceSetupProposal
+   reuse existing session authorization; approve only uncovered differences
+-> otherwise: perform the same audit directly
 -> latest origin/main clean owner worktree
--> apply only approved changes
--> appsdk guide compile
+-> apply authorized changes
+-> when Guidance is selected: appsdk guide compile
 -> appsdk verify
 ```
 
@@ -180,6 +182,8 @@ to `.appsdk/project.json#/guidance/rule_sources`, automatically overwrite
 project rules, or reset valid governance merely to adopt a newer template.
 The proposal records retained project rules, recommended changes, and declined
 template items so choosing not to adopt an item is explicit and valid.
+Guidance is optional for this audit. Repeated initialization and unrelated
+version refreshes do not trigger a whole-project rule audit.
 Missing or locally removed reference material does not fail ordinary
 `appsdk verify`; rerun `appsdk init` only when a fresh comparison is wanted.
 
@@ -203,7 +207,7 @@ appsdk init
 -> Agent reads returned AGENTS and local Skill candidates
 -> Agent asks only unresolved questions
 -> Agent presents GuidanceSetupProposal
--> explicit user approval
+-> reuse session authorization; approve only uncovered differences
 -> clean owner worktree updates AGENTS/local Skill/machine contract/source declaration
 -> appsdk guide compile
 -> appsdk verify
@@ -289,7 +293,7 @@ paths. After the canonical pair is installed, remove only those authorized,
 verified paths. Never remove `~/.appsdk`, `~/.collab`, project
 `.agent-collab/`, or business source as part of binary cleanup.
 
-The lower-level `appsdk reset-governance --discard-legacy` command remains
+The lower-level `appsdk reset-governance <project> --discard-legacy` command remains
 available and uses the same transactional reset owner. Neither command
 authorizes manual deletion or hand-editing of version/hash/ReviewRecord, and
 neither permits two active governance roots. If old Active/Protected artifacts
@@ -395,7 +399,7 @@ instead of preserving it, use the single offline reset owner:
 
 ```bash
 collab down
-collab reset --discard-legacy --approval "<explicit user authorization>"
+collab reset --project --discard-legacy --approval "<explicit user authorization>"
 collab up
 collab context
 ```
@@ -419,8 +423,8 @@ start from the current SDK baseline, the preferred single entry is:
 ```bash
 cd /abs/path/project
 git worktree add -b codex/governance-reset-<slug> \
-  playground/governance-reset-<slug> origin/main
-cd playground/governance-reset-<slug>
+  /Volumes/Intel/playground/<project-key>/<task-slug> origin/main
+cd /Volumes/Intel/playground/<project-key>/<task-slug>
 appsdk init "$PWD" --fresh --discard-legacy
 appsdk guide init --task governance-reset --mode bootstrap --module <module-id>
 appsdk guide compile
@@ -428,10 +432,13 @@ appsdk verify
 appsdk compile
 ```
 
+`<project-key>` and `<task-slug>` come from the current project and task. Do not
+reuse another task's worktree path.
+
 `appsdk init --fresh --discard-legacy` requires an existing
 `.appsdk/project.json`, a clean non-`main`/`master` worktree, and the explicit
 discard confirmation. It uses the same transactional reset owner as
-`appsdk reset-governance --discard-legacy`, but combines reset with current
+`appsdk reset-governance <project> --discard-legacy`, but combines reset with current
 contract rebuild. It removes the old AppSDK control plane, `.appsdk-control/`,
 and declared rebuildable generated roots; it preserves business source,
 runtime data, `active/`, and `protected/` by default. It must not remove

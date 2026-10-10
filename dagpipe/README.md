@@ -32,19 +32,31 @@ Failure returns both the classified error and its execution journal.
 
 ## Install the global CLI and Skill
 
-From the AppSDK checkout, run:
+From the AppSDK checkout on macOS or Linux, run:
 
 ```sh
 scripts/install-global-dagpipe.sh
 ```
 
-This builds and installs the `dagpipe` binary with Cargo, installs the SDK
-crate source to `~/.local/share/dagpipe/sdk`, then installs its packaged usage
-Skill to `~/.agents/skills/dagpipe-runtime/SKILL.md`. It updates an existing
-DAGpipe Skill in place and refuses to overwrite a differently named Skill. The
-script uses `cargo install --force` to update the DAGpipe binary. Run
-`dagpipe sdk path` to print the absolute SDK path for a consuming project's
-Cargo.toml (`~` is not expanded in TOML).
+From PowerShell on native Windows, run:
+
+```powershell
+.\dagpipe\scripts\install.ps1
+```
+
+Both entries build a temporary candidate with Cargo and call the same
+`dagpipe install --source <checkout>` owner. The owner installs the CLI, the SDK
+crate source, and the packaged usage Skill. It preserves the previous SDK for
+rollback and refuses to replace unrelated or modified SDK/Skill content.
+
+The SDK location is `~/.local/share/dagpipe/sdk` on macOS and Linux. On Windows,
+it is `%LOCALAPPDATA%\dagpipe\sdk`. The Skill is installed at
+`~/.agents/skills/dagpipe-runtime/SKILL.md` on macOS and Linux, and
+`%USERPROFILE%\.agents\skills\dagpipe-runtime\SKILL.md` on Windows.
+
+Run `dagpipe sdk path` to print the absolute SDK path for a consuming project's
+Cargo.toml (`~` is not expanded in TOML). On Windows, the command prints forward
+slashes so the path can be pasted directly into a TOML string.
 
 The CLI's built-in governance modules are static:
 

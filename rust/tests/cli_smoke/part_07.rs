@@ -362,13 +362,13 @@ fn repeated_init_projects_standard_template_and_bootstrap_upgrade_proposal() {
         intake_json["reason_code"],
         "GUIDANCE_TEMPLATE_UPGRADE_PROPOSAL_REQUIRED"
     );
-    assert_eq!(intake_json["readiness"], "needs_user_approval");
+    assert_eq!(intake_json["readiness"], "needs_conditional_authorization");
     assert_eq!(intake_json["writes_state"], false);
     assert_eq!(
         intake_json["standard_template"]["path"],
         ".appsdk/templates/minimal/AGENTS.md"
     );
-    assert_eq!(intake_json["standard_template"]["version"], "0.1.0012");
+    assert_eq!(intake_json["standard_template"]["version"], "0.1.0015");
     assert_eq!(
         intake_json["standard_template"]["digest"],
         file_digest(&reference)
@@ -411,7 +411,22 @@ fn repeated_init_projects_standard_template_and_bootstrap_upgrade_proposal() {
         intake_json["proposal_schema"]["declined_template_items"],
         serde_json::json!([])
     );
-    assert_eq!(intake_json["proposal_schema"]["approval_required"], true);
+    assert_eq!(
+        intake_json["proposal_schema"]["approval_required"],
+        "uncovered_durable_changes_only"
+    );
+    assert_eq!(
+        intake_json["proposal_schema"]["authorization_reuse"],
+        "existing_session_authorization"
+    );
+    assert!(intake_json["agent_instruction"]
+        .as_str()
+        .unwrap()
+        .contains("CI/hook"));
+    assert_eq!(
+        intake_json["next"]["requires"],
+        "authorization_check_for_uncovered_durable_changes"
+    );
     assert!(!intake_json["read_first"]
         .as_array()
         .unwrap()

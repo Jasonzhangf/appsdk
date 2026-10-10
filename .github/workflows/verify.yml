@@ -354,6 +354,15 @@ jobs:
           Invoke-CargoTest @('--bin', 'appsdk', 'producer::lock_tests')
           Invoke-CargoTest @('--test', 'platform_lock_cli')
           Invoke-CargoTest @('--test', 'registry_home_cli') -ExpectCount 3
+      - name: Governance reset CLI and interrupted-recovery tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo test --manifest-path rust/Cargo.toml --locked --test reset_platform_cli
+          if ($LASTEXITCODE -ne 0) { throw "Windows reset public CLI tests failed ($LASTEXITCODE)" }
+      - name: Governance reset and junction black-box acceptance
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/tests/test-windows-appsdk-reset.ps1
       - name: Check release binaries
         shell: pwsh
         run: |

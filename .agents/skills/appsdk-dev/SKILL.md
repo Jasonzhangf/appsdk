@@ -80,10 +80,9 @@ Rust 格式检查使用对应 manifest 的 `cargo fmt -- --check`。
   共享资源或 DAGPipe 库变化时运行 MSVC 构建、共享锁与公开入口定向测试（包括三例
   Windows `registry_home_cli`）及公开 consumer smoke；`windows_dagpipe` 在 DAGPipe
   源码、安装脚本或 PowerShell harness 变化时运行包测试、release 构建和安装黑盒。
-  文档与 Collab-only 变化不触发它们。候选 `a3f58b8b` 的完整 release run
-  `38059365783` 已验证 Windows AppSDK MSVC 构建/共享检查/public consumer 与
-  Windows DAGPipe 构建/安装黑盒；将其作为该准确候选的证据，不外推至其他 SHA、
-  Windows ARM64 或 Collab Windows。
+  文档与 Collab-only 变化不触发它们。release run 的结果只绑定其 `head_sha`；
+  任一适用 Review finding 修复后，须以修复候选重新执行受影响 job 和最终完整
+  release matrix，不能将祖先 SHA 的产物当作当前发布证据。
 - release（`v*` tag 或 `workflow_dispatch`）触发完整 release 产物图：Linux `release`
   完整门禁、Windows AppSDK MSVC 门禁与新增 macOS ARM64 native 门禁（断言 arm64
   host）各自构建并 stage/upload 一个 `appsdk-<version>-<triple>.tar.gz`（retention

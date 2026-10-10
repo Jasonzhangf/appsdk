@@ -1,11 +1,13 @@
 # AppSDK 跨平台与发布渠道方案
 
-状态：发布要求与实施记录。公开版仍是 `v0.1.0014`。候选
-`0.1.0015` / npm `0.1.15`，source commit
-`a3f58b8b59ea607ee9e1d6be9abedeec2428a360`，已通过完整三平台 release run
-`38059365783`，包括 native archives、npm packages 与三平台 consumers。当前仍待
-独立整体 Review、正式安装规则升级与公开发布/read-back。本文区分公开支持、已验候选
-和未完成验收，不以源码存在或合成包测试宣称平台支持。
+状态：发布要求与实施记录。公开版仍是 `v0.1.0014`。AppSDK `0.1.0015` / npm
+`0.1.15` 的三平台候选曾通过完整矩阵，但最终整体 Review 在该矩阵后发现历史迁移
+target 绑定缺陷，并指出 Windows reset 缺少原生黑盒验收。候选 SHA `0917ffa4` 的
+release run `38060743040` 和其祖先 SHA `a3f58b8b` 的 run `38059365783` 都是历史
+验收证据，不能代表修复后最终准入。当前按 finding 补齐实现与受影响平台验证；最新
+完整 release run 的 `head_sha`、归档 manifest 的 `sourceCommit` 与整体 Review 对象
+必须一致后方可发布。本文区分公开支持、历史候选证据和未完成验收，不以源码存在或
+合成包测试宣称平台支持。
 
 ## 发布目标与产品边界
 
@@ -25,8 +27,8 @@ CLI、Rust SDK 与运行 Skill；Collab 分发两个 binary 与协作 Skill。
 | Linux x64 | `v0.1.0014` Ubuntu release job 完成 AppSDK/DAGPipe 测试、构建、安装器和消费者 smoke；没有该 release 的 Linux 二进制资产 |
 | macOS ARM64 | AppSDK canonical installer/消费者及公开下载资产已有证据；Collab 的独立安装/live 记录不属于 AppSDK release 产品 |
 | 其他 CPU 架构 | 当前发布未提供独立平台资产及完整验收；不能从同 OS 的另一架构推广支持结论 |
-| Windows | `v0.1.0014` 公开版未支持；`a3f58b8b` 候选的 AppSDK MSVC 与 DAGPipe native build/install/consumer 均通过；Collab Unix socket/宿主 transport 仍未支持 |
-| npm | `@jsonstudio/appsdk@0.1.15` 与 macOS ARM64/Linux x64 GNU/Windows x64 MSVC 三个平台包已用候选 native binaries 打包，并在三原生 runners 消费通过；registry 尚未发布。当前账号是 `@jsonstudio` owner，目标包 E404，最终创建能力以 publish/read-back 确认 |
+| Windows | `v0.1.0014` 公开版未支持；历史 AppSDK MSVC 与 DAGPipe native build/install/consumer 通过；AppSDK reset 的原生成功、junction 拒绝和中断恢复仍待修复候选验收；Collab Unix socket/宿主 transport 仍未支持 |
+| npm | `@jsonstudio/appsdk@0.1.15` 及 macOS ARM64/Linux x64 GNU/Windows x64 MSVC 平台包的历史候选已在三原生 runners 消费通过；registry 尚未发布，finding 修复后须重新绑定并验收最终 tarballs。当前账号是 `@jsonstudio` owner，目标包 E404，最终创建能力以 publish/read-back 确认 |
 
 2026-10-10 对公开 npm registry 查询 `@jsonstudio/appsdk` 返回 `E404 Not Found`。
 这只表明本次未取得公开包元数据，不证明 scope 归属、账号写权限或名称可注册。
@@ -38,21 +40,19 @@ CLI、Rust SDK 与运行 Skill；Collab 分发两个 binary 与协作 Skill。
 和三 runner 的 `npm-consumers`：`windows_appsdk` 执行
 MSVC 构建、共享锁与公开入口定向测试及公开 consumer smoke；`windows_dagpipe`
 执行 DAGPipe 包测试、release 构建与 PowerShell 安装黑盒（安装/升级、真实 Cargo
-consumer、junction/reparse 拒绝、in-use 替换）。增量 run `38045199787`
-`38059365783` 在最终候选 SHA 完整通过：Linux AppSDK/DAGPipe full suites 与
-release build/install/consumer/archive，macOS ARM64 build/install/consumer/archive，
-Windows AppSDK MSVC build/shared checks/public consumer/archive，Windows DAGPipe
-native install black-box，统一 package job，以及同一主包 tarball 的 Windows/Linux/
-macOS consumers。候选 archives 和四个 npm tgz 已下载；`SHA256SUMS` 通过，所有
-manifest 绑定同一 source commit `a3f58b8b` 与 AppSDK source version `0.1.0015`。
-这些仍是候选证据；未发布前不得表述为当前公开资产。
+consumer、junction/reparse 拒绝、in-use 替换）。历史 run `38060743040` 在 SHA
+`0917ffa4` 上完整通过 Linux AppSDK/DAGPipe、macOS ARM64、Windows AppSDK 与 DAGPipe、
+统一 package 和三平台 npm consumers，并绑定了校验通过的 archives 与四个 tgz。
+但该 Windows job 没有运行 reset CLI 的原生成功、junction 拒绝或中断恢复验收；整体
+Review 还发现历史迁移记录的 actual target 可被单独篡改。它们是旧候选证据；修复后
+重新运行完整矩阵并复核确切 SHA，不能沿用祖先 tarballs 发布。
 源码审计证据来自下列 owner，静态检查不宣称 Windows 运行失败已复现或已修复。
 
 ## 首轮源码差距与候选处理
 
-以下是起始源码基线的差距及其保留约束。当前候选状态以上表为准：AppSDK
-Windows 锁、路径、Reset 事务、installer 与 public consumer，以及 DAGPipe Windows
-installer/consumer 均在上述准确候选完成验收。Collab daemon 和宿主 transport
+以下是起始源码基线的差距及其保留约束。AppSDK Windows 锁、路径、installer 与
+public consumer 有历史候选验收；Reset 事务当前仍缺原生 Windows 黑盒闭环。DAGPipe
+Windows installer/consumer 有对应历史候选验收。Collab daemon 和宿主 transport
 仍依赖 Unix socket、文件锁及进程语义，尚无原生 Windows 实现或验收。
 
 ## 平台适配的最小范围
@@ -142,8 +142,9 @@ pnpm/yarn 可消费同一 npm registry 产物，无需另建一套发布实现�
   `0.1.0014` → `0.1.14`；本地候选新增 `0.1.0015` → `0.1.15`，均保留源版本
   与 commit 关联。Collab 使用自己的版本 owner；发布前先检查目标版本唯一性。
 - 候选的 npm pack、Windows/Linux/macOS 本地 tgz 安装、全局 bin、路径含空格、
-  升级与真实消费者已在 run `38059365783` 验收；公开 registry 下载、完整性与
-  版本回执仍待 publish 后核对。
+  升级与真实消费者在历史 run `38060743040` 验收；该 SHA 后续 Review 未通过，
+  不作为最终发布包。修复候选需重做完整矩阵；公开 registry 下载、完整性与版本
+  回执仍待最终 publish 后核对。
 - 当前 npm 身份 `jasonzhangf` 是 `@jsonstudio` org owner。发布通过后以目标包
   的 publish 和 read-back 回执确认创建权限；不保存 token 到仓库或任务笔记。
 

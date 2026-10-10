@@ -179,6 +179,14 @@ expect_true "windows_dagpipe"
 expect_false "workflow_contract"
 expect_false "npm"
 
+# The Windows AppSDK reset harness selects its native owner only.
+run_scenario "windows-appsdk-reset" "push" "branch" "1" "scripts/tests/test-windows-appsdk-reset.ps1"
+expect_only "windows_appsdk"
+
+# The Windows-capable reset CLI integration target selects the same native owner.
+run_scenario "reset-platform-cli" "push" "branch" "1" "rust/tests/reset_platform_cli.rs"
+expect_only "windows_appsdk"
+
 # 11. Missing baseline (force push / first push) stays fail-closed.
 run_scenario "no-baseline" "push" "branch" "0" ""
 expect_true "app_sdk_full"

@@ -142,6 +142,9 @@ while IFS= read -r path; do
     scripts/tests/test-windows-dagpipe.ps1)
       windows_dagpipe=true
       ;;
+    scripts/tests/test-windows-appsdk-reset.ps1)
+      windows_appsdk=true
+      ;;
     rust/release-version|rust/Cargo.toml|rust/Cargo.lock|rust/build.rs|contracts/sdk-bundle.manifest.json|contracts/migrations/*|templates/minimal/.appsdk/project.json|templates/minimal/.appsdk/sdk.lock)
       app_sdk_full=true
       resources=true
@@ -185,6 +188,9 @@ while IFS= read -r path; do
       ;;
     rust/tests/registry_home_cli.rs)
       rust_registry_home_cli=true
+      windows_appsdk=true
+      ;;
+    rust/tests/reset_platform_cli.rs)
       windows_appsdk=true
       ;;
     rust/src/*|rust/tests/*)

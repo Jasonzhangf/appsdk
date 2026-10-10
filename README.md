@@ -148,11 +148,12 @@ installer 不重启已有 daemon，升级运行态须在已授权维护窗口按
 | macOS x64 / Linux ARM64 | 尚未建立对应架构的完整发布证据 | 同左 | 同左 | 未提供对应平台的该 release 资产 |
 | 原生 Windows | 公开版未支持 | 公开版未支持 | 未支持：Unix socket 与宿主 transport 不可用 | 尚无原生 installer 或 release 资产 |
 
-当前 release 候选为 AppSDK `0.1.0015` / npm `0.1.15`，source commit
-`a3f58b8b59ea607ee9e1d6be9abedeec2428a360`。完整 release run
-`38059365783` 已通过 Linux、macOS ARM64、原生 Windows AppSDK/DAGPipe 构建与
-消费者验收；三个平台的 npm tarballs 均通过同包 consumer smoke。独立整体 Review
-与公开 GitHub/npm 发布仍待完成，因此当前公开支持仍以 `v0.1.0014` 为准。
+AppSDK `0.1.0015` / npm `0.1.15` 的三平台候选已完成构建与 consumer smoke；
+完整矩阵绑定候选 SHA `0917ffa4` 的 run `38060743040` 通过。但该候选的独立整体
+Review 发现迁移记录完整性问题，以及 Windows reset 缺少原生验收；该 run 与更早的
+`a3f58b8b` run `38059365783` 均为历史候选证据，不能作为最终发布准入。修复后的
+最终候选须用最新完整 release run 的 `head_sha` 与包内 `sourceCommit` 对齐，并通过
+整体 Review。GitHub/npm 尚未发布，当前公开支持仍以 `v0.1.0014` 为准。
 `jasonzhangf` 已核实为 `@jsonstudio` org owner；目标包仍返回 E404，实际新包创建
 能力以发布及 registry read-back 为准。
 三平台产物、npm 包边界、版本映射与交付顺序见

@@ -35,11 +35,9 @@ pub(super) fn preflight_record_map_bindings(
                 && !sdk_map_migration_checks_live_target(step)
                 && explicit_custom_source
                 && Some(canonical_source) == declared.get("source_digest")
-                && sdk_map_migration_historical_target_authorized(
-                    declared,
-                    record_bundle,
-                    canonical_target,
-                );
+                && canonical_target.as_str().is_some_and(|target| {
+                    sdk_map_migration_historical_target_authorized(declared, record_bundle, target)
+                });
             let custom_target_bound = bundle_transition
                 && explicit_custom_source
                 && Some(canonical_source) == declared.get("source_digest")

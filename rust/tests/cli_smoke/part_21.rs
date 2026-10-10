@@ -170,6 +170,25 @@ fn pin_lock_rejects_unlisted_historical_agentteams_target_tuple() {
 }
 
 #[test]
+fn pin_lock_rejects_tampered_actual_historical_agentteams_target_with_valid_witness() {
+    let root = extract_agentteams_baseline("pin-lock-agentteams-tampered-actual-target");
+    let record_path = root.join(".appsdk/migrations/0.1.5-to-0.1.6/record.json");
+    let mut record: Value = serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+    record["maps"][0]["target_digest"] = Value::String(format!("sha256:{}", "f".repeat(64)));
+    fs::write(
+        &record_path,
+        serde_json::to_string_pretty(&record).unwrap() + "\n",
+    )
+    .unwrap();
+
+    assert_agentteams_pin_rejected(
+        &root,
+        "SDK_MIGRATION_TARGET_MAP_MISMATCH:resource-map.json",
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn pin_lock_rejects_absent_historical_agentteams_bundle_witness() {
     let root = extract_agentteams_baseline("pin-lock-agentteams-absent-witness");
     let lock_path = root.join(".appsdk/sdk.lock");

@@ -28,7 +28,13 @@ CLI、Rust SDK 与运行 Skill；Collab 分发两个 binary 与协作 Skill。
 这只表明本次未取得公开包元数据，不证明 scope 归属、账号写权限或名称可注册。
 
 已发布版本资产见 [v0.1.0014](https://github.com/Jasonzhangf/appsdk/releases/tag/v0.1.0014)。
-现有 release gate 见 [verify.yml](../../.github/workflows/verify.yml)；
+现有 release gate 见 [verify.yml](../../.github/workflows/verify.yml)。日常 push/PR
+按受影响组件选测；`v*` tag 与 `workflow_dispatch` 运行完整 Ubuntu release job，
+并并行运行两个原生 Windows（`windows-latest`/MSVC）job：`windows_appsdk` 执行
+MSVC 构建、共享锁与公开入口定向测试及公开 consumer smoke；`windows_dagpipe`
+执行 DAGPipe 包测试、release 构建与 PowerShell 安装黑盒（安装/升级、真实 Cargo
+consumer、junction/reparse 拒绝、in-use 替换）。这两个 job 目前只有接线与选择器
+证据，原生 Windows 运行结果仍为 UNVERIFIED，不能据此声明平台支持。
 源码审计证据来自下列 owner，静态检查不宣称 Windows 运行失败已复现或已修复。
 
 ## 平台适配的最小范围

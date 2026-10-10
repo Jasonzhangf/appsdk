@@ -20,11 +20,16 @@ jobs:
       rust_communication: ${{ steps.scope.outputs.rust_communication }}
       rust_memory: ${{ steps.scope.outputs.rust_memory }}
       rust_registry: ${{ steps.scope.outputs.rust_registry }}
+      rust_producer: ${{ steps.scope.outputs.rust_producer }}
+      rust_cli_smoke: ${{ steps.scope.outputs.rust_cli_smoke }}
+      rust_platform_lock_cli: ${{ steps.scope.outputs.rust_platform_lock_cli }}
       resources: ${{ steps.scope.outputs.resources }}
       dagpipe: ${{ steps.scope.outputs.dagpipe }}
       collab: ${{ steps.scope.outputs.collab }}
       installer: ${{ steps.scope.outputs.installer }}
       docs: ${{ steps.scope.outputs.docs }}
+      windows_appsdk: ${{ steps.scope.outputs.windows_appsdk }}
+      windows_dagpipe: ${{ steps.scope.outputs.windows_dagpipe }}
       release: ${{ steps.scope.outputs.release }}
       base_sha: ${{ steps.scope.outputs.base_sha }}
       head_sha: ${{ steps.scope.outputs.head_sha }}
@@ -65,17 +70,24 @@ jobs:
           rust_communication=false
           rust_memory=false
           rust_registry=false
+          rust_producer=false
+          rust_cli_smoke=false
+          rust_platform_lock_cli=false
           resources=false
           dagpipe=false
           collab=false
           installer=false
           docs=false
+          windows_appsdk=false
+          windows_dagpipe=false
 
           if [[ "$release" == true ]]; then
             app_sdk_full=true
             resources=true
             installer=true
             dagpipe=true
+            windows_appsdk=true
+            windows_dagpipe=true
           fi
 
           baseline_ok=false
@@ -95,6 +107,8 @@ jobs:
             collab=true
             installer=true
             docs=true
+            windows_appsdk=true
+            windows_dagpipe=true
             base=""
           fi
 
@@ -105,6 +119,8 @@ jobs:
             collab=true
             installer=true
             docs=true
+            windows_appsdk=true
+            windows_dagpipe=true
           fi
 
           while IFS= read -r path; do
@@ -117,6 +133,8 @@ jobs:
                 collab=true
                 installer=true
                 docs=true
+                windows_appsdk=true
+                windows_dagpipe=true
                 ;;
               scripts/install-global-appsdk.sh)
                 resources=true
@@ -130,32 +148,76 @@ jobs:
                 ;;
               scripts/install-global-dagpipe.sh)
                 dagpipe=true
+                windows_dagpipe=true
+                ;;
+              scripts/tests/test-windows-dagpipe.ps1)
+                windows_dagpipe=true
                 ;;
               rust/release-version|rust/Cargo.toml|rust/Cargo.lock|rust/build.rs|contracts/sdk-bundle.manifest.json|contracts/migrations/*|templates/minimal/.appsdk/project.json|templates/minimal/.appsdk/sdk.lock)
                 app_sdk_full=true
                 resources=true
+                windows_appsdk=true
+                ;;
+              rust/src/main/producer.rs)
+                rust_producer=true
+                rust_cli_smoke=true
+                rust_platform_lock_cli=true
+                windows_appsdk=true
                 ;;
               rust/src/guidance.rs|rust/src/guidance/*)
                 rust_guidance=true
+                windows_appsdk=true
                 ;;
               rust/src/communication.rs|rust/src/communication/*)
                 rust_communication=true
+                rust_platform_lock_cli=true
+                windows_appsdk=true
                 ;;
               rust/src/memory.rs|rust/src/memory_cli.rs|rust/src/bin/project-memory.rs)
                 rust_memory=true
+                windows_appsdk=true
                 ;;
               rust/src/global_registry.rs|rust/src/global_registry_communication.rs|rust/src/global_registry_tests.rs)
                 rust_registry=true
                 rust_communication=true
+                windows_appsdk=true
+                ;;
+              rust/tests/cli_smoke/main.rs|rust/tests/cli_smoke/goal_subscribe_rearm.rs|rust/tests/cli_smoke/part_0[1-9].rs|rust/tests/cli_smoke/part_1[0-9].rs|rust/tests/cli_smoke/part_2[0-5].rs)
+                rust_cli_smoke=true
+                windows_appsdk=true
+                ;;
+              rust/tests/communication_cli/main.rs|rust/tests/communication_cli/master_wake.rs|rust/tests/communication_cli/idle_wakeup.rs|rust/tests/communication_cli/routing_discovery.rs|rust/tests/communication_cli/rebind_loops.rs|rust/tests/communication_cli/runtime_identity.rs|rust/tests/communication_cli/delivery_retry.rs|rust/tests/communication_event_schema.rs|rust/tests/communication_request_schema.rs)
+                rust_communication=true
+                windows_appsdk=true
+                ;;
+              rust/tests/platform_lock_cli.rs)
+                rust_platform_lock_cli=true
+                windows_appsdk=true
                 ;;
               rust/src/*|rust/tests/*)
                 app_sdk_full=true
+                windows_appsdk=true
                 ;;
               dagpipe/docs/*|dagpipe/*.md)
                 docs=true
                 ;;
+              dagpipe/Cargo.toml|dagpipe/Cargo.lock|dagpipe/src/lib.rs)
+                dagpipe=true
+                windows_dagpipe=true
+                windows_appsdk=true
+                ;;
+              dagpipe/src/bin/*)
+                dagpipe=true
+                windows_dagpipe=true
+                ;;
+              dagpipe/src/*)
+                dagpipe=true
+                windows_dagpipe=true
+                windows_appsdk=true
+                ;;
               dagpipe/*)
                 dagpipe=true
+                windows_dagpipe=true
                 ;;
               collab/docs/*|collab/*.md)
                 docs=true
@@ -167,25 +229,31 @@ jobs:
                 resources=true
                 rust_memory=true
                 installer=true
+                windows_appsdk=true
                 ;;
               sdk-skill-sources/*)
                 resources=true
                 rust_guidance=true
                 installer=true
+                windows_appsdk=true
                 ;;
               templates/*)
                 resources=true
                 rust_guidance=true
+                windows_appsdk=true
                 ;;
               contracts/*)
                 app_sdk_full=true
                 resources=true
+                windows_appsdk=true
                 ;;
               docs/*|README.md|MEMORY.md|*.md)
                 docs=true
                 ;;
               *)
                 app_sdk_full=true
+                windows_appsdk=true
+                windows_dagpipe=true
                 ;;
             esac
           done <<< "$changed"
@@ -195,11 +263,16 @@ jobs:
           emit rust_communication "$rust_communication"
           emit rust_memory "$rust_memory"
           emit rust_registry "$rust_registry"
+          emit rust_producer "$rust_producer"
+          emit rust_cli_smoke "$rust_cli_smoke"
+          emit rust_platform_lock_cli "$rust_platform_lock_cli"
           emit resources "$resources"
           emit dagpipe "$dagpipe"
           emit collab "$collab"
           emit installer "$installer"
           emit docs "$docs"
+          emit windows_appsdk "$windows_appsdk"
+          emit windows_dagpipe "$windows_dagpipe"
           emit release "$release"
           emit base_sha "$base"
           emit head_sha "$HEAD_SHA"
@@ -208,11 +281,15 @@ jobs:
     name: AppSDK targeted
     needs: changes
     if: |
+      needs.changes.outputs.release != 'true' &&
       needs.changes.outputs.app_sdk_full != 'true' &&
       (needs.changes.outputs.rust_guidance == 'true' ||
        needs.changes.outputs.rust_communication == 'true' ||
        needs.changes.outputs.rust_memory == 'true' ||
        needs.changes.outputs.rust_registry == 'true' ||
+       needs.changes.outputs.rust_producer == 'true' ||
+       needs.changes.outputs.rust_cli_smoke == 'true' ||
+       needs.changes.outputs.rust_platform_lock_cli == 'true' ||
        needs.changes.outputs.resources == 'true')
     runs-on: ubuntu-latest
     steps:
@@ -221,7 +298,8 @@ jobs:
       - name: Install git-bug
         if: |
           needs.changes.outputs.rust_guidance == 'true' ||
-          needs.changes.outputs.rust_memory == 'true'
+          needs.changes.outputs.rust_memory == 'true' ||
+          needs.changes.outputs.rust_cli_smoke == 'true'
         run: |
           curl -fsSL -o /tmp/git-bug \
             https://github.com/git-bug/git-bug/releases/download/v0.10.1/git-bug_linux_amd64
@@ -232,7 +310,10 @@ jobs:
           needs.changes.outputs.rust_guidance == 'true' ||
           needs.changes.outputs.rust_communication == 'true' ||
           needs.changes.outputs.rust_memory == 'true' ||
-          needs.changes.outputs.rust_registry == 'true'
+          needs.changes.outputs.rust_registry == 'true' ||
+          needs.changes.outputs.rust_producer == 'true' ||
+          needs.changes.outputs.rust_cli_smoke == 'true' ||
+          needs.changes.outputs.rust_platform_lock_cli == 'true'
         run: cargo fmt --manifest-path rust/Cargo.toml -- --check
       - name: Validate resource contracts and versions
         if: needs.changes.outputs.resources == 'true'
@@ -243,7 +324,9 @@ jobs:
           test "$(jq -r '.sdk.version' templates/minimal/.appsdk/project.json)" = "$release_version"
           test "$(jq -r '.version' templates/minimal/.appsdk/sdk.lock)" = "$release_version"
       - name: Guidance tests
-        if: needs.changes.outputs.rust_guidance == 'true'
+        if: |
+          needs.changes.outputs.rust_guidance == 'true' &&
+          needs.changes.outputs.rust_cli_smoke != 'true'
         run: |
           cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke -- --list \
             | grep -E 'guidance_' > /dev/null
@@ -251,7 +334,9 @@ jobs:
           cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke existing_governance_without_guide_gets_read_only_setup_proposal -- --exact
           cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke repeated_init_
       - name: Resource consumer tests
-        if: needs.changes.outputs.resources == 'true'
+        if: |
+          needs.changes.outputs.resources == 'true' &&
+          needs.changes.outputs.rust_cli_smoke != 'true'
         run: |
           cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke project_agent_contract_is_created_for_new_projects_but_never_overwrites_project_rules -- --exact
           cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke install_bundle_resources_projects_declared_record_contract_sources -- --exact
@@ -263,21 +348,49 @@ jobs:
           cargo test --manifest-path rust/Cargo.toml --locked --test communication_cli
           cargo test --manifest-path rust/Cargo.toml --locked --test communication_event_schema
           cargo test --manifest-path rust/Cargo.toml --locked --test communication_request_schema
+          cargo test --manifest-path rust/Cargo.toml --locked --bin appsdk communication::lock_tests -- --list \
+            | grep -E ': test' > /dev/null
+          cargo test --manifest-path rust/Cargo.toml --locked --bin appsdk communication::lock_tests
       - name: Memory tests
-        if: needs.changes.outputs.rust_memory == 'true'
+        if: |
+          needs.changes.outputs.rust_memory == 'true' &&
+          needs.changes.outputs.rust_cli_smoke != 'true'
         run: |
           cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke -- --list \
             | grep -E 'project_memory' > /dev/null
           cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke project_memory
-      - name: Registry tests
+      - name: Registry unit tests
         if: needs.changes.outputs.rust_registry == 'true'
         run: |
           cargo test --manifest-path rust/Cargo.toml --locked --bin appsdk -- --list \
             | grep -E 'registry|registration' > /dev/null
           cargo test --manifest-path rust/Cargo.toml --locked --bin appsdk registr
+      - name: Registry registration tests
+        if: |
+          needs.changes.outputs.rust_registry == 'true' &&
+          needs.changes.outputs.rust_cli_smoke != 'true'
+        run: |
           cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke -- registration init_ --list \
             | grep -E ': test' > /dev/null
           cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke -- registration init_
+      - name: Producer lock tests
+        if: needs.changes.outputs.rust_producer == 'true'
+        run: |
+          cargo test --manifest-path rust/Cargo.toml --locked --bin appsdk producer::lock_tests -- --list \
+            | grep -E ': test' > /dev/null
+          cargo test --manifest-path rust/Cargo.toml --locked --bin appsdk producer::lock_tests
+      - name: Public lock CLI target
+        if: needs.changes.outputs.rust_platform_lock_cli == 'true'
+        run: |
+          cargo test --manifest-path rust/Cargo.toml --locked --test platform_lock_cli -- --list \
+            | grep -E ': test' > /dev/null
+          cargo test --manifest-path rust/Cargo.toml --locked --test platform_lock_cli
+      - name: Full cli_smoke target
+        if: needs.changes.outputs.rust_cli_smoke == 'true'
+        run: |
+          cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke -- --list \
+            | grep -E ': test' > /dev/null
+          cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke
 
   app-sdk-full:
     name: AppSDK full
@@ -366,6 +479,144 @@ jobs:
           else
             git show --check --oneline --format= "$HEAD_SHA"
           fi
+
+  windows-appsdk:
+    name: Windows AppSDK (MSVC)
+    needs: changes
+    if: needs.changes.outputs.windows_appsdk == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Record toolchain and runner identity
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustc -Vv
+          $rustHost = ((rustc -vV) | Where-Object { $_ -like 'host:*' }) -replace '^host:\s*', ''
+          if ($rustHost.Trim() -ne 'x86_64-pc-windows-msvc') {
+            throw "expected native MSVC host x86_64-pc-windows-msvc, got '$rustHost'"
+          }
+          [System.Environment]::OSVersion.VersionString
+          "PROCESSOR_ARCHITECTURE=$env:PROCESSOR_ARCHITECTURE"
+          "checkout=$(git rev-parse HEAD)"
+      - name: Build release binaries (MSVC)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo build --release --manifest-path rust/Cargo.toml --locked
+          if ($LASTEXITCODE -ne 0) { throw "cargo build failed with exit code $LASTEXITCODE" }
+      - name: Shared lock, owner, and public CLI tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Invoke-CargoTest {
+            param(
+              [Parameter(Mandatory)][string[]]$Selectors,
+              [int]$ExpectCount = -1,
+              [switch]$Exact
+            )
+            $base = @('test', '--manifest-path', 'rust/Cargo.toml', '--locked') + $Selectors
+            $listed = & cargo @base '--' '--list'
+            if ($LASTEXITCODE -ne 0) {
+              throw "cargo test --list failed ($LASTEXITCODE) for '$($Selectors -join ' ')'"
+            }
+            $count = @($listed | Where-Object { $_ -match ': test$' }).Count
+            if ($ExpectCount -ge 0) {
+              if ($count -ne $ExpectCount) {
+                throw "expected exactly $ExpectCount test(s) for '$($Selectors -join ' ')', found $count"
+              }
+            } elseif ($count -lt 1) {
+              throw "expected at least one test for '$($Selectors -join ' ')', found $count"
+            }
+            if ($Exact) { & cargo @base '--' '--exact' } else { & cargo @base }
+            if ($LASTEXITCODE -ne 0) {
+              throw "cargo test failed ($LASTEXITCODE) for '$($Selectors -join ' ')'"
+            }
+            Write-Host "PASS: $($Selectors -join ' ') ($count test(s))"
+          }
+          Invoke-CargoTest @('--bin', 'appsdk', 'platform::tests::try_lock_is_nonblocking_and_releases_on_close') -ExpectCount 1 -Exact
+          Invoke-CargoTest @('--bin', 'appsdk', 'platform::tests::try_lock_conflicts_across_processes') -ExpectCount 1 -Exact
+          Invoke-CargoTest @('--bin', 'appsdk', 'communication::lock_tests')
+          Invoke-CargoTest @('--bin', 'appsdk', 'producer::lock_tests')
+          Invoke-CargoTest @('--test', 'platform_lock_cli')
+      - name: Check release binaries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($bin in @('rust/target/release/appsdk.exe', 'rust/target/release/project-memory.exe')) {
+            if (-not (Test-Path -LiteralPath $bin -PathType Leaf)) {
+              throw "missing release binary: $bin"
+            }
+          }
+      - name: Isolated public consumer smoke
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path ([System.IO.Path]::GetTempPath()) ("appsdk windows smoke " + [Guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $root | Out-Null
+          try {
+            $project = Join-Path $root 'project dir'
+            $appsdk = Join-Path $PWD 'rust/target/release/appsdk.exe'
+            $memory = Join-Path $PWD 'rust/target/release/project-memory.exe'
+            & $appsdk verify-sdk-source-registry .
+            if ($LASTEXITCODE -ne 0) { throw "verify-sdk-source-registry failed ($LASTEXITCODE)" }
+            & $appsdk new $project
+            if ($LASTEXITCODE -ne 0) { throw "appsdk new failed ($LASTEXITCODE)" }
+            $verify = & $appsdk verify $project
+            if ($LASTEXITCODE -ne 0) { throw "appsdk verify failed ($LASTEXITCODE)" }
+            $parsed = ($verify -join "`n") | ConvertFrom-Json
+            if ($parsed.command_ok -ne $true) { throw "verify did not report command_ok" }
+            if ($parsed.development_ready -ne $true) { throw "verify did not report development_ready" }
+            & $memory --help
+            if ($LASTEXITCODE -ne 0) { throw "project-memory --help failed ($LASTEXITCODE)" }
+            foreach ($dir in @('playground', 'active/lib', 'protected/source', 'generated', '.appsdk-control')) {
+              if (-not (Test-Path -LiteralPath (Join-Path $project $dir) -PathType Container)) {
+                throw "missing governance directory: $dir"
+              }
+            }
+            foreach ($file in @('.appsdk/sdk-resources.json', '.appsdk/contracts/project.schema.json', '.appsdk/docs/design/appsdk-project-integration.md', '.appsdk/maps/module-registry.json', '.appsdk/contracts/records/worktree-record.schema.json', '.appsdk/rules/appsdk-project-governance.md', '.appsdk/skills/appsdk-project-governance/SKILL.md')) {
+              if (-not (Test-Path -LiteralPath (Join-Path $project $file) -PathType Leaf)) {
+                throw "missing governance file: $file"
+              }
+            }
+          } finally {
+            Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+  windows-dagpipe:
+    name: Windows DAGPipe (MSVC)
+    needs: changes
+    if: needs.changes.outputs.windows_dagpipe == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Record toolchain and runner identity
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustc -Vv
+          $rustHost = ((rustc -vV) | Where-Object { $_ -like 'host:*' }) -replace '^host:\s*', ''
+          if ($rustHost.Trim() -ne 'x86_64-pc-windows-msvc') {
+            throw "expected native MSVC host x86_64-pc-windows-msvc, got '$rustHost'"
+          }
+          "checkout=$(git rev-parse HEAD)"
+      - name: DAGPipe package tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo test --manifest-path dagpipe/Cargo.toml --locked --all-targets
+          if ($LASTEXITCODE -ne 0) { throw "dagpipe tests failed ($LASTEXITCODE)" }
+      - name: Build DAGPipe release binary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo build --release --manifest-path dagpipe/Cargo.toml --locked --bin dagpipe
+          if ($LASTEXITCODE -ne 0) { throw "dagpipe build failed ($LASTEXITCODE)" }
+      - name: DAGPipe Windows install black-box harness
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/tests/test-windows-dagpipe.ps1
 
   release:
     name: Release candidate

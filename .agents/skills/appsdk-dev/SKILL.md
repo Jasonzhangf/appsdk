@@ -35,8 +35,9 @@ description: "开发、调试、重构和发布 AppSDK 源码仓库；提供模�
 | 变更范围 | 相关验证入口 |
 |---|---|
 | 根级规则、项目开发 Skill、普通文档 | 检查语义、引用路径、Skill frontmatter 和 diff；不执行 Rust 测试 |
+| producer / 锁 | `--bin appsdk producer::lock_tests`、`--test platform_lock_cli`；producer 或共享生命周期/记录消费者变化再跑完整 `--test cli_smoke` |
 | Guidance | `cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke guidance_`；涉及 setup/init 再选对应消费者用例 |
-| Communication | `cargo test --manifest-path rust/Cargo.toml --locked --test communication_cli`；schema 变化再测 `communication_request_schema` / `communication_event_schema` |
+| Communication | `cargo test --manifest-path rust/Cargo.toml --locked --test communication_cli`；schema 变化再测 `communication_request_schema` / `communication_event_schema`；锁行为变化再测 `--bin appsdk communication::lock_tests` |
 | Memory | `cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke project_memory`；涉及独立 binary 再验证其公开入口 |
 | Registry | `cargo test --manifest-path rust/Cargo.toml --locked --bin appsdk registr`；再选 registration/init 和受影响 Communication 消费者 |
 | 初始化、迁移、pin、编译、生命周期 | 在 `rust/tests/cli_smoke/` 和 `rust/tests/sdk_*_migration.rs` 找实际受影响用例，选择 target/精确名称；跨模块时扩大消费者覆盖 |
@@ -55,13 +56,24 @@ Rust 格式检查使用对应 manifest 的 `cargo fmt -- --check`。
 
 [verify.yml](../../../.github/workflows/verify.yml) 是自动选测与 release 门禁的执行入口：
 
-- 日常 push/PR 对 Guidance、Communication、Memory、Registry、资源、安装器、
-  DAGPipe、Collab 和文档分别选择 job。
+- 日常 push/PR 对 Guidance、Communication、Memory、Registry、producer、资源、
+  安装器、DAGPipe、Collab 和文档分别选择 job。
+- producer 变化选择完整 `cli_smoke` target（覆盖 records/chain/retire 与 review
+  消费者）、`--bin appsdk producer::lock_tests` 和 `--test platform_lock_cli`；
+  Communication 变化在既有 `communication_cli`/schema 之外增加
+  `--bin appsdk communication::lock_tests`。完整 `cli_smoke` 运行时，其覆盖的
+  Guidance/Memory/Registry/资源 `cli_smoke` 分组步骤不再重复执行。
 - 其余 `rust/src/*` / `rust/tests/*`、共享合同、版本/依赖及未知路径目前仍可能
   选择整个 AppSDK 包；workflow 变化或基线缺失会进一步扩大检查。
 - 这是一项现存粒度限制。局部开发选测遵循上面的风险依据；修改 CI 选择器时，
   必须证明受影响消费者被覆盖，不能以空选择或绕 gate 缩短时间。
-- 版本 tag 和 `workflow_dispatch` 触发完整 AppSDK release job。
+- 两个原生 Windows job 复用同一 selector：`windows_appsdk` 在 AppSDK 源码/测试、
+  共享资源、DAGPipe 库或 workflow 变化时运行 MSVC 构建、共享锁与公开入口定向
+  测试及公开 consumer smoke；`windows_dagpipe` 在 DAGPipe 源码、安装脚本或
+  PowerShell harness 变化时运行包测试、release 构建和安装黑盒。文档与
+  Collab-only 变化不触发它们。当前只有接线与选择器证据，原生 Windows 运行仍为
+  UNVERIFIED。
+- 版本 tag 和 `workflow_dispatch` 触发完整 AppSDK release job 与两个 Windows job。
   手动 dispatch 当前等同于请求完整发布候选检查。
 
 ## 规则与 Skill 升级

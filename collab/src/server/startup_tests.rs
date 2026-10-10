@@ -298,7 +298,9 @@
         let original = UnixListener::bind(&socket).expect("bind original socket");
         let captured = std::fs::symlink_metadata(&socket).expect("capture socket metadata");
         drop(original);
-        std::fs::remove_file(&socket).expect("remove original socket path");
+        // Keep the original inode allocated while creating the replacement.
+        let retired = socket.with_extension("retired");
+        std::fs::rename(&socket, &retired).expect("retire original socket path");
         let replacement = UnixListener::bind(&socket).expect("bind replacement socket");
         let current = std::fs::symlink_metadata(&socket).expect("read replacement metadata");
         assert!(!same_inode(&captured, &current));
@@ -311,6 +313,7 @@
 
         drop(replacement);
         std::fs::remove_file(&socket).ok();
+        std::fs::remove_file(&retired).ok();
         std::fs::remove_dir_all(root).expect("remove startup test root");
     }
 

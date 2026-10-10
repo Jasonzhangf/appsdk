@@ -409,7 +409,9 @@ fn cleanup_rejects_unmerged_then_removes_only_merged_clean_worktree() {
             .output()
             .unwrap()
     };
-    assert!(git(&["init", "-q"]).status.success());
+    assert!(git(&["init", "-q", "--initial-branch=main"])
+        .status
+        .success());
     assert!(git(&["config", "user.email", "test@example.com"])
         .status
         .success());

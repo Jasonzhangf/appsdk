@@ -96,6 +96,10 @@ fn init_git(root: &Path) {
 #[test]
 fn communication_cli_lock_guards_mailbox() {
     let root = temp_root("communication");
+    // Communication enforces an absolute canonical project root; the OS temp
+    // dir is not canonical on every platform (macOS `/var` alias, Windows 8.3
+    // short names), so resolve it once before driving the real CLI.
+    let root = root.canonicalize().unwrap();
     let communication_dir = root.join(".appsdk-control/communication");
     fs::create_dir_all(&communication_dir).unwrap();
     let lock_path = communication_dir.join("mailbox.jsonl.lock");

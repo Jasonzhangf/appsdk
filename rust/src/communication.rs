@@ -1067,7 +1067,40 @@ mod lock_tests {
                 .as_nanos()
         ));
         fs::create_dir_all(&root).unwrap();
-        root
+        // Communication enforces an absolute canonical project root. The OS
+        // temp dir is not canonical on every platform (macOS `/var` alias,
+        // Windows 8.3 short names), so resolve it once for the fixture.
+        root.canonicalize().unwrap()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn canonical_native_prefix_root_passes_lexical_check() {
+        let root = temp_root("native-prefix");
+        let canonical = root.canonicalize().unwrap();
+        let text = canonical.to_str().unwrap();
+        assert!(
+            text.starts_with(r"\\?\"),
+            "expected a native verbatim prefix: {text}"
+        );
+        assert!(
+            is_lexically_canonical_absolute(&canonical),
+            "canonical native prefix root must pass the lexical check: {text}"
+        );
+        // Redundant separators, embedded dot/parent segments and trailing
+        // separators stay rejected on the same canonical prefix root.
+        for variant in [
+            format!("{text}\\"),
+            format!("{text}\\\\child"),
+            format!("{text}\\.\\child"),
+            format!("{text}\\..\\child"),
+        ] {
+            assert!(
+                !is_lexically_canonical_absolute(Path::new(&variant)),
+                "non-canonical variant must be rejected: {variant}"
+            );
+        }
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]

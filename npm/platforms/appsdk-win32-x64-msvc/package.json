@@ -1,0 +1,24 @@
+{
+  "name": "@jsonstudio/appsdk-win32-x64-msvc",
+  "version": "0.1.14-dev.0",
+  "description": "Development-only Windows x64 MSVC runtime package; incomplete until M5 assembles verified artifacts.",
+  "private": true,
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/appsdk.exe",
+    "bin/project-memory.exe",
+    "skills/appsdk-project-governance/**",
+    "skills/appsdk-migration/**",
+    "skills/project-memory/**"
+  ],
+  "appsdk": {
+    "targetTriple": "x86_64-pc-windows-msvc",
+    "artifactStatus": "incomplete-until-M5"
+  },
+  "license": "MIT"
+}

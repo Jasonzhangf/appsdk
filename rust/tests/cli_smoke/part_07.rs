@@ -368,7 +368,7 @@ fn repeated_init_projects_standard_template_and_bootstrap_upgrade_proposal() {
         intake_json["standard_template"]["path"],
         ".appsdk/templates/minimal/AGENTS.md"
     );
-    assert_eq!(intake_json["standard_template"]["version"], "0.1.0013");
+    assert_eq!(intake_json["standard_template"]["version"], "0.1.0014");
     assert_eq!(
         intake_json["standard_template"]["digest"],
         file_digest(&reference)

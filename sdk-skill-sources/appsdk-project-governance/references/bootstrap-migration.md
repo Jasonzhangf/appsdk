@@ -423,14 +423,17 @@ start from the current SDK baseline, the preferred single entry is:
 ```bash
 cd /abs/path/project
 git worktree add -b codex/governance-reset-<slug> \
-  playground/governance-reset-<slug> origin/main
-cd playground/governance-reset-<slug>
+  /Volumes/Intel/playground/<project-key>/<task-slug> origin/main
+cd /Volumes/Intel/playground/<project-key>/<task-slug>
 appsdk init "$PWD" --fresh --discard-legacy
 appsdk guide init --task governance-reset --mode bootstrap --module <module-id>
 appsdk guide compile
 appsdk verify
 appsdk compile
 ```
+
+`<project-key>` and `<task-slug>` come from the current project and task. Do not
+reuse another task's worktree path.
 
 `appsdk init --fresh --discard-legacy` requires an existing
 `.appsdk/project.json`, a clean non-`main`/`master` worktree, and the explicit

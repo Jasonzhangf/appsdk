@@ -1,8 +1,8 @@
 # Review and Delivery
 
 Apply this runtime lifecycle when runtime delivery is in scope. Documentation
-and rule edits use their relevant checks and review; they do not invent a
-runtime deployment, Active artifact or freeze ceremony.
+and rule edits use targeted checks; they do not invent a runtime deployment,
+Active artifact or freeze ceremony.
 
 ## Authoritative requirement review packet
 
@@ -75,8 +75,10 @@ they affect changed scope, safety, ownership, evidence truth, or required
 delivery.
 
 Any source, test, build config, environment, artifact, scope, owner, or required
-rule change invalidates affected evidence. Revise plan, rerun affected gates,
-then review again.
+rule change invalidates affected evidence. Refresh only affected evidence;
+revise the plan only when goal, scope, acceptance, key approach, or dependencies
+materially change. Follow the host contract for review triggers and finding
+re-checks; internal progress does not dispatch another review.
 
 ## Review to mainline
 

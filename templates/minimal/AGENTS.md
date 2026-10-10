@@ -73,12 +73,14 @@ current ledger version, and use the SDK review context for all applicable items.
   affected by ordinary changes; run the declared complete gate for release.
 - Within a selected workflow execute declared transitions. Optional nodes use an
   explicit bypass edge, never an undeclared jump.
-- Append observations and evidence to the active step. Revise the plan when
-  source, scope, owner, rules, environment, or evidence changes.
+- Append observations and evidence to the active step. Input changes refresh
+  affected evidence; revise the plan only when goal, scope, acceptance, key
+  approach, or dependencies materially change.
 - Workflow close and lifecycle completion are separate results.
 - Review blocks concrete quality, safety, contract and material structural
-  regressions. Optional simplification is advisory. Reuse valid evidence when
-  relevant inputs are unchanged; rerun affected checks on drift.
+  regressions. Optional simplification is advisory. Follow the host review
+  contract; internal progress does not dispatch another review. Reuse valid
+  evidence when relevant inputs are unchanged; rerun affected checks on drift.
 - Keep Collab automatic for multi-worker identity, communication and task/file
   ownership. Check conflicts before shared writes. Failure blocks dependent
   collaboration, not independent isolated work or quality checks.

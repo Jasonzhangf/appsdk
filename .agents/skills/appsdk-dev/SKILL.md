@@ -97,3 +97,11 @@ consumer smoke。Collab 不自动进入 AppSDK release 产品；受影响时走�
 
 发布证据绑定准确候选与 commit/tag；公开资产下载后核对字节/哈希。
 已发布 tag/assets 不修改。仅根级文档/开发 Skill 变化不升级 SDK 版本或重发产品。
+
+### 平台与分发渠道
+
+发布能力演进时，读取 [跨平台与渠道方案](../../../docs/design/release-distribution.md)。
+按产品及 OS/CPU/ABI 定义验收；Windows 的路径、真实排他锁、事务、IPC 与进程
+语义由对应 owner 处理，不能用无锁/空实现替代现有保障。各渠道复用已验 binary、
+资源、版本与 commit；新增 npm 入口先验证 pack 和干净环境安装/升级，再公开发布。
+同步 README 的起步命令与平台/渠道矩阵，只将已有适用证据的格子标为支持。

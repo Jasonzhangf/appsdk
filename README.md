@@ -1,216 +1,182 @@
 # AppSDK
 
-通用项目骨架：模板、阶段治理、变更范围、冻结合同和确定性编译产物。
+AppSDK 为 AI 与开发者提供通用项目治理：明确目标和变更边界，维护项目规则与
+模块合同，校验交付证据，编译并发布可追溯产物。业务源码、协议、provider 和
+业务 pipeline 由使用它的项目拥有。
 
-AppSDK 不包含任何业务协议、provider、项目 pipeline 或运行时实现。新项目拥有业务语义；AppSDK 只提供机制。
+默认流程是：**明确目标与范围 → 实现 → 受影响验证 → 适用 review → 交付**。
+日常按风险选测，release 执行完整发布门禁。Guidance 与 Memory 按需使用；
+Collab 的可用性与项目质量准入分别判断。
 
-本仓库的架构与边界见 [根级 AGENTS.md](AGENTS.md)；源码开发、按风险选测、
-规则升级和发布操作见 [appsdk-dev Skill](.agents/skills/appsdk-dev/SKILL.md)。
+## 三个模块如何配合
 
-## 验证与发布边界
+| 模块 | 提供什么 | 何时使用 | 安装入口 |
+|---|---|---|---|
+| **AppSDK** · `rust/` | `appsdk` 治理 CLI、`project-memory` 与三个 SDK Skills；初始化、规则升级、合同/证据验证、编译和冻结发布 | 开始项目治理；按需启用 Guidance 和 Memory | `scripts/install-global-appsdk.sh` |
+| **DAGPipe** · `dagpipe/` | `pipeline_runtime` Rust 库、`dagpipe` CLI、SDK 副本与运行 Skill | 声明、校验和执行确定性 DAG，或在 Rust 项目注册 Operators | `scripts/install-global-dagpipe.sh` |
+| **Collab** · `collab/` | `collab`、`collab-mcp` 与协作 Skill；daemon、身份、durable mailbox、任务与资源归属 | 多 Agent 协作及宿主原生消息投递 | `scripts/install-global-collab.sh` |
 
-`.github/workflows/verify.yml` 按变更路径选择组件，不把全量构建作为日常
-push/PR 的默认动作。Rust 共享入口、版本、bundle、迁移或 workflow 变化会扩大到
-完整 AppSDK Rust 包；DAGPipe 变化运行完整 DAGPipe 目标及必要 AppSDK consumer；
-Collab 变化使用独立 job，不进入 AppSDK release 产品。选择器缺少基线或遇到未知
-共享路径时扩大对应包范围，不让空选择通过。
+```mermaid
+flowchart LR
+    P[消费者项目] --> A[AppSDK：治理与交付验证]
+    A --> D[DAGPipe：确定性图运行库]
+    P --> C[Collab：Agent 协作]
+    A -. 初始化时尝试协作接入 .-> C
+    C --> H[已注册的宿主通信端点]
+```
 
-完整 release 候选只在 `workflow_dispatch` 或版本 tag 上运行。该 job 执行 Rust
-与 DAGPipe 完整测试、合同和版本一致性检查、`appsdk` 与 `project-memory` 两个
-release binary 构建、installer 测试、source registry 检查和 consumer smoke。
-日常 push/PR 不无条件执行 release build 或 smoke。
+AppSDK 在源码中以 path dependency 使用 DAGPipe；普通 `appsdk init` 不重复
+安装独立 DAGPipe CLI。Collab 有独立 binary 与 daemon，AppSDK 初始化会尝试
+官方 Collab 接入；不可用时明确报告 pending/unavailable，独立开发继续。
+三个模块在同一仓库维护，安装和运行生命周期各有 owner。
 
-AppSDK release 的最小产品边界是 `appsdk`、`project-memory` 和
-`appsdk-project-governance`、`appsdk-migration`、`project-memory` 三个
-SDK-managed Skills。DAGPipe 是发布门禁的一部分，但不由 AppSDK installer 安装；
-Collab 使用自己的 source、installer 和 daemon 生命周期。
+## 安装 AppSDK
 
-独立用户应从公开 release 对应的 source tag 运行正式 installer：
+当前正式安装入口从公开 release 的源码 tag 构建，适用于具备 Unix 工具链的
+macOS/Linux 环境。需要 Git、Rust/Cargo 和本机 C 编译工具链；平台证据范围见下表。
 
 ```bash
-git clone --branch <release-tag> --depth 1 https://github.com/Jasonzhangf/appsdk.git
+git clone --branch v0.1.0014 --depth 1 https://github.com/Jasonzhangf/appsdk.git
 cd appsdk
 scripts/install-global-appsdk.sh
+appsdk version
 ```
 
-该命令从 source 构建并安装两个 binary 和三个 Skills。release assets 是发布回执，
-不是替代 source tag 的第二安装入口。Skill 正文仍只维护在
-`sdk-skill-sources/`。
+installer 将 `appsdk`、`project-memory` 安装到当前 Cargo executable 所在目录，
+将 `appsdk-project-governance`、`appsdk-migration`、`project-memory` Skills 安装到
+`~/.agents/skills/`。将 binary 目录加入 PATH；已有 shell 可执行 `rehash`（zsh）
+或 `hash -r`（bash）刷新命令缓存。
 
-## Collab runtime
+当前 [公开 release](https://github.com/Jasonzhangf/appsdk/releases/latest) 的下载资产
+用于核对版本和哈希；正式安装仍使用上述源码 installer。原生 Windows 安装和
+npm 安装尚未提供，不将 Git Bash 或 WSL 视为原生 Windows 支持。
 
-本仓库同时维护 `collab/` 下的独立 Collab runtime。它保留自己的 Cargo
-package 和 `collab` / `collab-mcp` binary；AppSDK 只统一源码版本、构建、安装
-和维护入口，不把 Collab 合并成 AppSDK 主 binary 的子命令。
+## 如何开始治理
+
+### 新项目
+
+在目标项目的父目录运行：
 
 ```bash
-scripts/build-collab.sh
-scripts/install-global-collab.sh
-collab down
-collab up
-collab context
+appsdk new ./my-project
+cd my-project
+appsdk verify
 ```
 
-`collab/` 是唯一 Collab source/build truth。安装脚本从当前 AppSDK checkout
-构建并安装两个独立 binary；安装不会自动重启 daemon，必须通过官方
-`collab down` → `collab up` 受控重启，再用 `collab context` 验证 live route。
+生成骨架后，读取项目 `AGENTS.md`，由项目 owner 明确目标、模块归属、
+业务源码位置、构建命令和验收要求。`verify` 检查当前阶段的合同完整性；
+骨架通过不等于业务功能或发布验收完成。
 
-## DAGpipe runtime
+### 已有项目
 
-`dagpipe/` 是独立的 `pipeline_runtime` 库和 `dagpipe` CLI 的唯一源码。
-AppSDK 的 `rust/` crate 使用本仓库 path dependency；`appsdk dagpipe` 保留
-AppSDK 专用的图与 Operator 入口。迁入基线及职责见
-[`docs/design/dagpipe-internal-module.md`](docs/design/dagpipe-internal-module.md)。
+在已有项目的 canonical main checkout 中准备初始化：
 
 ```bash
-cargo test --manifest-path dagpipe/Cargo.toml --all-targets
+cd /path/to/existing-project
+appsdk prepare
+```
+
+与 Agent 确认 `.appsdk-prepare.json` 中的目标、项目根、旧代码边界、允许/
+禁止修改路径及验收，将准备记录完整确认后执行：
+
+```bash
+appsdk init
+appsdk verify
+```
+
+需要将治理项目放在子目录时，在准备记录中确认该相对根，并使用
+`appsdk init --project-root <relative-path>`。普通 init 保留已有项目规则；
+旧 SDK pin 不匹配时应按迁移 Skill 升级，不能通过重复 init 绕过。
+
+### 从规则走到日常开发
+
+请 Agent 读取上层规则、项目 AGENTS/Skills、真实测试命令和 CI/hooks，
+审计哪些旧规则应删除、合并或收窄；将项目事实保存在项目 AGENTS，开发
+操作保存在项目 Skill，并同步实际测试入口。已有规则无需整份替换。
+
+- 提交前验证变更影响范围和必要消费者；共享合同/依赖的风险决定扩大范围。
+- 适用的独立 review 在完整重大 milestone 的交付边界执行。
+- release 执行完整门禁，保留准确的源码、产物与消费者证据。
+- Guidance、Memory 和协作队列按实际需要启用。
+
+若选择 Guidance，在模块已绑定后执行只读 setup intake：
+
+```bash
+appsdk guide init --task guidance-setup --mode bootstrap --module app-core
+```
+
+`app-core` 替换为真实 module ID。读取返回的 setup proposal，按项目授权更新
+规则源，再执行 `appsdk guide compile`。详细用法见下方 Guidance 文档。
+治理 reset 会替换旧 epoch，须按迁移 Skill 明确范围和授权。
+
+## 使用 DAGPipe 与 Collab
+
+以下安装命令从 AppSDK 源码 checkout 根目录运行。
+
+### DAGPipe
+
+```bash
 scripts/install-global-dagpipe.sh
+dagpipe modules list
+dagpipe sdk path
 dagpipe graph validate dagpipe/examples/governance_graph.json
 ```
 
-安装脚本从本仓库独立模块构建和更新全局 CLI、SDK 副本与 Skill；普通
-`appsdk init` 只初始化项目合同，不重复安装全局 DAGpipe 软件。DAGpipe 没有
-daemon，也无需 Collab 重启。
+图校验检查拓扑与合同；业务 Operators 由消费者注册。
+Rust 库消费、并发和效果语义见 [DAGPipe 使用指南](dagpipe/docs/usage.md)。
+DAGPipe 无 daemon。
 
-默认流程：明确目标/范围 → 实现 → 相关验证 → review → 授权交付。
-质量、安全和证据真实性门禁按适用范围强制。Collab 保持多 worker 自动注册、
-通信与任务/文件归属；仅协作不强制启用合并队列。Guidance、Memory 默认辅助，
-不要求每个任务创建计划、写记忆或清理工作树才能交付。
-运行时 review 的安装/重启要求由模块 `deployment_operations` 声明，缺省保留
-两项旧要求，`[]` 表示均不适用。该声明绑定产物；黑盒、准确候选和产物证据仍强制。
-Review 后复用相同输入/产物的有效证据，发生相关变化才重跑；AI 置信度不再是门禁。
-下面的完整运行时冻结流程仅在相应交付范围内使用。
-
-## Development Process Control Harness
-
-Harness 将项目声明的 `AGENTS.md`、Skill 和 JSON 流程合同编译为确定性规则上下文；Agent 生成 Plan，AppSDK 校验并持久化 Plan/Revision/Step event，投影当前状态和唯一相邻下一步。它不调用模型、不复制 lifecycle、不自动写 memory，且默认 advisory。
-
-项目命令默认以当前进程 `cwd` 为项目根，不需要项目根环境变量。只有从项目目录
-外操作时才传可选路径。明确选择 Guide 的项目若尚未配置，执行幂等
-`appsdk init`，再执行只读
-bootstrap intake。Agent 读取返回的项目文档和本地 Skill 候选，向用户提交
-`GuidanceSetupProposal`；批准后才写项目规则并 compile：
+### Collab
 
 ```bash
-cd ./existing-project
-appsdk init
-appsdk guide init --task guidance-setup --mode bootstrap --module app-core
-# user approves the Agent proposal; Agent updates project-owned rule sources
-appsdk guide compile
-appsdk verify
+scripts/install-global-collab.sh
 ```
 
-`appsdk init` 在项目根目录执行官方 `collab init`。worker 只提交当前 Codex
-sessionID 对应的 AppServer 能力候选；Collab 服务器自行完成端点与身份自检，
-选择 AppServer 通道并在应答中返回 `transport_selected`。AppSDK 不自行选择通道。
-服务器不可用、超时或没有可用 AppServer 通道时，AppSDK 明确输出 Collab
-pending/unavailable；独立开发继续。
+在需要协作的项目 main checkout 中执行 `collab context`，读取实际身份、
+route 和 peer 状态。它需要可用的宿主通信端点；安装成功不证明消息投递成功。
+installer 不重启已有 daemon，升级运行态须在已授权维护窗口按正式
+`collab down` → `collab up` 流程执行。详见 [Collab 入口](collab/README.md)。
 
-```bash
-appsdk guide compile
-appsdk guide status --task task-id
-appsdk guide init --task task-id --mode develop --module app-core
-appsdk guide develop --task task-id --module app-core
-appsdk guide plan --task task-id --input plan.json
-appsdk guide update --task task-id --input result.json
-appsdk guide next --task task-id
-appsdk guide close --task task-id
-```
+## 平台与渠道状态
 
-`guide init` 只读返回需要先读的项目 AGENTS/本地 Skills、仍需询问用户的问题、Skill 调用建议和下一条 guide 命令。项目级 `GuidanceSetupProposal` 与任务级 `PlanProposal` 分离；`guide plan` 才开始写入任务控制态，任务 Plan 不会自动写入项目 Skill。
+以下是截至 `v0.1.0014` 的已知证据，按产品和 CPU 架构区分：
 
-功能边界见 [Development Process Control Harness](./docs/architecture/development-process-control-harness.md)，详细合同见 [Harness design](./docs/design/appsdk-guidance-framework.md)。
+| 平台 | AppSDK | DAGPipe | Collab | 下载/渠道 |
+|---|---|---|---|---|
+| macOS ARM64 | 已有安装、消费者和公开产物证据 | 随 AppSDK 构建使用库；独立 CLI 不在此 AppSDK release 资产中 | 已有独立安装/live [交付记录](docs/evidence/collab-master-authority-fix-20261007/README.md) | GitHub 源码与 AppSDK ARM64 资产 |
+| Linux x64 | Ubuntu release 门禁、安装器与消费者 smoke 通过 | Ubuntu release 门禁测试通过 | 有独立 Ubuntu CI job；具体 live 能力依宿主环境验收 | 可使用源码安装；尚无该 release 的 Linux 二进制 |
+| macOS x64 / Linux ARM64 | 尚未建立对应架构的完整发布证据 | 同左 | 同左 | 未提供对应平台的该 release 资产 |
+| 原生 Windows | 待适配：路径、锁、事务与安装入口 | 待平台构建与安装验收 | 待适配：Unix socket、宿主 transport、锁与进程管理 | 尚无原生 installer 或 release 资产 |
 
-## 第一阶段治理流程
+本仓库尚未实现 npm 发布；已确定主包名为 `@jsonstudio/appsdk`。
+三平台产物、npm 包边界、版本映射与交付顺序见
+[跨平台与发布渠道方案](docs/design/release-distribution.md)。新增平台和渠道
+完成对应验收后更新本表；编译成功不等于该平台的完整运行支持。
 
-```text
-Goal clarification -> clean worktree -> reproduce -> fix candidate -> development whitebox PASS -> build/install/restart -> deployed blackbox PASS -> review admission -> architecture PASS -> effectiveness replay -> tested integration -> local/remote mainline receipt -> compile library
-                  -> Active lib -> Protected source/contracts -> lock -> close
-```
+## 文档路由
 
-核心命令：
+| 你要做什么 | 阅读入口 |
+|---|---|
+| 开始项目治理、理解初始化与模块合同 | [项目集成](docs/design/appsdk-project-integration.md)、[治理 Skill](sdk-skill-sources/appsdk-project-governance/SKILL.md) |
+| 审计/升级现有规则 | [治理 Skill：规则与 Skill 升级](sdk-skill-sources/appsdk-project-governance/SKILL.md#rule-and-skill-upgrade-audit) |
+| 迁移 SDK 或授权重置治理 | [迁移 Skill](sdk-skill-sources/appsdk-migration/SKILL.md) |
+| 使用 Guidance | [Harness 架构](docs/architecture/development-process-control-harness.md)、[详细合同](docs/design/appsdk-guidance-framework.md) |
+| 编译、promotion、freeze 与版本化消费 | [Promotion 合同](docs/design/playground-active-promotion.md)、[生命周期记录](docs/design/lifecycle-records.md)、[分区转换](docs/architecture/zone-transition-matrix.md) |
+| 使用项目记忆 | [Memory 设计](docs/design/project-memory.md)、[Memory Skill](sdk-skill-sources/project-memory/SKILL.md) |
+| 接入通信、投递与消费回执 | [Communication 合同](docs/design/apps-sdk-communication.md) |
+| 声明/运行 DAG | [DAGPipe](dagpipe/README.md)、[SDK 接入职责](docs/design/dagpipe-internal-module.md) |
+| 多 Agent 协作与 daemon 操作 | [Collab](collab/README.md)、[原生通信架构](docs/codex-tui-collab-architecture.md) |
+| 开发本仓库、按风险选测 | [根级 AGENTS](AGENTS.md)、[appsdk-dev Skill](.agents/skills/appsdk-dev/SKILL.md) |
+| 平台适配、发布资产与 npm 等渠道 | [发布方案](docs/design/release-distribution.md) |
 
-```bash
-appsdk prepare ./existing-workspace
-appsdk init ./existing-workspace --project-root new-code
-appsdk new ./my-app
-appsdk produce-lifecycle-records --module app-core --input /path/to/baseline-declaration.json
-# Only for a supported legacy SDK migration:
-appsdk pin-lock --binary /path/to/appsdk
-appsdk compile
-appsdk rehydrate-frozen --module app-core
-appsdk begin-version --module app-core --from active-v1 --to active-v2
-appsdk verify
-appsdk verify --review-admission --module app-core
-appsdk promote --to source_implemented
-appsdk promote-module --module app-core --to architecture_stable
-appsdk freeze --module app-core
-appsdk publish-active --module app-core --version active-v1
-# 唯一全局安装入口（可从任意目录执行）
-scripts/install-global-appsdk.sh
+## 验证与发布
 
-```
+[verify.yml](.github/workflows/verify.yml) 按实际变更选择组件。部分未细分 Rust
+路径、共享合同/版本与未知路径仍扩大到整个 AppSDK 包；该限制在开发 Skill
+中记录。版本 tag 或 `workflow_dispatch` 执行完整 AppSDK release 候选门禁：
+AppSDK/DAGPipe 完整测试、合同/版本一致性、两个 release binary、installer、
+source registry 与真实消费者 smoke。Collab 使用独立门禁和产品安装流程。
 
-旧版本治理已失效或拖住开发时，在干净的非 `main` owner worktree 中，经用户明确授权后用 fresh init 重新建立当前治理 epoch；不要手改旧 records/hash：
-
-```bash
-appsdk init ./existing-project --fresh --discard-legacy
-appsdk guide init --task governance-reset --mode bootstrap --module app-core
-appsdk guide compile
-appsdk verify
-appsdk compile
-```
-
-fresh init 只接受已有 `.appsdk/project.json` 的 clean 非 `main`/`master` worktree，
-并以当前 SDK scaffold 作为唯一 reset 基线：旧 SDK pin、旧迁移 witness 和旧 SDK 合同
-投影全部忽略，缺失的 SDK 自有字段按当前基线重补；只保留项目身份、模块归属、构建声明、
-保护边界，以及业务源码、运行数据、`active/`、`protected/`。旧 `.appsdk/` 审计与迁移
-记录、`.appsdk-control/` 和声明的可重建 generated root 会被替换，随后只按新 staging
-中的当前版本校验，记录 `mode: "fresh_init"`。`appsdk init --fresh --discard-legacy`
-与 `appsdk reset-governance --discard-legacy` 共用同一 transactional reset owner；
-旧 Active/Protected 若确实废弃，必须另行指定精确路径并授权清理。
-
-`appsdk prepare` 先创建初始化需求模板。AI 读取模板并与用户确认 change kind、项目根、旧代码边界、新目录、Protected 路径和禁止修改路径；只有 preparation status 为 `confirmed` 时，新建或 relocated `appsdk init` 才允许执行。普通 `appsdk init` 用于已有工作区：通过可选的 `--project-root <relative-path>` 将新 AppSDK 项目放进可配置子目录，允许新旧代码共存。它幂等创建治理目录，补齐缺失的 `.appsdk/` 合同文件，并向新项目根目录的 `.gitignore` 追加一次受 SDK 管理的忽略区块；同时通过同环境官方 `collab init` 提交当前 Codex sessionID 的 AppServer 能力候选，由服务器自检、选择并应答通道。需要放弃旧治理 epoch 时，改用上面的显式 `--fresh --discard-legacy`，它不要求复制旧证据。
-
-治理设计：
-
-- [Playground → Active Promotion Contract](./docs/design/playground-active-promotion.md)
-- [AppSDK Governance Architecture](./docs/architecture/appsdk-governance-architecture.md)
-- [Lifecycle Record Contract](./docs/design/lifecycle-records.md)
-- [Zone Transition Matrix](./docs/architecture/zone-transition-matrix.md)
-- [Goal Clarification Contract](./docs/design/goal-clarification-contract.md)
-- [AppSDK Project Integration](./docs/design/appsdk-project-integration.md)
-- [Development Scenario Contracts](./docs/design/development-scenarios.md)
-- [Development Process Control Harness](./docs/architecture/development-process-control-harness.md)
-- [Harness Detailed Design](./docs/design/appsdk-guidance-framework.md)
-- [Rust Binary Delivery](./docs/design/rust-binary-delivery.md)
-
-目标提示词：收到一个新开发/debug目标时，先澄清并确认目标；只有目标确实需要持久化执行真源时才写 `docs/goals/<feature-name>-plan.md`，最后输出短 `/goal`。固定规范见 [`sdk-skill-sources/appsdk-project-governance/references/goal-prompt.md`](./sdk-skill-sources/appsdk-project-governance/references/goal-prompt.md)。
-
-可复用 Skill：[`sdk-skill-sources/appsdk-project-governance/SKILL.md`](./sdk-skill-sources/appsdk-project-governance/SKILL.md) 与 [`sdk-skill-sources/appsdk-migration/SKILL.md`](./sdk-skill-sources/appsdk-migration/SKILL.md)。前者定义新项目如何引用外部 AppSDK、提交 `.appsdk/` 项目治理合同、忽略 `.appsdk-control/` 本地运行态，并执行 clarification → Playground → review → promotion → freeze；后者定义 preserve/migrate 或 fresh-init/reset 的迁移闭环。
-
-内部通信接口：[`docs/design/apps-sdk-communication.md`](./docs/design/apps-sdk-communication.md)。
-`appsdk communication <project> --json '<request>'` 提供稳定的 `appsdk-comm/v1`
-控制面；`.appsdk-control/communication/mailbox.jsonl` 是可重放的事实记录。mailbox
-和 appserver 是承载 adapter：mailbox 只负责持久化，appserver 返回宿主待执行意图。
-adapter receipt、通知批处理、master 唤醒和错误都写入同一份 JSONL；同一 mailbox
-的命令使用独占锁，忙时显式返回 `communication_busy`；队列接受不等于宿主已执行。
-宿主先用 `register_runtime` 在 `~/.appsdk/runtimes.jsonl` 登记稳定 runtime，再用
-`runtimeId` 注册 scope/agent；真实投递、执行、回复和消费通过 `record_delivery` 回写，
-AppSDK 会校验目标 runtime、拒绝身份冲突和状态回退。
-
-升级到 AppServer-only runtime 合同前，旧版 `~/.appsdk/runtimes.jsonl` 不迁移也不
-重放。显式受控入口是
-`appsdk communication reset-runtime-registry --discard-legacy --approval "<授权文本>"`；
-它只归档旧 runtime registry 并重建空基线，`delivery_verified` 为 false，且不改动
-`projects.jsonl` / `communication.jsonl`。
-
-`goal clarification` 未进入 `confirmed` 前，不允许创建正式 claim、写 Playground、修改 source 或生成 red test。`playground/` 是可变实验源代码；`active/lib/` 是不可变、当前有效的消费面，不是活跃源代码；`protected/` 保存冻结源代码、合同和历史版本；`generated/` 只保存编译物和索引。进入 review 前必须同时有开发白盒 PASS、部署后的公开入口黑盒 PASS，以及绑定候选 commit/tree、artifact、environment 和 entrypoint 的 PreReviewValidationRecord；`appsdk verify --review-admission` 是强制 admission 命令，宿主 CI/pre-commit 需要调用它才能物理阻断 Git commit。进入 Active 还必须有架构 review PASS、主线合并、编译产物和 required gates。锁定必须记录 Git clean、source commit/tag、library hash、public API hash、review PASS、旧 Active 不可变。
-
-多 worker 自动使用 Collab 注册、通信和任务/文件归属。`multi_worker_collaboration` 可独立启用；选择 `multi_worktree_merge_queue` 时才额外要求串行集成及其完整证据。每个 worker 独占 semantic claim、branch 和 clean worktree；worker 不写 main。队列验证精确 integration commit/tree，并在本地与远端 main 都可达后才允许对应 promotion、cleanup 和 claim release。
-
-Playground 不是永久缓存：实验必须在 review/closeout 时归档并清理，默认 `archive_then_remove`；debug 正式合并必须在变更附近留下根因、设计批准 ID 和修改理由注释，并在 PromotionRecord 中留证。
-
-SDK 输出并校验 protected path、module owned path 和 frozen module 合同；真正文件写入由宿主的 worktree/container 或 race-resistant filesystem adapter 执行。没有物理隔离合同，SDK 不得宣称“AI 无法越界写入”。
-
-Protected + Git 负责审计、变更检测和恢复，不保证同仓库 shell agent 完全无法读取 Protected 源码；真正读隔离需要 host worktree/container/mount 策略。第一版只验证治理骨架；RouteCodex 迁移不属于本仓库第一阶段。
+此仓库的根级规则和开发 Skill 管理 SDK 源码开发。消费者项目的
+Playground/Active/Protected 分区和治理合同在相应设计中定义；根仓库
+不会因为存在 AGENTS 就自动成为已注册的 AppSDK 消费者项目。

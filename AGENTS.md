@@ -91,3 +91,12 @@ Playground/Active/Protected/generated 是消费者治理分区。不能据此把
   DAGPipe 参与发布门禁，使用独立 installer；Collab 使用独立构建、安装与维护流程。
 - 文件存在、`verify` 成功或 review PASS 分别只证明对应范围；报告源码、安装、
   live/消费者、远端、发布与资源清理的实际状态，不扩大证据含义。
+
+## 对外发布入口
+
+- 根 README 保存产品介绍、文档路由、治理起步、三模块关系与实际安装操作。
+- 平台支持按产品、OS、CPU/ABI 及真实安装/运行证据声明；源码可构建、CI 通过、
+  下载产物和 live 支持分别报告。WSL 不等于原生 Windows。
+- 渠道复用相同源码版本和已验产物；npm 等包装不复制核心实现，也不隐式接管
+  daemon、身份或项目初始化。当前状态和后续实施见
+  [跨平台与发布渠道方案](docs/design/release-distribution.md)。

@@ -96,3 +96,27 @@
   build, installer or daemon operation is required by these changes.
 - `skill-creator/scripts/quick_validate.py` passed. All local Markdown links in
   the new entrypoints and README resolve; the tracked diff check passed.
+
+## 2026-10-10 Release documentation, platforms and channels
+
+- Jason specified three release concerns: root README introduction/routes/
+  governance start/three-module operation, Windows/Linux/macOS, and npm channels.
+- Read-only observation confirmed v0.1.0014 has macOS ARM64 AppSDK and Memory
+  assets plus Skills/SHA256SUMS. Linux has existing Ubuntu release-gate evidence;
+  this release has no Linux/Windows binary assets. No npm package exists.
+- Windows source gaps include AppSDK Unix-only/no-op lock branches and reset
+  helper compilation boundary, shell installers, and Collab Unix IPC/host
+  transport/process management. These are static findings, not new build or
+  runtime test results; no platform support is declared from this observation.
+- Reworked README into the public product/start/documentation entrypoint and
+  added `docs/design/release-distribution.md` with facts, target matrix, owner
+  boundaries, fixed artifact/version flow, npm packaging proposal and increments.
+  Root AGENTS and appsdk-dev route platform/channel changes to that document.
+- This increment delivers documentation and a release implementation proposal.
+  Platform ports, matrix workflows, npm packages and registry publishing remain
+  unimplemented; Windows host transport capability remains open.
+- Jason selected the npm scope/name `@jsonstudio/appsdk`; registry versions and
+  publishing account access still need current evidence.
+- Public registry metadata query returned E404 on 2026-10-10. This is not proof
+  of scope ownership or publishing permission. Skill structure and all local
+  Markdown reference targets passed checks; no product tests were run.

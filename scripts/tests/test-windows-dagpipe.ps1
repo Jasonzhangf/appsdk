@@ -54,7 +54,7 @@ $realCargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } elseif ($realUserProfi
 $realRustupHome = if ($env:RUSTUP_HOME) { $env:RUSTUP_HOME } elseif ($realUserProfile) { Join-Path $realUserProfile '.rustup' } else { $null }
 
 $root = Join-Path ([System.IO.Path]::GetTempPath()) ("dagpipe windows harness " + [Guid]::NewGuid().ToString('N'))
-$home = Join-Path $root 'user home'
+$isolatedHome = Join-Path $root 'user home'
 $localAppData = Join-Path $root 'local app data'
 $cargoRoot = Join-Path $root 'cargo install root'
 $consumerRoot = Join-Path $root 'consumer project'
@@ -62,11 +62,11 @@ $externalTarget = Join-Path $root 'external sdk target'
 New-Item -ItemType Directory -Path $root | Out-Null
 
 $sdkPath = Join-Path $localAppData 'dagpipe\sdk'
-$skillPath = Join-Path $home '.agents\skills\dagpipe-runtime\SKILL.md'
+$skillPath = Join-Path $isolatedHome '.agents\skills\dagpipe-runtime\SKILL.md'
 $installedExe = Join-Path $cargoRoot 'bin\dagpipe.exe'
 
-$env:HOME = $home
-$env:USERPROFILE = $home
+$env:HOME = $isolatedHome
+$env:USERPROFILE = $isolatedHome
 $env:LOCALAPPDATA = $localAppData
 $env:CARGO_INSTALL_ROOT = $cargoRoot
 if ($realCargoHome) { $env:CARGO_HOME = $realCargoHome }

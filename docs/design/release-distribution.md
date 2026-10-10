@@ -1,13 +1,9 @@
 # AppSDK 跨平台与发布渠道方案
 
-状态：发布要求与实施记录。公开版仍是 `v0.1.0014`。AppSDK `0.1.0015` / npm
-`0.1.15` 的三平台候选曾通过完整矩阵，但最终整体 Review 在该矩阵后发现历史迁移
-target 绑定缺陷，并指出 Windows reset 缺少原生黑盒验收。候选 SHA `0917ffa4` 的
-release run `38060743040` 和其祖先 SHA `a3f58b8b` 的 run `38059365783` 都是历史
-验收证据，不能代表修复后最终准入。当前按 finding 补齐实现与受影响平台验证；最新
-完整 release run 的 `head_sha`、归档 manifest 的 `sourceCommit` 与整体 Review 对象
-必须一致后方可发布。本文区分公开支持、历史候选证据和未完成验收，不以源码存在或
-合成包测试宣称平台支持。
+状态：发布要求与实施记录。公开版为 GitHub `v0.1.0015` 与 npm
+`@jsonstudio/appsdk@0.1.15`。最终 release matrix、发布资产和 npm registry 回读已
+绑定提交 `ab6e57501316b92f4e84247924ea13cbc809dd06`；旧候选记录仅保留为历史证据。
+本文区分公开支持、历史候选证据和未完成验收，不以源码存在或合成包测试宣称平台支持。
 
 ## 发布目标与产品边界
 
@@ -23,36 +19,31 @@ CLI、Rust SDK 与运行 Skill；Collab 分发两个 binary 与协作 Skill。
 
 | 范围 | 当前证据/缺口 |
 |---|---|
-| `v0.1.0014` | GitHub 公开资产为 macOS ARM64 的 AppSDK、project-memory、Skills tgz 和 SHA256SUMS |
-| Linux x64 | `v0.1.0014` Ubuntu release job 完成 AppSDK/DAGPipe 测试、构建、安装器和消费者 smoke；没有该 release 的 Linux 二进制资产 |
-| macOS ARM64 | AppSDK canonical installer/消费者及公开下载资产已有证据；Collab 的独立安装/live 记录不属于 AppSDK release 产品 |
+| `v0.1.0015` | GitHub 公开三平台资产及 `SHA256SUMS`；完整 release matrix run `38067264460` |
+| Linux x64 GNU | 原生 release、AppSDK/DAGPipe 门禁及 npm consumer 通过；公开 GitHub 和 npm 资产可用 |
+| macOS ARM64 | 原生 release 与 npm consumer 通过；Collab 的独立安装/live 记录不属于 AppSDK release 产品 |
 | 其他 CPU 架构 | 当前发布未提供独立平台资产及完整验收；不能从同 OS 的另一架构推广支持结论 |
-| Windows | `v0.1.0014` 公开版未支持；历史 AppSDK MSVC 与 DAGPipe native build/install/consumer 通过；AppSDK reset 的原生成功、junction 拒绝和中断恢复仍待修复候选验收；Collab Unix socket/宿主 transport 仍未支持 |
-| npm | `@jsonstudio/appsdk@0.1.15` 及 macOS ARM64/Linux x64 GNU/Windows x64 MSVC 平台包的历史候选已在三原生 runners 消费通过；registry 尚未发布，finding 修复后须重新绑定并验收最终 tarballs。当前账号是 `@jsonstudio` owner，目标包 E404，最终创建能力以 publish/read-back 确认 |
+| Windows x64 MSVC | 原生 AppSDK/DAGPipe 构建、安装/升级、reset/reparse 与 npm consumer 验收通过；Collab Unix socket/宿主 transport 仍未支持 |
+| npm | 主包与 macOS ARM64/Linux x64 GNU/Windows x64 MSVC 三个平台包均为 `0.1.15`；主包 dist-tag、依赖、sourceCommit 与 registry tarball SHA-256 回读一致 |
 
-2026-10-10 对公开 npm registry 查询 `@jsonstudio/appsdk` 返回 `E404 Not Found`。
-这只表明本次未取得公开包元数据，不证明 scope 归属、账号写权限或名称可注册。
-
-已发布版本资产见 [v0.1.0014](https://github.com/Jasonzhangf/appsdk/releases/tag/v0.1.0014)。
+已发布版本资产见 [v0.1.0015](https://github.com/Jasonzhangf/appsdk/releases/tag/v0.1.0015)；
+主包见 [npm](https://www.npmjs.com/package/@jsonstudio/appsdk)。
 候选 release gate 见 [verify.yml](../../.github/workflows/verify.yml)。日常 push/PR
 按受影响组件选测；`v*` tag 与 `workflow_dispatch` 接入 Ubuntu release gate、
 两个原生 Windows（`windows-latest`/MSVC）job、ARM64 macOS job、统一 package job
 和三 runner 的 `npm-consumers`：`windows_appsdk` 执行
 MSVC 构建、共享锁与公开入口定向测试及公开 consumer smoke；`windows_dagpipe`
 执行 DAGPipe 包测试、release 构建与 PowerShell 安装黑盒（安装/升级、真实 Cargo
-consumer、junction/reparse 拒绝、in-use 替换）。历史 run `38060743040` 在 SHA
-`0917ffa4` 上完整通过 Linux AppSDK/DAGPipe、macOS ARM64、Windows AppSDK 与 DAGPipe、
-统一 package 和三平台 npm consumers，并绑定了校验通过的 archives 与四个 tgz。
-但该 Windows job 没有运行 reset CLI 的原生成功、junction 拒绝或中断恢复验收；整体
-Review 还发现历史迁移记录的 actual target 可被单独篡改。它们是旧候选证据；修复后
-重新运行完整矩阵并复核确切 SHA，不能沿用祖先 tarballs 发布。
+consumer、junction/reparse 拒绝、in-use 替换）。历史 run `38060743040` 的 SHA
+`0917ffa4` 曾通过早期矩阵，之后 Review 发现 Windows reset 验收和迁移 target 绑定缺口；
+这些旧证据已由最终候选 run `38067264460` 上的修复与完整矩阵验收取代。
 源码审计证据来自下列 owner，静态检查不宣称 Windows 运行失败已复现或已修复。
 
 ## 首轮源码差距与候选处理
 
-以下是起始源码基线的差距及其保留约束。AppSDK Windows 锁、路径、installer 与
-public consumer 有历史候选验收；Reset 事务当前仍缺原生 Windows 黑盒闭环。DAGPipe
-Windows installer/consumer 有对应历史候选验收。Collab daemon 和宿主 transport
+以下是起始源码基线的差距及其保留约束。AppSDK Windows 锁、路径、installer、reset
+事务与 public consumer 已在最终候选验收。DAGPipe Windows installer/consumer
+通过对应门禁。Collab daemon 和宿主 transport
 仍依赖 Unix socket、文件锁及进程语义，尚无原生 Windows 实现或验收。
 
 ## 平台适配的最小范围
@@ -79,9 +70,9 @@ WSL 归 Linux 验收，不能算原生 Windows。
 ### DAGPipe
 
 `dagpipe/` 的 Rust 核心是独立确定性库。起始的 `dagpipe/scripts/install.sh`
-依赖 shell、Unix 文件工具和安装树操作；当前候选加入 PowerShell/Windows installer
-与消费者实现，并在 run `38040962158` 有增量 Windows 证据。最终 SHA 仍需验收
-三个 OS 的库 consumer、CLI 图校验、SDK path 与安装升级。
+依赖 shell、Unix 文件工具和安装树操作；发布版本加入 PowerShell/Windows installer
+与消费者实现。最终 run `38067264460` 验收了三个 OS 的库 consumer、CLI 图校验、SDK
+path 与安装升级。
 Windows 的 SDK 路径必须能直接用于 Cargo manifest；不把格式正确的路径
 当作可消费 SDK 的证据。
 
@@ -124,14 +115,14 @@ Collab 当前正式构建从 host build counter 分配版本。多 target 发布
 
 用户已确定 npm 主包为 **`@jsonstudio/appsdk`**。首发先交付 AppSDK 产品，
 DAGPipe 与 Collab 是否增加独立 npm 包按后续需求确定，保持三模块 owner 边界。
-候选仓库已有可执行 npm launcher。正式 native artifacts 与三平台包 consumer
-验收已通过，但公开发布尚未完成，当前用户仍不能从 npm registry 安装该候选。
+仓库已有可执行 npm launcher。正式 native artifacts、三平台 consumer 与主包/平台包
+registry read-back 均已通过，所有包已经公开发布。
 pnpm/yarn 可消费同一 npm registry 产物，无需另建一套发布实现。
 
-- AppSDK 候选主包提供小型 Node launcher 和 `appsdk`/`project-memory` bin；
-  核心实现仍是 Rust。候选版本为 SDK `0.1.0015` → npm `0.1.15`。
-- 候选采用按 OS/CPU/ABI 限定的 optional platform packages：macOS ARM64、
-  Linux x64 GNU、Windows x64 MSVC。最终包须复用最终候选上已验 binary；launcher
+- AppSDK 主包提供小型 Node launcher 和 `appsdk`/`project-memory` bin；核心实现仍是
+  Rust。当前版本为 SDK `0.1.0015` → npm `0.1.15`。
+- 按 OS/CPU/ABI 发布 optional platform packages：macOS ARM64、Linux x64 GNU、
+  Windows x64 MSVC。主包复用最终候选上已验 binary；launcher
   只解析本机产物并透传参数、退出码和信号，不从 latest 下载或静默源码构建。
 - 明确最低 Node 版本；optionalDependencies 被禁用、缺包、平台不支持和版本
   不匹配须给出具体错误。安装自身不启动 daemon、不初始化项目或改身份。
@@ -139,14 +130,13 @@ pnpm/yarn 可消费同一 npm registry 产物，无需另建一套发布实现�
   位置由显式安装/setup 操作调用同一产品 owner；避免 npm postinstall 自行
   覆盖其他渠道的文件。新入口须定义升级、卸载和混装时唯一实际 binary。
 - `0.1.0014` 等源版本含前导零，不能直接作为 npm SemVer。保留已发布映射
-  `0.1.0014` → `0.1.14`；本地候选新增 `0.1.0015` → `0.1.15`，均保留源版本
+  `0.1.0014` → `0.1.14`；新增映射 `0.1.0015` → `0.1.15`，均保留源版本
   与 commit 关联。Collab 使用自己的版本 owner；发布前先检查目标版本唯一性。
-- 候选的 npm pack、Windows/Linux/macOS 本地 tgz 安装、全局 bin、路径含空格、
-  升级与真实消费者在历史 run `38060743040` 验收；该 SHA 后续 Review 未通过，
-  不作为最终发布包。修复候选需重做完整矩阵；公开 registry 下载、完整性与版本
-  回执仍待最终 publish 后核对。
-- 当前 npm 身份 `jasonzhangf` 是 `@jsonstudio` org owner。发布通过后以目标包
-  的 publish 和 read-back 回执确认创建权限；不保存 token 到仓库或任务笔记。
+- 最终 npm pack、Windows/Linux/macOS 原生 consumer、全局 bin、升级与真实消费者在
+  release run `38067264460` 验收。三个公开平台 tarball 的 registry read-back 与已验
+  发布 tarball SHA-256 一致；主包 `0.1.15` 的 optionalDependencies 精确绑定三个同版本
+  平台包，`sourceCommit` 为 `ab6e57501316b92f4e84247924ea13cbc809dd06`。
+- 发布时不保存 npm token 到仓库或任务笔记。
 
 GitHub Releases 继续作为源码 tag、平台下载与哈希入口。Homebrew、winget、
 Scoop、apt 等后续按用户需求加入，只消费已验产物；当前不建立全部渠道。
@@ -159,12 +149,12 @@ Scoop、apt 等后续按用户需求加入，只消费已验产物；当前不�
 | 平台基础 | AppSDK/DAGPipe 原生 Windows 边界及三 OS 构建/安装入口 | 每 target 的公开 CLI/真实库消费者、升级与失败数据保护；缺证据的格子仍标未验证 |
 | Collab 平台支持 | IPC/宿主 transport、锁和受控进程生命周期 | 每声明支持平台的真实 native 消息消费链；能力不足只阻断 Collab 支持声明 |
 | 产品资产 | 固定版本/commit 的 target 产物与资源 | 正式构建、渠道共用字节、hash、干净环境安装；已发布历史保持不可变 |
-| npm 首发 | 用户包、platform packages、launcher、资源安装与 publishing workflow | pack/本地安装/公开入口验收、独立整体 review、registry 回执 |
+| npm 首发 | 用户包、platform packages、launcher、资源安装与 publishing workflow | 主包及平台包 `0.1.15` 已发布；latest、依赖映射、来源 commit 与 registry SHA-256 回读一致 |
 
 未来代码实现前按项目 Skill 将本次事实交独立 Planner；每个完整重大交付
 milestone 验收后独立 review 一次。日常按受影响产品/平台验证；完整矩阵在
 release 执行。纯文档修改保持文档检查，不能因本方案存在就每次全仓回归。
 
-未确定项：npm 已有版本与发布账号权限、各 OS 最低版本、Linux ABI、Windows 宿主真实
-transport 能力、各平台 runner、签名与发布账号配置。实现时只前置阻断当前
+未确定项：各 OS 最低版本、Linux ABI、Windows 宿主真实 transport 能力、签名状态。
+实现时只前置阻断当前
 交付单元的未知；不因此拖住已有支持平台的文档和治理入口。

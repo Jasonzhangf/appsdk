@@ -1103,6 +1103,60 @@ mod lock_tests {
         fs::remove_dir_all(root).ok();
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn native_prefix_path_stat_preserves_symlink_refusal() {
+        use std::path::Component;
+
+        // Drive, verbatim drive, UNC and verbatim UNC roots all expose a
+        // leading `Prefix` followed by an explicit `RootDir`. These are pure
+        // component shapes; no network share is touched.
+        for raw in [
+            r"C:\dir",
+            r"\\?\C:\dir",
+            r"\\server\share\dir",
+            r"\\?\UNC\server\share\dir",
+        ] {
+            let mut parts = Path::new(raw).components();
+            assert!(
+                matches!(parts.next(), Some(Component::Prefix(_))),
+                "expected a leading prefix for {raw}"
+            );
+            assert!(
+                matches!(parts.next(), Some(Component::RootDir)),
+                "expected a root dir after the prefix for {raw}"
+            );
+        }
+
+        // The canonical temp root carries a real verbatim prefix and must now
+        // pass the component stat instead of failing on the bare `\\?\C:`.
+        let root = temp_root("native-prefix-stat");
+        let canonical = root.canonicalize().unwrap();
+        validate_communication_root_input(&canonical)
+            .expect("canonical native prefix root must pass component stat");
+
+        // A trailing component that does not exist still ends the walk via the
+        // existing NotFound behavior rather than a stat failure.
+        validate_communication_root_input(&canonical.join("does-not-exist"))
+            .expect("missing trailing component must keep the NotFound behavior");
+
+        // Real directory symlinks as a trailing and an intermediate component
+        // must still be refused.
+        let target = root.join("real-dir");
+        fs::create_dir_all(&target).unwrap();
+        let link = root.join("link");
+        std::os::windows::fs::symlink_dir(&target, &link)
+            .expect("creating a Windows directory symlink must succeed, not skip");
+        let error = validate_communication_root_input(&link)
+            .expect_err("trailing symlink component must be refused");
+        assert_eq!(error.code, "communication_path_symlink");
+        let error = validate_communication_root_input(&link.join("child"))
+            .expect_err("intermediate symlink component must be refused");
+        assert_eq!(error.code, "communication_path_symlink");
+
+        fs::remove_dir_all(root).ok();
+    }
+
     #[test]
     fn store_lock_is_exclusive_for_store_lifetime() {
         let root = temp_root("lifetime");

@@ -92,8 +92,19 @@ pub(super) fn reject_symlink_components(path: &Path, label: &str) -> CommResult<
         ));
     }
     let mut current = PathBuf::new();
-    for component in path.components() {
+    let mut components = path.components().peekable();
+    while let Some(component) = components.next() {
         current.push(component.as_os_str());
+        // A Windows `Prefix` is structural syntax, not an independently
+        // stat-able path: statting `\\?\C:` on its own fails with "Incorrect
+        // function". When a `RootDir` follows, defer the prefix so the
+        // complete root (for example `\\?\C:\`) is statted on the next step.
+        // Every other component keeps the original per-component check.
+        if matches!(component, std::path::Component::Prefix(_))
+            && matches!(components.peek(), Some(std::path::Component::RootDir))
+        {
+            continue;
+        }
         match fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 let canonical = fs::canonicalize(&current).ok();

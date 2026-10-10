@@ -1,8 +1,7 @@
 {
   "name": "@jsonstudio/appsdk-linux-x64-gnu",
-  "version": "0.1.14-dev.0",
-  "description": "Development-only Linux x64 glibc runtime package; incomplete until M5 assembles verified artifacts.",
-  "private": true,
+  "version": "0.1.15",
+  "description": "Linux x64 glibc runtime package for AppSDK; populated from verified release artifacts.",
   "os": [
     "linux"
   ],
@@ -20,8 +19,7 @@
     "skills/project-memory/**"
   ],
   "appsdk": {
-    "targetTriple": "x86_64-unknown-linux-gnu",
-    "artifactStatus": "incomplete-until-M5"
+    "targetTriple": "x86_64-unknown-linux-gnu"
   },
   "license": "MIT"
 }

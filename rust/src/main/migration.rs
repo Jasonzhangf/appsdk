@@ -724,6 +724,26 @@ pub(super) fn assert_sdk_migration_record(
                 record_bundle,
                 canonical_target,
             );
+        let actual_source = entry
+            .get("source_digest")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
+        let actual_target = entry
+            .get("target_digest")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
+        let actual_target_bound = if explicit_custom_target {
+            actual_target == actual_source
+                || historical_target_authorized
+                || (bundle_transition
+                    && Some(canonical_target) == entry.get("target_digest")
+                    && canonical_target.as_str().is_some_and(valid_bundle_digest))
+        } else {
+            declared.get("target_digest").and_then(Value::as_str) == Some(actual_target)
+        };
+        if !actual_target_bound {
+            fail(format!("SDK_MIGRATION_TARGET_MAP_MISMATCH:{}", name));
+        }
         if entry
             .get("canonical_source_digest")
             .is_some_and(|value| !value.is_null() && Some(value) != declared.get("source_digest"))

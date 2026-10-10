@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { gzipSync, gunzipSync } from "node:zlib";
@@ -93,19 +93,22 @@ function writeSkillTree(root, files) {
   }
 }
 
-function makeSyntheticRepo(root, skillFiles = DEFAULT_SKILLS) {
+function makeSyntheticRepo(root, skillFiles = DEFAULT_SKILLS, options = {}) {
+  const sourceVersion = options.sourceVersion ?? SOURCE_VERSION;
+  const packageVersion = options.packageVersion ?? CANDIDATE_VERSION;
+  const formal = options.formal ?? false;
   const npmRoot = join(root, "npm");
   const skillRoot = join(root, "sdk-skill-sources");
   const optionalDependencies = Object.fromEntries(
     SUPPORTED_TRIPLES.map((triple) => [
       `@jsonstudio/${PLATFORM_DIRS[triple]}`,
-      CANDIDATE_VERSION,
+      packageVersion,
     ]),
   );
   writeFile(join(npmRoot, "appsdk", "package.json"), `${JSON.stringify({
     name: "@jsonstudio/appsdk",
-    version: CANDIDATE_VERSION,
-    private: true,
+    version: packageVersion,
+    private: formal ? undefined : true,
     type: "module",
     bin: {
       appsdk: "bin/appsdk.js",
@@ -115,10 +118,10 @@ function makeSyntheticRepo(root, skillFiles = DEFAULT_SKILLS) {
     engines: { node: ">=24.0.0" },
     optionalDependencies,
     appsdk: {
-      sourceVersion: SOURCE_VERSION,
-      npmVersion: NPM_VERSION,
-      candidate: true,
-      artifactStatus: "incomplete-until-M5",
+      sourceVersion,
+      npmVersion: normalizeSourceVersion(sourceVersion),
+      candidate: formal ? undefined : true,
+      artifactStatus: formal ? undefined : "incomplete-until-M5",
     },
   }, null, 2)}\n`);
   writeFile(join(npmRoot, "appsdk", "README.md"), "synthetic main package\n");
@@ -130,13 +133,13 @@ function makeSyntheticRepo(root, skillFiles = DEFAULT_SKILLS) {
     const directory = PLATFORM_DIRS[triple];
     writeFile(join(npmRoot, "platforms", directory, "package.json"), `${JSON.stringify({
       name: `@jsonstudio/${directory}`,
-      version: CANDIDATE_VERSION,
-      private: true,
+      version: packageVersion,
+      private: formal ? undefined : true,
       ...platformRestrictions(triple),
       files: platformFiles(triple),
       appsdk: {
         targetTriple: triple,
-        artifactStatus: "incomplete-until-M5",
+        artifactStatus: formal ? undefined : "incomplete-until-M5",
       },
     }, null, 2)}\n`);
     writeFile(join(npmRoot, "platforms", directory, "README.md"), `synthetic ${triple}\n`);
@@ -159,7 +162,11 @@ function skillHashes(skillRoot) {
   return Object.fromEntries(Object.entries(hashes).sort(([a], [b]) => a.localeCompare(b)));
 }
 
-async function buildArchives(root, skillRoot, { skillRootByTriple = {} } = {}) {
+async function buildArchives(
+  root,
+  skillRoot,
+  { skillRootByTriple = {}, sourceVersion = SOURCE_VERSION } = {},
+) {
   const archiveDir = join(root, "archives");
   const binaries = new Map();
   for (const triple of SUPPORTED_TRIPLES) {
@@ -174,7 +181,7 @@ async function buildArchives(root, skillRoot, { skillRootByTriple = {} } = {}) {
     await stageReleaseArtifacts({
       targetTriple: triple,
       sourceCommit: SOURCE_COMMIT,
-      sourceVersion: SOURCE_VERSION,
+      sourceVersion,
       appsdkBinary: join(binaryDir, appsdkName),
       projectMemoryBinary: join(binaryDir, projectMemoryName),
       skillSourceDir: skillRootByTriple[triple] ?? skillRoot,
@@ -472,11 +479,51 @@ test("package emits four tarballs and sorted SHA256SUMS without changing source 
     assert.equal(hash, sha256(readFileSync(join(outputDir, name))));
   }
 
+  const mainTarball = result.tarballs.find((path) => basename(path).startsWith("jsonstudio-appsdk-"));
+  assert.ok(mainTarball);
+  const mainManifest = JSON.parse(readTarGz(mainTarball).get("package/package.json").bytes.toString("utf8"));
+  assert.equal(mainManifest.appsdk.sourceCommit, SOURCE_COMMIT);
+  assert.equal(mainManifest.appsdk.sourceVersion, SOURCE_VERSION);
+
   for (const triple of SUPPORTED_TRIPLES) {
     const manifestPath = join(npmRoot, "platforms", PLATFORM_DIRS[triple], "package.json");
     const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
     assert.equal(manifest.files.includes("artifact.json"), false);
   }
+});
+
+test("package binds formal 0.1.15 metadata to the release source commit", async (t) => {
+  const releaseSourceVersion = "0.1.0015";
+  const releaseNpmVersion = "0.1.15";
+  const root = tempRoot(t);
+  const { npmRoot, skillRoot } = makeSyntheticRepo(root, DEFAULT_SKILLS, {
+    formal: true,
+    sourceVersion: releaseSourceVersion,
+    packageVersion: releaseNpmVersion,
+  });
+  const { archiveDir } = await buildArchives(root, skillRoot, {
+    sourceVersion: releaseSourceVersion,
+  });
+  const result = await packageReleaseArtifacts({
+    archiveDir,
+    outputDir: join(root, "package-output"),
+    sourceCommit: SOURCE_COMMIT,
+    sourceVersion: releaseSourceVersion,
+    skillSourceDir: skillRoot,
+    npmRoot,
+  });
+
+  assert.equal(result.tarballs.length, 4);
+  const mainTarball = result.tarballs.find((path) => basename(path).startsWith("jsonstudio-appsdk-"));
+  assert.ok(mainTarball);
+  const mainManifest = JSON.parse(readTarGz(mainTarball).get("package/package.json").bytes.toString("utf8"));
+  assert.equal(mainManifest.version, releaseNpmVersion);
+  assert.equal(mainManifest.private, undefined);
+  assert.equal(mainManifest.appsdk.sourceVersion, releaseSourceVersion);
+  assert.equal(mainManifest.appsdk.npmVersion, releaseNpmVersion);
+  assert.equal(mainManifest.appsdk.sourceCommit, SOURCE_COMMIT);
+  assert.equal(mainManifest.appsdk.candidate, undefined);
+  assert.equal(mainManifest.appsdk.artifactStatus, undefined);
 });
 
 test("version normalization and CLI failures are typed", () => {
@@ -503,4 +550,16 @@ test("version normalization and CLI failures are typed", () => {
   ], { encoding: "utf8" });
   assert.equal(result.status, 1);
   assert.match(result.stderr, /UNSUPPORTED_TARGET_TRIPLE/);
+});
+
+test("module import without process.argv[1] does not enter the CLI guard", () => {
+  const moduleUrl = new URL("./release-artifacts.js", import.meta.url).href;
+  const result = spawnSync(process.execPath, [
+    "--input-type=module",
+    "-e",
+    `await import(${JSON.stringify(moduleUrl)}); process.stdout.write("import-ok\\n");`,
+  ], { encoding: "utf8" });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "import-ok\n");
 });

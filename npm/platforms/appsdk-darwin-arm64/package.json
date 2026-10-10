@@ -1,8 +1,7 @@
 {
   "name": "@jsonstudio/appsdk-darwin-arm64",
-  "version": "0.1.14-dev.0",
-  "description": "Development-only macOS ARM64 runtime package; incomplete until M5 assembles verified artifacts.",
-  "private": true,
+  "version": "0.1.15",
+  "description": "macOS ARM64 runtime package for AppSDK; populated from verified release artifacts.",
   "os": [
     "darwin"
   ],
@@ -17,8 +16,7 @@
     "skills/project-memory/**"
   ],
   "appsdk": {
-    "targetTriple": "aarch64-apple-darwin",
-    "artifactStatus": "incomplete-until-M5"
+    "targetTriple": "aarch64-apple-darwin"
   },
   "license": "MIT"
 }

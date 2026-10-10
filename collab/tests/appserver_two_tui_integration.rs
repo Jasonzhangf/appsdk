@@ -194,7 +194,7 @@ impl AppFixture {
             .args(args)
             .current_dir(&self.project)
             .env("COLLAB_STATE_DIR", &self.host_state)
-            .env_remove("COLLAB_APPSERVER_SOCKET")
+            .env("COLLAB_APPSERVER_SOCKET", &self.app_socket)
             .env_remove("CODEX_APP_SERVER_SOCKET")
             .env_remove("COLLAB_APPSERVER_NAMESPACE")
             .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop")
@@ -206,6 +206,25 @@ impl AppFixture {
             .env("CODEX_HOME", self.root.join("home"))
             .output()
             .expect("run Desktop collab CLI")
+    }
+
+    fn command_desktop_without_explicit_endpoint(&self, args: &[&str], thread: &str) -> Output {
+        Command::new(binary())
+            .args(args)
+            .current_dir(&self.project)
+            .env("COLLAB_STATE_DIR", &self.host_state)
+            .env_remove("COLLAB_APPSERVER_SOCKET")
+            .env_remove("CODEX_APP_SERVER_SOCKET")
+            .env_remove("COLLAB_APPSERVER_NAMESPACE")
+            .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop")
+            .env("CODEX_SESSION_ID", thread)
+            .env("CODEX_THREAD_ID", thread)
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .env_remove("COLLAB_WORKER")
+            .env("CODEX_HOME", self.root.join("home"))
+            .output()
+            .expect("run Desktop collab CLI without an explicit endpoint")
     }
 
     fn command_tui_without_explicit_endpoint(
@@ -658,7 +677,7 @@ fn two_tui_appserver_receipt_flow() {
 }
 
 #[test]
-fn desktop_managed_socket_registration_persists_and_uses_codex_app_namespace() {
+fn desktop_registration_uses_explicit_endpoint_and_codex_app_namespace() {
     let mut fixture = AppFixture::new_desktop_managed();
 
     let context_a = fixture.run_ok_desktop(&["context"], THREAD_A);
@@ -728,6 +747,35 @@ fn desktop_managed_socket_registration_persists_and_uses_codex_app_namespace() {
         replay_context["identity"]["transport"]["namespace"],
         "codex_app"
     );
+}
+
+#[test]
+fn desktop_managed_socket_is_not_inferred_without_explicit_endpoint() {
+    let fixture = AppFixture::new_desktop_managed();
+
+    let output = fixture.command_desktop_without_explicit_endpoint(&["context"], THREAD_A);
+    assert!(
+        output.status.success(),
+        "missing endpoint is a classified context result: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let context: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(context["registered"], false);
+    assert_eq!(
+        context["requires_identity_update"]["reason"],
+        "IDENTITY_INFORMATION_REQUIRED"
+    );
+    assert_eq!(
+        context["requires_identity_update"]["required_fields"],
+        json!(["endpoint"])
+    );
+    assert_eq!(
+        fixture.appserver_connections.load(Ordering::Relaxed),
+        0,
+        "the managed Desktop socket must not be probed without a current-runtime endpoint"
+    );
+    assert!(!fixture.host_state.join("bindings").exists());
 }
 
 #[test]

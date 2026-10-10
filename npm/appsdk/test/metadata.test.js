@@ -4,11 +4,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import {
-  assertCandidateVersion,
-  candidateVersion,
-  mapSourceVersion,
-} from "../lib/version.js";
+import { mapSourceVersion } from "../lib/version.js";
 
 const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const mainPackagePath = join(repoRoot, "npm/appsdk/package.json");
@@ -61,21 +57,15 @@ const platformPackages = [
   },
 ];
 
-test("main package is one internally consistent development candidate", () => {
+test("main package is one internally consistent release manifest", () => {
   assert.equal(mainPackage.name, "@jsonstudio/appsdk");
-  assert.equal(mainPackage.private, true);
-  assert.equal(mainPackage.version, candidateVersion(sourceVersion));
-  assert.equal(
-    assertCandidateVersion(sourceVersion, mainPackage.version),
-    "0.1.14-dev.0",
-  );
+  assert.equal(mainPackage.private, undefined);
+  assert.equal(mainPackage.version, mapSourceVersion(sourceVersion));
+  assert.equal(mainPackage.version, "0.1.15");
   assert.equal(mainPackage.appsdk.sourceVersion, sourceVersion);
-  assert.equal(
-    mainPackage.appsdk.npmVersion,
-    mapSourceVersion(sourceVersion),
-  );
-  assert.equal(mainPackage.appsdk.candidate, true);
-  assert.equal(mainPackage.appsdk.artifactStatus, "incomplete-until-M5");
+  assert.equal(mainPackage.appsdk.npmVersion, "0.1.15");
+  assert.equal(mainPackage.appsdk.candidate, undefined);
+  assert.equal(mainPackage.appsdk.artifactStatus, undefined);
   assert.deepEqual(mainPackage.bin, {
     appsdk: "bin/appsdk.js",
     "project-memory": "bin/project-memory.js",
@@ -101,7 +91,7 @@ test("platform manifests pin target restrictions and runtime files", () => {
 
     assert.equal(manifest.name, expected.name);
     assert.equal(manifest.version, mainPackage.version);
-    assert.equal(manifest.private, true);
+    assert.equal(manifest.private, undefined);
     assert.deepEqual(manifest.os, expected.os);
     assert.deepEqual(manifest.cpu, expected.cpu);
     if (expected.libc) {
@@ -111,6 +101,6 @@ test("platform manifests pin target restrictions and runtime files", () => {
     }
     assert.deepEqual(manifest.files, expected.files);
     assert.equal(manifest.scripts?.postinstall, undefined);
-    assert.equal(manifest.appsdk.artifactStatus, "incomplete-until-M5");
+    assert.equal(manifest.appsdk.artifactStatus, undefined);
   }
 });

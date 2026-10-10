@@ -25,21 +25,65 @@
     }
 
     #[test]
-    fn managed_appserver_socket_is_only_inferred_for_desktop_runtime() {
-        let home = std::path::PathBuf::from("/tmp").join(format!("cas-{}", std::process::id()));
-        let socket = home.join("app-server-control/app-server-control.sock");
-        std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
-        let listener = UnixListener::bind(&socket).unwrap();
+    fn managed_codex_home_socket_is_not_inferred_as_the_current_endpoint() {
+        let _guard = crate::scope::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let keys = [
+            "COLLAB_APPSERVER_SOCKET",
+            "CODEX_APP_SERVER_SOCKET",
+            "CODEX_HOME",
+            "HOME",
+            "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+            "COLLAB_APPSERVER_NAMESPACE",
+            "CODEX_SESSION_ID",
+            "CODEX_THREAD_ID",
+        ];
+        let previous = keys
+            .iter()
+            .map(|key| (*key, std::env::var_os(key)))
+            .collect::<Vec<_>>();
+        let root = std::path::PathBuf::from("/tmp")
+            .join(format!("cas-{}", std::process::id()));
+        let codex_home = root.join("codex-home");
+        let user_home = root.join("user-home");
+        let sockets = [
+            codex_home.join("app-server-control/app-server-control.sock"),
+            user_home.join(".codex/app-server-control/app-server-control.sock"),
+        ];
+        let listeners = sockets
+            .iter()
+            .map(|socket| {
+                std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+                UnixListener::bind(socket).unwrap()
+            })
+            .collect::<Vec<_>>();
+        for key in ["COLLAB_APPSERVER_SOCKET", "CODEX_APP_SERVER_SOCKET"] {
+            std::env::remove_var(key);
+        }
+        std::env::set_var("CODEX_HOME", &codex_home);
+        std::env::set_var("HOME", &user_home);
+        std::env::set_var("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop");
+        std::env::set_var("CODEX_SESSION_ID", "session-1");
+        std::env::set_var("CODEX_THREAD_ID", "thread-1");
 
-        assert_eq!(
-            managed_appserver_socket("codex_app", Some(&home)),
-            Some(socket.clone())
-        );
-        assert_eq!(managed_appserver_socket("codex_tui", Some(&home)), None);
+        assert_eq!(socket_candidate(), None);
+        assert!(identity_facts_from_env().unwrap().endpoint.is_none());
+        assert!(candidate_from_env().unwrap().is_none());
 
-        drop(listener);
-        std::fs::remove_file(&socket).unwrap();
-        std::fs::remove_dir_all(home).unwrap();
+        std::env::remove_var("CODEX_HOME");
+        assert_eq!(socket_candidate(), None);
+        assert!(identity_facts_from_env().unwrap().endpoint.is_none());
+        assert!(candidate_from_env().unwrap().is_none());
+
+        drop(listeners);
+        for (key, value) in previous {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     fn assert_malformed_active_turn(page: Value, expected_detail: &str) {

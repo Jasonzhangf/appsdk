@@ -47,7 +47,7 @@ installer 将 `appsdk`、`project-memory` 安装到当前 Cargo executable 所�
 `~/.agents/skills/`。将 binary 目录加入 PATH；已有 shell 可执行 `rehash`（zsh）
 或 `hash -r`（bash）刷新命令缓存。
 
-当前 [公开 release](https://github.com/Jasonzhangf/appsdk/releases/latest) 的下载资产
+当前最新公开版本为 `v0.1.0014`；[公开 release](https://github.com/Jasonzhangf/appsdk/releases/latest) 的下载资产
 用于核对版本和哈希；正式安装仍使用上述源码 installer。原生 Windows 安装和
 npm 安装尚未提供，不将 Git Bash 或 WSL 视为原生 Windows 支持。
 
@@ -139,16 +139,19 @@ installer 不重启已有 daemon，升级运行态须在已授权维护窗口按
 
 ## 平台与渠道状态
 
-以下是截至 `v0.1.0014` 的已知证据，按产品和 CPU 架构区分：
+下表只记录截至公开版 `v0.1.0014` 的证据，按产品和 CPU 架构区分：
 
 | 平台 | AppSDK | DAGPipe | Collab | 下载/渠道 |
 |---|---|---|---|---|
 | macOS ARM64 | 已有安装、消费者和公开产物证据 | 随 AppSDK 构建使用库；独立 CLI 不在此 AppSDK release 资产中 | 已有独立安装/live [交付记录](docs/evidence/collab-master-authority-fix-20261007/README.md) | GitHub 源码与 AppSDK ARM64 资产 |
 | Linux x64 | Ubuntu release 门禁、安装器与消费者 smoke 通过 | Ubuntu release 门禁测试通过 | 有独立 Ubuntu CI job；具体 live 能力依宿主环境验收 | 可使用源码安装；尚无该 release 的 Linux 二进制 |
 | macOS x64 / Linux ARM64 | 尚未建立对应架构的完整发布证据 | 同左 | 同左 | 未提供对应平台的该 release 资产 |
-| 原生 Windows | 待适配：路径、锁、事务与安装入口 | 待平台构建与安装验收 | 待适配：Unix socket、宿主 transport、锁与进程管理 | 尚无原生 installer 或 release 资产 |
+| 原生 Windows | 公开版未支持 | 公开版未支持 | 未支持：Unix socket 与宿主 transport 不可用 | 尚无原生 installer 或 release 资产 |
 
-本仓库尚未实现 npm 发布；已确定主包名为 `@jsonstudio/appsdk`。
+当前本地候选已加入 AppSDK Windows 路径/锁/事务/安装适配、DAGPipe Windows installer，
+以及 `@jsonstudio/appsdk@0.1.15` 和三个平台包。候选尚无最终 commit、三平台
+release archives 或最终 tarball consumer receipts，因此这些实现不构成新平台支持。
+此前 registry 查询未取得本次包的公开可用版本；新包创建权限仍需发布时核实。
 三平台产物、npm 包边界、版本映射与交付顺序见
 [跨平台与发布渠道方案](docs/design/release-distribution.md)。新增平台和渠道
 完成对应验收后更新本表；编译成功不等于该平台的完整运行支持。

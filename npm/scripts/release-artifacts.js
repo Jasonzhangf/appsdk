@@ -798,6 +798,14 @@ export async function packageReleaseArtifacts({
 
     const tempMainDir = join(tempRoot, "appsdk");
     copyPackageFiles(join(npmRoot, "appsdk"), tempMainDir);
+    const tempMainManifestPath = join(tempMainDir, "package.json");
+    const tempMainManifest = readJson(tempMainManifestPath, "NPM_MANIFEST_INVALID");
+    tempMainManifest.appsdk = {
+      ...tempMainManifest.appsdk,
+      sourceVersion,
+      sourceCommit,
+    };
+    writeFileSync(tempMainManifestPath, `${JSON.stringify(tempMainManifest, null, 2)}\n`);
     tarballs.push(runPack({ packageDir: tempMainDir, outputDir, cacheDir: packCacheDir }));
 
     const expectedTarballCount = 4;
@@ -905,7 +913,8 @@ export async function main(argv = process.argv.slice(2)) {
   return packageReleaseArtifacts(options);
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+const invokedScript = process.argv[1];
+if (invokedScript && import.meta.url === pathToFileURL(invokedScript).href) {
   main().catch((error) => {
     const code = error instanceof ArtifactError ? error.code : "RELEASE_ARTIFACTS_FAILED";
     process.stderr.write(`${error.name}: ${code}: ${error.message}\n`);

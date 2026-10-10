@@ -1,8 +1,7 @@
 # @jsonstudio/appsdk
 
-Development-only npm launcher candidate for AppSDK. This package is not a
-release and must not be published until M5 assembles verified platform
-artifacts and the release owner allocates a new source version.
+npm launcher for AppSDK. The platform packages are populated from the verified
+release artifacts by the M5 packaging flow.
 
 The package exposes `appsdk` and `project-memory`. Each launcher selects one
 exact optional platform package, verifies its version, then replaces itself
@@ -20,12 +19,11 @@ version mismatches, missing binaries, and spawn failures produce explicit
 `LauncherError` failures. The launcher never downloads, compiles, or falls back
 to a different target.
 
-The candidate version is derived from the source version by decimal
+The package version is derived from the source version by decimal
 normalization:
 
 ```text
-0.1.0014 -> 0.1.14
+0.1.0015 -> 0.1.15
 ```
 
-The current package uses `0.1.14-dev.0` because `0.1.14` is already the mapped
-release version of `0.1.0014`.
+The current package uses `0.1.15`, the mapped release version of `0.1.0015`.

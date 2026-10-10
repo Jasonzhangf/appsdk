@@ -26,6 +26,7 @@ pub(super) fn sdk_map_migration_manifest(step: &str) -> Value {
         "0.1.0011-to-0.1.0012" => (SDK_MAP_MIGRATION_0011_TO_0012, "0.1.0011", "0.1.0012"),
         "0.1.0012-to-0.1.0013" => (SDK_MAP_MIGRATION_0012_TO_0013, "0.1.0012", "0.1.0013"),
         "0.1.0013-to-0.1.0014" => (SDK_MAP_MIGRATION_0013_TO_0014, "0.1.0013", "0.1.0014"),
+        "0.1.0014-to-0.1.0015" => (SDK_MAP_MIGRATION_0014_TO_0015, "0.1.0014", "0.1.0015"),
         _ => fail("UNKNOWN_SDK_MAP_MIGRATION_STEP"),
     };
     let manifest: Value = serde_json::from_str(manifest_text)

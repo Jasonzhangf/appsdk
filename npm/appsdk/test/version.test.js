@@ -10,9 +10,11 @@ import {
 
 test("maps source versions by decimal component normalization", () => {
   assert.equal(mapSourceVersion("0.1.0014"), "0.1.14");
+  assert.equal(mapSourceVersion("0.1.0015"), "0.1.15");
   assert.equal(mapSourceVersion("00.01.0014"), "0.1.14");
   assert.equal(mapSourceVersion("1.02.0000"), "1.2.0");
   assert.equal(candidateVersion("0.1.0014"), "0.1.14-dev.0");
+  assert.equal(candidateVersion("0.1.0015"), "0.1.15-dev.0");
 });
 
 test("rejects non-canonical source version spellings", () => {

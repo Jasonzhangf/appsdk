@@ -61,7 +61,7 @@ fn assert_registered(registry: &Path, project: &Path, output: &Output) -> Value 
     let receipt = receipt(output);
     assert_eq!(receipt["registry_root"], canonical(registry));
     assert_eq!(receipt["project_root"], canonical(project));
-    assert_eq!(receipt["sdk_version"], "0.1.0014");
+    assert_eq!(receipt["sdk_version"], "0.1.0015");
     assert_eq!(receipt["idempotent"], false);
 
     let registry_file = registry.join("projects.jsonl");
@@ -71,7 +71,7 @@ fn assert_registered(registry: &Path, project: &Path, output: &Output) -> Value 
     assert_eq!(event["event"], "project.registered");
     assert_eq!(event["project_root"], receipt["project_root"]);
     assert_eq!(event["project_id"], receipt["project_id"]);
-    assert_eq!(event["sdk_version"], "0.1.0014");
+    assert_eq!(event["sdk_version"], "0.1.0015");
     assert!(project.join(".appsdk/project.json").is_file());
     receipt
 }

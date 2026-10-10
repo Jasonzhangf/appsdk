@@ -166,6 +166,11 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         SDK_MAP_MIGRATION_0013_TO_0014,
     ),
     (
+        "contracts/migrations/sdk-0.1.0014-to-0.1.0015.json",
+        "contracts",
+        SDK_MAP_MIGRATION_0014_TO_0015,
+    ),
+    (
         "contracts/migrations/0.1.0013/governance-maps/resource-map.json",
         "contracts",
         include_str!("../../contracts/migrations/0.1.0013/governance-maps/resource-map.json"),
@@ -184,6 +189,26 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         "contracts/migrations/0.1.0013/governance-maps/verification-map.json",
         "contracts",
         include_str!("../../contracts/migrations/0.1.0013/governance-maps/verification-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.0014/governance-maps/resource-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.0014/governance-maps/resource-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.0014/governance-maps/function-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.0014/governance-maps/function-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.0014/governance-maps/mainline-call-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.0014/governance-maps/mainline-call-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.0014/governance-maps/verification-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.0014/governance-maps/verification-map.json"),
     ),
     (
         "contracts/migrations/0.1.0012/governance-maps/resource-map.json",

@@ -4,6 +4,9 @@
 
 AppSDK 不包含任何业务协议、provider、项目 pipeline 或运行时实现。新项目拥有业务语义；AppSDK 只提供机制。
 
+本仓库的架构与边界见 [根级 AGENTS.md](AGENTS.md)；源码开发、按风险选测、
+规则升级和发布操作见 [appsdk-dev Skill](.agents/skills/appsdk-dev/SKILL.md)。
+
 ## 验证与发布边界
 
 `.github/workflows/verify.yml` 按变更路径选择组件，不把全量构建作为日常

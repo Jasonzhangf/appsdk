@@ -73,3 +73,26 @@
 - Current Desktop control socket still refuses connections. Direct Desktop identity recovery is not verified; the error remains in the receipt. Installation did not clear or replace formal Master grants. Live message-count observations changed concurrently and are not claimed unchanged.
 - Delivery index: `docs/evidence/collab-master-authority-fix-20261007/README.md`; main receipt: `main-runtime.md`; frozen contract and DAG: `docs/design/collab-master-authority-contract-20261007.md` and `docs/dagpipe/collab-master-authority.graph.json`.
 - Nine owned worktrees/branches and 21 isolated worker homes were reclaimed without force. Other task worktrees and dirty primary documents were preserved. The clean main clone's final removal and defect closure are recorded in the canonical external task note after the receipt push. Necessary raw result logs remain as task evidence.
+
+## 2026-10-09 SDK rule upgrade and project development guidance
+
+- AppSDK 0.1.0014 was delivered at `9dc90303278ddd2a8be5fab8e835d498057ebe6e`.
+  Rule/Skill audit evidence: `docs/evidence/rule-upgrade-audit-20261009/`;
+  final installed, review, CI, release and cleanup receipts:
+  `/Volumes/Intel/playground/appsdk/.worker-runs/rule-upgrade-audit-20261009/closeout-delivery.md`.
+- The release record reports affected local verification and independent review;
+  the full tag gate passed 531 AppSDK and 28 DAGPipe tests. Cleanup remains
+  PARTIAL: eight test roots were recreated by Collab timers. Product delivery
+  does not establish cleanup completion or authority for a shared daemon reset.
+- Jason requested root project rules and a development Skill. Added root
+  `AGENTS.md` for SDK architecture/features/ownership and
+  `.agents/skills/appsdk-dev/SKILL.md` for project commands, affected verification,
+  rule-upgrade audit and official product delivery; README links both entrypoints.
+- These documents govern source development. They do not initialize a managed
+  consumer contract. The CI selector still widens unspecified Rust paths to the
+  whole AppSDK package; this limitation is recorded rather than claimed fixed.
+- This is a documentation/Skill change under the current fast path. Validation
+  scope is Skill structure, references and Git diff; no product tests, release
+  build, installer or daemon operation is required by these changes.
+- `skill-creator/scripts/quick_validate.py` passed. All local Markdown links in
+  the new entrypoints and README resolve; the tracked diff check passed.

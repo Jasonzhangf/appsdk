@@ -205,8 +205,19 @@ fn registry_root() -> Result<PathBuf, String> {
     let root = env::var_os("APPSDK_HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(REGISTRY_DIR)))
-        .ok_or_else(|| "GLOBAL_APPSDK_HOME_UNAVAILABLE: set HOME or APPSDK_HOME".to_string())?;
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(REGISTRY_DIR)));
+    #[cfg(windows)]
+    let root = root.or_else(|| {
+        env::var_os("USERPROFILE")
+            .filter(|value| !value.is_empty())
+            .map(|home| PathBuf::from(home).join(REGISTRY_DIR))
+    });
+    let unavailable = if cfg!(windows) {
+        "GLOBAL_APPSDK_HOME_UNAVAILABLE: set HOME, USERPROFILE, or APPSDK_HOME"
+    } else {
+        "GLOBAL_APPSDK_HOME_UNAVAILABLE: set HOME or APPSDK_HOME"
+    };
+    let root = root.ok_or_else(|| unavailable.to_string())?;
     if !root.is_absolute() {
         return Err(format!(
             "GLOBAL_APPSDK_HOME_INVALID: path must be absolute: {}",

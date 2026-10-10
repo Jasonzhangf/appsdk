@@ -23,6 +23,7 @@ jobs:
       rust_producer: ${{ steps.scope.outputs.rust_producer }}
       rust_cli_smoke: ${{ steps.scope.outputs.rust_cli_smoke }}
       rust_platform_lock_cli: ${{ steps.scope.outputs.rust_platform_lock_cli }}
+      rust_registry_home_cli: ${{ steps.scope.outputs.rust_registry_home_cli }}
       resources: ${{ steps.scope.outputs.resources }}
       dagpipe: ${{ steps.scope.outputs.dagpipe }}
       collab: ${{ steps.scope.outputs.collab }}
@@ -73,6 +74,7 @@ jobs:
           rust_producer=false
           rust_cli_smoke=false
           rust_platform_lock_cli=false
+          rust_registry_home_cli=false
           resources=false
           dagpipe=false
           collab=false
@@ -194,6 +196,10 @@ jobs:
                 rust_platform_lock_cli=true
                 windows_appsdk=true
                 ;;
+              rust/tests/registry_home_cli.rs)
+                rust_registry_home_cli=true
+                windows_appsdk=true
+                ;;
               rust/src/*|rust/tests/*)
                 app_sdk_full=true
                 windows_appsdk=true
@@ -266,6 +272,7 @@ jobs:
           emit rust_producer "$rust_producer"
           emit rust_cli_smoke "$rust_cli_smoke"
           emit rust_platform_lock_cli "$rust_platform_lock_cli"
+          emit rust_registry_home_cli "$rust_registry_home_cli"
           emit resources "$resources"
           emit dagpipe "$dagpipe"
           emit collab "$collab"
@@ -290,6 +297,7 @@ jobs:
        needs.changes.outputs.rust_producer == 'true' ||
        needs.changes.outputs.rust_cli_smoke == 'true' ||
        needs.changes.outputs.rust_platform_lock_cli == 'true' ||
+       needs.changes.outputs.rust_registry_home_cli == 'true' ||
        needs.changes.outputs.resources == 'true')
     runs-on: ubuntu-latest
     steps:
@@ -313,7 +321,8 @@ jobs:
           needs.changes.outputs.rust_registry == 'true' ||
           needs.changes.outputs.rust_producer == 'true' ||
           needs.changes.outputs.rust_cli_smoke == 'true' ||
-          needs.changes.outputs.rust_platform_lock_cli == 'true'
+          needs.changes.outputs.rust_platform_lock_cli == 'true' ||
+          needs.changes.outputs.rust_registry_home_cli == 'true'
         run: cargo fmt --manifest-path rust/Cargo.toml -- --check
       - name: Validate resource contracts and versions
         if: needs.changes.outputs.resources == 'true'
@@ -385,6 +394,13 @@ jobs:
           cargo test --manifest-path rust/Cargo.toml --locked --test platform_lock_cli -- --list \
             | grep -E ': test' > /dev/null
           cargo test --manifest-path rust/Cargo.toml --locked --test platform_lock_cli
+      - name: Registry home CLI target
+        if: needs.changes.outputs.rust_registry_home_cli == 'true'
+        run: |
+          test_count="$(cargo test --manifest-path rust/Cargo.toml --locked --test registry_home_cli -- --list \
+            | awk '/: test$/ { count++ } END { print count + 0 }')"
+          test "$test_count" -eq 2
+          cargo test --manifest-path rust/Cargo.toml --locked --test registry_home_cli
       - name: Full cli_smoke target
         if: needs.changes.outputs.rust_cli_smoke == 'true'
         run: |
@@ -540,6 +556,7 @@ jobs:
           Invoke-CargoTest @('--bin', 'appsdk', 'communication::lock_tests')
           Invoke-CargoTest @('--bin', 'appsdk', 'producer::lock_tests')
           Invoke-CargoTest @('--test', 'platform_lock_cli')
+          Invoke-CargoTest @('--test', 'registry_home_cli') -ExpectCount 3
       - name: Check release binaries
         shell: pwsh
         run: |

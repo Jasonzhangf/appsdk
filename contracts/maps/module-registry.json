@@ -509,6 +509,7 @@
       "owned_paths": [
         "AGENTS.md",
         ".agents/skills/appsdk-dev/**",
+        ".gitattributes",
         ".github/workflows/**",
         ".gitignore",
         "MEMORY.md",

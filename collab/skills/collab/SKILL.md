@@ -1129,6 +1129,13 @@ subscription, as part of bootstrap.
 
 ## AppServer runtime registration
 
+Register only the AppServer that serves the current caller's active session and
+thread. The endpoint, session ID, and thread ID must come from that caller's
+own runtime; never submit another agent's or worker's AppServer, session, or
+thread, even if it is reachable. If ownership of the exact endpoint and tuple
+cannot be established, fail registration rather than borrowing another
+runtime's identity.
+
 Registration derives the host namespace from the active runtime. The exact
 `CODEX_INTERNAL_ORIGINATOR_OVERRIDE=Codex Desktop` marker selects `codex_app`;
 `Codex CLI` or `Codex TUI` selects `codex_tui`, and `TMUX_PANE` selects

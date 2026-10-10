@@ -194,8 +194,9 @@ Recovery errors are actionable and must not be repaired by hand:
   `collab master promote --approval "<user text>"` itself after explicit user
   approval. Master authority is arbitration only; it does not take another
   peer's task. Independent peers may temporarily decline a master
-  collaboration invite to protect their own task; managed subagents must obey
-  the master.
+  collaboration invite to protect their own task. A delegated subagent follows
+  its task contract and this Collab protocol only when it is itself a registered
+  peer; master-only rules also require an explicitly authorized master grant.
 - If a previously granted master has no live route, identity recovery may
   restore the same persisted grant only after one of the verified runtime or
   last-resort pane anchors resolves that exact principal, and only while no

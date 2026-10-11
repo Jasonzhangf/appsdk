@@ -1,6 +1,26 @@
 use super::*;
+#[path = "migration/bundle_witness.rs"]
+mod bundle_witness;
 #[path = "migration/record_bindings.rs"]
 mod record_bindings;
+
+/// Which authority authorizes a migration record whose SDK bundle differs from
+/// the current bundle.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum BundleAuthority {
+    /// The on-disk lock still remembers the record's bundle.
+    LockAnchored,
+    /// The SDK independently proves this historical bundle transition.
+    Historical,
+}
+
+fn migration_bundle_authority(root: &Path, step: &str, record: &Value) -> Option<BundleAuthority> {
+    bundle_witness::bundle_authority(root, step, record)
+}
+
+pub(super) fn sdk_migration_bundle_witnesses(root: &Path) -> Vec<String> {
+    bundle_witness::sdk_migration_bundle_witnesses(root)
+}
 
 pub(super) fn init_collab_control_project(root: &Path) {
     assert_ordinary_init_canonical_project_main_tree(root, false);
@@ -430,60 +450,6 @@ fn sdk_map_migration_historical_target_authorized(
         })
 }
 
-pub(super) fn migration_bundle_transition_digest(root: &Path, record: &Value) -> Option<String> {
-    let record_bundle = record
-        .get("bundle_digest")
-        .and_then(Value::as_str)
-        .filter(|digest| valid_bundle_digest(digest))?;
-    let lock_path = root.join(".appsdk/sdk.lock");
-    if !lock_path.is_file() {
-        return None;
-    }
-    if fs::symlink_metadata(&lock_path)
-        .map(|metadata| metadata.file_type().is_symlink())
-        .unwrap_or(false)
-    {
-        fail("GOVERNANCE_PATH_SYMLINK:sdk_lock");
-    }
-    let lock: Value = serde_json::from_str(
-        &fs::read_to_string(&lock_path).unwrap_or_else(|_| fail("INVALID_SDK_LOCK")),
-    )
-    .unwrap_or_else(|_| fail("INVALID_SDK_LOCK"));
-    let lock_bundle = lock
-        .get("bundle_digest")
-        .and_then(Value::as_str)
-        .filter(|digest| valid_bundle_digest(digest))?;
-    let lock_previous_bundles = lock
-        .get("previous_bundle_digests")
-        .and_then(Value::as_array)
-        .map(|digests| {
-            digests
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_else(|| {
-            lock.get("previous_bundle_digest")
-                .and_then(Value::as_str)
-                .into_iter()
-                .map(str::to_owned)
-                .collect()
-        });
-    let current_bundle = sdk_bundle_digest();
-    if record_bundle == current_bundle {
-        return None;
-    }
-    if lock_bundle == record_bundle
-        || lock_previous_bundles
-            .iter()
-            .any(|known| known == record_bundle)
-    {
-        return Some(record_bundle.to_string());
-    }
-    None
-}
-
 pub(super) fn lock_migration_bundle_witnesses(lock: &Value) -> Vec<String> {
     if let Some(digests) = lock.get("previous_bundle_digests") {
         return digests
@@ -513,59 +479,6 @@ pub(super) fn lock_migration_bundle_witnesses(lock: &Value) -> Vec<String> {
     Vec::new()
 }
 
-pub(super) fn sdk_migration_bundle_witnesses(root: &Path) -> Vec<String> {
-    let lock_path = root.join(".appsdk/sdk.lock");
-    if !lock_path.is_file() {
-        return Vec::new();
-    }
-    let lock: Value = serde_json::from_str(
-        &fs::read_to_string(&lock_path).unwrap_or_else(|_| fail("INVALID_SDK_LOCK")),
-    )
-    .unwrap_or_else(|_| fail("INVALID_SDK_LOCK"));
-    let lock_witnesses = lock_migration_bundle_witnesses(&lock);
-    let lock_bundle = lock
-        .get("bundle_digest")
-        .and_then(Value::as_str)
-        .filter(|digest| valid_bundle_digest(digest));
-    let mut records = Vec::new();
-    for step in SDK_MAP_MIGRATION_STEPS {
-        let record_path = sdk_map_migration_root(root, step).join("record.json");
-        if !record_path.is_file() {
-            continue;
-        }
-        let record: Value = serde_json::from_str(
-            &fs::read_to_string(&record_path)
-                .unwrap_or_else(|_| fail("INVALID_SDK_MIGRATION_RECORD")),
-        )
-        .unwrap_or_else(|_| fail("INVALID_SDK_MIGRATION_RECORD"));
-        if let Some(digest) = record
-            .get("bundle_digest")
-            .and_then(Value::as_str)
-            .filter(|digest| valid_bundle_digest(digest))
-        {
-            if digest != sdk_bundle_digest() {
-                records.push(digest.to_string());
-            }
-        }
-    }
-    if !records
-        .iter()
-        .any(|digest| Some(digest.as_str()) == lock_bundle)
-        && !records
-            .iter()
-            .any(|digest| lock_witnesses.iter().any(|known| known == digest))
-    {
-        return Vec::new();
-    }
-    let mut witnesses = lock_witnesses;
-    for digest in records {
-        if !witnesses.iter().any(|known| known == &digest) {
-            witnesses.push(digest);
-        }
-    }
-    witnesses
-}
-
 pub(super) fn sdk_map_migration_manifest_versions(manifest: &Value) -> (&str, &str) {
     (
         manifest
@@ -592,6 +505,322 @@ pub(super) fn sdk_map_migration_checks_live_target(step: &str) -> bool {
     let manifest = sdk_map_migration_manifest(step);
     let (_, target_version) = sdk_map_migration_manifest_versions(&manifest);
     target_version == SDK_VERSION
+}
+
+fn live_maps_match(root: &Path, manifest: &Value, field: &str) -> bool {
+    GOVERNANCE_MAP_NAMES.iter().all(|name| {
+        file_sha256(&root.join(".appsdk/maps").join(name), "governance_map")
+            == record_str(
+                sdk_map_migration_entry(manifest, name),
+                &format!("/{}", field),
+                "sdk-map-migration",
+            )
+    })
+}
+
+fn live_map_unreconciled_detail(
+    root: &Path,
+    manifest: &Value,
+    record: Option<&Value>,
+) -> &'static str {
+    GOVERNANCE_MAP_NAMES
+        .iter()
+        .find(|name| {
+            let live = file_sha256(&root.join(".appsdk/maps").join(name), "governance_map");
+            let current_target = record_str(
+                sdk_map_migration_entry(manifest, name),
+                "/target_digest",
+                "sdk-map-migration",
+            );
+            let recorded_target = record.and_then(|record| {
+                record
+                    .get("maps")
+                    .and_then(Value::as_array)
+                    .and_then(|maps| {
+                        maps.iter()
+                            .find(|entry| entry.get("name").and_then(Value::as_str) == Some(name))
+                    })
+            });
+            live != current_target
+                && recorded_target
+                    .map(|entry| live != record_str(entry, "/target_digest", "sdk-migration-map"))
+                    .unwrap_or(true)
+        })
+        .copied()
+        .unwrap_or("mixed")
+}
+
+fn historical_custom_maps_authorized(root: &Path) -> bool {
+    SDK_MAP_MIGRATION_STEPS
+        .iter()
+        .filter(|prior_step| !sdk_map_migration_checks_live_target(prior_step))
+        .any(|prior_step| {
+            if !sdk_map_migration_root(root, prior_step)
+                .join("record.json")
+                .is_file()
+            {
+                return false;
+            }
+            let prior_record = assert_sdk_migration_record(root, prior_step, false)
+                .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
+            let has_custom_binding = prior_record
+                .get("maps")
+                .and_then(Value::as_array)
+                .is_some_and(|maps| {
+                    maps.iter().any(|entry| {
+                        entry
+                            .get("canonical_source_digest")
+                            .is_some_and(Value::is_string)
+                            || entry
+                                .get("canonical_target_digest")
+                                .is_some_and(Value::is_string)
+                    })
+                });
+            has_custom_binding
+                && GOVERNANCE_MAP_NAMES.iter().all(|name| {
+                    let entry = prior_record
+                        .get("maps")
+                        .and_then(Value::as_array)
+                        .and_then(|maps| {
+                            maps.iter().find(|entry| {
+                                entry.get("name").and_then(Value::as_str) == Some(name)
+                            })
+                        })
+                        .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
+                    let live = file_sha256(&root.join(".appsdk/maps").join(name), "governance_map");
+                    live == record_str(entry, "/source_digest", "sdk-migration-map")
+                        || live == record_str(entry, "/target_digest", "sdk-migration-map")
+                })
+        })
+}
+
+/// The final live-target acceptance rule `assert_sdk_migration_record(...,
+/// check_live_target = true)` applies to a single governance map after the live
+/// maps have been reconciled. It is shared so the projected post-install digests
+/// can be validated with the same authorization rules before any write.
+fn final_live_target_accepts(
+    bundle_transition: bool,
+    live_digest: &str,
+    entry: &Value,
+    declared: &Value,
+    canonical_source: &Value,
+    canonical_target: &Value,
+    explicit_custom_source: bool,
+    explicit_custom_target: bool,
+) -> bool {
+    let current_target = record_str(declared, "/target_digest", "sdk-map-migration");
+    let current_target_is_authorized = bundle_transition
+        && live_digest == current_target
+        && explicit_custom_source
+        && explicit_custom_target
+        && Some(canonical_source) == declared.get("source_digest")
+        && Some(canonical_target) == entry.get("target_digest");
+    live_digest == record_str(entry, "/target_digest", "sdk-migration-map")
+        || current_target_is_authorized
+}
+
+/// Reject a projection that would fail the final live-target rules.
+///
+/// `install_governance_maps` overwrites the live maps with the canonical target
+/// whenever `source_maps` is set or the record has no custom binding; otherwise
+/// it preserves the current custom maps. Validating those projected digests with
+/// `final_live_target_accepts` before the install keeps the rejection atomic, so
+/// an incompatible custom current record replayed from canonical source maps is
+/// rejected before any consumer write.
+fn assert_projected_live_targets(
+    root: &Path,
+    step: &str,
+    manifest: &Value,
+    record: &Value,
+    source_maps: bool,
+    has_custom_map_binding: bool,
+) {
+    if !sdk_map_migration_checks_live_target(step) {
+        return;
+    }
+    let bundle_transition = migration_bundle_authority(root, step, record).is_some();
+    let installs_canonical_target = source_maps || !has_custom_map_binding;
+    let maps = record
+        .get("maps")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
+    for name in GOVERNANCE_MAP_NAMES {
+        let declared = sdk_map_migration_entry(manifest, name);
+        let entry = maps
+            .iter()
+            .find(|entry| entry.get("name").and_then(Value::as_str) == Some(name))
+            .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
+        let canonical_source = entry
+            .get("canonical_source_digest")
+            .or_else(|| entry.get("source_digest"))
+            .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
+        let canonical_target = entry
+            .get("canonical_target_digest")
+            .or_else(|| entry.get("target_digest"))
+            .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
+        let explicit_custom_source = entry
+            .get("canonical_source_digest")
+            .is_some_and(|value| !value.is_null());
+        let explicit_custom_target = entry
+            .get("canonical_target_digest")
+            .is_some_and(|value| !value.is_null());
+        let projected_digest = if installs_canonical_target {
+            record_str(declared, "/target_digest", "sdk-map-migration").to_string()
+        } else {
+            file_sha256(&root.join(".appsdk/maps").join(name), "governance_map")
+        };
+        if !final_live_target_accepts(
+            bundle_transition,
+            &projected_digest,
+            entry,
+            declared,
+            canonical_source,
+            canonical_target,
+            explicit_custom_source,
+            explicit_custom_target,
+        ) {
+            fail(format!("SDK_MIGRATION_TARGET_MAP_MISMATCH:{}", name));
+        }
+    }
+}
+
+/// Validate the current-step live-map reconciliation rules without writing.
+///
+/// The mutation path uses the returned `source_maps` value to decide whether it
+/// installs the current target. Running this before `pin_lock` writes anything
+/// keeps the later `SDK_MIGRATION_LIVE_MAP_UNRECONCILED` rejection atomic.
+pub(super) fn preflight_live_map_reconciliation(root: &Path, step: &str, record: &Value) -> bool {
+    let manifest = sdk_map_migration_manifest(step);
+    let source_maps = live_maps_match(root, &manifest, "source_digest");
+    let has_custom_map_binding = record
+        .pointer("/maps/0/canonical_source_digest")
+        .is_some_and(Value::is_string);
+    if !source_maps && !has_custom_map_binding {
+        let current_maps = live_maps_match(root, &manifest, "target_digest");
+        let recorded_target_maps = GOVERNANCE_MAP_NAMES.iter().all(|name| {
+            let entry = record
+                .get("maps")
+                .and_then(Value::as_array)
+                .and_then(|maps| {
+                    maps.iter()
+                        .find(|entry| entry.get("name").and_then(Value::as_str) == Some(name))
+                })
+                .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
+            file_sha256(&root.join(".appsdk/maps").join(name), "governance_map")
+                == record_str(entry, "/target_digest", "sdk-migration-map")
+        });
+        if !current_maps && !recorded_target_maps {
+            let detail = live_map_unreconciled_detail(root, &manifest, Some(record));
+            fail(format!("SDK_MIGRATION_LIVE_MAP_UNRECONCILED:{detail}"));
+        }
+    }
+    assert_projected_live_targets(
+        root,
+        step,
+        &manifest,
+        record,
+        source_maps,
+        has_custom_map_binding,
+    );
+    source_maps
+}
+
+enum MissingRecordLiveMaps {
+    Create { canonical_source_matches: bool },
+    AlreadyCurrent,
+    HistoricalCustom,
+}
+
+fn resolve_missing_record_live_maps(
+    root: &Path,
+    project: &Value,
+    step: &str,
+) -> MissingRecordLiveMaps {
+    let manifest = sdk_map_migration_manifest(step);
+    let (_, target_version) = sdk_map_migration_manifest_versions(&manifest);
+    let canonical_source_matches = live_maps_match(root, &manifest, "source_digest");
+    let current_target_matches = live_maps_match(root, &manifest, "target_digest");
+    for name in GOVERNANCE_MAP_NAMES {
+        let live = root.join(".appsdk/maps").join(name);
+        if !live.is_file() {
+            fail(format!("MISSING_GOVERNANCE_MAP:{}", name));
+        }
+        let _ = file_sha256(&live, "governance_map");
+    }
+    if project.pointer("/sdk/version").and_then(Value::as_str) != Some(target_version)
+        || canonical_source_matches
+    {
+        return MissingRecordLiveMaps::Create {
+            canonical_source_matches,
+        };
+    }
+    let historical_custom_maps = historical_custom_maps_authorized(root);
+    let prior_bundle_transition_required = SDK_MAP_MIGRATION_STEPS
+        .iter()
+        .filter(|prior_step| !sdk_map_migration_checks_live_target(prior_step))
+        .any(|prior_step| {
+            let record_path = sdk_map_migration_root(root, prior_step).join("record.json");
+            if !record_path.is_file() {
+                return false;
+            }
+            let prior_record: Value = serde_json::from_str(
+                &fs::read_to_string(&record_path)
+                    .unwrap_or_else(|_| fail("INVALID_SDK_MIGRATION_RECORD")),
+            )
+            .unwrap_or_else(|_| fail("INVALID_SDK_MIGRATION_RECORD"));
+            prior_record
+                .get("bundle_digest")
+                .and_then(Value::as_str)
+                .is_some_and(|digest| digest != sdk_bundle_digest())
+        });
+    let prior_witness = SDK_MAP_MIGRATION_STEPS
+        .iter()
+        .filter(|prior_step| !sdk_map_migration_checks_live_target(prior_step))
+        .any(|prior_step| {
+            let record_path = sdk_map_migration_root(root, prior_step).join("record.json");
+            if !record_path.is_file() {
+                return false;
+            }
+            let prior_record: Value = serde_json::from_str(
+                &fs::read_to_string(&record_path)
+                    .unwrap_or_else(|_| fail("INVALID_SDK_MIGRATION_RECORD")),
+            )
+            .unwrap_or_else(|_| fail("INVALID_SDK_MIGRATION_RECORD"));
+            migration_bundle_authority(root, prior_step, &prior_record).is_some()
+        });
+    if current_target_matches {
+        if prior_bundle_transition_required && !prior_witness {
+            fail("SDK_MIGRATION_BUNDLE_WITNESS_REQUIRED");
+        }
+        return MissingRecordLiveMaps::AlreadyCurrent;
+    }
+    if historical_custom_maps {
+        if prior_bundle_transition_required && !prior_witness {
+            fail("SDK_MIGRATION_BUNDLE_WITNESS_REQUIRED");
+        }
+        return MissingRecordLiveMaps::HistoricalCustom;
+    }
+    let detail = live_map_unreconciled_detail(root, &manifest, None);
+    fail(format!("SDK_MIGRATION_LIVE_MAP_UNRECONCILED:{detail}"));
+}
+
+pub(super) fn preflight_current_migration_live_maps(root: &Path) {
+    for step in SDK_MAP_MIGRATION_STEPS {
+        if !sdk_map_migration_checks_live_target(step) {
+            continue;
+        }
+        let record_path = sdk_map_migration_root(root, step).join("record.json");
+        if record_path.is_file() {
+            let record = assert_sdk_migration_record(root, step, false)
+                .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
+            let _ = preflight_live_map_reconciliation(root, step, &record);
+        } else {
+            // A missing current-step record may be reached by replaying earlier
+            // historical steps. `migrate_governance_maps` evaluates that state
+            // after replay, and `pin_lock` defers the authoring-manifest write
+            // until that validation completes.
+        }
+    }
 }
 
 pub(super) fn sdk_historical_review_map_binding(
@@ -691,7 +920,15 @@ pub(super) fn assert_sdk_migration_record(
         .get("bundle_digest")
         .and_then(Value::as_str)
         .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
-    let bundle_transition = migration_bundle_transition_digest(root, &record).is_some();
+    let authority = migration_bundle_authority(root, step, &record);
+    let bundle_transition = authority.is_some();
+    let unanchored_historical = authority == Some(BundleAuthority::Historical);
+    // A historical record that the lock no longer anchors is only authorized by
+    // the one independently proven transition. Require the complete four-map
+    // source+target legacy tuple as one atomic condition, not a per-map mixture
+    // of historical and current targets and not an explicit custom binding.
+    let legacy_historical_tuple = unanchored_historical
+        && bundle_witness::historical_legacy_tuple_matches(step, record_bundle, &manifest, maps);
     record_bindings::preflight_record_map_bindings(
         &manifest,
         maps,
@@ -763,7 +1000,24 @@ pub(super) fn assert_sdk_migration_record(
                 assert_no_symlink_components(root, &live_map, "governance_map");
                 live_map.is_file() && file_sha256(&live_map, "governance_map") == actual_target
             };
-        let actual_target_bound = if explicit_custom_target {
+        // Legacy `0.1.5-to-0.1.6` records carry null canonical bindings. Accept
+        // the proven historical tuple only, and only for the proven bundle.
+        let legacy_historical_target_authorized = bundle_transition
+            && !explicit_custom_source
+            && !explicit_custom_target
+            && bundle_witness::historical_target_matches(
+                step,
+                record_bundle,
+                declared,
+                name,
+                actual_source,
+                actual_target,
+            );
+        let actual_target_bound = if unanchored_historical {
+            // Only the complete, independently proven historical tuple is
+            // authorized for an unanchored historical record.
+            legacy_historical_tuple
+        } else if explicit_custom_target {
             actual_target == actual_source
                 || historical_actual_target_authorized
                 || historical_live_target_bound
@@ -774,6 +1028,7 @@ pub(super) fn assert_sdk_migration_record(
                     && canonical_target.as_str() == Some(actual_target))
         } else {
             declared.get("target_digest").and_then(Value::as_str) == Some(actual_target)
+                || legacy_historical_target_authorized
         };
         if !actual_target_bound {
             fail(format!("SDK_MIGRATION_TARGET_MAP_MISMATCH:{}", name));
@@ -805,16 +1060,16 @@ pub(super) fn assert_sdk_migration_record(
         }
         if check_live_target {
             let live_digest = file_sha256(&root.join(".appsdk/maps").join(name), "governance_map");
-            let current_target = record_str(declared, "/target_digest", "sdk-map-migration");
-            let current_target_is_authorized = bundle_transition
-                && live_digest == current_target
-                && explicit_custom_source
-                && explicit_custom_target
-                && Some(canonical_source) == declared.get("source_digest")
-                && Some(canonical_target) == entry.get("target_digest");
-            if live_digest != record_str(entry, "/target_digest", "sdk-migration-map")
-                && !current_target_is_authorized
-            {
+            if !final_live_target_accepts(
+                bundle_transition,
+                &live_digest,
+                entry,
+                declared,
+                canonical_source,
+                canonical_target,
+                explicit_custom_source,
+                explicit_custom_target,
+            ) {
                 fail(format!("SDK_MIGRATION_TARGET_MAP_MISMATCH:{}", name));
             }
         }
@@ -904,74 +1159,15 @@ pub(super) fn migrate_governance_maps(root: &Path, project: &Value, step: &str) 
                 .unwrap_or_else(|_| fail("INVALID_SDK_MIGRATION_RECORD")),
         )
         .unwrap_or_else(|_| fail("INVALID_SDK_MIGRATION_RECORD"));
-        let source_maps = GOVERNANCE_MAP_NAMES.iter().all(|name| {
-            file_sha256(&root.join(".appsdk/maps").join(name), "governance_map")
-                == record_str(
-                    sdk_map_migration_entry(&manifest, name),
-                    "/source_digest",
-                    "sdk-map-migration",
-                )
-        });
         let bundle_changed = record
             .get("bundle_digest")
             .and_then(Value::as_str)
             .is_some_and(|digest| digest != sdk_bundle_digest());
-        let bundle_transition = migration_bundle_transition_digest(root, &record).is_some();
+        let bundle_transition = migration_bundle_authority(root, step, &record).is_some();
         if bundle_changed && !bundle_transition {
             fail("SDK_MIGRATION_BUNDLE_WITNESS_REQUIRED");
         }
-        let has_custom_map_binding = record
-            .pointer("/maps/0/canonical_source_digest")
-            .is_some_and(Value::is_string);
-        if !source_maps && !has_custom_map_binding {
-            let current_maps = GOVERNANCE_MAP_NAMES.iter().all(|name| {
-                file_sha256(&root.join(".appsdk/maps").join(name), "governance_map")
-                    == record_str(
-                        sdk_map_migration_entry(&manifest, name),
-                        "/target_digest",
-                        "sdk-map-migration",
-                    )
-            });
-            let recorded_target_maps = GOVERNANCE_MAP_NAMES.iter().all(|name| {
-                let entry = record
-                    .get("maps")
-                    .and_then(Value::as_array)
-                    .and_then(|maps| {
-                        maps.iter()
-                            .find(|entry| entry.get("name").and_then(Value::as_str) == Some(name))
-                    })
-                    .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
-                file_sha256(&root.join(".appsdk/maps").join(name), "governance_map")
-                    == record_str(entry, "/target_digest", "sdk-migration-map")
-            });
-            if !current_maps && !recorded_target_maps {
-                let detail = GOVERNANCE_MAP_NAMES
-                    .iter()
-                    .find(|name| {
-                        let live =
-                            file_sha256(&root.join(".appsdk/maps").join(name), "governance_map");
-                        let current_target = record_str(
-                            sdk_map_migration_entry(&manifest, name),
-                            "/target_digest",
-                            "sdk-map-migration",
-                        );
-                        let entry = record
-                            .get("maps")
-                            .and_then(Value::as_array)
-                            .and_then(|maps| {
-                                maps.iter().find(|entry| {
-                                    entry.get("name").and_then(Value::as_str) == Some(name)
-                                })
-                            })
-                            .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
-                        live != current_target
-                            && live != record_str(entry, "/target_digest", "sdk-migration-map")
-                    })
-                    .copied()
-                    .unwrap_or("mixed");
-                fail(format!("SDK_MIGRATION_LIVE_MAP_UNRECONCILED:{detail}"));
-            }
-        }
+        let source_maps = preflight_live_map_reconciliation(root, step, &record);
         if source_maps {
             for module in project
                 .get("modules")
@@ -1008,133 +1204,12 @@ pub(super) fn migrate_governance_maps(root: &Path, project: &Value, step: &str) 
     }
     let manifest = sdk_map_migration_manifest(step);
     let (source_version, target_version) = sdk_map_migration_manifest_versions(&manifest);
-    let canonical_source_matches = GOVERNANCE_MAP_NAMES.iter().all(|name| {
-        file_sha256(&root.join(".appsdk/maps").join(name), "governance_map")
-            == record_str(
-                sdk_map_migration_entry(&manifest, name),
-                "/source_digest",
-                "sdk-map-migration",
-            )
-    });
-    let current_target_matches = GOVERNANCE_MAP_NAMES.iter().all(|name| {
-        file_sha256(&root.join(".appsdk/maps").join(name), "governance_map")
-            == record_str(
-                sdk_map_migration_entry(&manifest, name),
-                "/target_digest",
-                "sdk-map-migration",
-            )
-    });
-    for name in GOVERNANCE_MAP_NAMES {
-        let live = root.join(".appsdk/maps").join(name);
-        if !live.is_file() {
-            fail(format!("MISSING_GOVERNANCE_MAP:{}", name));
-        }
-        let _ = file_sha256(&live, "governance_map");
-    }
-    if project.pointer("/sdk/version").and_then(Value::as_str) == Some(target_version)
-        && !canonical_source_matches
-    {
-        let historical_custom_maps = SDK_MAP_MIGRATION_STEPS
-            .iter()
-            .filter(|prior_step| !sdk_map_migration_checks_live_target(prior_step))
-            .any(|prior_step| {
-                if !sdk_map_migration_root(root, prior_step)
-                    .join("record.json")
-                    .is_file()
-                {
-                    return false;
-                }
-                let prior_record = assert_sdk_migration_record(root, prior_step, false)
-                    .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
-                let has_custom_binding = prior_record
-                    .get("maps")
-                    .and_then(Value::as_array)
-                    .is_some_and(|maps| {
-                        maps.iter().any(|entry| {
-                            entry
-                                .get("canonical_source_digest")
-                                .is_some_and(Value::is_string)
-                                || entry
-                                    .get("canonical_target_digest")
-                                    .is_some_and(Value::is_string)
-                        })
-                    });
-                has_custom_binding
-                    && GOVERNANCE_MAP_NAMES.iter().all(|name| {
-                        let entry = prior_record
-                            .get("maps")
-                            .and_then(Value::as_array)
-                            .and_then(|maps| {
-                                maps.iter().find(|entry| {
-                                    entry.get("name").and_then(Value::as_str) == Some(name)
-                                })
-                            })
-                            .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
-                        let live =
-                            file_sha256(&root.join(".appsdk/maps").join(name), "governance_map");
-                        live == record_str(entry, "/source_digest", "sdk-migration-map")
-                            || live == record_str(entry, "/target_digest", "sdk-migration-map")
-                    })
-            });
-        let prior_bundle_transition_required = SDK_MAP_MIGRATION_STEPS
-            .iter()
-            .filter(|prior_step| !sdk_map_migration_checks_live_target(prior_step))
-            .any(|prior_step| {
-                let record_path = sdk_map_migration_root(root, prior_step).join("record.json");
-                if !record_path.is_file() {
-                    return false;
-                }
-                let prior_record: Value = serde_json::from_str(
-                    &fs::read_to_string(&record_path)
-                        .unwrap_or_else(|_| fail("INVALID_SDK_MIGRATION_RECORD")),
-                )
-                .unwrap_or_else(|_| fail("INVALID_SDK_MIGRATION_RECORD"));
-                prior_record
-                    .get("bundle_digest")
-                    .and_then(Value::as_str)
-                    .is_some_and(|digest| digest != sdk_bundle_digest())
-            });
-        let prior_witness = SDK_MAP_MIGRATION_STEPS
-            .iter()
-            .filter(|prior_step| !sdk_map_migration_checks_live_target(prior_step))
-            .any(|prior_step| {
-                let record_path = sdk_map_migration_root(root, prior_step).join("record.json");
-                if !record_path.is_file() {
-                    return false;
-                }
-                let prior_record: Value = serde_json::from_str(
-                    &fs::read_to_string(&record_path)
-                        .unwrap_or_else(|_| fail("INVALID_SDK_MIGRATION_RECORD")),
-                )
-                .unwrap_or_else(|_| fail("INVALID_SDK_MIGRATION_RECORD"));
-                migration_bundle_transition_digest(root, &prior_record).is_some()
-            });
-        if current_target_matches {
-            if prior_bundle_transition_required && !prior_witness {
-                fail("SDK_MIGRATION_BUNDLE_WITNESS_REQUIRED");
-            }
-            return;
-        }
-        if historical_custom_maps {
-            if prior_bundle_transition_required && !prior_witness {
-                fail("SDK_MIGRATION_BUNDLE_WITNESS_REQUIRED");
-            }
-            return;
-        }
-        let detail = GOVERNANCE_MAP_NAMES
-            .iter()
-            .find(|name| {
-                file_sha256(&root.join(".appsdk/maps").join(name), "governance_map")
-                    != record_str(
-                        sdk_map_migration_entry(&manifest, name),
-                        "/target_digest",
-                        "sdk-map-migration",
-                    )
-            })
-            .copied()
-            .unwrap_or("mixed");
-        fail(format!("SDK_MIGRATION_LIVE_MAP_UNRECONCILED:{detail}"));
-    }
+    let canonical_source_matches = match resolve_missing_record_live_maps(root, project, step) {
+        MissingRecordLiveMaps::Create {
+            canonical_source_matches,
+        } => canonical_source_matches,
+        MissingRecordLiveMaps::AlreadyCurrent | MissingRecordLiveMaps::HistoricalCustom => return,
+    };
 
     let mut frozen_reviews = Vec::new();
     let mut legacy_reconciled_reviews = Vec::new();

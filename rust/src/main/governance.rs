@@ -219,7 +219,7 @@ pub(super) fn install_bundle_resources(root: &Path) {
     atomic_write_json(&record_path, &record, "SDK_RESOURCE_RECORD_WRITE_FAILED");
 }
 
-pub(super) fn reconcile_authoring_bundle_manifest(root: &Path) {
+pub(super) fn preflight_authoring_bundle_manifest(root: &Path) {
     let authoring = root.join("contracts/sdk-bundle.manifest.json");
     if !authoring.exists() {
         return;
@@ -237,6 +237,13 @@ pub(super) fn reconcile_authoring_bundle_manifest(root: &Path) {
     .unwrap_or_else(|_| fail("SDK_INSTALLED_BUNDLE_MIRROR_INVALID"));
     if authoring_value != installed_value {
         fail("SDK_AUTHORING_BUNDLE_MIRROR_DRIFT");
+    }
+}
+
+pub(super) fn write_authoring_bundle_manifest(root: &Path) {
+    let authoring = root.join("contracts/sdk-bundle.manifest.json");
+    if !authoring.exists() {
+        return;
     }
     atomic_write_bytes(
         &authoring,

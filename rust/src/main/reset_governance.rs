@@ -30,6 +30,7 @@ pub(super) fn pin_lock(root: &Path, binary: &Path) {
     }
     let transition_contracts = preflight_current_transition_contracts(root, &project);
     let previous_bundle_digests = sdk_migration_bundle_witnesses(root);
+    preflight_current_migration_live_maps(root);
     let binary = binary
         .canonicalize()
         .unwrap_or_else(|_| fail("SDK_BINARY_MISSING"));
@@ -41,7 +42,7 @@ pub(super) fn pin_lock(root: &Path, binary: &Path) {
     {
         fail("SDK_PIN_BINARY_BUNDLE_MISMATCH");
     }
-    reconcile_authoring_bundle_manifest(root);
+    preflight_authoring_bundle_manifest(root);
     let original_version = project_version.clone();
     if matches!(original_version.as_str(), "0.1.3" | "0.1.4") {
         write_legacy_migration_step(root, &project_version);
@@ -111,6 +112,7 @@ pub(super) fn pin_lock(root: &Path, binary: &Path) {
     }
     let current_project = read_project(root);
     migrate_governance_maps(root, &current_project, "0.1.0014-to-0.1.0015");
+    write_authoring_bundle_manifest(root);
     let migrated_project = read_project(root);
     install_current_record_contracts(root);
     install_current_transition_contracts(root, &transition_contracts);

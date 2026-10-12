@@ -186,7 +186,29 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
     std::fs::remove_dir_all(fixture.host_state.join("identities")).unwrap();
     let up = fixture.command_without_pane(&["up"]);
     assert!(up.status.success(), "isolated fixture up must succeed");
-    let restart_context = fixture.run_context(&["context"], Some(&sender));
+    let restart_envelope = fixture.run_ok(&["context"], Some(&sender));
+    assert_eq!(
+        restart_envelope["result"]["outcome"], "completed",
+        "{restart_envelope}"
+    );
+    let restart_context = context_snapshot(&restart_envelope);
+    let peer_envelope = fixture.run_ok(&["context"], Some(&receiver));
+    assert_eq!(
+        peer_envelope["result"]["outcome"], "completed",
+        "{peer_envelope}"
+    );
+    assert_eq!(
+        context_snapshot(&peer_envelope)["identity"]["worker_id"],
+        receiver_id
+    );
+    assert_eq!(
+        context_snapshot(&peer_envelope)["identity"]["role"],
+        receiver_context["identity"]["role"]
+    );
+    assert_ne!(
+        context_snapshot(&peer_envelope)["identity"]["role"],
+        "master"
+    );
     assert_eq!(restart_context["identity"]["worker_id"], sender_id);
     assert_eq!(
         restart_context["binding"]["endpoint_generation"],
@@ -298,6 +320,19 @@ fn context_recovers_archived_master_in_the_same_live_pane() {
         thread_anchor: "thread-before-restart".into(),
     };
     fixture.initialized = true;
+    // The host route index and this project's reducer are distinct owners.
+    // This is also the shape of a daemon serving multiple real projects.
+    let resident = root.join("resident");
+    seed_baseline(&resident);
+    let up = fixture
+        .configured_command(&["up"], None, "Codex TUI")
+        .current_dir(&resident)
+        .output()
+        .unwrap();
+    assert!(
+        up.status.success(),
+        "isolated nonresident daemon up must succeed"
+    );
     // The daemon owns the worker id; the fixture must not assume a naming
     // scheme. Read the concrete worker from the registration receipt.
     let init = fixture.run_ok(&["init"], Some(&old));
@@ -314,6 +349,31 @@ fn context_recovers_archived_master_in_the_same_live_pane() {
         ],
         Some(&old),
     );
+    let before = fixture.run_context(&["context"], Some(&old));
+    let grant_before = fixture.run_ok(&["master", "status"], Some(&old));
+    let down = fixture.command_without_pane(&["down"]);
+    assert!(down.status.success(), "isolated fixture down must succeed");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && fixture.host_state.join("server.sock").exists() {
+        thread::sleep(Duration::from_millis(50));
+    }
+    let up = fixture
+        .configured_command(&["up"], None, "Codex TUI")
+        .current_dir(&resident)
+        .output()
+        .unwrap();
+    assert!(
+        up.status.success(),
+        "isolated nonresident daemon restart must succeed"
+    );
+    let restarted = fixture.run_ok(&["context"], Some(&old));
+    assert_eq!(restarted["result"]["outcome"], "completed", "{restarted}");
+    assert_eq!(context_snapshot(&restarted)["identity"], before["identity"]);
+    assert_eq!(context_snapshot(&restarted)["binding"], before["binding"]);
+    assert_eq!(
+        fixture.run_ok(&["master", "status"], Some(&old)),
+        grant_before
+    );
     let archive = fixture
         .host_state
         .join("archives/identities-retired-1")
@@ -329,10 +389,63 @@ fn context_recovers_archived_master_in_the_same_live_pane() {
         thread_anchor: "thread-after-restart".into(),
         ..old
     };
-    let recovered = fixture.run_context(&["context"], Some(&new));
+    let envelope = fixture.run_ok(&["context"], Some(&new));
+    assert_eq!(envelope["result"]["outcome"], "completed", "{envelope}");
+    let recovered = context_snapshot(&envelope);
     assert_eq!(recovered["identity"]["worker_id"], worker_id);
     assert_eq!(recovered["identity"]["role"], "master");
     assert_eq!(recovered["registered"], true);
+    assert_eq!(
+        recovered["binding"]["binding_id"],
+        before["binding"]["binding_id"]
+    );
+    assert_eq!(
+        recovered["binding"]["runtime_id"],
+        before["binding"]["runtime_id"]
+    );
+    assert_eq!(
+        recovered["binding"]["endpoint_generation"].as_u64(),
+        before["binding"]["endpoint_generation"]
+            .as_u64()
+            .map(|generation| generation + 1)
+    );
+    let receipt: Value = serde_json::from_slice(
+        &std::fs::read(
+            fixture
+                .host_state
+                .join("identities")
+                .join(&worker_id)
+                .join("identity.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        receipt["runtime"]["endpoint_generation"],
+        recovered["binding"]["endpoint_generation"]
+    );
+    let route = fixture.run_ok(&["route", "resolve", "--pane-id", &new.pane_id], Some(&new));
+    assert_eq!(
+        route["endpoint_generation"],
+        recovered["binding"]["endpoint_generation"]
+    );
+    let grant_after = fixture.run_ok(&["master", "status"], Some(&new));
+    for field in [
+        "worker_id",
+        "grant_id",
+        "grant_generation",
+        "assigned_by",
+        "approval",
+    ] {
+        assert_eq!(
+            grant_after["master"][field], grant_before["master"][field],
+            "master grant {field} must survive recovery"
+        );
+    }
+    assert_eq!(
+        grant_after["master"]["endpoint_generation"],
+        recovered["binding"]["endpoint_generation"]
+    );
     let again = fixture.run_context(&["context"], Some(&new));
     assert_eq!(again["identity"]["worker_id"], worker_id);
     assert_eq!(

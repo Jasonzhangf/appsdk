@@ -4,6 +4,85 @@ use crate::server::operation_journal::{inject_next_append_fault, OperationJourna
 use crate::server::peer_tests::test_server;
 use std::sync::Arc;
 
+#[test]
+fn context_success_receipts_use_the_registered_project_owner() {
+    let (host, host_root) = test_server();
+    let (runtime, root) = test_server();
+    let worker = "receipt-owner";
+    let scope = Scope { root: root.clone() };
+    let app = AppServerId::new("registered-app").unwrap();
+    let transport = SelectedTransport {
+        kind: TransportKind::AppServer,
+        endpoint: Some("unix:///tmp/receipt-owner.sock".into()),
+        namespace: Some("codex_tui".into()),
+        session_id: Some("receipt-session".into()),
+        thread_id: Some("receipt-thread".into()),
+        capabilities: Default::default(),
+        tmux_endpoint: None,
+        self_check: "fixture".into(),
+    };
+    let prepared = runtime
+        .prepare_register_envelope_for_scope(
+            worker,
+            "receipt-token",
+            &transport,
+            GlobalState::canonical_project_scope(&root).unwrap(),
+            &root.to_string_lossy(),
+            app.clone(),
+            false,
+        )
+        .unwrap();
+    let nested = (
+        prepared.nested_command_id.clone(),
+        prepared.nested_operation_id.clone(),
+    );
+    let receipt = consume_prepared_register_typed(&runtime, worker, &transport, prepared, None);
+    assert!(receipt.ok, "{receipt:?}");
+    commit_current_thread_route_for_runtime(
+        &host,
+        &runtime,
+        worker,
+        &root.to_string_lossy(),
+        Some(&app),
+    )
+    .unwrap();
+    let (binding, transport) =
+        identity::registration_from_receipt(&receipt.data, worker, &root).unwrap();
+    let mut ident = identity::Identity {
+        worker_id: worker.into(),
+        token: "receipt-token".into(),
+        project_scope: Some(GlobalState::canonical_project_scope(&root).unwrap()),
+        runtime: None,
+        transport: None,
+    };
+    identity::persist_registration_at(&host.host_paths, &scope, &mut ident, binding, transport)
+        .unwrap();
+    let response = Resp::data(json!({"identity_receipt":ident}));
+    let context = ProjectContext::for_registered_root_with_app(
+        &root,
+        AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        business_receipts_for_success(&host, &runtime, &context, None, &response, Some(&nested)),
+        vec!["nested_register", "route", "credential", "lease"]
+    );
+    let mut stale = Resp::data(response.data.clone());
+    stale.data["identity_receipt"]["runtime"]["endpoint_generation"] = json!(2);
+    assert_eq!(
+        business_receipts_for_success(&host, &runtime, &context, None, &stale, Some(&nested)),
+        vec!["nested_register"]
+    );
+    let mut cross_scope = Resp::data(response.data.clone());
+    cross_scope.data["identity_receipt"]["runtime"]["appserver_id"] = json!("other-app");
+    assert_eq!(
+        business_receipts_for_success(&host, &runtime, &context, None, &cross_scope, Some(&nested)),
+        vec!["nested_register"]
+    );
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(host_root).unwrap();
+}
+
 fn tmux_anchor() -> TmuxCandidate {
     TmuxCandidate {
         endpoint: crate::proto::TmuxEndpoint {

@@ -170,6 +170,7 @@ impl ProjectRuntimeManager {
                 // first owner whose durable proof is missing.
                 let mut business_receipts = business_receipts_for_success(
                     &self.host,
+                    &runtime,
                     &context,
                     approved.as_ref(),
                     &response,
@@ -341,7 +342,7 @@ impl ProjectRuntimeManager {
                         if fallback.outcome != "completed" {
                             result.requires.kind = Some("repair".into());
                         }
-                        let _ = error;
+                        result.owner_readback.insert("error".into(), json!(error));
                         return (runtime, typed_operation_resp(result));
                     }
                 };

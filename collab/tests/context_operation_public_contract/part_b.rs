@@ -230,6 +230,26 @@ fn b04_restart_query_replays_every_durable_phase_without_mutation() {
 
         let attempt = fixture.command(&["context", "--op", target_id], Some(&target_pane));
         let typed = json_stdout(&attempt);
+        if matches!(target_phase, "inner_dispatched" | "effect_observed") {
+            assert_ne!(attempt.status.code(), Some(0), "{}", text(&attempt));
+            assert_eq!(typed["ok"], false, "{typed}");
+            assert_eq!(
+                typed["result"]["owner_readback"]["error"],
+                format!(
+                    "IDENTITY_OPERATION_DURABILITY_FAILED: append: {}",
+                    std::io::Error::from_raw_os_error(libc::EFBIG)
+                ),
+                "the finish error must survive the public projection: {typed}"
+            );
+            assert_eq!(typed["result"]["failed_phase"], target_phase, "{typed}");
+            let retained = if target_phase == "inner_dispatched" {
+                json!([])
+            } else {
+                calibrated["result"]["committed_phases"].clone()
+            };
+            assert_eq!(typed["result"]["committed_phases"], retained, "{typed}");
+            println!("B04 late OS failure {target_phase}: exit={:?} {}", attempt.status.code(), text(&attempt));
+        }
         assert_eq!(
             typed["result"]["outcome"],
             expected_outcome,
@@ -248,6 +268,13 @@ fn b04_restart_query_replays_every_durable_phase_without_mutation() {
             "{target_phase}: {committed:?}"
         );
         assert_eq!(committed.last().unwrap()["phase"], target_phase);
+        if matches!(target_phase, "inner_dispatched" | "effect_observed") {
+            assert_eq!(
+                typed["result"]["committed_phases"],
+                committed.last().unwrap().get("business_receipts").cloned().unwrap_or(json!([])),
+                "the public failure retains only durable business receipts: {typed}"
+            );
+        }
 
         fixture.restart_daemon();
         let before = (
@@ -315,6 +342,26 @@ fn b04_restart_query_replays_every_durable_phase_without_mutation() {
         );
         if target_phase == "validating" {
             fixture.stop_degraded_daemon();
+        } else if matches!(target_phase, "inner_dispatched" | "effect_observed") {
+            let before = stable_surfaces(&fixture, &target_pane, target_id);
+            let journal_bytes = (fs::read(fixture.host_journal()).unwrap(), fs::read(fixture.project_journal()).unwrap());
+            let retry = fixture.command(&["context", "--op", target_id], Some(&target_pane));
+            let replay = json_stdout(&retry);
+            assert_ne!(retry.status.code(), Some(0), "{}", text(&retry));
+            assert_eq!(replay["result"]["outcome"], expected_outcome, "{replay}");
+            assert_eq!(replay["result"]["committed_phases"], typed["result"]["committed_phases"], "{replay}");
+            assert_eq!(stable_surfaces(&fixture, &target_pane, target_id), before,
+                "same explicit key must only read the retained projection");
+            assert_eq!((fs::read(fixture.host_journal()).unwrap(), fs::read(fixture.project_journal()).unwrap()), journal_bytes,
+                "same-key invocation must append nothing to either journal");
+            let effects = project_register_effect_counts(&fixture.project_journal());
+            let fresh = fixture.context(None, Some(&target_pane));
+            assert_eq!(fresh["result"]["outcome"], "completed", "{fresh}");
+            assert_ne!(fresh["operation_id"], target_id, "{fresh}");
+            assert!(fresh["result"]["requires"]["approval"].is_null(), "{fresh}");
+            assert_eq!(project_register_effect_counts(&fixture.project_journal()), effects,
+                "fresh invocation reuses the committed identity without repeating Register");
+            println!("B04 readonly retry {target_phase}: exit={:?} {}; fresh default: {fresh}", retry.status.code(), text(&retry));
         }
     }
 }
@@ -490,6 +537,8 @@ fn b08_os_append_failure_is_typed_and_never_projects_durable_completion() {
     let failed_id = "ctxop-v23-b08-failed";
     let failed = fixture.command(&["context", "--op", failed_id], Some(&pane));
     let failed_text = text(&failed);
+    assert_ne!(failed.status.code(), Some(0), "{failed_text}");
+    println!("B08 admission OS failure: exit={:?} {failed_text}", failed.status.code());
     assert!(
         failed_text.contains("IDENTITY_OPERATION_DURABILITY_FAILED"),
         "the public request must surface the real append failure: {failed_text}"

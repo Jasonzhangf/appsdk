@@ -563,6 +563,7 @@ fn registered_binding_fence(response: &Resp) -> Option<(BindingId, u64)> {
 /// proof are both present.
 fn business_receipts_for_success(
     host: &Server,
+    runtime: &Server,
     context: &ProjectContext,
     approved: Option<&ApprovedAdmission>,
     response: &Resp,
@@ -590,21 +591,40 @@ fn business_receipts_for_success(
     let Some((binding_id, generation)) = registered_binding_fence(response) else {
         return receipts;
     };
+    let Some(app_scope_id) = response.data["identity_receipt"]["runtime"]["appserver_id"]
+        .as_str()
+        .and_then(|app| AppServerId::new(app.to_owned()).ok())
+    else {
+        return receipts;
+    };
     let route_scope = crate::scope::RouteScope {
-        app_scope_id: context.app_scope_id.clone(),
+        app_scope_id,
         project_scope_id: context.project_scope.clone(),
     };
     // Route owner: the committed route must name exactly the binding version
     // the Register receipt returned, for this exact scope and principal.
-    let route_proven = {
-        let state = host.state.lock().unwrap();
+    let committed_binding = {
+        let state = runtime.state.lock().unwrap();
         state
             .global
             .lookup_binding_for(&route_scope, &binding_id)
-            .is_some_and(|binding| {
+            .filter(|binding| {
                 binding.agent_id.as_str() == worker_id && binding.endpoint_generation == generation
             })
+            .cloned()
     };
+    let route_proven = committed_binding.as_ref().is_some_and(|binding| {
+        let state = host.state.lock().unwrap();
+        match (
+            binding.session_id.as_ref(),
+            binding.native_thread_id.as_ref(),
+        ) {
+            (Some(session), Some(thread)) => {
+                state.global.lookup_current_thread_route(session, thread) == Some(binding)
+            }
+            _ => false,
+        }
+    });
     if !route_proven {
         return receipts;
     }
@@ -626,7 +646,7 @@ fn business_receipts_for_success(
     // Lease owner: the Register owner armed a default direct-message lease for
     // this worker. It must still be live, not merely recorded.
     let lease_proven = {
-        let state = host.state.lock().unwrap();
+        let state = runtime.state.lock().unwrap();
         state
             .notification_subscriptions
             .get(&crate::server::mailbox::default_direct_message_id(

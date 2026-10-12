@@ -120,3 +120,28 @@
 - Public registry metadata query returned E404 on 2026-10-10. This is not proof
   of scope ownership or publishing permission. Skill structure and all local
   Markdown reference targets passed checks; no product tests were run.
+
+## 2026-10-11 — Collab same-pane Context completion owner
+
+- Valid existing master/peer restoration in a nonresident project could commit
+  Register but return `registered=true / outcome=partial`. Context completion
+  read project binding/default lease from the host owner instead of the selected
+  project runtime. It now uses the registered app scope/project owner and the
+  host current-thread route. Existing identity, grant and generation fences stay
+  with their owners; same-pane restoration requires no additional promotion.
+- Removed the wrongly placed host binding/lease checks and kept existing failure
+  semantics. The actual outer journal append error is no longer discarded. No
+  new recovery policy, approval workflow, fault hook or native creator was added.
+- Old installed Collab 0.2.0261 reproduces both opaque partial completion and the
+  discarded error (`Null`) through the same public CLI fixtures; the candidate
+  passes those counterexamples. Validation: 19 focused source cases, 6 tmux CLI,
+  2 recovery wire, 1 authority security wire and 4 failure/replay CLI cases pass.
+  One overall independent review and its sole finding recheck completed PASS.
+- `PEER_LIFECYCLE_CREATE_NATIVE_REQUIRED` is the existing AppServer-only native
+  creation capability boundary for a tmux actor, not host approval rejection.
+  Original living panes were verified; old daemon `unknown` is not proof of lost
+  registration and is not claimed independently fixed by this owner correction.
+- Source and raw evidence:
+  `/Volumes/Intel/playground/appsdk/.worker-runs/collab-pane-recovery-20261011/`.
+  Installation/shared daemon/live/remote evidence is recorded there separately;
+  source tests and review alone do not prove those delivery endpoints.

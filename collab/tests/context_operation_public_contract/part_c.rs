@@ -596,6 +596,10 @@ fn c13_cancellation_after_owner_begins_never_claims_cancelled() {
             "lease"
         ]);
         assert_eq!(payload["result"]["outcome"], "partial", "{payload}");
+        assert_eq!(payload["result"]["failed_phase"], "partial", "{payload}");
+        assert_eq!(payload["result"]["owner_readback"]["master_grant"]["observed"],
+            "injected grant owner failure before Start", "{payload}");
+        println!("C13 committed Register / next owner failure: exit={:?} {}", output.status.code(), text(&output));
         assert_eq!(
             payload["result"]["committed_phases"], proven_receipts,
             "{payload}"
@@ -656,6 +660,21 @@ fn c13_cancellation_after_owner_begins_never_claims_cancelled() {
         );
         assert_eq!(fs::read(fixture.host_journal()).unwrap(), host_before);
         assert_eq!(fs::read(fixture.project_journal()).unwrap(), project_before);
+        let retry = run_context_cli(
+            &fixture, Some(&pane), Some(operation_id), None, None,
+            Some(&identity_approval), Some(&grant_approval), None, false,
+        );
+        let replay = typed_failure(&retry);
+        assert_ne!(retry.status.code(), Some(0), "{}", text(&retry));
+        assert_eq!(replay["result"]["outcome"], "partial", "{replay}");
+        assert_eq!(replay["result"]["committed_phases"], proven_receipts, "{replay}");
+        assert_eq!(fs::read(fixture.host_journal()).unwrap(), host_before);
+        assert_eq!(fs::read(fixture.project_journal()).unwrap(), project_before);
+        let fresh = fixture.context(None, Some(&pane));
+        assert_eq!(fresh["result"]["outcome"], "completed", "{fresh}");
+        assert!(fresh["result"]["requires"]["approval"].is_null(), "{fresh}");
+        assert_ne!(fresh["operation_id"], operation_id, "{fresh}");
+        println!("C13 readonly retry: exit={:?} {}; fresh default: {fresh}", retry.status.code(), text(&retry));
     }
 
     // 3) Register Start syncs but outer promotion fails. No Register business
@@ -952,6 +971,7 @@ fn c14_lost_first_response_queries_same_local_key_after_restart_without_remutati
 
     fixture.restart_daemon();
     let query = fixture.context_query(operation_id, Some(&pane));
+    println!("C14 lost response / restart readback: {query}");
     assert_eq!(
         query["result"]["queried_operation"]["outcome"], "completed",
         "{query}"

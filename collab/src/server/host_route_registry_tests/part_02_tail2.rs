@@ -13,13 +13,13 @@ async fn failed_registration_route_commit_is_explicit_and_replay_safe() {
     let worker_id = "host-route-compensation-worker";
     let token = "token-host-route-compensation-worker";
 
-    let (runtime, registered) = manager.dispatch_sync(
+    let (runtime, registered) = register_host_fixture(&manager,
         Some(context.clone()),
         Req::register(
             worker_id.into(),
             token.into(),
             project_root.display().to_string(),
-            test_candidates("thread-host-route-compensation-old"),
+            test_candidates_at("thread-host-route-compensation-old", &project_root),
         ),
     );
     assert!(registered.ok, "{registered:?}");
@@ -90,7 +90,7 @@ async fn failed_registration_route_commit_is_explicit_and_replay_safe() {
         .fail_current_thread_route_publish
         .store(true, std::sync::atomic::Ordering::SeqCst);
 
-    let (_, response) = manager.dispatch_sync(
+    let (_, response) = register_host_fixture(&manager,
         Some(context_with_runtime(
             &project_root,
             app,
@@ -108,7 +108,7 @@ async fn failed_registration_route_commit_is_explicit_and_replay_safe() {
             worker_id.into(),
             token.into(),
             project_root.display().to_string(),
-            test_candidates("thread-host-route-compensation-new"),
+            test_candidates_at("thread-host-route-compensation-new", &project_root),
         ),
     );
     assert!(!response.ok, "{response:?}");
@@ -169,14 +169,21 @@ async fn failed_registration_route_commit_is_explicit_and_replay_safe() {
             crate::server::global_state::PeerRole::Master
         );
     }
-    let old = manager
+    let restored = manager
         .resolve_route_by_native_thread(
             "session-thread-host-route-compensation-old",
             "thread-host-route-compensation-old",
         )
-        .unwrap_err();
-    assert!(old.starts_with("ROUTE_RESOLVE_NOT_FOUND"), "{old}");
-    assert!(old.contains("is gone"), "{old}");
+        .unwrap();
+    // Endpoint loss does not invalidate the restored durable owner. A failed
+    // replacement must preserve this exact old identity and route generation.
+    assert_eq!(restored.agent_id, binding.agent_id);
+    assert_eq!(restored.binding_id, binding.binding_id);
+    assert_eq!(restored.app_scope_id, binding.app_scope_id);
+    assert_eq!(restored.project_scope, binding.project_scope);
+    assert_eq!(restored.endpoint_generation, binding.endpoint_generation);
+    assert_eq!(restored.session_id, binding.session_id);
+    assert_eq!(restored.native_thread_id, binding.native_thread_id);
     let new = manager
         .resolve_route_by_native_thread(
             "session-thread-host-route-compensation-new",
@@ -192,8 +199,8 @@ async fn failed_registration_route_commit_is_explicit_and_replay_safe() {
             "session-thread-host-route-compensation-old",
             "thread-host-route-compensation-old",
         )
-        .unwrap_err();
-    assert!(old.starts_with("ROUTE_RESOLVE_NOT_FOUND"), "{old}");
+        .unwrap();
+    assert_eq!(old, restored, "replay must preserve the exact restored durable route");
     let missing = replayed
         .resolve_route_by_native_thread(
             "session-thread-host-route-compensation-new",
@@ -263,13 +270,13 @@ async fn ambiguous_registration_route_commit_does_not_restore_stale_binding() {
     let worker_id = "host-route-ambiguous-worker";
     let token = "token-host-route-ambiguous-worker";
 
-    let (runtime, registered) = manager.dispatch_sync(
+    let (runtime, registered) = register_host_fixture(&manager,
         Some(context.clone()),
         Req::register(
             worker_id.into(),
             token.into(),
             project_root.display().to_string(),
-            test_candidates("thread-host-route-ambiguous-old"),
+            test_candidates_at("thread-host-route-ambiguous-old", &project_root),
         ),
     );
     assert!(registered.ok, "{registered:?}");
@@ -286,7 +293,7 @@ async fn ambiguous_registration_route_commit_does_not_restore_stale_binding() {
         .unwrap();
     inject_current_thread_route_journal_fault(CurrentThreadRouteJournalFault::Sync);
 
-    let (_, response) = manager.dispatch_sync(
+    let (_, response) = register_host_fixture(&manager,
         Some(context_with_runtime(
             &project_root,
             app,
@@ -304,7 +311,7 @@ async fn ambiguous_registration_route_commit_does_not_restore_stale_binding() {
             worker_id.into(),
             token.into(),
             project_root.display().to_string(),
-            test_candidates("thread-host-route-ambiguous-new"),
+            test_candidates_at("thread-host-route-ambiguous-new", &project_root),
         ),
     );
     assert!(!response.ok, "{response:?}");
@@ -367,13 +374,13 @@ async fn manager_external_register_is_durable_and_replayed_in_its_runtime() {
     let context = context_with_app(&external_root, "manager-external-app");
     let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
 
-    let (runtime, response) = manager.dispatch_sync(
+    let (runtime, response) = register_host_fixture(&manager,
         Some(context.clone()),
         Req::register(
             "manager-external-worker".into(),
             "token-manager-external-worker".into(),
             external_root.display().to_string(),
-            test_candidates("thread-manager-external-worker"),
+            test_candidates_at("thread-manager-external-worker", &external_root),
         ),
     );
     assert!(response.ok, "{response:?}");
@@ -428,23 +435,23 @@ async fn manager_routes_project_queries_mutations_and_poll_to_one_runtime() {
     let recipient_token = "token-route-aware-recipient";
     let context = context_with_app(&project_root, app_scope);
 
-    let (sender_runtime, sender_registration) = manager.dispatch_sync(
+    let (sender_runtime, sender_registration) = register_host_fixture(&manager,
         Some(context.clone()),
         Req::register(
             sender_id.into(),
             sender_token.into(),
             project_root.display().to_string(),
-            test_candidates("thread-route-aware-sender"),
+            test_candidates_at("thread-route-aware-sender", &project_root),
         ),
     );
     assert!(sender_registration.ok, "{sender_registration:?}");
-    let (recipient_runtime, recipient_registration) = manager.dispatch_sync(
+    let (recipient_runtime, recipient_registration) = register_host_fixture(&manager,
         Some(context.clone()),
         Req::register(
             recipient_id.into(),
             recipient_token.into(),
             project_root.display().to_string(),
-            test_candidates("thread-route-aware-recipient"),
+            test_candidates_at("thread-route-aware-recipient", &project_root),
         ),
     );
     assert!(recipient_registration.ok, "{recipient_registration:?}");
@@ -593,7 +600,7 @@ async fn pane_takeover_plans_a_foreign_claimant_without_evicting_it() {
 
     let candidates_a = test_candidates("thread-pane-pid-a").unwrap();
     let anchor = candidates_a.tmux.as_ref().unwrap().endpoint.clone();
-    let (_, first) = manager.dispatch_sync(
+    let (_, first) = register_host_fixture(&manager,
         Some(context.clone()),
         Req::register(
             "pane-pid-a".into(),
@@ -683,7 +690,7 @@ async fn a_rejected_registration_leaves_the_foreign_pane_claimant_bound() {
 
     let candidates = test_candidates("thread-rejected-a").unwrap();
     let anchor = candidates.tmux.as_ref().unwrap().endpoint.clone();
-    let (_, first) = manager.dispatch_sync(
+    let (_, first) = register_host_fixture(&manager,
         Some(context_with_app(&root, "appserver-cli")),
         Req::register(
             "rejected-incumbent".into(),
@@ -757,7 +764,7 @@ async fn a_later_registration_takes_a_foreign_scope_anchor() {
 
     let candidates = test_candidates("thread-cross-scope-retire").unwrap();
     let anchor = candidates.tmux.as_ref().unwrap().endpoint.clone();
-    let (_, first) = manager.dispatch_sync(
+    let (_, first) = register_host_fixture(&manager,
         Some(context_with_app(&root, "appserver-cli")),
         Req::register(
             "cross-scope-worker".into(),
@@ -782,7 +789,7 @@ async fn a_later_registration_takes_a_foreign_scope_anchor() {
         candidates
     };
 
-    let (_, taken) = manager.dispatch_sync(
+    let (_, taken) = register_host_fixture(&manager,
         Some(context_with_app(&root, "tui-other")),
         Req::register(
             "cross-scope-worker".into(),
@@ -831,7 +838,7 @@ async fn a_later_registration_takes_a_foreign_scope_anchor() {
 #[tokio::test]
 async fn stale_pane_route_index_is_named_and_the_identity_gate_bootstraps_over_it() {
     let (host, host_root, _) = test_server();
-    let (runtime, project_root, _) = test_server();
+    let (runtime, project_root, _) = runtime_fixture_for_host(&host);
     let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
     let manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
     let app = AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
@@ -842,7 +849,7 @@ async fn stale_pane_route_index_is_named_and_the_identity_gate_bootstraps_over_i
     // The route table needs a runtime, but the target pane must stay free so
     // the bootstrap can register a fresh provisional runtime for it.
     let other_candidates = test_candidates("stale-index-other").unwrap();
-    let registered = handle_register_with_app_scope(
+    let registered = seed_published_registration_fixture(
         &runtime,
         "stale-index-owner".into(),
         "token-stale-index-owner".into(),
@@ -887,7 +894,7 @@ async fn stale_pane_route_index_is_named_and_the_identity_gate_bootstraps_over_i
     assert!(error.contains("missing runtime binding"), "{error}");
 
     let context = context_with_app(&project_root, crate::identity::CLI_APP_SERVER_ID);
-    let (_, response) = manager.dispatch_sync(
+    let (_, response) = register_host_fixture(&manager,
         Some(context),
         Req::IdentityContext {
             facts: crate::proto::IdentityFacts {
@@ -951,7 +958,7 @@ async fn runtime_less_draft_recovers_the_committed_credential() {
     let committed_token = "token-committed-runtime-less";
     let draft_token = "token-draft-runtime-less";
 
-    let registered = handle_register_with_app_scope(
+    let registered = seed_published_registration_fixture(
         &runtime,
         worker.clone(),
         committed_token.into(),
@@ -987,7 +994,7 @@ async fn runtime_less_draft_recovers_the_committed_credential() {
     write_runtime_less_identity(&host_paths, &worker, draft_token, &project_scope);
 
     let context = context_with_app(&project_root, crate::identity::CLI_APP_SERVER_ID);
-    let (_, response) = manager.dispatch_sync(
+    let (_, response) = register_host_fixture(&manager,
         Some(context),
         Req::IdentityContext {
             facts: crate::proto::IdentityFacts {
@@ -1013,7 +1020,7 @@ async fn runtime_less_draft_recovers_the_committed_credential() {
 #[tokio::test]
 async fn runtime_less_draft_keeps_its_token_without_a_committed_record() {
     let (host, host_root, _) = test_server();
-    let (runtime, project_root, _) = test_server();
+    let (runtime, project_root, _) = runtime_fixture_for_host(&host);
     let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
     let manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
     let app = AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
@@ -1026,7 +1033,7 @@ async fn runtime_less_draft_keeps_its_token_without_a_committed_record() {
     // A different peer owns a different pane route; the draft's own name has
     // no committed record anywhere.
     let other_candidates = test_candidates("runtime-less-draft-other").unwrap();
-    let registered = handle_register_with_app_scope(
+    let registered = seed_published_registration_fixture(
         &runtime,
         "runtime-less-draft-other-owner".into(),
         "token-runtime-less-draft-other-owner".into(),
@@ -1065,7 +1072,7 @@ async fn runtime_less_draft_keeps_its_token_without_a_committed_record() {
     write_runtime_less_identity(&host_paths, &worker, draft_token, &project_scope);
 
     let context = context_with_app(&project_root, crate::identity::CLI_APP_SERVER_ID);
-    let (_, response) = manager.dispatch_sync(
+    let (_, response) = register_host_fixture(&manager,
         Some(context),
         Req::IdentityContext {
             facts: crate::proto::IdentityFacts {
@@ -1101,7 +1108,7 @@ async fn conflicting_pane_route_index_stays_fatal_for_the_identity_gate() {
     let endpoint = candidates.tmux.as_ref().unwrap().endpoint.clone();
     let worker = format!("codex-{}", endpoint.pane_id);
 
-    let registered = handle_register_with_app_scope(
+    let registered = seed_published_registration_fixture(
         &runtime,
         worker.clone(),
         "token-conflicting-index".into(),
@@ -1145,7 +1152,7 @@ async fn conflicting_pane_route_index_stays_fatal_for_the_identity_gate() {
     );
 
     let context = context_with_app(&project_root, crate::identity::CLI_APP_SERVER_ID);
-    let (_, response) = manager.dispatch_sync(
+    let (_, response) = register_host_fixture(&manager,
         Some(context),
         Req::IdentityContext {
             facts: crate::proto::IdentityFacts {
@@ -1174,7 +1181,7 @@ async fn conflicting_pane_route_index_stays_fatal_for_the_identity_gate() {
 #[tokio::test]
 async fn an_orphan_stale_index_claim_does_not_block_the_identity_gate_takeover() {
     let (host, host_root, _) = test_server();
-    let (runtime, project_root, _) = test_server();
+    let (runtime, project_root, _) = runtime_fixture_for_host(&host);
     let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
     let manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
     let app = AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
@@ -1188,7 +1195,7 @@ async fn an_orphan_stale_index_claim_does_not_block_the_identity_gate_takeover()
     // The route table needs a runtime, but this pane must stay free so the
     // bootstrap can register a fresh provisional runtime for it.
     let other_candidates = test_candidates("orphan-takeover-other").unwrap();
-    let registered = handle_register_with_app_scope(
+    let registered = seed_published_registration_fixture(
         &runtime,
         "orphan-takeover-owner".into(),
         "token-orphan-takeover-owner".into(),
@@ -1242,7 +1249,7 @@ async fn an_orphan_stale_index_claim_does_not_block_the_identity_gate_takeover()
 
     // One gate call must recover: it takes the pane instead of failing.
     let context = context_with_app(&project_root, crate::identity::CLI_APP_SERVER_ID);
-    let (_, response) = manager.dispatch_sync(
+    let (_, response) = register_host_fixture(&manager,
         Some(context),
         Req::IdentityContext {
             facts: crate::proto::IdentityFacts {

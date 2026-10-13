@@ -4,83 +4,421 @@ use crate::server::operation_journal::{inject_next_append_fault, OperationJourna
 use crate::server::peer_tests::test_server;
 use std::sync::Arc;
 
-#[test]
-fn context_success_receipts_use_the_registered_project_owner() {
+fn persisted_context_fixture() -> (
+    Arc<Server>,
+    Arc<Server>,
+    Arc<ProjectRuntimeManager>,
+    PathBuf,
+    PathBuf,
+    IdentityFacts,
+    identity::Identity,
+) {
     let (host, host_root) = test_server();
     let (runtime, root) = test_server();
-    let worker = "receipt-owner";
-    let scope = Scope { root: root.clone() };
-    let app = AppServerId::new("registered-app").unwrap();
-    let transport = SelectedTransport {
-        kind: TransportKind::AppServer,
-        endpoint: Some("unix:///tmp/receipt-owner.sock".into()),
-        namespace: Some("codex_tui".into()),
-        session_id: Some("receipt-session".into()),
-        thread_id: Some("receipt-thread".into()),
-        capabilities: Default::default(),
-        tmux_endpoint: None,
-        self_check: "fixture".into(),
+    let host = Arc::new(host);
+    let runtime = Arc::new(runtime);
+    let mut candidate = tmux_anchor();
+    candidate.cwd = root.display().to_string();
+    let app = AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap();
+    // Durable prior state: this fixture establishes an already-registered owner
+    // so the ordinary-restore and role tests start from a committed identity.
+    // It is not an initial-registration test, so it seeds defined typed state
+    // instead of driving a live participant return. The public owner is
+    // exercised after this precondition.
+    let transport = crate::proto::SelectedTransport {
+        kind: crate::proto::TransportKind::Tmux,
+        endpoint: Some(candidate.endpoint.socket_path.clone()),
+        namespace: Some(candidate.endpoint.tmux_session_id.clone()),
+        session_id: candidate.endpoint.codex_session_id.clone(),
+        thread_id: candidate.endpoint.codex_thread_id.clone(),
+        tmux_endpoint: Some(candidate.endpoint.clone()),
+        capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
+        self_check: "persisted context fixture owner".into(),
     };
-    let prepared = runtime
-        .prepare_register_envelope_for_scope(
-            worker,
-            "receipt-token",
-            &transport,
-            GlobalState::canonical_project_scope(&root).unwrap(),
-            &root.to_string_lossy(),
-            app.clone(),
-            false,
-        )
-        .unwrap();
-    let nested = (
-        prepared.nested_command_id.clone(),
-        prepared.nested_operation_id.clone(),
+    let registered = crate::server::peer_tests::seed_committed_owner(
+        &runtime,
+        "saved-peer",
+        "saved-token",
+        &transport,
+        &root.display().to_string(),
+        Some(app.clone()),
     );
-    let receipt = consume_prepared_register_typed(&runtime, worker, &transport, prepared, None);
-    assert!(receipt.ok, "{receipt:?}");
+    assert!(registered.ok, "{registered:?}");
     commit_current_thread_route_for_runtime(
         &host,
         &runtime,
-        worker,
-        &root.to_string_lossy(),
+        "saved-peer",
+        &root.display().to_string(),
         Some(&app),
     )
     .unwrap();
     let (binding, transport) =
-        identity::registration_from_receipt(&receipt.data, worker, &root).unwrap();
-    let mut ident = identity::Identity {
-        worker_id: worker.into(),
-        token: "receipt-token".into(),
+        identity::registration_from_receipt(&registered.data, "saved-peer", &root).unwrap();
+    let mut saved = identity::Identity {
+        worker_id: "saved-peer".into(),
+        token: "saved-token".into(),
         project_scope: Some(GlobalState::canonical_project_scope(&root).unwrap()),
         runtime: None,
         transport: None,
     };
-    identity::persist_registration_at(&host.host_paths, &scope, &mut ident, binding, transport)
-        .unwrap();
-    let response = Resp::data(json!({"identity_receipt":ident}));
-    let context = ProjectContext::for_registered_root_with_app(
-        &root,
-        AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap(),
+    identity::persist_registration_at(
+        &host.host_paths,
+        &Scope { root: root.clone() },
+        &mut saved,
+        binding,
+        transport,
     )
     .unwrap();
-    assert_eq!(
-        business_receipts_for_success(&host, &runtime, &context, None, &response, Some(&nested)),
-        vec!["nested_register", "route", "credential", "lease"]
+    let manager = recovery_manager(host.clone());
+    let context = recovery_context(&root);
+    manager.install_runtime(
+        &(app.as_str().into(), context.project_scope.as_str().into()),
+        runtime.clone(),
+        None,
     );
-    let mut stale = Resp::data(response.data.clone());
-    stale.data["identity_receipt"]["runtime"]["endpoint_generation"] = json!(2);
-    assert_eq!(
-        business_receipts_for_success(&host, &runtime, &context, None, &stale, Some(&nested)),
-        vec!["nested_register"]
+    (
+        host,
+        runtime,
+        manager,
+        host_root,
+        root,
+        IdentityFacts {
+            tmux: Some(candidate),
+            ..Default::default()
+        },
+        saved,
+    )
+}
+
+#[test]
+fn ordinary_persisted_context_has_no_registration_effects() {
+    let (host, runtime, manager, host_root, root, mut facts, saved) = persisted_context_fixture();
+    let context = recovery_context(&root);
+    let before = std::fs::read(&runtime.journal_path).unwrap();
+    // An unavailable adjacent adaptor must never be admitted on restore.
+    facts.endpoint = Some("unix:///tmp/unavailable-restore-adaptor.sock".into());
+    facts.namespace = Some("codex_tui".into());
+    facts.session_id = Some("unselected-session".into());
+    facts.thread_id = Some("unselected-thread".into());
+    let (_, restored) = manager.dispatch_sync(
+        Some(context),
+        Req::IdentityContext {
+            facts,
+            identity_context: None,
+        },
     );
-    let mut cross_scope = Resp::data(response.data.clone());
-    cross_scope.data["identity_receipt"]["runtime"]["appserver_id"] = json!("other-app");
+    assert!(restored.ok, "{restored:?}");
+    assert_eq!(restored.data["identity_receipt"], json!(saved));
     assert_eq!(
-        business_receipts_for_success(&host, &runtime, &context, None, &cross_scope, Some(&nested)),
-        vec!["nested_register"]
+        std::fs::read(&runtime.journal_path).unwrap(),
+        before,
+        "ordinary restore must not Register or select/admit an adaptor"
     );
+    let stable = facts_from_saved_pane(&saved);
+    let (_, offline) = manager.dispatch_sync(
+        Some(recovery_context(&root)),
+        Req::IdentityContext {
+            facts: stable,
+            identity_context: None,
+        },
+    );
+    assert!(offline.ok, "{offline:?}");
+    assert_eq!(offline.data["identity_receipt"], json!(saved));
+    assert_eq!(std::fs::read(&runtime.journal_path).unwrap(), before);
+    drop(host);
     std::fs::remove_dir_all(root).unwrap();
     std::fs::remove_dir_all(host_root).unwrap();
+}
+
+#[test]
+fn minimal_role_intent_is_an_explicit_authority_approval() {
+    let (host, runtime, manager, host_root, root, facts, saved) = persisted_context_fixture();
+    let context = recovery_context(&root);
+    let app = context.app_scope_id.clone();
+    let mut other = facts.tmux.clone().unwrap();
+    other.endpoint.pane_id = "%4".into();
+    // The unrelated master is durable prior state, so seed a committed owner
+    // instead of driving an initial Register: a tmux candidate can only finish
+    // registration through a live participant return, which this fixture does
+    // not model.
+    let transport = SelectedTransport {
+        kind: TransportKind::Tmux,
+        endpoint: Some(other.endpoint.socket_path.clone()),
+        namespace: Some(other.endpoint.tmux_session_id.clone()),
+        session_id: other
+            .endpoint
+            .codex_session_id
+            .clone()
+            .or_else(|| Some(other.endpoint.tmux_session_id.clone())),
+        thread_id: other
+            .endpoint
+            .codex_thread_id
+            .clone()
+            .or_else(|| Some(other.endpoint.pane_id.clone())),
+        tmux_endpoint: Some(other.endpoint.clone()),
+        capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
+        self_check: "prior committed unrelated master fixture".into(),
+    };
+    let registered = crate::server::peer_tests::seed_committed_owner(
+        &runtime,
+        "unrelated-master",
+        "other-token",
+        &transport,
+        &root.display().to_string(),
+        Some(app),
+    );
+    assert!(registered.ok, "{registered:?}");
+    assert!(
+        handle_master_promote(
+            &runtime,
+            "unrelated-master".into(),
+            "other-token".into(),
+            "user assigned unrelated master".into()
+        )
+        .ok
+    );
+    commit_current_thread_route_for_runtime(
+        &host,
+        &runtime,
+        "unrelated-master",
+        &root.display().to_string(),
+        Some(&context.app_scope_id),
+    )
+    .unwrap();
+    let role_scope = RouteScope {
+        app_scope_id: context.app_scope_id.clone(),
+        project_scope_id: context.project_scope.clone(),
+    };
+    let unrelated =
+        current_master_grant(&runtime.state.lock().unwrap(), Some(&role_scope)).unwrap();
+    for (step, role) in ["peer", "master", "peer"].into_iter().enumerate() {
+        let mut stale = saved.clone();
+        stale.token = "stale-token".into();
+        let identity_path = host
+            .host_paths
+            .state_root()
+            .join("identities/saved-peer/identity.json");
+        std::fs::write(&identity_path, serde_json::to_vec(&stale).unwrap()).unwrap();
+        let mut request = IdentityContextRequest {
+            operation_id: format!("ctxop-role-{step}"),
+            invocation: "approved_recovery".into(),
+            action: "context".into(),
+            facts: facts.clone(),
+            approval: Some(
+                json!({"decision":"approved", "target_identity":"saved-peer", "action":format!("restore_{role}"), "authorization":format!("user requests {role}"), "expected_incumbent":{"binding_id":"obsolete-caller-fence","endpoint_generation":999}}),
+            ),
+            grant_approval: None,
+            query: false,
+            query_capability: "role-test-capability".into(),
+            invocation_ticket: String::new(),
+        };
+        if role == "master" {
+            request.grant_approval = request.approval.take();
+        }
+        let (_, result) = manager.identity_context(context.clone(), request.clone());
+        assert!(result.ok, "{result:?}");
+        assert_eq!(result.data["result"]["outcome"], "completed", "{result:?}");
+        assert_eq!(
+            result.data["result"]["snapshot"]["identity"]["role"],
+            if role == "master" { "master" } else { "worker" }
+        );
+        let grant = current_master_grant(&runtime.state.lock().unwrap(), Some(&role_scope));
+        if step == 0 {
+            assert_eq!(grant, Some(unrelated.clone()));
+        } else if role == "master" {
+            assert_eq!(grant.unwrap().agent_id.as_str(), "saved-peer");
+        } else {
+            assert!(grant.is_none());
+        }
+        let before = (
+            std::fs::read(&host.journal_path).unwrap(),
+            std::fs::read(&runtime.journal_path).unwrap(),
+            std::fs::read(&identity_path).unwrap(),
+        );
+        let (_, replay) = manager.identity_context(context.clone(), request);
+        assert!(replay.ok, "{replay:?}");
+        assert_eq!(
+            before,
+            (
+                std::fs::read(&host.journal_path).unwrap(),
+                std::fs::read(&runtime.journal_path).unwrap(),
+                std::fs::read(&identity_path).unwrap()
+            ),
+            "same-key replay must not duplicate effects"
+        );
+    }
+    let before = std::fs::read(&runtime.journal_path).unwrap();
+    // A real read-only descriptor makes the authority owner append fail.
+    *runtime.journal.lock().unwrap() = std::fs::File::open(&runtime.journal_path).unwrap();
+    let (_, failed) = manager.identity_context(context.clone(), IdentityContextRequest {
+        operation_id: "ctxop-role-write-failure".into(), invocation: "approved_recovery".into(), action: "context".into(), facts,
+        approval: Some(json!({"decision":"approved", "target_identity":"saved-peer", "action":"restore_master", "authorization":"user requires master"})),
+        grant_approval: None, query: false, query_capability: "role-failure-capability".into(), invocation_ticket: String::new(),
+    });
+    assert!(!failed.ok, "{failed:?}");
+    assert!(
+        failed.data["result"]["owner_readback"]["master_grant"]["observed"]
+            .as_str()
+            .unwrap()
+            .contains("MASTER_DURABILITY_FAILED"),
+        "{failed:?}"
+    );
+    assert!(!failed.data["result"]["committed_phases"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("grant")));
+    assert!(current_master_grant(&runtime.state.lock().unwrap(), Some(&role_scope)).is_none());
+    assert_eq!(std::fs::read(&runtime.journal_path).unwrap(), before);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(host_root).unwrap();
+}
+
+fn facts_from_saved_pane(saved: &identity::Identity) -> IdentityFacts {
+    let endpoint = saved
+        .transport
+        .as_ref()
+        .unwrap()
+        .tmux_endpoint
+        .as_ref()
+        .unwrap();
+    IdentityFacts {
+        tmux_anchor: Some(crate::proto::TmuxPaneAnchor {
+            socket_path: endpoint.socket_path.clone(),
+            pane_id: endpoint.pane_id.clone(),
+        }),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn context_success_receipts_use_the_registered_project_owner() {
+    for kind in [TransportKind::AppServer, TransportKind::Tmux] {
+        let (host, host_root) = test_server();
+        let (runtime, root) = test_server();
+        let worker = "receipt-owner";
+        let scope = Scope { root: root.clone() };
+        let app = AppServerId::new("registered-app").unwrap();
+        let mut transport = SelectedTransport {
+            kind: TransportKind::AppServer,
+            endpoint: Some("unix:///tmp/receipt-owner.sock".into()),
+            namespace: Some("codex_tui".into()),
+            session_id: Some("receipt-session".into()),
+            thread_id: Some("receipt-thread".into()),
+            capabilities: Default::default(),
+            tmux_endpoint: None,
+            self_check: "fixture".into(),
+        };
+        if kind == TransportKind::Tmux {
+            let endpoint = tmux_anchor().endpoint;
+            transport.kind = kind;
+            transport.endpoint = Some(endpoint.socket_path.clone());
+            transport.namespace = Some(endpoint.tmux_session_id.clone());
+            transport.session_id = None;
+            transport.thread_id = None;
+            transport.tmux_endpoint = Some(endpoint);
+        }
+        let prepared = runtime
+            .prepare_register_envelope_for_scope(
+                worker,
+                "receipt-token",
+                &transport,
+                GlobalState::canonical_project_scope(&root).unwrap(),
+                &root.to_string_lossy(),
+                app.clone(),
+                false,
+            )
+            .unwrap();
+        let nested = (
+            prepared.nested_command_id.clone(),
+            prepared.nested_operation_id.clone(),
+        );
+        let receipt = consume_prepared_register_typed(&runtime, worker, &transport, prepared, None);
+        assert!(receipt.ok, "{receipt:?}");
+        commit_current_thread_route_for_runtime(
+            &host,
+            &runtime,
+            worker,
+            &root.to_string_lossy(),
+            Some(&app),
+        )
+        .unwrap();
+        let (binding, transport) =
+            identity::registration_from_receipt(&receipt.data, worker, &root).unwrap();
+        let mut ident = identity::Identity {
+            worker_id: worker.into(),
+            token: "receipt-token".into(),
+            project_scope: Some(GlobalState::canonical_project_scope(&root).unwrap()),
+            runtime: None,
+            transport: None,
+        };
+        identity::persist_registration_at(&host.host_paths, &scope, &mut ident, binding, transport)
+            .unwrap();
+        let response = Resp::data(json!({"identity_receipt":ident}));
+        let context = ProjectContext::for_registered_root_with_app(
+            &root,
+            AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            business_receipts_for_success(
+                &host,
+                &runtime,
+                &context,
+                None,
+                &response,
+                Some(&nested)
+            ),
+            vec!["nested_register", "route", "credential", "lease"]
+        );
+        let mut stale = Resp::data(response.data.clone());
+        stale.data["identity_receipt"]["runtime"]["endpoint_generation"] = json!(2);
+        assert_eq!(
+            business_receipts_for_success(&host, &runtime, &context, None, &stale, Some(&nested)),
+            vec!["nested_register"]
+        );
+        let mut cross_scope = Resp::data(response.data.clone());
+        cross_scope.data["identity_receipt"]["runtime"]["appserver_id"] = json!("other-app");
+        assert_eq!(
+            business_receipts_for_success(
+                &host,
+                &runtime,
+                &context,
+                None,
+                &cross_scope,
+                Some(&nested)
+            ),
+            vec!["nested_register"]
+        );
+        let identity_path = host
+            .host_paths
+            .state_root()
+            .join("identities")
+            .join(worker)
+            .join("identity.json");
+        let identity_bytes = std::fs::read(&identity_path).unwrap();
+        let mut wrong_credential: serde_json::Value =
+            serde_json::from_slice(&identity_bytes).unwrap();
+        wrong_credential["token"] = json!("not-the-current-project-credential");
+        std::fs::write(
+            &identity_path,
+            serde_json::to_vec(&wrong_credential).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            business_receipts_for_success(
+                &host,
+                &runtime,
+                &context,
+                None,
+                &response,
+                Some(&nested)
+            ),
+            vec!["nested_register", "route"],
+            "stale credential must not prove completion"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(host_root).unwrap();
+    }
 }
 
 fn tmux_anchor() -> TmuxCandidate {
@@ -418,6 +756,7 @@ fn s23_b03_outer_sync_failure_prevents_register_consume() {
         false,
         None,
         Some(&mut before_consume),
+        None,
     );
     assert!(!response.ok, "{response:?}");
     assert!(
@@ -716,6 +1055,43 @@ fn recovery_facts(endpoint: &str, session: &str, thread: &str) -> IdentityFacts 
     }
 }
 
+/// A fake AppServer that serves the real admission handshake on every
+/// connection the daemon opens, then stops when the test releases it.
+///
+/// The number of connections a valid path opens is a product fact: an initial
+/// registration opens the verify, dispatch and observe connections, while an
+/// already-committed restore opens fewer. A fixed count would block on an
+/// accept the daemon will never make, so the loop is bounded by this explicit
+/// owned shutdown instead: `join`/`drop` stop the serve loop even when a valid
+/// path opened fewer connections.
+struct FakeAppServer {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    socket: PathBuf,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl FakeAppServer {
+    fn release(&self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        // Wake a pending accept so the serve loop observes the stop flag.
+        let _ = std::os::unix::net::UnixStream::connect(&self.socket);
+    }
+
+    fn join(mut self) -> std::thread::Result<()> {
+        self.release();
+        self.handle.take().expect("fake appserver handle").join()
+    }
+}
+
+impl Drop for FakeAppServer {
+    fn drop(&mut self) {
+        self.release();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 /// Serve the exact AppServer admission handshake (`initialize` then
 /// `thread/read`) so the daemon's real `verify_candidate` accepts the
 /// candidate without any production fault seam.
@@ -724,15 +1100,27 @@ fn serve_fake_appserver(
     session: &str,
     thread: &str,
     cwd: &Path,
-    connections: usize,
-) -> std::thread::JoinHandle<()> {
+) -> FakeAppServer {
     use std::io::{Read, Write};
     let session = session.to_owned();
     let thread = thread.to_owned();
     let cwd = cwd.to_string_lossy().into_owned();
-    std::thread::spawn(move || {
-        for _ in 0..connections {
-            let (mut stream, _) = listener.accept().unwrap();
+    let socket = listener
+        .local_addr()
+        .ok()
+        .and_then(|addr| addr.as_pathname().map(Path::to_path_buf))
+        .expect("fake appserver listener has a socket path");
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = Arc::clone(&stop);
+    let handle = std::thread::spawn(move || {
+        let mut registration: Option<(String, String, String, i64)> = None;
+        while !flag.load(std::sync::atomic::Ordering::SeqCst) {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            if flag.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
             let mut header = Vec::new();
             let mut byte = [0_u8; 1];
             while !header.ends_with(b"\r\n\r\n") {
@@ -743,7 +1131,9 @@ fn serve_fake_appserver(
                     .write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
                     .unwrap();
             loop {
-                let request = read_test_frame(&mut stream);
+                let Some(request) = read_test_frame(&mut stream) else {
+                    break;
+                };
                 let request: serde_json::Value = serde_json::from_slice(&request).unwrap();
                 let Some(id) = request.get("id").cloned() else {
                     continue;
@@ -751,17 +1141,98 @@ fn serve_fake_appserver(
                 let method = request["method"].as_str().unwrap();
                 let response = match method {
                     "initialize" => json!({"id": id, "result": {}}),
+                    "thread/resume" => json!({
+                        "id": id,
+                        "result": {"thread": {
+                            "id": thread,
+                            "sessionId": session,
+                            "cwd": cwd,
+                            "status": {"type": "idle"}
+                        }}
+                    }),
                     "thread/read" => {
+                        let turns = if request["params"]["includeTurns"].as_bool() == Some(true) {
+                            registration
+                                .as_ref()
+                                .map(|(turn_id, client_message_id, marker, completed_at)| {
+                                    json!([{
+                                        "id": turn_id,
+                                        "status": "completed",
+                                        "completedAt": completed_at,
+                                        "items": [
+                                            {
+                                                "type": "userMessage",
+                                                "id": client_message_id,
+                                                "clientMessageId": client_message_id
+                                            },
+                                            {"type": "agentMessage", "text": marker}
+                                        ]
+                                    }])
+                                })
+                                .unwrap_or_else(|| json!([]))
+                        } else {
+                            json!([])
+                        };
                         json!({
                             "id": id,
-                            "result": {"thread": {"id": thread, "sessionId": session, "cwd": cwd}}
+                            "result": {"thread": {
+                                "id": thread,
+                                "sessionId": session,
+                                "cwd": cwd,
+                                "status": {"type": "idle"},
+                                "turns": turns
+                            }}
                         })
                     }
                     "thread/items/list" => {
                         json!({"id": id, "error": {"code": -32601, "message": "unsupported"}})
                     }
-                    "turn/start" | "turn/steer" => {
-                        json!({"id": id, "error": {"code": -32600, "message": "invalid params"}})
+                    "turn/start" => {
+                        let thread_id = request["params"]["threadId"].as_str().unwrap_or_default();
+                        if thread_id.is_empty() {
+                            json!({
+                                "id": id,
+                                "result": {"turn": {"id": "probe-turn", "status": "inProgress"}}
+                            })
+                        } else {
+                            let output = request["params"]["toolOutput"]["output"]
+                                .as_str()
+                                .expect("registration dispatch carries the delegated prompt");
+                            let start = output
+                                .find("COLLAB_REGISTER_CHALLENGE ")
+                                .expect("delegated prompt carries the registration challenge");
+                            let raw = &output[start + "COLLAB_REGISTER_CHALLENGE ".len()..];
+                            let mut values = serde_json::Deserializer::from_str(raw)
+                                .into_iter::<serde_json::Value>();
+                            let challenge = values.next().unwrap().unwrap();
+                            let marker = challenge["challenge"]
+                                .as_str()
+                                .expect("registration challenge carries its marker")
+                                .to_owned();
+                            let client_message_id = request["params"]["clientUserMessageId"]
+                                .as_str()
+                                .expect("registration dispatch carries its command id")
+                                .to_owned();
+                            let turn_id = format!("registration-turn-{thread_id}");
+                            let completed_at = chrono::Utc::now().timestamp();
+                            registration =
+                                Some((turn_id.clone(), client_message_id, marker, completed_at));
+                            json!({
+                                "id": id,
+                                "result": {"turn": {"id": turn_id, "status": "inProgress"}}
+                            })
+                        }
+                    }
+                    "turn/steer" => {
+                        let thread_id = request["params"]["threadId"].as_str().unwrap_or_default();
+                        let turn_id = if thread_id.is_empty() {
+                            "probe-turn"
+                        } else {
+                            request["params"]["expectedTurnId"]
+                                .as_str()
+                                .unwrap_or_default()
+                        };
+                        json!({"id": id, "result": {"turnId": turn_id}})
                     }
                     "thread/turns/list" => json!({"id": id, "result": {"data": []}}),
                     other => panic!("unexpected AppServer method {other}"),
@@ -772,38 +1243,52 @@ fn serve_fake_appserver(
                         &serde_json::to_vec(&response).unwrap(),
                     ))
                     .unwrap();
-                if method == "thread/turns/list" {
+                if method == "thread/turns/list"
+                    || (method == "thread/read"
+                        && request["params"]["includeTurns"].as_bool() == Some(true))
+                    || (method == "turn/start"
+                        && request["params"]["threadId"]
+                            .as_str()
+                            .is_some_and(|thread_id| !thread_id.is_empty()))
+                {
                     break;
                 }
             }
             let _ = stream.shutdown(std::net::Shutdown::Both);
         }
-    })
+    });
+    FakeAppServer {
+        stop,
+        socket,
+        handle: Some(handle),
+    }
 }
 
-fn read_test_frame(stream: &mut std::os::unix::net::UnixStream) -> Vec<u8> {
+/// Read one client frame, or `None` when the client closed the stream. A clean
+/// close ends the connection instead of panicking the serve thread.
+fn read_test_frame(stream: &mut std::os::unix::net::UnixStream) -> Option<Vec<u8>> {
     use std::io::Read;
     let mut header = [0_u8; 2];
-    stream.read_exact(&mut header).unwrap();
+    stream.read_exact(&mut header).ok()?;
     let masked = header[1] & 0x80 != 0;
     let mut length = (header[1] & 0x7f) as usize;
     if length == 126 {
         let mut bytes = [0_u8; 2];
-        stream.read_exact(&mut bytes).unwrap();
+        stream.read_exact(&mut bytes).ok()?;
         length = u16::from_be_bytes(bytes) as usize;
     }
     let mut mask = [0_u8; 4];
     if masked {
-        stream.read_exact(&mut mask).unwrap();
+        stream.read_exact(&mut mask).ok()?;
     }
     let mut payload = vec![0_u8; length];
-    stream.read_exact(&mut payload).unwrap();
+    stream.read_exact(&mut payload).ok()?;
     if masked {
         for (index, byte) in payload.iter_mut().enumerate() {
             *byte ^= mask[index % 4];
         }
     }
-    payload
+    Some(payload)
 }
 
 fn encode_test_frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
@@ -952,15 +1437,9 @@ fn register_approval_proof_is_scoped_and_rechecks_the_exact_incumbent_fence() {
 
 /// Spawn the fake AppServer that answers the recovery Register's own
 /// `verify_candidate`, returning the request candidates bound to it.
-fn recovery_appserver(
-    endpoint: &Path,
-    session: &str,
-    thread: &str,
-    cwd: &Path,
-    connections: usize,
-) -> std::thread::JoinHandle<()> {
+fn recovery_appserver(endpoint: &Path, session: &str, thread: &str, cwd: &Path) -> FakeAppServer {
     let listener = std::os::unix::net::UnixListener::bind(endpoint).unwrap();
-    serve_fake_appserver(listener, session, thread, cwd, connections)
+    serve_fake_appserver(listener, session, thread, cwd)
 }
 
 /// Register and promote the daemon's current credential, then persist a
@@ -978,7 +1457,6 @@ fn stale_master_incumbent(
         &format!("session-{worker_id}-1"),
         &first_thread,
         root,
-        1,
     );
     let first_endpoint = first_socket.to_string_lossy().into_owned();
     let first = handle_register_with_app_scope(
@@ -1181,12 +1659,21 @@ fn approved_register_recovery_commits_binding_and_retains_master_grant() {
         stale_master_incumbent(&server, &root, "peer-a");
     let context = recovery_context(&root);
     let before_grant = grant_for(&server, &root, &binding_id).expect("master grant");
+    let incumbent_token = server.state.lock().unwrap().workers["peer-a"].token.clone();
+    assert_eq!(incumbent_token, "token-1");
+    assert_eq!(
+        identity::read_persisted(&server.host_paths, "peer-a")
+            .unwrap()
+            .unwrap()
+            .token,
+        "token-2",
+        "the local credential is deliberately stale"
+    );
     let recovery_server = recovery_appserver(
         &endpoint,
         facts.session_id.as_deref().expect("recovery session"),
         &thread,
         &root,
-        1,
     );
     let request = IdentityContextRequest {
         operation_id: "ctxop-approved-peer".into(),
@@ -1255,9 +1742,20 @@ fn approved_register_recovery_commits_binding_and_retains_master_grant() {
                 .workers
                 .get("peer-a")
                 .map(|worker| worker.token.as_str()),
-            Some("token-2")
+            Some(incumbent_token.as_str()),
+            "approved identity restoration keeps the current owner's credential"
         );
     }
+    assert_eq!(host_token.as_deref(), Some(incumbent_token.as_str()));
+    assert_eq!(runtime_token.as_deref(), Some(incumbent_token.as_str()));
+    assert_eq!(
+        identity::read_persisted(&server.host_paths, "peer-a")
+            .unwrap()
+            .unwrap()
+            .token,
+        incumbent_token,
+        "the stale local credential must converge to the authoritative owner"
+    );
     let after_grant = grant_for(&server, &root, &binding_id).expect("retained grant");
     assert_eq!(after_grant.agent_id, before_grant.agent_id);
     assert_eq!(after_grant.binding_id, before_grant.binding_id);
@@ -1266,10 +1764,10 @@ fn approved_register_recovery_commits_binding_and_retains_master_grant() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-/// A changed incumbent fence is refused with the accepted typed conflict
-/// before any owner effect, so no binding, credential, or grant moves.
+/// Explicit recovery reads the current incumbent internally. A stale caller
+/// fence does not require another approval; the existing grant survives.
 #[test]
-fn stale_incumbent_fence_is_refused_with_no_side_effects() {
+fn approved_recovery_reads_current_incumbent_despite_stale_caller_fence() {
     if !unix_sockets_available() {
         eprintln!("SKIP stale-incumbent owner test: sandbox denied unix socket bind");
         return;
@@ -1277,10 +1775,16 @@ fn stale_incumbent_fence_is_refused_with_no_side_effects() {
     let (server, root) = test_server();
     let server = Arc::new(server);
     let manager = recovery_manager(server.clone());
-    let (facts, binding_id, incumbent_generation, _agent, _endpoint, _thread) =
+    let (facts, binding_id, incumbent_generation, _agent, endpoint, thread) =
         stale_master_incumbent(&server, &root, "peer-stale");
     let context = recovery_context(&root);
     let before_grant = grant_for(&server, &root, &binding_id).expect("master grant");
+    let recovery_server = recovery_appserver(
+        &endpoint,
+        facts.session_id.as_deref().unwrap(),
+        &thread,
+        &root,
+    );
     let request = IdentityContextRequest {
         operation_id: "ctxop-approved-stale".into(),
         invocation: "approved_recovery".into(),
@@ -1299,12 +1803,9 @@ fn stale_incumbent_fence_is_refused_with_no_side_effects() {
         invocation_ticket: String::new(),
     };
     let (_, response) = manager.identity_context(context.clone(), request.clone());
-    assert!(!response.ok);
-    assert_eq!(response.data["result"]["outcome"], "denied");
-    assert_eq!(
-        response.data["result"]["owner_readback"]["error"],
-        "APPROVAL_STALE_CONFLICT"
-    );
+    assert!(response.ok, "{response:?}");
+    recovery_server.join().unwrap();
+    assert_eq!(response.data["result"]["outcome"], "completed");
     {
         let state = server.state.lock().unwrap();
         let binding = state
@@ -1317,10 +1818,14 @@ fn stale_incumbent_fence_is_refused_with_no_side_effects() {
                 &binding_id,
             )
             .expect("binding");
-        assert_eq!(binding.endpoint_generation, incumbent_generation);
+        assert!(binding.endpoint_generation > incumbent_generation);
     }
     let after_grant = grant_for(&server, &root, &binding_id).expect("grant");
-    assert_eq!(after_grant, before_grant);
+    assert_eq!(after_grant.resource_id(), before_grant.resource_id());
+    assert_eq!(
+        after_grant.resource_generation(),
+        before_grant.resource_generation()
+    );
     assert!(manager
         .operation_journal
         .query(
@@ -1328,7 +1833,7 @@ fn stale_incumbent_fence_is_refused_with_no_side_effects() {
             context.project_scope.as_str(),
             context.app_scope_id.as_str()
         )
-        .is_err());
+        .is_ok());
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -1353,7 +1858,6 @@ fn dual_approval_commits_identity_and_separate_grant_replacement() {
         facts.session_id.as_deref().expect("recovery session"),
         &thread,
         &root,
-        1,
     );
     let request = IdentityContextRequest {
         operation_id: "ctxop-approved-dual".into(),

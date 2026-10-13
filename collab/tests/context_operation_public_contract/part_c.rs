@@ -139,7 +139,7 @@ fn c12_sigint_before_admission_returns_local_cancelled_without_daemon_operation(
     let mut harness = CancellationHarness::start(&unique_root("c12-hook"));
     let (mut fixture, pane) = Fixture::isolated("collab-v23-c12");
     fixture.enable_cancellation_hooks(harness.socket());
-    let seed = fixture.context(Some("ctxop-v23-c12-seed"), Some(&pane));
+    let seed = fixture.registered_context("ctxop-v23-c12-seed", &pane);
     assert_eq!(seed["result"]["outcome"], "completed", "{seed}");
     let supplement = json!({"session_id": pane.session_anchor});
 
@@ -292,10 +292,12 @@ fn c12_sigint_before_admission_returns_local_cancelled_without_daemon_operation(
     );
     assert_eq!(
         between_payload["result"]["committed_phases"],
-        json!(["nested_register", "route", "credential", "lease"]),
+        json!(["route", "credential", "lease"]),
         "{between_payload}"
     );
     let between_records = operation_records(&fixture.host_journal(), between_operation);
+    assert!(between_records.last().unwrap()["nested_command_id"].is_null());
+    assert!(between_records.last().unwrap()["nested_operation_id"].is_null());
     assert_eq!(
         between_records
             .iter()
@@ -313,7 +315,7 @@ fn c12_sigint_before_admission_returns_local_cancelled_without_daemon_operation(
         (admitted_operation, json!([])),
         (
             between_operation,
-            json!(["nested_register", "route", "credential", "lease"]),
+            json!(["route", "credential", "lease"]),
         ),
     ] {
         let query = fixture.context_query(operation_id, Some(&pane));
@@ -497,8 +499,19 @@ fn c13_cancellation_after_owner_begins_never_claims_cancelled() {
             "the recovered binding must commit exactly once"
         );
 
+        let register_effects_before_restart = project_register_effect_counts(&fixture.project_journal());
         fixture.stop_daemon();
         fixture.restart_daemon();
+        // The resident timer emits only changed classifications. An already
+        // current classification survives restart without another scan receipt.
+        assert!(wait_until(Duration::from_secs(10), || read_lines(&fixture.project_journal())
+            .iter().rev().find(|row| row["ev"] == "GlobalRuntimeBindingLedgerClassified"
+                && row["record"]["binding_id"] == new_binding_id)
+            .is_some_and(|row| row["record"]["endpoint_generation"] == new_endpoint_generation
+                && row["record"]["state"] == "Live" && row["record"]["probe_state"] == "Live")),
+            "the exact current owned binding must have its real resident ledger classification");
+        assert_eq!(project_register_effect_counts(&fixture.project_journal()), register_effects_before_restart,
+            "startup ledger maintenance must not repeat any Register, binding or route effect");
         let journal_before = fs::read(fixture.host_journal()).expect("host journal before query");
         let project_before =
             fs::read(fixture.project_journal()).expect("project journal before query");
@@ -1029,15 +1042,6 @@ fn grant_fence(status: &Value) -> Value {
 }
 
 fn wait_child_output(child: &mut std::process::Child, timeout: Duration) -> std::process::Output {
-    assert!(
-        wait_until(timeout, || {
-            child
-                .try_wait()
-                .expect("poll exact fixture CLI child")
-                .is_some()
-        }),
-        "fixture CLI child did not exit within {timeout:?}"
-    );
     let stdout = child
         .stdout
         .take()
@@ -1046,13 +1050,27 @@ fn wait_child_output(child: &mut std::process::Child, timeout: Duration) -> std:
         .stderr
         .take()
         .expect("fixture CLI child stderr is piped");
-    let mut stdout_bytes = Vec::new();
-    let mut stderr_bytes = Vec::new();
-    std::io::Read::read_to_end(&mut std::io::BufReader::new(stdout), &mut stdout_bytes)
-        .expect("read fixture CLI stdout");
-    std::io::Read::read_to_end(&mut std::io::BufReader::new(stderr), &mut stderr_bytes)
-        .expect("read fixture CLI stderr");
+    // Drain both real streams while the process runs: waiting for exit first
+    // can block a child on a full pipe, including a large cancellation result.
+    let stdout_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::BufReader::new(stdout), &mut bytes).unwrap();
+        bytes
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::BufReader::new(stderr), &mut bytes).unwrap();
+        bytes
+    });
+    let exited = wait_until(timeout, || child.try_wait().expect("poll exact fixture CLI child").is_some());
+    if !exited {
+        child.kill().expect("stop only this owned fixture CLI child after its deadline");
+    }
     let status = child.wait().expect("wait for exact fixture CLI child");
+    let stdout_bytes = stdout_reader.join().expect("join owned stdout reader");
+    let stderr_bytes = stderr_reader.join().expect("join owned stderr reader");
+    assert!(exited, "fixture CLI child {} did not exit within {timeout:?}; stdout={} stderr={}",
+        child.id(), String::from_utf8_lossy(&stdout_bytes), String::from_utf8_lossy(&stderr_bytes));
     std::process::Output {
         status,
         stdout: stdout_bytes,

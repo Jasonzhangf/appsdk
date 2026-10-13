@@ -16,11 +16,12 @@ description: "仅约束已成功注册 Collab 的 peer；master 权限需另行�
 共享任务板与 dashboard 同样只在已注册时可用：`collab board show` 需要已注册身份但不需要 daemon 生命周期动作；`collab dashboard` 只读，不注册 peer、不启动 daemon、不消费消息。
 
 Durable identity, role, mailbox, task, and subscription truth lives in the
-Collab daemon. Codex AppServer RPC is the preferred communication and thread
-state transport. A tmux-only peer may be selected when it has no AppServer
-candidate; once an AppServer binding is selected, tmux is never a message,
-wake, presence, or status fallback. A verified tmux endpoint may also be stored
-as a last-resort identity recovery anchor when both runtime IDs are unavailable.
+Collab daemon. Transport selection is decided by the daemon based on runtime
+facts; initial registration prefers a verified current tmux pane. Persisted
+restoration reuses the durable selected binding. Once an AppServer binding is
+selected, tmux is never a message, wake, presence, or status fallback. Its
+observed tmux socket + pane may also be stored as the durable identity anchor,
+independently of native runtime IDs.
 Production projects use the globally installed Collab v1.
 
 ## Current-version baseline
@@ -139,8 +140,12 @@ baseline, starts the daemon unless an explicit `DOWN` marker exists, observes
 the available runtime facts, and sends a typed identity request to the daemon.
 The daemon owns identity selection, creation, recovery, update, credential and
 binding persistence, route publication, and default direct-message lease
-restoration. It returns either a registered snapshot or an explicit
-missing-facts result. The active contract is
+restoration. Initial registration commits only after a matching participant
+reply on the daemon-selected path. A verified current pane selects tmux even
+when adjacent AppServer facts are reported. Paste, Enter, probe and terminal
+echo prove no participant reply. Missing wait capability cannot waive this
+gate. It returns a registered snapshot, pending reply or explicit missing
+facts. The active contract is
 [`docs/design/collab-identity-minimal-interaction.md`](../../../docs/design/collab-identity-minimal-interaction.md)
 with recovery semantics in
 [`docs/design/collab-anchor-restore-model.md`](../../../docs/design/collab-anchor-restore-model.md).
@@ -149,12 +154,72 @@ with recovery semantics in
 collab context
 ```
 
+For tmux, the initial context releases the pane with a pending operation.
+The participant reads `COLLAB_REGISTER_CHALLENGE <JSON>` from that selected
+pane and invokes `collab context --return-challenge '<JSON>'` from its own
+environment. The JSON is the exact received challenge, not a value copied
+from a parent, query, capture or private ledger. The daemon checks purpose,
+operation, command, project/app scope, challenge and socket + pane before
+continuing the original prepared operation once. Duplicate return reuses the
+same receipt; cancelled or mismatched return cannot commit. `--query` stays
+read-only and never discloses the challenge. Pending and verified evidence
+survive daemon restart under the existing register reply owner.
+
+AppServer and DSH participants receive the same structured challenge through
+their selected adaptor. A late native typed return supplies the exact received
+association and the participant's own native facts. The daemon verifies those
+facts through the existing native adaptor, then resumes the original operation.
+AppServer participants can use `--return-challenge` from their native environment;
+the DSH participant uses the public `RegisterReply` interface with its gateway
+candidate. DSH initial admission remains the existing public `Register` entry.
+Neither ACK nor a first pending history snapshot completes registration.
+The private verified-pending Register owner preserves the original command
+and checks only its target resources under the reducer lock. Unrelated ledger
+classification cannot invalidate that wait. Ordinary typed commands retain CAS.
+See the normative [continuation contract](../../../docs/design/collab-identity-context-recovery-contract-20261008.md).
+
+`collab context --recover-communication` explicitly checks a restored
+communication path through the same reply gate. A failed reply retains the
+existing identity, role, grant, anchor and binding. Ordinary context restore
+does not trigger this check.
+
 The daemon recovers identity by anchor. Each transport has one designed anchor:
 the tmux owned pane, the AppServer session/thread, or the dsh session. An anchor
 that matches a persisted identity restores it directly, with no probe, no
 runtime state and no generation requirement. An anchor with no match drafts a
 new identity. Matching is never guessed: an ambiguous anchor or a cross-project
-match fails explicitly.
+match fails explicitly unless the user supplies an explicit recovery decision
+through the same `collab context --approve-identity` invocation. That decision
+names the target and action; the daemon reads the current incumbent inside its
+identity lock. No old fence lookup or second approval is required.
+
+Ordinary persisted restore reads the durable selected adaptor and binding. It
+does not run initial selection, Register, admission or loopback. A legitimate
+adjacent-generation staged publication completes through the existing typed
+Register recovery owner with its token, generation and scope guards. Stable
+socket + pane collection reaches the daemon when live display/capture fails;
+the daemon supplies saved fields and actual I/O errors remain explicit.
+An authenticated existing-principal binding move or exact approved identity
+restore also retains that typed owner. It does not enter initial reply
+admission. The daemon derives this boundary from the existing scoped binding
+and credential or approval proof; a caller capability or wait flag cannot
+declare a restore. Typed fences and the frozen-command CAS still apply.
+
+For an exact user master/peer request, one context approval names
+`decision=approved`, `target_identity`, `action=restore_master|restore_peer`, and
+`authorization` containing the user's words. Either `--approve-identity` or
+`--approve-grant` carries that one explicit intent. The daemon reads current
+fences and uses the authority owner: master transfers authority atomically;
+peer clears only the target's grant and preserves an unrelated master.
+`restore_identity` alone does not authorize a role change.
+
+Tmux identity uses socket path + pane ID. Session, PID, native IDs, activity,
+capture and endpoint probe do not gate restoration or validity.
+Unique persisted ownership repairs stale credentials and restart drift
+automatically. `identity_valid` and identity presence come from the current
+worker/binding/pane owner; retired records remain invalid. Endpoint and activity
+status retain actual missing, unknown and I/O errors. A valid identity proves
+neither agent readiness nor transport submission or consumption.
 
 You observe nothing by hand. `DSH_SESSION_ID`, `CODEX_SESSION_ID`,
 `CODEX_THREAD_ID` and the tmux pane are all read by the CLI. A gateway control
@@ -223,6 +288,13 @@ notification=accepted -> selected transport accepted the operation; it is not co
 recv receipt -> peer consumed the message
 task close receipt -> lifecycle ended
 ```
+
+For tmux, `send --delivery queued` retains the durable message until the existing
+configured event window. It returns `notification=queued`, `consumed=false` and
+records no wake attempt while deferred. The existing timer drains it through a
+daemon wake; only actual adapter success records submission. Accepted or unknown
+native outcomes are not blindly retried. Pane output never supplies a busy/idle
+decision or a recv receipt.
 
 An error, timeout, `subscribed-not-sent`, `thread-lost`, `identity-mismatch`,
 `unknown`, or absent Agent is not success. Preserve the exact error and
@@ -1099,9 +1171,10 @@ route resolve`, and `collab master status`. They are not agent identity
 recovery steps. `collab down`/`up` require explicit human authorization.
 `collab init` is not an agent bootstrap and not a second identity algorithm: it
 drives the same daemon identity gate as `collab context`, and it remains the
-documented entry for existing AppSDK init consumers. Ambiguous and
-cross-project anchor matches stay fail-closed on both entries and need human
-adjudication; no entry overrides them.
+documented entry for existing AppSDK init consumers. Unapproved ambiguous and
+cross-project anchor matches stay fail-closed on both entries without automatic
+guessing; a single explicit user approval intent overrides current mapping as
+specified in the recovery contract.
 
 ### Context 状态与终点（DAGpipe：单源单汇）
 
@@ -1111,14 +1184,16 @@ DAGpipe 顺序执行：解析项目根 → 检查/创建基线 → 检查/启动
 恢复、更新身份，持久化 credential/binding/lease，并返回完整快照。缺失事实是本次
 调用的终态：`registered=false`、`identity=null`，`requires_identity_update`
 给出精确 `required_fields`、`reason`、`action` 和 `exact_error`。Agent 只按
-`required_fields` 使用一次 `collab context --provide` 补充真实事实。没有 pending
-workflow，没有第二个修复入口。根解析失败和显式冲突/错误保持原错，不伪装为成功快照：
+`required_fields` 使用一次 `collab context --provide` 补充真实事实；若处于
+participant challenge pending，按前文 participant continuation 从自身环境续交，
+pending 阶段尚未完成注册。根解析失败和显式冲突/错误保持原错，不伪装为成功快照：
 
 | 状态/终态 | 含义 | Agent 动作 |
 | --- | --- | --- |
 | `state_snapshot` 且 `registered=true` | 注册成功；含 role/operations/master/peers/peer_count/summary/master_wake/subagents/inbox/worktrees/tasks/env | 读快照执行已注册角色的 `operations`；无需再跑 who/status/master status |
 | 陈旧/他人的 pane claim 已被顶掉 | 默认路径的一部分，不产生额外终态 | 无；不需要第二条命令，也不参与裁决 |
 | `identity_update` | daemon 需要缺失事实或报告显式身份冲突；`registered=false`，`requires_identity_update.required=true` | 只读 `required_fields`/`reason`/`action`/`exact_error`；已授权初始化或已注册身份恢复中，若 action 是 factual supplement，可用一次 `collab context --provide` 补真实事实。成功注册前不执行角色协议；显式冲突保留原错，不选择 worker，不把 `collab init` 当第二次修复尝试 |
+| `participant challenge pending` | 初始选择路径等待挑战应答；`registered=false`，尚未完成注册 | 参见前述 participant continuation：participant 从所选 pane 读取挑战并于自身环境调用 `collab context --return-challenge` 续交；`--query` 保持只读且不泄露挑战 |
 | `COLLAB_CONTEXT_UNRESOLVED` | 无 route、无 baseline、无 git 根（非零退出） | 保留原错，不自动换 cwd 重试；首次注册失败则独立继续，已注册者报告受影响协作，保留已领任务/claim |
 | 拒绝在 playground 创建基线 | 在 worktree 内引导（非零退出） | 保留原错，不改主树或删除旧身份；首次注册失败则独立继续，已注册者保留已有职责并报告协作缺口 |
 | 默认订阅已停 | owner 显式 unsubscribe 持久生效 | 需要再收消息时用 `collab notify subscribe --event direct-message` 重订阅 |
@@ -1128,8 +1203,9 @@ permission to select a worker. The supplement has exactly the four scalar fields
 `session_id`, `thread_id`, `endpoint`, and `namespace`. A value that conflicts
 with an automatically observed fact is `IDENTITY_FACT_CONFLICT`, not an override.
 Explicit conflicts, token rejection, route failure, runtime-binding failure, and
-transport failure keep their original error and non-zero exit; no fallback or
-pending workflow conceals them.
+transport failure keep their original error and non-zero exit; unapproved
+automatic resolution cannot bypass them, while true challenge pending remains
+an incomplete state awaiting participant return.
 
 完整语义图、转移表和 owner 映射见 `docs/collab-context-state-machine.md`；
 机器可校验 SESE 图见 `docs/dagpipe/collab-context.graph.json`
@@ -1220,8 +1296,9 @@ read-only operator diagnostic.
 The daemon is the sole route selector. The current AppServer owner plus exact
 session/thread binding identifies a route. Historical routes and tombstones
 are not candidates. The daemon verifies the selected owner with native
-`thread/read`; a tmux tuple can recover identity only when both runtime IDs are
-missing and never substitutes for communication or presence.
+`thread/read`; a tmux socket + pane anchor recovers identity independently of
+native IDs. It never substitutes for an AppServer communication channel. The
+daemon reads tmux route ownership without an admission probe.
 
 `collab route resolve` exposes a read-only operator diagnostic for the current
 native thread; `--native-thread-id <id>` and `--session-id <id>` must match the

@@ -1,10 +1,11 @@
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -35,6 +36,12 @@ impl Gateway {
         let listener = UnixListener::bind(&socket).expect("bind gateway socket");
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
+        // Every registration challenge the gateway actually delivers through
+        // `enqueue`, keyed by the messageId collab will later read back. The
+        // `agent-reply` answer is built only from these delivered challenges.
+        let delivered: Arc<Mutex<HashMap<String, (String, String, String)>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let delivered_thread = Arc::clone(&delivered);
         let handle = thread::spawn(move || {
             while !flag.load(Ordering::SeqCst) {
                 let Ok((stream, _)) = listener.accept() else {
@@ -52,9 +59,8 @@ impl Gateway {
                 let method = request["method"].as_str().unwrap_or_default();
                 let runtime_id = request["params"]["runtimeId"].as_str().unwrap_or_default();
                 let agent_id = request["params"]["agentId"].as_str().unwrap_or_default();
-                let reply = if method == "agent-facts"
-                    && agents.iter().any(|agent| agent == agent_id)
-                {
+                let known = agents.iter().any(|agent| agent == agent_id);
+                let reply = if method == "agent-facts" && known {
                     json!({"ok":true,"result":{
                         "nonce":request["params"]["nonce"],
                         "runtimeId":runtime_id,
@@ -63,12 +69,56 @@ impl Gateway {
                         "cwd":root,
                         "status":"running"
                     }})
-                } else if method == "enqueue" && agents.iter().any(|agent| agent == agent_id) {
+                } else if method == "enqueue" && known {
+                    // The registration challenge is a real payload delivered to
+                    // the selected participant; record the delivered marker so
+                    // `agent-reply` can answer from it. Wakes carry no challenge.
+                    if let Some(challenge) = request["params"]["content"][0]["text"]
+                        .as_str()
+                        .and_then(|text| text.strip_prefix("COLLAB_REGISTER_CHALLENGE "))
+                        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                    {
+                        if let (Some(message_id), Some(marker)) = (
+                            request["params"]["messageId"].as_str(),
+                            challenge["challenge"].as_str(),
+                        ) {
+                            delivered_thread.lock().unwrap().insert(
+                                message_id.to_owned(),
+                                (
+                                    runtime_id.to_owned(),
+                                    agent_id.to_owned(),
+                                    marker.to_owned(),
+                                ),
+                            );
+                        }
+                    }
                     json!({"ok":true,"result":{
                         "messageId":request["params"]["messageId"],
                         "runtimeId":runtime_id,
                         "agentId":agent_id
                     }})
+                } else if method == "agent-reply" && known {
+                    // Answer only from a challenge this gateway really delivered.
+                    // An unknown messageId stays pending, matching a gateway
+                    // that has not observed the participant's return yet.
+                    let message_id = request["params"]["messageId"].as_str().unwrap_or_default();
+                    match delivered_thread.lock().unwrap().get(message_id).cloned() {
+                        Some((_runtime_id, agent_id, marker)) => json!({"ok":true,"result":{
+                            "result":{
+                                "state":"replied",
+                                "agentId":agent_id,
+                                "messageId":message_id,
+                                "sessionId":agent_id,
+                                "turn":1,
+                                "step":1,
+                                "inputSeq":1,
+                                "outputSeq":2,
+                                "completedSeq":3,
+                                "text":marker
+                            }
+                        }}),
+                        None => json!({"ok":true,"result":{"result":{"state":"pending"}}}),
+                    }
                 } else {
                     json!({"ok":false,"error":{"code":"unknown-agent","message":"fixture unknown agent"}})
                 };

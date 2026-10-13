@@ -128,6 +128,7 @@ fn contract_stderr(output: &std::process::Output) -> String {
 
 fn create_daemon_for_subagent_cli(name: &str) -> (Fixture, Pane, String) {
     let (fixture, pane) = single_pane_fixture(name);
+    fixture.registered_context(&pane, true);
     let context = fixture.run_ok(&["context"], Some(&pane));
     let snapshot = &context["result"]["snapshot"];
     assert_eq!(

@@ -1,3 +1,174 @@
+    /// A selected participant receives the real challenge through pane stdin.
+    /// Its output is a public RegisterReply request, forwarded by the fixture.
+    /// No pending record, nonce, or prepared command is read by the test.
+    pub(super) fn register_host_fixture(
+        manager: &ProjectRuntimeManager,
+        context: Option<ProjectContext>,
+        request: Req,
+    ) -> (Arc<Server>, Resp) {
+        register_participant_fixture(manager, context, request,
+            |context, request| manager.dispatch_sync(Some(context), request), None)
+    }
+
+    fn register_host_fixture_intercept(
+        manager: &ProjectRuntimeManager,
+        context: Option<ProjectContext>,
+        request: Req,
+        on_received: &mut dyn FnMut(&ProjectContext, &Req, &Arc<Server>),
+    ) -> (Arc<Server>, Resp) {
+        register_participant_fixture(manager, context, request,
+            |context, request| manager.dispatch_sync(Some(context), request), Some(on_received))
+    }
+
+    async fn register_wire_fixture(server: Arc<Server>, context: Option<ProjectContext>, request: Req) -> Resp {
+        let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
+        let context = context.expect("wire participant context");
+        manager.install_runtime(&ProjectRuntimeManager::route_key(&context), server.clone(), None);
+        register_participant_fixture(&manager, Some(context), request, move |context, request| {
+            let selected = server.clone();
+            let response = std::thread::spawn(move || {
+                tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+                    .block_on(dispatch_wire(server, Some(context), request))
+            }).join().unwrap();
+            (selected, response)
+        }, None).1
+    }
+
+    fn register_participant_fixture(
+        manager: &ProjectRuntimeManager,
+        context: Option<ProjectContext>,
+        mut request: Req,
+        dispatch: impl FnOnce(ProjectContext, Req) -> (Arc<Server>, Resp),
+        on_received: Option<&mut dyn FnMut(&ProjectContext, &Req, &Arc<Server>)>,
+    ) -> (Arc<Server>, Resp) {
+        let context = context.expect("participant project context");
+        let context_readback = matches!(request, Req::IdentityContext { .. });
+        let (candidate, cwd) = match &mut request {
+            Req::Register { candidates: Some(candidates), cwd, .. } =>
+                (candidates.tmux.as_mut().expect("selected tmux participant"), cwd.clone()),
+            Req::IdentityContext { facts, identity_context: None } =>
+                (facts.tmux.as_mut().expect("selected context participant"), context.canonical_root.clone()),
+            _ => panic!("initial fixture requires selected Register or legacy context"),
+        };
+        let observed = std::process::Command::new("tmux").args([
+            "-S", &candidate.endpoint.socket_path, "display-message", "-p", "-t",
+            &candidate.endpoint.pane_id, "#{pane_current_path}",
+        ]).output().unwrap();
+        assert!(observed.status.success(), "inspect selected participant");
+        candidate.cwd = String::from_utf8(observed.stdout).unwrap().trim().to_owned();
+        let reply_file = Path::new(&candidate.cwd).join(format!("registration-{}-{}.reply.json",
+            Path::new(&candidate.endpoint.socket_path).file_name().unwrap().to_string_lossy(),
+            candidate.endpoint.pane_id));
+        match std::fs::remove_file(&reply_file) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("remove previous owned participant output: {error}"),
+        }
+        let original_request = request.clone();
+        let (runtime, response) = dispatch(context.clone(), request);
+        if !response.error.as_deref().is_some_and(|error| error.contains("REGISTER_REPLY_PENDING:")) {
+            return (runtime, response);
+        }
+        assert_eq!(std::fs::canonicalize(&cwd).unwrap(), std::fs::canonicalize(
+            match &original_request {
+                Req::Register { candidates: Some(candidates), .. } => &candidates.tmux.as_ref().unwrap().cwd,
+                Req::IdentityContext { facts, .. } => &facts.tmux.as_ref().unwrap().cwd,
+                _ => unreachable!(),
+            }).unwrap(), "actual participant cwd must match its declared project");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !reply_file.exists() {
+            assert!(std::time::Instant::now() < deadline, "selected participant did not return: {response:?}");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let reply: Req = serde_json::from_slice(&std::fs::read(&reply_file).unwrap()).unwrap();
+        std::fs::remove_file(&reply_file).unwrap();
+        assert!(matches!(reply, Req::RegisterReply { .. }));
+        if let Some(on_received) = on_received {
+            on_received(&context, &reply, &runtime);
+        }
+        let returned = manager.dispatch_sync(Some(context.clone()), reply);
+        if context_readback && returned.1.ok {
+            // The returned participant committed the owner. Read the context
+            // through its actual public durable-restoration path.
+            manager.dispatch_sync(Some(context), original_request)
+        } else {
+            returned
+        }
+    }
+
+    fn runtime_fixture_for_host(host: &Arc<Server>) -> (Arc<Server>, PathBuf, PathBuf) {
+        let (mut runtime, root, journal) = test_server();
+        Arc::get_mut(&mut runtime).unwrap().host_paths = host.host_paths.clone();
+        (runtime, root, journal)
+    }
+
+    fn replay_owned_test_server(server: &Arc<Server>) -> Arc<Server> {
+        Arc::new(Server {
+            config: server.config.clone(),
+            root: server.root.clone(), storage_root: server.storage_root.clone(),
+            journal_path: server.journal_path.clone(), host_paths: server.host_paths.clone(),
+            state: Mutex::new(replay_from_journal(&server.root, &server.journal_path).unwrap()),
+            journal: Mutex::new(std::fs::OpenOptions::new().create(true).append(true)
+                .open(&server.journal_path).unwrap()),
+            appserver_candidate_check: server.appserver_candidate_check.clone(),
+            appserver_notification_sink: server.appserver_notification_sink.clone(),
+            appserver_thread_status: server.appserver_thread_status.clone(),
+            appserver_thread_archive: server.appserver_thread_archive.clone(),
+            mailbox_notify: Notify::new(),
+        })
+    }
+
+    // Defined committed-owner state for resolver tests. This does not admit a
+    // participant or return a Register response; the public owner is exercised
+    // after these reducer events establish the test's durable precondition.
+    fn commit_host_route_fixture(
+        manager: &ProjectRuntimeManager,
+        server: &Arc<Server>,
+        worker_id: &str,
+        token: &str,
+        app: &str,
+        endpoint: crate::proto::TmuxEndpoint,
+    ) {
+        let scope = GlobalState::canonical_project_scope(&server.root).unwrap();
+        let app_scope = AppServerId::new(app).unwrap();
+        let session = endpoint.codex_session_id.clone()
+            .unwrap_or_else(|| endpoint.tmux_session_id.clone());
+        let thread = endpoint.codex_thread_id.clone()
+            .unwrap_or_else(|| endpoint.pane_id.clone());
+        let mut binding = RuntimeBinding::new_with_session(
+            scope.clone(), app_scope.clone(), AgentId::new(worker_id).unwrap(),
+            RuntimeId::new(format!("runtime-{worker_id}")).unwrap(),
+            BindingId::new(format!("binding-{worker_id}")).unwrap(), 1,
+            Some(crate::identity::SessionId::new(session.clone()).unwrap()),
+            Some(NativeThreadId::new(thread.clone()).unwrap()),
+        ).unwrap();
+        binding.tmux_endpoint = Some(endpoint.clone());
+        let mut events = Vec::new();
+        if server.state.lock().unwrap().global.lookup_registration(&scope, &app_scope).is_none() {
+            events.push(Event::GlobalProjectRegistered {
+                registration: ProjectRegistration::new(scope.clone(), app_scope.clone()).unwrap(),
+            });
+        }
+        events.extend([
+            Event::Registered { worker: WorkerRec {
+                id: worker_id.into(), token: token.into(),
+                cwd: server.root.display().to_string(), registered_ms: now_ms(),
+                transport: Some(SelectedTransport {
+                    kind: TransportKind::Tmux, endpoint: Some(endpoint.socket_path.clone()),
+                    namespace: Some(endpoint.tmux_session_id.clone()),
+                    session_id: Some(session), thread_id: Some(thread),
+                    tmux_endpoint: Some(endpoint),
+                    capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
+                    self_check: "committed resolver fixture".into(),
+                }),
+            } },
+            Event::GlobalRuntimeBound { binding: binding.clone() },
+            Event::GlobalCurrentThreadRouteSet { binding },
+        ]);
+        server.commit_checked(&events).unwrap();
+        manager.install_runtime(&(app.into(), scope.as_str().into()), server.clone(), None);
+    }
+
     #[test]
     fn native_thread_route_resolution_ignores_the_execution_cwd() {
         let (server, root, _) = test_server();
@@ -11,14 +182,12 @@
         let app = "app-cwd-route";
         let thread = "thread-cwd-route";
         let session = "session-thread-cwd-route";
-        let (_, registered) = manager.dispatch_sync(
-            Some(context_with_app(&root, app)),
-            Req::register("worker-cwd-route".into(),
-                 "token-worker-cwd-route".into(),
-                 root.display().to_string(),
-                 test_candidates(thread)),
-        );
-        assert!(registered.ok, "{registered:?}");
+        commit_host_route_fixture(&manager, &server, "worker-cwd-route",
+            "token-worker-cwd-route", app, crate::proto::TmuxEndpoint {
+                socket_path: root.join("committed-native-route.sock").display().to_string(),
+                server_pid: 42, tmux_session_id: "$1".into(), pane_id: "%1".into(), pane_pid: 99,
+                codex_session_id: Some(session.into()), codex_thread_id: Some(thread.into()),
+            });
 
         // The daemon returns the canonical registered root for the dual key.
         // It does not consult or echo any caller cwd, so the same thread
@@ -50,16 +219,24 @@
         let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
         let app = "app-thread-cwd-route";
         let thread = "thread-cwd-owner";
-        let candidates = test_candidates_at(thread, &canonical_root).unwrap();
-        let endpoint = candidates.tmux.as_ref().unwrap().endpoint.clone();
-        let (_, registered) = manager.dispatch_sync(
-            Some(context_with_app(&root, app)),
-            Req::register("worker-cwd-owner".into(),
-                 "token-worker-cwd-owner".into(),
-                 root.display().to_string(),
-                 Some(candidates)),
+        let endpoint = crate::proto::TmuxEndpoint {
+            socket_path: root.join("committed-route.sock").display().to_string(),
+            server_pid: 42,
+            tmux_session_id: "$1".into(),
+            pane_id: "%1".into(),
+            pane_pid: 99,
+            codex_session_id: Some(format!("session-{thread}")),
+            codex_thread_id: Some(thread.into()),
+        };
+        // This case reads an already committed route. Initial admission and
+        // participant return are covered by the public registration gate.
+        commit_host_route_fixture(
+            &manager, &server,
+            "worker-cwd-owner",
+            "token-worker-cwd-owner",
+            app,
+            endpoint.clone(),
         );
-        assert!(registered.ok, "{registered:?}");
 
         // Route resolution uses the persisted tmux endpoint and does not
         // derive or re-probe an App Server thread from caller cwd.
@@ -168,6 +345,17 @@
         .is_ok());
         let before = mutation_snapshot(&server);
         let journal_before = std::fs::read(&journal_path).unwrap();
+        // Persisted ownership resolves even when the daemon cannot probe this
+        // socket, and process/session drift is not a different pane address.
+        let mut observed = server.state.lock().unwrap().workers["agent-wire-route"]
+            .transport.as_ref().unwrap().tmux_endpoint.clone().unwrap();
+        observed.server_pid += 1;
+        observed.pane_pid += 1;
+        observed.tmux_session_id = "$999".into();
+        let resolved = manager.resolve_route_by_tmux_endpoint(&observed).unwrap();
+        assert_eq!(resolved.agent_id.as_str(), "agent-wire-route");
+        assert_eq!(mutation_snapshot(&server), before);
+        assert_eq!(std::fs::read(&journal_path).unwrap(), journal_before);
         let (_, response) = dispatch_wire_routed(
             manager,
             None,
@@ -198,107 +386,41 @@
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    struct IsolatedTmuxServer {
-        socket_path: PathBuf,
-    }
-
-    impl IsolatedTmuxServer {
-        fn start(root: &Path, name: &str) -> anyhow::Result<Self> {
-            let socket_path = root.join(format!("{name}.sock"));
-            let output = std::process::Command::new("tmux")
-                .args([
-                    "-S",
-                    socket_path.to_str().unwrap(),
-                    "new-session",
-                    "-d",
-                    "-s",
-                    "shared-name",
-                    "sleep 60",
-                ])
-                .output()?;
-            if !output.status.success() {
-                anyhow::bail!(
-                    "start isolated tmux {name}: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-            Ok(Self { socket_path })
-        }
-
-        fn endpoint(&self) -> anyhow::Result<crate::proto::TmuxEndpoint> {
-            let output = std::process::Command::new("tmux")
-                .args([
-                    "-S",
-                    self.socket_path.to_str().unwrap(),
-                    "display-message",
-                    "-p",
-                    "#{pid}\t#{session_id}\t#{pane_id}\t#{pane_pid}",
-                ])
-                .output()?;
-            if !output.status.success() {
-                anyhow::bail!(
-                    "inspect isolated tmux: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-            let text = String::from_utf8(output.stdout)?;
-            let fields = text.trim_end().split('\t').collect::<Vec<_>>();
-            if fields.len() != 4 {
-                anyhow::bail!("unexpected isolated tmux endpoint output: {text:?}");
-            }
-            Ok(crate::proto::TmuxEndpoint {
-                socket_path: self.socket_path.to_string_lossy().into_owned(),
-                server_pid: fields[0].parse()?,
-                tmux_session_id: fields[1].to_owned(),
-                pane_id: fields[2].to_owned(),
-                pane_pid: fields[3].parse()?,
-                codex_session_id: None,
-                codex_thread_id: None,
-            })
-        }
-    }
-
-    impl Drop for IsolatedTmuxServer {
-        fn drop(&mut self) {
-            let _ = std::process::Command::new("tmux")
-                .args(["-S", self.socket_path.to_str().unwrap(), "kill-server"])
-                .output();
-        }
-    }
-
     #[tokio::test]
     async fn tmux_routes_with_same_session_and_pane_on_different_sockets_are_distinct() {
         let (server, root, _) = test_server();
-        let tmux_a = IsolatedTmuxServer::start(&root, "route-a").unwrap();
-        let tmux_b = IsolatedTmuxServer::start(&root, "route-b").unwrap();
-        let endpoint_a = tmux_a.endpoint().unwrap();
-        let endpoint_b = tmux_b.endpoint().unwrap();
+        // The resolver reads durable socket+pane ownership. These committed
+        // addresses need not be live and must not trigger initial admission.
+        let endpoint_a = crate::proto::TmuxEndpoint {
+            socket_path: root.join("route-a.sock").display().to_string(),
+            server_pid: 42,
+            tmux_session_id: "$1".into(),
+            pane_id: "%1".into(),
+            pane_pid: 99,
+            codex_session_id: None,
+            codex_thread_id: None,
+        };
+        let endpoint_b = crate::proto::TmuxEndpoint {
+            socket_path: root.join("route-b.sock").display().to_string(),
+            ..endpoint_a.clone()
+        };
         assert_eq!(endpoint_a.tmux_session_id, endpoint_b.tmux_session_id);
         assert_eq!(endpoint_a.pane_id, endpoint_b.pane_id);
         assert_ne!(endpoint_a.socket_path, endpoint_b.socket_path);
 
         let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
         let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
-        register_known_project_with_app(&server, &root, "app-tmux-collision");
         for (worker_id, token, endpoint) in [
             ("worker-tmux-a", "token-tmux-a", endpoint_a.clone()),
             ("worker-tmux-b", "token-tmux-b", endpoint_b.clone()),
         ] {
-            let (_, response) = manager.dispatch_sync(
-                Some(context_with_app(&root, "app-tmux-collision")),
-                Req::register(worker_id.into(),
-                     token.into(),
-                     root.to_string_lossy().into_owned(),
-                     Some(TransportCandidates {
-                        appserver: None,
-                        dsh: None,
-                        tmux: Some(crate::proto::TmuxCandidate {
-                            endpoint,
-                            cwd: root.to_string_lossy().into_owned(),
-                        }),
-                    })),
+            commit_host_route_fixture(
+                &manager, &server,
+                worker_id,
+                token,
+                "app-tmux-collision",
+                endpoint,
             );
-            assert!(response.ok, "{response:?}");
         }
 
         let route_a = manager.resolve_route_by_tmux_endpoint(&endpoint_a).unwrap();
@@ -322,8 +444,6 @@
             Some("worker-tmux-b")
         );
 
-        drop(tmux_b);
-        drop(tmux_a);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -342,12 +462,12 @@
         Arc::get_mut(&mut manager).unwrap().route_journal = route_journal_blocker;
 
         let context = context_with_app(&external_root, "atomic-register-app");
-        let response = manager.dispatch_sync(
+        let response = register_host_fixture(&manager,
             Some(context.clone()),
             Req::register("atomic-register-worker".into(),
                  "token-atomic-register-worker".into(),
                  external_root.display().to_string(),
-                 test_candidates("thread-atomic-register-worker")),
+                 test_candidates_at("thread-atomic-register-worker", &external_root)),
         );
         assert!(!response.1.ok, "{:?}", response.1);
         assert!(response
@@ -394,20 +514,20 @@
         let context_a = context_with_app(&project_a, "current-app-a");
         let context_b = context_with_app(&project_b, "current-app-b");
 
-        let (_, first) = manager.dispatch_sync(
+        let (_, first) = register_host_fixture(&manager,
             Some(context_a.clone()),
             Req::register("current-worker-a".into(),
                  "token-current-a".into(),
                  project_a.display().to_string(),
-                 test_candidates(shared_thread)),
+                 test_candidates_at(shared_thread, &project_a)),
         );
         assert!(first.ok, "{first:?}");
-        let (_, second) = manager.dispatch_sync(
+        let (_, second) = register_host_fixture(&manager,
             Some(context_b.clone()),
             Req::register("current-worker-b".into(),
                  "token-current-b".into(),
                  project_b.display().to_string(),
-                 test_candidates(shared_thread)),
+                 test_candidates_at(shared_thread, &project_b)),
         );
         assert!(!second.ok, "{second:?}");
         assert!(
@@ -429,12 +549,12 @@
         assert_eq!(current.agent_id.as_str(), "current-worker-a");
         assert_eq!(current.binding_id.as_str(), "binding-current-worker-a");
 
-        let (_, rejected) = manager.dispatch_sync(
+        let (_, rejected) = register_host_fixture(&manager,
             Some(context_b.clone()),
             Req::register("rejected-worker".into(),
                  "token-rejected-worker".into(),
                  project_a.display().to_string(),
-                 test_candidates(shared_thread)),
+                 test_candidates_at(shared_thread, &project_a)),
         );
         assert!(!rejected.ok, "{rejected:?}");
         assert_eq!(
@@ -507,7 +627,7 @@
         let context = context_with_app(&root, app);
         let shared_thread = "thread-same-worker-old";
 
-        let (_, first) = manager.dispatch_sync(
+        let (_, first) = register_host_fixture(&manager,
             Some(context.clone()),
             Req::register(worker_id.into(),
                  token.into(),
@@ -517,7 +637,7 @@
         assert!(first.ok, "{first:?}");
 
         let provisional = RuntimeIdentity::cli_adapter(worker_id).unwrap();
-        let (_, rebound) = manager.dispatch_sync(
+        let (_, rebound) = register_host_fixture(&manager,
             Some(context_with_runtime(&root, app, &provisional)),
             Req::register(worker_id.into(),
                  token.into(),
@@ -541,7 +661,7 @@
             )
             .unwrap();
         assert_eq!(current.agent_id.as_str(), worker_id);
-        assert_eq!(current.native_thread_id.as_str(), "thread-same-worker-new");
+        assert_eq!(current.native_thread_id.as_ref().unwrap().as_str(), "thread-same-worker-new");
         let replayed_host = replay(&root).unwrap();
         let replayed_old = replayed_host
             .global
@@ -580,7 +700,7 @@
             Some(candidates)
         };
 
-        let (_, first) = manager.dispatch_sync(
+        let (_, first) = register_host_fixture(&manager,
             Some(context.clone()),
             Req::register(worker_id.into(),
                  token.into(),
@@ -590,7 +710,7 @@
         assert!(first.ok, "{first:?}");
         let previous = runtime_for_registered(&server, &root, worker_id, app);
 
-        let (_, rebound) = manager.dispatch_sync(
+        let (_, rebound) = register_host_fixture(&manager,
             Some(context_with_runtime(&root, app, &previous)),
             Req::register(worker_id.into(),
                  token.into(),
@@ -655,7 +775,7 @@
             Some(candidates)
         };
 
-        let (_, first_registration) = manager.dispatch_sync(
+        let (_, first_registration) = register_host_fixture(&manager,
             Some(context.clone()),
             Req::register("pane-owner-a".into(),
                  "token-pane-owner-a".into(),
@@ -664,7 +784,7 @@
         );
         assert!(first_registration.ok, "{first_registration:?}");
 
-        let (_, second_registration) = manager.dispatch_sync(
+        let (_, second_registration) = register_host_fixture(&manager,
             Some(context.clone()),
             Req::register("pane-owner-b".into(),
                  "token-pane-owner-b".into(),
@@ -712,14 +832,39 @@
         let context = context_with_app(&root, app);
         let shared_thread = "thread-shared-across-panes";
 
-        let (_, first_registration) = manager.dispatch_sync(
+        let initial_candidates = test_candidates_at(shared_thread, &root).unwrap();
+        let mut received_ids = None;
+        let (_, first_registration) = register_host_fixture_intercept(&manager,
             Some(context.clone()),
             Req::register("thread-owner-a".into(),
                  "token-thread-owner-a".into(),
                  root.display().to_string(),
-                 test_candidates(shared_thread)),
+                 Some(initial_candidates.clone())),
+            &mut |returned_context, returned, runtime| {
+                let Req::RegisterReply { reply } = returned else { panic!("actual participant reply"); };
+                received_ids = Some((reply.command_id.clone(), reply.operation_id.clone()));
+                let before = mutation_snapshot(runtime);
+                let journal_before = std::fs::read(&runtime.journal_path).unwrap();
+                let changed_target = test_candidates_at("pending-changed-target", &root).unwrap();
+                for (token, candidates) in [
+                    ("changed-token", initial_candidates.clone()),
+                    ("token-thread-owner-a", changed_target),
+                ] {
+                    let (_, conflict) = manager.dispatch_sync(Some(returned_context.clone()),
+                        Req::register("thread-owner-a".into(), token.into(), root.display().to_string(), Some(candidates)));
+                    assert!(!conflict.ok, "changed pending intent must fail: {conflict:?}");
+                    assert!(conflict.error.as_deref().is_some_and(|error|
+                        error.starts_with("REGISTER_REPLY_PENDING_MISMATCH:")), "{conflict:?}");
+                    assert_eq!(mutation_snapshot(runtime), before);
+                    assert_eq!(std::fs::read(&runtime.journal_path).unwrap(), journal_before);
+                }
+            },
         );
         assert!(first_registration.ok, "{first_registration:?}");
+        let (command_id, operation_id) = received_ids.unwrap();
+        assert_eq!(first_registration.data["command_id"], command_id);
+        assert_eq!(first_registration.data["operation_id"], operation_id);
+        assert_eq!(server.state.lock().unwrap().workers["thread-owner-a"].token, "token-thread-owner-a");
         let before = std::fs::read(&journal_path).unwrap();
 
         let (_, second_registration) = manager.dispatch_sync(
@@ -727,7 +872,7 @@
             Req::register("thread-owner-b".into(),
                  "token-thread-owner-b".into(),
                  root.display().to_string(),
-                 test_candidates(shared_thread)),
+                 test_candidates_at(shared_thread, &root)),
         );
         assert!(!second_registration.ok, "{second_registration:?}");
         assert!(
@@ -758,7 +903,7 @@
         let worker_id = "host-route-failure-worker";
         let token = "token-host-route-failure-worker";
 
-        let (_, registered) = manager.dispatch_sync(
+        let (_, registered) = register_host_fixture(&manager,
             Some(context.clone()),
             Req::register(worker_id.into(),
                  token.into(),
@@ -781,7 +926,7 @@
             .fail_current_thread_route_publish
             .store(true, std::sync::atomic::Ordering::SeqCst);
 
-        let (_, response) = manager.dispatch_sync(
+        let (_, response) = register_host_fixture(&manager,
             Some(context_with_runtime(
                 &root,
                 app,
@@ -836,8 +981,8 @@
         let worker = "same-pane-master";
         let token = "token-same-pane-master";
         let context = context_with_app(&root, app);
-        let old_candidates = test_candidates("same-pane-old").unwrap();
-        let (_, registered) = manager.dispatch_sync(
+        let old_candidates = test_candidates_at("same-pane-old", &root).unwrap();
+        let (_, registered) = register_host_fixture(&manager,
             Some(context.clone()),
             Req::register(
                 worker.into(),
@@ -876,7 +1021,7 @@
         manager
             .fail_current_thread_route_publish
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        let (_, recovered) = manager.dispatch_sync(
+        let (_, recovered) = register_host_fixture(&manager,
             Some(context_with_runtime(&root, app, &old)),
             Req::register(
                 worker.into(),

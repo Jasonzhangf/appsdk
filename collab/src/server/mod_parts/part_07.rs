@@ -1,29 +1,27 @@
+// Pure persisted identity proof. Callers holding the reducer lock must use
+// their current snapshot instead of acquiring server.state again.
+fn tmux_identity_presence(state: &State, worker: &WorkerRec) -> IdentityPresence {
+    let Some(endpoint) = worker.transport.as_ref().and_then(|transport| transport.tmux_endpoint.as_ref()) else {
+        return IdentityPresence::Missing;
+    };
+    let current = state.workers.get(&worker.id).is_some_and(|current| {
+        current.token == worker.token && current.transport == worker.transport
+    });
+    let owned = state.global.lookup_unique_tmux_pane_route(endpoint).is_some_and(|binding| {
+        binding.agent_id.as_str() == worker.id
+            && state.global.lookup_binding_for(&binding.route_scope(), &binding.binding_id) == Some(binding)
+    });
+    if current && owned { IdentityPresence::Present } else { IdentityPresence::Missing }
+}
+
 fn worker_identity_presence(server: &Server, worker: &WorkerRec) -> IdentityPresence {
     let Some(transport) = selected_transport_for_worker(worker) else {
         return IdentityPresence::Missing;
     };
     match transport.kind {
         TransportKind::Tmux => {
-            let Some(endpoint) = transport.tmux_endpoint.as_ref() else {
-                return IdentityPresence::Missing;
-            };
-            // A tmux pane is an address, never a liveness credential. The pane
-            // probe decides one thing only: a vanished pane is a vanished
-            // address, so it is Missing. It can never make the binding live.
-            match crate::client::adapters::tmux::probe(endpoint) {
-                Ok(crate::client::adapters::tmux::PanePresence::Missing) => {
-                    return IdentityPresence::Missing
-                }
-                Ok(crate::client::adapters::tmux::PanePresence::Present)
-                | Ok(crate::client::adapters::tmux::PanePresence::Unknown)
-                | Err(_) => {}
-            }
-            // A tmux pane is an address, not a runtime. Even when the
-            // registration recorded Codex session/thread ids, a tmux transport
-            // has no AppServer endpoint to answer them, so asking the AppServer
-            // oracle is an invalid edge. The agent runtime therefore stays
-            // Unknown; only the pane address itself is known.
-            IdentityPresence::Unknown
+            let state = server.state.lock().unwrap();
+            tmux_identity_presence(&state, worker)
         }
         TransportKind::AppServer => {
             let Some(thread_id) = transport.thread_id.as_deref() else {
@@ -91,6 +89,11 @@ fn worker_presence_with_view(
     }
     let identity_presence = worker_identity_presence(server, worker);
     let (status_presence, agent_view, _) = transport_agent_view(server, worker);
+    if selected_transport_for_worker(worker).is_some_and(|transport| transport.kind == TransportKind::Tmux) {
+        // Capture/view failure is activity telemetry. The persisted pane
+        // binding remains the identity and address decision.
+        return (identity_presence, agent_view);
+    }
     let presence = merge_transport_presence(identity_presence, status_presence);
     let presence = match (
         presence,
@@ -108,8 +111,155 @@ fn worker_presence_with_view(
     (presence, agent_view)
 }
 
+fn worker_presence_in_state(server: &Server, state: &State, worker: &WorkerRec) -> IdentityPresence {
+    if selected_transport_for_worker(worker).is_some_and(|transport| transport.kind == TransportKind::Tmux) {
+        tmux_identity_presence(state, worker)
+    } else {
+        worker_presence(server, worker)
+    }
+}
+
 pub(crate) fn worker_presence(server: &Server, worker: &WorkerRec) -> IdentityPresence {
+    if selected_transport_for_worker(worker).is_some_and(|transport| transport.kind == TransportKind::Tmux) {
+        return worker_identity_presence(server, worker);
+    }
     worker_presence_with_view(server, worker).0
+}
+
+// Pin only the observed owner and its bindings, not the reducer revision:
+// unrelated timer writes do not invalidate an endpoint observation.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct CloseEndpointTarget {
+    worker: Option<WorkerRec>,
+    bindings: Vec<RuntimeBinding>,
+    routes: Vec<RuntimeBinding>,
+    legacy_routes: Vec<RuntimeBinding>,
+}
+
+pub(crate) fn close_endpoint_target(state: &State, worker_id: &str) -> CloseEndpointTarget {
+    CloseEndpointTarget {
+        worker: state.workers.get(worker_id).cloned(),
+        bindings: state.global.projects.values().flat_map(|project| {
+            project.runtime_bindings.values().filter(|binding| binding.agent_id.as_str() == worker_id).cloned()
+        }).collect(),
+        routes: state.global.current_thread_routes.values()
+            .filter(|binding| binding.agent_id.as_str() == worker_id).cloned().collect(),
+        legacy_routes: state.global.legacy_thread_routes.values()
+            .filter(|binding| binding.agent_id.as_str() == worker_id).cloned().collect(),
+    }
+}
+
+/// Observe the selected address outside the reducer lock. Tmux identity is
+/// durable; only the existing probe's definitive Missing grants an exemption.
+pub(crate) fn close_endpoint_presence(server: &Server, target: &CloseEndpointTarget) -> IdentityPresence {
+    let Some(worker) = target.worker.as_ref() else {
+        return IdentityPresence::Missing;
+    };
+    let Some(transport) = selected_transport_for_worker(worker) else {
+        return IdentityPresence::Unknown;
+    };
+    if transport.kind != TransportKind::Tmux {
+        return worker_presence(server, worker);
+    }
+    let Some(endpoint) = transport.tmux_endpoint.as_ref() else {
+        return IdentityPresence::Unknown;
+    };
+    let mut bindings = target.bindings.iter()
+        .filter(|binding| binding.tmux_endpoint.as_ref() == Some(endpoint));
+    let Some(binding) = bindings.next() else {
+        return IdentityPresence::Unknown;
+    };
+    if bindings.next().is_some() || !target.routes.contains(binding) {
+        return IdentityPresence::Unknown;
+    }
+    match crate::client::adapters::tmux::probe(endpoint) {
+        Ok(crate::client::adapters::tmux::PanePresence::Missing) => IdentityPresence::Missing,
+        Ok(crate::client::adapters::tmux::PanePresence::Present) => IdentityPresence::Present,
+        _ => IdentityPresence::Unknown,
+    }
+}
+
+#[cfg(test)]
+mod close_endpoint_fence_tests {
+    use super::*;
+
+    #[test]
+    fn owner_fence_allows_unrelated_writes_but_rejects_token_transport_and_generation_changes() {
+        let mut state = State::default();
+        state.workers.insert("peer".into(), WorkerRec {
+            id: "peer".into(), token: "token".into(), cwd: "/project".into(),
+            registered_ms: 1, transport: None,
+        });
+        let binding = RuntimeBinding::new(
+            ProjectScopeId::new("/project").unwrap(), AppServerId::new("app").unwrap(),
+            AgentId::new("peer").unwrap(), RuntimeId::new("runtime").unwrap(),
+            BindingId::new("binding-peer").unwrap(), 1, None,
+        ).unwrap();
+        state.global.current_thread_routes.insert(("session".into(), "thread".into()), binding);
+        let observed = close_endpoint_target(&state, "peer");
+        state.global.revision += 1;
+        state.keepalives.insert("other".into(), keepalive::Record::default());
+        assert!(close_endpoint_target(&state, "peer") == observed);
+        state.workers.get_mut("peer").unwrap().token = "replacement".into();
+        assert!(close_endpoint_target(&state, "peer") != observed);
+        state.workers.get_mut("peer").unwrap().token = "token".into();
+        state.workers.get_mut("peer").unwrap().transport = Some(SelectedTransport {
+            kind: TransportKind::AppServer, endpoint: Some("unix:///new".into()),
+            namespace: Some("codex_app".into()), session_id: Some("session".into()),
+            thread_id: Some("thread".into()), tmux_endpoint: None,
+            capabilities: vec![], self_check: "bound".into(),
+        });
+        assert!(close_endpoint_target(&state, "peer") != observed);
+        state.workers.get_mut("peer").unwrap().transport = None;
+        state.global.current_thread_routes.values_mut().next().unwrap().endpoint_generation += 1;
+        assert!(close_endpoint_target(&state, "peer") != observed);
+    }
+}
+
+/// Project identity validity separately from activity/address reachability.
+///
+/// A persisted transport address proves the registered identity even when the
+/// current runtime state is unknown. `None` reachability means the probe could
+/// not decide; it is not a negative identity result.
+pub(crate) fn worker_identity_and_endpoint(
+    server: &Server,
+    worker: &WorkerRec,
+) -> (bool, Option<bool>) {
+    let Some(transport) = selected_transport_for_worker(worker) else {
+        return (false, Some(false));
+    };
+    match transport.kind {
+        TransportKind::Tmux => {
+            let identity_valid = worker_identity_presence(server, worker) == IdentityPresence::Present;
+            let endpoint_live = match transport
+                .tmux_endpoint
+                .as_ref()
+                .map(crate::client::adapters::tmux::probe)
+            {
+                Some(Ok(crate::client::adapters::tmux::PanePresence::Present)) => Some(true),
+                Some(Ok(crate::client::adapters::tmux::PanePresence::Missing)) => Some(false),
+                Some(Ok(crate::client::adapters::tmux::PanePresence::Unknown))
+                | Some(Err(_))
+                | None => None,
+            };
+            (identity_valid, endpoint_live)
+        }
+        TransportKind::AppServer | TransportKind::Dsh => {
+            let identity_valid = if transport.kind == TransportKind::AppServer {
+                transport.thread_id.is_some()
+            } else {
+                transport.endpoint.is_some()
+                    && transport.namespace.is_some()
+                    && transport.thread_id.is_some()
+            };
+            let endpoint_live = match worker_identity_presence(server, worker) {
+                IdentityPresence::Present | IdentityPresence::Cold => Some(true),
+                IdentityPresence::Missing => Some(false),
+                IdentityPresence::Unknown => None,
+            };
+            (identity_valid, endpoint_live)
+        }
+    }
 }
 
 fn transport_agent_view(
@@ -273,10 +423,9 @@ fn transport_agent_view(
     )
 }
 
-/// Pick a live registered peer without assigning work the peer already owns.
-/// Tmux output can report idle as unknown before its observation window elapses;
-/// the user-input conflict is outside this transport contract, so liveness is
-/// the admission condition and pane state remains observational.
+/// Pick an identity-valid registered peer without assigning work it already owns.
+/// Endpoint activity does not gate durable task admission; the notification
+/// owner separately records submission and wake outcomes.
 pub(crate) fn registered_available_peer_for_admission(
     server: &Server,
     requester: &str,
@@ -315,7 +464,7 @@ pub(crate) fn registered_available_peer_for_admission(
             && !is_managed_subagent(&state, &worker.id)
             && !board_peer_has_responsibility(&state, &worker.id, None)
         {
-            return Some((worker.id, "live registered peer has no active task".into()));
+            return Some((worker.id, "identity-valid registered peer has no active task".into()));
         }
     }
     None
@@ -377,7 +526,7 @@ pub(crate) fn idle_managed_subagent_for_admission(
             return Some((
                 record.id,
                 worker.id,
-                "live managed subagent is idle, owned, and has no active task".into(),
+                "identity-valid managed subagent is idle, owned, and has no active task".into(),
             ));
         }
     }
@@ -406,7 +555,7 @@ pub(crate) fn live_managed_subagent_count(server: &Server, parent: &str) -> usiz
         .values()
         .filter(|record| record.parent == parent && record.status != "closed")
         .filter_map(|record| state.workers.get(&record.peer))
-        .filter(|worker| matches!(worker_presence(server, worker), IdentityPresence::Present))
+        .filter(|worker| matches!(worker_presence_in_state(server, &state, worker), IdentityPresence::Present))
         .count()
 }
 
@@ -1366,6 +1515,23 @@ fn handle_worker_close(
             ))
         }
     };
+    let observed_target = close_endpoint_target(&state, &target_id);
+    drop(state);
+    let endpoint_presence = close_endpoint_presence(server, &observed_target);
+    let mut state = server.state.lock().unwrap();
+    if close_endpoint_target(&state, &target_id) != observed_target {
+        return Resp::err("WORKER_CLOSE_TARGET_CHANGED: observed worker or binding changed");
+    }
+    if let Err(error) = verify_master_actor(server, &state, &worker_id, &token) {
+        return error;
+    }
+    let current_route_scope = match server_route_scope(server, &state) {
+        Ok(scope) => scope,
+        Err(error) => return Resp::err(error),
+    };
+    if current_route_scope.as_ref() != Some(&route_scope) {
+        return Resp::err("WORKER_CLOSE_ROUTE_CHANGED: current project route changed");
+    }
     // Closing a worker that still owns live work would strand the task and its
     // worktree. The task lifecycle must be resolved first.
     let owned: Vec<String> = state
@@ -1393,7 +1559,7 @@ fn handle_worker_close(
             .filter(|receipt| receipt.thread_id == thread_id)
             .map(|receipt| receipt.captured_ms)
     });
-    let snapshot_captured_ms = match (worker_presence(server, &target), snapshot_captured_ms) {
+    let snapshot_captured_ms = match (endpoint_presence, snapshot_captured_ms) {
         (_, Some(captured_ms)) => Some(captured_ms),
         // A definitively Missing address has no live thread to snapshot. The
         // master may retire the registration without fabricating evidence.

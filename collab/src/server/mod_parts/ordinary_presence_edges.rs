@@ -23,7 +23,13 @@ fn record_ordinary_peer_presence_edges(server: &Server, worker_filter: Option<&s
     }
     .into_iter()
     .filter_map(|worker| {
-        ordinary_peer_presence_label(worker_presence(server, &worker)).map(|label| (worker, label))
+        // Pane reachability can report a lost endpoint. A registered identity
+        // or a reachable shell cannot report an online agent recovery.
+        let presence = match worker_identity_and_endpoint(server, &worker).1 {
+            Some(false) => IdentityPresence::Missing,
+            _ => IdentityPresence::Unknown,
+        };
+        ordinary_peer_presence_label(presence).map(|label| (worker, label))
     })
     .collect();
 

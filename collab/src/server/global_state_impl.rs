@@ -61,25 +61,7 @@ impl GlobalState {
 
         for (key, binding) in &self.current_thread_routes {
             binding.validate()?;
-            let Some(session_id) = binding.session_id.as_ref() else {
-                return Err(StateError::Invariant(format!(
-                    "current thread route {:?} has no session id",
-                    key
-                )));
-            };
-            let Some(native_thread_id) = binding.native_thread_id.as_ref() else {
-                return Err(StateError::Invariant(format!(
-                    "current thread route {:?} has no native thread id",
-                    key
-                )));
-            };
-            if key
-                != &current_thread_route_address(
-                    session_id,
-                    native_thread_id,
-                    binding.tmux_endpoint.as_ref(),
-                )
-            {
+            if binding_route_address(binding).as_ref() != Some(key) {
                 return Err(StateError::Invariant(format!(
                     "current thread route key {:?} does not match its session/thread/endpoint address",
                     key
@@ -582,22 +564,21 @@ impl GlobalState {
     /// pane are therefore never two owners: one of them is this binding's own
     /// route, and the other is the claim that took the pane.
     ///
-    /// A claimant at this binding's own route address is this route, not a
-    /// conflict, because a generation refresh keeps its address and must still
-    /// be published. A claimant that is this same durable binding at another
+    /// A generation refresh of the same principal and durable binding is this
+    /// route, even when its stable pane address is unchanged. A claimant that
+    /// is this same durable binding at another
     /// address is this route's own stale entry, and the repair is to advance it
     /// rather than to hand the pane to another project. Everything else on the
     /// pane is the claim that owns it.
     pub fn pane_claimant_other_than(&self, binding: &RuntimeBinding) -> Option<&RuntimeBinding> {
         let endpoint = binding.tmux_endpoint.as_ref()?;
-        let address_key = installed_route_address_key(binding);
         self.tmux_pane_route_claimants(endpoint)
             .into_iter()
             .find(|other| {
-                let same_claim =
-                    other.binding_id == binding.binding_id && other.same_principal(binding);
+                let same_claim = other.binding_id == binding.binding_id
+                    && other.same_principal(binding)
+                    && other.endpoint_generation <= binding.endpoint_generation;
                 !same_claim
-                    && installed_route_address_key(other).as_deref() != address_key.as_deref()
             })
     }
 

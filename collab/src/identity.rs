@@ -92,6 +92,29 @@ fn validate_registration_transport(
         .as_deref()
         .filter(|value| !value.is_empty())
         .ok_or_else(|| anyhow::anyhow!("selected transport has no endpoint"))?;
+    if transport.self_check.trim().is_empty() {
+        anyhow::bail!("selected transport is missing its server self-check");
+    }
+    if transport.kind == TransportKind::Tmux {
+        let tmux = transport
+            .tmux_endpoint
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("selected tmux transport has no tmux endpoint"))?;
+        crate::client::adapters::tmux::validate_endpoint(tmux).map_err(anyhow::Error::msg)?;
+        if endpoint != tmux.socket_path
+            || transport.session_id != tmux.codex_session_id
+            || transport.thread_id != tmux.codex_thread_id
+            || runtime.session_id.as_ref().map(SessionId::as_str) != transport.session_id.as_deref()
+            || runtime
+                .native_thread_id
+                .as_ref()
+                .map(NativeThreadId::as_str)
+                != transport.thread_id.as_deref()
+        {
+            anyhow::bail!("selected tmux address or runtime facts do not match typed binding");
+        }
+        return Ok(());
+    }
     let thread_id = transport
         .thread_id
         .as_deref()
@@ -137,23 +160,7 @@ fn validate_registration_transport(
                 }
             }
         }
-        TransportKind::Tmux => {
-            let tmux = transport
-                .tmux_endpoint
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("selected tmux transport has no tmux endpoint"))?;
-            let expected_session = tmux
-                .codex_session_id
-                .as_deref()
-                .unwrap_or(&tmux.tmux_session_id);
-            let expected_thread = tmux.codex_thread_id.as_deref().unwrap_or(&tmux.pane_id);
-            if endpoint != tmux.socket_path
-                || thread_id != expected_thread
-                || session_id != expected_session
-            {
-                anyhow::bail!("selected tmux address does not match its endpoint");
-            }
-        }
+        TransportKind::Tmux => unreachable!("tmux receipt validated above"),
         TransportKind::Dsh => {
             // The dsh endpoint is the gateway control socket. It gets its own
             // `unix://` judgement rather than sharing the App Server one: the
@@ -173,9 +180,6 @@ fn validate_registration_transport(
                 anyhow::bail!("selected dsh transport must not carry a tmux pane binding");
             }
         }
-    }
-    if transport.self_check.trim().is_empty() {
-        anyhow::bail!("selected transport is missing its server self-check");
     }
     Ok(())
 }
@@ -661,15 +665,9 @@ fn archived_pane_identity_at(
         let matches = identity.worker_id == route.agent_id.as_str()
             && identity.project_scope.as_ref() == Some(&route.project_scope)
             && identity.runtime.as_ref().is_some_and(|runtime| {
-                let current_generation = runtime.endpoint_generation == route.endpoint_generation
-                    && runtime.session_id.as_ref() == Some(&route.session_id)
-                    && runtime.native_thread_id.as_ref() == Some(&route.native_thread_id);
-                let committed_recovery_predecessor =
-                    runtime.endpoint_generation.checked_add(1) == Some(route.endpoint_generation);
                 runtime.agent_id == route.agent_id
                     && runtime.binding_id == route.binding_id
                     && runtime.appserver_id == route.app_scope_id
-                    && (current_generation || committed_recovery_predecessor)
             })
             && identity.transport.as_ref().is_some_and(|transport| {
                 transport.kind == TransportKind::Tmux
@@ -718,10 +716,6 @@ fn recover_archived_pane_at(
     let Some(route) = route else {
         return Ok(None);
     };
-    if candidate.endpoint.codex_session_id.is_none() || candidate.endpoint.codex_thread_id.is_none()
-    {
-        return Ok(None);
-    }
     route.validate()?;
     archived_pane_identity_at(host_paths, scope, candidate, route)
 }
@@ -761,25 +755,20 @@ fn identity_by_current_anchors_at(
         return Ok(None);
     }
     let mut anchors = Vec::new();
-    for value in observed.session_anchors() {
-        anchors.push(("codex_session_id", value));
-    }
-    for value in observed.thread_anchors() {
-        anchors.push(("codex_thread_id", value));
-    }
-    if let Some(candidate) = observed.tmux.as_ref() {
-        // One tmux anchor, named for its primary component. The tmux adapter
-        // designs the session id ($N) as the primary component and the pane id
-        // (%N) as the discriminator inside it, so the anchor is the owned pane
-        // pair. Matching the session id alone would make two panes of one tmux
-        // session claim one identity.
-        anchors.push((
-            "tmux_session_id",
-            candidate.endpoint.tmux_session_id.clone(),
-        ));
-    }
-    if let Some(value) = observed.dsh_session_id.as_ref() {
-        anchors.push(("dsh_session_id", value.clone()));
+    if let Some(anchor) = observed.tmux_anchor.as_ref() {
+        // Pane ownership is the only identity selector when tmux is observed.
+        // Codex session/thread ids are route observations and must not compete.
+        anchors.push(("tmux_pane", anchor.pane_id.clone()));
+    } else {
+        for value in observed.session_anchors() {
+            anchors.push(("codex_session_id", value));
+        }
+        for value in observed.thread_anchors() {
+            anchors.push(("codex_thread_id", value));
+        }
+        if let Some(value) = observed.dsh_session_id.as_ref() {
+            anchors.push(("dsh_session_id", value.clone()));
+        }
     }
     let mut matches = BTreeMap::<String, BTreeMap<String, Identity>>::new();
     for entry in std::fs::read_dir(identities_root)? {
@@ -798,13 +787,14 @@ fn identity_by_current_anchors_at(
         // only recorded a pane address (no Codex runtime ids) may still be
         // claimed by that pane. Both shapes are valid owners of a tmux anchor.
         let tmux_owner_matches =
-            |candidate: &crate::proto::TmuxCandidate, persisted: &crate::proto::TmuxEndpoint| {
-                let runtime_ids_absent = candidate.endpoint.codex_session_id.is_none()
-                    && candidate.endpoint.codex_thread_id.is_none();
+            |anchor: &crate::proto::TmuxPaneAnchor, persisted: &crate::proto::TmuxEndpoint| {
                 identity.transport.as_ref().is_some_and(|transport| {
-                    transport.kind == TransportKind::Tmux
-                        || (transport.kind == TransportKind::AppServer && runtime_ids_absent)
-                }) && crate::client::adapters::tmux::same_owned_pane(persisted, &candidate.endpoint)
+                    matches!(
+                        transport.kind,
+                        TransportKind::Tmux | TransportKind::AppServer
+                    )
+                }) && persisted.socket_path == anchor.socket_path
+                    && persisted.pane_id == anchor.pane_id
             };
         for (name, value) in &anchors {
             let matched =
@@ -833,11 +823,11 @@ fn identity_by_current_anchors_at(
                                 .and_then(|runtime| runtime.native_thread_id.as_ref())
                                 .is_some_and(|persisted| persisted.as_str() == value))
                     }
-                    "tmux_session_id" => persisted_endpoint.is_some_and(|persisted| {
+                    "tmux_pane" => persisted_endpoint.is_some_and(|persisted| {
                         observed
-                            .tmux
+                            .tmux_anchor
                             .as_ref()
-                            .is_some_and(|candidate| tmux_owner_matches(candidate, persisted))
+                            .is_some_and(|anchor| tmux_owner_matches(anchor, persisted))
                     }),
                     // The dsh anchor lives on the runtime binding, not on a tmux
                     // endpoint: `RuntimeIdentity.session_id` carries the gateway
@@ -937,9 +927,9 @@ pub(crate) fn load_existing_at(
     }
     let Some(worker_id) = explicit_worker.or_else(|| {
         observed
-            .tmux
+            .tmux_anchor
             .as_ref()
-            .map(|candidate| format!("codex-{}", candidate.endpoint.pane_id))
+            .map(|anchor| format!("codex-{}", anchor.pane_id))
     }) else {
         return Ok(None);
     };

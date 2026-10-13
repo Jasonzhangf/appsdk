@@ -168,60 +168,6 @@ fn operation_refusal(
     result
 }
 
-fn stale_approval_denial(
-    request: &IdentityContextRequest,
-    approval: &IdentityApproval,
-    observed: Option<&crate::server::global_state::RuntimeBinding>,
-) -> crate::proto::ContextOperationResult {
-    let mut result = operation_refusal(
-        request,
-        "APPROVAL_STALE_CONFLICT".into(),
-        "collab context --op <new-operation-id> --approve-identity '<fresh approval object>'",
-    );
-    result.requires.kind = Some("approval".into());
-    result.requires.repair_invocation = Some(
-        "collab context --approve-identity '<exact approval object from requires.approval>'".into(),
-    );
-    result.owner_readback.insert(
-        "error".into(),
-        serde_json::Value::String("APPROVAL_STALE_CONFLICT".into()),
-    );
-    result.owner_readback.insert(
-        "expected_incumbent".into(),
-        serde_json::json!({
-            "binding_id": approval.expected_incumbent_binding_id,
-            "endpoint_generation": approval.expected_incumbent_generation,
-        }),
-    );
-    if let Some(observed) = observed {
-        let mut fresh_approval = serde_json::json!({
-            "decision": "approved",
-            "target_identity": observed.agent_id.as_str(),
-            "project_scope": observed.project_scope.as_str(),
-            "app_scope_id": observed.app_scope_id.as_str(),
-            "action": "replace_binding",
-            "expected_incumbent": {
-                "binding_id": observed.binding_id.as_str(),
-                "endpoint_generation": observed.endpoint_generation,
-            }
-        });
-        fresh_approval["intent_digest"] =
-            serde_json::Value::String(approval_digest(&fresh_approval, &request.facts));
-        result.requires.approval = Some(fresh_approval);
-        result.owner_readback.insert(
-            "observed_incumbent".into(),
-            serde_json::json!({
-                "binding_id": observed.binding_id.as_str(),
-                "endpoint_generation": observed.endpoint_generation,
-                "target_identity": observed.agent_id.as_str(),
-                "project_scope": observed.project_scope.as_str(),
-                "app_scope_id": observed.app_scope_id.as_str(),
-            }),
-        );
-    }
-    result
-}
-
 fn missing_facts_result(
     request: &IdentityContextRequest,
     data: &serde_json::Value,
@@ -309,9 +255,10 @@ enum PreflightIdentityError {
     Error(anyhow::Error),
 }
 
-/// A user approval parsed from the exact staged schema. It binds one target
-/// identity, one route scope, one action, and one exact incumbent fence. The
-/// daemon validates these fields; it never trusts a caller's identity claim.
+/// A user approval for one explicit identity recovery. The old full shape with
+/// an incumbent fence remains accepted, while the minimal user intent only
+/// needs a target, action, and authorization text; the daemon fills the
+/// current incumbent fence inside its identity gate.
 #[derive(Debug, Clone)]
 struct IdentityApproval {
     decision: String,
@@ -324,6 +271,7 @@ struct IdentityApproval {
     expected_incumbent_generation: u64,
     intent_digest: String,
     approved_at_ms: i64,
+    authorization: String,
 }
 
 /// The separate owner fence for a master grant replacement. It is never
@@ -370,12 +318,14 @@ impl ApprovedAdmission {
     /// commits its replacement in its own transaction.
     fn requires_grant_replacement(&self) -> bool {
         self.grant_approval.is_some()
+            || matches!(
+                self.identity_approval.action.as_str(),
+                "restore_master" | "restore_peer"
+            )
     }
 }
 
 enum ApprovedAdmissionError {
-    /// A typed refusal returned to the caller without any side effect.
-    Denied(crate::proto::ContextOperationResult),
     /// A malformed request or an internal invariant break.
     Error(String),
 }
@@ -402,7 +352,10 @@ fn validate_operation_request(request: &IdentityContextRequest) -> Result<(), St
             );
         }
     } else {
-        if request.invocation != "automatic" && request.invocation != "supplement" {
+        if request.invocation != "automatic"
+            && request.invocation != "supplement"
+            && request.invocation != "manual_communication_restore"
+        {
             return Err("IDENTITY_CONTEXT_UNSUPPORTED: this adapter slice supports automatic and supplement context only".into());
         }
     }
@@ -429,44 +382,71 @@ fn parse_identity_approval(value: &serde_json::Value) -> Result<IdentityApproval
         ));
     }
     let target_identity = required_approval_string(object, "target_identity")?;
-    let project_scope = required_approval_string(object, "project_scope")?;
-    let app_scope_id = required_approval_string(object, "app_scope_id")?;
-    let action = required_approval_string(object, "action")?;
-    if action != "replace_binding" && action != "restore_identity" {
+    let project_scope = optional_approval_string(object, "project_scope").unwrap_or_default();
+    let app_scope_id = optional_approval_string(object, "app_scope_id").unwrap_or_default();
+    let action =
+        optional_approval_string(object, "action").unwrap_or_else(|| "restore_identity".into());
+    if !matches!(
+        action.as_str(),
+        "replace_binding" | "restore_identity" | "restore_master" | "restore_peer"
+    ) {
         return Err(format!(
-            "IDENTITY_APPROVAL_ACTION_INVALID: action must be replace_binding or restore_identity, observed {action}"
+            "IDENTITY_APPROVAL_ACTION_INVALID: action must be replace_binding, restore_identity, restore_master or restore_peer, observed {action}"
         ));
     }
-    let incumbent = object
+    let (expected_incumbent_binding_id, expected_incumbent_generation) = match object
         .get("expected_incumbent")
-        .and_then(serde_json::Value::as_object)
-        .ok_or_else(|| {
-            "IDENTITY_APPROVAL_FENCE_REQUIRED: expected_incumbent is required".to_string()
-        })?;
-    let expected_incumbent_binding_id = required_approval_string(incumbent, "binding_id")?;
-    let expected_incumbent_generation = incumbent
-        .get("endpoint_generation")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| {
-            "IDENTITY_APPROVAL_FENCE_REQUIRED: expected_incumbent.endpoint_generation is required"
-                .to_string()
-        })?;
+    {
+        Some(value) => {
+            let incumbent = value.as_object().ok_or_else(|| {
+                "IDENTITY_APPROVAL_FENCE_INVALID: expected_incumbent must be an object".to_string()
+            })?;
+            (
+                    required_approval_string(incumbent, "binding_id")?,
+                    incumbent
+                        .get("endpoint_generation")
+                        .and_then(serde_json::Value::as_u64)
+                        .ok_or_else(|| {
+                            "IDENTITY_APPROVAL_FENCE_INVALID: expected_incumbent.endpoint_generation is required"
+                                .to_string()
+                        })?,
+                )
+        }
+        None => (String::new(), 0),
+    };
+    let authorization = ["authorization", "user_authorization", "approval"]
+        .into_iter()
+        .find_map(|field| optional_approval_string(object, field))
+        .unwrap_or_default();
+    // Full legacy approvals already carry the user's decision and provenance.
+    // Only the simplified intent needs a separate authorization text.
+    if authorization.trim().is_empty()
+        && !(object.get("expected_incumbent").is_some()
+            && optional_approval_string(object, "decided_by").is_some()
+            && object
+                .get("approved_at_ms")
+                .and_then(serde_json::Value::as_i64)
+                .is_some_and(|time| time > 0))
+    {
+        return Err(
+            "IDENTITY_APPROVAL_AUTHORIZATION_REQUIRED: authorization text is required".into(),
+        );
+    }
     Ok(IdentityApproval {
         decision: decision.to_owned(),
-        decided_by: required_approval_string(object, "decided_by")?,
+        decided_by: optional_approval_string(object, "decided_by").unwrap_or_else(|| "user".into()),
         target_identity,
         project_scope,
         app_scope_id,
         action,
         expected_incumbent_binding_id,
         expected_incumbent_generation,
-        intent_digest: required_approval_string(object, "intent_digest")?,
+        intent_digest: optional_approval_string(object, "intent_digest").unwrap_or_default(),
         approved_at_ms: object
             .get("approved_at_ms")
             .and_then(serde_json::Value::as_i64)
-            .ok_or_else(|| {
-                "IDENTITY_APPROVAL_METADATA_INVALID: approved_at_ms is required".to_string()
-            })?,
+            .unwrap_or(0),
+        authorization,
     })
 }
 
@@ -573,13 +553,12 @@ fn business_receipts_for_success(
     if approved.is_some() {
         receipts.push("approval_decision".to_owned());
     }
-    let Some((command_id, operation_id)) = nested else {
-        return receipts;
-    };
-    if command_id.trim().is_empty() || operation_id.trim().is_empty() {
-        return receipts;
+    if let Some((command_id, operation_id)) = nested {
+        if command_id.trim().is_empty() || operation_id.trim().is_empty() {
+            return receipts;
+        }
+        receipts.push("nested_register".to_owned());
     }
-    receipts.push("nested_register".to_owned());
     let Some(worker_id) = response
         .data
         .get("identity_receipt")
@@ -615,14 +594,17 @@ fn business_receipts_for_success(
     };
     let route_proven = committed_binding.as_ref().is_some_and(|binding| {
         let state = host.state.lock().unwrap();
-        match (
-            binding.session_id.as_ref(),
-            binding.native_thread_id.as_ref(),
-        ) {
-            (Some(session), Some(thread)) => {
-                state.global.lookup_current_thread_route(session, thread) == Some(binding)
-            }
-            _ => false,
+        match binding.tmux_endpoint.as_ref() {
+            Some(endpoint) => state.global.lookup_tmux_route(endpoint) == Some(binding),
+            None => match (
+                binding.session_id.as_ref(),
+                binding.native_thread_id.as_ref(),
+            ) {
+                (Some(session), Some(thread)) => {
+                    state.global.lookup_current_thread_route(session, thread) == Some(binding)
+                }
+                _ => false,
+            },
         }
     });
     if !route_proven {
@@ -634,10 +616,24 @@ fn business_receipts_for_success(
     let credential_proven = identity::read_persisted(&host.host_paths, worker_id)
         .ok()
         .flatten()
-        .and_then(|identity| identity.runtime)
-        .is_some_and(|runtime| {
-            runtime.binding_id.as_str() == binding_id.as_str()
-                && runtime.endpoint_generation == generation
+        .is_some_and(|identity| {
+            let state = runtime.state.lock().unwrap();
+            identity.worker_id == worker_id
+                && identity.project_scope.as_ref() == Some(&context.project_scope)
+                && state.workers.get(worker_id).is_some_and(|worker| {
+                    worker.token == identity.token && worker.transport == identity.transport
+                })
+                && identity.runtime.as_ref().is_some_and(|saved| {
+                    saved.binding_id == binding_id
+                        && saved.endpoint_generation == generation
+                        && committed_binding.as_ref().is_some_and(|binding| {
+                            saved.agent_id == binding.agent_id
+                                && saved.appserver_id == binding.app_scope_id
+                                && saved.runtime_id == binding.runtime_id
+                                && saved.session_id == binding.session_id
+                                && saved.native_thread_id == binding.native_thread_id
+                        })
+                })
         });
     if !credential_proven {
         return receipts;
@@ -656,6 +652,13 @@ fn business_receipts_for_success(
                 subscription.worker_id == worker_id
                     && subscription.status == "armed"
                     && subscription.expires_ms > crate::server::state::now_ms()
+                    && state
+                        .workers
+                        .get(worker_id)
+                        .and_then(selected_transport_for_worker)
+                        .is_some_and(|transport| {
+                            subscription_matches_transport(subscription, &transport)
+                        })
             })
     };
     if lease_proven {
@@ -704,6 +707,18 @@ fn required_approval_string(
         .ok_or_else(|| {
             format!("IDENTITY_APPROVAL_FIELD_REQUIRED: {field} must be a non-empty string")
         })
+}
+
+fn optional_approval_string(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Option<String> {
+    object
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 #[cfg(test)]

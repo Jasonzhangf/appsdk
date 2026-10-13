@@ -225,6 +225,111 @@ fn automatic_notification_uses_immediate_without_sender_thread() {
 }
 
 #[test]
+fn queued_tmux_wake_drains_through_the_existing_timer_without_consumption() {
+    let (mut server, root) = test_server();
+    let subscription_id = register_and_subscribe(&server, "recipient");
+    let now = now_ms();
+    let (worker, subscription) = {
+        let state = server.state.lock().unwrap();
+        (
+            state.workers["recipient"].clone(),
+            state.notification_subscriptions[&subscription_id].clone(),
+        )
+    };
+    let mut worker = worker;
+    let endpoint = crate::proto::TmuxEndpoint {
+        socket_path: root.join("absent.sock").display().to_string(),
+        server_pid: 1,
+        pane_pid: 2,
+        tmux_session_id: "$1".into(),
+        pane_id: "%1".into(),
+        codex_session_id: None,
+        codex_thread_id: None,
+    };
+    worker.transport = Some(SelectedTransport {
+        kind: TransportKind::Tmux,
+        endpoint: Some(endpoint.socket_path.clone()),
+        namespace: Some("$1".into()),
+        session_id: None,
+        thread_id: None,
+        tmux_endpoint: Some(endpoint),
+        capabilities: vec!["send_message_to_pane".into()],
+        self_check: "fixture".into(),
+    });
+    let mut subscription = subscription;
+    subscription.method = "tmux".into();
+    subscription.target = "%1".into();
+    server.commit(&[
+        Event::Registered { worker },
+        Event::NotificationSubscribed { subscription },
+    ]);
+    queue_message(&server, "recipient", &subscription_id, "deferred-tmux", now);
+    server.commit(&[Event::DeliveryMode {
+        msg_id: "deferred-tmux".into(),
+        mode: "queued".into(),
+        source_thread_id: None,
+    }]);
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let observed = calls.clone();
+    Arc::get_mut(&mut server)
+        .unwrap()
+        .appserver_notification_sink = Arc::new(move |_, _, _, _, _, mode| {
+        observed.lock().unwrap().push(mode.to_string());
+        Ok(json!({"submitted": true, "consumed": false}))
+    });
+    let attempt =
+        attempt_notification_detailed_with_at(&server, "deferred-tmux", &subscription_id, now);
+    assert!(
+        matches!(attempt, NotificationAttempt::Deferred),
+        "{attempt:?}"
+    );
+    let response =
+        notification_send_response(json!({"msg_id":"deferred-tmux"}), true, "tmux", &attempt);
+    assert!(response.ok);
+    assert_eq!(response.data["notification"], "queued");
+    assert_eq!(response.data["consumed"], false);
+    assert!(calls.lock().unwrap().is_empty());
+    {
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.msgs["deferred-tmux"].wake_attempt_count, 0);
+        assert!(!state
+            .notification_delivery_accepted
+            .contains_key("deferred-tmux"));
+        assert!(!state
+            .notification_delivery_failures
+            .contains_key("deferred-tmux"));
+    }
+    timers::tick_with_idle_at(
+        &server,
+        now + server.config.notifications.delay_ms("direct-message"),
+        &|_| false,
+    );
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec![DAEMON_LIVE_CLOSURE_MODE.to_string()]
+    );
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.delivery_modes["deferred-tmux"], "queued");
+    assert_eq!(state.msgs["deferred-tmux"].state, "pending");
+    assert_eq!(state.msgs["deferred-tmux"].wake_attempt_count, 1);
+    assert!(state
+        .notification_delivery_accepted
+        .contains_key("deferred-tmux"));
+    drop(state);
+    timers::tick_with_idle_at(
+        &server,
+        now + 2 * server.config.notifications.delay_ms("direct-message"),
+        &|_| false,
+    );
+    assert_eq!(
+        calls.lock().unwrap().len(),
+        1,
+        "accepted queued wake must not be submitted again"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn queued_delivery_mode_reaches_notification_sink() {
     let (mut server, root) = test_server();
     let subscription_id = register_and_subscribe(&server, "recipient");

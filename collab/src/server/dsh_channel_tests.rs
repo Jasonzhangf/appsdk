@@ -1,5 +1,6 @@
 use super::*;
 use crate::proto::{DshCandidate, ProjectContext, TransportCandidates, TransportKind};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixListener as StdUnixListener;
 use std::os::unix::net::UnixStream as StdUnixStream;
@@ -139,6 +140,110 @@ fn facts_reply(request: &serde_json::Value, cwd: &Path) -> String {
     .to_string()
 }
 
+fn registration_challenge(request: &serde_json::Value) -> Option<serde_json::Value> {
+    let text = request
+        .pointer("/params/content/0/text")
+        .and_then(serde_json::Value::as_str)?;
+    let raw = text.strip_prefix("COLLAB_REGISTER_CHALLENGE ")?;
+    serde_json::from_str(raw).ok()
+}
+
+fn is_registration_enqueue(request: &serde_json::Value) -> bool {
+    request["method"] == "enqueue" && registration_challenge(request).is_some()
+}
+
+fn is_wake_enqueue(request: &serde_json::Value) -> bool {
+    request["method"] == "enqueue" && !is_registration_enqueue(request)
+}
+
+/// A gateway that answers the real registration challenge and can also serve
+/// wake traffic. The challenge marker and participant identity come from the
+/// actual enqueue request; no private pending record is read.
+fn registration_gateway<W>(
+    name: &str,
+    root: &Path,
+    seen: Option<Arc<Mutex<Vec<serde_json::Value>>>>,
+    wake: W,
+) -> Gateway
+where
+    W: Fn() -> Option<String> + Send + 'static,
+{
+    let root = root.to_path_buf();
+    let registrations: Arc<Mutex<HashMap<String, (String, String, String)>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    Gateway::start(name, move |request| {
+        if let Some(seen) = &seen {
+            seen.lock().unwrap().push(request.clone());
+        }
+        match request["method"].as_str().unwrap_or_default() {
+            "agent-facts" => Some(facts_reply(&request, &root)),
+            "enqueue" => {
+                if let Some(challenge) = registration_challenge(&request) {
+                    let message_id = request["params"]["messageId"].as_str()?.to_owned();
+                    let runtime_id = request["params"]["runtimeId"].as_str()?.to_owned();
+                    let agent_id = request["params"]["agentId"].as_str()?.to_owned();
+                    let marker = challenge["challenge"].as_str()?.to_owned();
+                    registrations.lock().unwrap().insert(
+                        message_id.clone(),
+                        (runtime_id.clone(), agent_id.clone(), marker),
+                    );
+                    Some(
+                        serde_json::json!({
+                            "ok": true,
+                            "result": {
+                                "messageId": message_id,
+                                "runtimeId": runtime_id,
+                                "agentId": agent_id,
+                            }
+                        })
+                        .to_string(),
+                    )
+                } else {
+                    wake()
+                }
+            }
+            "agent-reply" => {
+                let message_id = request["params"]["messageId"].as_str()?.to_owned();
+                let registration = registrations.lock().unwrap().get(&message_id).cloned();
+                match registration {
+                    Some((_runtime_id, agent_id, marker)) => Some(
+                        serde_json::json!({
+                            "ok": true,
+                            "result": {
+                                // `dsh::agent_reply` reads the gateway result and
+                                // then its nested `result`, matching the genuine
+                                // participant fixture in
+                                // `collab/tests/native_register_late_return.rs`.
+                                "result": {
+                                    "state": "replied",
+                                    "agentId": agent_id,
+                                    "messageId": message_id,
+                                    "sessionId": agent_id,
+                                    "turn": 1,
+                                    "step": 1,
+                                    "inputSeq": 1,
+                                    "outputSeq": 2,
+                                    "completedSeq": 3,
+                                    "text": marker,
+                                }
+                            }
+                        })
+                        .to_string(),
+                    ),
+                    None => Some(
+                        serde_json::json!({
+                            "ok": true,
+                            "result": {"result": {"state": "pending"}}
+                        })
+                        .to_string(),
+                    ),
+                }
+            }
+            _ => None,
+        }
+    })
+}
+
 fn wake_reply(message_id: &str) -> Option<String> {
     Some(
         serde_json::json!({
@@ -217,14 +322,28 @@ fn dsh_must_not_be_combined_with_a_pane_candidate() {
     // Design F1: dsh is mutually exclusive. The ambiguous set is refused rather
     // than ranked, so neither candidate can silently shadow the other.
     let root = scratch("mutex");
+    let tmux_socket = root.join("mutex.sock");
+    let started = std::process::Command::new("tmux")
+        .arg("-S")
+        .arg(&tmux_socket)
+        .args(["new-session", "-d", "-s", "dsh-mutex", "sleep", "60"])
+        .output()
+        .expect("start isolated tmux server");
+    assert!(
+        started.status.success(),
+        "start isolated tmux server: {}",
+        String::from_utf8_lossy(&started.stderr)
+    );
     let gateway = Gateway::start("mutex", |_| None);
     let server = test_server(&root);
     let tmux = crate::proto::TmuxCandidate {
         endpoint: crate::proto::TmuxEndpoint {
-            socket_path: "/tmp/collab-dsh-mutex-tmux.sock".into(),
+            socket_path: tmux_socket.to_string_lossy().into_owned(),
             server_pid: 1,
             tmux_session_id: "$1".into(),
-            pane_id: "%1".into(),
+            // The live server proves this address is missing rather than
+            // unreachable, so validation reaches the mutual-exclusion guard.
+            pane_id: "%999999".into(),
             pane_pid: 2,
             codex_session_id: Some("session-1".into()),
             codex_thread_id: Some("thread-1".into()),
@@ -232,6 +351,20 @@ fn dsh_must_not_be_combined_with_a_pane_candidate() {
         cwd: root.display().to_string(),
     };
 
+    // Test-only diagnostic. The mutual-exclusion guard is reached only after
+    // the tmux candidate probes `Missing`. Expose the declared precondition
+    // (live server, absent pane) and the actual probe result to retain the
+    // native counterexample to the old display-message query.
+    let declared_probe = crate::client::adapters::tmux::probe(&tmux.endpoint);
+    let panes = std::process::Command::new("tmux")
+        .arg("-S")
+        .arg(&tmux_socket)
+        .args(["list-panes", "-a", "-F", "#{pane_id}"])
+        .output()
+        .expect("list isolated tmux panes");
+    let declared_present = String::from_utf8_lossy(&panes.stdout)
+        .lines()
+        .any(|line| line.trim() == tmux.endpoint.pane_id);
     let error = validate_transport_candidates(
         &server,
         &TransportCandidates {
@@ -243,6 +376,22 @@ fn dsh_must_not_be_combined_with_a_pane_candidate() {
     )
     .expect_err("dsh plus tmux must be refused, not ranked");
 
+    eprintln!(
+        "dsh_mutex diagnostic: start_status={:?} start_stdout={:?} start_stderr={:?} declared_present={} probe={:?} list_panes_status={:?} list_panes_stdout={:?} list_panes_stderr={:?} error={error:?}",
+        started.status.code(),
+        String::from_utf8_lossy(&started.stdout),
+        String::from_utf8_lossy(&started.stderr),
+        declared_present,
+        declared_probe,
+        panes.status.code(),
+        String::from_utf8_lossy(&panes.stdout),
+        String::from_utf8_lossy(&panes.stderr),
+    );
+    let _ = std::process::Command::new("tmux")
+        .arg("-S")
+        .arg(&tmux_socket)
+        .arg("kill-server")
+        .output();
     assert!(error.starts_with("DSH_ENDPOINT_REJECTED:"), "{error}");
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -1051,26 +1200,8 @@ fn dsh_peers(
     b_enqueue: impl Fn() -> Option<String> + Send + 'static,
     seen: Arc<Mutex<Vec<serde_json::Value>>>,
 ) -> (Arc<Server>, Gateway, Gateway) {
-    let observer_a = Arc::clone(&seen);
-    let gateway_a = Gateway::start("peers-a", {
-        let root = root.to_path_buf();
-        move |request| {
-            observer_a.lock().unwrap().push(request.clone());
-            Some(facts_reply(&request, &root))
-        }
-    });
-    let observer_b = Arc::clone(&seen);
-    let gateway_b = Gateway::start("peers-b", {
-        let root = root.to_path_buf();
-        move |request| {
-            observer_b.lock().unwrap().push(request.clone());
-            if request.get("method").and_then(serde_json::Value::as_str) == Some("agent-facts") {
-                Some(facts_reply(&request, &root))
-            } else {
-                b_enqueue()
-            }
-        }
-    });
+    let gateway_a = registration_gateway("peers-a", root, Some(Arc::clone(&seen)), || None);
+    let gateway_b = registration_gateway("peers-b", root, Some(Arc::clone(&seen)), b_enqueue);
     let mut server = test_server(root);
     {
         let server = Arc::get_mut(&mut server).expect("unique test server");
@@ -1135,7 +1266,7 @@ fn a_dsh_peer_registers_and_is_woken_through_the_real_send_entry() {
     let requests = seen.lock().unwrap().clone();
     let enqueues = requests
         .iter()
-        .filter(|request| request["method"] == "enqueue")
+        .filter(|request| is_wake_enqueue(request))
         .collect::<Vec<_>>();
     assert_eq!(enqueues.len(), 1, "exactly one wake per send: {requests:?}");
     let enqueue = enqueues[0];
@@ -1217,10 +1348,7 @@ fn a_dsh_master_reconnect_is_not_fenced_as_a_foreign_promotion() {
     // the token, persisted identity, scope and runtime key prove the same
     // principal, and transport reachability never gates the reissued grant.
     let root = scratch("dsh-master-reconnect");
-    let gateway = Gateway::start("dsh-master-reconnect", {
-        let root = root.clone();
-        move |request| Some(facts_reply(&request, &root))
-    });
+    let gateway = registration_gateway("dsh-master-reconnect", &root, None, || None);
     let server = test_server(&root);
     let registered = register_dsh(&server, "dsh-master", &gateway.socket, "rt-1", "ses-1");
     assert!(registered.ok, "{registered:?}");
@@ -1256,10 +1384,7 @@ fn a_dsh_rebind_is_refused_without_pointing_at_a_tmux_pane() {
     // still happen - collab does not own a dsh agent's lifecycle - but it must
     // name the real owner.
     let root = scratch("dsh-rebind-wording");
-    let gateway = Gateway::start("dsh-rebind-wording", {
-        let root = root.clone();
-        move |request| Some(facts_reply(&request, &root))
-    });
+    let gateway = registration_gateway("dsh-rebind-wording", &root, None, || None);
     let server = test_server(&root);
     let registered = register_dsh(&server, "dsh-rebind", &gateway.socket, "rt-1", "ses-1");
     assert!(registered.ok, "{registered:?}");
@@ -1319,7 +1444,7 @@ fn a_dsh_wake_names_the_real_mailbox_id_so_a_peer_ack_can_match_it() {
     let requests = seen.lock().unwrap().clone();
     let enqueue = requests
         .iter()
-        .find(|request| request["method"] == "enqueue")
+        .find(|request| is_wake_enqueue(request))
         .unwrap_or_else(|| panic!("the peer was woken through enqueue: {requests:?}"));
     let message_id = enqueue["params"]["messageId"]
         .as_str()
@@ -1361,14 +1486,8 @@ fn a_dsh_peer_returning_on_a_new_gateway_address_replaces_its_transport() {
     let first_seen: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
     let second_seen: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
     let gateway_for = |name: &str, observer: Arc<Mutex<Vec<serde_json::Value>>>| {
-        let root = root.clone();
-        Gateway::start(name, move |request| {
-            observer.lock().unwrap().push(request.clone());
-            if request.get("method").and_then(serde_json::Value::as_str) == Some("agent-facts") {
-                Some(facts_reply(&request, &root))
-            } else {
-                wake_reply("msg-address-change")
-            }
+        registration_gateway(name, &root, Some(observer), || {
+            wake_reply("msg-address-change")
         })
     };
     let old_gateway = gateway_for("addr-old", Arc::clone(&first_seen));
@@ -1467,7 +1586,7 @@ fn a_dsh_peer_returning_on_a_new_gateway_address_replaces_its_transport() {
     let new_requests = second_seen.lock().unwrap().clone();
     let enqueues = new_requests
         .iter()
-        .filter(|request| request["method"] == "enqueue")
+        .filter(|request| is_wake_enqueue(request))
         .collect::<Vec<_>>();
     assert_eq!(
         enqueues.len(),
@@ -1484,7 +1603,7 @@ fn a_dsh_peer_returning_on_a_new_gateway_address_replaces_its_transport() {
             .lock()
             .unwrap()
             .iter()
-            .all(|request| request["method"] != "enqueue"),
+            .all(|request| !is_wake_enqueue(request)),
         "the dead socket must not receive the wake"
     );
     drop((old_gateway, new_gateway));

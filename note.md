@@ -145,3 +145,41 @@
   `/Volumes/Intel/playground/appsdk/.worker-runs/collab-pane-recovery-20261011/`.
   Installation/shared daemon/live/remote evidence is recorded there separately;
   source tests and review alone do not prove those delivery endpoints.
+
+## 2026-10-12 — Collab durable identity, explicit roles and selected-path registration
+
+- Candidate evidence follows requirements ledger v8 / communication v4.
+  Tmux identity uses the persisted socket+pane anchor. PID/session drift,
+  busy/idle, capture/probe failures and endpoint reachability no longer revoke
+  identity or role. One explicit master/peer intent overrides the current
+  role mapping through the existing authority owner.
+- Ordinary and committed staged restoration reuse the original identity,
+  binding/adaptor and receipt. They perform no new Register, initial admission,
+  loopback or binding generation. Manual communication recovery has its own
+  loopback; failure retains identity, role, grant and binding.
+- Initial registration requires a genuine participant return on the path the
+  daemon selected. Async continuation retains exact intent and owner fences
+  while allowing unrelated ledger activity. Late AppServer/DSH replies finish
+  the original operation. Original manager publication and compensation retain
+  terminal failures across duplicate replies and restart. New command IDs are
+  scope-qualified; saved legacy IDs stay unchanged.
+- Completed normal context repeats return the complete current project state
+  without repeating committed effects. Query remains pure. Endpoint and agent
+  activity are independent of durable identity through status, context, board,
+  dashboard and close/orphan consumers. A reachable tmux pane keeps endpoint
+  true while unknown agent activity remains unknown. Only exact missing-target
+  probe results permit the existing Missing close exemption; current authority,
+  responsibility, task, unread and actor/target fencing stay enforced.
+- Pre-integration native receipts: peer244/244, host-route119/119,
+  remaining binary586 passed with one preexisting live ignore, timer47/47,
+  genuine registration12/12, late native return10/10, AppServer public16/16,
+  Context other54/54 plus cancellation2/2, board/HTTP/physical endpoint4/4.
+  Old failure logs remain, and socket-denied child execution never counts as
+  acceptance. The final declared Collab CI and finding-specific review are
+  recorded separately from remote integration, installation and runtime.
+- Evidence and DAG audit:
+  `/Volumes/Intel/playground/appsdk/.worker-runs/tmux-identity-20261011/`.
+  Main and foreign candidates retain their unrelated requirements/governance
+  work. No reset, identity impersonation, real-peer message or memory write is
+  part of this repair. Exact remote, installed and cleanup receipts are kept
+  in the evidence root after their respective actions.

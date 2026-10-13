@@ -358,10 +358,12 @@ impl OperationJournal {
     /// invocation. The caller returns the durable cancelled projection and
     /// never starts the next owner.
     pub(crate) fn is_cancelled(&self, operation_id: &str) -> bool {
-        matches!(
-            self.state.lock().unwrap().live.get(operation_id),
-            Some(LiveBoundary::Cancelled)
-        )
+        let state = self.state.lock().unwrap();
+        matches!(state.live.get(operation_id), Some(LiveBoundary::Cancelled))
+            || state
+                .operations
+                .get(operation_id)
+                .is_some_and(|record| record.phase == IdentityOperationPhase::Cancelled)
     }
 
     pub(crate) fn live_receipts(&self, operation_id: &str) -> Option<Vec<String>> {

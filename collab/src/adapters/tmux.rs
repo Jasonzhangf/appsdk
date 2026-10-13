@@ -13,6 +13,24 @@ pub enum PanePresence {
 static LAST_PANE_OUTPUT: OnceLock<Mutex<std::collections::HashMap<String, u64>>> = OnceLock::new();
 const MAX_PANE_OBSERVATIONS: usize = 256;
 
+pub fn anchor_from_env() -> Result<crate::proto::TmuxPaneAnchor, String> {
+    let tmux =
+        std::env::var("TMUX").map_err(|_| "TMUX_ENDPOINT_MISSING: TMUX unavailable".to_owned())?;
+    let pane_id = std::env::var("TMUX_PANE")
+        .map_err(|_| "TMUX_ENDPOINT_MISSING: TMUX_PANE unavailable".to_owned())?;
+    validate_pane_id(&pane_id)?;
+    let socket_path = tmux
+        .rsplitn(3, ',')
+        .nth(2)
+        .filter(|path| path.starts_with('/') && !path.chars().any(char::is_control))
+        .ok_or_else(|| "TMUX_ENDPOINT_INVALID: malformed tmux socket path".to_owned())?
+        .to_owned();
+    Ok(crate::proto::TmuxPaneAnchor {
+        socket_path,
+        pane_id,
+    })
+}
+
 pub fn candidate_from_env() -> Result<TmuxCandidate, String> {
     let tmux = std::env::var("TMUX").map_err(|_| {
         "TMUX_ENDPOINT_MISSING: run this command from the registered tmux pane, then retry"
@@ -84,36 +102,32 @@ fn nonempty_env(key: &str) -> Option<String> {
 pub fn probe(endpoint: &TmuxEndpoint) -> Result<PanePresence, String> {
     validate_endpoint(endpoint)?;
     let args = [
-        "display-message",
-        "-p",
+        "list-panes",
         "-t",
         endpoint.pane_id.as_str(),
-        "#{pid}\t#{session_id}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}",
+        "-F",
+        "#{pane_id}",
     ];
-    match tmux_command(&endpoint.socket_path, &args) {
-        Ok(output) => {
-            let line = String::from_utf8_lossy(&output.stdout);
-            let mut fields = line.trim_end().split('\t');
-            let server_pid = fields.next().and_then(|value| value.parse::<u32>().ok());
-            let session = fields.next().unwrap_or_default();
-            let pane = fields.next().unwrap_or_default();
-            let pid = fields.next().and_then(|value| value.parse::<u32>().ok());
-            let dead = fields.next();
-            if server_pid != Some(endpoint.server_pid)
-                || session != endpoint.tmux_session_id
-                || pane != endpoint.pane_id
-                || pid != Some(endpoint.pane_pid)
-                || dead == Some("1")
-            {
-                return Ok(PanePresence::Missing);
-            }
-            if dead == Some("0") {
-                Ok(PanePresence::Present)
-            } else {
-                Ok(PanePresence::Unknown)
-            }
+    pane_probe_result(
+        &endpoint.pane_id,
+        tmux_command(&endpoint.socket_path, &args)
+            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned()),
+    )
+}
+
+fn pane_probe_result(
+    pane_id: &str,
+    result: Result<String, String>,
+) -> Result<PanePresence, String> {
+    match result {
+        Ok(panes)
+            if panes.lines().all(|pane| validate_pane_id(pane).is_ok())
+                && panes.lines().any(|pane| pane == pane_id) =>
+        {
+            Ok(PanePresence::Present)
         }
-        Err(error) if error.contains("can't find pane") => Ok(PanePresence::Missing),
+        Ok(_) => Ok(PanePresence::Unknown),
+        Err(error) if error == format!("can't find pane: {pane_id}") => Ok(PanePresence::Missing),
         Err(error) => Err(format!("TMUX_PROBE_UNKNOWN: {error}")),
     }
 }
@@ -267,7 +281,7 @@ fn buffer_name(message_id: &str) -> String {
     format!("collab-{:016x}", hasher.finish())
 }
 
-fn validate_pane_id(id: &str) -> Result<(), String> {
+pub(crate) fn validate_pane_id(id: &str) -> Result<(), String> {
     let digits = id.strip_prefix('%').unwrap_or_default();
     if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err("TMUX_ENDPOINT_INVALID: pane id must use tmux %N form".into());
@@ -308,29 +322,18 @@ pub fn validate_endpoint(endpoint: &TmuxEndpoint) -> Result<(), String> {
 /// One pane on one tmux server.
 ///
 /// A pane id names a pane only together with the server that issued it, so the
-/// socket path and session id complete the identity. The tmux server pid and the
-/// pane's shell pid are *not* part of it: tmux reissues both across restarts
-/// while the pane id stays the address, and the contract fixes ownership on the
-/// pane address alone. Use this predicate for every ownership question — who
-/// owns a pane, who a later registration replaces, which routes claim one pane.
+/// socket path completes the address. The tmux server pid, session id, and the
+/// pane's shell pid are *not* part of it: tmux reissues all three across
+/// restarts while the pane id stays the address. Use this predicate for every
+/// ownership question.
 pub fn same_owned_pane(left: &TmuxEndpoint, right: &TmuxEndpoint) -> bool {
-    left.socket_path == right.socket_path
-        && left.tmux_session_id == right.tmux_session_id
-        && left.pane_id == right.pane_id
+    same_pane_route(left, right)
 }
 
-/// The exact persisted endpoint address, including the server and shell pids.
-///
-/// Use this when a caller must prove that an endpoint it recorded earlier is
-/// still the same concrete endpoint, for example when resolving a route or
-/// re-anchoring an identity. Ownership never uses it: a new pane pid is a new
-/// process in the same owned pane, not a second pane.
+/// The persisted pane address: socket path plus pane id. Runtime observations
+/// such as server/session/pane pids and native thread ids do not redefine it.
 pub fn same_pane_route(left: &TmuxEndpoint, right: &TmuxEndpoint) -> bool {
-    left.socket_path == right.socket_path
-        && left.server_pid == right.server_pid
-        && left.tmux_session_id == right.tmux_session_id
-        && left.pane_id == right.pane_id
-        && left.pane_pid == right.pane_pid
+    left.socket_path == right.socket_path && left.pane_id == right.pane_id
 }
 
 fn tmux_command(socket: &str, args: &[&str]) -> Result<std::process::Output, String> {
@@ -348,7 +351,7 @@ fn tmux_command(socket: &str, args: &[&str]) -> Result<std::process::Output, Str
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::time::Duration;
@@ -445,13 +448,13 @@ mod tests {
         }
     }
 
-    struct TmuxFailureWrapper {
+    pub(crate) struct TmuxFailureWrapper {
         root: PathBuf,
         original_path: Option<std::ffi::OsString>,
     }
 
     impl TmuxFailureWrapper {
-        fn fail_command(command_name: &str) -> Self {
+        pub(crate) fn fail_command(command_name: &str) -> Self {
             let output = Command::new("which").arg("tmux").output().unwrap();
             assert!(output.status.success());
             let real_tmux = String::from_utf8(output.stdout).unwrap().trim().to_owned();
@@ -558,7 +561,7 @@ mod tests {
     }
 
     #[test]
-    fn pane_route_identity_includes_socket_session_and_process_generation() {
+    fn pane_route_identity_is_the_socket_and_pane_address() {
         let endpoint = TmuxEndpoint {
             socket_path: "/tmp/tmux-a.sock".into(),
             server_pid: 11,
@@ -569,11 +572,7 @@ mod tests {
             codex_thread_id: None,
         };
         assert!(same_pane_route(&endpoint, &endpoint));
-        for changed in [
-            TmuxEndpoint {
-                socket_path: "/tmp/tmux-b.sock".into(),
-                ..endpoint.clone()
-            },
+        for drifted in [
             TmuxEndpoint {
                 server_pid: 12,
                 ..endpoint.clone()
@@ -583,11 +582,22 @@ mod tests {
                 ..endpoint.clone()
             },
             TmuxEndpoint {
-                pane_id: "%4".into(),
+                pane_pid: 34,
+                ..endpoint.clone()
+            },
+        ] {
+            assert!(
+                same_pane_route(&endpoint, &drifted),
+                "the pane address must survive process/session drift"
+            );
+        }
+        for changed in [
+            TmuxEndpoint {
+                socket_path: "/tmp/tmux-b.sock".into(),
                 ..endpoint.clone()
             },
             TmuxEndpoint {
-                pane_pid: 34,
+                pane_id: "%4".into(),
                 ..endpoint.clone()
             },
         ] {
@@ -602,6 +612,34 @@ mod tests {
     }
 
     #[test]
+    fn pane_probe_requires_exact_membership_or_explicit_target_absence() {
+        assert_eq!(
+            pane_probe_result("%0", Ok("%2\n%0\n".into())).unwrap(),
+            PanePresence::Present
+        );
+        for output in ["", "\n", "%2\n", "95087\t\t\t\t\n", "%0\nbroken\n"] {
+            assert_eq!(
+                pane_probe_result("%0", Ok(output.into())).unwrap(),
+                PanePresence::Unknown,
+                "{output:?} cannot prove presence or absence"
+            );
+        }
+        assert_eq!(
+            pane_probe_result("%0", Err("can't find pane: %0".into())).unwrap(),
+            PanePresence::Missing
+        );
+        for error in [
+            "can't find pane: %1",
+            "can't find pane: %0\nconnection failed",
+            "no server running",
+        ] {
+            assert!(pane_probe_result("%0", Err(error.into()))
+                .unwrap_err()
+                .starts_with("TMUX_PROBE_UNKNOWN:"));
+        }
+    }
+
+    #[test]
     fn pane_probe_distinguishes_present_missing_and_unknown() {
         let tmux = IsolatedTmux::start();
         let endpoint = tmux.endpoint();
@@ -610,8 +648,21 @@ mod tests {
             server_pid: endpoint.server_pid + 1,
             ..endpoint.clone()
         };
-        assert_eq!(probe(&restarted).unwrap(), PanePresence::Missing);
+        assert_eq!(probe(&restarted).unwrap(), PanePresence::Present);
 
+        // Keep the tmux server alive after the target pane is removed. Removing
+        // the last pane would stop the service, which makes Unknown legitimate.
+        let keepalive = Command::new("tmux")
+            .arg("-S")
+            .arg(&tmux.socket)
+            .args(["new-session", "-d", "-s", "collab-keepalive", "sleep 60"])
+            .output()
+            .unwrap();
+        assert!(
+            keepalive.status.success(),
+            "start keepalive pane: {}",
+            String::from_utf8_lossy(&keepalive.stderr)
+        );
         let killed = Command::new("tmux")
             .arg("-S")
             .arg(&tmux.socket)
@@ -619,6 +670,68 @@ mod tests {
             .output()
             .unwrap();
         assert!(killed.status.success());
+        let alive = Command::new("tmux")
+            .arg("-S")
+            .arg(&tmux.socket)
+            .args(["has-session", "-t", "collab-keepalive"])
+            .output()
+            .unwrap();
+        assert!(
+            alive.status.success(),
+            "the tmux server must remain alive for a Missing assertion"
+        );
+        // Preserve the native counterexample: display-message succeeds with
+        // empty pane fields after target removal. Only the supported pane
+        // query proves the absence; malformed display output is not Missing.
+        for (label, args) in [
+            (
+                "legacy-display-message",
+                vec![
+                    "display-message",
+                    "-p",
+                    "-t",
+                    endpoint.pane_id.as_str(),
+                    "#{pid}\t#{session_id}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}",
+                ],
+            ),
+            (
+                "list-panes-all",
+                vec!["list-panes", "-a", "-F", "#{pane_id}"],
+            ),
+            (
+                "list-panes-target",
+                vec![
+                    "list-panes",
+                    "-t",
+                    endpoint.pane_id.as_str(),
+                    "-F",
+                    "#{pane_id}",
+                ],
+            ),
+            (
+                "list-sessions",
+                vec!["list-sessions", "-F", "#{session_name}"],
+            ),
+        ] {
+            let raw = Command::new("tmux")
+                .arg("-S")
+                .arg(&tmux.socket)
+                .args(&args)
+                .output()
+                .unwrap();
+            eprintln!(
+                "pane_probe diagnostic {label}: status={:?} stdout={:?} stderr={:?}",
+                raw.status.code(),
+                String::from_utf8_lossy(&raw.stdout),
+                String::from_utf8_lossy(&raw.stderr)
+            );
+        }
+        eprintln!(
+            "pane_probe diagnostic target={} server_alive={} probe={:?}",
+            endpoint.pane_id,
+            alive.status.success(),
+            probe(&endpoint)
+        );
         assert_eq!(probe(&endpoint).unwrap(), PanePresence::Missing);
 
         let unknown = TmuxEndpoint {

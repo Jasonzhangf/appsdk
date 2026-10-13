@@ -1,9 +1,118 @@
 #[test]
-fn recreated_tmux_pane_reports_unknown_and_never_fabricates_online_recovery() {
+fn capture_and_probe_errors_do_not_change_persisted_pane_identity() {
+    let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+    let (server, root) = test_server();
+    let tmux = IsolatedTmux::start_single(&root);
+    assert!(register_tmux(&server, "pane-owner", tmux.endpoints().remove(0)).ok);
+    let server = Arc::new(server);
+    assert!(approve_promotion(&server, "pane-owner").ok);
+    let worker = server.state.lock().unwrap().workers["pane-owner"].clone();
+    let binding = registered_binding(&server, "pane-owner");
+    let grant = dispatch(&server, Req::MasterStatus).data["master"].clone();
+    for command in ["capture-pane", "list-panes"] {
+        let _wrapper =
+            crate::client::adapters::tmux::tests::TmuxFailureWrapper::fail_command(command);
+        assert_eq!(
+            worker_identity_presence(&server, &worker),
+            IdentityPresence::Present
+        );
+        assert_eq!(worker_presence(&server, &worker), IdentityPresence::Present);
+        let status = dispatch(
+            &server,
+            Req::WorkerStatus {
+                worker_id: Some("pane-owner".into()),
+            },
+        );
+        assert!(status.ok, "{status:?}");
+        assert_eq!(status.data["workers"][0]["identity_valid"], true);
+        assert_eq!(status.data["workers"][0]["presence"], "present");
+        assert_eq!(status.data["workers"][0]["agent_state"], "unknown");
+        if command == "capture-pane" {
+            assert_eq!(status.data["workers"][0]["endpoint_live"], true);
+            assert!(status.data["workers"][0]["transport_view"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("capture-pane"));
+        } else {
+            assert_eq!(
+                status.data["workers"][0]["endpoint_live"],
+                serde_json::Value::Null
+            );
+        }
+        assert_eq!(registered_binding(&server, "pane-owner"), binding);
+        assert_eq!(server.state.lock().unwrap().workers["pane-owner"], worker);
+    }
+    let after = dispatch(&server, Req::MasterStatus).data["master"].clone();
+    for field in ["worker_id", "grant_id", "grant_generation", "approval"] {
+        assert_eq!(after[field], grant[field]);
+    }
+    drop(tmux);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn recreated_tmux_pane_preserves_identity_without_fabricating_online_recovery() {
     let (server, root) = test_server();
     register(&server, "master-worker", "thread-master");
     register(&server, "cold-worker", "thread-cold");
+    let worker = server.state.lock().unwrap().workers["cold-worker"].clone();
+    let binding = registered_binding(&server, "cold-worker");
+    let endpoint = worker
+        .transport
+        .as_ref()
+        .unwrap()
+        .tmux_endpoint
+        .as_ref()
+        .unwrap()
+        .clone();
     kill_registered_worker_pane(&server, "cold-worker");
+    let probe_evidence = || {
+        let raw = Command::new("tmux")
+            .args([
+                "-S",
+                &endpoint.socket_path,
+                "list-panes",
+                "-t",
+                &endpoint.pane_id,
+                "-F",
+                "#{pane_id}",
+            ])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&raw.stdout);
+        let stderr = String::from_utf8_lossy(&raw.stderr);
+        eprintln!(
+            "registered-pane probe exit={:?} stdout={stdout:?} stderr={stderr:?}",
+            raw.status.code()
+        );
+        let probe = crate::client::adapters::tmux::probe(&endpoint);
+        if raw.status.success() {
+            let present = stdout.lines().any(|pane| pane == endpoint.pane_id);
+            assert_eq!(
+                probe.unwrap(),
+                if present {
+                    crate::client::adapters::tmux::PanePresence::Present
+                } else {
+                    crate::client::adapters::tmux::PanePresence::Unknown
+                }
+            );
+            if present {
+                Some(true)
+            } else {
+                None
+            }
+        } else if stderr.trim() == format!("can't find pane: {}", endpoint.pane_id) {
+            assert_eq!(
+                probe.unwrap(),
+                crate::client::adapters::tmux::PanePresence::Missing
+            );
+            Some(false)
+        } else {
+            assert!(probe.unwrap_err().starts_with("TMUX_PROBE_UNKNOWN:"));
+            None
+        }
+    };
+    let endpoint_live = probe_evidence();
     let server_arc = std::sync::Arc::new(server);
     let promote_resp = dispatch(
         &server_arc,
@@ -14,6 +123,7 @@ fn recreated_tmux_pane_reports_unknown_and_never_fabricates_online_recovery() {
         },
     );
     assert!(promote_resp.ok);
+    let grant = dispatch(&server_arc, Req::MasterStatus).data["master"].clone();
 
     let offline = dispatch(
         &server_arc,
@@ -22,17 +132,59 @@ fn recreated_tmux_pane_reports_unknown_and_never_fabricates_online_recovery() {
         },
     );
     assert!(offline.ok, "{offline:?}");
-    assert_eq!(offline.data["workers"][0]["status"], "lost");
+    assert_eq!(
+        endpoint_live,
+        Some(false),
+        "the strict selected-pane query must prove this owned killed address absent"
+    );
+    assert_eq!(
+        offline.data["workers"][0]["status"],
+        if endpoint_live == Some(false) {
+            "lost"
+        } else {
+            "unknown"
+        }
+    );
     {
         let state = server_arc.state.lock().unwrap();
-        assert_eq!(state.keepalives["cold-worker"].notified_presence, "offline");
+        assert_eq!(
+            state
+                .keepalives
+                .get("cold-worker")
+                .map(|record| record.notified_presence.as_str())
+                .filter(|value| !value.is_empty()),
+            if endpoint_live == Some(false) {
+                Some("offline")
+            } else {
+                None
+            }
+        );
         assert!(state.msgs.values().all(|m| {
             !(m.to == "master-worker"
                 && m.subject == Some("worker-unresponsive: cold-worker".into()))
         }));
     }
 
-    assert!(register(&server_arc, "cold-worker", "thread-cold").ok);
+    // tmux allocates a new pane id. Recreating a shell does not transfer the
+    // registered anchor or credential to that new address.
+    let created = Command::new("tmux")
+        .args([
+            "-S",
+            &endpoint.socket_path,
+            "new-session",
+            "-d",
+            "-s",
+            "recreated-unowned",
+            "sleep 60",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    assert_eq!(probe_evidence(), endpoint_live);
     let online = dispatch(
         &server_arc,
         Req::WorkerStatus {
@@ -40,14 +192,26 @@ fn recreated_tmux_pane_reports_unknown_and_never_fabricates_online_recovery() {
         },
     );
     assert!(online.ok, "{online:?}");
-    // A recreated pane is a recreated address, not a live agent. Presence stays
-    // Unknown and must never be projected as a fabricated online recovery.
-    assert_eq!(online.data["workers"][0]["presence"], "unknown");
+    assert_eq!(offline.data["workers"][0]["identity_valid"], true);
+    assert_eq!(offline.data["workers"][0]["presence"], "present");
+    assert_eq!(
+        offline.data["workers"][0]["endpoint_live"],
+        serde_json::json!(endpoint_live)
+    );
+    // Registered identity and pane reachability do not prove agent activity.
+    assert_eq!(online.data["workers"][0]["presence"], "present");
     assert_eq!(
         online.data["workers"][0]["endpoint_live"],
-        serde_json::Value::Null
+        serde_json::json!(endpoint_live)
     );
-    assert_eq!(online.data["workers"][0]["agent_state"], "unknown");
+    assert_eq!(
+        online.data["workers"][0]["agent_state"],
+        if endpoint_live == Some(false) {
+            "absent"
+        } else {
+            "unknown"
+        }
+    );
     let repeated = dispatch(
         &server_arc,
         Req::WorkerStatus {
@@ -55,6 +219,26 @@ fn recreated_tmux_pane_reports_unknown_and_never_fabricates_online_recovery() {
         },
     );
     assert!(repeated.ok, "{repeated:?}");
+    assert_eq!(registered_binding(&server_arc, "cold-worker"), binding);
+    assert_eq!(
+        server_arc.state.lock().unwrap().workers["cold-worker"],
+        worker
+    );
+    let grant_after = dispatch(&server_arc, Req::MasterStatus).data["master"].clone();
+    for field in [
+        "worker_id",
+        "grant_id",
+        "grant_generation",
+        "binding_id",
+        "endpoint_generation",
+        "assigned_by",
+        "assigned_ms",
+        "approval",
+        "boundary",
+        "scope",
+    ] {
+        assert_eq!(grant_after[field], grant[field], "grant {field}");
+    }
     let state = server_arc.state.lock().unwrap();
     assert_eq!(
         state
@@ -67,7 +251,18 @@ fn recreated_tmux_pane_reports_unknown_and_never_fabricates_online_recovery() {
         0,
         "a recreated pane must not fabricate an online recovery notification"
     );
-    assert_eq!(state.keepalives["cold-worker"].notified_presence, "offline");
+    assert_eq!(
+        state
+            .keepalives
+            .get("cold-worker")
+            .map(|record| record.notified_presence.as_str())
+            .filter(|value| !value.is_empty()),
+        if endpoint_live == Some(false) {
+            Some("offline")
+        } else {
+            None
+        }
+    );
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -109,11 +304,9 @@ fn stale_presence_probe_after_reregister_does_not_notify_or_mutate_new_worker() 
         },
     );
     assert!(status.ok, "{status:?}");
-    // The stale probe result was captured before re-registration; the current
-    // binding has a fresh tmux address whose runtime is Unknown. Neither the
-    // stale probe nor the recreated pane may flip the new worker to present, and
-    // no presence notification may be emitted for the unchanged observation.
-    assert_eq!(status.data["workers"][0]["presence"], "unknown");
+    // The retired record stays missing; the current binding remains valid.
+    assert_eq!(status.data["workers"][0]["presence"], "present");
+    assert_eq!(status.data["workers"][0]["identity_valid"], true);
     assert_eq!(status.data["workers"][0]["agent_state"], "unknown");
     let state = server_arc.state.lock().unwrap();
     assert_eq!(state.workers["edge-worker"].token, "token-edge-worker");
@@ -154,11 +347,10 @@ fn presence_edge_skips_a_tmux_only_peer() {
         },
     );
     assert!(status.ok, "{status:?}");
-    // A tmux-only binding registers no AppServer session or thread, so the pane
-    // probe can only prove reachability. The peer stays Unknown, and an Unknown
-    // peer records no presence edge at all: it is neither announced online nor
-    // declared offline.
-    assert_eq!(status.data["workers"][0]["presence"], "unknown");
+    // A pane-only identity is valid without native IDs or an activity oracle.
+    assert_eq!(status.data["workers"][0]["presence"], "present");
+    assert_eq!(status.data["workers"][0]["identity_valid"], true);
+    assert_eq!(status.data["workers"][0]["agent_state"], "unknown");
     assert!(
         !server_arc
             .state
@@ -493,7 +685,11 @@ fn context_never_returns_another_peers_binding() {
     let second_receipt = second.data["command"]["binding"].clone();
     assert_ne!(first_receipt, second_receipt, "{first:?} {second:?}");
 
-    let response = handle_context(&server, "receipt-first".into(), "token-receipt-first".into());
+    let response = handle_context(
+        &server,
+        "receipt-first".into(),
+        "token-receipt-first".into(),
+    );
     assert!(response.ok, "{response:?}");
     assert_eq!(
         response.data["binding"], first_receipt,
@@ -549,7 +745,11 @@ fn context_returns_the_callers_binding_when_the_root_holds_several_app_scopes() 
         );
     }
 
-    let response = handle_context(&server, "receipt-multi".into(), "token-receipt-multi".into());
+    let response = handle_context(
+        &server,
+        "receipt-multi".into(),
+        "token-receipt-multi".into(),
+    );
     assert!(response.ok, "context failed: {response:?}");
     assert_eq!(
         response.data["binding"], receipt,
@@ -583,7 +783,11 @@ fn context_records_tmux_offline_but_never_fabricates_online_recovery() {
     assert!(promoted.ok, "{promoted:?}");
 
     // The first read only establishes the offline baseline; it must not notify.
-    let baseline = handle_context(&server_arc, "master-worker".into(), "token-master-worker".into());
+    let baseline = handle_context(
+        &server_arc,
+        "master-worker".into(),
+        "token-master-worker".into(),
+    );
     assert!(baseline.ok, "{baseline:?}");
     {
         let state = server_arc.state.lock().unwrap();
@@ -595,10 +799,17 @@ fn context_records_tmux_offline_but_never_fabricates_online_recovery() {
     }
 
     assert!(register(&server_arc, "cold-worker", "thread-cold").ok);
-    let recovered =
-        handle_context(&server_arc, "master-worker".into(), "token-master-worker".into());
+    let recovered = handle_context(
+        &server_arc,
+        "master-worker".into(),
+        "token-master-worker".into(),
+    );
     assert!(recovered.ok, "{recovered:?}");
-    let repeated = handle_context(&server_arc, "master-worker".into(), "token-master-worker".into());
+    let repeated = handle_context(
+        &server_arc,
+        "master-worker".into(),
+        "token-master-worker".into(),
+    );
     assert!(repeated.ok, "{repeated:?}");
 
     let state = server_arc.state.lock().unwrap();

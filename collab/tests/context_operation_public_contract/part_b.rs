@@ -1,8 +1,210 @@
 #[test]
+fn persisted_context_restores_without_live_collection_or_admission() {
+    use std::os::unix::fs::PermissionsExt;
+    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (mut fixture, pane) = Fixture::isolated("restore-offline");
+    let seed = fixture.registered_context("ctxop-offline-seed", &pane);
+    fixture.run_ok(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "user assigned offline master",
+        ],
+        Some(&pane),
+    );
+    let master = master_status(&fixture, &pane);
+    let binding = seed["result"]["snapshot"]["binding"].clone();
+    let effects = project_register_effect_counts(&fixture.project_journal());
+    let wrapper_dir = fixture.root.join("failed-display");
+    fs::create_dir(&wrapper_dir).unwrap();
+    let wrapper = wrapper_dir.join("tmux");
+    fs::write(
+        &wrapper,
+        "#!/bin/sh\necho 'fixture display/capture I/O failed' >&2\nexit 71\n",
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    for step in 0..2 {
+        if step == 1 {
+            fixture.restart_daemon();
+        }
+        let op = format!("ctxop-offline-{step}");
+        let output = fixture
+            .configured_command(&["context", "--op", &op], Some(&pane))
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    wrapper_dir.display(),
+                    std::env::var("PATH").unwrap()
+                ),
+            )
+            .env(
+                "CODEX_APP_SERVER_SOCKET",
+                "/tmp/unavailable-adjacent-adaptor.sock",
+            )
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("fixture display/capture I/O failed"),
+            "actual collection failure must remain explicit"
+        );
+        let result = success_payload(&output);
+        assert_eq!(result["result"]["outcome"], "completed", "{result}");
+        assert_eq!(result["result"]["snapshot"]["binding"], binding);
+        assert_eq!(
+            result["result"]["snapshot"]["master"]["worker_id"],
+            master["worker_id"]
+        );
+        assert!(result["result"]["nested_command_id"].is_null());
+        assert_eq!(
+            project_register_effect_counts(&fixture.project_journal()),
+            effects,
+            "restore must not register or admit the unavailable adjacent adaptor"
+        );
+        assert_eq!(master_status(&fixture, &pane), master);
+    }
+}
+
+#[test]
+fn single_context_master_peer_intent_overrides_and_replays_after_restart() {
+    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (mut fixture, pane) = Fixture::isolated("single-role");
+    let fence = seed_stale_identity(&fixture, &pane, "ctxop-role-seed", false);
+    let other = second_pane(&fixture, "unrelated-master", pane.server_pid);
+    let other_context = fixture.registered_context("ctxop-other-seed", &other);
+    let other_id = other_context["result"]["snapshot"]["identity"]["worker_id"].clone();
+    fixture.run_ok(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "user assigned unrelated master",
+        ],
+        Some(&other),
+    );
+    let unrelated = master_status(&fixture, &other);
+    for (step, role) in ["peer", "master", "peer"].into_iter().enumerate() {
+        let op = format!("ctxop-role-public-{step}");
+        let approval = json!({"decision":"approved", "target_identity":fence.worker_id,
+            "action":format!("restore_{role}"), "authorization":format!("user requires {role}"),
+            "expected_incumbent":{"binding_id":"old-caller-fence", "endpoint_generation":999}});
+        let (identity_approval, grant_approval) = if role == "master" {
+            (None, Some(&approval))
+        } else {
+            (Some(&approval), None)
+        };
+        let output = run_context_cli(
+            &fixture,
+            Some(&pane),
+            Some(&op),
+            None,
+            None,
+            identity_approval,
+            grant_approval,
+            None,
+            false,
+        );
+        let result = success_payload(&output);
+        assert_eq!(result["result"]["outcome"], "completed", "{result}");
+        assert!(result["result"]["committed_phases"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("grant")));
+        assert_eq!(
+            result["result"]["snapshot"]["identity"]["role"],
+            if role == "master" { "master" } else { "worker" }
+        );
+        let grant = master_status(&fixture, &pane);
+        if step == 0 {
+            assert_eq!(grant, unrelated, "peer intent preserves unrelated master");
+        } else if role == "master" {
+            assert_eq!(grant["worker_id"], fence.worker_id);
+            assert_eq!(grant["approval"], "user requires master");
+            let demoted = fixture.context(Some("ctxop-other-demoted"), Some(&other));
+            assert_eq!(demoted["result"]["snapshot"]["identity"]["role"], "worker");
+            assert_eq!(
+                demoted["result"]["snapshot"]["master"]["worker_id"],
+                fence.worker_id
+            );
+            assert_ne!(other_id, fence.worker_id);
+        } else {
+            assert!(
+                grant.is_null(),
+                "target peer intent clears its own master grant"
+            );
+        }
+        let bytes = (
+            fs::read(fixture.host_journal()).unwrap(),
+            fs::read(fixture.project_journal()).unwrap(),
+            fs::read(&fence.identity_path).unwrap(),
+        );
+        let replay = run_context_cli(
+            &fixture,
+            Some(&pane),
+            Some(&op),
+            None,
+            None,
+            identity_approval,
+            grant_approval,
+            None,
+            false,
+        );
+        assert_eq!(success_payload(&replay)["result"]["outcome"], "completed");
+        assert_eq!(
+            bytes,
+            (
+                fs::read(fixture.host_journal()).unwrap(),
+                fs::read(fixture.project_journal()).unwrap(),
+                fs::read(&fence.identity_path).unwrap()
+            )
+        );
+        fixture.restart_daemon();
+        assert_eq!(
+            master_status(&fixture, &pane),
+            grant,
+            "restart retains exact durable role"
+        );
+        let after_restart = (
+            fs::read(fixture.host_journal()).unwrap(),
+            fs::read(fixture.project_journal()).unwrap(),
+            fs::read(&fence.identity_path).unwrap(),
+        );
+        let replay = run_context_cli(
+            &fixture,
+            Some(&pane),
+            Some(&op),
+            None,
+            None,
+            identity_approval,
+            grant_approval,
+            None,
+            false,
+        );
+        assert_eq!(success_payload(&replay)["result"]["outcome"], "completed");
+        assert_eq!(
+            after_restart,
+            (
+                fs::read(fixture.host_journal()).unwrap(),
+                fs::read(fixture.project_journal()).unwrap(),
+                fs::read(&fence.identity_path).unwrap(),
+            ),
+            "same-key replay after restart must not repeat effects"
+        );
+        let restored = fixture.context(Some(&format!("ctxop-role-readback-{step}")), Some(&pane));
+        assert_eq!(
+            restored["result"]["snapshot"]["identity"]["worker_id"],
+            fence.worker_id
+        );
+    }
+}
+
+#[test]
 fn b01_automatic_context_persists_proof_before_effect_and_redacts_capability() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (fixture, pane) = Fixture::isolated("collab-v23-b01");
-    let result = fixture.context(None, Some(&pane));
+    let result = fixture.registered_automatic_context(&pane);
     let operation_id = result["operation_id"]
         .as_str()
         .expect("automatic context returns its durable operation id");
@@ -54,7 +256,7 @@ fn b02_same_key_retry_is_read_only_and_changed_facts_conflict() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (fixture, pane) = Fixture::isolated("collab-v23-b02");
     let operation_id = "ctxop-v23-b02-same-key";
-    let first = fixture.context(Some(operation_id), Some(&pane));
+    let first = fixture.registered_context(operation_id, &pane);
     assert_eq!(first["result"]["outcome"], "completed", "{first}");
     let before = stable_surfaces(&fixture, &pane, operation_id);
 
@@ -82,11 +284,10 @@ fn b03_discarded_response_recovers_same_nested_receipt_after_restart() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (mut fixture, pane) = Fixture::isolated("collab-v23-b03");
     let operation_id = "ctxop-v23-b03-lost-response";
-    let discarded = fixture.command(&["context", "--op", operation_id], Some(&pane));
+    let discarded = fixture.registered_context(operation_id, &pane);
     assert!(
-        discarded.status.success(),
-        "first public request failed: {}",
-        text(&discarded)
+        discarded["ok"] == true && discarded["result"]["outcome"] == "completed",
+        "first public transaction failed: {discarded}"
     );
     drop(discarded); // Model a caller that committed the invocation but lost its response.
 
@@ -140,14 +341,18 @@ fn b04_restart_query_replays_every_durable_phase_without_mutation() {
     ];
     for (target_phase, expected_outcome, allowed_records) in cases {
         let label = format!("collab-v23-b04-{target_phase}");
-        let (mut fixture, seed_pane) = Fixture::isolated(&label);
-        let seed = fixture.context(Some("ctxop-v23-b04-seed"), Some(&seed_pane));
+        let mut fixture = Fixture::without_tmux(&label);
+        let seed_host = TestAppServer::start_with_effect_at(&fixture.root, "seed.sock",
+            "b04-seed-session", "b04-seed-thread", "ack_only");
+        let seed_facts = json!({"session_id":"b04-seed-session", "thread_id":"b04-seed-thread",
+            "endpoint":seed_host.endpoint(), "namespace":"codex_tui"});
+        let seed = fixture.context_provide("ctxop-v23-b04-seed", &seed_facts, None);
         assert_eq!(seed["result"]["outcome"], "completed", "{seed}");
         let seed_worker = seed["result"]["snapshot"]["identity"]["worker_id"].clone();
         let seed_operation = operation_records(&fixture.host_journal(), "ctxop-v23-b04-seed");
         let seed_receipt = seed_operation.last().expect("completed seed operation");
-        let seed_nested_command = seed_receipt["nested_command_id"].clone();
-        let seed_nested_operation = seed_receipt["nested_operation_id"].clone();
+        assert!(seed_receipt["nested_command_id"].is_string(), "initial participant binds its own command");
+        assert!(seed_receipt["nested_operation_id"].is_string(), "initial participant binds its own operation");
         let project_effects_before_reuse =
             project_register_effect_counts(&fixture.project_journal());
         for index in 0..100 {
@@ -157,24 +362,26 @@ fn b04_restart_query_replays_every_durable_phase_without_mutation() {
                 break;
             }
             let operation_id = format!("ctxop-v23-b04-pad-{index:04}");
-            let output = fixture.command(&["context", "--op", &operation_id], Some(&seed_pane));
+            let output = run_context_cli(&fixture, None, Some(&operation_id), None, None,
+                None, None, Some(&seed_facts), false);
             let typed = json_stdout(&output);
             assert_eq!(typed["result"]["outcome"], "completed", "{typed}");
             assert_eq!(
                 typed["result"]["snapshot"]["identity"]["worker_id"], seed_worker,
                 "padding contexts must reuse the registered identity: {typed}"
             );
+            assert_eq!(typed["result"]["snapshot"]["binding"], seed["result"]["snapshot"]["binding"]);
             if index == 0 {
                 let padding_records = operation_records(&fixture.host_journal(), &operation_id);
                 assert_eq!(
                     padding_records.last().unwrap()["nested_command_id"],
-                    seed_nested_command,
-                    "same-peer reuse must bind the exact committed Register command"
+                    Value::Null,
+                    "ordinary same-owner context must not invent or borrow a nested Register command"
                 );
                 assert_eq!(
                     padding_records.last().unwrap()["nested_operation_id"],
-                    seed_nested_operation,
-                    "same-peer reuse must bind the exact committed Register operation"
+                    Value::Null,
+                    "ordinary same-owner context must not invent or borrow a nested Register operation"
                 );
                 assert_eq!(
                     padding_records
@@ -182,12 +389,11 @@ fn b04_restart_query_replays_every_durable_phase_without_mutation() {
                         .filter(|record| record["phase"] == "inner_dispatched")
                         .count(),
                     1,
-                    "receipt reuse promotes the new outer operation once"
+                    "the new outer control operation advances once without Register"
                 );
                 assert_eq!(
                     padding_records.last().unwrap()["business_receipts"],
                     json!([
-                        "nested_register",
                         "route",
                         "credential",
                         "lease",
@@ -210,13 +416,19 @@ fn b04_restart_query_replays_every_durable_phase_without_mutation() {
         );
 
         let calibration_id = "ctxop-v23-b04-calibrate";
-        let calibration_pane = second_pane(&fixture, "calibration", seed_pane.server_pid);
-        let calibrated = fixture.context(Some(calibration_id), Some(&calibration_pane));
+        let calibration_host = TestAppServer::start_with_effect_at(&fixture.root, "calibration.sock",
+            "b04-calibrate-session", "b04-calibrate-thread", "ack_only");
+        let calibration_facts = json!({"session_id":"b04-calibrate-session", "thread_id":"b04-calibrate-thread",
+            "endpoint":calibration_host.endpoint(), "namespace":"codex_tui"});
+        let calibrated = fixture.context_provide(calibration_id, &calibration_facts, None);
         assert_eq!(calibrated["result"]["outcome"], "completed", "{calibrated}");
         let calibration_lengths = operation_line_lengths(&fixture.host_journal(), calibration_id);
         assert_eq!(calibration_lengths.len(), 5, "{calibration_lengths:?}");
 
-        let target_pane = second_pane(&fixture, target_phase, seed_pane.server_pid);
+        let target_host = TestAppServer::start_with_effect_at(&fixture.root, "target-0000.sock",
+            "b04-targetxxx-session", "b04-targetxxx-thread", "ack_only");
+        let target_facts = json!({"session_id":"b04-targetxxx-session", "thread_id":"b04-targetxxx-thread",
+            "endpoint":target_host.endpoint(), "namespace":"codex_tui"});
         let target_id = "ctxop-v23-b04-target000";
         assert_eq!(calibration_id.len(), target_id.len());
         let journal_len = fs::metadata(fixture.host_journal()).unwrap().len();
@@ -228,7 +440,8 @@ fn b04_restart_query_replays_every_durable_phase_without_mutation() {
         );
         fixture.restart_daemon_with_file_limit(file_limit);
 
-        let attempt = fixture.command(&["context", "--op", target_id], Some(&target_pane));
+        let attempt = run_context_cli(&fixture, None, Some(target_id), None, None,
+            None, None, Some(&target_facts), false);
         let typed = json_stdout(&attempt);
         if matches!(target_phase, "inner_dispatched" | "effect_observed") {
             assert_ne!(attempt.status.code(), Some(0), "{}", text(&attempt));
@@ -248,7 +461,11 @@ fn b04_restart_query_replays_every_durable_phase_without_mutation() {
                 calibrated["result"]["committed_phases"].clone()
             };
             assert_eq!(typed["result"]["committed_phases"], retained, "{typed}");
-            println!("B04 late OS failure {target_phase}: exit={:?} {}", attempt.status.code(), text(&attempt));
+            println!(
+                "B04 late OS failure {target_phase}: exit={:?} {}",
+                attempt.status.code(),
+                text(&attempt)
+            );
         }
         assert_eq!(
             typed["result"]["outcome"],
@@ -271,7 +488,12 @@ fn b04_restart_query_replays_every_durable_phase_without_mutation() {
         if matches!(target_phase, "inner_dispatched" | "effect_observed") {
             assert_eq!(
                 typed["result"]["committed_phases"],
-                committed.last().unwrap().get("business_receipts").cloned().unwrap_or(json!([])),
+                committed
+                    .last()
+                    .unwrap()
+                    .get("business_receipts")
+                    .cloned()
+                    .unwrap_or(json!([])),
                 "the public failure retains only durable business receipts: {typed}"
             );
         }
@@ -282,7 +504,7 @@ fn b04_restart_query_replays_every_durable_phase_without_mutation() {
             fs::read(fixture.host_routes()).unwrap_or_default(),
             fs::read(fixture.project_journal()).unwrap(),
         );
-        let query = fixture.context_query(target_id, Some(&target_pane));
+        let query = fixture.context_query(target_id, None);
         assert_eq!(
             query["result"]["queried_operation"]["phase"], target_phase,
             "replayed phase {target_phase}: {query}"
@@ -343,25 +565,60 @@ fn b04_restart_query_replays_every_durable_phase_without_mutation() {
         if target_phase == "validating" {
             fixture.stop_degraded_daemon();
         } else if matches!(target_phase, "inner_dispatched" | "effect_observed") {
-            let before = stable_surfaces(&fixture, &target_pane, target_id);
-            let journal_bytes = (fs::read(fixture.host_journal()).unwrap(), fs::read(fixture.project_journal()).unwrap());
-            let retry = fixture.command(&["context", "--op", target_id], Some(&target_pane));
+            let target_surfaces = || {
+                let output = fixture.configured_command(&["notify", "status"], None)
+                    .env("CODEX_APP_SERVER_SOCKET", target_host.endpoint().strip_prefix("unix://").unwrap())
+                    .env("CODEX_SESSION_ID", "b04-targetxxx-session")
+                    .env("CODEX_THREAD_ID", "b04-targetxxx-thread")
+                    .output().unwrap();
+                assert!(output.status.success(), "{}", text(&output));
+                (operation_records(&fixture.host_journal(), target_id),
+                    fs::read(fixture.host_routes()).unwrap_or_default(),
+                    project_register_effect_counts(&fixture.project_journal()), json_stdout(&output))
+            };
+            let before = target_surfaces();
+            let journal_bytes = (
+                fs::read(fixture.host_journal()).unwrap(),
+                fs::read(fixture.project_journal()).unwrap(),
+            );
+            let retry = run_context_cli(&fixture, None, Some(target_id), None, None,
+                None, None, Some(&target_facts), false);
             let replay = json_stdout(&retry);
             assert_ne!(retry.status.code(), Some(0), "{}", text(&retry));
             assert_eq!(replay["result"]["outcome"], expected_outcome, "{replay}");
-            assert_eq!(replay["result"]["committed_phases"], typed["result"]["committed_phases"], "{replay}");
-            assert_eq!(stable_surfaces(&fixture, &target_pane, target_id), before,
-                "same explicit key must only read the retained projection");
-            assert_eq!((fs::read(fixture.host_journal()).unwrap(), fs::read(fixture.project_journal()).unwrap()), journal_bytes,
-                "same-key invocation must append nothing to either journal");
+            assert_eq!(
+                replay["result"]["committed_phases"], typed["result"]["committed_phases"],
+                "{replay}"
+            );
+            assert_eq!(
+                target_surfaces(),
+                before,
+                "same explicit key must only read the retained projection"
+            );
+            assert_eq!(
+                (
+                    fs::read(fixture.host_journal()).unwrap(),
+                    fs::read(fixture.project_journal()).unwrap()
+                ),
+                journal_bytes,
+                "same-key invocation must append nothing to either journal"
+            );
             let effects = project_register_effect_counts(&fixture.project_journal());
-            let fresh = fixture.context(None, Some(&target_pane));
+            let fresh = success_payload(&run_context_cli(&fixture, None, None, None, None,
+                None, None, Some(&target_facts), false));
             assert_eq!(fresh["result"]["outcome"], "completed", "{fresh}");
             assert_ne!(fresh["operation_id"], target_id, "{fresh}");
             assert!(fresh["result"]["requires"]["approval"].is_null(), "{fresh}");
-            assert_eq!(project_register_effect_counts(&fixture.project_journal()), effects,
-                "fresh invocation reuses the committed identity without repeating Register");
-            println!("B04 readonly retry {target_phase}: exit={:?} {}; fresh default: {fresh}", retry.status.code(), text(&retry));
+            assert_eq!(
+                project_register_effect_counts(&fixture.project_journal()),
+                effects,
+                "fresh invocation reuses the committed identity without repeating Register"
+            );
+            println!(
+                "B04 readonly retry {target_phase}: exit={:?} {}; fresh default: {fresh}",
+                retry.status.code(),
+                text(&retry)
+            );
         }
     }
 }
@@ -371,7 +628,7 @@ fn b05_query_remains_available_when_real_project_journal_is_unavailable() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (mut fixture, pane) = Fixture::isolated("collab-v23-b05");
     let operation_id = "ctxop-v23-b05-degraded";
-    let completed = fixture.context(Some(operation_id), Some(&pane));
+    let completed = fixture.registered_context(operation_id, &pane);
     assert_eq!(completed["result"]["outcome"], "completed", "{completed}");
     let project_bytes = fs::read(fixture.project_journal()).expect("real journal exists");
     let host_before = fs::read(fixture.host_journal()).unwrap();
@@ -399,7 +656,7 @@ fn b06_mcp_query_uses_retained_capability_and_rejects_wrong_one_without_leaks() 
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (fixture, pane) = Fixture::isolated("collab-v23-b06");
     let operation_id = "ctxop-v23-b06-capability";
-    let completed = fixture.context(Some(operation_id), Some(&pane));
+    let completed = fixture.registered_context(operation_id, &pane);
     assert_eq!(completed["result"]["outcome"], "completed", "{completed}");
     let proof = fixture.proof(operation_id);
     let capability = proof["query_capability"].as_str().unwrap().to_owned();
@@ -528,7 +785,7 @@ fn b07_missing_facts_are_exact_and_fresh_supplement_registers_through_public_cli
 fn b08_os_append_failure_is_typed_and_never_projects_durable_completion() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (mut fixture, pane) = Fixture::isolated("collab-v23-b08");
-    let seed = fixture.context(Some("ctxop-v23-b08-seed"), Some(&pane));
+    let seed = fixture.registered_context("ctxop-v23-b08-seed", &pane);
     assert_eq!(seed["result"]["outcome"], "completed", "{seed}");
     let journal_path = fixture.host_journal();
     let valid_prefix = fs::metadata(&journal_path).unwrap().len();
@@ -538,7 +795,10 @@ fn b08_os_append_failure_is_typed_and_never_projects_durable_completion() {
     let failed = fixture.command(&["context", "--op", failed_id], Some(&pane));
     let failed_text = text(&failed);
     assert_ne!(failed.status.code(), Some(0), "{failed_text}");
-    println!("B08 admission OS failure: exit={:?} {failed_text}", failed.status.code());
+    println!(
+        "B08 admission OS failure: exit={:?} {failed_text}",
+        failed.status.code()
+    );
     assert!(
         failed_text.contains("IDENTITY_OPERATION_DURABILITY_FAILED"),
         "the public request must surface the real append failure: {failed_text}"
@@ -566,15 +826,12 @@ fn b08_os_append_failure_is_typed_and_never_projects_durable_completion() {
 }
 
 #[test]
-fn c03_unapproved_stale_recovery_requires_approval_without_mutation() {
+fn c03_unapproved_unique_pane_stale_recovery_repairs_without_approval() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (fixture, pane) = Fixture::isolated("collab-v23-c03");
     let operation_id = "ctxop-v23-c03-unapproved";
     let fence = seed_stale_identity(&fixture, &pane, operation_id, false);
     let host_before = fs::read(fixture.host_journal()).expect("host journal before recovery");
-    let routes_before = fs::read(fixture.host_routes()).unwrap_or_default();
-    let project_before =
-        fs::read(fixture.project_journal()).expect("project journal before recovery");
     let recovery_id = "ctxop-v23-c03-recovery";
 
     let automatic = run_context_cli(
@@ -588,70 +845,42 @@ fn c03_unapproved_stale_recovery_requires_approval_without_mutation() {
         None,
         false,
     );
-    let automatic_payload = typed_failure(&automatic);
+    let automatic_payload = success_payload(&automatic);
     let automatic_text = text(&automatic);
     assert!(
-        automatic_text.contains("IDENTITY_APPROVAL_REQUIRED"),
-        "unapproved stale recovery must be typed: {automatic_text}"
+        automatic.status.success(),
+        "unique same-pane stale credential must auto-repair: {automatic_text}"
+    );
+    assert!(
+        !automatic_text.contains("IDENTITY_APPROVAL_REQUIRED"),
+        "automatic pane recovery must not request approval: {automatic_text}"
     );
     assert_eq!(
-        automatic_payload["result"]["outcome"], "denied",
+        automatic_payload["result"]["outcome"], "completed",
         "{automatic_payload}"
-    );
-    assert_eq!(
-        automatic_payload["result"]["phase"],
-        Value::Null,
-        "approval preflight must not admit an operation: {automatic_payload}"
-    );
-    assert_eq!(
-        automatic_payload["result"]["requires"]["kind"], "approval",
-        "{automatic_payload}"
-    );
-    let approval = &automatic_payload["result"]["requires"]["approval"];
-    assert_eq!(
-        approval["target_identity"], fence.worker_id,
-        "{automatic_payload}"
-    );
-    assert_eq!(
-        approval["project_scope"],
-        canonical_root(&fixture),
-        "{automatic_payload}"
-    );
-    assert_eq!(
-        approval["app_scope_id"], "appserver-cli",
-        "{automatic_payload}"
-    );
-    assert_eq!(
-        approval["expected_incumbent"]["binding_id"], fence.binding_id,
-        "{automatic_payload}"
-    );
-    assert_eq!(
-        approval["expected_incumbent"]["endpoint_generation"], fence.endpoint_generation,
-        "{automatic_payload}"
-    );
-    let repair = automatic_payload["result"]["requires"]["repair_invocation"]
-        .as_str()
-        .expect("approval result must carry an executable repair invocation");
-    assert!(repair.contains("--approve-identity"), "{automatic_payload}");
-    let repair_identity = identity_approval(&fixture, &pane, &fence, "replace_binding");
-    assert_eq!(
-        approval["intent_digest"], repair_identity["intent_digest"],
-        "the returned approval must be directly executable for this invocation: {automatic_payload}"
     );
     assert!(
         !automatic_text.contains("stale-"),
         "approval result must not leak the stale credential: {automatic_text}"
     );
-    assert!(operation_records(&fixture.host_journal(), recovery_id).is_empty());
-    assert_eq!(fs::read(fixture.host_journal()).unwrap(), host_before);
     assert_eq!(
-        fs::read(fixture.host_routes()).unwrap_or_default(),
-        routes_before
+        automatic_payload["result"]["snapshot"]["identity"]["worker_id"], fence.worker_id,
+        "{automatic_payload}"
     );
-    assert_eq!(fs::read(fixture.project_journal()).unwrap(), project_before);
+    assert!(fs::read(fixture.host_journal()).unwrap().len() > host_before.len());
     assert_eq!(
-        fs::read(&fence.identity_path).expect("stale cache remains"),
-        fence.stale_identity_bytes
+        automatic_payload["result"]["snapshot"]["binding"]["binding_id"],
+        fence.binding_id
+    );
+    assert_eq!(
+        automatic_payload["result"]["snapshot"]["binding"]["endpoint_generation"],
+        fence.endpoint_generation
+    );
+    assert_eq!(automatic_payload["result"]["snapshot"]["registered"], true);
+    assert_ne!(
+        fs::read(&fence.identity_path).expect("stale cache replaced"),
+        fence.stale_identity_bytes,
+        "the daemon must replace the stale local credential"
     );
 }
 
@@ -745,22 +974,29 @@ fn c04_approved_identity_recovery_retires_exact_incumbent_without_grant_change()
 }
 
 #[test]
-fn c05_changed_incumbent_is_stale_conflict_before_any_owner_commit() {
+fn c05_minimal_approval_reads_current_incumbent_without_second_approval() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (fixture, pane) = Fixture::isolated("collab-v23-c05");
     let operation_id = "ctxop-v23-c05-seed";
     let fence = seed_stale_identity(&fixture, &pane, operation_id, false);
-    let approval = identity_approval(&fixture, &pane, &fence, "replace_binding");
     let recovery_id = "ctxop-v23-c05-recovery";
 
     let replacement_id = "ctxop-v23-c05-replacement";
+    let minimal_approval = json!({
+        "decision": "approved",
+        "target_identity": fence.worker_id,
+        "project_scope": canonical_root(&fixture),
+        "app_scope_id": "appserver-cli",
+        "action": "restore_identity",
+        "authorization": "user explicitly restored this pane identity"
+    });
     let replacement = run_context_cli(
         &fixture,
         Some(&pane),
         Some(replacement_id),
         None,
         None,
-        Some(&approval),
+        Some(&minimal_approval),
         None,
         None,
         false,
@@ -770,12 +1006,7 @@ fn c05_changed_incumbent_is_stale_conflict_before_any_owner_commit() {
         replacement["result"]["outcome"], "completed",
         "{replacement}"
     );
-    let before = (
-        fs::read(fixture.host_journal()).unwrap(),
-        fs::read(fixture.host_routes()).unwrap_or_default(),
-        fs::read(fixture.project_journal()).unwrap(),
-    );
-    let events_before = before.0.clone();
+    let host_before = fs::read(fixture.host_journal()).expect("host journal after replacement");
     let identity_before = fs::read(&fence.identity_path).expect("identity after replacement");
     let changed = run_context_cli(
         &fixture,
@@ -783,35 +1014,89 @@ fn c05_changed_incumbent_is_stale_conflict_before_any_owner_commit() {
         Some(recovery_id),
         None,
         None,
-        Some(&approval),
+        Some(&minimal_approval),
         None,
         None,
         false,
     );
-    let changed_text = text(&changed);
-    assert!(
-        !changed.status.success(),
-        "changed incumbent must be refused: {changed_text}"
+    let changed_payload = success_payload(&changed);
+    assert_eq!(
+        changed_payload["result"]["outcome"], "completed",
+        "one explicit intent must read the current incumbent and continue: {changed_payload}"
     );
     assert!(
-        changed_text.contains("APPROVAL_STALE_CONFLICT")
-            || changed_text.contains("IDENTITY_APPROVAL_STALE_INCUMBENT"),
-        "stale fence must be typed: {changed_text}"
+        !text(&changed).contains("APPROVAL_STALE_CONFLICT"),
+        "current incumbent read must not require a second approval: {}",
+        text(&changed)
     );
-    let payload = typed_failure(&changed);
-    assert_eq!(payload["result"]["outcome"], "denied", "{payload}");
-    assert_eq!(fs::read(fixture.host_journal()).unwrap(), events_before);
+    assert!(
+        changed_payload["result"]["snapshot"]["binding"]["endpoint_generation"]
+            .as_u64()
+            .is_some_and(|generation| {
+                generation
+                    > replacement["result"]["snapshot"]["binding"]["endpoint_generation"]
+                        .as_u64()
+                        .expect("replacement binding has a generation")
+            }),
+        "{changed_payload}"
+    );
+    assert_ne!(
+        fs::read(&fence.identity_path).expect("stale cache replaced"),
+        identity_before,
+        "the second explicit recovery must write its committed identity receipt"
+    );
+    assert_eq!(
+        fs::read(fixture.host_journal()).unwrap().len() > host_before.len(),
+        true,
+        "a new explicit recovery operation must append its durable projection"
+    );
+    let before_replay = (
+        fs::read(fixture.host_journal()).unwrap(),
+        fs::read(fixture.project_journal()).unwrap(),
+    );
+    let identity_before_replay = fs::read(&fence.identity_path).unwrap();
+    let replay = run_context_cli(
+        &fixture,
+        Some(&pane),
+        Some(recovery_id),
+        None,
+        None,
+        Some(&minimal_approval),
+        None,
+        None,
+        false,
+    );
+    let replay = success_payload(&replay);
+    assert_eq!(replay["result"]["outcome"], "completed");
+    for field in ["operation_id", "outcome", "phase", "committed_phases"] {
+        assert_eq!(
+            replay["result"][field], changed_payload["result"][field],
+            "replay {field}: {replay}"
+        );
+    }
+    assert!(
+        replay["result"]["snapshot"].is_null(),
+        "replay must not reconcile: {replay}"
+    );
     assert_eq!(
         (
             fs::read(fixture.host_journal()).unwrap(),
-            fs::read(fixture.host_routes()).unwrap_or_default(),
-            fs::read(fixture.project_journal()).unwrap(),
+            fs::read(fixture.project_journal()).unwrap()
         ),
-        before
+        before_replay
     );
     assert_eq!(
-        fs::read(&fence.identity_path).expect("stale cache remains"),
-        identity_before
+        fs::read(&fence.identity_path).unwrap(),
+        identity_before_replay
+    );
+    let route = fixture.run_ok(
+        &["route", "resolve", "--pane-id", &pane.pane_id],
+        Some(&pane),
+    );
+    assert_eq!(route["endpoint_generation"], 3, "{route}");
+    assert_eq!(
+        route["binding_id"],
+        changed_payload["result"]["snapshot"]["binding"]["binding_id"]
     );
 }
 

@@ -76,8 +76,32 @@ pub struct Fixture {
     hook_socket: Option<PathBuf>,
 }
 
+/// Owns a public consumer command running in the fixture's selected pane.
+///
+/// The pane process receives the challenge through its own tty, exactly like
+/// an interactive participant. The fixture only supplies the command to run;
+/// it never writes the challenge into the process environment.
+pub struct PaneConsumer {
+    pub stdout: PathBuf,
+    pub stderr: PathBuf,
+}
+
+impl PaneConsumer {
+    pub fn output(&self) -> String {
+        format!(
+            "{}{}",
+            std::fs::read_to_string(&self.stdout).unwrap_or_default(),
+            std::fs::read_to_string(&self.stderr).unwrap_or_default()
+        )
+    }
+}
+
 impl Fixture {
     pub fn isolated(label: &str) -> (Self, Pane) {
+        Self::isolated_with_pane_command(label, "sleep 600")
+    }
+
+    pub fn isolated_with_pane_command(label: &str, pane_command: &str) -> (Self, Pane) {
         let root = unique_root(label);
         let host_state = root.join("h");
         let tmux_socket = root.join("t.sock");
@@ -94,7 +118,7 @@ impl Fixture {
         };
         tmux(
             &tmux_socket,
-            &["new-session", "-d", "-s", label, "sleep 600"],
+            &["new-session", "-d", "-s", label, pane_command],
         );
         let server_pid =
             String::from_utf8(tmux(&tmux_socket, &["display-message", "-p", "#{pid}"]).stdout)
@@ -115,6 +139,35 @@ impl Fixture {
             thread_anchor: format!("thread-{pane_id}"),
         };
         (fixture, pane)
+    }
+
+    pub fn run_in_pane(&self, pane: &Pane, label: &str, script: &str) -> PaneConsumer {
+        let stdout = self.root.join(format!("{label}.stdout"));
+        let stderr = self.root.join(format!("{label}.stderr"));
+        let script_path = self.root.join(format!("{label}.sh"));
+        std::fs::write(&script_path, script).expect("write selected-pane consumer");
+        let hook_env = self.hook_socket.as_ref().map(|socket| format!(
+            "COLLAB_CONTEXT_CANCEL_HOOK_SOCKET={} ", shell_quote(&socket.to_string_lossy())
+        )).unwrap_or_default();
+        let command = format!(
+            "cd {} && unset COLLAB_SOCKET_PATH COLLAB_HOST_SOCKET COLLAB_LOCK_PATH COLLAB_HOST_LOCK COLLAB_APPSERVER_SOCKET CODEX_APP_SERVER_SOCKET COLLAB_APPSERVER_NAMESPACE COLLAB_WORKER DSH_SESSION_ID; {}COLLAB_BINARY={} PROJECT_ROOT={} COLLAB_STATE_DIR={} CODEX_HOME={} CODEX_SESSION_ID={} CODEX_THREAD_ID={} CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex TUI' PANE_STDOUT={} PANE_STDERR={} sh {}",
+            shell_quote(&self.root.to_string_lossy()),
+            hook_env,
+            shell_quote(&self.binary.to_string_lossy()),
+            shell_quote(&self.root.to_string_lossy()),
+            shell_quote(&self.host_state.to_string_lossy()),
+            shell_quote(&self.root.join("home").to_string_lossy()),
+            shell_quote(&pane.session_anchor),
+            shell_quote(&pane.thread_anchor),
+            shell_quote(&stdout.to_string_lossy()),
+            shell_quote(&stderr.to_string_lossy()),
+            shell_quote(&script_path.to_string_lossy())
+        );
+        tmux(
+            &self.tmux_socket,
+            &["respawn-pane", "-k", "-t", &pane.pane_id, &command],
+        );
+        PaneConsumer { stdout, stderr }
     }
 
     pub fn without_tmux(label: &str) -> Self {
@@ -212,6 +265,43 @@ impl Fixture {
             args.extend(["--op", operation_id]);
         }
         self.run_ok(&args, pane)
+    }
+
+    /// Seed a real participant before testing durable identity recovery.
+    /// Challenge bytes travel only through the selected pane's stdin.
+    pub fn registered_context(&self, operation_id: &str, pane: &Pane) -> Value {
+        self.registered_participant(Some(operation_id), operation_id, pane)
+    }
+
+    /// Exercise automatic operation-id creation with a genuine participant.
+    pub fn registered_automatic_context(&self, pane: &Pane) -> Value {
+        self.registered_participant(None, "automatic-registration", pane)
+    }
+
+    fn registered_participant(&self, operation_id: Option<&str>, label: &str, pane: &Pane) -> Value {
+        let done = self.root.join(format!("{label}.participant-done"));
+        let result = self.root.join(format!("{label}.participant-result"));
+        let invocation = operation_id.map(|id| format!("--op {}", shell_quote(id))).unwrap_or_default();
+        let script = format!(
+            "\"$COLLAB_BINARY\" context {} >\"$PANE_STDOUT\" 2>\"$PANE_STDERR\" || true\nIFS= read -r challenge || exit 3\ncase \"$challenge\" in 'COLLAB_REGISTER_CHALLENGE '{{*) ;; *) exit 4 ;; esac\n\"$COLLAB_BINARY\" context --return-challenge \"${{challenge#COLLAB_REGISTER_CHALLENGE }}\" >{} 2>>\"$PANE_STDERR\"\nprintf done >{}\nsleep 600\n",
+            invocation, shell_quote(&result.to_string_lossy()), shell_quote(&done.to_string_lossy())
+        );
+        let consumer = self.run_in_pane(pane, label, &script);
+        assert!(
+            wait_until(Duration::from_secs(15), || done.exists()),
+            "participant setup did not complete: {} {}",
+            consumer.output(),
+            std::fs::read_to_string(&result).unwrap_or_default()
+        );
+        let result: Value = serde_json::from_slice(&std::fs::read(result).unwrap()).unwrap();
+        assert_eq!(result["ok"], true, "{result}");
+        assert_eq!(result["result"]["outcome"], "completed", "{result}");
+        if operation_id.is_none() {
+            let initial: Value = serde_json::from_slice(&std::fs::read(&consumer.stdout).unwrap()).unwrap();
+            let emitted_id = initial["operation_id"].as_str().expect("automatic public context emitted operation id");
+            return self.context(Some(emitted_id), Some(pane));
+        }
+        result
     }
 
     pub fn context_query(&self, operation_id: &str, pane: Option<&Pane>) -> Value {
@@ -478,6 +568,10 @@ impl Fixture {
         }
         surfaces
     }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 pub struct DaemonPause {
@@ -1046,7 +1140,32 @@ fn serve_appserver_connection(
                     }
                     json!({"id": id, "result": {"turn": {"id": turn_id, "status": "inProgress"}}})
                 } else {
-                    if state.effect == "reject_generic_turn_start" {
+                    let register_marker = prompt.lines().find_map(|line| {
+                        let prefix = "COLLAB_REGISTER_CHALLENGE ";
+                        let start = line.find(prefix)?;
+                        let challenge = line[start + prefix.len()..].split("</input>").next()?;
+                        let challenge: Value = serde_json::from_str(challenge).ok()?;
+                        challenge["challenge"].as_str().map(str::to_owned)
+                    });
+                    if let Some(marker) = register_marker.as_deref() {
+                        let turn_id = "registration-challenge-turn";
+                        if state.effect != "register_no_reply" {
+                            let text = if state.effect == "register_wrong_reply" {
+                                "wrong-reply"
+                            } else {
+                                marker
+                            };
+                            let turn = json!({"id":turn_id, "status":"completed", "completedAt":now,
+                                "items":[{"type":"userMessage", "clientMessageId":client_message_id},
+                                    {"type":"agentMessage", "text":text}]});
+                            if requested.as_deref() == state.created_thread.as_deref() {
+                                state.created_turns.push(turn);
+                            } else {
+                                state.turns.push(turn);
+                            }
+                        }
+                        json!({"id":id,"result":{"turn":{"id":turn_id,"status":"completed"}}})
+                    } else if state.effect == "reject_generic_turn_start" {
                         json!({
                             "id": id,
                             "error": {
@@ -1121,6 +1240,7 @@ fn serve_appserver_connection(
                 if !created
                     && include_turns
                     && state.effect == "update_challenge_wrong_thread"
+                    && state.challenge_requests > 0
                 {
                     thread["id"] = json!("wrong-thread");
                 }

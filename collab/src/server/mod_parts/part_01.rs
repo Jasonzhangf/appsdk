@@ -134,11 +134,26 @@ fn default_appserver_candidate_check() -> Arc<AppServerCandidateCheck> {
 
 fn default_tmux_notification_sink() -> Arc<TmuxNotificationSink> {
     Arc::new(
-        |transport, source_thread_id, body, message_id, explicit, _mode| {
+        |transport, source_thread_id, body, message_id, explicit, mode| {
             if transport.kind != TransportKind::Tmux {
                 return Err("TRANSPORT_UNSUPPORTED: Collab notifications require tmux".into());
             }
             let _ = (source_thread_id, explicit);
+            match mode {
+                "immediate" | "explicit-notification" => {}
+                "queued" => {
+                    return Err(
+                        "TMUX_DELIVERY_MODE_UNSUPPORTED: queued delivery must remain durable until a wake-capable mode is selected"
+                            .into(),
+                    )
+                }
+                "daemon-live-closure" | "restart-replay-pending" => {}
+                other => {
+                    return Err(format!(
+                        "TMUX_DELIVERY_MODE_UNSUPPORTED: unknown delivery mode {other}"
+                    ))
+                }
+            }
             let endpoint = transport.tmux_endpoint.as_ref().ok_or_else(|| {
                 "TMUX_ENDPOINT_MISSING: selected transport has no endpoint".to_owned()
             })?;
@@ -473,6 +488,7 @@ enum NotificationDeliveryError {
 #[derive(Debug)]
 enum NotificationAttempt {
     Accepted,
+    Deferred,
     NotAttempted(String),
     Rejected(String),
 }

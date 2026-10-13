@@ -90,6 +90,53 @@ fn identity_operation_envelope_matches_the_frozen_top_level_wire_shape() {
 }
 
 #[test]
+fn cancelled_pending_operation_remains_cancelled_after_journal_reopen() {
+    let root = test_root("cancelled-pending");
+    let path = root.join("journal.jsonl");
+    let journal = OperationJournal::open(&path).unwrap();
+    journal.append(admission("ctxop-1", "digest-1")).unwrap();
+    journal
+        .transition(
+            "ctxop-1",
+            IdentityOperationPhase::Validating,
+            Some("register-command".into()),
+            Some("register-operation".into()),
+        )
+        .unwrap();
+    journal.install_safe("ctxop-1", Vec::new());
+    journal.begin_owner_start("ctxop-1", "register").unwrap();
+    journal.reopen_safe("ctxop-1", Vec::new());
+    let cancelled = journal
+        .cancel(
+            "ctxop-1",
+            "/tmp/project",
+            crate::identity::CLI_APP_SERVER_ID,
+            &capability_hash("raw-capability-that-must-not-persist"),
+        )
+        .unwrap();
+    assert!(matches!(
+        cancelled,
+        super::operation_journal::CancelOutcome::Cancelled(_)
+    ));
+    drop(journal);
+    let journal = OperationJournal::open(&path).unwrap();
+    assert!(journal.is_cancelled("ctxop-1"));
+    // Re-admission cannot erase the durable cancellation decision.
+    journal.install_safe("ctxop-1", Vec::new());
+    assert!(journal.is_cancelled("ctxop-1"));
+    let query = journal
+        .query(
+            &query_request("raw-capability-that-must-not-persist"),
+            "/tmp/project",
+            crate::identity::CLI_APP_SERVER_ID,
+        )
+        .unwrap();
+    assert_eq!(query.result.phase, IdentityOperationPhase::Cancelled);
+    assert!(query.result.business_receipts.is_empty());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn append_sync_reopen_and_replay_returns_the_exact_projection() {
     let root = test_root("replay");
     let journal_path = root.join("journal.jsonl");

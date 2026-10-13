@@ -21,7 +21,7 @@
         let app = AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
 
         let candidates = test_candidates(master_worker).unwrap();
-        let first = handle_register_with_app_scope_unfinalized(
+        let first = seed_committed_registration_fixture(
             &runtime,
             master_worker.into(),
             format!("token-{master_worker}"),
@@ -99,7 +99,7 @@
         // The peer registers on a different pane, so nobody took the anchor.
         let peer_worker = "fenced-other-pane-peer";
         let peer_token = "token-fenced-other-pane-peer";
-        let peer = handle_register_with_app_scope_unfinalized(
+        let peer = seed_committed_registration_fixture(
             &runtime,
             peer_worker.into(),
             peer_token.into(),
@@ -143,7 +143,7 @@
         let endpoint = &mut candidates.tmux.as_mut().unwrap().endpoint;
         endpoint.codex_session_id = Some("session-taken-pane-peer".into());
         endpoint.codex_thread_id = Some("taken-pane-peer-thread".into());
-        let peer = handle_register_with_app_scope_unfinalized(
+        let peer = seed_committed_registration_fixture(
             &runtime,
             peer_worker.into(),
             peer_token.into(),
@@ -176,7 +176,7 @@
         let endpoint = &mut candidates.tmux.as_mut().unwrap().endpoint;
         endpoint.codex_session_id = Some("session-moved-off-pane-peer".into());
         endpoint.codex_thread_id = Some("moved-off-pane-peer-thread".into());
-        let peer = handle_register_with_app_scope_unfinalized(
+        let peer = seed_committed_registration_fixture(
             &runtime,
             peer_worker.into(),
             peer_token.into(),
@@ -226,7 +226,7 @@
         let master_worker = "moved-peer-pane-master";
         let master_token = "token-moved-peer-pane-master";
         let candidates = test_candidates(master_worker).unwrap();
-        let first = handle_register_with_app_scope_unfinalized(
+        let first = seed_committed_registration_fixture(
             &runtime,
             master_worker.into(),
             master_token.into(),
@@ -273,7 +273,7 @@
         let endpoint = &mut peer_candidates.tmux.as_mut().unwrap().endpoint;
         endpoint.codex_session_id = Some("session-moved-same-pane-peer".into());
         endpoint.codex_thread_id = Some("moved-same-pane-peer-thread".into());
-        let peer = handle_register_with_app_scope_unfinalized(
+        let peer = seed_committed_registration_fixture(
             &runtime,
             peer_worker.into(),
             peer_token.into(),
@@ -306,7 +306,7 @@
         // The peer rebinds to another pane. Its durable route on the master pane
         // is untouched: pane ownership is an index fact, not the peer's current
         // transport, so the moved peer still owns the master pane.
-        let moved = handle_register_with_app_scope_unfinalized(
+        let moved = seed_committed_registration_fixture(
             &runtime,
             peer_worker.into(),
             peer_token.into(),
@@ -353,7 +353,7 @@
         let master_worker = "missing-host-route-pane-master";
         let master_token = "token-missing-host-route-pane-master";
         let candidates = test_candidates(master_worker).unwrap();
-        let first = handle_register_with_app_scope_unfinalized(
+        let first = seed_committed_registration_fixture(
             &runtime,
             master_worker.into(),
             master_token.into(),
@@ -415,7 +415,7 @@
         let master_worker = "other-pane-peer-master";
         let master_token = "token-other-pane-peer-master";
         let master_candidates = test_candidates(master_worker).unwrap();
-        let first = handle_register_with_app_scope_unfinalized(
+        let first = seed_committed_registration_fixture(
             &runtime,
             master_worker.into(),
             master_token.into(),
@@ -460,7 +460,7 @@
         // the master binding.
         let other_worker = "other-pane-live-peer";
         let other_token = "token-other-pane-live-peer";
-        let other = handle_register_with_app_scope_unfinalized(
+        let other = seed_committed_registration_fixture(
             &runtime,
             other_worker.into(),
             other_token.into(),
@@ -507,7 +507,7 @@
         let token = "token-startup-thread-route-recovery";
         let app = AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
         let candidates = test_candidates("startup-thread-route-recovery").unwrap();
-        let registered = handle_register_with_app_scope_unfinalized(
+        let registered = seed_committed_registration_fixture(
             &runtime,
             worker.into(),
             token.into(),
@@ -572,7 +572,7 @@
         let token = "token-startup-stale-thread-route-recovery";
         let app = AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
         let candidates = test_candidates("startup-stale-thread-route-recovery").unwrap();
-        let registered = handle_register_with_app_scope_unfinalized(
+        let registered = seed_committed_registration_fixture(
             &runtime,
             worker.into(),
             token.into(),
@@ -657,12 +657,14 @@
             .fail_current_thread_route_publish
             .store(true, std::sync::atomic::Ordering::SeqCst);
 
-        let (_, response) = manager.dispatch_sync(
-            Some(context),
+        let mut actual_return = None;
+        let (_, response) = register_host_fixture_intercept(&manager,
+            Some(context.clone()),
             Req::register(worker_id.into(),
                  token.into(),
                  root.display().to_string(),
                  test_candidates("thread-first-route-compensation")),
+            &mut |_, reply, _| actual_return = Some(reply.clone()),
         );
         assert!(!response.ok, "{response:?}");
         assert!(
@@ -692,8 +694,25 @@
                 .all(|binding| binding.agent_id.as_str() != worker_id));
         }
 
+        let actual_return = actual_return.expect("actual selected participant return");
+        let before_replay = mutation_snapshot(&server);
+        let journal_before_replay = std::fs::read(&server.journal_path).unwrap();
+        let (_, repeated_failure) = manager.dispatch_sync(Some(context.clone()), actual_return.clone());
+        assert!(!repeated_failure.ok, "{repeated_failure:?}");
+        assert_eq!(repeated_failure.error, response.error, "repeat must preserve the terminal error");
+        assert_eq!(mutation_snapshot(&server), before_replay);
+        assert_eq!(std::fs::read(&server.journal_path).unwrap(), journal_before_replay);
+
         drop(manager);
-        let replayed = ProjectRuntimeManager::new(server, &host_paths).unwrap();
+        let replayed_server = replay_owned_test_server(&server);
+        let replayed = ProjectRuntimeManager::new(replayed_server.clone(), &host_paths).unwrap();
+        let after_startup = mutation_snapshot(&replayed_server);
+        let journal_after_startup = std::fs::read(&replayed_server.journal_path).unwrap();
+        let (_, restarted_failure) = replayed.dispatch_sync(Some(context), actual_return);
+        assert!(!restarted_failure.ok, "{restarted_failure:?}");
+        assert_eq!(restarted_failure.error, response.error, "restart must preserve the terminal error");
+        assert_eq!(mutation_snapshot(&replayed_server), after_startup);
+        assert_eq!(std::fs::read(&replayed_server.journal_path).unwrap(), journal_after_startup);
         let missing = replayed
             .resolve_route_by_native_thread(
                 "session-thread-first-route-compensation",

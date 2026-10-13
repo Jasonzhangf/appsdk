@@ -419,16 +419,26 @@ impl ProjectRuntimeManager {
         if let Req::PeerLifecycle { ref request } = req {
             // Pure lifecycle requests never initialize a project runtime or
             // reconcile same-pane routes, leases, or registration state.
-            let runtime = self.routes.lock().unwrap().get(&Self::route_key(&context))
+            let runtime = self
+                .routes
+                .lock()
+                .unwrap()
+                .get(&Self::route_key(&context))
                 .and_then(|route| route.runtime.clone());
             let Some(runtime) = runtime else {
-                return (self.host.clone(), peer_lifecycle::unavailable(request, "PEER_LIFECYCLE_ROUTE_UNAVAILABLE", false));
+                return (
+                    self.host.clone(),
+                    peer_lifecycle::unavailable(request, "PEER_LIFECYCLE_ROUTE_UNAVAILABLE", false),
+                );
             };
             let response = match validate_request_context(&runtime, &req, Some(&context)) {
                 Ok(()) => dispatch_with_route_context_bound(&runtime, req, Some(context), None),
                 Err(error) => peer_lifecycle::unavailable(request, &error, true),
             };
             return (runtime, response);
+        }
+        if let Req::RegisterReply { reply } = req {
+            return self.participant_register_reply(context, reply);
         }
         if let Req::IdentityContext {
             facts,
@@ -485,7 +495,6 @@ impl ProjectRuntimeManager {
             Req::Register { worker_id, .. } => Some(worker_id.clone()),
             _ => None,
         };
-        let _register_guard = is_register.then(|| self.register_gate.lock().unwrap());
         if let Err(error) = self.admit_committed_pane_register_retry(&mut context, &req) {
             return (self.host.clone(), Resp::err(error));
         }
@@ -517,22 +526,21 @@ impl ProjectRuntimeManager {
                 }
                 None => (None, None, None, Vec::new()),
             };
-            let response =
-                if let Err(error) = validate_request_context_with_register_approval(
+            let response = if let Err(error) = validate_request_context_with_register_approval(
+                &runtime,
+                &req,
+                Some(&context),
+                register_binding.and_then(RegisterOuterBinding::approval),
+            ) {
+                Resp::err(error)
+            } else {
+                dispatch_with_route_context_bound(
                     &runtime,
-                    &req,
-                    Some(&context),
-                    register_binding.and_then(RegisterOuterBinding::approval),
-                ) {
-                    Resp::err(error)
-                } else {
-                    dispatch_with_route_context_bound(
-                        &runtime,
-                        req,
-                        Some(context.clone()),
-                        register_binding,
-                    )
-                };
+                    req,
+                    Some(context.clone()),
+                    register_binding,
+                )
+            };
             let (runtime, response) = self.finalize_registration(
                 runtime,
                 &context,
@@ -574,22 +582,21 @@ impl ProjectRuntimeManager {
                 }
                 None => (None, None, None, Vec::new()),
             };
-            let response =
-                if let Err(error) = validate_request_context_with_register_approval(
+            let response = if let Err(error) = validate_request_context_with_register_approval(
+                &runtime,
+                &req,
+                Some(&context),
+                register_binding.and_then(RegisterOuterBinding::approval),
+            ) {
+                Resp::err(error)
+            } else {
+                dispatch_with_route_context_bound(
                     &runtime,
-                    &req,
-                    Some(&context),
-                    register_binding.and_then(RegisterOuterBinding::approval),
-                ) {
-                    Resp::err(error)
-                } else {
-                    dispatch_with_route_context_bound(
-                        &runtime,
-                        req,
-                        Some(context.clone()),
-                        register_binding,
-                    )
-                };
+                    req,
+                    Some(context.clone()),
+                    register_binding,
+                )
+            };
             let (runtime, response) = self.finalize_registration(
                 runtime,
                 &context,
@@ -617,6 +624,10 @@ impl ProjectRuntimeManager {
                 if let Err(error) = self.append_resident_route_record(&context) {
                     return (self.host.clone(), Resp::err(error));
                 }
+                // The runtime reservation is already durable. Keep the same
+                // resident reducer available when registration pauses at the
+                // participant gate; continuation must not append it again.
+                self.install_runtime(&key, self.host.clone(), None);
             }
             let rollback_state = match register_worker_id.as_deref() {
                 Some(worker_id) => {
@@ -627,27 +638,23 @@ impl ProjectRuntimeManager {
                 }
                 None => (None, None, None, Vec::new()),
             };
-            let response =
-                if let Err(error) = validate_request_context_with_register_approval(
+            let response = if let Err(error) = validate_request_context_with_register_approval(
+                &self.host,
+                &req,
+                Some(&context),
+                register_binding.and_then(RegisterOuterBinding::approval),
+            ) {
+                Resp::err(error)
+            } else {
+                dispatch_with_route_context_bound(
                     &self.host,
-                    &req,
-                    Some(&context),
-                    register_binding.and_then(RegisterOuterBinding::approval),
-                ) {
-                    Resp::err(error)
-                } else {
-                    dispatch_with_route_context_bound(
-                        &self.host,
-                        req,
-                        Some(context.clone()),
-                        register_binding,
-                    )
-                };
+                    req,
+                    Some(context.clone()),
+                    register_binding,
+                )
+            };
             if !response.ok {
                 return (self.host.clone(), response);
-            }
-            if is_register {
-                self.install_runtime(&key, self.host.clone(), None);
             }
             let (runtime, response) = self.finalize_registration(
                 self.host.clone(),
@@ -733,5 +740,4 @@ impl ProjectRuntimeManager {
             self.retire_superseded_claimants(superseded, response),
         )
     }
-
 }

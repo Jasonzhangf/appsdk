@@ -4,6 +4,15 @@ impl ProjectRuntimeManager {
         context: ProjectContext,
         request: IdentityContextRequest,
     ) -> (Arc<Server>, Resp) {
+        self.identity_context_continue(context, request, false)
+    }
+
+    fn identity_context_continue(
+        &self,
+        context: ProjectContext,
+        request: IdentityContextRequest,
+        continuing: bool,
+    ) -> (Arc<Server>, Resp) {
         if request.action == "prepare_invocation" {
             return self.prepare_context_invocation(&context, request);
         }
@@ -12,7 +21,7 @@ impl ProjectRuntimeManager {
         }
         let _guard = self.identity_gate.lock().unwrap();
         if request.operation_id.is_empty() {
-            return match self.reconcile_identity_context(context, request.facts, None, None) {
+            return match self.reconcile_identity_context(context, request.facts, None, None, true) {
                 Ok((runtime, response, _)) => (runtime, response),
                 Err(error) => (self.host.clone(), Resp::err(format!("{error:#}"))),
             };
@@ -30,30 +39,46 @@ impl ProjectRuntimeManager {
             context.project_scope.as_str(),
             context.app_scope_id.as_str(),
         ) {
-            return match self.admit_identity_operation(&context, &request) {
-                Ok(_) => {
-                    let completed = existing.result.outcome == "completed";
-                    let result = operation_result(&request, existing.result, completed, None);
-                    (self.host.clone(), typed_operation_resp(result))
-                }
-                Err(error) if error.starts_with("IDENTITY_OPERATION_INTENT_CONFLICT") => (
-                    self.host.clone(),
-                    typed_operation_resp(operation_refusal(
-                        &request,
-                        error,
-                        "collab context --op <new-operation-id>",
-                    )),
-                ),
-                Err(error) => (self.host.clone(), Resp::err(error)),
-            };
+            if !continuing || existing.result.outcome == "completed" {
+                return match self.admit_identity_operation(&context, &request) {
+                    Ok(_) => {
+                        let completed = existing.result.outcome == "completed";
+                        let (runtime, snapshot) = if completed && request.invocation == "automatic" {
+                            match self.completed_context_readback(&context, &request.facts) {
+                                Ok((runtime, snapshot)) => (runtime, Some(snapshot)),
+                                Err(error) => return (self.host.clone(), Resp::err(format!(
+                                    "IDENTITY_CONTEXT_READBACK_FAILED: {error:#}"
+                                ))),
+                            }
+                        } else {
+                            (self.host.clone(), None)
+                        };
+                        let result = operation_result(&request, existing.result, completed, snapshot);
+                        (runtime, typed_operation_resp(result))
+                    }
+                    Err(error) if error.starts_with("IDENTITY_OPERATION_INTENT_CONFLICT") => (
+                        self.host.clone(),
+                        typed_operation_resp(operation_refusal(
+                            &request,
+                            error,
+                            "collab context --op <new-operation-id>",
+                        )),
+                    ),
+                    Err(error) => (self.host.clone(), Resp::err(error)),
+                };
+            }
         }
         let digest = identity_operation_intent_digest(&context, &request);
-        if let Err(error) = self.operation_journal.claim_invocation(
-            &request.operation_id,
-            &request.invocation_ticket,
-            &digest,
-            &crate::server::operation_journal::capability_hash(&request.query_capability),
-        ) {
+        if let Err(error) = if continuing {
+            Ok(())
+        } else {
+            self.operation_journal.claim_invocation(
+                &request.operation_id,
+                &request.invocation_ticket,
+                &digest,
+                &crate::server::operation_journal::capability_hash(&request.query_capability),
+            )
+        } {
             if error == "IDENTITY_OPERATION_CANCELLED" {
                 let cancelled = operation_result(
                     &request,
@@ -78,9 +103,6 @@ impl ProjectRuntimeManager {
         // it must not re-evaluate an incumbent already changed by that commit.
         let approved = match self.approved_recovery_admission(&context, &request) {
             Ok(approved) => approved,
-            Err(ApprovedAdmissionError::Denied(result)) => {
-                return (self.host.clone(), typed_operation_resp(result));
-            }
             Err(ApprovedAdmissionError::Error(error)) => {
                 return (self.host.clone(), Resp::err(error));
             }
@@ -107,18 +129,6 @@ impl ProjectRuntimeManager {
                 return (self.host.clone(), Resp::err(format!("{error:#}")));
             }
         };
-        // A stale local credential on the current committed pane is not an
-        // ordinary Register request. The daemon can prove the exact incumbent
-        // from its own worker and binding records before admission; return the
-        // explicit approval path without minting, persisting, or dispatching
-        // Register.
-        if approved.is_none() {
-            match self.unapproved_stale_identity(&context, &request, &facts) {
-                Ok(Some(result)) => return (self.host.clone(), typed_operation_resp(result)),
-                Ok(None) => {}
-                Err(error) => return (self.host.clone(), Resp::err(format!("{error:#}"))),
-            }
-        }
         let admitted = match self.admit_identity_operation(&context, &request) {
             Ok(operation) => operation,
             Err(error) => return (self.host.clone(), Resp::err(error)),
@@ -152,15 +162,31 @@ impl ProjectRuntimeManager {
                 self.operation_journal.clone(),
                 request.operation_id.clone(),
             ),
-        };
+        }
+        .with_continuation(context.clone(), request.clone());
         let approved_identity = approved.as_ref().map(|approved| approved.identity.clone());
-        match self.reconcile_identity_context(
+        // Do not hold identity serialization across selected-path dispatch.
+        drop(_guard);
+        let reconciliation = self.reconcile_identity_context(
             context.clone(),
             facts,
             Some(outer_binding.clone()),
             approved_identity,
-        ) {
-            Ok((runtime, response, nested)) if response.ok => {
+            approved.as_ref().is_none_or(|approved| {
+                matches!(
+                    approved.identity_approval.action.as_str(),
+                    "restore_master" | "restore_peer"
+                )
+            }),
+        );
+        let reconciliation = if request.invocation == "manual_communication_restore" {
+            self.manual_communication_gate(&context, &request, &outer_binding, reconciliation)
+        } else {
+            reconciliation
+        };
+        let _guard = self.identity_gate.lock().unwrap();
+        match reconciliation {
+            Ok((runtime, mut response, nested)) if response.ok => {
                 let bound = outer_binding.bound();
                 let nested_ref = nested.as_ref().or(bound.as_ref());
                 // Business receipts are projected only from durable owner
@@ -209,9 +235,13 @@ impl ProjectRuntimeManager {
                     // Identity-only recovery keeps the existing authority owner
                     // and never promotes, clears, or replaces it.
                     if approved.requires_grant_replacement() {
-                        if let Err(reason) = self
-                            .replace_approved_master_grant(&context, &request, &response, approved)
-                        {
+                        if let Err(reason) = self.replace_approved_master_grant(
+                            &runtime,
+                            &context,
+                            &request,
+                            &mut response,
+                            approved,
+                        ) {
                             // A cancellation that won at the between-owners
                             // boundary must be returned as the durable
                             // cancelled projection, never as a repair result.
@@ -356,14 +386,23 @@ impl ProjectRuntimeManager {
                 (runtime, typed_operation_resp(result))
             }
             Ok((runtime, response, nested)) => {
-                self.operation_journal.remove_live(&request.operation_id);
                 let bound = outer_binding.bound();
+                let awaiting_reply = response
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.starts_with("REGISTER_REPLY_PENDING"));
                 // The prepared envelope's IDs are durable but consume produced
                 // no receipt (for example the existing CAS rejected a stale
                 // revision). The outer projection must stay at the durable
                 // `Validating` intent: `unknown`, never `inner_dispatched`
                 // or `partial`, and no reprepare/retry.
-                if outer_binding.bound().is_some() && nested.is_none() {
+                if nested.is_none() && (outer_binding.bound().is_some() || awaiting_reply) {
+                    if awaiting_reply {
+                        self.operation_journal
+                            .reopen_safe(&request.operation_id, Vec::new());
+                    } else {
+                        self.operation_journal.remove_live(&request.operation_id);
+                    }
                     let fallback = self
                         .latest_projection(&context, &request)
                         .unwrap_or_else(|| admitted.clone());
@@ -380,6 +419,7 @@ impl ProjectRuntimeManager {
                     }
                     return (runtime, typed_operation_resp(result));
                 }
+                self.operation_journal.remove_live(&request.operation_id);
                 // Reconciliation failed after admission. A committed nested
                 // Register receipt makes this a `partial` with committed
                 // phases retained; otherwise it is a pre-commit `failed`.
@@ -443,6 +483,178 @@ impl ProjectRuntimeManager {
                 (self.host.clone(), typed_operation_resp(result))
             }
         }
+    }
+
+    pub(super) fn participant_register_reply(
+        &self,
+        context: ProjectContext,
+        reply: crate::proto::RegisterParticipantReply,
+    ) -> (Arc<Server>, Resp) {
+        if self.operation_journal.is_cancelled(&reply.operation_id) {
+            return (self.host.clone(), Resp::err("IDENTITY_OPERATION_CANCELLED"));
+        }
+        let record =
+            match register_reply::accept(self.host.host_paths.state_root(), &context, &reply) {
+                Ok(record) => record,
+                Err(error) => return (self.host.clone(), Resp::err(error)),
+            };
+        let Some(continuation) = record.continuation.clone() else {
+            let completion_context = record
+                .completion
+                .as_ref()
+                .map(|completion| &completion.context)
+                .unwrap_or(&context);
+            let runtime = match self.select_runtime(completion_context) {
+                Ok(runtime) => runtime,
+                Err(error) => return (self.host.clone(), Resp::err(error)),
+            };
+            return self.complete_participant_registration(runtime, &context, record);
+        };
+        // The exact admitted intent and prepared envelope come from the one
+        // control owner, never from return payload or query projection.
+        self.identity_context_continue(continuation.context, continuation.request, true)
+    }
+
+    /// Read current typed owners without loading a runtime or replaying any
+    /// registration, credential, lease, role or presence-maintenance effect.
+    fn completed_context_readback(
+        &self,
+        context: &ProjectContext,
+        facts: &IdentityFacts,
+    ) -> anyhow::Result<(Arc<Server>, serde_json::Value)> {
+        if context.app_scope_id.as_str() != identity::CLI_APP_SERVER_ID
+            || context.runtime_context.is_some()
+        {
+            anyhow::bail!("bootstrap requires the CLI project scope without a caller-selected identity");
+        }
+        let mut facts = facts.clone();
+        self.complete_persisted_tmux_facts(context, &mut facts)?;
+        validate_facts(&facts)?;
+        let scope = Scope { root: PathBuf::from(&context.canonical_root) };
+        if facts.tmux.is_none() {
+            self.complete_persisted_native_facts(&scope, &mut facts)?;
+        }
+        let host_binding = self.current_anchor_binding(&facts)?;
+        let (app_scope, binding_id) = if let Some(binding) = host_binding.as_ref() {
+            if binding.project_scope != context.project_scope {
+                anyhow::bail!("current anchor belongs to another project");
+            }
+            (binding.app_scope_id.clone(), binding.binding_id.clone())
+        } else {
+            let persisted = identity::existing_for_daemon_at(&self.host.host_paths, &scope, &facts)?;
+            let saved = persisted.as_ref().and_then(|identity| identity.runtime.as_ref())
+                .ok_or_else(|| anyhow::anyhow!("current anchor has no typed runtime binding"))?;
+            if persisted.as_ref().and_then(|identity| identity.project_scope.as_ref()) != Some(&context.project_scope) {
+                anyhow::bail!("persisted anchor belongs to another project");
+            }
+            (saved.appserver_id.clone(), saved.binding_id.clone())
+        };
+        let route_scope = crate::scope::RouteScope {
+            app_scope_id: app_scope.clone(),
+            project_scope_id: context.project_scope.clone(),
+        };
+        let key = (app_scope.as_str().to_owned(), context.project_scope.as_str().to_owned());
+        let runtime = self.routes.lock().unwrap().get(&key)
+            .and_then(|route| route.runtime.clone())
+            .ok_or_else(|| anyhow::anyhow!("current project runtime is not loaded"))?;
+        let (binding, worker, target) = {
+            let state = runtime.state.lock().unwrap();
+            let binding = state.global.lookup_binding_for(&route_scope, &binding_id)
+                .ok_or_else(|| anyhow::anyhow!("current project binding is missing"))?.clone();
+            if host_binding.as_ref().is_some_and(|host| host != &binding) {
+                anyhow::bail!("current host and project bindings differ");
+            }
+            let worker = state.workers.get(binding.agent_id.as_str())
+                .ok_or_else(|| anyhow::anyhow!("current binding worker is missing"))?.clone();
+            let transport = selected_transport_for_worker(&worker)
+                .ok_or_else(|| anyhow::anyhow!("current worker selected transport is missing"))?;
+            if transport.tmux_endpoint != binding.tmux_endpoint
+                || (transport.kind == TransportKind::AppServer
+                    && transport.thread_id.as_deref() != binding.native_thread_id.as_ref().map(NativeThreadId::as_str))
+            {
+                anyhow::bail!("current selected transport differs from binding");
+            }
+            let target = close_endpoint_target(&state, &worker.id);
+            (binding, worker, target)
+        };
+        let response = context_projection(&runtime, worker.id.clone(), worker.token.clone());
+        if !response.ok {
+            anyhow::bail!("current context projection failed: {}", response.error.unwrap_or_default());
+        }
+        if response.data.get("binding") != Some(&json!(binding)) {
+            anyhow::bail!("current context binding is ambiguous or changed");
+        }
+        let current_target = {
+            let state = runtime.state.lock().unwrap();
+            close_endpoint_target(&state, &worker.id)
+        };
+        if current_target != target
+            || (host_binding.is_some() && self.current_anchor_binding(&facts)? != host_binding)
+        {
+            anyhow::bail!("current readback owner or binding changed");
+        }
+        Ok((runtime, response.data))
+    }
+
+    fn manual_communication_gate(
+        &self,
+        context: &ProjectContext,
+        request: &IdentityContextRequest,
+        outer: &RegisterOuterBinding,
+        reconciliation: Result<(Arc<Server>, Resp, Option<(String, String)>), ReconcileError>,
+    ) -> Result<(Arc<Server>, Resp, Option<(String, String)>), ReconcileError> {
+        let (runtime, mut response, nested) = reconciliation?;
+        if !response.ok {
+            return Ok((runtime, response, nested));
+        }
+        let identity: identity::Identity =
+            serde_json::from_value(response.data["identity_receipt"].clone()).map_err(|error| {
+                anyhow::anyhow!("COMMUNICATION_RESTORE_IDENTITY_REQUIRED: {error}")
+            })?;
+        let binding = identity
+            .runtime
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("COMMUNICATION_RESTORE_IDENTITY_REQUIRED"))?;
+        let transport = identity
+            .transport
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("COMMUNICATION_RESTORE_BINDING_REQUIRED"))?;
+        let root = self.host.host_paths.state_root();
+        let saved =
+            register_reply::read(root, &request.operation_id).map_err(anyhow::Error::msg)?;
+        let prepared = match saved.as_ref() {
+            Some(record) => record.prepared.clone(),
+            None => runtime
+                .prepare_register_envelope_for_scope(
+                    &identity.worker_id,
+                    &identity.token,
+                    transport,
+                    context.project_scope.clone(),
+                    &context.canonical_root,
+                    binding.appserver_id.clone(),
+                    true,
+                )
+                .map_err(anyhow::Error::msg)?,
+        };
+        let gate = register_reply::ensure_pending(
+            root,
+            &identity.worker_id,
+            transport,
+            &prepared,
+            Some(outer),
+            register_reply::Purpose::ManualCommunicationRestore,
+        )
+        .and_then(|record| {
+            register_reply::enforce(root, record.clone())?;
+            register_reply::verified_for_commit(root, &record)
+        });
+        if let Err(error) = gate {
+            response.ok = false;
+            response.error = Some(error);
+        }
+        // Communication evidence changes only after a real reply. No Register,
+        // credential or authority mutation occurs on this restored binding.
+        Ok((runtime, response, nested))
     }
 
     fn prepare_context_invocation(
@@ -552,13 +764,20 @@ impl ProjectRuntimeManager {
             .map_err(PreflightIdentityError::Error)?;
         validate_project_registration_cwd(&context.canonical_root, &root)
             .map_err(|error| PreflightIdentityError::Error(anyhow::Error::msg(error)))?;
+        self.complete_persisted_tmux_facts(context, &mut facts)
+            .map_err(PreflightIdentityError::Error)?;
         validate_facts(&facts).map_err(PreflightIdentityError::Error)?;
         let scope = Scope { root };
-        if !required_fields(&facts).is_empty() {
+        let restoring_pane = self.has_persisted_pane_route(context, &facts);
+        if !restoring_pane && !required_fields(&facts).is_empty() {
             self.complete_persisted_native_facts(&scope, &mut facts)
                 .map_err(PreflightIdentityError::Error)?;
         }
-        let required = required_fields(&facts);
+        let required = if restoring_pane {
+            Vec::new()
+        } else {
+            required_fields(&facts)
+        };
         if !required.is_empty() {
             let descriptions = json!({
                 "session_id": "Current runtime session identifier",
@@ -587,123 +806,6 @@ impl ProjectRuntimeManager {
             })));
         }
         Ok(facts)
-    }
-
-    /// Classify the narrow stale-cache case before any admission or Register.
-    ///
-    /// This is not a second credential authority. The resolver first proves
-    /// the current pane maps to exactly one committed binding. The daemon's
-    /// worker record then proves which token is current. Only when both facts
-    /// are present, the persisted local cache names the same worker, and the
-    /// cached token differs from the daemon record do we return the approval
-    /// terminal. Any ambiguity or mismatch in the authoritative facts returns
-    /// no classification and leaves the existing conflict path in charge.
-    fn unapproved_stale_identity(
-        &self,
-        context: &ProjectContext,
-        request: &IdentityContextRequest,
-        facts: &IdentityFacts,
-    ) -> anyhow::Result<Option<crate::proto::ContextOperationResult>> {
-        let Some(candidate) = facts.tmux.as_ref() else {
-            return Ok(None);
-        };
-        let Ok(route) = self.resolve_route_by_tmux_endpoint(&candidate.endpoint) else {
-            // Keep the existing typed conflict path for an absent, stale, or
-            // ambiguous anchor. This preflight only classifies a proven one.
-            return Ok(None);
-        };
-        if route.validate().is_err() {
-            return Ok(None);
-        }
-        if route.project_scope != context.project_scope
-            || route.app_scope_id != context.app_scope_id
-            || route.canonical_root != context.canonical_root
-        {
-            return Ok(None);
-        }
-        let Some(persisted) =
-            identity::read_persisted(&self.host.host_paths, route.agent_id.as_str())?
-        else {
-            return Ok(None);
-        };
-        if persisted.worker_id != route.agent_id.as_str()
-            || persisted.project_scope.as_ref() != Some(&route.project_scope)
-        {
-            return Ok(None);
-        }
-        {
-            let state = self.host.state.lock().unwrap();
-            let Some(worker) = state.workers.get(route.agent_id.as_str()) else {
-                return Ok(None);
-            };
-            if worker.token == persisted.token {
-                return Ok(None);
-            }
-            let Some(binding) = state.global.lookup_binding_for(
-                &crate::scope::RouteScope {
-                    app_scope_id: route.app_scope_id.clone(),
-                    project_scope_id: route.project_scope.clone(),
-                },
-                &route.binding_id,
-            ) else {
-                return Ok(None);
-            };
-            if binding.agent_id != route.agent_id
-                || binding.endpoint_generation != route.endpoint_generation
-                || binding.project_scope != route.project_scope
-                || binding.app_scope_id != route.app_scope_id
-            {
-                return Ok(None);
-            }
-        }
-        let mut approval = serde_json::json!({
-            "decision": "approved",
-            "target_identity": route.agent_id.as_str(),
-            "project_scope": route.project_scope.as_str(),
-            "app_scope_id": route.app_scope_id.as_str(),
-            "action": "replace_binding",
-            "expected_incumbent": {
-                "binding_id": route.binding_id.as_str(),
-                "endpoint_generation": route.endpoint_generation,
-            }
-        });
-        approval["intent_digest"] =
-            serde_json::Value::String(approval_digest(&approval, &request.facts));
-        let mut result = operation_result(
-            request,
-            crate::proto::IdentityOperationProjection {
-                operation_id: request.operation_id.clone(),
-                phase: crate::proto::IdentityOperationPhase::Admitted,
-                outcome: "denied".into(),
-                committed_phases: Vec::new(),
-                business_receipts: Vec::new(),
-                nested_command_id: None,
-                nested_operation_id: None,
-            },
-            false,
-            None,
-        );
-        result.phase = None;
-        result.requires.kind = Some("approval".into());
-        result.requires.approval = Some(approval);
-        result.requires.repair_invocation = Some(
-            "collab context --approve-identity '<exact approval object from requires.approval>'"
-                .into(),
-        );
-        result.owner_readback.insert(
-            "identity".into(),
-            serde_json::json!({
-                "target_identity": route.agent_id.as_str(),
-                "project_scope": route.project_scope.as_str(),
-                "app_scope_id": route.app_scope_id.as_str(),
-                "incumbent": {
-                    "binding_id": route.binding_id.as_str(),
-                    "endpoint_generation": route.endpoint_generation,
-                },
-                "reason": "IDENTITY_APPROVAL_REQUIRED",
-            }),
-        );
-        Ok(Some(result))
     }
 
     fn finish_identity_operation(
@@ -768,7 +870,11 @@ impl ProjectRuntimeManager {
                 nested_operation_id.clone(),
             )?;
         }
-        if operation.nested_command_id.is_none() {
+        if operation.nested_command_id.is_none()
+            && !business_receipts
+                .iter()
+                .any(|receipt| receipt == "context_complete")
+        {
             // No nested Register receipt exists for this invocation, so no
             // effect-producing phase can be claimed; the durable phase stops at
             // `validating` and the projection reports it honestly.
@@ -946,7 +1052,7 @@ impl ProjectRuntimeManager {
         }
         if !matches!(
             request.invocation.as_str(),
-            "automatic" | "supplement" | "approved_recovery"
+            "automatic" | "supplement" | "approved_recovery" | "manual_communication_restore"
         ) {
             return Err("IDENTITY_CONTEXT_UNSUPPORTED: unsupported context invocation".into());
         }
@@ -987,5 +1093,4 @@ impl ProjectRuntimeManager {
             .install_safe(&request.operation_id, Vec::new());
         Ok(admission)
     }
-
 }

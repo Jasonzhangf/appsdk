@@ -133,13 +133,8 @@ fn handle_task_review(
     if let Some((message_id, subscription_id)) = pending_notification {
         // Surface any non-accepted wake attempt as an explicit repair terminal;
         // pending_merges stays durable regardless.
-        match attempt_notification_detailed_with_at(
-            server,
-            &message_id,
-            &subscription_id,
-            now,
-        ) {
-            NotificationAttempt::Accepted => {}
+        match attempt_notification_detailed_with_at(server, &message_id, &subscription_id, now) {
+            NotificationAttempt::Accepted | NotificationAttempt::Deferred => {}
             NotificationAttempt::Rejected(error) => {
                 notification_attempt_failure = Some(error);
             }
@@ -217,10 +212,7 @@ fn handle_task_integrated(
                 }),
             );
         }
-        let is_master_holder = current_master_holder(server, &st)
-            .ok()
-            .flatten()
-            .as_deref()
+        let is_master_holder = current_master_holder(server, &st).ok().flatten().as_deref()
             == Some(worker_id.as_str());
         if !is_master_holder {
             return Resp::err_data(
@@ -349,17 +341,26 @@ fn handle_task_close(
         let Some(reason) = reason else {
             return Resp::err("force close requires a non-empty --reason");
         };
+        let observed_owner = close_endpoint_target(&st, &task.owner);
+        let observed_task = json!(task);
+        drop(st);
+        let owner_presence = close_endpoint_presence(server, &observed_owner);
+        let mut st = server.state.lock().unwrap();
+        if st.workers.get(&worker_id) != Some(&worker)
+            || close_endpoint_target(&st, &task.owner) != observed_owner
+            || st.tasks.get(&task_id).map(|task| json!(task)) != Some(observed_task)
+        {
+            return Resp::err("TASK_CLOSE_TARGET_CHANGED: observed owner, task or binding changed");
+        }
         let master_holder = match current_master_holder(server, &st) {
             Ok(master) => master,
             Err(error) => return Resp::err(error),
         };
-        // Only a definitively missing owner identity is treated as dead.  A
+        // Only a definitively missing owner address is treated as dead. A
         // cold thread may simply be idle on the endpoint and an unknown probe
         // is not evidence of death, so neither authorizes force-closing
         // another peer's task.
-        let owner_identity_live = st.workers.get(&task.owner).is_some_and(|owner| {
-            !matches!(worker_presence(server, owner), IdentityPresence::Missing)
-        });
+        let owner_identity_live = owner_presence != IdentityPresence::Missing;
         let authorized = master_holder.as_deref() == Some(worker_id.as_str())
             || (master_holder.is_none() && (task.owner == worker_id || !owner_identity_live));
         if !authorized {
@@ -369,7 +370,7 @@ fn handle_task_close(
                     "master_holder": master_holder,
                     "task_owner": task.owner,
                     "requester": worker_id,
-                    "rule": "the current master may close any task; with no master assigned, the owner may close its task or a registered peer may close an orphaned task whose owner identity is no longer live",
+                    "rule": "the current master may close any task; with no master assigned, the owner may close its task or a registered peer may close an orphaned task whose owner address is definitively missing",
                     "owner_identity_live": owner_identity_live,
                 }),
             );
@@ -394,7 +395,7 @@ fn handle_task_close(
                     },
                     "superseded_pending_keepalives": [],
                     "stale_workers": stale_worker_views(&st, &|worker| {
-                        worker_presence(server, worker)
+                        worker_presence_in_state(server, &st, worker)
                     }),
                     "idempotent": true,
                     "next_action": if cleanup_verified {
@@ -429,29 +430,29 @@ fn handle_task_close(
             })
             .map(|m| m.id.clone())
             .collect();
-    let mut events: Vec<Event> = vec![
-        Event::CleanupVerified {
-            receipt: receipt.clone(),
-        },
-        Event::TaskUpdated {
-            task: closed.clone(),
-        },
-    ];
-    if st.pending_merges.contains_key(&closed.id) {
-        let stale_notices = pending_merge_notice_ids(&st, &closed.id);
-        events.push(Event::MergeResolved {
-            task_id: closed.id.clone(),
-            resolved_by: worker_id.clone(),
-            reason: Some(format!("force close: {reason}")),
-            at_ms: closed.updated_ms,
-        });
-        if !stale_notices.is_empty() {
-            events.push(Event::Superseded { ids: stale_notices });
+        let mut events: Vec<Event> = vec![
+            Event::CleanupVerified {
+                receipt: receipt.clone(),
+            },
+            Event::TaskUpdated {
+                task: closed.clone(),
+            },
+        ];
+        if st.pending_merges.contains_key(&closed.id) {
+            let stale_notices = pending_merge_notice_ids(&st, &closed.id);
+            events.push(Event::MergeResolved {
+                task_id: closed.id.clone(),
+                resolved_by: worker_id.clone(),
+                reason: Some(format!("force close: {reason}")),
+                at_ms: closed.updated_ms,
+            });
+            if !stale_notices.is_empty() {
+                events.push(Event::Superseded { ids: stale_notices });
+            }
         }
-    }
-    if !superseded.is_empty() {
-        events.push(Event::Superseded {
-            ids: superseded.clone(),
+        if !superseded.is_empty() {
+            events.push(Event::Superseded {
+                ids: superseded.clone(),
             });
         }
         let other_actionable = st.tasks.values().any(|t| {
@@ -476,7 +477,8 @@ fn handle_task_close(
             drop(st);
             return Resp::err(format!("TASK_CLOSE_DURABILITY_FAILED: {error}"));
         }
-        let stale_workers = stale_worker_views(&st, &|worker| worker_presence(server, worker));
+        let stale_workers =
+            stale_worker_views(&st, &|worker| worker_presence_in_state(server, &st, worker));
         drop(st);
         return Resp::data(json!({
             "task": closed.id,
@@ -630,7 +632,8 @@ fn handle_task_close(
 
     let subscribed_notifications = release_dependents_of_closed_task(server, &mut st, &closed.id);
 
-    let stale_workers = stale_worker_views(&st, &|worker| worker_presence(server, worker));
+    let stale_workers =
+        stale_worker_views(&st, &|worker| worker_presence_in_state(server, &st, worker));
     drop(st);
     for (message_id, subscription_id) in subscribed_notifications {
         attempt_notification(server, &message_id, &subscription_id);
@@ -786,16 +789,24 @@ fn handle_task_finalize_cleanup(
             task_id, task.status
         ));
     }
+    let observed_owner = close_endpoint_target(&st, &task.owner);
+    let observed_task = json!(task);
+    drop(st);
+    let owner_presence = close_endpoint_presence(server, &observed_owner);
+    let mut st = server.state.lock().unwrap();
+    if st.workers.get(&worker_id) != Some(&worker)
+        || close_endpoint_target(&st, &task.owner) != observed_owner
+        || st.tasks.get(&task_id).map(|task| json!(task)) != Some(observed_task)
+    {
+        return Resp::err("CLEANUP_FINALIZE_TARGET_CHANGED: observed owner, task or binding changed");
+    }
     let master_holder = match current_master_holder(server, &st) {
         Ok(master) => master,
         Err(error) => return Resp::err(error),
     };
-    // Only a definitively missing owner identity is treated as dead, matching
+    // Only a definitively missing owner address is treated as dead, matching
     // the force-close authorization rule.
-    let owner_identity_live = st
-        .workers
-        .get(&task.owner)
-        .is_some_and(|owner| !matches!(worker_presence(server, owner), IdentityPresence::Missing));
+    let owner_identity_live = owner_presence != IdentityPresence::Missing;
     let authorized = task.owner == worker_id
         || master_holder.as_deref() == Some(worker_id.as_str())
         || (master_holder.is_none() && !owner_identity_live);
@@ -914,7 +925,8 @@ fn handle_task_finalize_cleanup(
         .map(|waiter| waiter.id)
         .collect::<Vec<_>>();
     let notifications = resume_cleanup_release(server, &mut st, &task.id);
-    let stale_workers = stale_worker_views(&st, &|worker| worker_presence(server, worker));
+    let stale_workers =
+        stale_worker_views(&st, &|worker| worker_presence_in_state(server, &st, worker));
     drop(st);
     for (message_id, subscription_id) in notifications {
         attempt_notification(server, &message_id, &subscription_id);
@@ -1070,6 +1082,20 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
             }
         }
     }
+    drop(st);
+    record_ordinary_peer_presence_edges(server, None);
+    context_projection(server, worker_id, token)
+}
+
+/// The current Context serializer without lease rearm or presence-edge writes.
+fn context_projection(server: &Server, worker_id: String, token: String) -> Resp {
+    let st = server.state.lock().unwrap();
+    if let Err(error) = verify(&st, &worker_id, &token) {
+        return error;
+    }
+    let Some(worker) = st.workers.get(&worker_id).cloned() else {
+        return Resp::err(format!("worker {} not registered", worker_id));
+    };
     let mut tasks: Vec<serde_json::Value> = st
         .tasks
         .values()
@@ -1168,29 +1194,15 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
     // `collab context` is the single agent bootstrap read, so the projections
     // that `collab status --all` and `collab who` expose belong to the same
     // snapshot instead of a second call. They are captured here because `st` is
-    // released before the transport probes below. `master_wake` and the message
-    // count are deliberately not captured here: the presence recording below can
-    // commit a wake signal and worker-unresponsive / worker-recovered messages,
-    // so reading them before it would return pre-transition scheduling state.
+    // released before the transport probes below. Normal Context has already
+    // recorded presence; completed readback does not perform that maintenance.
     let task_count = st.tasks.len();
     let mut subagents: Vec<crate::subagent::Record> = st.subagents.values().cloned().collect();
     subagents.sort_by(|left, right| left.id.cmp(&right.id));
     drop(st);
 
-    // `collab context` replaces `collab who` / `collab status --all` /
-    // `collab master status` for agents, and `Workers` / `StatusAll` were the
-    // calls that recorded ordinary-peer presence edges. Without this the
-    // online/offline transitions would stop emitting KeepaliveUpdated,
-    // MasterWakeSignal, worker-unresponsive and worker-recovered as soon as
-    // agents follow the consolidated entry. Must run after `drop(st)` because it
-    // takes the state lock itself.
-    record_ordinary_peer_presence_edges(server, None);
-
-    // That recording can commit KeepaliveUpdated, MasterWakeSignal, and
-    // worker-unresponsive / worker-recovered messages, so the scheduling
-    // projections are read after it. `StatusAll` records first for the same
-    // reason; reading them before would return pre-transition state next to
-    // already-updated peer presence.
+    // Normal Context records presence before this pure projection. A completed
+    // operation readback projects the same current state without recording it.
     let (master_wake, message_count, unread_count, inbox_messages) = {
         let st = server.state.lock().unwrap();
         let unread: Vec<&Message> = st.inbox_of(&worker_id);
@@ -1219,10 +1231,19 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
     };
 
     let (presence, agent) = worker_presence_with_view(server, &worker);
+    let (_, caller_endpoint_live) = worker_identity_and_endpoint(server, &worker);
+    // Durable identity presence and current endpoint reachability are separate
+    // observations. Keep the raw endpoint value (`true`/`false`/`null`) so the
+    // peer rows and the master row below agree with `status`.
+    let mut endpoint_live_by_worker: std::collections::HashMap<String, Option<bool>> =
+        std::collections::HashMap::new();
+    endpoint_live_by_worker.insert(worker.id.clone(), caller_endpoint_live);
     let peers: Vec<_> = peer_snapshots
         .into_iter()
         .map(|(peer, peer_role)| {
             let peer_presence = worker_presence(server, &peer);
+            let (_, peer_endpoint_live) = worker_identity_and_endpoint(server, &peer);
+            endpoint_live_by_worker.insert(peer.id.clone(), peer_endpoint_live);
             json!({
                 "worker_id": peer.id,
                 "id": peer.id,
@@ -1233,7 +1254,7 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
                     IdentityPresence::Missing => "missing",
                     IdentityPresence::Unknown => "unknown",
                 },
-                "endpoint_live": peer_presence == IdentityPresence::Present,
+                "endpoint_live": peer_endpoint_live,
             })
         })
         .collect();
@@ -1260,15 +1281,13 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
     // removes the holder from context.
     let master = {
         let st = server.state.lock().unwrap();
-        let transport_live = current_master_grant(&st, route_scope.as_ref())
-            .and_then(|grant| {
-                peers
-                    .iter()
-                    .find(|peer| peer["worker_id"] == grant.agent_id.as_str())
-                    .and_then(|peer| peer["endpoint_live"].as_bool())
-            })
-            .unwrap_or(false);
-        master_authority_view(&st, route_scope.as_ref(), transport_live)
+        let endpoint_live = current_master_grant(&st, route_scope.as_ref()).and_then(|grant| {
+            endpoint_live_by_worker
+                .get(grant.agent_id.as_str())
+                .copied()
+                .flatten()
+        });
+        master_authority_view_with_endpoint(&st, route_scope.as_ref(), endpoint_live)
     };
     let recorded_unusable = serde_json::Value::Null;
     let mut next_actions: Vec<String> = tasks
@@ -1322,11 +1341,7 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
                 "pending_merges": pending_merges,
             }));
         }
-        if master
-            .get("worker_id")
-            .and_then(serde_json::Value::as_str)
-            == Some(worker_id.as_str())
-        {
+        if master.get("worker_id").and_then(serde_json::Value::as_str) == Some(worker_id.as_str()) {
             operations.push(json!({
                 "kind": "peer_lifecycle",
                 "trigger": "the current peer master needs to create, inspect, update, or close a registered peer",
@@ -1390,10 +1405,9 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
         },
         "role_brief": current_role_brief,
         "liveness": {
-            // `live` stays reserved for a thread that is resident now.  A cold
-            // thread reports its own presence value below and is labelled
-            // "cold" rather than "present" or "missing".
-            "live": presence == IdentityPresence::Present,
+            // `live` stays reserved for an endpoint that is resident now.
+            // Durable identity presence is reported separately below.
+            "live": caller_endpoint_live == Some(true),
             "presence": match presence {
                 IdentityPresence::Present => "present",
                 IdentityPresence::Cold => "cold",

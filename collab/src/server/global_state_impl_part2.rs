@@ -128,27 +128,18 @@ impl GlobalState {
         binding: RuntimeBinding,
     ) -> Result<StateVersion, StateError> {
         binding.validate()?;
-        let native_thread_id = binding.native_thread_id.clone().ok_or_else(|| {
-            StateError::invalid("current thread route", "requires a native thread id")
+        let route_address = binding_route_address(&binding).ok_or_else(|| {
+            StateError::invalid(
+                "current thread route",
+                "requires a pane or native session/thread address",
+            )
         })?;
-        let session_id = binding
-            .session_id
-            .clone()
-            .ok_or_else(|| StateError::invalid("current thread route", "requires a session id"))?;
-        let route_address = current_thread_route_address(
-            &session_id,
-            &native_thread_id,
-            binding.tmux_endpoint.as_ref(),
-        );
         let app_scope_key = binding.app_scope_id.as_str().to_owned();
         let upgraded_binding_id = binding.binding_id.as_str().to_owned();
         let thread_key = binding
             .native_thread_id
             .as_ref()
-            .map(|thread| thread.as_str().to_owned())
-            .ok_or_else(|| {
-                StateError::invalid("current thread route", "requires a native thread id")
-            })?;
+            .map(|thread| thread.as_str().to_owned());
         if self.current_thread_routes.get(&route_address) == Some(&binding) {
             return Ok(self.version());
         }
@@ -171,24 +162,7 @@ impl GlobalState {
                 // A higher endpoint generation on the same session/thread is
                 // a transport refresh, not an address rebind. Keep the route
                 // current and do not create a tombstone for the same address.
-                let old_session_id = old.session_id.clone().ok_or_else(|| {
-                    StateError::invalid(
-                        "current thread route tombstone",
-                        "old binding has no session id",
-                    )
-                })?;
-                let old_native_thread_id = old.native_thread_id.clone().ok_or_else(|| {
-                    StateError::invalid(
-                        "current thread route tombstone",
-                        "old binding has no native thread id",
-                    )
-                })?;
-                if current_thread_route_address(
-                    &old_session_id,
-                    &old_native_thread_id,
-                    old.tmux_endpoint.as_ref(),
-                ) == route_address
-                {
+                if binding_route_address(&old).as_ref() == Some(&route_address) {
                     continue;
                 }
                 // An incumbent that this reducer holds no runtime binding for
@@ -204,11 +178,12 @@ impl GlobalState {
                 {
                     continue;
                 }
-                let key = current_route_address_key(
-                    &old_session_id,
-                    &old_native_thread_id,
-                    old.tmux_endpoint.as_ref(),
-                );
+                let key = installed_route_address_key(&old).ok_or_else(|| {
+                    StateError::invalid(
+                        "current thread route tombstone",
+                        "old binding has no route address",
+                    )
+                })?;
                 next.current_thread_route_tombstones
                     .insert(key, RuntimeBindingTombstone::new(&old, &binding)?);
             }
@@ -217,11 +192,7 @@ impl GlobalState {
             // route and its stale tombstone must not coexist, so clear the
             // tombstone for the exact address we are re-activating.
             next.current_thread_route_tombstones
-                .remove(&current_route_address_key(
-                    &session_id,
-                    &native_thread_id,
-                    binding.tmux_endpoint.as_ref(),
-                ));
+                .remove(&installed_route_address_key(&binding).expect("validated route address"));
             // One tmux pane owns exactly one binding, host-wide. Installing this
             // route evicts every other claimant of the same pane, whatever its
             // project or route scope, so the later writer takes the resource.
@@ -248,7 +219,7 @@ impl GlobalState {
             next.legacy_thread_routes
                 .retain(|(app, thread, binding_id), _| {
                     app != &app_scope_key
-                        || thread != &thread_key
+                        || Some(thread) != thread_key.as_ref()
                         || binding_id != &upgraded_binding_key
                 });
             Ok(())
@@ -260,23 +231,12 @@ impl GlobalState {
         binding: RuntimeBinding,
     ) -> Result<StateVersion, StateError> {
         binding.validate()?;
-        let Some(native_thread_id) = binding.native_thread_id.as_ref() else {
-            return Err(StateError::invalid(
+        let route_address = binding_route_address(&binding).ok_or_else(|| {
+            StateError::invalid(
                 "current thread route retirement",
-                "requires a native thread id",
-            ));
-        };
-        let Some(session_id) = binding.session_id.as_ref() else {
-            return Err(StateError::invalid(
-                "current thread route retirement",
-                "requires a session id",
-            ));
-        };
-        let route_address = current_thread_route_address(
-            session_id,
-            native_thread_id,
-            binding.tmux_endpoint.as_ref(),
-        );
+                "requires a route address",
+            )
+        })?;
         self.mutate(|next| {
             if next.current_thread_routes.get(&route_address) == Some(&binding) {
                 next.current_thread_routes.remove(&route_address);

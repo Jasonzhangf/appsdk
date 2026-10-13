@@ -27,7 +27,9 @@ fn board_invite(server: &Server, actor: String, token: String, id: String, to: S
         };
         (peer, binding)
     };
-    if worker_presence(server, &peer) != IdentityPresence::Present { return Resp::err("BOARD_PEER_NOT_LIVE: invite a live peer"); }
+    // Invitation admission proves identity; endpoint uncertainty does not
+    // prevent durable delivery. The notification owner reports wake failure.
+    if worker_presence(server, &peer) != IdentityPresence::Present { return Resp::err("BOARD_PEER_NOT_LIVE: invite a registered peer with valid identity"); }
     let mut state = server.state.lock().unwrap();
     if let Err(error) = board_check_actor(&state, &actor, &token)
         .and_then(|()| board_check_master_locked(server, &state, &actor)) { return error; }
@@ -88,7 +90,8 @@ fn board_respond(server: &Server, actor: String, token: String, id: String, expe
         if let Err(error) = board_check_actor(&state, &actor, &token) { return error; }
         state.workers.get(&actor).cloned().expect("verified actor")
     };
-    if accept && worker_presence(server, &peer) != IdentityPresence::Present { return Resp::err("BOARD_PEER_NOT_LIVE: accepting peer must be live"); }
+    // Task ownership admission is independent of current endpoint activity.
+    if accept && worker_presence(server, &peer) != IdentityPresence::Present { return Resp::err("BOARD_PEER_NOT_LIVE: accepting peer must have valid identity"); }
     let mut state = server.state.lock().unwrap();
     if let Err(error) = board_check_actor(&state, &actor, &token) { return error; }
     let mut details = match board_check_revision(&state, &id, expected_revision) { Ok(details) => details, Err(error) => return error };

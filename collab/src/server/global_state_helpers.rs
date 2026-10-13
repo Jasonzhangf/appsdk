@@ -12,11 +12,7 @@ pub(super) fn current_thread_route_address(
     tmux_endpoint: Option<&TmuxEndpoint>,
 ) -> (String, String) {
     match tmux_endpoint {
-        Some(endpoint)
-            if endpoint.codex_session_id.is_none() && endpoint.codex_thread_id.is_none() =>
-        {
-            tmux_route_address(endpoint)
-        }
+        Some(endpoint) => tmux_route_address(endpoint),
         _ => (
             session_id.as_str().to_owned(),
             native_thread_id.as_str().to_owned(),
@@ -26,29 +22,15 @@ pub(super) fn current_thread_route_address(
 
 pub(super) fn tmux_route_address(endpoint: &TmuxEndpoint) -> (String, String) {
     let socket_path = &endpoint.socket_path;
-    let session_id = &endpoint.tmux_session_id;
     let pane_id = &endpoint.pane_id;
     (
-        format!(
-            "\0tmux\0{}:{}\0{}\0{}:{}\0{}:{}\0{}",
-            socket_path.len(),
-            socket_path,
-            endpoint.server_pid,
-            session_id.len(),
-            session_id,
-            pane_id.len(),
-            pane_id,
-            endpoint.pane_pid,
-        ),
+        format!("\0tmux\0{}:{}\0{}", socket_path.len(), socket_path, pane_id,),
         pane_id.clone(),
     )
 }
 
 pub(super) fn tmux_route_address_for_lookup(endpoint: &TmuxEndpoint) -> (String, String) {
-    match (&endpoint.codex_session_id, &endpoint.codex_thread_id) {
-        (Some(session), Some(thread)) => (session.clone(), thread.clone()),
-        _ => tmux_route_address(endpoint),
-    }
+    tmux_route_address(endpoint)
 }
 
 pub(super) fn current_route_address_key(
@@ -67,16 +49,21 @@ pub(super) fn tmux_route_address_key(endpoint: &TmuxEndpoint) -> String {
 
 /// The route address key of an already-installed route.
 ///
-/// A route in `current_thread_routes` always carries both ids, so `None` only
-/// means the caller holds a binding that was never installed.
-pub(crate) fn installed_route_address_key(binding: &RuntimeBinding) -> Option<String> {
-    let session_id = binding.session_id.as_ref()?;
-    let native_thread_id = binding.native_thread_id.as_ref()?;
-    Some(current_route_address_key(
-        session_id,
-        native_thread_id,
-        binding.tmux_endpoint.as_ref(),
+/// Pane routes do not require native runtime IDs.
+pub(super) fn binding_route_address(binding: &RuntimeBinding) -> Option<(String, String)> {
+    if let Some(endpoint) = binding.tmux_endpoint.as_ref() {
+        return Some(tmux_route_address(endpoint));
+    }
+    Some(current_thread_route_address(
+        binding.session_id.as_ref()?,
+        binding.native_thread_id.as_ref()?,
+        None,
     ))
+}
+
+pub(crate) fn installed_route_address_key(binding: &RuntimeBinding) -> Option<String> {
+    let address = binding_route_address(binding)?;
+    Some(format!("{}\0{}", address.0, address.1))
 }
 
 pub(super) fn tmux_route_address_key_for_lookup(endpoint: &TmuxEndpoint) -> String {

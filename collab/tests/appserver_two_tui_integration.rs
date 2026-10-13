@@ -269,7 +269,7 @@ impl AppFixture {
     }
 
     fn run_public(&self, args: &[&str], thread: &str) -> Value {
-        let output = self.command_public(args, thread);
+        let output = self.finish_registration(self.command_public(args, thread), thread, false);
         assert!(
             output.status.success(),
             "collab {:?} failed: stdout={} stderr={}",
@@ -286,7 +286,7 @@ impl AppFixture {
     }
 
     fn run_ok_desktop(&self, args: &[&str], thread: &str) -> Value {
-        let output = self.command_desktop(args, thread);
+        let output = self.finish_registration(self.command_desktop(args, thread), thread, true);
         assert!(
             output.status.success(),
             "Desktop collab {:?} failed: stdout={} stderr={}",
@@ -300,6 +300,50 @@ impl AppFixture {
             .and_then(|result| result.get("snapshot"))
             .cloned()
             .unwrap_or(value)
+    }
+
+    /// The selected participant returns only the challenge delivered to its
+    /// native turn. A dispatch acknowledgement cannot complete registration.
+    fn finish_registration(&self, output: Output, thread: &str, desktop: bool) -> Output {
+        let Ok(pending) = serde_json::from_slice::<Value>(&output.stdout) else {
+            return output;
+        };
+        if pending["result"]["owner_readback"]["error"]
+            != "REGISTER_REPLY_PENDING: native participant return required"
+        {
+            return output;
+        }
+        assert!(
+            !output.status.success(),
+            "pending registration cannot succeed"
+        );
+        let operation = pending["operation_id"].as_str().unwrap();
+        let challenge = self.state.lock().unwrap()[thread]
+            .register_challenges
+            .iter()
+            .find(|challenge| challenge["operation_id"] == operation)
+            .expect("selected native participant received this operation's challenge")
+            .clone();
+        let challenge_json = challenge.to_string();
+        let args = ["context", "--return-challenge", &challenge_json];
+        let returned = if desktop {
+            self.command_desktop(&args, thread)
+        } else {
+            self.command_public(&args, thread)
+        };
+        assert!(
+            returned.status.success(),
+            "actual native participant return failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&returned.stdout),
+            String::from_utf8_lossy(&returned.stderr)
+        );
+        let reply: Value = serde_json::from_slice(&returned.stdout).unwrap();
+        assert_eq!(reply["result"]["operation_id"], operation, "{reply}");
+        assert_eq!(reply["result"]["outcome"], "completed", "{reply}");
+        // This public receipt is the original context continuation, including
+        // its supplement intent. A new plain context request would change that
+        // intent and correctly fail the operation's replay guard.
+        returned
     }
 
     /// The daemon owns the worker id. Fixtures must read it back from the
@@ -342,6 +386,7 @@ struct ThreadState {
     status: String,
     active_turn: Option<String>,
     turns: Vec<Value>,
+    register_challenges: Vec<Value>,
     tool_namespaces: Vec<Option<String>>,
     seq: u64,
     queued: u64,
@@ -353,6 +398,7 @@ impl ThreadState {
             status: "idle".into(),
             active_turn: None,
             turns: Vec::new(),
+            register_challenges: Vec::new(),
             tool_namespaces: Vec::new(),
             seq: 0,
             queued: 0,
@@ -440,7 +486,8 @@ fn thread_read(
                 "id": thread_id,
                 "sessionId": thread_id.clone(),
                 "cwd": project_root,
-                "status": {"type": entry.status}
+                "status": {"type": entry.status},
+                "turns": entry.turns
             }
         }
     })
@@ -460,6 +507,11 @@ fn thread_turns(params: Value, id: Value, state: &Mutex<HashMap<String, ThreadSt
 
 fn turn_start(params: Value, id: Value, state: &Mutex<HashMap<String, ThreadState>>) -> Value {
     let thread_id = params["threadId"].as_str().unwrap_or_default().to_string();
+    // Admission probes method availability with an empty target. They do not
+    // dispatch a participant turn or produce a registration reply.
+    if thread_id.is_empty() {
+        return json!({"id": id, "result": {}});
+    }
     let mut locked = state.lock().unwrap();
     let entry = locked
         .entry(thread_id.clone())
@@ -470,6 +522,38 @@ fn turn_start(params: Value, id: Value, state: &Mutex<HashMap<String, ThreadStat
             .map(str::to_owned),
     );
     let turn_id = entry.next_turn();
+    let prompt = format!(
+        "{}\n{}",
+        params
+            .pointer("/input/0/text")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+        params
+            .pointer("/toolOutput/output")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+    );
+    if let Some(start) = prompt.find("COLLAB_REGISTER_CHALLENGE ") {
+        let raw = &prompt[start + "COLLAB_REGISTER_CHALLENGE ".len()..];
+        // The actual body wraps JSON in <input>...</input>. Parse the first
+        // received JSON value rather than interpreting the closing tag as JSON.
+        let challenge = serde_json::Deserializer::from_str(raw)
+            .into_iter::<Value>()
+            .next()
+            .expect("received challenge JSON")
+            .expect("valid received challenge JSON");
+        entry.turns.push(json!({
+            "id": turn_id, "status": "completed",
+            "completedAt": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+            "items": [
+                {"type": "userMessage", "clientMessageId": params["clientMessageId"]},
+                {"type": "agentMessage", "text": challenge["challenge"]}
+            ]
+        }));
+        entry.register_challenges.push(challenge);
+        return json!({"id": id, "result": {"turn": {"id": turn_id, "status": "completed"}}});
+    }
     entry.status = "active".into();
     entry.active_turn = Some(turn_id.clone());
     entry
@@ -1104,7 +1188,11 @@ fn one_full_supplement_establishes_and_then_replays_the_same_identity() {
     let supplement = format!(
         "{{\"session_id\":\"{THREAD_A}\",\"thread_id\":\"{THREAD_A}\",\"endpoint\":\"{endpoint}\",\"namespace\":\"codex_tui\"}}"
     );
-    let registered = fixture.command_without_native_facts(&["context", "--provide", &supplement]);
+    let registered = fixture.finish_registration(
+        fixture.command_without_native_facts(&["context", "--provide", &supplement]),
+        THREAD_A,
+        false,
+    );
     assert_context_display_is_public("full-supplement context", &registered);
     assert!(
         registered.status.success(),
@@ -1164,8 +1252,11 @@ fn one_thread_supplement_survives_continuously_missing_environment() {
         json!(["thread_id"])
     );
     let supplement = format!("{{\"thread_id\":\"{THREAD_A}\"}}");
-    let registered =
-        fixture.command_without_thread(&["context", "--provide", &supplement], THREAD_A);
+    let registered = fixture.finish_registration(
+        fixture.command_without_thread(&["context", "--provide", &supplement], THREAD_A),
+        THREAD_A,
+        false,
+    );
     assert_context_display_is_public("thread supplement", &registered);
     assert!(
         registered.status.success(),

@@ -390,7 +390,11 @@ impl RuntimeBinding {
                             .as_deref()
                             .unwrap_or(&endpoint.pane_id),
                     );
-            if !tmux_route_matches && !codex_identity_matches {
+            let native_facts_match = self.session_id.as_ref().map(SessionId::as_str)
+                == endpoint.codex_session_id.as_deref()
+                && self.native_thread_id.as_ref().map(NativeThreadId::as_str)
+                    == endpoint.codex_thread_id.as_deref();
+            if !native_facts_match && !tmux_route_matches && !codex_identity_matches {
                 return Err(StateError::invalid(
                     "runtime binding tmux endpoint",
                     "runtime identity must match Codex anchors or the tmux session/pane address",

@@ -44,6 +44,7 @@ fn dispatch_with_route_context_bound(
         .as_ref()
         .map(|context| context.app_scope_id.clone());
     match req {
+        Req::RegisterReply { .. } => Resp::err("REGISTER_REPLY_HOST_REQUIRED"),
         Req::PeerLifecycle { request } => peer_lifecycle::handle(server, project_context.as_ref(), request),
         Req::IdentityContext { .. } => Resp::err("IDENTITY_CONTEXT_HOST_REQUIRED: identity reconciliation belongs to the host daemon"),
         Req::BoardShow => handle_board_show(server),

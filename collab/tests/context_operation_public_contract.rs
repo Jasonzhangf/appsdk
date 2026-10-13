@@ -812,7 +812,7 @@ fn lifecycle_replay_events(fixture: &mut Fixture, identity: &Value, events: &[Va
 fn peer_lifecycle_r3_legacy_close_never_proves_full_terminal() {
     let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (mut fixture, pane) = Fixture::isolated("peer-r3");
-    let seed = fixture.context(Some("peer-r3-parent"), Some(&pane));
+    let seed = fixture.registered_context("peer-r3-parent", &pane);
     let parent = lifecycle_identity(&fixture, &seed);
     fixture.run_ok(
         &[
@@ -824,7 +824,7 @@ fn peer_lifecycle_r3_legacy_close_never_proves_full_terminal() {
         Some(&pane),
     );
     let child_pane = second_pane(&fixture, "r3-child", pane.server_pid);
-    let seed = fixture.context(Some("peer-r3-child"), Some(&child_pane));
+    let seed = fixture.registered_context("peer-r3-child", &child_pane);
     let child = lifecycle_identity(&fixture, &seed);
     let child_id = child["worker_id"].as_str().unwrap();
     lifecycle_replay_events(
@@ -866,17 +866,17 @@ fn peer_lifecycle_r4_managed_visibility_is_authorized_and_pure() {
     let (mut fixture, pane) = Fixture::isolated("peer-r4");
     let parent = lifecycle_identity(
         &fixture,
-        &fixture.context(Some("peer-r4-parent"), Some(&pane)),
+        &fixture.registered_context("peer-r4-parent", &pane),
     );
     let child_pane = second_pane(&fixture, "r4-child", pane.server_pid);
     let child = lifecycle_identity(
         &fixture,
-        &fixture.context(Some("peer-r4-child"), Some(&child_pane)),
+        &fixture.registered_context("peer-r4-child", &child_pane),
     );
     let other_pane = second_pane(&fixture, "r4-other", pane.server_pid);
     let other = lifecycle_identity(
         &fixture,
-        &fixture.context(Some("peer-r4-other"), Some(&other_pane)),
+        &fixture.registered_context("peer-r4-other", &other_pane),
     );
     lifecycle_replay_events(
         &mut fixture,

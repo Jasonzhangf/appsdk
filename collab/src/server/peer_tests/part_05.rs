@@ -216,13 +216,14 @@ fn cross_project_send_requires_master_endpoints_on_both_sides() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-fn register_appserver(server: &mut Server, id: &str, thread_id: &str) -> Resp {
-    register(server, id, thread_id)
+fn register_appserver(server: &Arc<Server>, id: &str, thread_id: &str) -> Resp {
+    register_public(server, id, thread_id)
 }
 
 #[test]
 fn init_registration_result_exposes_persisted_runtime_identity() {
     let (mut server, root) = test_server();
+    let mut server = Arc::new(server);
     let registration = register_appserver(&mut server, "peer-init", "thread-init");
     assert!(registration.ok, "{registration:?}");
     let runtime =
@@ -262,6 +263,7 @@ fn master_promotion_is_not_blocked_by_an_unproven_candidate_transport() {
 #[test]
 fn master_promotion_allows_live_tmux_peer() {
     let (mut server, root) = test_server();
+    let mut server = Arc::new(server);
     let registered = register_appserver(&mut server, "peer-appserver", "thread-appserver");
     assert!(registered.ok, "{registered:?}");
     assert_eq!(registered.data["transport_selected"]["kind"], "tmux");
@@ -306,6 +308,7 @@ fn master_assigned_replays_approval_and_live_identity() {
 #[test]
 fn master_authority_is_generation_bound_and_replays_from_typed_grant() {
     let (mut server, root) = test_server();
+    let mut server = Arc::new(server);
     let registered = register_appserver(&mut server, "peer-appserver", "thread-appserver");
     assert!(registered.ok, "{registered:?}");
 
@@ -385,6 +388,7 @@ fn master_authority_is_generation_bound_and_replays_from_typed_grant() {
 #[test]
 fn same_runtime_registration_recovery_preserves_master_authority() {
     let (mut server, root) = test_server();
+    let mut server = Arc::new(server);
     let registered = register_appserver(&mut server, "peer-appserver", "thread-appserver");
     assert!(registered.ok, "{registered:?}");
     let promoted = super::handle_master_promote(
@@ -450,8 +454,8 @@ fn same_runtime_registration_recovery_preserves_master_authority() {
 }
 
 /// Register the same peer against its next distinct pane/session fixture.
-fn recover_worker_on_new_thread(server: &mut Server, id: &str, thread_id: &str) -> Resp {
-    register(server, id, thread_id)
+fn recover_worker_on_new_thread(server: &Arc<Server>, id: &str, thread_id: &str) -> Resp {
+    register_public(server, id, thread_id)
 }
 
 fn registered_binding(server: &Server, id: &str) -> crate::server::global_state::RuntimeBinding {
@@ -471,6 +475,7 @@ fn registered_binding(server: &Server, id: &str) -> crate::server::global_state:
 #[test]
 fn wire_master_recover_reissues_master_grant_for_new_generation() {
     let (mut server, root) = test_server();
+    let mut server = Arc::new(server);
     let registered = register_appserver(&mut server, "recover-master", "thread-recover-master-old");
     assert!(registered.ok, "{registered:?}");
     promote_master(&server, "recover-master", "user approved recover-master");
@@ -547,6 +552,7 @@ fn wire_master_recover_reissues_master_grant_for_new_generation() {
 #[test]
 fn same_principal_master_recovery_keeps_grant_while_incumbent_pane_stays() {
     let (mut server, root) = test_server();
+    let mut server = Arc::new(server);
     let registered = register_appserver(&mut server, "live-master", "thread-live-master-old");
     assert!(registered.ok, "{registered:?}");
     promote_master(&server, "live-master", "user approved live-master");
@@ -588,6 +594,7 @@ fn same_principal_master_recovery_keeps_grant_while_incumbent_pane_stays() {
 #[test]
 fn same_principal_master_recovery_is_allowed_when_probe_is_unknown() {
     let (mut server, root) = test_server();
+    let mut server = Arc::new(server);
     let registered = register_appserver(&mut server, "unknown-master", "thread-unknown-master-old");
     assert!(registered.ok, "{registered:?}");
     promote_master(&server, "unknown-master", "user approved unknown-master");
@@ -607,6 +614,7 @@ fn same_principal_master_recovery_is_allowed_when_probe_is_unknown() {
 #[test]
 fn wire_peer_recover_does_not_revoke_unrelated_master() {
     let (mut server, root) = test_server();
+    let mut server = Arc::new(server);
     let master = register_appserver(&mut server, "recover-keep-master", "thread-keep-master");
     assert!(master.ok, "{master:?}");
     let peer = recover_worker_on_new_thread(&mut server, "recover-plain-peer", "thread-plain-peer");
@@ -657,6 +665,7 @@ fn wire_peer_recover_does_not_revoke_unrelated_master() {
 #[test]
 fn recovered_master_keeps_goal_deadline_scheduling() {
     let (mut server, root) = test_server();
+    let mut server = Arc::new(server);
     let registered = register_appserver(&mut server, "recover-deadline", "thread-deadline-old");
     assert!(registered.ok, "{registered:?}");
     promote_master(
@@ -693,6 +702,7 @@ fn legacy_master_assignment_cannot_override_typed_grant_on_replay() {
     use std::io::Write;
 
     let (mut server, root) = test_server();
+    let mut server = Arc::new(server);
     let registered = register_appserver(&mut server, "peer-appserver", "thread-appserver");
     assert!(registered.ok, "{registered:?}");
     let promoted = super::handle_master_promote(
@@ -739,6 +749,7 @@ fn legacy_master_assignment_before_runtime_rebind_does_not_regrant_authority() {
     use std::io::Write;
 
     let (mut server, root) = test_server();
+    let mut server = Arc::new(server);
     let registered = register_appserver(&mut server, "peer-appserver", "thread-appserver");
     assert!(registered.ok, "{registered:?}");
 
@@ -970,12 +981,13 @@ fn journal_root_assigned_rewrites_to_master_on_replay() {
 #[test]
 fn first_and_later_registration_are_equal_peers() {
     let (server, root) = test_server();
+    let server = Arc::new(server);
     assert_eq!(
-        register(&server, "peer-a", "%peer-a").data["identity_kind"],
+        register_public(&server, "peer-a", "%peer-a").data["identity_kind"],
         "peer"
     );
     assert_eq!(
-        register(&server, "peer-b", "%peer-b").data["identity_kind"],
+        register_public(&server, "peer-b", "%peer-b").data["identity_kind"],
         "peer"
     );
     let state = server.state.lock().unwrap();
@@ -988,8 +1000,9 @@ fn first_and_later_registration_are_equal_peers() {
 #[test]
 fn registration_creates_one_finite_default_direct_message_subscription() {
     let (server, root) = test_server();
-    assert!(register(&server, "peer", "%peer").ok);
-    assert!(register(&server, "peer", "%peer").ok);
+    let server = Arc::new(server);
+    assert!(register_public(&server, "peer", "%peer").ok);
+    assert!(register_public(&server, "peer", "%peer").ok);
     let state = server.state.lock().unwrap();
     let subscriptions: Vec<_> = state
         .notification_subscriptions
@@ -1009,8 +1022,9 @@ fn registration_creates_one_finite_default_direct_message_subscription() {
 #[test]
 fn tmux_reregistration_replaces_a_persisted_appserver_default_wake_lease() {
     let (mut server, root) = test_server();
-    assert!(register(&server, "sender", "thread-sender").ok);
-    assert!(register(&server, "recipient", "thread-recipient").ok);
+    let mut server = Arc::new(server);
+    assert!(register_public(&server, "sender", "thread-sender").ok);
+    assert!(register_public(&server, "recipient", "thread-recipient").ok);
     {
         let mut state = server.state.lock().unwrap();
         server
@@ -1040,7 +1054,7 @@ fn tmux_reregistration_replaces_a_persisted_appserver_default_wake_lease() {
             .expect("commit legacy appserver lease");
     }
 
-    assert!(register(&server, "recipient", "thread-recipient").ok);
+    assert!(register_public(&server, "recipient", "thread-recipient").ok);
     let lease = server.state.lock().unwrap().notification_subscriptions
         ["sub-default-direct-message-recipient"]
         .clone();
@@ -1048,7 +1062,7 @@ fn tmux_reregistration_replaces_a_persisted_appserver_default_wake_lease() {
     assert_eq!(lease.target, "thread-recipient");
     assert_eq!(lease.status, "armed");
 
-    server.appserver_notification_sink = Arc::new(|transport, _, _, _, _, _mode| {
+    Arc::get_mut(&mut server).unwrap().appserver_notification_sink = Arc::new(|transport, _, _, _, _, _mode| {
         if transport.kind != TransportKind::Tmux {
             return Err("expected tmux wake transport".into());
         }

@@ -8,6 +8,7 @@ struct AnchorObservation {
     session_id: Option<String>,
     thread_id: Option<String>,
     tmux: Option<crate::proto::TmuxCandidate>,
+    tmux_anchor: Option<crate::proto::TmuxPaneAnchor>,
     /// The dsh adapter's primary anchor. Read from `DSH_SESSION_ID`, which the
     /// DSH runtime exports for the current agent session.
     dsh_session_id: Option<String>,
@@ -19,6 +20,15 @@ impl AnchorObservation {
             session_id: non_empty(facts.session_id.as_deref()),
             thread_id: non_empty(facts.thread_id.as_deref()),
             tmux: facts.tmux.clone(),
+            tmux_anchor: facts.tmux_anchor.clone().or_else(|| {
+                facts
+                    .tmux
+                    .as_ref()
+                    .map(|candidate| crate::proto::TmuxPaneAnchor {
+                        socket_path: candidate.endpoint.socket_path.clone(),
+                        pane_id: candidate.endpoint.pane_id.clone(),
+                    })
+            }),
             dsh_session_id: non_empty(facts.dsh_session_id.as_deref()),
         }
     }
@@ -26,8 +36,8 @@ impl AnchorObservation {
     /// Legacy adapter for the read-only CLI callers (`load_existing_at`). The
     /// daemon path never uses this: it consumes only `IdentityFacts`.
     fn from_env() -> anyhow::Result<Self> {
-        let tmux = if std::env::var_os("TMUX_PANE").is_some() {
-            Some(crate::client::adapters::tmux::candidate_from_env().map_err(anyhow::Error::msg)?)
+        let tmux_anchor = if std::env::var_os("TMUX_PANE").is_some() {
+            Some(crate::client::adapters::tmux::anchor_from_env().map_err(anyhow::Error::msg)?)
         } else {
             None
         };
@@ -36,7 +46,8 @@ impl AnchorObservation {
         Ok(Self {
             session_id: non_empty(session_env.as_deref()),
             thread_id: non_empty(thread_env.as_deref()),
-            tmux,
+            tmux: None,
+            tmux_anchor,
             dsh_session_id: non_empty(std::env::var("DSH_SESSION_ID").ok().as_deref()),
         })
     }
@@ -82,6 +93,7 @@ impl AnchorObservation {
         self.session_id.is_some()
             || self.thread_id.is_some()
             || self.tmux.is_some()
+            || self.tmux_anchor.is_some()
             || self.dsh_session_id.is_some()
     }
 }
@@ -169,8 +181,8 @@ pub(crate) fn resolve_for_daemon_with_route_at(
 /// `codex-<pane>` and `codex-thread-<hex>` naming so a fresh verified anchor
 /// keeps its stable, filesystem-safe identity.
 fn draft_worker_id_at(observed: &AnchorObservation) -> anyhow::Result<String> {
-    if let Some(tmux) = observed.tmux.as_ref() {
-        let worker_id = format!("codex-{}", tmux.endpoint.pane_id);
+    if let Some(tmux) = observed.tmux_anchor.as_ref() {
+        let worker_id = format!("codex-{}", tmux.pane_id);
         validate_id(&worker_id)?;
         return Ok(worker_id);
     }

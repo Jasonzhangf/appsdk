@@ -132,13 +132,16 @@ impl ProjectRuntimeManager {
                     record.registered_ms,
                 )
                 .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?;
-                if host
+                let registration_missing = host
                     .state
                     .lock()
                     .unwrap()
                     .global
                     .lookup_registration(&registration.project_scope, &registration.app_scope_id)
-                    .is_none()
+                    .is_none();
+                if registration_missing
+                    && !register_reply::pending_initial_for_scope(&host, &key.1, &key.0)
+                        .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?
                 {
                     host.commit_checked(&[Event::GlobalProjectRegistered { registration }])
                         .map_err(|error| {
@@ -229,20 +232,11 @@ impl ProjectRuntimeManager {
                 if binding.tmux_endpoint.is_none() {
                     return false;
                 }
-                let binding_text = binding.binding_id.as_str();
-                let command_prefix =
-                    format!("register-{binding_text}-{}", binding.endpoint_generation);
-                let operation_prefix =
-                    format!("register-op-{binding_text}-{}", binding.endpoint_generation);
-                let recorded_operation = state.global.command_receipts.values().any(|receipt| {
-                    let command = receipt.command_id.as_str();
-                    let operation = receipt.operation_id.as_str();
-                    let suffix = command.strip_prefix(&command_prefix);
-                    suffix.is_some_and(|suffix| {
-                        (suffix.is_empty() || suffix.starts_with("-retry-"))
-                            && operation.strip_prefix(&operation_prefix) == Some(suffix)
-                    })
-                });
+                let recorded_operation = state
+                    .global
+                    .command_receipts
+                    .values()
+                    .any(|receipt| register_receipt_names_binding(receipt, binding));
                 recorded_operation
                     && state
                         .global

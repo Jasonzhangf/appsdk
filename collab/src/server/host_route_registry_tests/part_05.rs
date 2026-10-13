@@ -9,17 +9,17 @@
         let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
         let manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
         let context = context_with_app(&project_root, "child-route-app");
-        let (runtime, parent) = manager.dispatch_sync(
+        let (runtime, parent) = register_host_fixture(&manager,
             Some(context.clone()),
             Req::register("child-route-parent".into(),
                  "token-child-route-parent".into(),
                  project_root.display().to_string(),
-                 test_candidates("thread-child-route-parent")),
+                 test_candidates_at("thread-child-route-parent", &project_root)),
         );
         assert!(parent.ok, "{parent:?}");
         assert!(!Arc::ptr_eq(&runtime, &host));
 
-        let child = handle_register_with_app_scope_unfinalized(
+        let child = seed_committed_registration_fixture(
             &runtime,
             "child-route-child".into(),
             "token-child-route-child".into(),
@@ -75,7 +75,7 @@
             .lookup_current_thread_route(&child_session, &child_thread)
             .is_none());
 
-        let failed_child = handle_register_with_app_scope_unfinalized(
+        let failed_child = seed_committed_registration_fixture(
             &runtime,
             "child-route-failed".into(),
             "token-child-route-failed".into(),
@@ -147,16 +147,10 @@
         let app = "app-wire";
         let worker_id = "notification-worker";
         let token = "token-notification-worker";
-        let registered = dispatch_wire(
-            server.clone(),
-            Some(context_with_app(&root, app)),
-            Req::register(worker_id.into(),
-                 token.into(),
-                 root.display().to_string(),
-                 test_candidates(&format!("thread-{worker_id}"))),
-        )
-        .await;
-        assert!(registered.ok, "{registered:?}");
+        // This wire contract starts from a durable registered identity.
+        let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
+        commit_host_route_fixture(&manager, &server, worker_id, token, app,
+            committed_tmux_endpoint(&root, &format!("thread-{worker_id}")));
 
         let mailbox_dir = root.join(".agent-collab/mailbox");
         let before = mutation_snapshot(&server);
@@ -238,16 +232,10 @@
             let (server, root, journal_path) = test_server();
             let worker_id = "route-worker".to_owned();
             let token = "token-route-worker".to_owned();
-            let response = dispatch_wire(
-                server.clone(),
-                Some(context_with_app(&root, app)),
-                Req::register(worker_id.clone(),
-                     token.clone(),
-                     root.display().to_string(),
-                     test_candidates(&format!("thread-{worker_id}"))),
-            )
-            .await;
-            assert!(response.ok, "{response:?}");
+            // Scope/generation guards operate on prior committed owner state.
+            let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
+            commit_host_route_fixture(&manager, &server, &worker_id, &token, app,
+                committed_tmux_endpoint(&root, &format!("thread-{worker_id}")));
             let runtime = runtime_for_registered(&server, &root, &worker_id, app);
             (server, root, journal_path, runtime, worker_id, token)
         }
@@ -455,15 +443,10 @@
         let (server, root, journal_path) = test_server();
         let app = "app-wire";
         for worker_id in ["sender", "recipient"] {
-            let response = dispatch_wire(
-                server.clone(),
-                Some(context_with_app(&root, app)),
-                Req::register(worker_id.into(),
-                     format!("token-{worker_id}"),
-                     root.display().to_string(),
-                     test_candidates(&format!("thread-{worker_id}"))),
-            )
-            .await;
+            let response = seed_published_registration_fixture(&server, worker_id.into(),
+                format!("token-{worker_id}"), root.display().to_string(),
+                Some(AppServerId::new(app).unwrap()),
+                test_candidates_at(&format!("thread-{worker_id}"), &root));
             assert!(response.ok, "{response:?}");
         }
         let sender_runtime = runtime_for_registered(&server, &root, "sender", app);
@@ -553,7 +536,7 @@
         let app = crate::identity::CLI_APP_SERVER_ID;
         let worker_id = "recover-worker";
         let token = "token-recover-worker";
-        let first = dispatch_wire(
+        let first = register_wire_fixture(
             server.clone(),
             Some(context_with_app(&root, app)),
             Req::register(worker_id.into(),
@@ -580,7 +563,7 @@
         assert!(validate_request_context(&server, &stale_request, Some(&old_context)).is_ok());
 
         let provisional = RuntimeIdentity::cli_adapter(worker_id).unwrap();
-        let recovered = dispatch_wire(
+        let recovered = register_wire_fixture(
             server.clone(),
             Some(context_with_runtime(&root, app, &provisional)),
             Req::register(worker_id.into(),
@@ -634,7 +617,7 @@
         let worker_id = "lost-token-worker";
         let old_token = "old-token-lost-token-worker";
         let new_token = "new-token-lost-token-worker";
-        let first = dispatch_wire(
+        let first = register_wire_fixture(
             server.clone(),
             Some(context_with_app(&root, app)),
             Req::register(worker_id.into(),
@@ -713,7 +696,7 @@
         let worker_id = "worker-recover-worker";
         let old_token = "old-token-worker-recover-worker";
         let new_token = "new-token-worker-recover-worker";
-        let first = dispatch_wire(
+        let first = register_wire_fixture(
             server.clone(),
             Some(context_with_app(&root, app)),
             Req::register(worker_id.into(),
@@ -766,7 +749,7 @@
         let app = crate::identity::CLI_APP_SERVER_ID;
         let worker_id = "orphan-binding-worker";
         let token = "token-orphan-binding-worker";
-        let registered = dispatch_wire(
+        let registered = register_wire_fixture(
             server.clone(),
             Some(context_with_app(&root, app)),
             Req::register(worker_id.into(),
@@ -799,7 +782,7 @@
         // cross-project registration.
         server.state.lock().unwrap().workers.remove(worker_id);
         let provisional = RuntimeIdentity::cli_adapter(worker_id).unwrap();
-        let recovered = dispatch_wire(
+        let recovered = register_wire_fixture(
             server.clone(),
             Some(context_with_runtime(&root, app, &provisional)),
             Req::register(worker_id.into(),
@@ -847,7 +830,7 @@
         let app = crate::identity::CLI_APP_SERVER_ID;
         let worker_id = "orphan-binding-negative-worker";
         let token = "token-orphan-binding-negative-worker";
-        let registered = dispatch_wire(
+        let registered = register_wire_fixture(
             server.clone(),
             Some(context_with_app(&root, app)),
             Req::register(worker_id.into(),
@@ -885,7 +868,7 @@
             Req::register(worker_id.into(),
                  "forged-token".into(),
                  root.display().to_string(),
-                 test_candidates("thread-unbound-replacement")),
+                 test_candidates_at("thread-unbound-replacement", &root)),
         )
         .await;
         assert!(!forged.ok, "{forged:?}");
@@ -908,7 +891,7 @@
         let app = crate::identity::CLI_APP_SERVER_ID;
         let worker_id = "orphan-binding-forged-token-worker";
         let token = "token-orphan-binding-forged-token-worker";
-        let registered = dispatch_wire(
+        let registered = register_wire_fixture(
             server.clone(),
             Some(context_with_app(&root, app)),
             Req::register(worker_id.into(),
@@ -938,7 +921,7 @@
             Req::register(worker_id.into(),
                  "forged-token".into(),
                  root.display().to_string(),
-                 test_candidates(&format!("thread-{worker_id}"))),
+                 test_candidates_at(&format!("thread-{worker_id}"), &root)),
         )
         .await;
         assert!(!forged.ok, "{forged:?}");
@@ -961,7 +944,7 @@
         let app = crate::identity::CLI_APP_SERVER_ID;
         let worker_id = "orphan-binding-ambiguous-worker";
         let token = "token-orphan-binding-ambiguous-worker";
-        let registered = dispatch_wire(
+        let registered = register_wire_fixture(
             server.clone(),
             Some(context_with_app(&root, app)),
             Req::register(worker_id.into(),
@@ -1012,7 +995,7 @@
             Req::register(worker_id.into(),
                  token.into(),
                  root.display().to_string(),
-                 test_candidates(&format!("thread-{worker_id}"))),
+                 test_candidates_at(&format!("thread-{worker_id}"), &root)),
         )
         .await;
         assert!(!rejected.ok, "{rejected:?}");
@@ -1036,7 +1019,7 @@
         let app = crate::identity::CLI_APP_SERVER_ID;
         let worker_id = "recover-negative-worker";
         let token = "token-recover-negative-worker";
-        let registered = dispatch_wire(
+        let registered = register_wire_fixture(
             server.clone(),
             Some(context_with_app(&root, app)),
             Req::register(worker_id.into(),
@@ -1066,7 +1049,7 @@
             Req::register(worker_id.into(),
                  "forged-token".into(),
                  root.display().to_string(),
-                 test_candidates("thread-forged-token")),
+                 test_candidates_at("thread-forged-token", &root)),
         )
         .await;
         assert!(!wrong_token.ok, "{wrong_token:?}");
@@ -1081,7 +1064,7 @@
             before_mailbox
         );
 
-        let other = dispatch_wire(
+        let other = register_wire_fixture(
             server.clone(),
             Some(context_with_app(&root, app)),
             Req::register("other-worker".into(),
@@ -1216,7 +1199,7 @@
         let taker_id = "reclaim-tombstone-taker";
         let candidates = test_candidates(&format!("thread-{worker_id}")).unwrap();
         let endpoint = candidates.tmux.as_ref().unwrap().endpoint.clone();
-        let (_, registered) = manager.dispatch_sync(
+        let (_, registered) = register_host_fixture(&manager,
             Some(context.clone()),
             Req::register(worker_id.into(),
                  token.into(),
@@ -1267,7 +1250,7 @@
             taker_endpoint.pane_id = endpoint.pane_id.clone();
             taker_endpoint.pane_pid = endpoint.pane_pid;
         }
-        let (_, taken) = manager.dispatch_sync(
+        let (_, taken) = register_host_fixture(&manager,
             Some(context.clone()),
             Req::register(taker_id.into(),
                  format!("token-{taker_id}"),
@@ -1301,7 +1284,7 @@
         let provisional = RuntimeIdentity::cli_adapter(worker_id).unwrap();
         let mut reclaim_candidates = test_candidates(&format!("thread-{worker_id}")).unwrap();
         reclaim_candidates.tmux.as_mut().unwrap().endpoint = endpoint.clone();
-        let (_, reclaimed) = manager.dispatch_sync(
+        let (_, reclaimed) = register_host_fixture(&manager,
             Some(context_with_runtime(&root, app, &provisional)),
             Req::register(worker_id.into(),
                  token.into(),
@@ -1348,7 +1331,7 @@
         let taker_id = "forged-tombstone-taker";
         let candidates = test_candidates(&format!("thread-{worker_id}")).unwrap();
         let endpoint = candidates.tmux.as_ref().unwrap().endpoint.clone();
-        let (_, registered) = manager.dispatch_sync(
+        let (_, registered) = register_host_fixture(&manager,
             Some(context.clone()),
             Req::register(
                 worker_id.into(),
@@ -1400,7 +1383,7 @@
             taker_endpoint.pane_id = endpoint.pane_id.clone();
             taker_endpoint.pane_pid = endpoint.pane_pid;
         }
-        let (_, taken) = manager.dispatch_sync(
+        let (_, taken) = register_host_fixture(&manager,
             Some(context.clone()),
             Req::register(
                 taker_id.into(),
@@ -1414,7 +1397,7 @@
         let provisional = RuntimeIdentity::cli_adapter(worker_id).unwrap();
         let mut forged_candidates = test_candidates(&format!("thread-{worker_id}")).unwrap();
         forged_candidates.tmux.as_mut().unwrap().endpoint = endpoint.clone();
-        let (_, forged) = manager.dispatch_sync(
+        let (_, forged) = register_host_fixture(&manager,
             Some(context_with_runtime(&root, app, &provisional)),
             Req::register(
                 worker_id.into(),

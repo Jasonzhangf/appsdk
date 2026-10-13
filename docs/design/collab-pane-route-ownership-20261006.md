@@ -115,8 +115,8 @@ next.current_thread_routes
 next.current_thread_routes.insert(route_address, binding);
 ```
 
-`same_pane_route` (`adapters/tmux.rs:308-314`) compares socket path, server pid,
-tmux session id, pane id and pane pid. Raw endpoint equality is wrong twice
+`same_pane_route` and `same_owned_pane` compare socket path and pane id.
+Session, server/pane pid and native IDs are observations. Raw endpoint equality is wrong twice
 over: it would drop every entry whose `tmux_endpoint` is `None`, and it would
 miss a pane whose `server_pid` changed after a tmux server restart.
 
@@ -595,11 +595,11 @@ an anchor. Another worker that holds that thread on a *different* pane is still
 refused, because the pane is the only thing that changed owner. The refusal
 happens before any commit, so the journal does not move.
 
-A tmux-only binding has no explicitly registered AppServer session or thread. It
-is therefore `Unknown` while its pane answers, and `Missing` when the pane is
-gone. The pane probe answers addressability, and it is the anchor for the tmux
-identity. It never makes a binding live on its own. An `Unknown` peer records no
-presence edge, so it is neither announced online nor declared offline.
+A tmux-only binding needs no AppServer session or thread. Its current persisted
+worker/binding/pane owner proves identity `Present` without a live probe. A
+missing endpoint remains absent and a failed status probe remains unknown;
+neither changes that identity or proves agent readiness. Registration, route
+reads, staged recovery and retries do not repeat adapter admission probes.
 
 ### 11.2 Code changes
 
@@ -636,13 +636,10 @@ presence edge, so it is neither announced online nor declared offline.
   answered `promotion candidate identity is unknown; defer promotion until
   transport probes succeed`, which is exactly the refusal that stranded a project
   whose only candidate is a tmux-only peer.
-- `worker_identity_presence` (`part_07.rs`) answers a tmux transport from its
-  registered AppServer anchor, never from the pane. The pane probe decides one
-  thing only: a vanished pane is a vanished address, so it is `Missing`. A
-  reachable pane is not liveness. A tmux endpoint with no `codex_session_id` or
-  no `codex_thread_id` has no registered anchor, so it is `Unknown`; one that
-  carries both asks the AppServer status seam for that exact thread and is
-  `Present` only when that query answers.
+- `worker_identity_presence` (`part_07.rs`) checks the current worker and pane
+  binding owner. It does not query AppServer or tmux for tmux identity. A retired
+  worker or superseded binding is missing. `worker_identity_and_endpoint`
+  separately reports actual pane reachability for status.
 - `default_appserver_thread_status` (`part_01.rs`) refuses every tmux transport
   unconditionally. A tmux transport's endpoint is the tmux socket, so it has no
   App Server endpoint to query; the old arm compared the requested thread with
@@ -657,12 +654,12 @@ presence edge, so it is neither announced online nor declared offline.
   to accept. The gate still fails closed when the anchor is a Codex
   session/thread: `appserver_worker.is_some()` or no tmux candidate keeps
   `IDENTITY_RESTORE_CONFLICT` and `IDENTITY_RESTORE_CROSS_PROJECT`.
-- Pane ownership has one predicate, `tmux::same_owned_pane` (socket, session,
-  pane id). `tmux::same_pane_route` keeps the server and shell pids and stays the
-  exact-endpoint proof used by route resolution, recovery and identity
-  re-anchoring. Ownership ignores those pids because tmux reissues them while the
-  pane id stays the address; identity re-anchoring keeps them because a reissued
-  pane id must not hand a new process a dead worker's identity.
+- Pane ownership and recovery compare socket + pane id. Ordinary persisted
+  recovery and process/session drift read the durable owner directly without
+  initial Register, admission, or loopback; only authenticated staged publication
+  or an explicit typed binding transaction uses the existing commit owner.
+  A different socket or pane does not restore that identity. Native communication
+  selection remains separate.
 - The cross-runtime takeover is ordered so the pane is never stranded.
   `validate_current_thread_candidate` only *plans* the foreign claimants; the
   registering runtime commits the takeover first, and
@@ -681,14 +678,13 @@ send` still requires `master.endpoint_live == true`. The stale-master symptom is
 fixed at the root: the pane re-anchors to the later registrant, and an
 authorized promotion always replaces the incumbent.
 
-The liveness rule has one consequence that is deliberate: a tmux-only peer is
-`Unknown`, so it holds no live master authority, `endpoint_live` is `null` rather
-than `false`, and `master send` refuses it. A peer that registers an explicit
-AppServer session and thread keeps its reachability probe, and the tmux arm now
-routes that probe through the same AppServer status seam.
+Tmux identity and authority survive unknown/missing endpoint status. Actual send
+and wake still expose adapter submission errors, and only recv records consumption.
+Status reachability remains true/false/unknown independently of identity validity.
+The AppServer status seam is used only for a selected AppServer transport.
 
-Making the pane itself the liveness answer for *any* tmux transport is the
-variant this revision rejects. It fails 94 of the 949 unit tests across the
+The historical liveness variant made the pane itself the agent activity answer.
+The original revision rejected it; its historical run failed 94 of 949 tests across the
 delivery, wake and authority paths, and it would let a dead Codex inside a live
 pane hold live master authority. The query-based rule keeps every one of those
 tests meaningful: the test server's status seam is the AppServer answer, so a

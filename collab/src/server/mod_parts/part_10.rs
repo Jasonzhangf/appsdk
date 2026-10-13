@@ -297,18 +297,17 @@ fn worker_status_summary_with_maps(
         .values()
         .find(|task| task.owner == w.id && !matches!(task.status.as_str(), "closed" | "cancelled"));
     let (presence, transport_view) = worker_presence_with_view(server, w);
-    let endpoint_live = presence == IdentityPresence::Present;
-    let identity_valid = matches!(presence, IdentityPresence::Present | IdentityPresence::Cold);
+    let (identity_valid, endpoint_live) = worker_identity_and_endpoint(server, w);
     let thread_state = transport_view
         .get("thread_state")
         .and_then(serde_json::Value::as_str);
-    let agent_state = match (presence, thread_state) {
-        (IdentityPresence::Missing, _) => "absent",
-        (IdentityPresence::Unknown, _) => "unknown",
-        (IdentityPresence::Cold, _) => "cold",
-        (IdentityPresence::Present, Some("idle")) => "idle",
-        (IdentityPresence::Present, Some("working")) => "working",
-        (IdentityPresence::Present, Some("active")) => "working",
+    let agent_state = match (endpoint_live, thread_state) {
+        (Some(false), _) => "absent",
+        (None, _) => "unknown",
+        (Some(true), Some("notLoaded")) => "cold",
+        (Some(true), Some("idle")) => "idle",
+        (Some(true), Some("working")) => "working",
+        (Some(true), Some("active")) => "working",
         _ => "unknown",
     };
     let unacked_notifications = msgs
@@ -323,12 +322,12 @@ fn worker_status_summary_with_maps(
     let keepalive = keepalives.get(&w.id);
     let suspected_offline = keepalive.map(|k| k.suspected_offline).unwrap_or(false);
     let unacked_keepalives = keepalive.map(|k| k.unacked).unwrap_or(0);
-    let status = if agent_state == "unknown" {
-        "unknown"
-    } else if !endpoint_live {
-        "lost"
-    } else if !identity_valid {
+    let status = if !identity_valid {
         "identity-mismatch"
+    } else if endpoint_live == Some(false) {
+        "lost"
+    } else if agent_state == "unknown" {
+        "unknown"
     } else if suspected_offline {
         "offline"
     } else {
@@ -362,8 +361,8 @@ fn worker_status_summary_with_maps(
             IdentityPresence::Missing => "missing",
             IdentityPresence::Unknown => "unknown",
         },
-        "endpoint_live": (presence != IdentityPresence::Unknown).then_some(endpoint_live),
-        "identity_valid": (presence != IdentityPresence::Unknown).then_some(identity_valid),
+        "endpoint_live": endpoint_live,
+        "identity_valid": identity_valid,
         "agent_state": agent_state,
         "transport_view": transport_view,
         "unacked_notifications": unacked_notifications,
@@ -442,6 +441,7 @@ fn mutation_blocked_during_migration(req: &Req) -> bool {
         | Req::Ping
         | Req::StatusAll
         | Req::MailboxRead { .. } => false,
+        Req::RegisterReply { .. } => true,
     }
 }
 

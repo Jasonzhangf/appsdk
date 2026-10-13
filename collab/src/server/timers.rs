@@ -34,7 +34,11 @@ fn tick_with_idle(server: &Arc<Server>, _can_receive: &dyn Fn(&str) -> bool) {
 }
 
 #[cfg(test)]
-fn tick_with_idle_at(server: &Arc<Server>, now: i64, _can_receive: &dyn Fn(&str) -> bool) {
+pub(super) fn tick_with_idle_at(
+    server: &Arc<Server>,
+    now: i64,
+    _can_receive: &dyn Fn(&str) -> bool,
+) {
     tick_at(server, now);
 }
 
@@ -366,7 +370,25 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                 let subscription = state.notification_subscriptions.get(subscription_id)?;
                 (message.state == "pending"
                     && message.wake_attempt_count < MAX_WAKE_ATTEMPTS
-                    && !super::mailbox::is_explicit_delivery_mode(&state, message)
+                    && (!super::mailbox::is_explicit_delivery_mode(&state, message)
+                        || (state
+                            .delivery_modes
+                            .get(message_id)
+                            .is_some_and(|mode| mode == "queued")
+                            && state
+                                .workers
+                                .get(&message.to)
+                                .and_then(super::selected_transport_for_worker)
+                                .is_some_and(|transport| {
+                                    transport.kind == crate::proto::TransportKind::Tmux
+                                })
+                            && !state
+                                .notification_delivery_accepted
+                                .contains_key(message_id)
+                            && state
+                                .notification_delivery_failures
+                                .get(message_id)
+                                .is_none_or(|failure| failure.retryable)))
                     && super::mailbox::automatic_retry_eligible(
                         message,
                         server.config.notifications.delay_ms(&subscription.event),
@@ -420,7 +442,20 @@ fn tick_ledger_maintenance_at(server: &Arc<Server>, now: i64) {
             blocked = blocked.saturating_add(1);
             continue;
         };
-        let (state, reason) = match super::worker_presence(server, &worker) {
+        // Ledger classification describes endpoint observation, not durable
+        // identity admission. Preserve the non-tmux cold/activity contract.
+        let presence = if super::selected_transport_for_worker(&worker)
+            .is_some_and(|transport| transport.kind == crate::proto::TransportKind::Tmux)
+        {
+            match super::worker_identity_and_endpoint(server, &worker).1 {
+                Some(true) => super::presence::IdentityPresence::Present,
+                Some(false) => super::presence::IdentityPresence::Missing,
+                None => super::presence::IdentityPresence::Unknown,
+            }
+        } else {
+            super::worker_presence(server, &worker)
+        };
+        let (state, reason) = match presence {
             super::presence::IdentityPresence::Present => (RuntimeBindingLedgerState::Live, None),
             super::presence::IdentityPresence::Cold => (RuntimeBindingLedgerState::Cold, None),
             super::presence::IdentityPresence::Missing => (

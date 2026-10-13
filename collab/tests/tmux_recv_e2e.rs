@@ -64,6 +64,7 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
     let receiver = pane(pane_ids[1]);
 
     fixture.initialized = true;
+    fixture.registered_context_with_originator(&sender, true, "Codex future host");
     let unknown_host =
         fixture.command_with_originator(&["context"], Some(&sender), "Codex future host");
     assert!(
@@ -78,7 +79,7 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
         context_snapshot(&unknown_host_registration)["identity"]["transport"]["kind"],
         "tmux"
     );
-    let receiver_context = fixture.run_context(&["context"], Some(&receiver));
+    let receiver_context = fixture.registered_context(&receiver, true);
     let sender_context = fixture.run_context(&["context"], Some(&sender));
     let receiver_id = receiver_context["identity"]["worker_id"]
         .as_str()
@@ -122,6 +123,8 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
         sent["consumed"], false,
         "wake acceptance is not consumption"
     );
+    assert_eq!(sent["durable"], true);
+    assert_eq!(sent["notification"], "tmux-input-submitted");
 
     let received = fixture.run_ok(
         &[
@@ -142,6 +145,36 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
     assert_eq!(status["state"], "read");
     assert_eq!(sender_context["identity"]["worker_id"], sender_id);
     assert_eq!(receiver_context["identity"]["worker_id"], receiver_id);
+
+    let queued = fixture.run_ok(
+        &[
+            "sendmessage",
+            "--to",
+            &receiver_id,
+            "--subject",
+            "queued recv e2e",
+            "--delivery",
+            "queued",
+            "consume queued body",
+        ],
+        Some(&sender),
+    );
+    assert_eq!(queued["durable"], true);
+    assert_eq!(queued["notification"], "queued");
+    assert_eq!(queued["consumed"], false);
+    let queued_id = queued["msg_id"].as_str().unwrap();
+    let pending = fixture.run_ok(&["msg", queued_id], Some(&sender));
+    assert_eq!(pending["state"], "pending");
+    assert_eq!(pending["wake_attempts"], 0);
+    assert_eq!(pending["consumed_by_recv"], false);
+    let recv = fixture.run_ok(
+        &["recv", "--timeout", "0", "--receive-id", "queued-recv-1"],
+        Some(&receiver),
+    );
+    assert_eq!(recv["messages"][0]["id"], queued_id);
+    let consumed = fixture.run_ok(&["msg", queued_id], Some(&sender));
+    assert_eq!(consumed["state"], "read");
+    assert_eq!(consumed["consumed_by_recv"], true);
 
     // Register an owned task and leave one durable message unread so the
     // restart proves tasks and mailbox survive, not only the identity.
@@ -335,6 +368,7 @@ fn context_recovers_archived_master_in_the_same_live_pane() {
     );
     // The daemon owns the worker id; the fixture must not assume a naming
     // scheme. Read the concrete worker from the registration receipt.
+    fixture.registered_context(&old, true);
     let init = fixture.run_ok(&["init"], Some(&old));
     let worker_id = init["worker_id"]
         .as_str()
@@ -351,6 +385,23 @@ fn context_recovers_archived_master_in_the_same_live_pane() {
     );
     let before = fixture.run_context(&["context"], Some(&old));
     let grant_before = fixture.run_ok(&["master", "status"], Some(&old));
+    let durable_master_fields = |status: &Value| {
+        let master = &status["master"];
+        json!({
+            "worker_id": master["worker_id"],
+            "grant_id": master["grant_id"],
+            "grant_generation": master["grant_generation"],
+            "binding_id": master["binding_id"],
+            "endpoint_generation": master["endpoint_generation"],
+            "assigned_by": master["assigned_by"],
+            "assigned_ms": master["assigned_ms"],
+            "boundary": master["boundary"],
+            "approval": master["approval"],
+            "master_scope": master["scope"],
+            "scope": status["scope"],
+            "recorded_unusable": status["recorded_unusable"],
+        })
+    };
     let down = fixture.command_without_pane(&["down"]);
     assert!(down.status.success(), "isolated fixture down must succeed");
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -370,9 +421,17 @@ fn context_recovers_archived_master_in_the_same_live_pane() {
     assert_eq!(restarted["result"]["outcome"], "completed", "{restarted}");
     assert_eq!(context_snapshot(&restarted)["identity"], before["identity"]);
     assert_eq!(context_snapshot(&restarted)["binding"], before["binding"]);
+    let grant_restarted = fixture.run_ok(&["master", "status"], Some(&old));
     assert_eq!(
-        fixture.run_ok(&["master", "status"], Some(&old)),
-        grant_before
+        durable_master_fields(&grant_restarted),
+        durable_master_fields(&grant_before),
+        "daemon restart must preserve master grant identity"
+    );
+    // MasterStatus derives this flag from the current holder's identity
+    // presence. It does not infer busy/idle or require a transport probe.
+    assert_eq!(
+        grant_restarted["master"]["endpoint_live"], true,
+        "the restored current holder owns its persisted pane binding: {grant_restarted}"
     );
     let archive = fixture
         .host_state
@@ -404,10 +463,8 @@ fn context_recovers_archived_master_in_the_same_live_pane() {
         before["binding"]["runtime_id"]
     );
     assert_eq!(
-        recovered["binding"]["endpoint_generation"].as_u64(),
-        before["binding"]["endpoint_generation"]
-            .as_u64()
-            .map(|generation| generation + 1)
+        recovered["binding"]["endpoint_generation"], before["binding"]["endpoint_generation"],
+        "ordinary archived identity restore retains its durable generation"
     );
     let receipt: Value = serde_json::from_slice(
         &std::fs::read(
@@ -424,7 +481,23 @@ fn context_recovers_archived_master_in_the_same_live_pane() {
         receipt["runtime"]["endpoint_generation"],
         recovered["binding"]["endpoint_generation"]
     );
-    let route = fixture.run_ok(&["route", "resolve", "--pane-id", &new.pane_id], Some(&new));
+    let route_output = fixture
+        .configured_command(
+            &["route", "resolve", "--pane-id", &new.pane_id],
+            Some(&new),
+            "Codex TUI",
+        )
+        .env_remove("CODEX_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("CODEX_THREAD")
+        .output()
+        .unwrap();
+    assert!(
+        route_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&route_output.stderr)
+    );
+    let route: Value = serde_json::from_slice(&route_output.stdout).unwrap();
     assert_eq!(
         route["endpoint_generation"],
         recovered["binding"]["endpoint_generation"]
@@ -435,7 +508,10 @@ fn context_recovers_archived_master_in_the_same_live_pane() {
         "grant_id",
         "grant_generation",
         "assigned_by",
+        "assigned_ms",
+        "boundary",
         "approval",
+        "scope",
     ] {
         assert_eq!(
             grant_after["master"][field], grant_before["master"][field],
@@ -445,6 +521,15 @@ fn context_recovers_archived_master_in_the_same_live_pane() {
     assert_eq!(
         grant_after["master"]["endpoint_generation"],
         recovered["binding"]["endpoint_generation"]
+    );
+    assert_eq!(
+        grant_after["master"]["binding_id"],
+        recovered["binding"]["binding_id"]
+    );
+    assert_eq!(grant_after["scope"], grant_before["scope"]);
+    assert_eq!(
+        grant_after["recorded_unusable"],
+        grant_before["recorded_unusable"]
     );
     let again = fixture.run_context(&["context"], Some(&new));
     assert_eq!(again["identity"]["worker_id"], worker_id);
@@ -479,12 +564,10 @@ fn context_recovers_archived_master_in_the_same_live_pane() {
 
 /// The implicit bootstrap path — `collab context` run from a pane with no
 /// `--worker` and no `COLLAB_WORKER` — resolves its durable identity from the
-/// live anchor and can then be rejected by the daemon. The terminal must name
-/// that resolved identity: before, it echoed the caller's optional `--worker`,
-/// Context must return an explicit approval object for that identity before
-/// it replaces the rejected credential or binding.
+/// pane anchor. A stale local token must synchronize with its unique durable
+/// owner in the same invocation, without an approval terminal.
 #[test]
-fn implicit_context_requires_approval_to_replace_a_rejected_credential() {
+fn implicit_context_repairs_a_rejected_same_pane_credential() {
     let root = unique_root();
     let host_state = root.join("h");
     let tmux_socket = root.join("t.sock");
@@ -528,6 +611,7 @@ fn implicit_context_requires_approval_to_replace_a_rejected_credential() {
     fixture.initialized = true;
     // The daemon owns the worker id; read the concrete value from the init
     // receipt instead of re-deriving the old naming scheme.
+    fixture.registered_context(&pane, true);
     let init = fixture.run_ok(&["init"], Some(&pane));
     let worker_id = init["worker_id"]
         .as_str()
@@ -535,8 +619,7 @@ fn implicit_context_requires_approval_to_replace_a_rejected_credential() {
         .to_owned();
 
     // Durable identity exists and is registered; now make its token unusable.
-    // Context must identify the exact recovery target and request approval
-    // before replacing the rejected credential.
+    // The same pane restores the daemon's authoritative credential automatically.
     let identity_path = host_state
         .join("identities")
         .join(&worker_id)
@@ -569,32 +652,24 @@ fn implicit_context_requires_approval_to_replace_a_rejected_credential() {
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let public_error = format!("{stdout}{stderr}");
     assert!(
-        !output.status.success(),
-        "a rejected stored credential must fail: stdout={stdout} stderr={stderr}"
+        output.status.success(),
+        "same-pane credential repair must complete: stdout={stdout} stderr={stderr}"
     );
-    let denied: Value = serde_json::from_slice(&output.stdout).expect("typed context JSON");
-    assert_eq!(denied["result"]["outcome"], "denied", "{denied}");
-    assert_eq!(denied["result"]["requires"]["kind"], "approval", "{denied}");
+    let repaired: Value = serde_json::from_slice(&output.stdout).expect("typed context JSON");
+    assert_eq!(repaired["result"]["outcome"], "completed", "{repaired}");
     assert_eq!(
-        denied["result"]["requires"]["approval"]["target_identity"], worker_id,
-        "the approval must identify the recovery target: {denied}"
-    );
-    assert_eq!(
-        denied["result"]["requires"]["approval"]["action"], "replace_binding",
-        "the daemon must identify the required recovery action: {denied}"
-    );
-    assert_eq!(
-        denied["result"]["requires"]["repair_invocation"],
-        "collab context --approve-identity '<exact approval object from requires.approval>'"
+        context_snapshot(&repaired)["identity"]["worker_id"],
+        worker_id,
+        "repair preserves the principal: {repaired}"
     );
     assert!(
         !public_error.contains("not-the-recorded-token"),
         "the rejected credential must not leak: {public_error}"
     );
     let after: Value = serde_json::from_slice(&std::fs::read(&identity_path).unwrap()).unwrap();
-    assert_eq!(
+    assert_ne!(
         after["token"], identity["token"],
-        "the daemon must not replace a rejected credential"
+        "the daemon must replace the rejected credential"
     );
 }
 
@@ -645,13 +720,41 @@ fn context_returns_the_binding_receipt_that_addresses_the_route() {
         thread_anchor: "thread-binding".into(),
     };
     fixture.initialized = true;
-    let registered = fixture.run_context(&["context"], Some(&pane));
+    fixture.registered_context(&pane, false);
+    let pane_only = |args: &[&str]| {
+        let output = fixture
+            .configured_command(args, Some(&pane), "Codex TUI")
+            .env_remove("CODEX_SESSION_ID")
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("CODEX_THREAD")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["result"]["outcome"], "completed", "{value}");
+        for receipt in ["route", "credential", "lease"] {
+            assert!(
+                value["result"]["committed_phases"]
+                    .as_array()
+                    .unwrap_or_else(|| panic!("missing public committed phases: {value}"))
+                    .contains(&json!(receipt)),
+                "missing {receipt}: {value}"
+            );
+        }
+        context_snapshot(&value).clone()
+    };
+    let registered = pane_only(&["context"]);
     let worker_id = registered["identity"]["worker_id"]
         .as_str()
         .expect("daemon receipt names the registered worker")
         .to_owned();
 
-    let context = fixture.run_context(&["context"], Some(&pane));
+    let context = pane_only(&["context"]);
     let binding = &context["binding"];
     let canonical_root = root.canonicalize().unwrap().to_string_lossy().into_owned();
     assert_eq!(binding["agent_id"], worker_id);
@@ -662,8 +765,9 @@ fn context_returns_the_binding_receipt_that_addresses_the_route() {
             .is_some_and(|scope| !scope.is_empty()),
         "the receipt must name its app scope: {context}"
     );
-    assert_eq!(binding["session_id"], pane.session_anchor);
-    assert_eq!(binding["native_thread_id"], pane.thread_anchor);
+    assert_eq!(binding["session_id"], Value::Null);
+    assert_eq!(binding["native_thread_id"], Value::Null);
+    assert_eq!(context["identity"]["transport"]["thread_id"], Value::Null);
     assert!(
         binding["runtime_id"]
             .as_str()
@@ -686,8 +790,47 @@ fn context_returns_the_binding_receipt_that_addresses_the_route() {
 
     // The receipt is the daemon's record, not a copy of the caller's local
     // state: reading it again returns the same binding.
-    let again = fixture.run_context(&["context"], Some(&pane));
+    let again = pane_only(&["context"]);
     assert_eq!(again["binding"], *binding);
+    let route_output = fixture
+        .configured_command(
+            &["route", "resolve", "--pane-id", &pane.pane_id],
+            Some(&pane),
+            "Codex TUI",
+        )
+        .env_remove("CODEX_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("CODEX_THREAD")
+        .output()
+        .unwrap();
+    assert!(
+        route_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&route_output.stderr)
+    );
+    let route: Value = serde_json::from_slice(&route_output.stdout).unwrap();
+    assert_eq!(route["binding_id"], binding["binding_id"]);
+    assert_eq!(route["session_id"], Value::Null);
+    assert_eq!(route["native_thread_id"], Value::Null);
+    let constrained = fixture.command(
+        &["route", "resolve", "--pane-id", &pane.pane_id],
+        Some(&pane),
+    );
+    assert!(
+        !constrained.status.success(),
+        "actual native constraint must not accept null IDs"
+    );
+    assert!(String::from_utf8_lossy(&constrained.stderr).contains("ROUTE_RESOLVE_INVALID"));
+    let down = fixture.command_without_pane(&["down"]);
+    assert!(down.status.success());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && fixture.host_state.join("server.sock").exists() {
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(fixture.command_without_pane(&["up"]).status.success());
+    let restarted = pane_only(&["context"]);
+    assert_eq!(restarted["identity"]["worker_id"], worker_id);
+    assert_eq!(restarted["binding"], *binding);
 }
 
 #[test]

@@ -91,8 +91,8 @@ unless the operator explicitly chooses the owner's migration or reset route.
 
 - The current client is Codex only. The current route is bound to the verified
   AppServer owner and exact sessionID/threadID pair. The daemon may use a
-  verified tmux socket/server/session/pane/process tuple when both runtime IDs
-  are unavailable. Do not reconstruct an endpoint from a stale route or
+  observed tmux socket + pane anchor independently of runtime IDs. Session and
+  process IDs remain observations. Do not reconstruct a new endpoint or
   manually edit route state.
 - A Git worktree does not inherit `.agent-collab/` and is not an identity
   context. Run `collab context`; the CLI automatically observes runtime facts
@@ -116,12 +116,12 @@ unless the operator explicitly chooses the owner's migration or reset route.
 
 ## Transport selection
 
-- Workers never choose transport themselves. The server validates the candidate
+- Workers never choose transport themselves. The daemon validates runtime facts
   and selects the channel.
-- AppServer RPC is preferred when its owner passes native thread/session/cwd
-  self-checks. A tmux-only candidate can be selected as its own transport when
-  no AppServer candidate is available. Once an AppServer binding is selected,
-  tmux is never a communication, wake, presence, or status fallback.
+- Initial registration prefers a verified current tmux pane, and the daemon
+  selects transport according to runtime facts. Persisted restoration reuses the
+  durable selected binding. Once an AppServer binding is selected, tmux is never
+  a communication, wake, presence, or status fallback.
 - Do not treat pane presence as evidence of Codex turn state or message
   consumption.
 
@@ -152,9 +152,11 @@ healthy.
 
 A registered AppServer route is live only when the verified owner resolves the
 exact saved session/thread and project cwd through native `thread/read`. A
-tmux-only binding uses its verified pane as address proof only; the pane never
-proves the agent is alive or `Present`. A missing endpoint is absent; a failed
-probe is unknown. Neither presence signal establishes message consumption.
+tmux-only binding uses current persisted worker/binding/pane ownership for
+identity `Present` and validity, without live probe. Route reads and restoration
+use that ownership. A missing endpoint is absent; a failed status probe is
+unknown. Neither registered identity nor endpoint presence proves agent
+activity, transport submission or message consumption.
 
 An operator may use these read-only diagnostics for audit:
 

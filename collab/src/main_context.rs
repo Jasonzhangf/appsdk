@@ -357,6 +357,7 @@ fn parse_identity_supplement(raw: &str) -> anyhow::Result<IdentityFacts> {
         endpoint: supplement.endpoint,
         namespace: supplement.namespace,
         tmux: None,
+        tmux_anchor: None,
         dsh_session_id: None,
     })
 }
@@ -486,6 +487,82 @@ pub(crate) fn context_operation_with_options(
     provide: Option<&str>,
     query: bool,
 ) -> anyhow::Result<serde_json::Value> {
+    context_operation_with_intent(
+        operation_id,
+        explicit_project_root,
+        app_scope,
+        approve_identity,
+        approve_grant,
+        provide,
+        query,
+        false,
+    )
+}
+
+pub(crate) fn return_registration_challenge(raw: &str) -> anyhow::Result<Value> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Challenge {
+        operation_id: String,
+        command_id: String,
+        purpose: proto::RegisterReplyPurpose,
+        challenge: String,
+    }
+    let challenge: Challenge = serde_json::from_str(raw)?;
+    let facts = crate::client::adapters::codex_app_server::identity_facts_from_env()?;
+    let anchor = facts.tmux_anchor;
+    let native = if anchor.is_none() {
+        Some(proto::RegisterNativeReply::AppServer {
+            candidate: proto::AppServerCandidate {
+                endpoint: facts.endpoint.ok_or_else(|| {
+                    anyhow::anyhow!("REGISTER_REPLY_NATIVE_FACTS_REQUIRED: endpoint")
+                })?,
+                namespace: facts.namespace.ok_or_else(|| {
+                    anyhow::anyhow!("REGISTER_REPLY_NATIVE_FACTS_REQUIRED: namespace")
+                })?,
+                session_id: facts.session_id.ok_or_else(|| {
+                    anyhow::anyhow!("REGISTER_REPLY_NATIVE_FACTS_REQUIRED: session_id")
+                })?,
+                thread_id: facts.thread_id.ok_or_else(|| {
+                    anyhow::anyhow!("REGISTER_REPLY_NATIVE_FACTS_REQUIRED: thread_id")
+                })?,
+                cwd: std::env::current_dir()?.to_string_lossy().into_owned(),
+            },
+        })
+    } else {
+        None
+    };
+    let paths = scope::HostPaths::resolve()?;
+    let cwd = std::env::current_dir()?;
+    let (scope, _) = resolve_context_root(&paths, &cwd)?;
+    let response = client::call_with_context_response(
+        &scope.sock_path(),
+        &Req::RegisterReply {
+            reply: proto::RegisterParticipantReply {
+                operation_id: challenge.operation_id,
+                command_id: challenge.command_id,
+                purpose: challenge.purpose,
+                challenge: challenge.challenge,
+                anchor,
+                native,
+            },
+        },
+        Some(cli_project_context(&scope.root)?),
+    )?;
+    Ok(serde_json::to_value(response)?)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn context_operation_with_intent(
+    operation_id: Option<String>,
+    explicit_project_root: Option<&Path>,
+    app_scope: Option<&str>,
+    approve_identity: Option<&str>,
+    approve_grant: Option<&str>,
+    provide: Option<&str>,
+    query: bool,
+    recover_communication: bool,
+) -> anyhow::Result<Value> {
     let approval = approve_identity
         .map(|raw| parse_approval_json("--approve-identity", raw))
         .transpose()?;
@@ -520,7 +597,9 @@ pub(crate) fn context_operation_with_options(
             &host_paths,
             &project_context,
             operation_id,
-            if approval.is_some() || grant_approval.is_some() {
+            if recover_communication {
+                "manual_communication_restore"
+            } else if approval.is_some() || grant_approval.is_some() {
                 "approved_recovery"
             } else if provide.is_some() {
                 "supplement"

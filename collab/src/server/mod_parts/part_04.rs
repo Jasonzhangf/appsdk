@@ -133,17 +133,6 @@ impl ProjectRuntimeManager {
         if verify(&runtime.state.lock().unwrap(), worker_id, token).is_err() {
             return Err("TOKEN_MISMATCH: pane recovery credential does not own worker".into());
         }
-        match crate::client::adapters::tmux::probe(endpoint)
-            .map_err(|error| format!("ROUTE_RESOLVE_UNKNOWN: {error}"))?
-        {
-            crate::client::adapters::tmux::PanePresence::Present => {}
-            crate::client::adapters::tmux::PanePresence::Missing => {
-                return Err("ROUTE_RESOLVE_NOT_FOUND: tmux pane is gone".into())
-            }
-            crate::client::adapters::tmux::PanePresence::Unknown => {
-                return Err("ROUTE_RESOLVE_UNKNOWN: tmux pane liveness is uncertain".into())
-            }
-        }
         let route = RouteResolution {
             app_scope_id: old.app_scope_id,
             project_scope: old.project_scope.clone(),
@@ -152,12 +141,8 @@ impl ProjectRuntimeManager {
             agent_id: old.agent_id,
             binding_id: old.binding_id,
             endpoint_generation: old.endpoint_generation,
-            session_id: old
-                .session_id
-                .ok_or_else(|| "ROUTE_RESOLVE_INVALID: old route has no session".to_owned())?,
-            native_thread_id: old
-                .native_thread_id
-                .ok_or_else(|| "ROUTE_RESOLVE_INVALID: old route has no thread".to_owned())?,
+            session_id: old.session_id,
+            native_thread_id: old.native_thread_id,
         };
         route
             .validate()
@@ -238,14 +223,6 @@ impl ProjectRuntimeManager {
                 "RECOVERY_RECONCILE_REQUIRED: host pane route does not match retry transition"
                     .into(),
             );
-        }
-        match crate::client::adapters::tmux::probe(&candidate.endpoint)
-            .map_err(|error| format!("ROUTE_RESOLVE_UNKNOWN: {error}"))?
-        {
-            crate::client::adapters::tmux::PanePresence::Present => {}
-            _ => {
-                return Err("ROUTE_RESOLVE_UNKNOWN: pane is not present for register retry".into())
-            }
         }
         context.runtime_context = Some(crate::identity::RuntimeIdentity {
             agent_id: binding.agent_id,
@@ -369,8 +346,9 @@ impl ProjectRuntimeManager {
         // A legacy record has no persisted session; keep the host-provided
         // session as the live address without writing it back to the record.
         let session_id = match binding.session_id.clone() {
-            Some(bound) => bound,
-            None if legacy => session_id,
+            Some(bound) => Some(bound),
+            None if legacy => Some(session_id),
+            None if binding.tmux_endpoint.is_some() => None,
             None => {
                 return Err(format!(
                     "ROUTE_RESOLVE_INVALID: current route state for App Server thread {native_thread_id} has no session id"
@@ -419,19 +397,6 @@ impl ProjectRuntimeManager {
                         ));
                     }
                 }
-                match crate::client::adapters::tmux::probe(endpoint)
-                    .map_err(|error| format!("ROUTE_RESOLVE_UNKNOWN: {error}"))?
-                {
-                    crate::client::adapters::tmux::PanePresence::Present => {}
-                    crate::client::adapters::tmux::PanePresence::Missing => {
-                        return Err(format!(
-                            "ROUTE_RESOLVE_NOT_FOUND: tmux pane {native_thread_id} is gone"
-                        ));
-                    }
-                    crate::client::adapters::tmux::PanePresence::Unknown => {
-                        return Err(format!("ROUTE_RESOLVE_UNKNOWN: tmux pane {native_thread_id} liveness is uncertain"));
-                    }
-                }
             }
             TransportKind::AppServer => {
                 if requested_tmux_endpoint.is_some() {
@@ -446,7 +411,7 @@ impl ProjectRuntimeManager {
                     namespace: transport.namespace.ok_or_else(|| {
                         format!("ROUTE_RESOLVE_INVALID: current route state for thread {native_thread_id} has no namespace")
                     })?,
-                    session_id: session_id.as_str().to_owned(),
+                    session_id: session_id.as_ref().ok_or("ROUTE_RESOLVE_INVALID: App Server has no session")?.as_str().to_owned(),
                     thread_id: native_thread_id.as_str().to_owned(),
                     cwd: canonical_root.clone(),
                 };
@@ -498,10 +463,7 @@ impl ProjectRuntimeManager {
             binding_id: binding.binding_id,
             endpoint_generation: binding.endpoint_generation,
             session_id,
-            native_thread_id: binding.native_thread_id.ok_or_else(|| {
-                "ROUTE_RESOLVE_INVALID: current route state has no native App Server thread"
-                    .to_owned()
-            })?,
+            native_thread_id: binding.native_thread_id,
         };
         route
             .validate()
@@ -538,28 +500,20 @@ impl ProjectRuntimeManager {
                     "ROUTE_TRANSITION_INVALID: successful registration for {worker_id} has no matching runtime binding"
                 )
             })?;
-        let native_thread_id = binding.native_thread_id.as_ref().ok_or_else(|| {
-            format!(
-                "ROUTE_TRANSITION_INVALID: successful registration for {worker_id} has no native App Server thread"
-            )
-        })?;
-        let session_id = binding.session_id.as_ref().ok_or_else(|| {
-            format!(
-                "ROUTE_TRANSITION_INVALID: successful registration for {worker_id} has no session id"
-            )
-        })?;
         let current = {
             let state = self.host.state.lock().unwrap();
             let current = match binding.tmux_endpoint.as_ref() {
-                Some(endpoint)
-                    if endpoint.codex_session_id.is_none()
-                        && endpoint.codex_thread_id.is_none() =>
-                {
-                    state.global.lookup_tmux_route(endpoint)
-                }
-                _ => state
-                    .global
-                    .lookup_current_thread_route(session_id, native_thread_id),
+                Some(endpoint) => state.global.lookup_unique_tmux_pane_route(endpoint),
+                None => state.global.lookup_current_thread_route(
+                    binding
+                        .session_id
+                        .as_ref()
+                        .ok_or("ROUTE_TRANSITION_INVALID: no session id")?,
+                    binding
+                        .native_thread_id
+                        .as_ref()
+                        .ok_or("ROUTE_TRANSITION_INVALID: no native thread id")?,
+                ),
             };
             current.cloned()
         };
@@ -584,7 +538,12 @@ impl ProjectRuntimeManager {
             {
                 return Err(format!(
                     "RUNTIME_BINDING_REJECTED: App Server thread {} is already bound to worker {}",
-                    native_thread_id, existing.agent_id
+                    binding
+                        .native_thread_id
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_default(),
+                    existing.agent_id
                 ));
             }
         }
@@ -626,6 +585,15 @@ impl ProjectRuntimeManager {
                 }),
         };
         if let Err(RoutePublishError::Definite(error)) = publish_result {
+            // Staged completion publishes an already committed project owner.
+            // Its current snapshot is the failed binding itself; there was no
+            // new Register transaction to compensate or older generation to
+            // restore. Keep that durable owner and its grant intact.
+            if previous_binding == Some(&binding) {
+                return Err(format!(
+                    "ROUTE_TRANSITION_DURABILITY_FAILED: {error}; committed project worker, selected adaptor, subscriptions, binding, and grant were preserved"
+                ));
+            }
             let rollback = runtime
                 .commit_checked(&[Event::GlobalRuntimeBindingRollback {
                     failed: binding,
@@ -650,6 +618,102 @@ impl ProjectRuntimeManager {
             ));
         }
         Ok(())
+    }
+
+    fn complete_participant_registration(
+        &self,
+        runtime: Arc<Server>,
+        context: &ProjectContext,
+        mut record: register_reply::Record,
+    ) -> (Arc<Server>, Resp) {
+        if let Some(outcome) = record.publication_outcome.as_ref() {
+            return (
+                runtime,
+                Resp {
+                    ok: outcome.ok,
+                    error: outcome.error.clone(),
+                    data: outcome.data.clone(),
+                },
+            );
+        }
+        let root = self.host.host_paths.state_root();
+        // A receipt without a terminal publication record is an interrupted
+        // completion, not permission to publish a possibly compensated binding.
+        if register_reply::committed(&runtime, &record.prepared.nested_command_id) {
+            return (
+                runtime,
+                Resp::err("REGISTER_REPLY_PUBLICATION_INCOMPLETE: committed Register has no durable manager publication outcome; preserve both journals"),
+            );
+        }
+        if record.completion.is_none() {
+            let previous =
+                match self.registration_rollback_state(&runtime, context, &record.worker_id) {
+                    Ok(previous) => previous,
+                    Err(error) => return (runtime, Resp::err(error)),
+                };
+            let completion = register_reply::RegistrationCompletion {
+                context: context.clone(),
+                previous_binding: previous.0,
+                previous_grant: previous.1,
+                previous_worker: previous.2,
+                previous_subscriptions: previous.3,
+            };
+            if let Err(error) = register_reply::save_completion(root, &mut record, completion) {
+                return (runtime, Resp::err(error));
+            }
+        }
+        let completion = record.completion.as_ref().unwrap().clone();
+        let TypedCommand::RegisterWorker { worker, .. } = &record.prepared.typed.command;
+        let request = Req::register(
+            worker.id.clone(),
+            worker.token.clone(),
+            worker.cwd.clone(),
+            Some(TransportCandidates {
+                tmux: record.transport.tmux_endpoint.clone().map(|endpoint| {
+                    crate::proto::TmuxCandidate {
+                        endpoint,
+                        cwd: worker.cwd.clone(),
+                    }
+                }),
+                ..TransportCandidates::default()
+            }),
+        );
+        let superseded = match self.validate_current_thread_candidate(&completion.context, &request)
+        {
+            Ok(superseded) => superseded,
+            Err(error) => return (runtime, Resp::err(error)),
+        };
+        let response = consume_register_typed(
+            &runtime,
+            &record.worker_id,
+            &record.transport,
+            record.prepared.clone(),
+            None,
+            Some(&record),
+        );
+        // A failed consume has no publication outcome and remains subject to
+        // the original exact intent/resource guards on any genuine return.
+        if !response.ok {
+            return (runtime, response);
+        }
+        let (runtime, response) = self.finalize_registration(
+            runtime,
+            &completion.context,
+            Some(&record.worker_id),
+            completion.previous_binding,
+            completion.previous_grant,
+            completion.previous_worker,
+            completion.previous_subscriptions,
+            response,
+        );
+        let response = self.retire_superseded_claimants(superseded, response);
+        if response.ok {
+            restore_registered_peer_default_leases(&runtime);
+        }
+        if let Err(error) = register_reply::save_publication_outcome(root, &mut record, &response) {
+            return (runtime, Resp::err(error));
+        }
+        (runtime, response)
     }
 
     fn finalize_registration(
@@ -784,7 +848,5 @@ impl ProjectRuntimeManager {
         self.install_runtime(key, runtime.clone(), project_lock);
         Ok(runtime)
     }
-
-
 }
 include!("part_04/runtime.rs");

@@ -404,7 +404,7 @@ fn default_direct_message_events(
     }
     if current_is_fresh {
         if refresh_due {
-            let Some(thread_id) = transport.thread_id.as_deref() else {
+            let Some(thread_id) = notification_target(transport) else {
                 return events;
             };
             events.push(Event::NotificationSubscribed {
@@ -435,7 +435,7 @@ fn default_direct_message_events(
     // transport. Keep an explicit journal transition before replacing a
     // retired target so upgrades cannot leave the peer permanently unwoken.
     if current_is_armed {
-        let Some(thread_id) = transport.thread_id.as_deref() else {
+        let Some(thread_id) = notification_target(transport) else {
             return events;
         };
         events.push(Event::NotificationStatus {
@@ -471,7 +471,7 @@ fn default_direct_message_events(
         }
         return events;
     }
-    let Some(thread_id) = transport.thread_id.as_deref() else {
+    let Some(thread_id) = notification_target(transport) else {
         return events;
     };
     events.push(Event::NotificationSubscribed {
@@ -531,14 +531,21 @@ fn selected_transport_for_worker(worker: &WorkerRec) -> Option<SelectedTransport
     worker.transport.clone()
 }
 
+fn notification_target(transport: &SelectedTransport) -> Option<&str> {
+    match transport.kind {
+        TransportKind::Tmux => transport.thread_id.as_deref().or_else(|| {
+            transport.tmux_endpoint.as_ref().map(|endpoint| endpoint.pane_id.as_str())
+        }),
+        _ => transport.thread_id.as_deref(),
+    }
+}
+
 fn subscription_matches_transport(
     subscription: &NotificationSubscription,
     transport: &SelectedTransport,
 ) -> bool {
     subscription.method == transport.kind.as_str()
-        && transport
-            .thread_id
-            .as_deref()
+        && notification_target(transport)
             .is_some_and(|thread_id| subscription.target == thread_id)
 }
 
@@ -735,6 +742,7 @@ fn attempt_tmux_notification_with_retry(
     let Some(first) = batch.first() else {
         return NotificationAttempt::NotAttempted("notification batch is empty".into());
     };
+    let queued_tmux = transport.kind == TransportKind::Tmux && delivery_mode == "queued";
     let last_attempt = state
         .msgs
         .values()
@@ -763,6 +771,9 @@ fn attempt_tmux_notification_with_retry(
         .max()
         .unwrap_or(0);
     if now.saturating_sub(window_start_ms) < delay || now.saturating_sub(last_attempt) < delay {
+        if queued_tmux {
+            return NotificationAttempt::Deferred;
+        }
         return NotificationAttempt::NotAttempted(
             "notification delivery window has not elapsed".into(),
         );
@@ -795,7 +806,7 @@ fn attempt_tmux_notification_with_retry(
         &text,
         &first.1,
         explicit,
-        &delivery_mode,
+        if queued_tmux { DAEMON_LIVE_CLOSURE_MODE } else { &delivery_mode },
     ) {
         Ok(receipt) => {
             append_log(
@@ -1034,6 +1045,14 @@ fn notification_delivery_delay_ms(
     event: &str,
     config: &crate::config::Notifications,
 ) -> i64 {
+    if state.delivery_modes.get(message_id).is_some_and(|mode| mode == "queued")
+        && state.msgs.get(message_id)
+            .and_then(|message| state.workers.get(&message.to))
+            .and_then(selected_transport_for_worker)
+            .is_some_and(|transport| transport.kind == TransportKind::Tmux)
+    {
+        return config.delay_ms(event);
+    }
     match state.delivery_modes.get(message_id).map(String::as_str) {
         Some(
             "explicit-notification"
@@ -1090,6 +1109,12 @@ fn notification_send_response(
         return Resp::data(data);
     }
     match notification {
+        NotificationAttempt::Deferred => {
+            data["durable"] = json!(true);
+            data["notification"] = json!("queued");
+            data["consumed"] = json!(false);
+            Resp::data(data)
+        }
         NotificationAttempt::Accepted => {
             data["durable"] = json!(true);
             data["notification"] = match notification_method {

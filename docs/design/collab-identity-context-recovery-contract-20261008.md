@@ -8,7 +8,10 @@ readback, and failure terminals. It does not assert that any missing phase,
 receipt, query, or recovery seam already exists. It also does not implement
 them and does not authorize product code.
 
-Authority order:
+Authority order (canonical requirements ledger at `.appsdk/requirements.json`
+v8 / communication v4 is authoritative and supersedes older Goal/plan
+interpretations within affected scope; older Goal and plan documents retain
+their historical scope elsewhere):
 
 1. The user's four requested Collab capabilities as persisted in the canonical
    task Goal at
@@ -43,6 +46,66 @@ Scope boundary:
 
 ## 2. Terms and exact owner map
 
+Initial registration now includes a selected-path participant gate. The
+daemon verifies the caller's capability facts and prefers a verified current
+tmux pane. Every selected initial path requires an actual matching reply;
+missing capability or caller wait policy cannot skip it. The existing
+`server/register_reply.rs` owns durable pending and verified evidence. The
+Register transaction owns business commit, and the identity operation journal
+owns continuation, cancellation and query. No business payload mirrors this
+control state.
+
+Tmux dispatch sends `COLLAB_REGISTER_CHALLENGE <JSON>` and returns pending to
+release the initiating pane. Its participant reads the challenge from that
+pane stdin and invokes the typed return from its own environment. The daemon
+checks project/app scope, purpose, outer operation, nested command, nonce and
+selected socket/pane before continuing the exact saved prepared envelope.
+The runtime route reservation is persisted and installed before this pause;
+it does not imply a Registered effect or verified communication. Query only
+projects durable progress and never reveals the nonce. Restart and duplicate
+return reuse the original evidence and receipt, without redispatch or a new
+command. Cancellation rejects a later return.
+
+New Register command and operation IDs use one bounded key over the typed
+project scope, app scope, binding and generation. Saved IDs remain unchanged.
+A participant return completes the original manager publication and
+compensation path. The same pending control record retains the previous scoped
+state and the terminal publication result. A definite failure restores that
+state; an ambiguous publication outcome preserves the journals and reports the
+actual error. Repeated returns cannot publish a compensated registration.
+
+AppServer and DSH receive the same structured challenge through their selected
+native adaptor. A first history or agent-reply observation may remain pending.
+The actual participant later returns the received operation, command, purpose
+and nonce with its own native candidate through `RegisterReply`. AppServer
+thread/read and the existing DSH agent-facts admission validate the exact
+selected endpoint, namespace/runtime, session, thread/agent and project root.
+The return resumes the original context operation or, for the existing DSH
+`Register` entry, its original nested operation. An ACK, echo or query cannot
+complete it. No new gateway, polling, retry or context admission surface exists.
+
+The private verified-pending Register path consumes the exact saved command
+using its prepare-time target-resource precondition. The same reducer lock
+checks identity/credential, binding principal/generation, effective app owner,
+stable anchor claimants and the relevant target grant, then commits. Normal
+ledger classification, PID/activity observations and an unrelated master do
+not invalidate it. A compatible first publication of the same app scope does
+not repeat ProjectRegistered. True resource conflicts and cancellation reject.
+Ordinary public typed dispatch and recovery retain their existing whole-revision
+CAS. No caller flag can select the private fence; no reprepare or new IDs occur.
+Pending records predating the scoped precondition fail explicitly rather than
+reconstructing a fence from logs or a current snapshot.
+
+Ordinary durable identity/role/anchor/binding restoration and authenticated
+staged completion remain separate and perform no loopback. Explicit manual
+communication restore uses the same gate on the restored binding; failure
+retains identity, role and grant. No timer or retry policy is added.
+Existing-principal moves and exact approved identity recovery retain the
+authenticated typed Register owner without initial challenge admission. This
+is derived from the existing scoped same-principal binding plus its credential
+or approval proof. Caller wait/capability flags cannot select this path, and
+typed fence and frozen revision checks remain mandatory.
+
 | Term | Exact meaning | Owner |
 | --- | --- | --- |
 | caller operation key | Caller-generated `operation_id` retained before the first side effect; it is the outer identity-operation identity. | CLI/MCP for generation and retention; daemon for durable admission and conflict checking |
@@ -59,6 +122,19 @@ binding/route transaction. Identity resolution remains owned by the resolver.
 The local credential file remains a daemon-written cache of the committed
 identity, not a separate authority. The authority owner remains the owner of
 master grant state and explicit grant changes.
+
+Ordinary persisted restoration reads those owners directly. It preserves the
+saved selected adaptor and does not run initial selection, Register, admission
+or loopback. Stable `tmux_anchor` facts contain only socket + pane; optional live
+enrichment failure is visible without preventing the daemon request. Saved
+endpoint fields come from the durable owner, never invented PID/native IDs.
+Authenticated adjacent-generation staged recovery reads the original committed
+Register receipt, current typed binding and selected adaptor. It completes the
+existing manager publication without another Register, initial admission,
+loopback or generation increment. Credential, scope, adjacent-generation and
+grant guards remain. Publication failure preserves the committed staged owner
+and its recovery material. Ordinary readback can prove route, credential and
+lease without claiming a new nested Register receipt.
 
 `actor_binding_id` is always the real committed binding selected by the daemon.
 No layer may fabricate one. An approved recovery uses an internal admission
@@ -397,8 +473,9 @@ name.
 Ordinary `Req::Register` and ordinary authenticated commands keep their
 existing token, binding, generation, scope, and runtime checks. A mismatch in
 an ordinary command remains a typed rejection, including `TOKEN_MISMATCH` when
-the supplied credential is rejected. The approved recovery transaction is the
-only exception, and it is available only through the explicit approval schema.
+the supplied credential is rejected. Unique same-pane context recovery first
+synchronizes the authoritative project credential; this does not alter ordinary
+token admission. Conflict replacement uses the explicit approved transaction.
 
 ### 5.3 Approved replacement transaction
 
@@ -410,10 +487,10 @@ admission that would otherwise reject the stale incumbent:
    before touching identity, binding, route, credential, grant, or lease state.
 2. **Validate approval.** Require a non-empty approval decision bound to the
    exact project scope, app scope, target identity, action, normalized intent
-   digest, expected incumbent binding id, and expected incumbent generation.
-   Reject a changed incumbent with `APPROVAL_STALE_CONFLICT`.
-3. **Verify endpoint ownership.** Re-run the existing adapter probe against the
-   candidate endpoint/session/thread. Approval does not replace this proof.
+   digest when supplied. A minimal approved target/action intent is sufficient;
+   the daemon reads the current incumbent binding/generation under its lock.
+3. **Verify ownership.** Check address structure, current scope and persisted
+   ownership. Tmux registration and recovery do not repeat a live pane probe.
 4. **Select incumbent.** Read authoritative committed identity facts from the
    project reducer/worker owner and credential owner. The stale local receipt is
    evidence only; it cannot be promoted to authority. If no authoritative
@@ -450,7 +527,8 @@ admission that would otherwise reject the stale incumbent:
 
 ### 5.4 Incumbent conflict fence
 
-The approval request must include `expected_incumbent`:
+The daemon records the current `expected_incumbent` internally. A caller may
+still submit the full legacy object, but no prior fence lookup is required:
 
 ```json
 {
@@ -462,10 +540,11 @@ The approval request must include `expected_incumbent`:
 }
 ```
 
-Before commit, the daemon reloads the exact incumbent and compares binding id,
-generation, target, project scope, and app scope. If any value differs, it
-returns `APPROVAL_STALE_CONFLICT` with the observed values and no mutation.
-Approval never authorizes a later different incumbent.
+Before commit, the daemon reads the current target, project/app scope and pane
+claimants inside the identity lock and binds Register admission to that current
+incumbent. Explicit recovery authorizes this invocation to override those
+conflicts. Ordinary commands retain token and current binding/generation guards.
+Same-key replay returns the retained operation without a second replacement.
 
 ## 6. Public request schemas
 
@@ -530,6 +609,14 @@ There is no `--restore-as`, `--worker`, `--token`, or generic `--force`
 argument. `--approve-identity` and `--approve-grant` are distinct flags; one
 flag cannot silently authorize the other owner.
 
+An explicit `restore_master` or `restore_peer` action is a single combined user
+intent. Either existing flag can carry `{decision:"approved", target_identity,
+action, authorization}`. The daemon restores the target, reads current fences,
+then calls the authority owner and returns actual role readback. Master intent
+atomically transfers the scoped grant. Peer intent revokes only the target's
+grant; an unrelated holder remains. Identity-only `restore_identity` still
+cannot imply promotion or demotion. Same-key replay returns retained evidence.
+
 The CLI exits 0 only for `ok: true`. It exits 2 for a typed incomplete or
 refused result (`missing_facts`, `approval_required`, `denied`, `partial`,
 `unknown`, `failed`, or `cancelled`) while preserving the full JSON result on
@@ -572,8 +659,10 @@ store before dispatch, so a lost response can be queried after adapter restart.
 }
 ```
 
-`action` is `restore_identity` or `replace_binding` for identity approval. Its
-`expected_incumbent` binds the exact binding id and endpoint generation.
+`action` is `restore_identity`, `replace_binding`, `restore_master` or
+`restore_peer` for identity approval. Its
+`expected_incumbent` is optional caller metadata; execution uses the current
+binding id and generation read by the daemon in this invocation.
 `replace_master_grant` has a separate schema and owner fence:
 
 ```json
@@ -596,7 +685,7 @@ fence, and requested facts, excluding `intent_digest` itself, `decided_by`, and
 descriptive metadata; the daemon validates the approval fields and scope, not
 the caller’s claim of identity. Approval text or a truthy boolean alone is
 insufficient. Identity approval cannot substitute a grant fence and grant
-approval cannot substitute an incumbent binding fence.
+approval does not bypass Register's internally captured current binding fence.
 
 ### 6.3 MCP `tools/call`
 
@@ -836,10 +925,10 @@ not extra parallel sinks.
 3. An unapproved conflict returns `denied` or `approval_required`, never a
    guessed worker or a new identity.
 4. Approved recovery with a stale local credential succeeds only when the
-   daemon proves the endpoint, the exact target, and the expected incumbent;
+   daemon proves persistent ownership, the exact target and actual effects;
    the old binding retires and the replacement receives the real binding id.
-5. Same approval with a changed incumbent returns `APPROVAL_STALE_CONFLICT`
-   and mutates nothing.
+5. A new explicit invocation reads a changed incumbent and completes without
+   another approval; same-key replay does not repeat effects.
 6. A changed endpoint, cross-project scope, or missing approval returns a typed
    refusal before minting a credential.
 7. Same-key same-intent replay returns the original operation projection.
@@ -852,14 +941,16 @@ not extra parallel sinks.
 10. Automatic or supplement failure after a committed phase retains
     `committed_phases` and reports `partial`/`failed`, never a false completed
     state.
-11. Grant replacement occurs only when `approve_grant` is present, is distinct
-    from identity recovery, and leaves authority state unchanged when it is
-    absent.
+11. Grant replacement occurs only when explicit role intent (`restore_master`
+    or `restore_peer`) is present, or an exact `approve_grant` is supplied;
+    an identity-only approval leaves authority state unchanged, but a single
+    existing approval flag carrying explicit role intent applies authority
+    effects without a second approval.
 12. `cancelled` is returned only at an enumerated safe boundary; it never
     erases a committed side effect.
 13. A stale master identity recovers its exact binding while preserving the
-    existing grant id/generation unless a separate exact `approve_grant` is
-    present.
+    existing grant id/generation unless explicit role intent or an exact
+    `approve_grant` is present in that single approval.
 14. One invocation containing both `approve_identity` and `approve_grant`
     validates both exact approvals before admission, commits both owner phases
     at most once, and reports any partial owner result without claiming
@@ -934,8 +1025,9 @@ synced with immutable nested `command_id` and `operation_id` before any
 Register consume. That phase records durable intent, not an inner receipt or
 effect. The daemon prepares one actual `TypedEnvelope` from one consistent
 state snapshot and consumes that same envelope; IDs are not regenerated during
-consume. A sync failure prevents consume, and a failed existing CAS does not
-trigger automatic reprepare, new IDs, or replay. After outer authorization, a
+consume. A sync failure prevents consume. Ordinary dispatch retains its CAS;
+verified asynchronous Register uses the private resource fence defined above.
+A rejected fence does not trigger reprepare, new IDs, or replay. After outer authorization, a
 pure query may read the exact nested receipt from the already-loaded runtime;
 it must not load/ensure a runtime, repair routes, or dispatch Register.
 

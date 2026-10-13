@@ -18,16 +18,17 @@
         let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
 
         let register = |context: ProjectContext, worker_id: &str, token: &str| {
-            let (runtime, response) = manager.dispatch_sync(
+            let cwd = if worker_id == "app-a-worker" || worker_id == "app-b-worker" {
+                &project_a
+            } else {
+                &project_b
+            };
+            let (runtime, response) = register_host_fixture(&manager,
                 Some(context),
                 Req::register(worker_id.into(),
                      token.into(),
-                     if worker_id == "app-a-worker" || worker_id == "app-b-worker" {
-                        project_a.display().to_string()
-                    } else {
-                        project_b.display().to_string()
-                    },
-                     test_candidates(&format!("thread-{worker_id}"))),
+                     cwd.display().to_string(),
+                     test_candidates_at(&format!("thread-{worker_id}"), cwd)),
             );
             assert!(response.ok, "registration {worker_id}: {response:?}");
             runtime
@@ -419,7 +420,7 @@
         let master_b = "cross-project-master-b";
         let token_a = "token-cross-project-master-a";
         let token_b = "token-cross-project-master-b";
-        let (source_runtime, source_registration) = manager.dispatch_sync(
+        let (source_runtime, source_registration) = register_host_fixture(&manager,
             Some(context_with_app(&project_a, app_a)),
             Req::register(master_a.into(),
                  token_a.into(),
@@ -442,7 +443,7 @@
         // Server status probe, not the tmux pane.
         register_native_peer(&source_runtime, &project_a, master_a, token_a, "thread-a", app_a);
 
-        let (target_runtime, target_registration) = manager.dispatch_sync(
+        let (target_runtime, target_registration) = register_host_fixture(&manager,
             Some(context_with_app(&project_b, app_b)),
             Req::register(master_b.into(),
                  token_b.into(),
@@ -594,20 +595,20 @@
         let sender_token = "token-full-replay-sender";
         let recipient_token = "token-full-replay-recipient";
 
-        let (sender_runtime, sender_registration) = manager.dispatch_sync(
+        let (sender_runtime, sender_registration) = register_host_fixture(&manager,
             Some(context_with_app(&project_root, app_scope)),
             Req::register(sender_id.into(),
                  sender_token.into(),
                  project_root.display().to_string(),
-                 test_candidates("thread-full-replay-sender")),
+                 test_candidates_at("thread-full-replay-sender", &project_root)),
         );
         assert!(sender_registration.ok, "{sender_registration:?}");
-        let (recipient_runtime, recipient_registration) = manager.dispatch_sync(
+        let (recipient_runtime, recipient_registration) = register_host_fixture(&manager,
             Some(context_with_app(&project_root, app_scope)),
             Req::register(recipient_id.into(),
                  recipient_token.into(),
                  project_root.display().to_string(),
-                 test_candidates("thread-full-replay-recipient")),
+                 test_candidates_at("thread-full-replay-recipient", &project_root)),
         );
         assert!(recipient_registration.ok, "{recipient_registration:?}");
         assert!(Arc::ptr_eq(&sender_runtime, &recipient_runtime));
@@ -796,12 +797,12 @@
         let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
 
         let register = |context: ProjectContext, worker_id: &str, token: &str| {
-            let (runtime, response) = manager.dispatch_sync(
+            let (runtime, response) = register_host_fixture(&manager,
                 Some(context),
                 Req::register(worker_id.into(),
                      token.into(),
                      project_root.display().to_string(),
-                     test_candidates(&format!("thread-{worker_id}"))),
+                     test_candidates_at(&format!("thread-{worker_id}"), &project_root)),
             );
             assert!(response.ok, "registration {worker_id}: {response:?}");
             runtime
@@ -969,12 +970,12 @@
         // must replay it, while a new encoded route must be rejected before
         // the host route journal is replaced.
         let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
-        let (_runtime, collision_response) = manager.dispatch_sync(
+        let (_runtime, collision_response) = register_host_fixture(&manager,
             Some(context_with_app(&project_root, candidate_app_scope)),
             Req::register("prospective-collision-worker".into(),
                  "token-prospective-collision".into(),
                  project_root.display().to_string(),
-                 test_candidates("thread-prospective-collision-worker")),
+                 test_candidates_at("thread-prospective-collision-worker", &project_root)),
         );
         assert!(!collision_response.ok, "{collision_response:?}");
         assert!(
@@ -989,12 +990,12 @@
         // The rejected prospective route must not poison the old route that
         // was successfully replayed from the durable journal.
         let legacy_context = context_with_app(&project_root, legacy_app_scope);
-        let (_runtime, registration_response) = manager.dispatch_sync(
+        let (_runtime, registration_response) = register_host_fixture(&manager,
             Some(legacy_context.clone()),
             Req::register("legacy-replayed-worker".into(),
                  "token-legacy-replayed".into(),
                  project_root.display().to_string(),
-                 test_candidates("thread-legacy-replayed-worker")),
+                 test_candidates_at("thread-legacy-replayed-worker", &project_root)),
         );
         assert!(registration_response.ok, "{registration_response:?}");
         let (_runtime, status_response) =
@@ -1042,7 +1043,7 @@
         // First establish the resident route. Its reducer owns the storage
         // root and the canonical route is durably published.
         let resident_context = context_with_app(&host_root, "resident-app");
-        let (_runtime, resident_response) = manager.dispatch_sync(
+        let (_runtime, resident_response) = register_host_fixture(&manager,
             Some(resident_context.clone()),
             Req::register("resident-worker".into(),
                  "token-resident-worker".into(),
@@ -1062,12 +1063,12 @@
         // A second project whose storage root equals the resident reducer's
         // root must fail before a route record or second reducer is created.
         let collision_context = context_with_app(&resident_storage_root, "collision-app");
-        let (_runtime, collision_response) = manager.dispatch_sync(
+        let (_runtime, collision_response) = register_host_fixture(&manager,
             Some(collision_context.clone()),
             Req::register("resident-collision-worker".into(),
                  "token-resident-collision".into(),
                  resident_storage_root.display().to_string(),
-                 test_candidates("thread-resident-collision-worker")),
+                 test_candidates_at("thread-resident-collision-worker", &resident_storage_root)),
         );
         assert!(!collision_response.ok, "{collision_response:?}");
         assert!(
@@ -1108,20 +1109,20 @@
         let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
         let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
 
-        let (seed_runtime, seed_response) = manager.dispatch_sync(
+        let (seed_runtime, seed_response) = register_host_fixture(&manager,
             Some(context_with_app(&project_root, "seed")),
             Req::register("nested-seed-worker".into(),
                  "token-nested-seed".into(),
                  project_root.display().to_string(),
-                 test_candidates("thread-nested-seed-worker")),
+                 test_candidates_at("thread-nested-seed-worker", &project_root)),
         );
         assert!(seed_response.ok, "{seed_response:?}");
-        let (app_runtime, app_response) = manager.dispatch_sync(
+        let (app_runtime, app_response) = register_host_fixture(&manager,
             Some(context_with_app(&project_root, "app/a")),
             Req::register("nested-app-worker".into(),
                  "token-nested-app".into(),
                  project_root.display().to_string(),
-                 test_candidates("thread-nested-app-worker")),
+                 test_candidates_at("thread-nested-app-worker", &project_root)),
         );
         assert!(app_response.ok, "{app_response:?}");
         assert!(!Arc::ptr_eq(&seed_runtime, &app_runtime));
@@ -1133,12 +1134,12 @@
 
         let route_journal = host_paths.state_root().join("routes.jsonl");
         let before_collision = std::fs::read(&route_journal).unwrap();
-        let (_runtime, collision_response) = manager.dispatch_sync(
+        let (_runtime, collision_response) = register_host_fixture(&manager,
             Some(context_with_app(&nested_root, "nested-app")),
             Req::register("nested-collision-worker".into(),
                  "token-nested-collision".into(),
                  nested_root.display().to_string(),
-                 test_candidates("thread-nested-collision-worker")),
+                 test_candidates_at("thread-nested-collision-worker", &nested_root)),
         );
         assert!(!collision_response.ok, "{collision_response:?}");
         assert!(
@@ -1279,12 +1280,12 @@
         let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
         let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
 
-        let (runtime, response) = manager.dispatch_sync(
+        let (runtime, response) = register_host_fixture(&manager,
             Some(context.clone()),
             Req::register("routecodex-master".into(),
                  "token-routecodex-master".into(),
                  external_root.display().to_string(),
-                 test_candidates("thread-routecodex-master")),
+                 test_candidates_at("thread-routecodex-master", &external_root)),
         );
         assert!(response.ok, "{response:?}");
 

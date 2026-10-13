@@ -16,6 +16,24 @@ fn validate_transport_candidates(
             candidate_root.display()
         ));
     }
+    // A daemon-confirmed current pane wins over all unselected native facts.
+    if let Some(candidate) = candidates.tmux.as_ref() {
+        validate_tmux_candidate(candidate, &candidate_root)?;
+        match crate::client::adapters::tmux::probe(&candidate.endpoint)? {
+            crate::client::adapters::tmux::PanePresence::Present => return Ok(SelectedTransport {
+                kind: TransportKind::Tmux,
+                endpoint: Some(candidate.endpoint.socket_path.clone()),
+                namespace: Some(candidate.endpoint.tmux_session_id.clone()),
+                session_id: candidate.endpoint.codex_session_id.clone(),
+                thread_id: candidate.endpoint.codex_thread_id.clone(),
+                tmux_endpoint: Some(candidate.endpoint.clone()),
+                capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
+                self_check: "daemon verified current pane; participant reply required".into(),
+            }),
+            crate::client::adapters::tmux::PanePresence::Missing => {},
+            crate::client::adapters::tmux::PanePresence::Unknown => return Err("TMUX_PANE_UNKNOWN".into()),
+        }
+    }
     // dsh is a mutually exclusive channel: it has no pane to act as an App
     // Server recovery anchor, and a caller supplying dsh *and* a tmux/appserver
     // candidate has ambiguous intent. Resolving that silently is exactly the
@@ -37,89 +55,31 @@ fn validate_transport_candidates(
         if app_cwd != candidate_root {
             return Err(format!(
                 "RUNTIME_BINDING_REJECTED: App Server candidate cwd {} does not match project root {}",
-                app_cwd.display(),
-                candidate_root.display()
+                app_cwd.display(), candidate_root.display()
             ));
         }
         let mut selected = crate::client::adapters::verify_candidate(appserver)
             .map_err(|error| format!("APPSERVER_ENDPOINT_REJECTED: {error}"))?;
         if let Some(tmux) = candidates.tmux.as_ref() {
-            if !tmux.cwd.starts_with('/') {
-                return Err("RUNTIME_BINDING_REJECTED: tmux candidate cwd must be absolute".into());
-            }
-            match crate::client::adapters::tmux::probe(&tmux.endpoint)? {
-                crate::client::adapters::tmux::PanePresence::Present => {}
-                crate::client::adapters::tmux::PanePresence::Missing => {
-                    return Err("TMUX_PANE_MISSING: recovery pane is not live".into())
-                }
-                crate::client::adapters::tmux::PanePresence::Unknown => {
-                    return Err("TMUX_PANE_UNKNOWN: recovery pane liveness is uncertain".into())
-                }
-            }
-            let mut recovery = tmux.endpoint.clone();
-            if recovery.codex_session_id.is_none() {
-                recovery.codex_session_id = Some(appserver.session_id.clone());
-            }
-            if recovery.codex_thread_id.is_none() {
-                recovery.codex_thread_id = Some(appserver.thread_id.clone());
-            }
-            selected.tmux_endpoint = Some(recovery);
-            if !selected
-                .capabilities
-                .iter()
-                .any(|cap| cap == "pane_recovery_anchor")
-            {
+            validate_tmux_candidate(tmux, &candidate_root)?;
+            selected.tmux_endpoint = Some(tmux.endpoint.clone());
+            if !selected.capabilities.iter().any(|cap| cap == "pane_recovery_anchor") {
                 selected.capabilities.push("pane_recovery_anchor".into());
             }
         }
         return Ok(selected);
     }
-    if let Some(candidate) = candidates.tmux.as_ref() {
-        if !candidate.cwd.starts_with('/') {
-            return Err("RUNTIME_BINDING_REJECTED: tmux candidate cwd must be absolute".into());
-        }
-        match crate::client::adapters::tmux::probe(&candidate.endpoint)? {
-            crate::client::adapters::tmux::PanePresence::Present => {}
-            crate::client::adapters::tmux::PanePresence::Missing => {
-                return Err("TMUX_PANE_MISSING: registration pane is not live".into())
-            }
-            crate::client::adapters::tmux::PanePresence::Unknown => {
-                return Err("TMUX_PANE_UNKNOWN: registration pane liveness is uncertain".into())
-            }
-        }
-        if candidate
-            .endpoint
-            .codex_session_id
-            .as_deref()
-            .is_some_and(|id| id.trim().is_empty())
-            || candidate
-                .endpoint
-                .codex_thread_id
-                .as_deref()
-                .is_some_and(|id| id.trim().is_empty())
-        {
-            return Err("TMUX_IDENTITY_INVALID: empty Codex identity anchor".into());
-        }
-        return Ok(SelectedTransport {
-            kind: TransportKind::Tmux,
-            endpoint: Some(candidate.endpoint.socket_path.clone()),
-            namespace: Some(candidate.endpoint.tmux_session_id.clone()),
-            session_id: candidate
-                .endpoint
-                .codex_session_id
-                .clone()
-                .or_else(|| Some(candidate.endpoint.tmux_session_id.clone())),
-            thread_id: candidate
-                .endpoint
-                .codex_thread_id
-                .clone()
-                .or_else(|| Some(candidate.endpoint.pane_id.clone())),
-            tmux_endpoint: Some(candidate.endpoint.clone()),
-            capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
-            self_check: "tmux socket, session, pane and pane pid verified".into(),
-        });
-    }
     Err("TRANSPORT_NONE: no reachable App Server, tmux or dsh candidate was supplied".into())
+}
+
+fn validate_tmux_candidate(candidate: &crate::proto::TmuxCandidate, root: &Path) -> Result<(), String> {
+    crate::client::adapters::tmux::validate_endpoint(&candidate.endpoint)?;
+    let cwd = std::fs::canonicalize(&candidate.cwd)
+        .map_err(|error| format!("RUNTIME_BINDING_REJECTED: tmux candidate cwd: {error}"))?;
+    if !Path::new(&candidate.cwd).is_absolute() || cwd != root {
+        return Err("RUNTIME_BINDING_REJECTED: tmux candidate cwd does not match project root".into());
+    }
+    Ok(())
 }
 
 /// Admits a dsh candidate by challenging the gateway control socket once.

@@ -504,9 +504,9 @@ fn missing_subagent_retires_without_snapshot_when_responsibilities_are_resolved(
     kill_registered_worker_pane(&server, "child");
     let child = server.state.lock().unwrap().workers["child"].clone();
     assert_eq!(
-        worker_presence(&server, &child),
-        IdentityPresence::Missing,
-        "route-unavailable identity must classify as definitive Missing"
+        worker_identity_and_endpoint(&server, &child),
+        (true, Some(false)),
+        "the committed identity remains valid while the owned address is definitively missing"
     );
     let server = Arc::new(server);
     let response = dispatch(
@@ -547,9 +547,9 @@ fn live_tmux_subagent_still_requires_a_snapshot_before_close() {
     });
     let child = server.state.lock().unwrap().workers["child"].clone();
     assert_eq!(
-        worker_presence(&server, &child),
-        IdentityPresence::Unknown,
-        "a tmux pane is an address, not a runtime; even a recorded Codex thread on a tmux transport is not evidence of presence"
+        worker_identity_and_endpoint(&server, &child),
+        (true, Some(true)),
+        "the reachable address and committed identity do not provide the required snapshot"
     );
     let server = Arc::new(server);
     let response = dispatch(
@@ -600,7 +600,7 @@ fn missing_subagent_with_unresolved_responsibility_still_requires_a_snapshot() {
     ]);
     kill_registered_worker_pane(&server, "child");
     let child = server.state.lock().unwrap().workers["child"].clone();
-    assert_eq!(worker_presence(&server, &child), IdentityPresence::Missing);
+    assert_eq!(worker_identity_and_endpoint(&server, &child), (true, Some(false)));
     let server = Arc::new(server);
     let response = dispatch(
         &server,
@@ -617,6 +617,32 @@ fn missing_subagent_with_unresolved_responsibility_still_requires_a_snapshot() {
     let state = server.state.lock().unwrap();
     assert_eq!(state.subagents["missing-busy"].status, "idle");
     assert_eq!(state.tasks["task-missing-busy"].status, "working");
+    drop(state);
+    // Resolve the task through its real owner, then retain a distinct unread
+    // mailbox responsibility. Missing address alone still cannot retire it.
+    let closed_task = handle_task_close(&server, "child".into(), "token-child".into(),
+        "task-missing-busy".into(), true, Some("owner resolves the fixture task before unread-only responsibility check".into()));
+    assert!(closed_task.ok, "{closed_task:?}");
+    let finalized = handle_task_finalize_cleanup(&server, "child".into(), "token-child".into(),
+        "task-missing-busy".into());
+    assert!(finalized.ok, "{finalized:?}");
+    assert_eq!(finalized.data["cleanup"]["result"], "verified");
+    assert_eq!(server.state.lock().unwrap().tasks["task-missing-busy"].status, "closed");
+    let sent = handle_send(&server, "parent".into(), "child".into(), "notify".into(),
+        Some("unread responsibility".into()), "This child still owns an unread result.".into(),
+        None, "queued".into());
+    assert!(sent.ok, "{sent:?}");
+    let message_id = sent.data["msg_id"].as_str().unwrap();
+    let journals_before = std::fs::read(&server.journal_path).unwrap();
+    let unread_refusal = dispatch(&server, subagent_req(crate::subagent::Action::Close {
+        id: "missing-busy".into(),
+    }));
+    assert!(!unread_refusal.ok, "{unread_refusal:?}");
+    assert!(unread_refusal.error.as_deref().unwrap_or_default().contains("requires a successful snapshot"));
+    assert_eq!(std::fs::read(&server.journal_path).unwrap(), journals_before);
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.subagents["missing-busy"].status, "idle");
+    assert_eq!(state.msgs[message_id].state, "pending");
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -653,6 +679,64 @@ fn live_subagent_still_requires_a_snapshot_before_close() {
         "idle"
     );
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn subagent_close_rechecks_observed_owner_and_actor_but_allows_unrelated_writes() {
+    for changed in ["child", "parent", "unrelated"] {
+        let (mut server, root) = test_server();
+        register(&server, "parent", "thread-parent");
+        register_appserver_worker(&server, &root, "child", "thread-child");
+        server.commit(&[Event::SubagentUpdated {
+            subagent: subagent_record("observed-close", "idle", "child"),
+        }]);
+        let slot = Arc::new(std::sync::Mutex::new(None::<std::sync::Weak<Server>>));
+        let observed_journal = Arc::new(std::sync::Mutex::new(None::<Vec<u8>>));
+        let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let callback_slot = slot.clone();
+        let callback_journal = observed_journal.clone();
+        let callback_fired = fired.clone();
+        server.appserver_thread_status = Arc::new(move |_, thread| {
+            assert_eq!(thread, "thread-child");
+            if !callback_fired.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let server = callback_slot.lock().unwrap().as_ref().unwrap().upgrade().unwrap();
+                if changed == "unrelated" {
+                    server.commit(&[Event::KeepaliveUpdated {
+                        worker_id: "parent".into(), record: Default::default(),
+                    }]);
+                } else {
+                    let worker = server.state.lock().unwrap().workers[changed].clone();
+                    let result = seed_committed_owner(&server, changed,
+                        &format!("replacement-token-{changed}"), worker.transport.as_ref().unwrap(),
+                        &server.root.display().to_string(), Some(AppServerId::new("tui-default").unwrap()));
+                    assert!(result.ok, "{result:?}");
+                }
+                *callback_journal.lock().unwrap() = Some(std::fs::read(&server.journal_path).unwrap());
+            }
+            Err("APP_SERVER_THREAD_MISSING: controlled observed endpoint absence".into())
+        });
+        let server = Arc::new(server);
+        *slot.lock().unwrap() = Some(Arc::downgrade(&server));
+        let result = dispatch(&server, subagent_req(crate::subagent::Action::Close {
+            id: "observed-close".into(),
+        }));
+        assert!(fired.load(std::sync::atomic::Ordering::SeqCst), "real existing observer must execute");
+        if changed == "unrelated" {
+            assert!(result.ok, "unrelated write must not reject exact owner: {result:?}");
+            assert_eq!(server.state.lock().unwrap().subagents["observed-close"].status, "closed");
+        } else {
+            assert!(!result.ok, "changed {changed} must be refused: {result:?}");
+            let error = result.error.as_deref().unwrap_or_default();
+            assert!(if changed == "child" { error.contains("SUBAGENT_CLOSE_TARGET_CHANGED") }
+                else { error.contains("authentication failed") }, "{result:?}");
+            assert_eq!(server.state.lock().unwrap().subagents["observed-close"].status, "idle");
+            assert_eq!(std::fs::read(&server.journal_path).unwrap(),
+                observed_journal.lock().unwrap().as_ref().unwrap().clone());
+            assert_eq!(replay(&root).unwrap().subagents["observed-close"].status, "idle");
+        }
+        drop(server);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[test]

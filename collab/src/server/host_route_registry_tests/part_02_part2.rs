@@ -1,22 +1,76 @@
 #[tokio::test]
 async fn split_journal_same_pane_master_is_fenced_until_host_reconcile() {
+    split_journal_context_recovery(true, false).await;
+}
+
+#[tokio::test]
+async fn staged_split_context_recovery_without_live_pane() {
+    split_journal_context_recovery(false, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn public_cli_context_recovers_authenticated_staged_split() {
+    split_journal_context_recovery(true, true).await;
+}
+
+async fn split_journal_context_recovery(native: bool, public_cli: bool) {
     let (host, host_root, _) = test_server();
-    let (runtime, project_root, _) = test_server();
+    let (runtime, project_root, _) = runtime_fixture_for_host(&host);
     let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
     let manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
     let worker = "split-pane-master";
     let token = "token-split-pane-master";
     let app = AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
-    let old_candidates = test_candidates("split-pane-old").unwrap();
-    let first = handle_register_with_app_scope(
+    let old_candidates = if native {
+        test_candidates_at("split-pane-old", &project_root).unwrap()
+    } else {
+        TransportCandidates {
+            appserver: None,
+            dsh: None,
+            tmux: Some(crate::proto::TmuxCandidate {
+                endpoint: crate::proto::TmuxEndpoint {
+                    socket_path: host_root.join("absent.sock").display().to_string(),
+                    server_pid: 42,
+                    tmux_session_id: "$7".into(),
+                    pane_id: "%3".into(),
+                    pane_pid: 99,
+                    codex_session_id: Some("session-split-pane-old".into()),
+                    codex_thread_id: Some("split-pane-old".into()),
+                },
+                cwd: project_root.display().to_string(),
+            }),
+        }
+    };
+    // This recovery fixture starts from an already committed typed owner.
+    // Initial communication admission is covered by the public pane consumer.
+    let fixture_transport = |candidates: &TransportCandidates| {
+        let endpoint = candidates.tmux.as_ref().unwrap().endpoint.clone();
+        SelectedTransport {
+            kind: TransportKind::Tmux,
+            endpoint: Some(endpoint.socket_path.clone()),
+            namespace: Some(endpoint.tmux_session_id.clone()),
+            session_id: endpoint.codex_session_id.clone(),
+            thread_id: endpoint.codex_thread_id.clone(),
+            tmux_endpoint: Some(endpoint),
+            capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
+            self_check: "previously registered typed-owner fixture".into(),
+        }
+    };
+    let old_transport = fixture_transport(&old_candidates);
+    let prepared = prepare_register_typed(
         &runtime,
-        worker.into(),
-        token.into(),
-        project_root.display().to_string(),
+        worker,
+        token,
+        &old_transport,
+        &project_root.display().to_string(),
+        Some(GlobalState::canonical_project_scope(&project_root).unwrap()),
         Some(app.clone()),
-        Some(old_candidates.clone()),
-    );
+        false,
+    )
+    .unwrap();
+    let first = consume_prepared_register_typed(&runtime, worker, &old_transport, prepared, None);
     assert!(first.ok, "{first:?}");
+    restore_registered_peer_default_leases(&runtime);
     let old_transport = runtime.state.lock().unwrap().workers[worker]
         .transport
         .clone()
@@ -62,15 +116,21 @@ async fn split_journal_same_pane_master_is_fenced_until_host_reconcile() {
     let previous = manager
         .registration_rollback_state(&runtime, &context, worker)
         .unwrap();
-    let second = handle_register_with_app_scope_unfinalized(
+    let new_transport = fixture_transport(&new_candidates);
+    let prepared = prepare_register_typed(
         &runtime,
-        worker.into(),
-        token.into(),
-        project_root.display().to_string(),
+        worker,
+        token,
+        &new_transport,
+        &project_root.display().to_string(),
+        Some(GlobalState::canonical_project_scope(&project_root).unwrap()),
         Some(app.clone()),
-        Some(new_candidates.clone()),
-    );
+        false,
+    )
+    .unwrap();
+    let second = consume_prepared_register_typed(&runtime, worker, &new_transport, prepared, None);
     assert!(second.ok, "{second:?}");
+    restore_registered_peer_default_leases(&runtime);
     manager
         .fail_current_thread_route_publish
         .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -98,7 +158,10 @@ async fn split_journal_same_pane_master_is_fenced_until_host_reconcile() {
     manager
         .fail_current_thread_route_publish
         .store(false, std::sync::atomic::Ordering::SeqCst);
-    let retry = handle_register_with_app_scope_unfinalized(
+    // Re-establish the staged typed-owner precondition. A public Register here
+    // would perform initial candidate admission, which this restoration case
+    // expressly excludes (including its absent/killed-pane variants).
+    let retry = seed_committed_registration_fixture(
         &runtime,
         worker.into(),
         token.into(),
@@ -107,20 +170,49 @@ async fn split_journal_same_pane_master_is_fenced_until_host_reconcile() {
         Some(new_candidates.clone()),
     );
     assert!(retry.ok, "{retry:?}");
+    restore_registered_peer_default_leases(&runtime);
     assert_eq!(
         retry.data["command"]["binding"]["endpoint_generation"],
         old.endpoint_generation + 1
     );
     assert!(manager.same_pane_master_route_ready(&runtime).is_err());
+    let staged = runtime.state.lock().unwrap().global
+        .lookup_binding_for(&old.route_scope(), &old.binding_id).unwrap().clone();
+    let committed_ids = (
+        retry.data["command_id"].as_str().unwrap().to_owned(),
+        retry.data["operation_id"].as_str().unwrap().to_owned(),
+    );
+    let staged_worker = runtime.state.lock().unwrap().workers[worker].clone();
+    let staged_subscriptions = json!(runtime.state.lock().unwrap().notification_subscriptions);
     let pane = old.tmux_endpoint.as_ref().unwrap();
+    // Loss of the live pane must not block durable staged/retry ownership.
+    if native && !public_cli {
+        let output = std::process::Command::new("tmux")
+            .args(["-S", &pane.socket_path, "kill-pane", "-t", &pane.pane_id])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     assert!(manager.resolve_route_by_tmux_endpoint(pane).is_err());
     assert!(manager
         .resolve_staged_pane_recovery(pane, worker, "wrong-token")
         .is_err());
     let mut wrong_pane = pane.clone();
-    wrong_pane.pane_pid += 1;
+    wrong_pane.pane_id = "%999999".into();
     assert!(manager
         .resolve_staged_pane_recovery(&wrong_pane, worker, token)
+        .is_err());
+    let mut wrong_socket = pane.clone();
+    wrong_socket.socket_path.push_str(".other");
+    assert!(manager
+        .resolve_staged_pane_recovery(&wrong_socket, worker, token)
+        .is_err());
+    assert!(manager
+        .resolve_staged_pane_recovery(pane, "other-principal", token)
         .is_err());
     let recovered = manager
         .resolve_staged_pane_recovery(pane, worker, token)
@@ -154,11 +246,240 @@ async fn split_journal_same_pane_master_is_fenced_until_host_reconcile() {
         old_transport,
     )
     .unwrap();
+    if !public_cli {
+        let facts = crate::proto::IdentityFacts {
+            tmux: new_candidates.tmux.clone(),
+            ..Default::default()
+        };
+        let identity_path = host_paths
+            .state_root()
+            .join("identities")
+            .join(worker)
+            .join("identity.json");
+        let identity_bytes = std::fs::read(&identity_path).unwrap();
+        let journals = (
+            std::fs::read(host.journal_path.clone()).unwrap(),
+            std::fs::read(runtime.journal_path.clone()).unwrap(),
+        );
+        for invalid_field in ["token", "endpoint_generation"] {
+            let mut invalid: serde_json::Value = serde_json::from_slice(&identity_bytes).unwrap();
+            if invalid_field == "token" {
+                invalid["token"] = json!("wrong-token");
+            } else {
+                invalid["runtime"]["endpoint_generation"] = json!(old.endpoint_generation + 1);
+            }
+            std::fs::write(&identity_path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+            let (_, denied) = manager.dispatch_sync(
+                Some(context.clone()),
+                Req::IdentityContext {
+                    facts: facts.clone(),
+                    identity_context: None,
+                },
+            );
+            assert!(
+                !denied.ok,
+                "invalid staged {invalid_field} must fail: {denied:?}"
+            );
+            assert_eq!(
+                (
+                    std::fs::read(host.journal_path.clone()).unwrap(),
+                    std::fs::read(runtime.journal_path.clone()).unwrap()
+                ),
+                journals
+            );
+            std::fs::write(&identity_path, &identity_bytes).unwrap();
+        }
+        manager
+            .fail_current_thread_route_publish
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let (_, failed) = manager.dispatch_sync(
+            Some(context.clone()),
+            Req::IdentityContext {
+                facts,
+                identity_context: None,
+            },
+        );
+        assert!(
+            !failed.ok,
+            "publication failure must not complete recovery: {failed:?}"
+        );
+        assert!(failed.error.as_deref().is_some_and(|error|
+            error.starts_with("ROUTE_TRANSITION_DURABILITY_FAILED:")),
+            "the injected publication failure must be reached, not candidate admission: {failed:?}");
+        assert!(manager.resolve_route_by_tmux_endpoint(pane).is_err());
+        assert!(manager.same_pane_master_route_ready(&runtime).is_err());
+        let host_replay = replay_from_journal(&host.root, &host.journal_path).unwrap();
+        let project_replay = replay_from_journal(&runtime.root, &runtime.journal_path).unwrap();
+        assert_eq!(host_replay.global.lookup_unique_tmux_pane_route(pane), Some(&old));
+        assert_eq!(project_replay.global.lookup_binding_for(&old.route_scope(), &old.binding_id), Some(&staged));
+        assert_eq!(json!(project_replay.workers[worker]), json!(staged_worker));
+        assert_eq!(json!(project_replay.notification_subscriptions), staged_subscriptions);
+        assert_eq!(project_replay.global.lookup_master_grant_for(&old.route_scope(), &old.binding_id),
+            runtime.state.lock().unwrap().global.lookup_master_grant_for(&old.route_scope(), &old.binding_id));
+        assert!(project_replay.global.command_receipts.contains_key(&committed_ids.0));
+        manager.fail_current_thread_route_publish
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+    let grant_before_recovery = runtime
+        .state
+        .lock()
+        .unwrap()
+        .global
+        .lookup_master_grant_for(&old.route_scope(), &old.binding_id)
+        .unwrap()
+        .clone();
+    if public_cli {
+        std::fs::create_dir_all(project_root.join(".agent-collab")).unwrap();
+        let listener = tokio::net::UnixListener::bind(host_paths.socket_path()).unwrap();
+        let (shutdown, receiver) = tokio::sync::watch::channel(false);
+        let serving_manager = manager.clone();
+        let serving = tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                tokio::spawn(super::conn_task_routed(
+                    serving_manager.clone(),
+                    stream,
+                    receiver.clone(),
+                ));
+            }
+        });
+        let endpoint = new_candidates.tmux.as_ref().unwrap().endpoint.clone();
+        let binary = std::env::var_os("COLLAB_TEST_BINARY")
+            .expect("parent must supply freshly built COLLAB_TEST_BINARY for public CLI fixture");
+        let cwd = project_root.clone();
+        let state_root = host_paths.state_root().to_path_buf();
+        let host_journal = host.journal_path.clone();
+        let project_journal = runtime.journal_path.clone();
+        let mutation_manager = manager.clone();
+        let mutation_context = ProjectContext::for_registered_route(&project_root,
+            &crate::identity::RuntimeIdentity {
+                agent_id: staged.agent_id.clone(),
+                runtime_id: staged.runtime_id.clone(),
+                appserver_id: staged.app_scope_id.clone(),
+                endpoint_generation: staged.endpoint_generation,
+                binding_id: staged.binding_id.clone(),
+                session_id: staged.session_id.clone(),
+                native_thread_id: staged.native_thread_id.clone(),
+            }).unwrap();
+        let mutation_worker = worker.to_string();
+        let mutation_token = staged_worker.token.clone();
+        let mutation_command = CommandEnvelope::new(
+            CommandId::new("staged-current-state-send-command").unwrap(),
+            OperationId::new("staged-current-state-send-operation").unwrap(),
+            staged.binding_id.clone(), staged.endpoint_generation, staged.route_scope(),
+            None, None, None, None,
+        );
+        let output = tokio::task::spawn_blocking(move || {
+            let mut command = std::process::Command::new(binary);
+            command.args(["context", "--op", "ctxop-host-staged-split"])
+                .current_dir(cwd)
+                .env("COLLAB_STATE_DIR", state_root)
+                .env(
+                    "TMUX",
+                    format!("{},{},0", endpoint.socket_path, endpoint.server_pid),
+                )
+                .env("TMUX_PANE", endpoint.pane_id)
+                .env("CODEX_SESSION_ID", endpoint.codex_session_id.unwrap())
+                .env("CODEX_THREAD_ID", endpoint.codex_thread_id.unwrap())
+                .env_remove("CODEX_APP_SERVER_SOCKET")
+                .env_remove("COLLAB_APPSERVER_SOCKET")
+                .env_remove("DSH_SESSION_ID")
+                .env_remove("COLLAB_SOCKET_PATH")
+                .env_remove("COLLAB_HOST_SOCKET");
+            let first = command.output().unwrap();
+            assert!(first.status.success(), "{}", String::from_utf8_lossy(&first.stderr));
+            let initial: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+            assert_eq!(initial["result"]["snapshot"]["inbox"]["unread"], 0);
+            let host_initial = std::fs::read(&host_journal).unwrap();
+            let project_initial = std::fs::read(&project_journal).unwrap();
+            let unchanged_repeat = command.output().unwrap();
+            assert!(unchanged_repeat.status.success(), "{}", String::from_utf8_lossy(&unchanged_repeat.stderr));
+            let unchanged: serde_json::Value = serde_json::from_slice(&unchanged_repeat.stdout).unwrap();
+            assert_eq!(unchanged["result"]["outcome"], "completed");
+            assert_eq!(unchanged["result"]["snapshot"]["binding"], initial["result"]["snapshot"]["binding"]);
+            assert_eq!(unchanged["result"]["snapshot"]["identity"], initial["result"]["snapshot"]["identity"]);
+            assert_eq!(unchanged["result"]["snapshot"]["peers"], initial["result"]["snapshot"]["peers"]);
+            assert_eq!(unchanged["result"]["snapshot"]["inbox"]["unread"], 0);
+            assert_eq!(std::fs::read(&host_journal).unwrap(), host_initial);
+            assert_eq!(std::fs::read(&project_journal).unwrap(), project_initial);
+            // Mutate through the existing authenticated public message owner.
+            // A cached first snapshot cannot satisfy this current-state readback.
+            let (_, sent) = mutation_manager.dispatch_sync(Some(mutation_context), Req::Send {
+                from: mutation_worker.clone(), worker_id: Some(mutation_worker.clone()),
+                token: Some(mutation_token), command: Some(mutation_command), to: mutation_worker,
+                mtype: "notify".into(), subject: Some("current-context-readback".into()),
+                body: "A message committed after the original context completed.".into(),
+                in_reply_to: None, delivery: "queued".into(),
+            });
+            assert!(sent.ok, "{sent:?}");
+            assert_eq!(sent.data["durable"], true);
+            let message_id = sent.data["msg_id"].as_str().unwrap();
+            let host_before = std::fs::read(&host_journal).unwrap();
+            let project_before = std::fs::read(&project_journal).unwrap();
+            let repeated = command.output().unwrap();
+            assert!(repeated.status.success(), "{}", String::from_utf8_lossy(&repeated.stderr));
+            let again: serde_json::Value = serde_json::from_slice(&repeated.stdout).unwrap();
+            assert_eq!(again["result"]["outcome"], "completed");
+            assert_eq!(again["result"]["operation_id"], initial["result"]["operation_id"]);
+            assert_eq!(again["result"]["phase"], initial["result"]["phase"]);
+            assert_eq!(again["result"]["committed_phases"], initial["result"]["committed_phases"]);
+            assert_eq!(again["result"]["snapshot"]["binding"], initial["result"]["snapshot"]["binding"]);
+            assert_eq!(again["result"]["snapshot"]["identity"], initial["result"]["snapshot"]["identity"]);
+            assert_eq!(again["result"]["snapshot"]["peers"], initial["result"]["snapshot"]["peers"]);
+            for field in ["worker_id", "scope", "grant_id", "grant_generation", "binding_id", "endpoint_generation"] {
+                assert_eq!(again["result"]["snapshot"]["master"][field],
+                    initial["result"]["snapshot"]["master"][field]);
+            }
+            assert_eq!(again["bootstrap"]["identity"], "daemon-owned");
+            assert_eq!(again["bootstrap"]["registered"], true);
+            assert_eq!(again["result"]["snapshot"]["inbox"]["unread"], 1);
+            assert_eq!(again["result"]["snapshot"]["inbox"]["messages"][0]["id"], message_id);
+            assert_eq!(std::fs::read(&host_journal).unwrap(), host_before);
+            assert_eq!(std::fs::read(&project_journal).unwrap(), project_before);
+            first
+        })
+        .await
+        .unwrap();
+        shutdown.send(true).unwrap();
+        serving.abort();
+        assert!(
+            output.status.success(),
+            "CLI exit={:?} stdout={} stderr={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["result"]["outcome"], "completed", "{value}");
+        assert_eq!(
+            value["result"]["snapshot"]["binding"]["endpoint_generation"],
+            old.endpoint_generation + 1,
+            "{value}"
+        );
+        assert!(manager.same_pane_master_route_ready(&runtime).is_ok());
+        assert_eq!(
+            runtime
+                .state
+                .lock()
+                .unwrap()
+                .global
+                .lookup_master_grant_for(&old.route_scope(), &old.binding_id),
+            Some(&grant_before_recovery)
+        );
+        let project_replay = replay_from_journal(&runtime.root, &runtime.journal_path).unwrap();
+        assert_eq!(project_replay.global.lookup_binding_for(&old.route_scope(), &old.binding_id), Some(&staged));
+        assert_eq!(project_replay.global.lookup_master_grant_for(&old.route_scope(), &old.binding_id), Some(&grant_before_recovery));
+        std::fs::remove_dir_all(host_root).unwrap();
+        std::fs::remove_dir_all(project_root).unwrap();
+        return;
+    }
     let (_, completed) = manager.dispatch_sync(
         Some(context),
         Req::IdentityContext {
             facts: crate::proto::IdentityFacts {
-                tmux: new_candidates.tmux,
+                // The staged proof uses the persisted exact endpoint and
+                // credential; this report is not live admission evidence.
+                tmux: new_candidates.tmux.clone(),
                 ..Default::default()
             },
             identity_context: None,
@@ -170,6 +491,43 @@ async fn split_journal_same_pane_master_is_fenced_until_host_reconcile() {
         old.endpoint_generation + 1
     );
     assert!(manager.same_pane_master_route_ready(&runtime).is_ok());
+    assert_eq!(
+        runtime
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_master_grant_for(&old.route_scope(), &old.binding_id),
+        Some(&grant_before_recovery)
+    );
+    let binding_before_read = completed.data["snapshot"]["binding"].clone();
+    let (_, ordinary) = manager.dispatch_sync(
+        Some(context_with_app(
+            &project_root,
+            crate::identity::CLI_APP_SERVER_ID,
+        )),
+        Req::IdentityContext {
+            facts: crate::proto::IdentityFacts {
+                tmux: new_candidates.tmux,
+                ..Default::default()
+            },
+            identity_context: None,
+        },
+    );
+    assert!(
+        ordinary.ok,
+        "ordinary context after convergence: {ordinary:?}"
+    );
+    assert_eq!(ordinary.data["snapshot"]["binding"], binding_before_read);
+    let host_replay = replay_from_journal(&host.root, &host.journal_path).unwrap();
+    let project_replay = replay_from_journal(&runtime.root, &runtime.journal_path).unwrap();
+    assert_eq!(host_replay.global.lookup_unique_tmux_pane_route(pane), Some(&staged));
+    assert_eq!(project_replay.global.lookup_binding_for(&old.route_scope(), &old.binding_id), Some(&staged));
+    assert_eq!(json!(project_replay.workers[worker]), json!(staged_worker));
+    assert_eq!(project_replay.global.lookup_master_grant_for(&old.route_scope(), &old.binding_id), Some(&grant_before_recovery));
+    assert_eq!(json!(project_replay.notification_subscriptions), staged_subscriptions);
+    assert!(project_replay.global.command_receipts.contains_key(&committed_ids.0));
+    assert_eq!(project_replay.global.command_receipts[&committed_ids.0].operation_id.as_str(), committed_ids.1);
     std::fs::remove_dir_all(host_root).unwrap();
     std::fs::remove_dir_all(project_root).unwrap();
 }
@@ -184,7 +542,7 @@ async fn startup_reconciles_a_lagged_same_pane_master_route() {
     let token = "token-lagged-startup-pane-master";
     let app = AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
     let candidates = test_candidates("lagged-startup-pane-master").unwrap();
-    let first = handle_register_with_app_scope(
+    let first = seed_committed_registration_fixture(
         &runtime,
         worker.into(),
         token.into(),
@@ -260,7 +618,7 @@ async fn superseded_same_pane_master_does_not_fence_project_route() {
     let master_worker = "stale-same-pane-master";
     let master_token = "token-stale-same-pane-master";
     let master_candidates = test_candidates(master_worker).unwrap();
-    let first = handle_register_with_app_scope_unfinalized(
+    let first = seed_committed_registration_fixture(
         &runtime,
         master_worker.into(),
         master_token.into(),
@@ -313,7 +671,7 @@ async fn superseded_same_pane_master_does_not_fence_project_route() {
     let endpoint = &mut peer_candidates.tmux.as_mut().unwrap().endpoint;
     endpoint.codex_session_id = Some("session-live-same-pane-peer".into());
     endpoint.codex_thread_id = Some("live-same-pane-peer-thread".into());
-    let peer = handle_register_with_app_scope_unfinalized(
+    let peer = seed_committed_registration_fixture(
         &runtime,
         peer_worker.into(),
         peer_token.into(),
@@ -371,8 +729,17 @@ async fn cross_scope_pane_claimant_takes_the_pane_without_fencing_the_project_ro
 
     let master_worker = "cross-scope-pane-master";
     let master_token = "token-cross-scope-pane-master";
-    let candidates = test_candidates(master_worker).unwrap();
-    let registered = handle_register_with_app_scope_unfinalized(
+    // This guard compares prior durable host claims across projects. A live
+    // initial participant adds no guarantee to the claimant/index predicate.
+    let candidates = TransportCandidates {
+        appserver: None,
+        dsh: None,
+        tmux: Some(crate::proto::TmuxCandidate {
+            endpoint: committed_tmux_endpoint(&project_root, master_worker),
+            cwd: project_root.display().to_string(),
+        }),
+    };
+    let registered = seed_committed_registration_fixture(
         &runtime,
         master_worker.into(),
         master_token.into(),
@@ -425,7 +792,7 @@ async fn cross_scope_pane_claimant_takes_the_pane_without_fencing_the_project_ro
     let peer_endpoint = &mut peer_candidates.tmux.as_mut().unwrap().endpoint;
     peer_endpoint.codex_session_id = Some("session-cross-scope-pane-peer".into());
     peer_endpoint.codex_thread_id = Some("cross-scope-pane-peer-thread".into());
-    let peer = handle_register_with_app_scope_unfinalized(
+    let peer = seed_committed_registration_fixture(
         &peer_runtime,
         peer_worker.into(),
         "token-cross-scope-pane-peer".into(),
@@ -488,10 +855,8 @@ async fn cross_scope_pane_claimant_takes_the_pane_without_fencing_the_project_ro
             "the evicted project's address is gone from the index"
         );
     }
-    assert!(
-        manager.same_pane_master_route_ready(&runtime).is_ok(),
-        "an evicted claimant must not fence another project's route"
-    );
+    let ready = manager.same_pane_master_route_ready(&runtime);
+    assert!(ready.is_ok(), "an evicted claimant must not fence another project's route: {ready:?}");
     assert!(
         manager.reconcile_same_pane_master_routes().is_ok(),
         "the startup reconciler must skip the evicted claimant instead of failing"
@@ -512,7 +877,7 @@ async fn same_pane_master_still_fences_when_host_route_is_missing() {
     let master_worker = "missing-host-route-pane-master";
     let master_token = "token-missing-host-route-pane-master";
     let candidates = test_candidates(master_worker).unwrap();
-    let first = handle_register_with_app_scope_unfinalized(
+    let first = seed_committed_registration_fixture(
         &runtime,
         master_worker.into(),
         master_token.into(),
@@ -575,7 +940,7 @@ async fn same_pane_master_still_fences_when_host_route_is_missing() {
     let endpoint = &mut peer_candidates.tmux.as_mut().unwrap().endpoint;
     endpoint.codex_session_id = Some("session-active-same-pane-peer".into());
     endpoint.codex_thread_id = Some("active-same-pane-peer-thread".into());
-    let peer = handle_register_with_app_scope_unfinalized(
+    let peer = seed_committed_registration_fixture(
         &runtime,
         "active-same-pane-peer".into(),
         "token-active-same-pane-peer".into(),
@@ -615,7 +980,7 @@ async fn closed_same_pane_peer_keeps_the_pane_ownership() {
     let master_worker = "closed-peer-pane-master";
     let master_token = "token-closed-peer-pane-master";
     let candidates = test_candidates(master_worker).unwrap();
-    let first = handle_register_with_app_scope_unfinalized(
+    let first = seed_committed_registration_fixture(
         &runtime,
         master_worker.into(),
         master_token.into(),
@@ -669,7 +1034,7 @@ async fn closed_same_pane_peer_keeps_the_pane_ownership() {
     let endpoint = &mut peer_candidates.tmux.as_mut().unwrap().endpoint;
     endpoint.codex_session_id = Some("session-closed-same-pane-peer".into());
     endpoint.codex_thread_id = Some("closed-same-pane-peer-thread".into());
-    let peer = handle_register_with_app_scope_unfinalized(
+    let peer = seed_committed_registration_fixture(
         &runtime,
         peer_worker.into(),
         peer_token.into(),
@@ -708,7 +1073,7 @@ async fn closed_same_pane_peer_keeps_the_pane_ownership() {
     // the close, so the pane stays owned by a worker that is gone.
     let closer_worker = "closed-peer-pane-closer";
     let closer_token = "token-closed-peer-pane-closer";
-    let closer = handle_register_with_app_scope_unfinalized(
+    let closer = seed_committed_registration_fixture(
         &runtime,
         closer_worker.into(),
         closer_token.into(),

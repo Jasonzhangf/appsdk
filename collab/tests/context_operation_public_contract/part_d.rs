@@ -212,7 +212,7 @@ fn peer_lifecycle_c6_exact_missing_thread_is_classified_and_retired() {
 fn peer_lifecycle_c8_unsupported_transport_stays_cleanup_open() {
     let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (mut fixture, master_pane) = Fixture::isolated("peer-c8");
-    let master_seed = fixture.context(Some("peer-c8-master"), Some(&master_pane));
+    let master_seed = fixture.registered_context("peer-c8-master", &master_pane);
     let master = lifecycle_identity(&fixture, &master_seed);
     fixture.run_ok(
         &[
@@ -224,7 +224,7 @@ fn peer_lifecycle_c8_unsupported_transport_stays_cleanup_open() {
         Some(&master_pane),
     );
     let child_pane = second_pane(&fixture, "peer-c8-child", master_pane.server_pid);
-    let child_seed = fixture.context(Some("peer-c8-child"), Some(&child_pane));
+    let child_seed = fixture.registered_context("peer-c8-child", &child_pane);
     let child = lifecycle_identity(&fixture, &child_seed);
     let target = lifecycle_read(
         &fixture,

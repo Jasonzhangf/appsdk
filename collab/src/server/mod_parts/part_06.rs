@@ -84,10 +84,10 @@ fn handle_notification_subscribe(
     let Some(transport) = selected_transport_for_worker(&worker) else {
         return Resp::err("registered worker has no server-selected transport");
     };
-    let Some(thread_id) = transport.thread_id.clone() else {
+    let Some(thread_id) = notification_target(&transport) else {
         return Resp::err("selected transport has no route address");
     };
-    let target = thread_id;
+    let target = thread_id.to_owned();
     if goal_deadline {
         let requested_key = trigger_ms
             .or_else(|| trigger_times_ms.first().copied())
@@ -295,7 +295,7 @@ fn verify(state: &State, worker_id: &str, token: &str) -> Result<WorkerRec, Resp
 fn migration_issues(server: &Server, state: &State) -> Vec<String> {
     let mut issues = Vec::new();
     for worker in state.workers.values() {
-        match worker_presence(server, worker) {
+        match worker_presence_in_state(server, state, worker) {
             IdentityPresence::Present => {}
             IdentityPresence::Cold => {}
             IdentityPresence::Missing => issues.push(format!(
@@ -749,11 +749,26 @@ fn consume_prepared_register_typed(
     prepared: PreparedRegisterEnvelope,
     approval: Option<&RegisterApprovalProof>,
 ) -> Resp {
+    consume_register_typed(server, worker_id, transport, prepared, approval, None)
+}
+
+fn consume_register_typed(
+    server: &Server,
+    worker_id: &str,
+    transport: &SelectedTransport,
+    prepared: PreparedRegisterEnvelope,
+    approval: Option<&RegisterApprovalProof>,
+    verified: Option<&register_reply::Record>,
+) -> Resp {
     let registered_at = match &prepared.typed.command {
         TypedCommand::RegisterWorker { worker, .. } => worker.registered_ms,
     };
     let command = prepared.typed.command.clone();
-    match server.consume_prepared_register_with_approval(prepared, approval) {
+    let committed = match verified {
+        Some(record) => server.consume_verified_register(record, approval),
+        None => server.consume_prepared_register_with_approval(prepared, approval),
+    };
+    match committed {
         Ok(outcome) => {
             let (role_brief, _) = {
                 let st = server.state.lock().unwrap();
@@ -778,32 +793,53 @@ fn consume_prepared_register_typed(
     }
 }
 
-/// Legacy Register owner: prepare then consume with no outer observation.
-/// Every other Register path must route through the same two functions so the
-/// identifier algorithm only lives in `part_02.rs`.
-fn register_typed(
+/// Read the existing scoped Register owner. This never prepares, consumes,
+/// probes, or projects an invented command from a receipt.
+fn committed_register_readback(
     server: &Server,
+    binding: &RuntimeBinding,
     worker_id: &str,
     token: &str,
-    transport: &SelectedTransport,
-    cwd: &str,
-    project_scope: Option<ProjectScopeId>,
-    app_scope: Option<AppServerId>,
-    reuse_existing: bool,
-) -> Resp {
-    register_typed_observed(
-        server,
-        worker_id,
-        token,
-        transport,
-        cwd,
-        project_scope,
-        app_scope,
-        reuse_existing,
-        None,
-        None,
-    )
+) -> Result<(global_state::CommandReceipt, SelectedTransport), String> {
+    let state = server.state.lock().unwrap();
+    if binding.agent_id.as_str() != worker_id
+        || state
+            .global
+            .lookup_binding_for(&binding.route_scope(), &binding.binding_id)
+            != Some(binding)
+    {
+        return Err("RECOVERY_RECONCILE_REQUIRED: committed staged binding changed".into());
+    }
+    let worker = state
+        .workers
+        .get(worker_id)
+        .ok_or("RECOVERY_RECONCILE_REQUIRED: committed staged worker missing")?;
+    if worker.token != token {
+        return Err("TOKEN_MISMATCH: staged readback credential does not own worker".into());
+    }
+    let transport = selected_transport_for_worker(worker)
+        .ok_or("RECOVERY_RECONCILE_REQUIRED: committed selected adaptor missing")?;
+    if transport.kind != TransportKind::Tmux || transport.tmux_endpoint != binding.tmux_endpoint {
+        return Err(
+            "RECOVERY_RECONCILE_REQUIRED: committed selected adaptor differs from binding".into(),
+        );
+    }
+    let receipt = state
+        .global
+        .command_receipts
+        .values()
+        .filter(|receipt| register_receipt_names_binding(receipt, binding))
+        .max_by_key(|receipt| (receipt.revision, receipt.sequence))
+        .ok_or("RECOVERY_RECONCILE_REQUIRED: exact committed Register receipt missing")?;
+    if receipt.outcome.get("scope") != Some(&json!(binding.route_scope())) {
+        return Err(
+            "RECOVERY_RECONCILE_REQUIRED: committed Register receipt scope missing or different"
+                .into(),
+        );
+    }
+    Ok((receipt.clone(), transport))
 }
+include!("part_06/register_typed.rs");
 
 /// Prepare then, before consume, hand the exact prepared envelope to
 /// `before_consume`. A hook error aborts the operation without consuming, so a
@@ -819,29 +855,88 @@ fn register_typed_observed(
     reuse_existing: bool,
     register_approval: Option<&RegisterApprovalProof>,
     before_consume: Option<&mut dyn FnMut(&PreparedRegisterEnvelope) -> Result<(), String>>,
+    outer_binding: Option<&RegisterOuterBinding>,
 ) -> Resp {
-    let prepared = match prepare_register_typed(
-        server,
-        worker_id,
-        token,
-        transport,
-        cwd,
-        project_scope,
-        app_scope,
-        reuse_existing,
-    ) {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            return Resp::err(format!("typed registrar failed to build command: {error}"))
-        }
+    let root = server.host_paths.state_root();
+    let retained = outer_binding
+        .and_then(|binding| register_reply::read(root, &binding.operation_id).transpose());
+    let prepared = match retained {
+        Some(Ok(record)) => record.prepared,
+        Some(Err(error)) => return Resp::err(error),
+        None => match prepare_register_typed(
+            server,
+            worker_id,
+            token,
+            transport,
+            cwd,
+            project_scope,
+            app_scope,
+            reuse_existing,
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return Resp::err(format!("typed registrar failed to build command: {error}"))
+            }
+        },
     };
     if let Some(before_consume) = before_consume {
         if let Err(error) = before_consume(&prepared) {
             return Resp::err(error);
         }
     }
-    let response =
-        consume_prepared_register_typed(server, worker_id, transport, prepared, register_approval);
+    let TypedCommand::RegisterWorker {
+        binding, worker, ..
+    } = &prepared.typed.command;
+    let persisted_restore = {
+        let state = server.state.lock().unwrap();
+        state
+            .global
+            .lookup_binding_for(&binding.route_scope(), &binding.binding_id)
+            .is_some_and(|current| current.same_principal(binding))
+            && state.workers.get(&worker.id).is_some_and(|existing| {
+                existing.token == worker.token
+                    || approved_register_authorized(
+                        register_approval,
+                        &worker.id,
+                        Some(&binding.project_scope),
+                        Some(&binding.app_scope_id),
+                    )
+            })
+    };
+    let mut verified = None;
+    if !persisted_restore && !register_reply::committed(server, &prepared.nested_command_id) {
+        let gate = register_reply::ensure_pending(
+            root,
+            worker_id,
+            transport,
+            &prepared,
+            outer_binding,
+            register_reply::Purpose::InitialRegister,
+        )
+        .and_then(|record| {
+            register_reply::enforce(root, record.clone())?;
+            let record = register_reply::read(root, &record.operation_id)?
+                .ok_or("REGISTER_REPLY_PENDING_MISSING")?;
+            register_reply::verified_for_commit(root, &record)?;
+            Ok(record)
+        });
+        match gate {
+            Ok(record) => verified = Some(record),
+            Err(error) => {
+                clear_context_cancel_operation();
+                crate::server::clear_context_register_start_binding();
+                return Resp::err(error);
+            }
+        }
+    }
+    let response = consume_register_typed(
+        server,
+        worker_id,
+        transport,
+        prepared,
+        register_approval,
+        verified.as_ref(),
+    );
     clear_context_cancel_operation();
     crate::server::clear_context_register_start_binding();
     response
@@ -881,6 +976,7 @@ pub(crate) fn register_created_peer(
         Some(context.project_scope.clone()),
         Some(context.app_scope_id.clone()),
         false,
+        None,
         None,
         None,
     );
@@ -993,24 +1089,19 @@ pub(crate) fn commit_current_thread_route_for_runtime(
                 "ROUTE_TRANSITION_INVALID: successful registration for {worker_id} has no matching runtime binding"
             )
         })?;
-    let native_thread_id = binding.native_thread_id.as_ref().ok_or_else(|| {
-        format!(
-            "ROUTE_TRANSITION_INVALID: successful registration for {worker_id} has no native App Server thread"
-        )
-    })?;
-    let session_id = binding.session_id.as_ref().ok_or_else(|| {
-        format!(
-            "ROUTE_TRANSITION_INVALID: successful registration for {worker_id} has no session id"
-        )
-    })?;
-    if route_owner
-        .state
-        .lock()
-        .unwrap()
-        .global
-        .lookup_current_thread_route(session_id, native_thread_id)
-        == Some(&binding)
-    {
+    let current = {
+        let state = route_owner.state.lock().unwrap();
+        if let Some(endpoint) = binding.tmux_endpoint.as_ref() {
+            state.global.lookup_unique_tmux_pane_route(endpoint) == Some(&binding)
+        } else if let (Some(session), Some(thread)) =
+            (&binding.session_id, &binding.native_thread_id)
+        {
+            state.global.lookup_current_thread_route(session, thread) == Some(&binding)
+        } else {
+            return Err("ROUTE_TRANSITION_INVALID: registration has no route address".into());
+        }
+    };
+    if current {
         return Ok(());
     }
     // A successful registration is live activity, so it is the later writer for
@@ -1153,6 +1244,9 @@ fn approved_register_fence_current(
     project_scope: &ProjectScopeId,
     app_scope: &AppServerId,
 ) -> bool {
+    if proof.incumbent_binding_id.is_empty() {
+        return true;
+    }
     let route_scope = RouteScope {
         app_scope_id: app_scope.clone(),
         project_scope_id: project_scope.clone(),
@@ -1164,8 +1258,7 @@ fn approved_register_fence_current(
         .global
         .lookup_binding_for(&route_scope, &binding_id)
         .is_some_and(|binding| {
-            binding.agent_id.as_str() == proof.target_identity
-                && binding.binding_id.as_str() == proof.incumbent_binding_id
+            binding.binding_id.as_str() == proof.incumbent_binding_id
                 && binding.endpoint_generation == proof.incumbent_endpoint_generation
         })
 }
@@ -1305,6 +1398,7 @@ fn handle_register_with_app_scope_inner_bound(
             reuse_existing,
             outer_binding.and_then(RegisterOuterBinding::approval),
             Some(&mut before_consume),
+            outer_binding,
         );
         if resp.ok {
             if reuse_existing {
@@ -1335,6 +1429,7 @@ fn handle_register_with_app_scope_inner_bound(
         false,
         outer_binding.and_then(RegisterOuterBinding::approval),
         Some(&mut before_consume),
+        outer_binding,
     )
 }
 
@@ -1401,6 +1496,5 @@ fn route_scope_for_root(root: &Path, state: &State) -> Result<Option<RouteScope>
         project_scope_id: project_scope,
     }))
 }
-
 
 include!("part_06/master_recovery.rs");

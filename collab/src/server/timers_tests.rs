@@ -70,6 +70,52 @@ fn register_tmux(server: &Server, worker_id: &str, endpoint: crate::proto::TmuxE
     assert!(response.ok, "worker registration failed: {response:?}");
 }
 
+fn seed_ledger_owner(server: &Server, worker_id: &str) {
+    let endpoint = crate::proto::TmuxEndpoint {
+        socket_path: server
+            .root
+            .join("prior-ledger-owner.sock")
+            .display()
+            .to_string(),
+        server_pid: 42,
+        tmux_session_id: "$1".into(),
+        pane_id: "%1".into(),
+        pane_pid: 99,
+        codex_session_id: Some(format!("session-{worker_id}")),
+        codex_thread_id: Some(format!("thread-{worker_id}")),
+    };
+    let transport = SelectedTransport {
+        kind: crate::proto::TransportKind::Tmux,
+        endpoint: Some(endpoint.socket_path.clone()),
+        namespace: Some(endpoint.tmux_session_id.clone()),
+        session_id: endpoint.codex_session_id.clone(),
+        thread_id: endpoint.codex_thread_id.clone(),
+        tmux_endpoint: Some(endpoint),
+        capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
+        self_check: "prior committed ledger owner".into(),
+    };
+    let response = crate::server::peer_tests::seed_committed_owner(
+        server,
+        worker_id,
+        &format!("token-{worker_id}"),
+        &transport,
+        &server.root.display().to_string(),
+        Some(crate::identity::AppServerId::new("tui-default").unwrap()),
+    );
+    assert!(response.ok, "committed ledger fixture failed: {response:?}");
+    let binding = server
+        .state
+        .lock()
+        .unwrap()
+        .global
+        .lookup_binding(&crate::identity::BindingId::new(format!("binding-{worker_id}")).unwrap())
+        .unwrap()
+        .clone();
+    server
+        .commit_checked(&[Event::GlobalCurrentThreadRouteSet { binding }])
+        .unwrap();
+}
+
 fn register_master(server: &Server) {
     register(server, "master");
     let now = now_ms();
@@ -789,7 +835,7 @@ fn ledger_maintenance_skips_routes_this_daemon_does_not_own() {
     use crate::server::global_state::RuntimeBinding;
 
     let (server, root) = test_server();
-    register(&server, "codex-owner");
+    seed_ledger_owner(&server, "codex-owner");
     let foreign_scope = ProjectScopeId::new("/tmp/collab-unregistered-project".to_owned()).unwrap();
     let foreign_app = AppServerId::new("appserver-cli".to_owned()).unwrap();
     {
@@ -852,7 +898,7 @@ fn ledger_commit_drops_classifications_the_reducer_would_reject() {
     use crate::server::state::Event;
 
     let (server, root) = test_server();
-    register(&server, "codex-owner");
+    seed_ledger_owner(&server, "codex-owner");
     let owned = {
         let state = server.state.lock().unwrap();
         let project_scope =

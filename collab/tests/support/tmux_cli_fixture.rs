@@ -98,6 +98,67 @@ impl Fixture {
             .cloned()
             .unwrap_or(value)
     }
+
+    fn registered_context(&self, pane: &Pane, native_ids: bool) -> Value {
+        self.registered_context_with_originator(pane, native_ids, "Codex TUI")
+    }
+
+    fn registered_context_with_originator(
+        &self,
+        pane: &Pane,
+        native_ids: bool,
+        originator: &str,
+    ) -> Value {
+        let label = format!("participant-{}", pane.pane_id.trim_start_matches('%'));
+        let script_path = self.root.join(format!("{label}.sh"));
+        let initial = self.root.join(format!("{label}.initial"));
+        let result = self.root.join(format!("{label}.result"));
+        let error = self.root.join(format!("{label}.error"));
+        let done = self.root.join(format!("{label}.done"));
+        let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+        let native = if native_ids {
+            format!(
+                "export CODEX_SESSION_ID={} CODEX_THREAD_ID={}\n",
+                quote(&pane.session_anchor),
+                quote(&pane.thread_anchor)
+            )
+        } else {
+            "unset CODEX_SESSION_ID CODEX_THREAD_ID CODEX_THREAD\n".into()
+        };
+        let script = format!(
+            "set -e\ncd {}\nunset COLLAB_SOCKET_PATH COLLAB_HOST_SOCKET COLLAB_LOCK_PATH COLLAB_HOST_LOCK COLLAB_APPSERVER_SOCKET CODEX_APP_SERVER_SOCKET COLLAB_APPSERVER_NAMESPACE COLLAB_WORKER DSH_SESSION_ID\nexport COLLAB_STATE_DIR={} CODEX_HOME={} CODEX_INTERNAL_ORIGINATOR_OVERRIDE={}\n{native}{} context --op {} >{} 2>{} || true\nIFS= read -r challenge\ncase \"$challenge\" in 'COLLAB_REGISTER_CHALLENGE '{{*) ;; *) exit 3 ;; esac\n{} context --return-challenge \"${{challenge#COLLAB_REGISTER_CHALLENGE }}\" >{} 2>>{}\nprintf done >{}\nsleep 600\n",
+            quote(&self.root.to_string_lossy()), quote(&self.host_state.to_string_lossy()),
+            quote(&self.root.join("home").to_string_lossy()), quote(originator), quote(&self.binary.to_string_lossy()),
+            quote(&label), quote(&initial.to_string_lossy()), quote(&error.to_string_lossy()),
+            quote(&self.binary.to_string_lossy()), quote(&result.to_string_lossy()),
+            quote(&error.to_string_lossy()), quote(&done.to_string_lossy())
+        );
+        std::fs::write(&script_path, script).unwrap();
+        tmux(
+            &self.tmux_socket,
+            &[
+                "respawn-pane",
+                "-k",
+                "-t",
+                &pane.pane_id,
+                &format!("sh {}", quote(&script_path.to_string_lossy())),
+            ],
+        );
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !done.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            done.exists(),
+            "participant setup failed: {} {}",
+            std::fs::read_to_string(&error).unwrap_or_default(),
+            std::fs::read_to_string(&result).unwrap_or_default()
+        );
+        let value: Value = serde_json::from_slice(&std::fs::read(result).unwrap()).unwrap();
+        assert_eq!(value["ok"], true, "{value}");
+        assert_eq!(value["result"]["outcome"], "completed", "{value}");
+        value["result"]["snapshot"].clone()
+    }
 }
 
 impl Drop for Fixture {

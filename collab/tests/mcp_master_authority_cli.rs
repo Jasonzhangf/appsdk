@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Output, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn binaries() -> (PathBuf, PathBuf) {
     let explicit_cli = std::env::var_os("COLLAB_TEST_BINARY");
@@ -115,6 +115,50 @@ impl Fixture {
             .and_then(|result| result.get("snapshot"))
             .cloned()
             .unwrap_or(value)
+    }
+
+    fn registered_context(&self) -> Value {
+        let script_path = self.root.join("participant.sh");
+        let initial = self.root.join("participant.initial");
+        let result = self.root.join("participant.result");
+        let error = self.root.join("participant.error");
+        let done = self.root.join("participant.done");
+        let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+        let script = format!(
+            "set -e\ncd {}\nunset COLLAB_SOCKET_PATH COLLAB_HOST_SOCKET COLLAB_LOCK_PATH COLLAB_HOST_LOCK COLLAB_APPSERVER_SOCKET CODEX_APP_SERVER_SOCKET COLLAB_APPSERVER_NAMESPACE COLLAB_WORKER DSH_SESSION_ID\nexport COLLAB_STATE_DIR={} CODEX_HOME={} CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex TUI' CODEX_SESSION_ID='mcp-fixture-session' CODEX_THREAD_ID='mcp-fixture-thread'\n{} context --op mcp-authority-seed >{} 2>{} || true\nIFS= read -r challenge\ncase \"$challenge\" in 'COLLAB_REGISTER_CHALLENGE '{{*) ;; *) exit 3 ;; esac\n{} context --return-challenge \"${{challenge#COLLAB_REGISTER_CHALLENGE }}\" >{} 2>>{}\nprintf done >{}\nsleep 600\n",
+            quote(&self.root.to_string_lossy()),
+            quote(&self.root.join("h").to_string_lossy()),
+            quote(&self.root.join("home").to_string_lossy()),
+            quote(&self.cli.to_string_lossy()),
+            quote(&initial.to_string_lossy()),
+            quote(&error.to_string_lossy()),
+            quote(&self.cli.to_string_lossy()),
+            quote(&result.to_string_lossy()),
+            quote(&error.to_string_lossy()),
+            quote(&done.to_string_lossy()),
+        );
+        std::fs::write(&script_path, script).unwrap();
+        self.tmux(&[
+            "respawn-pane",
+            "-k",
+            "-t",
+            &self.pane,
+            &format!("sh {}", quote(&script_path.to_string_lossy())),
+        ]);
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !done.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            done.exists(),
+            "actual MCP participant did not return: {} {}",
+            std::fs::read_to_string(&error).unwrap_or_default(),
+            std::fs::read_to_string(&result).unwrap_or_default()
+        );
+        let response: Value = serde_json::from_slice(&std::fs::read(result).unwrap()).unwrap();
+        assert_eq!(response["ok"], true, "{response}");
+        assert_eq!(response["result"]["outcome"], "completed", "{response}");
+        response["result"]["snapshot"].clone()
     }
 
     fn start_mcp(&self) -> Mcp {
@@ -258,7 +302,7 @@ impl Drop for Mcp {
 #[test]
 fn mcp_tools_call_clears_authority_and_refuses_invalid_approval() {
     let fixture = Fixture::new();
-    let registered = fixture.cli(&["context"]);
+    let registered = fixture.registered_context();
     let holder = registered["identity"]["worker_id"]
         .as_str()
         .unwrap()

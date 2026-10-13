@@ -80,16 +80,11 @@ fn persisted_runtime_matches_scope(scope: &Scope, ident: &Identity) -> anyhow::R
         let Some(persisted_endpoint) = transport.tmux_endpoint.as_ref() else {
             return Ok(false);
         };
-        let Ok(current) = crate::client::adapters::tmux::candidate_from_env() else {
+        let Ok(current) = crate::client::adapters::tmux::anchor_from_env() else {
             return Ok(false);
         };
-        if !crate::client::adapters::tmux::same_pane_route(&current.endpoint, persisted_endpoint) {
-            return Ok(false);
-        }
-        if current.endpoint.codex_session_id.as_deref()
-            != persisted_endpoint.codex_session_id.as_deref()
-            || current.endpoint.codex_thread_id.as_deref()
-                != persisted_endpoint.codex_thread_id.as_deref()
+        if current.socket_path != persisted_endpoint.socket_path
+            || current.pane_id != persisted_endpoint.pane_id
         {
             return Ok(false);
         }
@@ -983,19 +978,26 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             approve_grant,
             provide,
             query,
+            return_challenge,
+            recover_communication,
         } => {
-            match context_operation_with_options(
-                operation_id,
-                project.as_deref(),
-                app_scope.as_deref(),
-                approve_identity.as_deref(),
-                approve_grant.as_deref(),
-                provide.as_deref(),
-                query,
-            ) {
+            let result = if let Some(challenge) = return_challenge {
+                main_context::return_registration_challenge(&challenge)
+            } else {
+                main_context::context_operation_with_intent(
+                    operation_id,
+                    project.as_deref(),
+                    app_scope.as_deref(),
+                    approve_identity.as_deref(),
+                    approve_grant.as_deref(),
+                    provide.as_deref(),
+                    query,
+                    recover_communication,
+                )
+            };
+            match result {
                 Ok(value) => {
-                    if value.get("ok") == Some(&Value::Bool(false)) && value.get("result").is_some()
-                    {
+                    if value.get("ok") == Some(&Value::Bool(false)) {
                         out(&value);
                         std::process::exit(2);
                     }

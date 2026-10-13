@@ -595,8 +595,8 @@ fn worker_close_allows_definitively_missing_worker_without_snapshot() {
     kill_registered_worker_pane(&server, "missing-peer");
     let target = server.state.lock().unwrap().workers["missing-peer"].clone();
     assert_eq!(
-        worker_presence(&server, &target),
-        IdentityPresence::Missing,
+        worker_identity_and_endpoint(&server, &target),
+        (true, Some(false)),
         "the close path may only bypass snapshot evidence for a definitively Missing address"
     );
 

@@ -54,13 +54,26 @@ fn handle_board_show(server: &Server) -> Resp {
         state.workers.values().filter(|worker| !is_managed_subagent(&state, &worker.id)).cloned().collect()
     };
     let observations: std::collections::HashMap<_, _> = candidates.into_iter().map(|worker| {
-        let status = match worker_presence(server, &worker) {
-            IdentityPresence::Present => "online",
-            IdentityPresence::Cold => "cold",
-            IdentityPresence::Missing => "offline",
-            IdentityPresence::Unknown => "unknown",
+        let (status, endpoint_live) = if selected_transport_for_worker(&worker)
+            .is_some_and(|transport| transport.kind == TransportKind::Tmux)
+        {
+            let (identity_valid, endpoint_live) = worker_identity_and_endpoint(server, &worker);
+            let status = match (identity_valid, endpoint_live) {
+                (false, _) | (_, Some(false)) => "offline",
+                (true, Some(true)) | (true, None) => "unknown",
+            };
+            (status, endpoint_live)
+        } else {
+            // Preserve the activity owner's resumable/cold distinction on
+            // other transports; only tmux presence became identity-only.
+            match worker_presence(server, &worker) {
+                IdentityPresence::Present => ("online", Some(true)),
+                IdentityPresence::Cold => ("cold", Some(true)),
+                IdentityPresence::Missing => ("offline", Some(false)),
+                IdentityPresence::Unknown => ("unknown", None),
+            }
         };
-        (worker.id, status)
+        (worker.id, (status, endpoint_live))
     }).collect();
     let state = server.state.lock().unwrap();
     let route = match server_route_scope(server, &state) {
@@ -71,11 +84,11 @@ fn handle_board_show(server: &Server) -> Resp {
     // `status` and `context` use. The per-worker status stays a separate
     // transport observation, so a pane address never invents a live agent.
     let holder = current_master_worker_id(&state, route.as_ref());
-    let transport_live = holder
+    let endpoint_live = holder
         .as_deref()
         .and_then(|id| observations.get(id))
-        .is_some_and(|status| *status == "online");
-    let authority = master_authority_view(&state, route.as_ref(), transport_live);
+        .and_then(|(_, endpoint_live)| *endpoint_live);
+    let authority = master_authority_view_with_endpoint(&state, route.as_ref(), endpoint_live);
     let master = authority
         .get("worker_id")
         .and_then(serde_json::Value::as_str)
@@ -86,7 +99,7 @@ fn handle_board_show(server: &Server) -> Resp {
         BoardMemberView {
             id: worker.id.clone(),
             role: if master.as_deref() == Some(worker.id.as_str()) { "master" } else { "peer" }.into(),
-            status: observations.get(&worker.id).copied().unwrap_or("unknown").into(),
+            status: observations.get(&worker.id).map(|(status, _)| *status).unwrap_or("unknown").into(),
             task_ids: tasks.iter().filter(|task| task.owner == worker.id && board_execution_responsibility(&task.status)).map(|task| task.id.clone()).collect(),
             invitation_ids: tasks.iter().filter(|task| task.status == "invited" && task.invited_peer.as_deref() == Some(worker.id.as_str())).map(|task| task.id.clone()).collect(),
         }

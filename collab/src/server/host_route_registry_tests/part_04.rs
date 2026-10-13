@@ -61,16 +61,9 @@
     async fn cross_project_wire_request_is_rejected_without_resident_mutation() {
         let (server, root, journal_path) = test_server();
         let project_context = context_with_app(&root, "app-wire");
-        let registered = dispatch_wire(
-            server.clone(),
-            Some(project_context.clone()),
-            Req::register("target-master".into(),
-                 "token-target-master".into(),
-                 root.display().to_string(),
-                 test_candidates("thread-target-master")),
-        )
-        .await;
-        assert!(registered.ok, "{registered:?}");
+        let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
+        commit_host_route_fixture(&manager, &server, "target-master", "token-target-master",
+            project_context.app_scope_id.as_str(), committed_tmux_endpoint(&root, "thread-target-master"));
         let promoted = handle_master_promote(
             &server,
             "target-master".into(),
@@ -243,7 +236,7 @@
 
         let worker_id = "resident-route-worker";
         let thread_id = "thread-resident-route-worker";
-        let (_, response) = manager.dispatch_sync(
+        let (_, response) = register_host_fixture(&manager,
             Some(context_with_app(&root, crate::identity::CLI_APP_SERVER_ID)),
             Req::register(worker_id.into(),
                  "token-resident-route-worker".into(),
@@ -273,7 +266,7 @@
         let app_scope = "resident-app";
         let context = context_with_app(&host_root, app_scope);
 
-        let (resident_runtime, registered) = manager.dispatch_sync(
+        let (resident_runtime, registered) = register_host_fixture(&manager,
             Some(context.clone()),
             Req::register("resident-replay-worker".into(),
                  "token-resident-replay-worker".into(),
@@ -315,7 +308,7 @@
 
         let worker_id = "resident-replay-after-restart";
         let thread_id = "thread-resident-replay-after-restart";
-        let (selected, response) = replayed_manager.dispatch_sync(
+        let (selected, response) = register_host_fixture(&replayed_manager,
             Some(context),
             Req::register(worker_id.into(),
                  "token-resident-replay-after-restart".into(),
@@ -356,7 +349,7 @@
         };
 
         let context = context_with_app(&root, crate::identity::CLI_APP_SERVER_ID);
-        let (_, failed) = manager.dispatch_sync(
+        let (_, failed) = register_host_fixture(&manager,
             Some(context),
             Req::register("resident-route-failure-worker".into(),
                  "token-resident-route-failure-worker".into(),
@@ -445,7 +438,7 @@
         let (server, root, _) = test_server();
         register_known_project_with_app(&server, &root, "app-a");
         assert!(
-            handle_register_with_app_scope(
+            seed_published_registration_fixture(
                 &server,
                 "resident".into(),
                 "token-resident".into(),
@@ -485,7 +478,7 @@
         let (server, root, journal_path) = test_server();
         register_known_project_with_app(&server, &root, "app-a");
         assert!(
-            handle_register_with_app_scope(
+            seed_published_registration_fixture(
                 &server,
                 "legacy-resident".into(),
                 "token-legacy-resident".into(),
@@ -622,7 +615,7 @@
         with_appserver_check(&mut server, |candidate| Ok(verified_appserver(candidate)));
         let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
         let route_journal = host_paths.state_root().join("routes.jsonl");
-        let registered = handle_register_with_app_scope_unfinalized(
+        let registered = seed_committed_registration_fixture(
             &server,
             "resident-repair-worker".into(),
             "token-resident-repair-worker".into(),
@@ -681,7 +674,7 @@
             )
             .is_some());
 
-        let retried = manager.dispatch_sync(
+        let retried = register_host_fixture(&manager,
             Some(context_with_runtime(
                 &root,
                 crate::identity::CLI_APP_SERVER_ID,
@@ -824,12 +817,12 @@
         let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
         let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
         let seed_context = context_with_app(&project_root, "runtime-seed");
-        let (_, seed_response) = manager.dispatch_sync(
+        let (_, seed_response) = register_host_fixture(&manager,
             Some(seed_context),
             Req::register("runtime-seed-worker".into(),
                  "token-runtime-seed-worker".into(),
                  project_root.display().to_string(),
-                 test_candidates("thread-runtime-seed-worker")),
+                 test_candidates_at("thread-runtime-seed-worker", &project_root)),
         );
         assert!(seed_response.ok, "{seed_response:?}");
 
@@ -838,12 +831,12 @@
         symlink(&external_root, &escape_storage_root).unwrap();
         let route_journal = host_paths.state_root().join("routes.jsonl");
         let before_route_journal = std::fs::read(&route_journal).unwrap();
-        let (_, escape_response) = manager.dispatch_sync(
+        let (_, escape_response) = register_host_fixture(&manager,
             Some(escape_context.clone()),
             Req::register("runtime-escape-worker".into(),
                  "token-runtime-escape-worker".into(),
                  project_root.display().to_string(),
-                 test_candidates("thread-runtime-escape-worker")),
+                 test_candidates_at("thread-runtime-escape-worker", &project_root)),
         );
 
         assert!(!escape_response.ok, "{escape_response:?}");
@@ -1024,12 +1017,12 @@
 
         std::fs::set_permissions(&blocked_parent, std::fs::Permissions::from_mode(0o000)).unwrap();
         let context = context_with_app(&external_root, "permission-external-app");
-        let (_runtime, response) = manager.dispatch_sync(
+        let (_runtime, response) = register_host_fixture(&manager,
             Some(context.clone()),
             Req::register("permission-external-worker".into(),
                  "token-permission-external".into(),
                  external_root.display().to_string(),
-                 test_candidates("thread-permission-external-worker")),
+                 test_candidates_at("thread-permission-external-worker", &external_root)),
         );
         std::fs::set_permissions(&blocked_parent, std::fs::Permissions::from_mode(0o700)).unwrap();
 
@@ -1062,15 +1055,14 @@
     async fn first_register_uses_the_explicit_context_app_scope() {
         let (server, root, journal_path) = test_server();
         let project_context = context_with_app(&root, "app-wire");
-        let response = dispatch_wire(
+        let response = register_wire_fixture(
             server.clone(),
             Some(project_context),
             Req::register("wire-worker".into(),
                  "token-wire-worker".into(),
                  root.display().to_string(),
                  test_candidates("thread-wire-worker")),
-        )
-        .await;
+        ).await;
         assert!(response.ok, "{response:?}");
         let project_scope = GlobalState::canonical_project_scope(&root).unwrap();
         let grant = {
@@ -1152,15 +1144,14 @@
             native_thread_id: Some(NativeThreadId::new("thread-wire-runtime-worker").unwrap()),
         };
 
-        let response = dispatch_wire(
+        let response = register_wire_fixture(
             server.clone(),
             Some(context_with_runtime(&root, app, &runtime)),
             Req::register(worker_id.into(),
                  "token-wire-runtime-worker".into(),
                  root.display().to_string(),
                  test_candidates("thread-wire-runtime-worker")),
-        )
-        .await;
+        ).await;
         assert!(response.ok, "{response:?}");
         let registered = runtime_for_registered(&server, &root, worker_id, app);
         assert_eq!(registered.agent_id, runtime.agent_id);
@@ -1272,25 +1263,20 @@
         let (server, root, _) = test_server();
         let app = AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
         let context = ProjectContext::for_registered_root_with_app(&root, app.clone()).unwrap();
-        let parent = dispatch_wire(
+        let parent = register_wire_fixture(
             server.clone(),
             Some(context.clone()),
             Req::register("parent".into(),
                  "token-parent".into(),
                  root.display().to_string(),
                  test_candidates("thread-parent")),
-        )
-        .await;
+        ).await;
         assert!(parent.ok, "{parent:?}");
 
-        let child = handle_register_with_app_scope(
-            &server,
-            "child".into(),
-            "token-child".into(),
-            root.display().to_string(),
-            Some(app.clone()),
-            test_candidates("thread-child"),
-        );
+        let child = register_wire_fixture(server.clone(), Some(context.clone()),
+            Req::register("child".into(), "token-child".into(), root.display().to_string(),
+                test_candidates("thread-child")),
+        ).await;
         assert!(child.ok, "{child:?}");
         let child_route = server
             .state
@@ -1356,6 +1342,13 @@
     fn direct_registration_route_failure_reports_cleanup_failure() {
         let (mut server, root, _) = test_server();
         with_appserver_check(&mut server, |candidate| Ok(verified_appserver(candidate)));
+        // Establish an unpublished typed owner, then exercise the real direct
+        // registration publication/cleanup boundary with a replayed command.
+        let candidates = test_candidates_at("thread-route-failure-worker", &root);
+        let seeded = seed_committed_registration_fixture(&server, "route-failure-worker".into(),
+            "token-route-failure-worker".into(), root.display().to_string(),
+            Some(AppServerId::new("route-failure-app").unwrap()), candidates.clone());
+        assert!(seeded.ok, "{seeded:?}");
         inject_current_thread_route_journal_fault(CurrentThreadRouteJournalFault::Sync);
         let registered = handle_register_with_app_scope(
             &server,
@@ -1363,7 +1356,7 @@
             "token-route-failure-worker".into(),
             root.display().to_string(),
             Some(AppServerId::new("route-failure-app").unwrap()),
-            test_candidates("thread-route-failure-worker"),
+            candidates,
         );
         assert!(!registered.ok, "{registered:?}");
         let error = registered.error.unwrap_or_default();

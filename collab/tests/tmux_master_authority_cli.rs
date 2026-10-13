@@ -7,7 +7,7 @@ include!("support/tmux_cli_fixture.rs");
 #[test]
 fn master_authority_tmux_unknown_holder_keeps_control_and_projection() {
     let (fixture, pane) = single_pane_fixture("collab-master-authority-b01");
-    let registered = fixture.run_context(&["context"], Some(&pane));
+    let registered = fixture.registered_context(&pane, true);
     let worker_id = registered["identity"]["worker_id"]
         .as_str()
         .expect("context receipt names the registered worker")
@@ -52,10 +52,14 @@ fn master_authority_tmux_unknown_holder_keeps_control_and_projection() {
     assert_eq!(context["identity"]["role"], "master");
     assert_scope("assigned context", &context, &project_scope, &app_scope_id);
     assert!(context["recorded_unusable"].is_null(), "{context}");
-    assert_ne!(
-        context["liveness"]["presence"], "present",
-        "a tmux pane address is not an online credential: {context}"
-    );
+    // Durable identity stays Present for the registered pane; endpoint
+    // reachability and agent activity are separate observations.
+    assert_eq!(context["liveness"]["presence"], "present");
+    assert_eq!(context["liveness"]["live"], true);
+    assert_eq!(context["master"]["endpoint_live"], true);
+    assert_eq!(context["agent"]["thread_state"], "unknown");
+    assert_eq!(context["agent"]["latest_turn_status"], "unknown");
+    assert!(context["agent"]["can_accept_direct_input"].is_null());
 
     let published = fixture.run_ok(
         &[
@@ -99,7 +103,7 @@ fn master_authority_tmux_unknown_holder_keeps_control_and_projection() {
 #[test]
 fn master_authority_clear_removes_grant_and_preserves_business_state() {
     let (fixture, pane) = single_pane_fixture("collab-master-authority-b03");
-    let registered = fixture.run_context(&["context"], Some(&pane));
+    let registered = fixture.registered_context(&pane, true);
     let worker_id = registered["identity"]["worker_id"]
         .as_str()
         .expect("context receipt names the registered worker")
@@ -287,7 +291,7 @@ fn master_authority_clear_removes_grant_and_preserves_business_state() {
 #[test]
 fn master_authority_rejects_blank_approval_without_state_change() {
     let (fixture, pane) = single_pane_fixture("collab-master-authority-b04");
-    fixture.run_context(&["context"], Some(&pane));
+    fixture.registered_context(&pane, true);
 
     let promote = fixture.command(&["master", "promote", "--approval", "   "], Some(&pane));
     assert!(
@@ -316,7 +320,7 @@ fn master_authority_rejects_blank_approval_without_state_change() {
 #[test]
 fn master_authority_dashboard_get_agrees_with_status_context_and_board() {
     let (fixture, pane) = single_pane_fixture("collab-master-authority-b10");
-    let registered = fixture.run_context(&["context"], Some(&pane));
+    let registered = fixture.registered_context(&pane, true);
     let worker_id = registered["identity"]["worker_id"]
         .as_str()
         .expect("context receipt names the registered worker")
@@ -546,7 +550,7 @@ fn tmux_register_request(
 #[test]
 fn master_authority_same_principal_recovery_and_new_principal_do_not_inherit() {
     let (fixture, first_pane) = single_pane_fixture("collab-master-authority-b06");
-    let registered = fixture.run_context(&["context"], Some(&first_pane));
+    let registered = fixture.registered_context(&first_pane, true);
     let worker_id = registered["identity"]["worker_id"]
         .as_str()
         .expect("context receipt names the registered worker")
@@ -583,20 +587,12 @@ fn master_authority_same_principal_recovery_and_new_principal_do_not_inherit() {
         thread_anchor: format!("thread-{second_pane_id}"),
         server_pid: first_pane.server_pid,
     };
+    let second_registered = fixture.registered_context(&second_pane, true);
     let socket = fixture.host_state.join("server.sock");
-    let second_registered = wire_request(
-        &socket,
-        &tmux_register_request(
-            "recovery-second-principal",
-            "token-recovery-second-principal",
-            &fixture.root,
-            &second_pane,
-            &fixture.tmux_socket,
-        ),
-    );
+    assert_ne!(second_registered["identity"]["worker_id"], worker_id);
     assert_eq!(
-        second_registered["ok"], true,
-        "the second principal must register as a peer: {second_registered}"
+        second_registered["identity"]["role"], "worker",
+        "{second_registered}"
     );
     let second_status = fixture.run_ok(&["master", "status"], Some(&second_pane));
     assert_eq!(
@@ -730,10 +726,86 @@ fn master_authority_same_principal_recovery_and_new_principal_do_not_inherit() {
 
 /// B09/B15: real routed mutations preserve other project/app scopes, and
 /// concurrent clear/promote observations are complete committed states.
+fn scope_registration_participant(
+    fixture: &Fixture,
+    pane: &Pane,
+    root: &Path,
+    app: &str,
+    worker: &str,
+    token: &str,
+) -> Value {
+    let script = fixture.root.join(format!("{worker}.py"));
+    let result = fixture.root.join(format!("{worker}.reply"));
+    let done = fixture.root.join(format!("{worker}.done"));
+    let context = json!({"app_scope_id":app,"canonical_root":root.canonicalize().unwrap(),
+        "project_scope":root.canonicalize().unwrap()});
+    // This participant reads the actual selected pane input. The parent does
+    // not obtain the marker from capture output or the evidence journal.
+    std::fs::write(
+        &script,
+        r#"import json, os, socket, sys, time
+line = sys.stdin.readline()
+prefix = 'COLLAB_REGISTER_CHALLENGE '
+assert line.startswith(prefix), line
+reply = json.loads(line[len(prefix):])
+reply['anchor'] = {'socket_path': os.environ['TMUX'].rsplit(',', 2)[0], 'pane_id': os.environ['TMUX_PANE']}
+request = {'op': 'RegisterReply', 'reply': reply, 'project_context': json.loads(sys.argv[2])}
+with socket.socket(socket.AF_UNIX) as client:
+    client.connect(sys.argv[1])
+    client.sendall((json.dumps(request) + '\n').encode())
+    response = json.loads(client.makefile().readline())
+with open(sys.argv[3], 'w') as output:
+    json.dump(response, output)
+with open(sys.argv[4], 'w') as output:
+    output.write('done')
+time.sleep(600)
+"#,
+    )
+    .unwrap();
+    let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+    tmux(
+        &fixture.tmux_socket,
+        &[
+            "respawn-pane",
+            "-k",
+            "-t",
+            &pane.pane_id,
+            &format!(
+                "python3 {} {} {} {} {}",
+                quote(&script.to_string_lossy()),
+                quote(&fixture.host_state.join("server.sock").to_string_lossy()),
+                quote(&context.to_string()),
+                quote(&result.to_string_lossy()),
+                quote(&done.to_string_lossy())
+            ),
+        ],
+    );
+    let mut register = tmux_register_request(worker, token, root, pane, &fixture.tmux_socket);
+    register["project_context"]["app_scope_id"] = json!(app);
+    let pending = wire_request(&fixture.host_state.join("server.sock"), &register);
+    assert_eq!(
+        pending["ok"], false,
+        "initial register must await return: {pending}"
+    );
+    assert!(
+        pending["error"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("REGISTER_REPLY_PENDING:"),
+        "{pending}"
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !done.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(done.exists(), "scope participant did not return: {pending}");
+    serde_json::from_slice(&std::fs::read(result).unwrap()).unwrap()
+}
+
 #[test]
 fn master_authority_scope_isolation_and_concurrent_mutations() {
     let (fixture, first_pane) = single_pane_fixture("collab-master-scopes");
-    let initial = fixture.run_context(&["context"], Some(&first_pane));
+    let initial = fixture.registered_context(&first_pane, true);
     let socket = fixture.host_state.join("server.sock");
     let other_root = fixture.root.join("other-project");
     seed_baseline(&other_root);
@@ -769,10 +841,8 @@ fn master_authority_scope_isolation_and_concurrent_mutations() {
         };
         let worker = format!("scope-worker-{index}");
         let token = format!("scope-token-{index}");
-        let mut register =
-            tmux_register_request(&worker, &token, root, &pane, &fixture.tmux_socket);
-        register["project_context"]["app_scope_id"] = json!(app);
-        let registered = wire_request(&socket, &register);
+        let registered =
+            scope_registration_participant(&fixture, &pane, root, app, &worker, &token);
         assert_eq!(registered["ok"], true, "scope registration: {registered}");
         let binding = registered["command"]["binding"].clone();
         let runtime = runtime_context_from_receipt(&json!({"binding": binding}));
@@ -867,7 +937,7 @@ fn master_authority_scope_isolation_and_concurrent_mutations() {
 #[test]
 fn master_authority_public_wire_rejects_bad_token_scope_and_generation_without_state_change() {
     let (fixture, pane) = single_pane_fixture("collab-master-authority-b05");
-    let receipt = fixture.run_context(&["context"], Some(&pane));
+    let receipt = fixture.registered_context(&pane, true);
     let worker_id = receipt["identity"]["worker_id"]
         .as_str()
         .expect("context receipt names the registered worker")

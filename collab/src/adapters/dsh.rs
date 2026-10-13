@@ -287,6 +287,84 @@ pub fn probe(endpoint: &str, runtime_id: &str, agent_id: &str) -> PeerPresence {
 }
 
 /// The `messageId` the gateway deduplicates wakes on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentReply {
+    Pending,
+    Replied {
+        agent_id: String,
+        message_id: String,
+        session_id: String,
+        turn: u64,
+        step: u64,
+        input_seq: u64,
+        output_seq: u64,
+        completed_seq: u64,
+        text: String,
+    },
+}
+
+pub fn agent_reply(
+    endpoint: &str,
+    runtime_id: &str,
+    agent_id: &str,
+    message_id: &str,
+) -> Result<AgentReply, ControlError> {
+    let outer = round_trip(
+        &control_socket(endpoint)?,
+        "agent-reply",
+        serde_json::json!({
+            "runtimeId":runtime_id,"agentId":agent_id,"messageId":message_id
+        }),
+    )?;
+    let result = outer
+        .get("result")
+        .ok_or_else(|| rejected("agent-reply answer carries no gateway result".into()))?;
+    match result["state"].as_str() {
+        Some("pending") => Ok(AgentReply::Pending),
+        Some("replied") => {
+            let field = |name: &str| {
+                result[name]
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| rejected(format!("agent-reply missing {name}")))
+            };
+            let sequence = |name: &str| {
+                result[name]
+                    .as_u64()
+                    .ok_or_else(|| rejected(format!("agent-reply missing {name}")))
+            };
+            Ok(AgentReply::Replied {
+                agent_id: field("agentId")?,
+                message_id: field("messageId")?,
+                session_id: field("sessionId")?,
+                turn: sequence("turn")?,
+                step: sequence("step")?,
+                input_seq: sequence("inputSeq")?,
+                output_seq: sequence("outputSeq")?,
+                completed_seq: sequence("completedSeq")?,
+                text: field("text")?,
+            })
+        }
+        _ => Err(rejected(
+            "agent-reply state must be pending or replied".into(),
+        )),
+    }
+}
+
+pub fn registration_message_id(operation_id: &str) -> Result<String, ControlError> {
+    let paths = crate::scope::HostPaths::resolve().map_err(|error| ControlError::Unusable {
+        detail: error.to_string(),
+    })?;
+    let digest = Sha256::digest(paths.state_root().to_string_lossy().as_bytes());
+    let prefix: String = digest
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Ok(format!("collab:{prefix}:register-{operation_id}"))
+}
+
+/// The `messageId` the gateway deduplicates wakes on.
 ///
 /// The gateway folds every `enqueue` on this id, and collab replays its own
 /// wakes (`daemon-live-closure`, `restart-replay-pending`), so the id must be
@@ -327,6 +405,26 @@ pub fn notify(
     text: &str,
     msg_id: &str,
 ) -> Result<serde_json::Value, ControlError> {
+    notify_with_message_id(
+        endpoint,
+        runtime_id,
+        agent_id,
+        mode,
+        sender_id,
+        text,
+        &wake_message_id(msg_id)?,
+    )
+}
+
+pub fn notify_with_message_id(
+    endpoint: &str,
+    runtime_id: &str,
+    agent_id: &str,
+    mode: &str,
+    sender_id: &str,
+    text: &str,
+    message_id: &str,
+) -> Result<serde_json::Value, ControlError> {
     let socket = control_socket(endpoint)?;
     let result = round_trip(
         &socket,
@@ -337,7 +435,7 @@ pub fn notify(
             "mode": mode,
             "content": [{"type": "text", "text": text}],
             "sender": {"runtimeId": "collab", "id": sender_id, "name": "collab"},
-            "messageId": wake_message_id(msg_id)?,
+            "messageId": message_id,
         }),
     )?;
     let message_id = result

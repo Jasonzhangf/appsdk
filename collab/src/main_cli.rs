@@ -456,6 +456,12 @@ pub(crate) enum Cmd {
         provide: Option<String>,
         #[arg(long)]
         query: bool,
+        /// Return a registration challenge received in this participant pane.
+        #[arg(long, conflicts_with_all = ["query", "provide", "approve_identity", "approve_grant", "recover_communication"])]
+        return_challenge: Option<String>,
+        /// Explicitly verify the restored communication path.
+        #[arg(long, conflicts_with_all = ["query", "approve_identity", "approve_grant"])]
+        recover_communication: bool,
     },
     /// Mark messages as read
     Ack {

@@ -748,11 +748,11 @@ fn tmux_identity_facts(fixture: &Fixture, pane: &Pane) -> Value {
             "-p",
             "-t",
             &pane.pane_id,
-            "#{session_id}\t#{pane_id}\t#{pane_pid}",
+            "#{session_id}|#{pane_id}|#{pane_pid}",
         ],
     );
     let line = String::from_utf8(output.stdout).expect("tmux pane facts are UTF-8");
-    let mut fields = line.trim_end().split('\t');
+    let mut fields = line.trim_end().split('|');
     let tmux_session_id = fields.next().expect("tmux session id").to_owned();
     let observed_pane_id = fields.next().expect("tmux pane id");
     assert_eq!(observed_pane_id, pane.pane_id);
@@ -768,6 +768,10 @@ fn tmux_identity_facts(fixture: &Fixture, pane: &Pane) -> Value {
         // so the CLI identity fact collector always adds this namespace. The
         // approval digest binds every observed fact, including this one.
         "namespace": "codex_tui",
+        "tmux_anchor": {
+            "socket_path": fixture.tmux_socket.to_string_lossy(),
+            "pane_id": pane.pane_id
+        },
         "tmux": {
             "endpoint": {
                 "socket_path": fixture.tmux_socket.to_string_lossy(),
@@ -812,7 +816,7 @@ fn seed_stale_identity(
     operation_id: &str,
     with_grant: bool,
 ) -> IdentityFence {
-    let seed = fixture.context(Some(operation_id), Some(pane));
+    let seed = fixture.registered_context(operation_id, pane);
     assert_eq!(seed["result"]["outcome"], "completed", "{seed}");
     if with_grant {
         fixture.run_ok(

@@ -4,83 +4,421 @@ use crate::server::operation_journal::{inject_next_append_fault, OperationJourna
 use crate::server::peer_tests::test_server;
 use std::sync::Arc;
 
-#[test]
-fn context_success_receipts_use_the_registered_project_owner() {
+fn persisted_context_fixture() -> (
+    Arc<Server>,
+    Arc<Server>,
+    Arc<ProjectRuntimeManager>,
+    PathBuf,
+    PathBuf,
+    IdentityFacts,
+    identity::Identity,
+) {
     let (host, host_root) = test_server();
     let (runtime, root) = test_server();
-    let worker = "receipt-owner";
-    let scope = Scope { root: root.clone() };
-    let app = AppServerId::new("registered-app").unwrap();
-    let transport = SelectedTransport {
-        kind: TransportKind::AppServer,
-        endpoint: Some("unix:///tmp/receipt-owner.sock".into()),
-        namespace: Some("codex_tui".into()),
-        session_id: Some("receipt-session".into()),
-        thread_id: Some("receipt-thread".into()),
-        capabilities: Default::default(),
-        tmux_endpoint: None,
-        self_check: "fixture".into(),
+    let host = Arc::new(host);
+    let runtime = Arc::new(runtime);
+    let mut candidate = tmux_anchor();
+    candidate.cwd = root.display().to_string();
+    let app = AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap();
+    // Durable prior state: this fixture establishes an already-registered owner
+    // so the ordinary-restore and role tests start from a committed identity.
+    // It is not an initial-registration test, so it seeds defined typed state
+    // instead of driving a live participant return. The public owner is
+    // exercised after this precondition.
+    let transport = crate::proto::SelectedTransport {
+        kind: crate::proto::TransportKind::Tmux,
+        endpoint: Some(candidate.endpoint.socket_path.clone()),
+        namespace: Some(candidate.endpoint.tmux_session_id.clone()),
+        session_id: candidate.endpoint.codex_session_id.clone(),
+        thread_id: candidate.endpoint.codex_thread_id.clone(),
+        tmux_endpoint: Some(candidate.endpoint.clone()),
+        capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
+        self_check: "persisted context fixture owner".into(),
     };
-    let prepared = runtime
-        .prepare_register_envelope_for_scope(
-            worker,
-            "receipt-token",
-            &transport,
-            GlobalState::canonical_project_scope(&root).unwrap(),
-            &root.to_string_lossy(),
-            app.clone(),
-            false,
-        )
-        .unwrap();
-    let nested = (
-        prepared.nested_command_id.clone(),
-        prepared.nested_operation_id.clone(),
+    let registered = crate::server::peer_tests::seed_committed_owner(
+        &runtime,
+        "saved-peer",
+        "saved-token",
+        &transport,
+        &root.display().to_string(),
+        Some(app.clone()),
     );
-    let receipt = consume_prepared_register_typed(&runtime, worker, &transport, prepared, None);
-    assert!(receipt.ok, "{receipt:?}");
+    assert!(registered.ok, "{registered:?}");
     commit_current_thread_route_for_runtime(
         &host,
         &runtime,
-        worker,
-        &root.to_string_lossy(),
+        "saved-peer",
+        &root.display().to_string(),
         Some(&app),
     )
     .unwrap();
     let (binding, transport) =
-        identity::registration_from_receipt(&receipt.data, worker, &root).unwrap();
-    let mut ident = identity::Identity {
-        worker_id: worker.into(),
-        token: "receipt-token".into(),
+        identity::registration_from_receipt(&registered.data, "saved-peer", &root).unwrap();
+    let mut saved = identity::Identity {
+        worker_id: "saved-peer".into(),
+        token: "saved-token".into(),
         project_scope: Some(GlobalState::canonical_project_scope(&root).unwrap()),
         runtime: None,
         transport: None,
     };
-    identity::persist_registration_at(&host.host_paths, &scope, &mut ident, binding, transport)
-        .unwrap();
-    let response = Resp::data(json!({"identity_receipt":ident}));
-    let context = ProjectContext::for_registered_root_with_app(
-        &root,
-        AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap(),
+    identity::persist_registration_at(
+        &host.host_paths,
+        &Scope { root: root.clone() },
+        &mut saved,
+        binding,
+        transport,
     )
     .unwrap();
-    assert_eq!(
-        business_receipts_for_success(&host, &runtime, &context, None, &response, Some(&nested)),
-        vec!["nested_register", "route", "credential", "lease"]
+    let manager = recovery_manager(host.clone());
+    let context = recovery_context(&root);
+    manager.install_runtime(
+        &(app.as_str().into(), context.project_scope.as_str().into()),
+        runtime.clone(),
+        None,
     );
-    let mut stale = Resp::data(response.data.clone());
-    stale.data["identity_receipt"]["runtime"]["endpoint_generation"] = json!(2);
-    assert_eq!(
-        business_receipts_for_success(&host, &runtime, &context, None, &stale, Some(&nested)),
-        vec!["nested_register"]
+    (
+        host,
+        runtime,
+        manager,
+        host_root,
+        root,
+        IdentityFacts {
+            tmux: Some(candidate),
+            ..Default::default()
+        },
+        saved,
+    )
+}
+
+#[test]
+fn ordinary_persisted_context_has_no_registration_effects() {
+    let (host, runtime, manager, host_root, root, mut facts, saved) = persisted_context_fixture();
+    let context = recovery_context(&root);
+    let before = std::fs::read(&runtime.journal_path).unwrap();
+    // An unavailable adjacent adaptor must never be admitted on restore.
+    facts.endpoint = Some("unix:///tmp/unavailable-restore-adaptor.sock".into());
+    facts.namespace = Some("codex_tui".into());
+    facts.session_id = Some("unselected-session".into());
+    facts.thread_id = Some("unselected-thread".into());
+    let (_, restored) = manager.dispatch_sync(
+        Some(context),
+        Req::IdentityContext {
+            facts,
+            identity_context: None,
+        },
     );
-    let mut cross_scope = Resp::data(response.data.clone());
-    cross_scope.data["identity_receipt"]["runtime"]["appserver_id"] = json!("other-app");
+    assert!(restored.ok, "{restored:?}");
+    assert_eq!(restored.data["identity_receipt"], json!(saved));
     assert_eq!(
-        business_receipts_for_success(&host, &runtime, &context, None, &cross_scope, Some(&nested)),
-        vec!["nested_register"]
+        std::fs::read(&runtime.journal_path).unwrap(),
+        before,
+        "ordinary restore must not Register or select/admit an adaptor"
     );
+    let stable = facts_from_saved_pane(&saved);
+    let (_, offline) = manager.dispatch_sync(
+        Some(recovery_context(&root)),
+        Req::IdentityContext {
+            facts: stable,
+            identity_context: None,
+        },
+    );
+    assert!(offline.ok, "{offline:?}");
+    assert_eq!(offline.data["identity_receipt"], json!(saved));
+    assert_eq!(std::fs::read(&runtime.journal_path).unwrap(), before);
+    drop(host);
     std::fs::remove_dir_all(root).unwrap();
     std::fs::remove_dir_all(host_root).unwrap();
+}
+
+#[test]
+fn minimal_role_intent_is_an_explicit_authority_approval() {
+    let (host, runtime, manager, host_root, root, facts, saved) = persisted_context_fixture();
+    let context = recovery_context(&root);
+    let app = context.app_scope_id.clone();
+    let mut other = facts.tmux.clone().unwrap();
+    other.endpoint.pane_id = "%4".into();
+    // The unrelated master is durable prior state, so seed a committed owner
+    // instead of driving an initial Register: a tmux candidate can only finish
+    // registration through a live participant return, which this fixture does
+    // not model.
+    let transport = SelectedTransport {
+        kind: TransportKind::Tmux,
+        endpoint: Some(other.endpoint.socket_path.clone()),
+        namespace: Some(other.endpoint.tmux_session_id.clone()),
+        session_id: other
+            .endpoint
+            .codex_session_id
+            .clone()
+            .or_else(|| Some(other.endpoint.tmux_session_id.clone())),
+        thread_id: other
+            .endpoint
+            .codex_thread_id
+            .clone()
+            .or_else(|| Some(other.endpoint.pane_id.clone())),
+        tmux_endpoint: Some(other.endpoint.clone()),
+        capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
+        self_check: "prior committed unrelated master fixture".into(),
+    };
+    let registered = crate::server::peer_tests::seed_committed_owner(
+        &runtime,
+        "unrelated-master",
+        "other-token",
+        &transport,
+        &root.display().to_string(),
+        Some(app),
+    );
+    assert!(registered.ok, "{registered:?}");
+    assert!(
+        handle_master_promote(
+            &runtime,
+            "unrelated-master".into(),
+            "other-token".into(),
+            "user assigned unrelated master".into()
+        )
+        .ok
+    );
+    commit_current_thread_route_for_runtime(
+        &host,
+        &runtime,
+        "unrelated-master",
+        &root.display().to_string(),
+        Some(&context.app_scope_id),
+    )
+    .unwrap();
+    let role_scope = RouteScope {
+        app_scope_id: context.app_scope_id.clone(),
+        project_scope_id: context.project_scope.clone(),
+    };
+    let unrelated =
+        current_master_grant(&runtime.state.lock().unwrap(), Some(&role_scope)).unwrap();
+    for (step, role) in ["peer", "master", "peer"].into_iter().enumerate() {
+        let mut stale = saved.clone();
+        stale.token = "stale-token".into();
+        let identity_path = host
+            .host_paths
+            .state_root()
+            .join("identities/saved-peer/identity.json");
+        std::fs::write(&identity_path, serde_json::to_vec(&stale).unwrap()).unwrap();
+        let mut request = IdentityContextRequest {
+            operation_id: format!("ctxop-role-{step}"),
+            invocation: "approved_recovery".into(),
+            action: "context".into(),
+            facts: facts.clone(),
+            approval: Some(
+                json!({"decision":"approved", "target_identity":"saved-peer", "action":format!("restore_{role}"), "authorization":format!("user requests {role}"), "expected_incumbent":{"binding_id":"obsolete-caller-fence","endpoint_generation":999}}),
+            ),
+            grant_approval: None,
+            query: false,
+            query_capability: "role-test-capability".into(),
+            invocation_ticket: String::new(),
+        };
+        if role == "master" {
+            request.grant_approval = request.approval.take();
+        }
+        let (_, result) = manager.identity_context(context.clone(), request.clone());
+        assert!(result.ok, "{result:?}");
+        assert_eq!(result.data["result"]["outcome"], "completed", "{result:?}");
+        assert_eq!(
+            result.data["result"]["snapshot"]["identity"]["role"],
+            if role == "master" { "master" } else { "worker" }
+        );
+        let grant = current_master_grant(&runtime.state.lock().unwrap(), Some(&role_scope));
+        if step == 0 {
+            assert_eq!(grant, Some(unrelated.clone()));
+        } else if role == "master" {
+            assert_eq!(grant.unwrap().agent_id.as_str(), "saved-peer");
+        } else {
+            assert!(grant.is_none());
+        }
+        let before = (
+            std::fs::read(&host.journal_path).unwrap(),
+            std::fs::read(&runtime.journal_path).unwrap(),
+            std::fs::read(&identity_path).unwrap(),
+        );
+        let (_, replay) = manager.identity_context(context.clone(), request);
+        assert!(replay.ok, "{replay:?}");
+        assert_eq!(
+            before,
+            (
+                std::fs::read(&host.journal_path).unwrap(),
+                std::fs::read(&runtime.journal_path).unwrap(),
+                std::fs::read(&identity_path).unwrap()
+            ),
+            "same-key replay must not duplicate effects"
+        );
+    }
+    let before = std::fs::read(&runtime.journal_path).unwrap();
+    // A real read-only descriptor makes the authority owner append fail.
+    *runtime.journal.lock().unwrap() = std::fs::File::open(&runtime.journal_path).unwrap();
+    let (_, failed) = manager.identity_context(context.clone(), IdentityContextRequest {
+        operation_id: "ctxop-role-write-failure".into(), invocation: "approved_recovery".into(), action: "context".into(), facts,
+        approval: Some(json!({"decision":"approved", "target_identity":"saved-peer", "action":"restore_master", "authorization":"user requires master"})),
+        grant_approval: None, query: false, query_capability: "role-failure-capability".into(), invocation_ticket: String::new(),
+    });
+    assert!(!failed.ok, "{failed:?}");
+    assert!(
+        failed.data["result"]["owner_readback"]["master_grant"]["observed"]
+            .as_str()
+            .unwrap()
+            .contains("MASTER_DURABILITY_FAILED"),
+        "{failed:?}"
+    );
+    assert!(!failed.data["result"]["committed_phases"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("grant")));
+    assert!(current_master_grant(&runtime.state.lock().unwrap(), Some(&role_scope)).is_none());
+    assert_eq!(std::fs::read(&runtime.journal_path).unwrap(), before);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(host_root).unwrap();
+}
+
+fn facts_from_saved_pane(saved: &identity::Identity) -> IdentityFacts {
+    let endpoint = saved
+        .transport
+        .as_ref()
+        .unwrap()
+        .tmux_endpoint
+        .as_ref()
+        .unwrap();
+    IdentityFacts {
+        tmux_anchor: Some(crate::proto::TmuxPaneAnchor {
+            socket_path: endpoint.socket_path.clone(),
+            pane_id: endpoint.pane_id.clone(),
+        }),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn context_success_receipts_use_the_registered_project_owner() {
+    for kind in [TransportKind::AppServer, TransportKind::Tmux] {
+        let (host, host_root) = test_server();
+        let (runtime, root) = test_server();
+        let worker = "receipt-owner";
+        let scope = Scope { root: root.clone() };
+        let app = AppServerId::new("registered-app").unwrap();
+        let mut transport = SelectedTransport {
+            kind: TransportKind::AppServer,
+            endpoint: Some("unix:///tmp/receipt-owner.sock".into()),
+            namespace: Some("codex_tui".into()),
+            session_id: Some("receipt-session".into()),
+            thread_id: Some("receipt-thread".into()),
+            capabilities: Default::default(),
+            tmux_endpoint: None,
+            self_check: "fixture".into(),
+        };
+        if kind == TransportKind::Tmux {
+            let endpoint = tmux_anchor().endpoint;
+            transport.kind = kind;
+            transport.endpoint = Some(endpoint.socket_path.clone());
+            transport.namespace = Some(endpoint.tmux_session_id.clone());
+            transport.session_id = None;
+            transport.thread_id = None;
+            transport.tmux_endpoint = Some(endpoint);
+        }
+        let prepared = runtime
+            .prepare_register_envelope_for_scope(
+                worker,
+                "receipt-token",
+                &transport,
+                GlobalState::canonical_project_scope(&root).unwrap(),
+                &root.to_string_lossy(),
+                app.clone(),
+                false,
+            )
+            .unwrap();
+        let nested = (
+            prepared.nested_command_id.clone(),
+            prepared.nested_operation_id.clone(),
+        );
+        let receipt = consume_prepared_register_typed(&runtime, worker, &transport, prepared, None);
+        assert!(receipt.ok, "{receipt:?}");
+        commit_current_thread_route_for_runtime(
+            &host,
+            &runtime,
+            worker,
+            &root.to_string_lossy(),
+            Some(&app),
+        )
+        .unwrap();
+        let (binding, transport) =
+            identity::registration_from_receipt(&receipt.data, worker, &root).unwrap();
+        let mut ident = identity::Identity {
+            worker_id: worker.into(),
+            token: "receipt-token".into(),
+            project_scope: Some(GlobalState::canonical_project_scope(&root).unwrap()),
+            runtime: None,
+            transport: None,
+        };
+        identity::persist_registration_at(&host.host_paths, &scope, &mut ident, binding, transport)
+            .unwrap();
+        let response = Resp::data(json!({"identity_receipt":ident}));
+        let context = ProjectContext::for_registered_root_with_app(
+            &root,
+            AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            business_receipts_for_success(
+                &host,
+                &runtime,
+                &context,
+                None,
+                &response,
+                Some(&nested)
+            ),
+            vec!["nested_register", "route", "credential", "lease"]
+        );
+        let mut stale = Resp::data(response.data.clone());
+        stale.data["identity_receipt"]["runtime"]["endpoint_generation"] = json!(2);
+        assert_eq!(
+            business_receipts_for_success(&host, &runtime, &context, None, &stale, Some(&nested)),
+            vec!["nested_register"]
+        );
+        let mut cross_scope = Resp::data(response.data.clone());
+        cross_scope.data["identity_receipt"]["runtime"]["appserver_id"] = json!("other-app");
+        assert_eq!(
+            business_receipts_for_success(
+                &host,
+                &runtime,
+                &context,
+                None,
+                &cross_scope,
+                Some(&nested)
+            ),
+            vec!["nested_register"]
+        );
+        let identity_path = host
+            .host_paths
+            .state_root()
+            .join("identities")
+            .join(worker)
+            .join("identity.json");
+        let identity_bytes = std::fs::read(&identity_path).unwrap();
+        let mut wrong_credential: serde_json::Value =
+            serde_json::from_slice(&identity_bytes).unwrap();
+        wrong_credential["token"] = json!("not-the-current-project-credential");
+        std::fs::write(
+            &identity_path,
+            serde_json::to_vec(&wrong_credential).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            business_receipts_for_success(
+                &host,
+                &runtime,
+                &context,
+                None,
+                &response,
+                Some(&nested)
+            ),
+            vec!["nested_register", "route"],
+            "stale credential must not prove completion"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(host_root).unwrap();
+    }
 }
 
 fn tmux_anchor() -> TmuxCandidate {
@@ -418,6 +756,7 @@ fn s23_b03_outer_sync_failure_prevents_register_consume() {
         false,
         None,
         Some(&mut before_consume),
+        None,
     );
     assert!(!response.ok, "{response:?}");
     assert!(
@@ -599,799 +938,4 @@ fn s23_b03_stale_prepared_revision_is_rejected_without_effect_or_reprepare() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[test]
-fn approved_identity_digest_excludes_descriptive_metadata_but_binds_facts_and_fence() {
-    let facts = IdentityFacts {
-        thread_id: Some("thread-a".into()),
-        ..Default::default()
-    };
-    let mut approval = json!({
-        "decision":"approved", "decided_by":"user", "target_identity":"peer-a",
-        "project_scope":"/project", "app_scope_id":"appserver-cli",
-        "action":"restore_identity",
-        "expected_incumbent":{"binding_id":"bind-7", "endpoint_generation":7},
-        "intent_digest":"sha256:placeholder", "approved_at_ms":1770000000000_i64
-    });
-    let expected = approval_digest(&approval, &facts);
-    approval["intent_digest"] = expected.clone().into();
-    assert_eq!(
-        parse_identity_approval(&approval).unwrap().intent_digest,
-        expected
-    );
-    approval["decided_by"] = "operator".into();
-    approval["approved_at_ms"] = 1770000000001_i64.into();
-    assert_eq!(approval_digest(&approval, &facts), expected);
-    approval["expected_incumbent"]["endpoint_generation"] = 8.into();
-    assert_ne!(approval_digest(&approval, &facts), expected);
-    assert_ne!(
-        approval_digest(&approval, &IdentityFacts::default()),
-        expected
-    );
-}
-
-#[test]
-fn approved_recovery_without_durable_incumbent_is_denied_before_admission() {
-    let (server, root) = test_server();
-    let host_paths = server.host_paths.clone();
-    let journal = Arc::new(OperationJournal::open(host_paths.journal_path()).unwrap());
-    let manager = ProjectRuntimeManager::new_with_operation_journal(
-        Arc::new(server),
-        &host_paths,
-        journal.clone(),
-    )
-    .unwrap();
-    let context = ProjectContext::for_registered_root_with_app(
-        &root,
-        AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap(),
-    )
-    .unwrap();
-    let facts = IdentityFacts {
-        tmux: Some(tmux_anchor()),
-        ..Default::default()
-    };
-    let mut approval = json!({
-        "decision":"approved", "decided_by":"user", "target_identity":"peer-missing",
-        "project_scope":context.project_scope.as_str(), "app_scope_id":context.app_scope_id.as_str(),
-        "action":"restore_identity",
-        "expected_incumbent":{"binding_id":"bind-7", "endpoint_generation":7},
-        "intent_digest":"sha256:placeholder", "approved_at_ms":1770000000000_i64
-    });
-    approval["intent_digest"] = approval_digest(&approval, &facts).into();
-    let request = IdentityContextRequest {
-        operation_id: "ctxop-approved-no-incumbent".into(),
-        invocation: "approved_recovery".into(),
-        // The request action is the context operation; the approval's own
-        // `action` field carries `restore_identity` / `replace_binding`.
-        action: "context".into(),
-        facts,
-        approval: Some(approval),
-        grant_approval: None,
-        query: false,
-        query_capability: "base64url:capability".into(),
-        invocation_ticket: String::new(),
-    };
-    let (_, response) = manager.identity_context(context.clone(), request.clone());
-    assert!(!response.ok);
-    assert_eq!(
-        response.error.as_deref(),
-        Some("IDENTITY_APPROVAL_IDENTITY_NOT_FOUND")
-    );
-    assert!(journal
-        .query(
-            &request,
-            context.project_scope.as_str(),
-            context.app_scope_id.as_str()
-        )
-        .is_err());
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-/// One verified AppServer candidate for the fake socket the test serves.
-fn appserver_candidate(
-    root: &Path,
-    endpoint: &str,
-    session: &str,
-    thread: &str,
-) -> TransportCandidates {
-    TransportCandidates {
-        appserver: Some(AppServerCandidate {
-            endpoint: format!("unix://{endpoint}"),
-            namespace: "codex_tui".into(),
-            session_id: session.into(),
-            thread_id: thread.into(),
-            cwd: root.to_string_lossy().into_owned(),
-        }),
-        tmux: None,
-        dsh: None,
-    }
-}
-
-fn recovery_facts(endpoint: &str, session: &str, thread: &str) -> IdentityFacts {
-    IdentityFacts {
-        session_id: Some(session.into()),
-        thread_id: Some(thread.into()),
-        endpoint: Some(format!("unix://{endpoint}")),
-        namespace: Some("codex_tui".into()),
-        ..IdentityFacts::default()
-    }
-}
-
-/// Serve the exact AppServer admission handshake (`initialize` then
-/// `thread/read`) so the daemon's real `verify_candidate` accepts the
-/// candidate without any production fault seam.
-fn serve_fake_appserver(
-    listener: std::os::unix::net::UnixListener,
-    session: &str,
-    thread: &str,
-    cwd: &Path,
-    connections: usize,
-) -> std::thread::JoinHandle<()> {
-    use std::io::{Read, Write};
-    let session = session.to_owned();
-    let thread = thread.to_owned();
-    let cwd = cwd.to_string_lossy().into_owned();
-    std::thread::spawn(move || {
-        for _ in 0..connections {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut header = Vec::new();
-            let mut byte = [0_u8; 1];
-            while !header.ends_with(b"\r\n\r\n") {
-                stream.read_exact(&mut byte).unwrap();
-                header.push(byte[0]);
-            }
-            stream
-                    .write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
-                    .unwrap();
-            loop {
-                let request = read_test_frame(&mut stream);
-                let request: serde_json::Value = serde_json::from_slice(&request).unwrap();
-                let Some(id) = request.get("id").cloned() else {
-                    continue;
-                };
-                let method = request["method"].as_str().unwrap();
-                let response = match method {
-                    "initialize" => json!({"id": id, "result": {}}),
-                    "thread/read" => {
-                        json!({
-                            "id": id,
-                            "result": {"thread": {"id": thread, "sessionId": session, "cwd": cwd}}
-                        })
-                    }
-                    "thread/items/list" => {
-                        json!({"id": id, "error": {"code": -32601, "message": "unsupported"}})
-                    }
-                    "turn/start" | "turn/steer" => {
-                        json!({"id": id, "error": {"code": -32600, "message": "invalid params"}})
-                    }
-                    "thread/turns/list" => json!({"id": id, "result": {"data": []}}),
-                    other => panic!("unexpected AppServer method {other}"),
-                };
-                stream
-                    .write_all(&encode_test_frame(
-                        0x1,
-                        &serde_json::to_vec(&response).unwrap(),
-                    ))
-                    .unwrap();
-                if method == "thread/turns/list" {
-                    break;
-                }
-            }
-            let _ = stream.shutdown(std::net::Shutdown::Both);
-        }
-    })
-}
-
-fn read_test_frame(stream: &mut std::os::unix::net::UnixStream) -> Vec<u8> {
-    use std::io::Read;
-    let mut header = [0_u8; 2];
-    stream.read_exact(&mut header).unwrap();
-    let masked = header[1] & 0x80 != 0;
-    let mut length = (header[1] & 0x7f) as usize;
-    if length == 126 {
-        let mut bytes = [0_u8; 2];
-        stream.read_exact(&mut bytes).unwrap();
-        length = u16::from_be_bytes(bytes) as usize;
-    }
-    let mut mask = [0_u8; 4];
-    if masked {
-        stream.read_exact(&mut mask).unwrap();
-    }
-    let mut payload = vec![0_u8; length];
-    stream.read_exact(&mut payload).unwrap();
-    if masked {
-        for (index, byte) in payload.iter_mut().enumerate() {
-            *byte ^= mask[index % 4];
-        }
-    }
-    payload
-}
-
-fn encode_test_frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
-    let mut frame = vec![0x80 | opcode];
-    let length = payload.len();
-    if length < 126 {
-        frame.push(0x80 | length as u8);
-    } else if length <= u16::MAX as usize {
-        frame.push(0x80 | 126);
-        frame.extend_from_slice(&(length as u16).to_be_bytes());
-    } else {
-        frame.push(0x80 | 127);
-        frame.extend_from_slice(&(length as u64).to_be_bytes());
-    }
-    let mask = [0x11_u8, 0x22, 0x33, 0x44];
-    frame.extend_from_slice(&mask);
-    for (index, byte) in payload.iter().enumerate() {
-        frame.push(byte ^ mask[index % 4]);
-    }
-    frame
-}
-
-fn test_socket_path(worker_id: &str, generation: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "collab-d2i-{}-{worker_id}-{generation}.sock",
-        std::process::id()
-    ))
-}
-
-/// True when this sandbox permits binding a unix socket. The managed
-/// sandbox denies it, so real-transport owner tests skip rather than
-/// report a false failure; the same pattern is used by the adapter tests.
-fn unix_sockets_available() -> bool {
-    let probe = std::env::temp_dir().join(format!(
-        "collab-d2i-probe-{}-{}.sock",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    match std::os::unix::net::UnixListener::bind(&probe) {
-        Ok(listener) => {
-            drop(listener);
-            let _ = std::fs::remove_file(&probe);
-            true
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => false,
-        Err(error) => panic!("probe unix socket bind: {error}"),
-    }
-}
-
-/// Owner-boundary proof consumption and the exact incumbent fence recheck,
-/// exercised without a live transport. The Register owner must accept the
-/// proof only for its exact target and route scope, and the fence must name
-/// the committed incumbent binding and generation.
-#[test]
-fn register_approval_proof_is_scoped_and_rechecks_the_exact_incumbent_fence() {
-    let project_scope = ProjectScopeId::new("/tmp/collab-d2i-fence".to_owned()).unwrap();
-    let app_scope = AppServerId::new("appserver-cli").unwrap();
-    let other_app_scope = AppServerId::new("tui-default").unwrap();
-    let binding_id = BindingId::new("binding-peer-a").unwrap();
-    let mut state = State::default();
-    state
-        .global
-        .register_project(
-            ProjectRegistration::with_registered_at(project_scope.clone(), app_scope.clone(), 1)
-                .unwrap(),
-        )
-        .unwrap();
-    state
-        .global
-        .bind_runtime(
-            RuntimeBinding::new_with_session(
-                project_scope.clone(),
-                app_scope.clone(),
-                AgentId::new("peer-a").unwrap(),
-                RuntimeId::new("runtime-peer-a").unwrap(),
-                binding_id.clone(),
-                7,
-                Some(crate::identity::SessionId::new("session-peer-a").unwrap()),
-                Some(NativeThreadId::new("thread-peer-a").unwrap()),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-
-    let proof = RegisterApprovalProof {
-        target_identity: "peer-a".into(),
-        project_scope: project_scope.as_str().to_owned(),
-        app_scope_id: app_scope.as_str().to_owned(),
-        incumbent_binding_id: binding_id.as_str().to_owned(),
-        incumbent_endpoint_generation: 7,
-    };
-    assert!(approved_register_authorized(
-        Some(&proof),
-        "peer-a",
-        Some(&project_scope),
-        Some(&app_scope),
-    ));
-    assert!(!approved_register_authorized(
-        Some(&proof),
-        "peer-b",
-        Some(&project_scope),
-        Some(&app_scope),
-    ));
-    assert!(!approved_register_authorized(
-        Some(&proof),
-        "peer-a",
-        Some(&project_scope),
-        Some(&other_app_scope),
-    ));
-    assert!(!approved_register_authorized(
-        None,
-        "peer-a",
-        Some(&project_scope),
-        Some(&app_scope),
-    ));
-    assert!(approved_register_fence_current(
-        &state,
-        &proof,
-        &project_scope,
-        &app_scope,
-    ));
-    let stale = RegisterApprovalProof {
-        incumbent_endpoint_generation: 8,
-        ..proof.clone()
-    };
-    assert!(!approved_register_fence_current(
-        &state,
-        &stale,
-        &project_scope,
-        &app_scope,
-    ));
-    let unknown_binding = RegisterApprovalProof {
-        incumbent_binding_id: "binding-missing".into(),
-        ..proof
-    };
-    assert!(!approved_register_fence_current(
-        &state,
-        &unknown_binding,
-        &project_scope,
-        &app_scope,
-    ));
-}
-
-/// Spawn the fake AppServer that answers the recovery Register's own
-/// `verify_candidate`, returning the request candidates bound to it.
-fn recovery_appserver(
-    endpoint: &Path,
-    session: &str,
-    thread: &str,
-    cwd: &Path,
-    connections: usize,
-) -> std::thread::JoinHandle<()> {
-    let listener = std::os::unix::net::UnixListener::bind(endpoint).unwrap();
-    serve_fake_appserver(listener, session, thread, cwd, connections)
-}
-
-/// Register and promote the daemon's current credential, then persist a
-/// stale local credential and return a separate recovery endpoint.
-fn stale_master_incumbent(
-    server: &Server,
-    root: &Path,
-    worker_id: &str,
-) -> (IdentityFacts, BindingId, u64, String, PathBuf, String) {
-    let first_socket = test_socket_path(worker_id, "1");
-    let first_listener = std::os::unix::net::UnixListener::bind(&first_socket).unwrap();
-    let first_thread = format!("thread-{worker_id}-1");
-    let first_server = serve_fake_appserver(
-        first_listener,
-        &format!("session-{worker_id}-1"),
-        &first_thread,
-        root,
-        1,
-    );
-    let first_endpoint = first_socket.to_string_lossy().into_owned();
-    let first = handle_register_with_app_scope(
-        server,
-        worker_id.into(),
-        "token-1".into(),
-        root.to_string_lossy().into_owned(),
-        Some(AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap()),
-        Some(appserver_candidate(
-            root,
-            &first_endpoint,
-            &format!("session-{worker_id}-1"),
-            &first_thread,
-        )),
-    );
-    assert!(first.ok, "{:?}", first.error);
-    first_server.join().unwrap();
-    let promote = handle_master_promote(
-        server,
-        worker_id.into(),
-        "token-1".into(),
-        "user-approved master promotion".into(),
-    );
-    assert!(promote.ok, "{:?}", promote.error);
-    let scope = ProjectContext::for_registered_root_with_app(
-        root,
-        AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap(),
-    )
-    .unwrap();
-    let binding = {
-        let state = server.state.lock().unwrap();
-        state
-            .global
-            .lookup_binding_for(
-                &RouteScope {
-                    app_scope_id: scope.app_scope_id.clone(),
-                    project_scope_id: scope.project_scope.clone(),
-                },
-                &BindingId::new(format!("binding-{worker_id}")).unwrap(),
-            )
-            .cloned()
-            .expect("registered binding")
-    };
-    let transport = {
-        let state = server.state.lock().unwrap();
-        selected_transport_for_worker(state.workers.get(worker_id).expect("worker"))
-            .expect("selected transport")
-    };
-    let recovery_socket = test_socket_path(worker_id, "recovery");
-    let recovery_endpoint = recovery_socket.to_string_lossy().into_owned();
-    let recovery_session = format!("session-{worker_id}-recovery");
-    let recovery_thread = format!("thread-{worker_id}-recovery");
-    let mut identity = identity::Identity {
-        worker_id: worker_id.into(),
-        token: "token-2".into(),
-        project_scope: Some(scope.project_scope.clone()),
-        runtime: None,
-        transport: None,
-    };
-    identity::persist_registration_at(
-        &server.host_paths,
-        &Scope {
-            root: root.to_path_buf(),
-        },
-        &mut identity,
-        RuntimeIdentity {
-            agent_id: binding.agent_id.clone(),
-            runtime_id: binding.runtime_id.clone(),
-            appserver_id: binding.app_scope_id.clone(),
-            endpoint_generation: binding.endpoint_generation,
-            binding_id: binding.binding_id.clone(),
-            session_id: binding.session_id.clone(),
-            native_thread_id: binding.native_thread_id.clone(),
-        },
-        transport.clone(),
-    )
-    .unwrap();
-    (
-        recovery_facts(&recovery_endpoint, &recovery_session, &recovery_thread),
-        binding.binding_id.clone(),
-        binding.endpoint_generation,
-        binding.agent_id.as_str().to_owned(),
-        recovery_socket,
-        recovery_thread,
-    )
-}
-
-fn recovery_manager(server: Arc<Server>) -> Arc<ProjectRuntimeManager> {
-    let host_paths = server.host_paths.clone();
-    let journal = Arc::new(OperationJournal::open(host_paths.journal_path()).unwrap());
-    ProjectRuntimeManager::new_with_operation_journal(server, &host_paths, journal).unwrap()
-}
-
-fn recovery_context(root: &Path) -> ProjectContext {
-    ProjectContext::for_registered_root_with_app(
-        root,
-        AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap(),
-    )
-    .unwrap()
-}
-
-fn identity_approval(
-    context: &ProjectContext,
-    facts: &IdentityFacts,
-    target: &str,
-    incumbent_binding_id: &str,
-    incumbent_generation: u64,
-) -> serde_json::Value {
-    let mut approval = json!({
-        "decision":"approved",
-        "decided_by":"user",
-        "target_identity": target,
-        "project_scope": context.project_scope.as_str(),
-        "app_scope_id": context.app_scope_id.as_str(),
-        "action":"replace_binding",
-        "expected_incumbent":{
-            "binding_id": incumbent_binding_id,
-            "endpoint_generation": incumbent_generation
-        },
-        "intent_digest":"sha256:placeholder",
-        "approved_at_ms":1770000000000_i64
-    });
-    approval["intent_digest"] = approval_digest(&approval, facts).into();
-    approval
-}
-
-fn grant_approval(
-    context: &ProjectContext,
-    facts: &IdentityFacts,
-    target: &str,
-    grant_id: &str,
-    grant_generation: u64,
-) -> serde_json::Value {
-    let mut approval = json!({
-        "decision":"approved",
-        "decided_by":"user",
-        "target_identity": target,
-        "project_scope": context.project_scope.as_str(),
-        "app_scope_id": context.app_scope_id.as_str(),
-        "action":"replace_master_grant",
-        "expected_grant":{"grant_id": grant_id, "generation": grant_generation},
-        "intent_digest":"sha256:placeholder",
-        "approved_at_ms":1770000000000_i64
-    });
-    approval["intent_digest"] = approval_digest(&approval, facts).into();
-    approval
-}
-
-fn grant_for(
-    server: &Server,
-    root: &Path,
-    binding_id: &BindingId,
-) -> Option<crate::server::global_state::MasterGrant> {
-    let context = recovery_context(root);
-    let state = server.state.lock().unwrap();
-    current_master_grant(
-        &state,
-        Some(&RouteScope {
-            app_scope_id: context.app_scope_id,
-            project_scope_id: context.project_scope,
-        }),
-    )
-    .filter(|grant| grant.binding_id == *binding_id)
-}
-
-fn binding_generation_for(
-    server: &Server,
-    context: &ProjectContext,
-    binding_id: &BindingId,
-) -> u64 {
-    server
-        .state
-        .lock()
-        .unwrap()
-        .global
-        .lookup_binding_for(
-            &RouteScope {
-                app_scope_id: context.app_scope_id.clone(),
-                project_scope_id: context.project_scope.clone(),
-            },
-            binding_id,
-        )
-        .expect("recovered binding")
-        .endpoint_generation
-}
-
-/// Approved peer recovery consumes the daemon Register proof at the owner
-/// boundary, commits the exact binding, and keeps the existing master grant
-/// for an identity-only approval (no implicit promotion, clear, or replace).
-#[test]
-fn approved_register_recovery_commits_binding_and_retains_master_grant() {
-    if !unix_sockets_available() {
-        eprintln!("SKIP approved-register owner test: sandbox denied unix socket bind");
-        return;
-    }
-    let (server, root) = test_server();
-    let server = Arc::new(server);
-    let manager = recovery_manager(server.clone());
-    let (facts, binding_id, incumbent_generation, _agent, endpoint, thread) =
-        stale_master_incumbent(&server, &root, "peer-a");
-    let context = recovery_context(&root);
-    let before_grant = grant_for(&server, &root, &binding_id).expect("master grant");
-    let recovery_server = recovery_appserver(
-        &endpoint,
-        facts.session_id.as_deref().expect("recovery session"),
-        &thread,
-        &root,
-        1,
-    );
-    let request = IdentityContextRequest {
-        operation_id: "ctxop-approved-peer".into(),
-        invocation: "approved_recovery".into(),
-        action: "context".into(),
-        facts: facts.clone(),
-        approval: Some(identity_approval(
-            &context,
-            &facts,
-            "peer-a",
-            binding_id.as_str(),
-            incumbent_generation,
-        )),
-        grant_approval: None,
-        query: false,
-        query_capability: "base64url:capability".into(),
-        invocation_ticket: String::new(),
-    };
-    let (runtime, response) = manager.identity_context(context.clone(), request);
-    if response.ok {
-        recovery_server.join().unwrap();
-    } else {
-        drop(recovery_server);
-    }
-    let host_token = server
-        .state
-        .lock()
-        .unwrap()
-        .workers
-        .get("peer-a")
-        .map(|worker| worker.token.clone());
-    let runtime_token = runtime
-        .state
-        .lock()
-        .unwrap()
-        .workers
-        .get("peer-a")
-        .map(|worker| worker.token.clone());
-    assert!(
-        response.ok,
-        "error={:?} data={} host_token={host_token:?} runtime_token={runtime_token:?}",
-        response.error, response.data
-    );
-    assert_eq!(response.data["result"]["outcome"], "completed");
-    assert_eq!(response.data["result"]["phase"], "context_complete");
-    let new_generation = binding_generation_for(&server, &context, &binding_id);
-    assert!(
-        new_generation > incumbent_generation,
-        "recovery must advance the endpoint generation"
-    );
-    {
-        let state = server.state.lock().unwrap();
-        let binding = state
-            .global
-            .lookup_binding_for(
-                &RouteScope {
-                    app_scope_id: context.app_scope_id.clone(),
-                    project_scope_id: context.project_scope.clone(),
-                },
-                &binding_id,
-            )
-            .expect("recovered binding");
-        assert_eq!(binding.endpoint_generation, new_generation);
-        assert_eq!(
-            state
-                .workers
-                .get("peer-a")
-                .map(|worker| worker.token.as_str()),
-            Some("token-2")
-        );
-    }
-    let after_grant = grant_for(&server, &root, &binding_id).expect("retained grant");
-    assert_eq!(after_grant.agent_id, before_grant.agent_id);
-    assert_eq!(after_grant.binding_id, before_grant.binding_id);
-    assert_eq!(after_grant.endpoint_generation, new_generation);
-    assert_eq!(after_grant.granted_by, before_grant.granted_by);
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-/// A changed incumbent fence is refused with the accepted typed conflict
-/// before any owner effect, so no binding, credential, or grant moves.
-#[test]
-fn stale_incumbent_fence_is_refused_with_no_side_effects() {
-    if !unix_sockets_available() {
-        eprintln!("SKIP stale-incumbent owner test: sandbox denied unix socket bind");
-        return;
-    }
-    let (server, root) = test_server();
-    let server = Arc::new(server);
-    let manager = recovery_manager(server.clone());
-    let (facts, binding_id, incumbent_generation, _agent, _endpoint, _thread) =
-        stale_master_incumbent(&server, &root, "peer-stale");
-    let context = recovery_context(&root);
-    let before_grant = grant_for(&server, &root, &binding_id).expect("master grant");
-    let request = IdentityContextRequest {
-        operation_id: "ctxop-approved-stale".into(),
-        invocation: "approved_recovery".into(),
-        action: "context".into(),
-        facts: facts.clone(),
-        approval: Some(identity_approval(
-            &context,
-            &facts,
-            "peer-stale",
-            binding_id.as_str(),
-            incumbent_generation + 1,
-        )),
-        grant_approval: None,
-        query: false,
-        query_capability: "base64url:capability".into(),
-        invocation_ticket: String::new(),
-    };
-    let (_, response) = manager.identity_context(context.clone(), request.clone());
-    assert!(!response.ok);
-    assert_eq!(response.data["result"]["outcome"], "denied");
-    assert_eq!(
-        response.data["result"]["owner_readback"]["error"],
-        "APPROVAL_STALE_CONFLICT"
-    );
-    {
-        let state = server.state.lock().unwrap();
-        let binding = state
-            .global
-            .lookup_binding_for(
-                &RouteScope {
-                    app_scope_id: context.app_scope_id.clone(),
-                    project_scope_id: context.project_scope.clone(),
-                },
-                &binding_id,
-            )
-            .expect("binding");
-        assert_eq!(binding.endpoint_generation, incumbent_generation);
-    }
-    let after_grant = grant_for(&server, &root, &binding_id).expect("grant");
-    assert_eq!(after_grant, before_grant);
-    assert!(manager
-        .operation_journal
-        .query(
-            &request,
-            context.project_scope.as_str(),
-            context.app_scope_id.as_str()
-        )
-        .is_err());
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-/// One invocation carrying both approvals validates them before admission,
-/// then commits the identity binding and the distinct grant replacement
-/// under their separate owners and reads both back before `completed`.
-#[test]
-fn dual_approval_commits_identity_and_separate_grant_replacement() {
-    if !unix_sockets_available() {
-        eprintln!("SKIP dual-approval owner test: sandbox denied unix socket bind");
-        return;
-    }
-    let (server, root) = test_server();
-    let server = Arc::new(server);
-    let manager = recovery_manager(server.clone());
-    let (facts, binding_id, incumbent_generation, _agent, endpoint, thread) =
-        stale_master_incumbent(&server, &root, "master-a");
-    let context = recovery_context(&root);
-    let before_grant = grant_for(&server, &root, &binding_id).expect("master grant");
-    let recovery_server = recovery_appserver(
-        &endpoint,
-        facts.session_id.as_deref().expect("recovery session"),
-        &thread,
-        &root,
-        1,
-    );
-    let request = IdentityContextRequest {
-        operation_id: "ctxop-approved-dual".into(),
-        invocation: "approved_recovery".into(),
-        action: "context".into(),
-        facts: facts.clone(),
-        approval: Some(identity_approval(
-            &context,
-            &facts,
-            "master-a",
-            binding_id.as_str(),
-            incumbent_generation,
-        )),
-        grant_approval: Some(grant_approval(
-            &context,
-            &facts,
-            "master-a",
-            binding_id.as_str(),
-            before_grant.endpoint_generation,
-        )),
-        query: false,
-        query_capability: "base64url:capability".into(),
-        invocation_ticket: String::new(),
-    };
-    let (_, response) = manager.identity_context(context.clone(), request);
-    if response.ok {
-        recovery_server.join().unwrap();
-    } else {
-        drop(recovery_server);
-    }
-    assert!(response.ok, "{:?}", response.error);
-    assert_eq!(response.data["result"]["outcome"], "completed");
-    let new_generation = binding_generation_for(&server, &context, &binding_id);
-    let after_grant = grant_for(&server, &root, &binding_id).expect("replacement grant");
-    assert_eq!(after_grant.agent_id, before_grant.agent_id);
-    assert_eq!(after_grant.binding_id, before_grant.binding_id);
-    assert_eq!(after_grant.endpoint_generation, new_generation);
-    assert_eq!(after_grant.granted_by, "user");
-    assert_ne!(after_grant.approval, before_grant.approval);
-    std::fs::remove_dir_all(root).unwrap();
-}
+include!("required_fields_tests_tail.rs");

@@ -99,12 +99,22 @@ pub struct IdentityFacts {
     pub namespace: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tmux: Option<TmuxCandidate>,
+    /// Stable address available without display/capture or native runtime IDs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmux_anchor: Option<TmuxPaneAnchor>,
     /// The adapter-designed dsh anchor, observed by the CLI from
     /// `DSH_SESSION_ID`. It is separate from a transport candidate because the
     /// gateway control socket may be unreachable while the anchor is still
     /// observable; the anchor alone is enough to recover a dsh identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dsh_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TmuxPaneAnchor {
+    pub socket_path: String,
+    pub pane_id: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,6 +170,33 @@ pub struct IdentityContextRequest {
     /// argument.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub invocation_ticket: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegisterReplyPurpose {
+    InitialRegister,
+    ManualCommunicationRestore,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterParticipantReply {
+    pub operation_id: String,
+    pub command_id: String,
+    pub purpose: RegisterReplyPurpose,
+    pub challenge: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<TmuxPaneAnchor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native: Option<RegisterNativeReply>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RegisterNativeReply {
+    AppServer { candidate: AppServerCandidate },
+    Dsh { candidate: DshCandidate },
 }
 
 impl IdentityContextRequest {
@@ -431,8 +468,8 @@ pub struct RouteResolution {
     pub agent_id: AgentId,
     pub binding_id: BindingId,
     pub endpoint_generation: u64,
-    pub session_id: SessionId,
-    pub native_thread_id: NativeThreadId,
+    pub session_id: Option<SessionId>,
+    pub native_thread_id: Option<NativeThreadId>,
 }
 
 impl RouteResolution {
@@ -441,8 +478,12 @@ impl RouteResolution {
         self.project_scope.validate()?;
         crate::identity::validate_id_for_protocol(self.agent_id.as_str())?;
         crate::identity::validate_id_for_protocol(self.binding_id.as_str())?;
-        crate::identity::validate_id_for_protocol(self.session_id.as_str())?;
-        crate::identity::validate_id_for_protocol(self.native_thread_id.as_str())?;
+        if let Some(session) = &self.session_id {
+            crate::identity::validate_id_for_protocol(session.as_str())?;
+        }
+        if let Some(thread) = &self.native_thread_id {
+            crate::identity::validate_id_for_protocol(thread.as_str())?;
+        }
         for (name, value) in [
             ("canonical root", self.canonical_root.as_str()),
             ("storage root", self.storage_root.as_str()),
@@ -550,6 +591,9 @@ impl ProjectContext {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op")]
 pub enum Req {
+    RegisterReply {
+        reply: RegisterParticipantReply,
+    },
     BoardShow,
     Board {
         worker_id: String,
@@ -1031,8 +1075,8 @@ mod tests {
             agent_id: AgentId::new("agent-1").unwrap(),
             binding_id: BindingId::new("binding-1").unwrap(),
             endpoint_generation: 7,
-            session_id: crate::identity::SessionId::new("session-1").unwrap(),
-            native_thread_id: NativeThreadId::new("thread-1").unwrap(),
+            session_id: Some(crate::identity::SessionId::new("session-1").unwrap()),
+            native_thread_id: Some(NativeThreadId::new("thread-1").unwrap()),
         }
     }
 

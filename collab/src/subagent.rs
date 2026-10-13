@@ -707,6 +707,26 @@ fn run(server: &Server, actor: &str, token: &str, action: Action) -> Result<serd
             if record.status == "probing" && record.error.is_none() {
                 bail!("startup probe is in progress; check status, or close after its bounded completion");
             }
+            let observed_target = crate::server::close_endpoint_target(&state, &record.peer);
+            let observed_record = serde_json::to_value(&record)?;
+            drop(state);
+            let presence = crate::server::close_endpoint_presence(server, &observed_target);
+            let mut state = server.state.lock().unwrap();
+            if crate::server::close_endpoint_target(&state, &record.peer) != observed_target
+                || state.subagents.get(&record.id).map(serde_json::to_value).transpose()?
+                    != Some(observed_record)
+            {
+                bail!("SUBAGENT_CLOSE_TARGET_CHANGED: observed child or binding changed");
+            }
+            if !state.workers.get(actor).is_some_and(|worker| worker.token == token) {
+                bail!("subagent authentication failed");
+            }
+            if record.parent != actor
+                && crate::server::current_master_holder(server, &state)
+                    .map_err(anyhow::Error::msg)?.as_deref() != Some(actor)
+            {
+                bail!("only the creating parent or current master may manage this subagent");
+            }
             let snapshot = state
                 .subagent_snapshots
                 .get(&record.id)
@@ -718,11 +738,6 @@ fn run(server: &Server, actor: &str, token: &str, action: Action) -> Result<serd
             let snapshot_captured_ms = match snapshot {
                 Some(snapshot) => Some(snapshot.captured_ms),
                 None => {
-                    let presence = state
-                        .workers
-                        .get(&record.peer)
-                        .map(|worker| crate::server::worker_presence(server, worker))
-                        .unwrap_or(crate::server::presence::IdentityPresence::Missing);
                     if presence != crate::server::presence::IdentityPresence::Missing
                         || !subagent_responsibilities_resolved(&state, &record)
                     {

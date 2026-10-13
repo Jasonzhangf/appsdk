@@ -253,16 +253,22 @@ fn non_master_force_close_is_rejected() {
 #[test]
 fn orphan_force_close_defers_when_owner_appserver_probe_is_unknown() {
     let (mut server, root) = test_server();
-    register(&server, "owner", "thread-owner");
+    let transport = test_appserver_transport("thread-owner");
+    let app = AppServerId::new("tui-default").unwrap();
+    let cwd = server.root.display().to_string();
+    assert!(seed_committed_owner(&server, "owner", "token-owner", &transport, &cwd, Some(app.clone())).ok);
+    commit_current_thread_route_for_runtime(&server, &server, "owner", &cwd, Some(&app)).unwrap();
     register(&server, "peer", "thread-peer");
     assert!(create_task(&server, "owner", "working", "feature").ok);
-    server.appserver_candidate_check = Arc::new(|candidate| {
-        if candidate.thread_id == "thread-owner" {
+    server.appserver_thread_status = Arc::new(|_, thread_id| {
+        if thread_id == "thread-owner" {
             Err("owner route probe unknown".into())
         } else {
-            Ok(test_appserver_transport(&candidate.thread_id))
+            Ok(serde_json::json!({"thread": {"id": thread_id, "status": {"type": "idle"}}}))
         }
     });
+    let owner = server.state.lock().unwrap().workers["owner"].clone();
+    assert_eq!(worker_identity_and_endpoint(&server, &owner), (true, None));
     let resp = handle_task_close(
         &server,
         "peer".into(),
@@ -287,7 +293,11 @@ fn orphan_force_close_defers_when_owner_appserver_probe_is_unknown() {
 #[test]
 fn orphan_force_close_refuses_a_cold_owner_because_cold_is_not_dead() {
     let (mut server, root) = test_server();
-    register(&server, "owner", "thread-owner");
+    let transport = test_appserver_transport("thread-owner");
+    let app = AppServerId::new("tui-default").unwrap();
+    let cwd = server.root.display().to_string();
+    assert!(seed_committed_owner(&server, "owner", "token-owner", &transport, &cwd, Some(app.clone())).ok);
+    commit_current_thread_route_for_runtime(&server, &server, "owner", &cwd, Some(&app)).unwrap();
     register(&server, "peer", "thread-peer");
     assert!(create_task(&server, "owner", "orphan", "feature").ok);
     server.appserver_thread_status = Arc::new(|_, thread_id| {
@@ -299,6 +309,10 @@ fn orphan_force_close_refuses_a_cold_owner_because_cold_is_not_dead() {
             }
         }))
     });
+
+    let owner = server.state.lock().unwrap().workers["owner"].clone();
+    assert_eq!(worker_presence(&server, &owner), IdentityPresence::Cold);
+    assert_eq!(worker_identity_and_endpoint(&server, &owner), (true, Some(true)));
 
     // A cold thread is not evidence that its owner is dead: the owner may
     // simply be idle on the endpoint, so force close stays refused.
@@ -369,6 +383,8 @@ fn registered_peer_force_closes_orphaned_owner_with_no_live_master() {
     register(&server, "peer", "thread-peer");
     assert!(create_task(&server, "owner", "orphan", "feature").ok);
     kill_registered_worker_pane(&server, "owner");
+    let owner = server.state.lock().unwrap().workers["owner"].clone();
+    assert_eq!(worker_identity_and_endpoint(&server, &owner), (true, Some(false)));
     let resp = handle_task_close(
         &server,
         "peer".into(),
@@ -395,6 +411,8 @@ fn repeated_orphan_force_close_is_idempotent_after_journal_replay() {
     register(&server, "peer", "thread-peer");
     assert!(create_task(&server, "owner", "orphan", "feature").ok);
     kill_registered_worker_pane(&server, "owner");
+    let owner = server.state.lock().unwrap().workers["owner"].clone();
+    assert_eq!(worker_identity_and_endpoint(&server, &owner), (true, Some(false)));
     let reason = "owner route lost; replay closes the same orphan";
     let first = handle_task_close(
         &server,
@@ -440,6 +458,21 @@ fn repeated_orphan_force_close_is_idempotent_after_journal_replay() {
         std::fs::read_to_string(&journal_path).unwrap(),
         journal_after_first
     );
+    // The same orphan address proof must also authorize the existing cleanup
+    // owner. This task declared no filesystem or Git resource to remove.
+    let finalized = handle_task_finalize_cleanup(&server, "peer".into(), "token-peer".into(), "orphan".into());
+    assert!(finalized.ok, "{finalized:?}");
+    assert_eq!(finalized.data["cleanup"]["result"], "verified");
+    let finalized_id = finalized.data["cleanup"]["receipt_id"].clone();
+    let finalized_journal = std::fs::read(&journal_path).unwrap();
+    *server.state.lock().unwrap() = replay(&root).unwrap();
+    let finalize_again = handle_task_finalize_cleanup(&server, "peer".into(), "token-peer".into(), "orphan".into());
+    assert!(finalize_again.ok, "{finalize_again:?}");
+    assert_eq!(finalize_again.data["idempotent"], true);
+    assert_eq!(finalize_again.data["cleanup"]["receipt_id"], finalized_id);
+    assert_eq!(std::fs::read(&journal_path).unwrap(), finalized_journal);
+    let owner = server.state.lock().unwrap().workers["owner"].clone();
+    assert_eq!(worker_identity_and_endpoint(&server, &owner), (true, Some(false)));
     std::fs::remove_dir_all(root).ok();
 }
 

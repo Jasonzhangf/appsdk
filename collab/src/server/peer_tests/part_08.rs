@@ -1417,7 +1417,8 @@ fn explicit_retry_is_refused_for_a_decode_failure() {
 #[test]
 fn reregistration_replaces_a_stale_default_target_with_current_tmux_route() {
     let (server, root) = test_server();
-    assert!(register(&server, "peer", "%peer").ok);
+    let server = Arc::new(server);
+    assert!(register_public(&server, "peer", "%peer").ok);
     {
         let mut state = server.state.lock().unwrap();
         state
@@ -1426,7 +1427,7 @@ fn reregistration_replaces_a_stale_default_target_with_current_tmux_route() {
             .unwrap()
             .target = "thread-stale".into();
     }
-    assert!(register(&server, "peer", "%peer").ok);
+    assert!(register_public(&server, "peer", "%peer").ok);
     let state = server.state.lock().unwrap();
     let subscription = &state.notification_subscriptions["sub-default-direct-message-peer"];
     let current_thread = state.workers["peer"]

@@ -76,8 +76,32 @@ pub struct Fixture {
     hook_socket: Option<PathBuf>,
 }
 
+/// Owns a public consumer command running in the fixture's selected pane.
+///
+/// The pane process receives the challenge through its own tty, exactly like
+/// an interactive participant. The fixture only supplies the command to run;
+/// it never writes the challenge into the process environment.
+pub struct PaneConsumer {
+    pub stdout: PathBuf,
+    pub stderr: PathBuf,
+}
+
+impl PaneConsumer {
+    pub fn output(&self) -> String {
+        format!(
+            "{}{}",
+            std::fs::read_to_string(&self.stdout).unwrap_or_default(),
+            std::fs::read_to_string(&self.stderr).unwrap_or_default()
+        )
+    }
+}
+
 impl Fixture {
     pub fn isolated(label: &str) -> (Self, Pane) {
+        Self::isolated_with_pane_command(label, "sleep 600")
+    }
+
+    pub fn isolated_with_pane_command(label: &str, pane_command: &str) -> (Self, Pane) {
         let root = unique_root(label);
         let host_state = root.join("h");
         let tmux_socket = root.join("t.sock");
@@ -94,7 +118,7 @@ impl Fixture {
         };
         tmux(
             &tmux_socket,
-            &["new-session", "-d", "-s", label, "sleep 600"],
+            &["new-session", "-d", "-s", label, pane_command],
         );
         let server_pid =
             String::from_utf8(tmux(&tmux_socket, &["display-message", "-p", "#{pid}"]).stdout)
@@ -115,6 +139,35 @@ impl Fixture {
             thread_anchor: format!("thread-{pane_id}"),
         };
         (fixture, pane)
+    }
+
+    pub fn run_in_pane(&self, pane: &Pane, label: &str, script: &str) -> PaneConsumer {
+        let stdout = self.root.join(format!("{label}.stdout"));
+        let stderr = self.root.join(format!("{label}.stderr"));
+        let script_path = self.root.join(format!("{label}.sh"));
+        std::fs::write(&script_path, script).expect("write selected-pane consumer");
+        let hook_env = self.hook_socket.as_ref().map(|socket| format!(
+            "COLLAB_CONTEXT_CANCEL_HOOK_SOCKET={} ", shell_quote(&socket.to_string_lossy())
+        )).unwrap_or_default();
+        let command = format!(
+            "cd {} && unset COLLAB_SOCKET_PATH COLLAB_HOST_SOCKET COLLAB_LOCK_PATH COLLAB_HOST_LOCK COLLAB_APPSERVER_SOCKET CODEX_APP_SERVER_SOCKET COLLAB_APPSERVER_NAMESPACE COLLAB_WORKER DSH_SESSION_ID; {}COLLAB_BINARY={} PROJECT_ROOT={} COLLAB_STATE_DIR={} CODEX_HOME={} CODEX_SESSION_ID={} CODEX_THREAD_ID={} CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex TUI' PANE_STDOUT={} PANE_STDERR={} sh {}",
+            shell_quote(&self.root.to_string_lossy()),
+            hook_env,
+            shell_quote(&self.binary.to_string_lossy()),
+            shell_quote(&self.root.to_string_lossy()),
+            shell_quote(&self.host_state.to_string_lossy()),
+            shell_quote(&self.root.join("home").to_string_lossy()),
+            shell_quote(&pane.session_anchor),
+            shell_quote(&pane.thread_anchor),
+            shell_quote(&stdout.to_string_lossy()),
+            shell_quote(&stderr.to_string_lossy()),
+            shell_quote(&script_path.to_string_lossy())
+        );
+        tmux(
+            &self.tmux_socket,
+            &["respawn-pane", "-k", "-t", &pane.pane_id, &command],
+        );
+        PaneConsumer { stdout, stderr }
     }
 
     pub fn without_tmux(label: &str) -> Self {
@@ -212,6 +265,43 @@ impl Fixture {
             args.extend(["--op", operation_id]);
         }
         self.run_ok(&args, pane)
+    }
+
+    /// Seed a real participant before testing durable identity recovery.
+    /// Challenge bytes travel only through the selected pane's stdin.
+    pub fn registered_context(&self, operation_id: &str, pane: &Pane) -> Value {
+        self.registered_participant(Some(operation_id), operation_id, pane)
+    }
+
+    /// Exercise automatic operation-id creation with a genuine participant.
+    pub fn registered_automatic_context(&self, pane: &Pane) -> Value {
+        self.registered_participant(None, "automatic-registration", pane)
+    }
+
+    fn registered_participant(&self, operation_id: Option<&str>, label: &str, pane: &Pane) -> Value {
+        let done = self.root.join(format!("{label}.participant-done"));
+        let result = self.root.join(format!("{label}.participant-result"));
+        let invocation = operation_id.map(|id| format!("--op {}", shell_quote(id))).unwrap_or_default();
+        let script = format!(
+            "\"$COLLAB_BINARY\" context {} >\"$PANE_STDOUT\" 2>\"$PANE_STDERR\" || true\nIFS= read -r challenge || exit 3\ncase \"$challenge\" in 'COLLAB_REGISTER_CHALLENGE '{{*) ;; *) exit 4 ;; esac\n\"$COLLAB_BINARY\" context --return-challenge \"${{challenge#COLLAB_REGISTER_CHALLENGE }}\" >{} 2>>\"$PANE_STDERR\"\nprintf done >{}\nsleep 600\n",
+            invocation, shell_quote(&result.to_string_lossy()), shell_quote(&done.to_string_lossy())
+        );
+        let consumer = self.run_in_pane(pane, label, &script);
+        assert!(
+            wait_until(Duration::from_secs(15), || done.exists()),
+            "participant setup did not complete: {} {}",
+            consumer.output(),
+            std::fs::read_to_string(&result).unwrap_or_default()
+        );
+        let result: Value = serde_json::from_slice(&std::fs::read(result).unwrap()).unwrap();
+        assert_eq!(result["ok"], true, "{result}");
+        assert_eq!(result["result"]["outcome"], "completed", "{result}");
+        if operation_id.is_none() {
+            let initial: Value = serde_json::from_slice(&std::fs::read(&consumer.stdout).unwrap()).unwrap();
+            let emitted_id = initial["operation_id"].as_str().expect("automatic public context emitted operation id");
+            return self.context(Some(emitted_id), Some(pane));
+        }
+        result
     }
 
     pub fn context_query(&self, operation_id: &str, pane: Option<&Pane>) -> Value {
@@ -478,6 +568,10 @@ impl Fixture {
         }
         surfaces
     }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 pub struct DaemonPause {
@@ -768,426 +862,7 @@ fn complete_delayed_challenge(state: &mut TestAppServerState, created: bool) {
     }
 }
 
-fn serve_appserver_connection(
-    mut stream: UnixStream,
-    root: &Path,
-    session_id: &str,
-    thread_id: &str,
-    state: &Arc<Mutex<TestAppServerState>>,
-    gate: &Arc<ArchiveGate>,
-) {
-    // macOS carries O_NONBLOCK from a nonblocking listener to accepted
-    // sockets. Keep only accept() nonblocking; frame reads need to wait for
-    // the peer's next request after the HTTP upgrade.
-    stream
-        .set_nonblocking(false)
-        .expect("set accepted AppServer stream blocking");
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-    let mut request = Vec::new();
-    let mut byte = [0_u8; 1];
-    loop {
-        if stream.read_exact(&mut byte).is_err() {
-            return;
-        }
-        request.push(byte[0]);
-        if request.ends_with(b"\r\n\r\n") {
-            break;
-        }
-    }
-    if stream
-        .write_all(
-            b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
-        )
-        .is_err()
-    {
-        return;
-    }
-    loop {
-        let payload = match read_appserver_frame(&mut stream) {
-            Ok(Some(payload)) => payload,
-            Ok(None) => return,
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-                ) =>
-            {
-                return;
-            }
-            Err(error) => {
-                eprintln!("test AppServer websocket read failed: {error}");
-                return;
-            }
-        };
-        let Ok(request) = serde_json::from_slice::<Value>(&payload) else {
-            eprintln!("test AppServer received invalid JSON frame");
-            return;
-        };
-        eprintln!(
-            "test AppServer request method={:?} id={:?}",
-            request.get("method"),
-            request.get("id")
-        );
-        let Some(id) = request.get("id").cloned() else {
-            continue;
-        };
-        let method = request.get("method").and_then(Value::as_str);
-        let response = match method {
-            Some("thread/start") => {
-                let mut state = state.lock().unwrap();
-                state.start_requests += 1;
-                let created = format!("created-thread-{}", state.start_requests);
-                state.created_thread = Some(created.clone());
-                state.created_cwd = request
-                    .pointer("/params/cwd")
-                    .and_then(Value::as_str)
-                    .unwrap()
-                    .to_owned();
-                if state.effect == "create_response_loss" {
-                    return;
-                }
-                // A notification with another id must never be accepted as the start response.
-                let unrelated = json!({"id":999999,"result":{"thread":{"id":"unrelated-thread"}}});
-                write_appserver_frame(&mut stream, &serde_json::to_vec(&unrelated).unwrap())
-                    .unwrap();
-                json!({"id":id,"result":{"thread":{"id":created}}})
-            }
-            Some("thread/resume") => {
-                let requested = request
-                    .pointer("/params/threadId")
-                    .and_then(Value::as_str)
-                    .unwrap_or(thread_id);
-                json!({"id":id,"result":{"thread":{"id":requested,"status":{"type":"idle"}}}})
-            }
-            Some("turn/start") => {
-                let mut state = state.lock().unwrap();
-                let requested = request
-                    .pointer("/params/threadId")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
-                // `immediate_notify` carries the body inside the delegated
-                // tool output for a fresh turn and inside `input` when
-                // steering; accept either carrier.
-                let input_text = request
-                    .pointer("/params/input/0/text")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                let tool_output = request
-                    .pointer("/params/toolOutput/output")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                let prompt = format!("{input_text}\n{tool_output}");
-                let marker_file = challenge_marker_from_prompt(&prompt);
-                let client_message_id = request
-                    .pointer("/params/clientUserMessageId")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                let is_create_readiness = client_message_id.starts_with("create-ready-");
-                let is_update_challenge = client_message_id.starts_with("update-challenge-");
-                let now = now_secs();
-                let effect = state.effect.clone();
-                if is_create_readiness {
-                    state.readiness_requests += 1;
-                    let turn_id = "create-readiness-turn";
-                    let cwd = state.created_cwd.clone();
-                    let marker = marker_file
-                        .as_deref()
-                        .and_then(|file| read_challenge_marker(&cwd, file));
-                    match effect.as_str() {
-                        "create_ready" | "ready_and_update_ok" | "reject_generic_turn_start" => {
-                            if let Some(marker) = marker.as_deref() {
-                                state.created_turns.push(json!({
-                                    "id": turn_id, "status": "completed", "completedAt": now,
-                                    "items": [{
-                                        "id": "create-challenge", "type": "agentMessage",
-                                        "text": challenge_envelope(&cwd, marker),
-                                    }],
-                                }));
-                            }
-                        }
-                        "create_ready_delayed" => {
-                            state.challenge_marker = marker_file.clone();
-                            state.challenge_reads = 0;
-                            state.created_turns.push(json!({
-                                "id": turn_id, "status": "inProgress", "items": [],
-                            }));
-                        }
-                        // Producer-side correlation failures: the turn is
-                        // dispatched, but the history cannot prove the exact
-                        // marker, turn, or thread, so it must never finalize.
-                        "create_ready_wrong_marker" => {
-                            if marker.is_some() {
-                                state.created_turns.push(json!({
-                                    "id": turn_id, "status": "completed", "completedAt": now,
-                                    "items": [{
-                                        "id": "create-wrong-marker", "type": "agentMessage",
-                                        "text": format!("post-update:{cwd}:wrong-marker"),
-                                    }],
-                                }));
-                            }
-                        }
-                        "create_ready_wrong_turn" => {
-                            if let Some(marker) = marker.as_deref() {
-                                state.created_turns.push(json!({
-                                    "id": "wrong-create-turn", "status": "completed", "completedAt": now,
-                                    "items": [{
-                                        "id": "create-wrong-turn", "type": "agentMessage",
-                                        "text": challenge_envelope(&cwd, marker),
-                                    }],
-                                }));
-                            }
-                        }
-                        "create_ready_wrong_thread" => {
-                            if let Some(marker) = marker.as_deref() {
-                                state.created_turns.push(json!({
-                                    "id": turn_id, "status": "completed", "completedAt": now,
-                                    "items": [{
-                                        "id": "create-wrong-thread", "type": "agentMessage",
-                                        "text": challenge_envelope(&cwd, marker),
-                                    }],
-                                }));
-                            }
-                        }
-                        _ => {}
-                    }
-                    json!({"id": id, "result": {"turn": {"id": turn_id, "status": "inProgress"}}})
-                } else if is_update_challenge {
-                    state.challenge_requests += 1;
-                    let turn_id = "update-challenge-turn";
-                    let cwd = state.cwd.clone();
-                    let marker = marker_file
-                        .as_deref()
-                        .and_then(|file| read_challenge_marker(&cwd, file));
-                    let mut new_turns: Vec<Value> = Vec::new();
-                    match effect.as_str() {
-                        "completed_turn" | "update_challenge_ok" | "ready_and_update_ok" => {
-                            if let Some(marker) = marker.as_deref() {
-                                new_turns.push(json!({
-                                    "id": turn_id, "status": "completed", "completedAt": now,
-                                    "items": [{
-                                        "id": "update-challenge", "type": "agentMessage",
-                                        "text": challenge_envelope(&cwd, marker),
-                                    }],
-                                }));
-                            }
-                        }
-                        "update_challenge_delayed" => {
-                            state.challenge_marker = marker_file.clone();
-                            state.challenge_reads = 0;
-                            new_turns.push(json!({
-                                "id": turn_id, "status": "inProgress", "items": [],
-                            }));
-                        }
-                        "update_challenge_quoted" => {
-                            if let Some(marker) = marker.as_deref() {
-                                new_turns.push(json!({
-                                    "id": turn_id, "status": "completed", "completedAt": now,
-                                    "items": [{
-                                        "id": "update-quoted", "type": "agentMessage",
-                                        "text": format!("\"{}\"", challenge_envelope(&cwd, marker)),
-                                    }],
-                                }));
-                            }
-                        }
-                        "update_challenge_failed" => {
-                            new_turns.push(json!({
-                                "id": turn_id, "status": "completed", "completedAt": now,
-                                "items": [{
-                                    "id": "update-failed", "type": "agentMessage",
-                                    "text": "execution failed: cat: no such file or directory",
-                                }],
-                            }));
-                        }
-                        "update_challenge_prefix" => {
-                            if let Some(marker) = marker.as_deref() {
-                                new_turns.push(json!({
-                                    "id": turn_id, "status": "completed", "completedAt": now,
-                                    "items": [{
-                                        "id": "update-prefix", "type": "agentMessage",
-                                        "text": format!("post-update:{cwd}-longer:{marker}"),
-                                    }],
-                                }));
-                            }
-                        }
-                        "update_challenge_stale" => {
-                            if let Some(marker) = marker.as_deref() {
-                                // A stale turn completed in the same second but
-                                // is not the dispatched challenge turn.
-                                new_turns.push(json!({
-                                    "id": "stale-preupdate-turn", "status": "completed",
-                                    "completedAt": now,
-                                    "items": [{
-                                        "id": "update-stale", "type": "agentMessage",
-                                        "text": challenge_envelope(&cwd, marker),
-                                    }],
-                                }));
-                            }
-                            new_turns.push(json!({
-                                "id": turn_id, "status": "inProgress", "items": [],
-                            }));
-                        }
-                        "update_challenge_wrong_thread" => {
-                            if let Some(marker) = marker.as_deref() {
-                                new_turns.push(json!({
-                                    "id": turn_id, "status": "completed", "completedAt": now,
-                                    "items": [{
-                                        "id": "update-wrong-thread", "type": "agentMessage",
-                                        "text": challenge_envelope(&cwd, marker),
-                                    }],
-                                }));
-                            }
-                        }
-                        _ => {}
-                    }
-                    if requested.as_deref() == state.created_thread.as_deref() {
-                        state.created_turns.extend(new_turns);
-                    } else {
-                        state.turns.extend(new_turns);
-                    }
-                    json!({"id": id, "result": {"turn": {"id": turn_id, "status": "inProgress"}}})
-                } else {
-                    if state.effect == "reject_generic_turn_start" {
-                        json!({
-                            "id": id,
-                            "error": {
-                                "code": -32000,
-                                "message": "APPSERVER_NOTIFICATION_REJECTED: fixture refused generic notification",
-                                "data": {
-                                    "notification_error": "fixture refused generic notification",
-                                    "repair_required": true
-                                }
-                            }
-                        })
-                    } else {
-                        json!({"id": id, "result": {"turn": {"id": "unrelated-turn", "status": "completed"}}})
-                    }
-                }
-            }
-            Some("thread/read") => {
-                let include_turns = request
-                    .pointer("/params/includeTurns")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-                let effect = state.lock().unwrap().effect.clone();
-                let archived = state.lock().unwrap().archived;
-                if effect == "archive_hold_readback" && archived {
-                    let mut inner = gate.inner.lock().unwrap();
-                    inner.readback_requests += 1;
-                    while !inner.release_readback {
-                        inner = gate.changed.wait(inner).unwrap();
-                    }
-                }
-                let mut state = state.lock().unwrap();
-                let requested = request
-                    .pointer("/params/threadId")
-                    .and_then(Value::as_str)
-                    .unwrap_or(thread_id);
-                let created = state.created_thread.as_deref() == Some(requested);
-                if created && state.effect == "create_register_failure" {
-                    // The first exact read establishes the session; formal Register then fails its probe.
-                    if !include_turns {
-                        return;
-                    }
-                }
-                if include_turns {
-                    complete_delayed_challenge(&mut state, created);
-                }
-                let mut thread = json!({
-                    "id": if created { requested } else { thread_id },
-                    "sessionId": if created {
-                        if state.start_requests == 1 {
-                            "created-session".to_owned()
-                        } else {
-                            format!("created-session-{}", state.start_requests)
-                        }
-                    } else {
-                        session_id.to_owned()
-                    },
-                    "cwd": if created { &state.created_cwd } else { &state.cwd },
-                    "status": {"type": if state.archived { "notLoaded" } else { "idle" }}
-                });
-                // Simulate a completed challenge that landed on a different
-                // thread: the exact-thread correlation must reject it. The
-                // post-start read must still see the exact created thread so
-                // registration can complete; only post-challenge reads are
-                // redirected.
-                if created
-                    && include_turns
-                    && state.effect == "create_ready_wrong_thread"
-                    && state.readiness_requests > 0
-                {
-                    thread["id"] = json!("wrong-thread");
-                }
-                if !created
-                    && include_turns
-                    && state.effect == "update_challenge_wrong_thread"
-                {
-                    thread["id"] = json!("wrong-thread");
-                }
-                if include_turns {
-                    thread["turns"] = if created {
-                        json!(state.created_turns)
-                    } else {
-                        json!(state.turns)
-                    };
-                }
-                json!({"id": id, "result": {"thread": thread}})
-            }
-            Some("thread/archive") => {
-                let effect = state.lock().unwrap().effect.clone();
-                {
-                    let mut inner = gate.inner.lock().unwrap();
-                    inner.archive_requests += 1;
-                    if effect == "archive_hold_readback" {
-                        while !inner.release_archive {
-                            inner = gate.changed.wait(inner).unwrap();
-                        }
-                    }
-                }
-                match effect.as_str() {
-                    "archive_unknown" => return,
-                    "archive_missing" => {
-                        json!({"id": id, "error": {"code": -32000, "message": format!("thread {thread_id} not found")}})
-                    }
-                    "archive_refused" => {
-                        json!({"id": id, "error": {"code": -32000, "message": "archive refused"}})
-                    }
-                    _ => {
-                        state.lock().unwrap().archived = true;
-                        json!({"id": id, "result": {"archived": true}})
-                    }
-                }
-            }
-            Some("thread/settings/update") => {
-                let effect = state.lock().unwrap().effect.clone();
-                if effect == "unknown" {
-                    return;
-                }
-                if effect == "refused" {
-                    json!({"id": id, "error": {"code": -32000, "message": "settings refused"}})
-                } else {
-                    let cwd = request
-                        .pointer("/params/cwd")
-                        .and_then(Value::as_str)
-                        .unwrap_or(root.to_string_lossy().as_ref())
-                        .to_owned();
-                    let mut state = state.lock().unwrap();
-                    state.settings_requests += 1;
-                    state.cwd = cwd.clone();
-                    json!({"id": id, "result": {"thread": {"id": thread_id, "cwd": cwd}}})
-                }
-            }
-            _ => json!({"id": id, "result": {}}),
-        };
-        let Ok(encoded) = serde_json::to_vec(&response) else {
-            return;
-        };
-        if let Err(error) = write_appserver_frame(&mut stream, &encoded) {
-            eprintln!("test AppServer websocket write failed: {error}");
-            return;
-        }
-    }
-}
+include!("context_operation_fixture/appserver_connection.rs");
 
 fn read_appserver_frame(stream: &mut UnixStream) -> std::io::Result<Option<Vec<u8>>> {
     let mut header = [0_u8; 2];

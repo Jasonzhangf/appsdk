@@ -2,18 +2,39 @@
 pub(crate) struct IsolatedTmux {
     socket: PathBuf,
     owner_root: PathBuf,
+    pane_command: String,
 }
 
 impl IsolatedTmux {
     pub(crate) fn start(root: &std::path::Path) -> Self {
-        Self::start_with_spare_pane(root, true)
+        Self::start_with_spare_pane(root, true, "sleep 60")
     }
 
     pub(crate) fn start_single(root: &std::path::Path) -> Self {
-        Self::start_with_spare_pane(root, false)
+        Self::start_with_spare_pane(root, false, "sleep 60")
     }
 
-    fn start_with_spare_pane(root: &std::path::Path, spare_pane: bool) -> Self {
+    pub(crate) fn start_registration_participant(root: &Path) -> Self {
+        let script = root.join("registration-participant.py");
+        std::fs::write(&script, r#"import json, os, pathlib, sys
+for line in sys.stdin:
+    prefix = 'COLLAB_REGISTER_CHALLENGE '
+    if not line.startswith(prefix):
+        continue
+    reply = json.loads(line[len(prefix):])
+    socket = os.environ['TMUX'].split(',')[0]
+    pane = os.environ['TMUX_PANE']
+    reply['anchor'] = {'socket_path': socket, 'pane_id': pane}
+    path = pathlib.Path.cwd() / ('registration-' + pathlib.Path(socket).name + '-' + pane + '.reply.json')
+    temporary = path.with_suffix('.pending')
+    temporary.write_text(json.dumps({'op': 'RegisterReply', 'reply': reply}))
+    temporary.replace(path)
+"#).unwrap();
+        let command = format!("python3 '{}'", script.display().to_string().replace('\'', "'\\''"));
+        Self::start_with_spare_pane(root, true, &command)
+    }
+
+    fn start_with_spare_pane(root: &std::path::Path, spare_pane: bool, pane_command: &str) -> Self {
         static SOCKET_SEQ: AtomicU64 = AtomicU64::new(0);
         let socket = std::env::temp_dir().join(format!(
             "ctmux-{}-{}.sock",
@@ -26,9 +47,11 @@ impl IsolatedTmux {
                 socket.to_str().unwrap(),
                 "new-session",
                 "-d",
+                "-c",
+                root.to_str().unwrap(),
                 "-s",
                 "worker-snapshot-test",
-                "sleep 60",
+                pane_command,
             ])
             .output()
             .unwrap();
@@ -44,9 +67,11 @@ impl IsolatedTmux {
                     socket.to_str().unwrap(),
                     "split-window",
                     "-d",
+                    "-c",
+                    root.to_str().unwrap(),
                     "-t",
                     "worker-snapshot-test:0",
-                    "sleep 60",
+                    pane_command,
                 ])
                 .output()
                 .unwrap();
@@ -59,6 +84,7 @@ impl IsolatedTmux {
         Self {
             socket,
             owner_root: root.to_path_buf(),
+            pane_command: pane_command.into(),
         }
     }
 
@@ -109,6 +135,10 @@ impl IsolatedTmux {
     }
 
     pub(crate) fn add_session(&self) -> crate::proto::TmuxEndpoint {
+        self.add_session_at(&self.owner_root)
+    }
+
+    pub(crate) fn add_session_at(&self, root: &Path) -> crate::proto::TmuxEndpoint {
         static SESSION_SEQ: AtomicU64 = AtomicU64::new(0);
         let session = format!(
             "worker-snapshot-test-{}-{}",
@@ -121,9 +151,11 @@ impl IsolatedTmux {
                 self.socket.to_str().unwrap(),
                 "new-session",
                 "-d",
+                "-c",
+                root.to_str().unwrap(),
                 "-s",
                 &session,
-                "sleep 60",
+                &self.pane_command,
             ])
             .output()
             .unwrap();
@@ -205,26 +237,48 @@ impl Drop for IsolatedTmux {
     }
 }
 
+/// Defined committed owner for tests that begin with an existing peer. This
+/// seeds typed state; it does not test public initial participant admission.
 pub(super) fn register_tmux(
     server: &Server,
     id: &str,
     endpoint: crate::proto::TmuxEndpoint,
 ) -> Resp {
-    handle_register_with_app_scope(
-        server,
-        id.into(),
-        format!("token-{id}"),
-        server.root.display().to_string(),
-        Some(AppServerId::new("tui-default").unwrap()),
-        Some(TransportCandidates {
-            appserver: None,
-            dsh: None,
-            tmux: Some(crate::proto::TmuxCandidate {
-                endpoint,
-                cwd: server.root.display().to_string(),
-            }),
-        }),
-    )
+    let app = AppServerId::new("tui-default").unwrap();
+    let cwd = server.root.display().to_string();
+    let transport = SelectedTransport {
+        kind: TransportKind::Tmux,
+        endpoint: Some(endpoint.socket_path.clone()),
+        namespace: Some(endpoint.tmux_session_id.clone()),
+        session_id: endpoint.codex_session_id.clone().or_else(|| Some(endpoint.tmux_session_id.clone())),
+        thread_id: endpoint.codex_thread_id.clone().or_else(|| Some(endpoint.pane_id.clone())),
+        tmux_endpoint: Some(endpoint),
+        capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
+        self_check: "prior committed peer fixture".into(),
+    };
+    let response = seed_committed_owner(server, id, &format!("token-{id}"), &transport, &cwd, Some(app.clone()));
+    if response.ok {
+        commit_current_thread_route_for_runtime(server, server, id, &cwd, Some(&app)).unwrap();
+        restore_registered_peer_default_leases(server);
+    }
+    response
+}
+
+/// Seed a defined prior typed owner. This is fixture state, not evidence that
+/// a public initial Register passed participant admission.
+pub(super) fn seed_committed_owner(
+    server: &Server,
+    worker_id: &str,
+    token: &str,
+    transport: &SelectedTransport,
+    cwd: &str,
+    app_scope: Option<AppServerId>,
+) -> Resp {
+    let prepared = prepare_register_typed(
+        server, worker_id, token, transport, cwd,
+        Some(GlobalState::canonical_project_scope(&server.root).unwrap()), app_scope, false,
+    ).unwrap();
+    consume_prepared_register_typed(server, worker_id, transport, prepared, None)
 }
 
 fn retire_registered_test_pane(binding: &crate::server::global_state::RuntimeBinding) {
@@ -263,6 +317,8 @@ pub(super) fn kill_registered_worker_pane(server: &Server, worker_id: &str) {
             .0
             .kill_pane(&endpoint.pane_id)
     });
+    eprintln!("owned killed pane worker={worker_id} endpoint_probe={:?}",
+        crate::client::adapters::tmux::probe(&endpoint));
 }
 
 fn stop_registered_test_tmux_server() {
@@ -654,15 +710,20 @@ fn test_tmux_transport(thread_id: &str) -> SelectedTransport {
     }
 }
 
-pub(crate) fn register(server: &Server, id: &str, thread_id: &str) -> Resp {
+fn fixture_peer_endpoint(server: &Server, thread_id: &str) -> crate::proto::TmuxEndpoint {
     let thread_id = thread_id
         .strip_prefix('%')
         .map(|legacy_fixture| format!("thread-{legacy_fixture}"))
         .unwrap_or_else(|| thread_id.to_string());
     let mut endpoint = REGISTERED_TEST_TMUX.with(|fixture| {
         let mut fixture = fixture.borrow_mut();
+        // A test can create multiple owned roots. The participant script and
+        // pane cwd belong to one root and must not outlive its fixture.
+        if fixture.as_ref().is_some_and(|(tmux, _)| tmux.owner_root != server.root) {
+            *fixture = None;
+        }
         let (tmux, endpoint_index) =
-            fixture.get_or_insert_with(|| (IsolatedTmux::start(&server.root), 0));
+            fixture.get_or_insert_with(|| (IsolatedTmux::start_registration_participant(&server.root), 0));
         let endpoint = if *endpoint_index == 0 {
             tmux.endpoints().remove(0)
         } else {
@@ -673,7 +734,35 @@ pub(crate) fn register(server: &Server, id: &str, thread_id: &str) -> Resp {
     });
     endpoint.codex_session_id = Some(format!("session-{thread_id}"));
     endpoint.codex_thread_id = Some(thread_id);
-    register_tmux(server, id, endpoint)
+    endpoint
+}
+
+/// Prior-state fixture for task, notification and readback tests. Explicit
+/// registration effects use register_public and its real participant return.
+pub(crate) fn register(server: &Server, id: &str, thread_id: &str) -> Resp {
+    register_tmux(server, id, fixture_peer_endpoint(server, thread_id))
+}
+
+fn register_public(server: &Arc<Server>, id: &str, thread_id: &str) -> Resp {
+    let endpoint = fixture_peer_endpoint(server, thread_id);
+    let app = AppServerId::new("tui-default").unwrap();
+    let prior = server.state.lock().unwrap().global.projects.values()
+        .flat_map(|project| project.runtime_bindings.values())
+        .find(|binding| binding.agent_id.as_str() == id && binding.app_scope_id == app).cloned();
+    let context = match prior {
+        Some(binding) => ProjectContext::for_registered_route(&server.root, &crate::identity::RuntimeIdentity {
+            agent_id: binding.agent_id, runtime_id: binding.runtime_id, appserver_id: binding.app_scope_id,
+            endpoint_generation: binding.endpoint_generation, binding_id: binding.binding_id,
+            session_id: binding.session_id, native_thread_id: binding.native_thread_id,
+        }).unwrap(),
+        None => ProjectContext::for_registered_root_with_app(&server.root, app).unwrap(),
+    };
+    let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
+    super::host_route_registry_tests::register_host_fixture(&manager, Some(context),
+        Req::register(id.into(), format!("token-{id}"), server.root.display().to_string(),
+            Some(TransportCandidates { appserver: None, dsh: None,
+                tmux: Some(crate::proto::TmuxCandidate { endpoint, cwd: server.root.display().to_string() }) })),
+    ).1
 }
 
 /// Model the provenance committed by an explicit managed-child Bind after

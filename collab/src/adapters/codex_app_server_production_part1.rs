@@ -365,11 +365,14 @@ pub(crate) fn identity_facts_from_env() -> Result<IdentityFacts, AdapterError> {
     }
 
     if std::env::var_os("TMUX_PANE").is_some() {
-        facts.tmux = Some(crate::client::adapters::tmux::candidate_from_env().map_err(
-            |error| AdapterError::InvalidBinding {
-                detail: format!("cannot collect tmux candidate: {error}"),
-            },
-        )?);
+        facts.tmux_anchor = Some(
+            crate::client::adapters::tmux::anchor_from_env()
+                .map_err(|error| AdapterError::InvalidBinding { detail: error })?,
+        );
+        match crate::client::adapters::tmux::candidate_from_env() {
+            Ok(candidate) => facts.tmux = Some(candidate),
+            Err(error) => eprintln!("collab: tmux live enrichment unavailable: {error}"),
+        }
     }
     // The dsh adapter designs `DSH_SESSION_ID` as the agent's primary anchor.
     // Only the anchor is observable here: the gateway control socket address

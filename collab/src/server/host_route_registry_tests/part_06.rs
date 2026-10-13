@@ -4,7 +4,7 @@
         let app = crate::identity::CLI_APP_SERVER_ID;
         let worker_id = "poll-recover-worker";
         let token = "token-poll-recover-worker";
-        let registered = dispatch_wire(
+        let registered = register_wire_fixture(
             server.clone(),
             Some(context_with_app(&root, app)),
             Req::register(worker_id.into(),
@@ -32,7 +32,7 @@
             },
         );
         let rebind = async move {
-            let response = dispatch_wire(
+            let response = register_wire_fixture(
                 rebind_server.clone(),
                 Some(recovery_context),
                 Req::register(worker_id.into(),

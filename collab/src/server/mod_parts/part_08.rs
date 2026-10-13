@@ -16,12 +16,14 @@ pub(crate) fn scope_view(route_scope: Option<&RouteScope>) -> serde_json::Value 
 /// The single daemon-owned authority projection shared by `status`, `context`
 /// and the board. It reads only the current typed grant for the exact route
 /// scope and reports the holder, that scope, and the grant metadata. The
-/// transport observation is supplied by the caller and can never change the
-/// authority status: an unknown or unreachable holder stays assigned.
-pub(crate) fn master_authority_view(
+/// endpoint observation is supplied by the caller and can never change the
+/// authority status: an unknown or unreachable holder stays assigned, and the
+/// endpoint field carries the independent reachability value (`true`, `false`
+/// or `null` when the probe could not decide).
+pub(crate) fn master_authority_view_with_endpoint(
     state: &State,
     route_scope: Option<&RouteScope>,
-    transport_live: bool,
+    endpoint_live: Option<bool>,
 ) -> serde_json::Value {
     let Some(grant) = current_master_grant(state, route_scope) else {
         return serde_json::Value::Null;
@@ -29,7 +31,7 @@ pub(crate) fn master_authority_view(
     json!({
         "worker_id": grant.agent_id.as_str(),
         "scope": scope_view(route_scope),
-        "endpoint_live": transport_live,
+        "endpoint_live": endpoint_live,
         "grant_id": grant.resource_id(),
         "grant_generation": grant.resource_generation(),
         "assigned_by": grant.granted_by,
@@ -51,7 +53,7 @@ fn prune_master_wake_idle_capacity(server: &Server) {
             .filter(|record| record.status == "idle")
             .filter(|record| {
                 state.workers.get(&record.peer).is_some_and(|worker| {
-                    worker_presence(server, worker) == IdentityPresence::Present
+                    worker_presence_in_state(server, &state, worker) == IdentityPresence::Present
                 })
             })
             .filter(|record| {
@@ -65,7 +67,9 @@ fn prune_master_wake_idle_capacity(server: &Server) {
         let live_idle_workers = state
             .workers
             .values()
-            .filter(|worker| worker_presence(server, worker) == IdentityPresence::Present)
+            .filter(|worker| {
+                worker_presence_in_state(server, &state, worker) == IdentityPresence::Present
+            })
             .filter(|worker| {
                 state
                     .keepalives
@@ -96,18 +100,28 @@ fn prune_master_wake_idle_capacity(server: &Server) {
 
 fn handle_master_status(server: &Server) -> Resp {
     prune_master_wake_idle_capacity(server);
-    let state = server.state.lock().unwrap();
     // The typed grant is the only authority source. A route, reducer or scope
     // failure is an explicit error; a transport observation is reported
-    // separately and never removes the holder.
-    let route_scope = match server_route_scope(server, &state) {
-        Ok(route_scope) => route_scope,
-        Err(error) => return Resp::err(error),
+    // separately and never removes the holder. The endpoint probe must run
+    // without the reducer lock.
+    let (route_scope, holder) = {
+        let state = server.state.lock().unwrap();
+        let route_scope = match server_route_scope(server, &state) {
+            Ok(route_scope) => route_scope,
+            Err(error) => return Resp::err(error),
+        };
+        let holder = current_master_grant(&state, route_scope.as_ref())
+            .and_then(|grant| state.workers.get(grant.agent_id.as_str()).cloned());
+        (route_scope, holder)
     };
-    let transport_live = current_master_grant(&state, route_scope.as_ref())
-        .and_then(|grant| state.workers.get(grant.agent_id.as_str()).cloned())
-        .is_some_and(|worker| worker_presence(server, &worker) == IdentityPresence::Present);
-    let master = master_authority_view(&state, route_scope.as_ref(), transport_live);
+    // Identity presence proves the grant holder, not communication. The
+    // endpoint value comes from the same independent observation the worker
+    // status uses, and it is read outside the reducer lock.
+    let endpoint_live = holder
+        .as_ref()
+        .and_then(|worker| worker_identity_and_endpoint(server, worker).1);
+    let state = server.state.lock().unwrap();
+    let master = master_authority_view_with_endpoint(&state, route_scope.as_ref(), endpoint_live);
     Resp::data(json!({
         "master": master,
         "scope": scope_view(route_scope.as_ref()),
@@ -364,34 +378,8 @@ pub(crate) fn handle_send_with_task(
         let (error, data) = handoff_unresolved_recipient(&to);
         return Resp::err_data(error, data);
     }
-    let Some(recipient) = st.workers.get(&to).cloned() else {
-        return Resp::err(format!("recipient {} not registered", to));
-    };
-    // Presence probes open an AppServer RPC connection, so run them outside
-    // the global state lock to avoid stalling unrelated daemon commands.
-    drop(st);
-    if worker_presence(server, &recipient) == IdentityPresence::Missing {
-        // Missing is a transport failure, not a durable mailbox failure. The
-        // message is committed below and the attempted wake carries the exact
-        // missing endpoint error, so recovery can preserve and later receive it.
-    }
-    let mut st = server.state.lock().unwrap();
-    // The presence probe runs outside the lock, so a concurrent
-    // WorkerClosed/rebind can remove or replace the recipient while it is in
-    // flight.  Commit only against the exact recipient that was probed.
-    match st.workers.get(&to) {
-        Some(current) if current == &recipient => {}
-        Some(_) => {
-            return Resp::err(format!(
-                "recipient {} transport changed while verifying liveness; retry the send",
-                to
-            ));
-        }
-        None => {
-            let (error, data) = handoff_unresolved_recipient(&to);
-            return Resp::err_data(error, data);
-        }
-    }
+    // Durable send admission depends on the recipient record and binding.
+    // Endpoint failure is reported by the notification owner after enqueue.
     if let Some(ref rid) = in_reply_to {
         if !st.msgs.contains_key(rid) {
             return Resp::err(format!("in_reply_to message {} not found", rid));
@@ -597,7 +585,7 @@ fn handle_live_closure_daemon_send(
         return Resp::err(format!("recipient {} not registered", to));
     };
     drop(st);
-    if worker_presence(server, &recipient) != IdentityPresence::Present {
+    if worker_identity_and_endpoint(server, &recipient).1 != Some(true) {
         return Resp::err("COLLAB_LIVE_CLOSURE_TARGET_ROUTE_UNAVAILABLE");
     }
     let mut st = server.state.lock().unwrap();
@@ -705,15 +693,19 @@ fn handle_cross_project_send(
         Err(error) => return Resp::err(error),
     };
     if target_master.as_deref() != Some(to.as_str()) {
-        return Resp::err("cross-project communication requires the target to be the project master");
+        return Resp::err(
+            "cross-project communication requires the target to be the project master",
+        );
     }
     let Some(recipient) = st.workers.get(&to).cloned() else {
         return Resp::err(format!("recipient {} not registered", to));
     };
     drop(st);
+    // Cross-project messages are durable mailbox entries. Identity admission
+    // must not turn endpoint uncertainty or activity into an enqueue failure.
     if worker_presence(server, &recipient) != IdentityPresence::Present {
         return Resp::err(
-            "cross-project communication requires a live target identity on its server-selected transport",
+            "cross-project communication requires a valid target identity on its server-selected transport",
         );
     }
     let mut st = server.state.lock().unwrap();
@@ -961,10 +953,11 @@ fn handle_task_relocate(
     if worker.token != token {
         return Resp::err("token mismatch: identity does not own this worker_id");
     }
-    let canonical_worktree = match validate_worktree_path(&server.root, &server.config, &worktree_path) {
-        Ok(path) => path,
-        Err(error) => return Resp::err(error),
-    };
+    let canonical_worktree =
+        match validate_worktree_path(&server.root, &server.config, &worktree_path) {
+            Ok(path) => path,
+            Err(error) => return Resp::err(error),
+        };
     let worktree_path = canonical_worktree.display().to_string();
     let Some(mut task) = st.tasks.get(&task_id).cloned() else {
         return Resp::err(format!("task {} not found", task_id));
@@ -1085,7 +1078,9 @@ fn handle_task_accept(server: &Server, worker_id: String, token: String, task_id
     task.status = "working".into();
     task.wait = None;
     task.updated_ms = now_ms();
-    if let Err(error) = server.commit_locked_checked(&mut st, &[Event::TaskUpdated { task: task.clone() }]) {
+    if let Err(error) =
+        server.commit_locked_checked(&mut st, &[Event::TaskUpdated { task: task.clone() }])
+    {
         return Resp::err(format!("TASK_DURABILITY_FAILED: {error}"));
     }
     Resp::data(json!({
@@ -1107,7 +1102,9 @@ fn handle_task_update(
     next_step: Option<String>,
 ) -> Resp {
     let mut st = server.state.lock().unwrap();
-    task_update_locked(server, &mut st, worker_id, token, task_id, status, next_step)
+    task_update_locked(
+        server, &mut st, worker_id, token, task_id, status, next_step,
+    )
 }
 
 fn task_update_locked(
@@ -1192,7 +1189,10 @@ fn task_update_locked(
         events.push(Event::MergeResolved {
             task_id: task_id.clone(),
             resolved_by: worker_id.clone(),
-            reason: Some(format!("task no longer awaits merge (status={})", task.status)),
+            reason: Some(format!(
+                "task no longer awaits merge (status={})",
+                task.status
+            )),
             at_ms: task.updated_ms,
         });
         if !stale_notices.is_empty() {
@@ -1447,7 +1447,11 @@ fn resolve_candidate_commit(root: &Path, task: &TaskRec, worktree: &str) -> Opti
     if let Some(branch) = task.branch.as_deref() {
         let branch_head = Command::new("git")
             .current_dir(root)
-            .args(["rev-parse", "--verify", &format!("refs/heads/{branch}^{{commit}}")])
+            .args([
+                "rev-parse",
+                "--verify",
+                &format!("refs/heads/{branch}^{{commit}}"),
+            ])
             .output()
             .ok()
             .filter(|output| output.status.success())

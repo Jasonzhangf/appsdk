@@ -1,5 +1,44 @@
 use super::*;
 
+#[test]
+fn context_collector_keeps_stable_pane_when_live_display_fails() {
+    let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+    let keys = ["TMUX", "TMUX_PANE", "CODEX_SESSION_ID", "CODEX_THREAD_ID"];
+    let previous: Vec<_> = keys.iter().map(|key| std::env::var_os(key)).collect();
+    std::env::set_var("TMUX", "/tmp/collab-no-live-collector.sock,123,0");
+    std::env::set_var("TMUX_PANE", "%3");
+    std::env::remove_var("CODEX_SESSION_ID");
+    std::env::remove_var("CODEX_THREAD_ID");
+    let result = main_context::collect_identity_facts(None);
+    let root = test_root("stable-pane-readonly");
+    let paths = crate::scope::HostPaths::for_state_root(root.join("host-state")).unwrap();
+    let read_only = identity::load_existing_at(&paths, &Scope { root: root.clone() }, None);
+    for (key, value) in keys.iter().zip(previous) {
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+    let facts = result.expect("stable pane facts must reach daemon despite a live display failure");
+    assert!(
+        read_only.is_ok(),
+        "read-only anchor collection must not require live display: {read_only:?}"
+    );
+    assert_eq!(
+        facts.tmux_anchor,
+        Some(proto::TmuxPaneAnchor {
+            socket_path: "/tmp/collab-no-live-collector.sock".into(),
+            pane_id: "%3".into()
+        })
+    );
+    assert!(
+        facts.tmux.is_none(),
+        "failed discovery must not invent live endpoint fields"
+    );
+    assert!(facts.session_id.is_none() && facts.thread_id.is_none());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 /// Build the exact `Resp` wire the daemon emits for a typed operation result:
 /// outer `ok` owns success and the flattened payload holds one `result` object.
 fn typed_operation_wire(ok: bool, result: Value) -> Resp {

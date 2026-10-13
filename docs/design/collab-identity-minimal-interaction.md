@@ -8,7 +8,10 @@ readback, and failure terminals. It does not assert that any missing phase,
 receipt, query, or recovery seam already exists. It also does not implement
 them and does not authorize product code.
 
-Authority order:
+Authority order (canonical requirements ledger at `.appsdk/requirements.json`
+v8 / communication v4 is authoritative and supersedes older Goal/plan
+interpretations within affected scope; older Goal and plan documents retain
+their historical scope elsewhere):
 
 1. The user's four requested Collab capabilities as persisted in the canonical
    task Goal at
@@ -42,6 +45,10 @@ Scope boundary:
   never `PASS`, implementation admission, or product completion.
 
 ## 2. Terms and exact owner map
+
+Initial registration participant gate and continuation contracts are normatively
+defined in `collab-identity-context-recovery-contract-20261008.md` Section 2.
+This document acts as a compatibility mirror and references that owner.
 
 | Term | Exact meaning | Owner |
 | --- | --- | --- |
@@ -397,8 +404,9 @@ name.
 Ordinary `Req::Register` and ordinary authenticated commands keep their
 existing token, binding, generation, scope, and runtime checks. A mismatch in
 an ordinary command remains a typed rejection, including `TOKEN_MISMATCH` when
-the supplied credential is rejected. The approved recovery transaction is the
-only exception, and it is available only through the explicit approval schema.
+the supplied credential is rejected. Unique same-pane context recovery first
+synchronizes the authoritative project credential; this does not alter ordinary
+token admission. Conflict replacement uses the explicit approved transaction.
 
 ### 5.3 Approved replacement transaction
 
@@ -410,10 +418,10 @@ admission that would otherwise reject the stale incumbent:
    before touching identity, binding, route, credential, grant, or lease state.
 2. **Validate approval.** Require a non-empty approval decision bound to the
    exact project scope, app scope, target identity, action, normalized intent
-   digest, expected incumbent binding id, and expected incumbent generation.
-   Reject a changed incumbent with `APPROVAL_STALE_CONFLICT`.
-3. **Verify endpoint ownership.** Re-run the existing adapter probe against the
-   candidate endpoint/session/thread. Approval does not replace this proof.
+   digest when supplied. A minimal approved target/action intent is sufficient;
+   the daemon reads the current incumbent binding/generation under its lock.
+3. **Verify ownership.** Check address structure, current scope and persisted
+   ownership. Tmux registration and recovery do not repeat a live pane probe.
 4. **Select incumbent.** Read authoritative committed identity facts from the
    project reducer/worker owner and credential owner. The stale local receipt is
    evidence only; it cannot be promoted to authority. If no authoritative
@@ -450,7 +458,8 @@ admission that would otherwise reject the stale incumbent:
 
 ### 5.4 Incumbent conflict fence
 
-The approval request must include `expected_incumbent`:
+The daemon records the current `expected_incumbent` internally. A caller may
+still submit the full legacy object, but no prior fence lookup is required:
 
 ```json
 {
@@ -462,10 +471,11 @@ The approval request must include `expected_incumbent`:
 }
 ```
 
-Before commit, the daemon reloads the exact incumbent and compares binding id,
-generation, target, project scope, and app scope. If any value differs, it
-returns `APPROVAL_STALE_CONFLICT` with the observed values and no mutation.
-Approval never authorizes a later different incumbent.
+Before commit, the daemon reads the current target, project/app scope and pane
+claimants inside the identity lock and binds Register admission to that current
+incumbent. Explicit recovery authorizes this invocation to override those
+conflicts. Ordinary commands retain token and current binding/generation guards.
+Same-key replay returns the retained operation without a second replacement.
 
 ## 6. Public request schemas
 
@@ -530,6 +540,12 @@ There is no `--restore-as`, `--worker`, `--token`, or generic `--force`
 argument. `--approve-identity` and `--approve-grant` are distinct flags; one
 flag cannot silently authorize the other owner.
 
+Explicit `restore_master` / `restore_peer` user intent can be carried by either
+existing flag in one context call. The minimum object names `decision=approved`,
+`target_identity`, `action`, and `authorization`. Scope and current fences are
+read by the daemon. Authority effects and replay follow the recovery contract;
+`restore_identity` alone still does not assign a role.
+
 The CLI exits 0 only for `ok: true`. It exits 2 for a typed incomplete or
 refused result (`missing_facts`, `approval_required`, `denied`, `partial`,
 `unknown`, `failed`, or `cancelled`) while preserving the full JSON result on
@@ -572,8 +588,10 @@ store before dispatch, so a lost response can be queried after adapter restart.
 }
 ```
 
-`action` is `restore_identity` or `replace_binding` for identity approval. Its
-`expected_incumbent` binds the exact binding id and endpoint generation.
+`action` is `restore_identity`, `replace_binding`, `restore_master` or
+`restore_peer` for identity approval. Its
+`expected_incumbent` is optional caller metadata; execution uses the current
+binding id and generation read by the daemon in this invocation.
 `replace_master_grant` has a separate schema and owner fence:
 
 ```json
@@ -596,7 +614,7 @@ fence, and requested facts, excluding `intent_digest` itself, `decided_by`, and
 descriptive metadata; the daemon validates the approval fields and scope, not
 the caller’s claim of identity. Approval text or a truthy boolean alone is
 insufficient. Identity approval cannot substitute a grant fence and grant
-approval cannot substitute an incumbent binding fence.
+approval does not bypass Register's internally captured current binding fence.
 
 ### 6.3 MCP `tools/call`
 
@@ -836,10 +854,10 @@ not extra parallel sinks.
 3. An unapproved conflict returns `denied` or `approval_required`, never a
    guessed worker or a new identity.
 4. Approved recovery with a stale local credential succeeds only when the
-   daemon proves the endpoint, the exact target, and the expected incumbent;
+   daemon proves persistent ownership, the exact target and actual effects;
    the old binding retires and the replacement receives the real binding id.
-5. Same approval with a changed incumbent returns `APPROVAL_STALE_CONFLICT`
-   and mutates nothing.
+5. A new explicit invocation reads a changed incumbent and completes without
+   another approval; same-key replay does not repeat effects.
 6. A changed endpoint, cross-project scope, or missing approval returns a typed
    refusal before minting a credential.
 7. Same-key same-intent replay returns the original operation projection.
@@ -852,14 +870,16 @@ not extra parallel sinks.
 10. Automatic or supplement failure after a committed phase retains
     `committed_phases` and reports `partial`/`failed`, never a false completed
     state.
-11. Grant replacement occurs only when `approve_grant` is present, is distinct
-    from identity recovery, and leaves authority state unchanged when it is
-    absent.
+11. Grant replacement occurs only when explicit role intent (`restore_master`
+    or `restore_peer`) is present, or an exact `approve_grant` is supplied;
+    an identity-only approval leaves authority state unchanged, but a single
+    existing approval flag carrying explicit role intent applies authority
+    effects without a second approval.
 12. `cancelled` is returned only at an enumerated safe boundary; it never
     erases a committed side effect.
 13. A stale master identity recovers its exact binding while preserving the
-    existing grant id/generation unless a separate exact `approve_grant` is
-    present.
+    existing grant id/generation unless explicit role intent or an exact
+    `approve_grant` is present in that single approval.
 14. One invocation containing both `approve_identity` and `approve_grant`
     validates both exact approvals before admission, commits both owner phases
     at most once, and reports any partial owner result without claiming

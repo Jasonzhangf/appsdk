@@ -126,15 +126,11 @@ pub fn resolve_route(
             tmux_endpoint: endpoint.clone(),
         },
     )?;
-    let session_id = endpoint
-        .codex_session_id
-        .as_deref()
-        .unwrap_or(&endpoint.tmux_session_id);
-    let native_thread_id = endpoint
-        .codex_thread_id
-        .as_deref()
-        .unwrap_or(&endpoint.pane_id);
-    validate_route_resolution(route, session_id, native_thread_id)
+    validate_route_resolution(
+        route,
+        endpoint.codex_session_id.as_deref(),
+        endpoint.codex_thread_id.as_deref(),
+    )
 }
 
 /// Round-trip a native App Server route resolution with the live daemon.
@@ -154,25 +150,37 @@ pub fn resolve_native_route(
             native_thread_id: native_thread_id.to_owned(),
         },
     )?;
-    validate_route_resolution(route, session_id, native_thread_id)
+    validate_route_resolution(route, Some(session_id), Some(native_thread_id))
 }
 
 fn validate_route_resolution(
     route: RouteResolution,
-    session_id: &str,
-    native_thread_id: &str,
+    session_id: Option<&str>,
+    native_thread_id: Option<&str>,
 ) -> anyhow::Result<RouteResolution> {
     route.validate()?;
-    if route.session_id.as_str() != session_id {
+    if session_id.is_some()
+        && route
+            .session_id
+            .as_ref()
+            .map(crate::identity::SessionId::as_str)
+            != session_id
+    {
         anyhow::bail!(
-            "ROUTE_RESOLVE_INVALID: daemon returned session {} for requested session {}",
+            "ROUTE_RESOLVE_INVALID: daemon returned session {:?} for requested session {:?}",
             route.session_id,
             session_id
         );
     }
-    if route.native_thread_id.as_str() != native_thread_id {
+    if native_thread_id.is_some()
+        && route
+            .native_thread_id
+            .as_ref()
+            .map(crate::identity::NativeThreadId::as_str)
+            != native_thread_id
+    {
         anyhow::bail!(
-            "ROUTE_RESOLVE_INVALID: daemon returned thread {} for requested thread {}",
+            "ROUTE_RESOLVE_INVALID: daemon returned thread {:?} for requested thread {:?}",
             route.native_thread_id,
             native_thread_id
         );
@@ -968,32 +976,52 @@ mod tests {
         let fixture = TempServerDir::new("route-thread-mismatch");
         let listener = UnixListener::bind(fixture.socket()).expect("bind route response");
         let responder = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept route request");
-            let mut line = String::new();
-            std::io::BufReader::new(&stream)
-                .read_line(&mut line)
-                .expect("read route request");
-            assert!(line.contains("\"pane_id\":\"%1\""));
-            let root = env!("CARGO_MANIFEST_DIR");
-            let response = json!({
-                "ok": true,
-                "app_scope_id": "appserver-1",
-                "project_scope": root,
-                "canonical_root": root,
-                "storage_root": root,
-                "agent_id": "agent-1",
-                "binding_id": "binding-1",
-                "endpoint_generation": 7,
-                "session_id": "$1",
-                "native_thread_id": "thread-other"
-            });
-            stream
-                .write_all(format!("{response}\n").as_bytes())
-                .expect("write route response");
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().expect("accept route request");
+                let mut line = String::new();
+                std::io::BufReader::new(&stream)
+                    .read_line(&mut line)
+                    .expect("read route request");
+                assert!(line.contains("\"pane_id\":\"%1\""));
+                let root = env!("CARGO_MANIFEST_DIR");
+                let response = json!({
+                    "ok": true,
+                    "app_scope_id": "appserver-1",
+                    "project_scope": root,
+                    "canonical_root": root,
+                    "storage_root": root,
+                    "agent_id": "agent-1",
+                    "binding_id": "binding-1",
+                    "endpoint_generation": 7,
+                    "session_id": "$1",
+                    "native_thread_id": "thread-other"
+                });
+                stream
+                    .write_all(format!("{response}\n").as_bytes())
+                    .expect("write route response");
+            }
         });
 
+        // The pane address is the stable identity. When the caller declares no
+        // codex_thread_id, the daemon's actual optional native binding is the
+        // readback, not a mismatch.
         let endpoint = route_test_endpoint("$1", "%1");
-        let error = resolve_route(&fixture.socket(), &endpoint).unwrap_err();
+        let resolved = resolve_route(&fixture.socket(), &endpoint)
+            .expect("a stable pane accepts the daemon's actual native binding");
+        assert_eq!(
+            resolved.session_id.as_ref().map(|id| id.as_str()),
+            Some("$1")
+        );
+        assert_eq!(
+            resolved.native_thread_id.as_ref().map(|id| id.as_str()),
+            Some("thread-other")
+        );
+
+        // An explicitly declared thread that differs from the daemon binding is
+        // still refused.
+        let mut declared = endpoint;
+        declared.codex_thread_id = Some("thread-requested".into());
+        let error = resolve_route(&fixture.socket(), &declared).unwrap_err();
         assert!(
             error.to_string().contains("ROUTE_RESOLVE_INVALID"),
             "{error}"

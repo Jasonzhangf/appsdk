@@ -7,6 +7,7 @@ pub mod notification_state;
 pub(crate) mod operation_journal;
 mod peer_lifecycle;
 pub mod presence;
+pub(crate) mod register_reply;
 pub mod state;
 pub mod timers;
 

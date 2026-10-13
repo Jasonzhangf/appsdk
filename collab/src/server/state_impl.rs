@@ -910,7 +910,7 @@ impl State {
             }
             Event::GlobalCurrentThreadRouteSet { binding } => {
                 let mut next = self.global.clone();
-                if binding.session_id.is_none() {
+                if binding.session_id.is_none() && binding.tmux_endpoint.is_none() {
                     // A durable thread-only route predates the strict dual key.
                     // Replay must keep it resolvable through the read-only
                     // compatibility index instead of aborting the host

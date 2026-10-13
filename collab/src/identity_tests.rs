@@ -44,6 +44,10 @@ fn observation(
     AnchorObservation {
         session_id: session.map(str::to_owned),
         thread_id: thread.map(str::to_owned),
+        tmux_anchor: tmux.as_ref().map(|candidate| crate::proto::TmuxPaneAnchor {
+            socket_path: candidate.endpoint.socket_path.clone(),
+            pane_id: candidate.endpoint.pane_id.clone(),
+        }),
         tmux,
         dsh_session_id: None,
     }
@@ -60,6 +64,7 @@ fn facts(
         endpoint: None,
         namespace: None,
         tmux,
+        tmux_anchor: None,
         dsh_session_id: None,
     }
 }
@@ -452,8 +457,8 @@ fn archived_route_recovery_reads_without_calling_back() {
         agent_id: AgentId::new("pane-worker").unwrap(),
         binding_id: BindingId::new("binding-pane-worker").unwrap(),
         endpoint_generation: 1,
-        session_id: SessionId::new("session-old").unwrap(),
-        native_thread_id: NativeThreadId::new("thread-old").unwrap(),
+        session_id: Some(SessionId::new("session-old").unwrap()),
+        native_thread_id: Some(NativeThreadId::new("thread-old").unwrap()),
     };
     // No socket exists under the state root, so any daemon-to-self RPC would
     // fail; the route-aware resolver returns the archived credential directly.
@@ -463,6 +468,7 @@ fn archived_route_recovery_reads_without_calling_back() {
         endpoint: None,
         namespace: None,
         tmux: Some(candidate.clone()),
+        tmux_anchor: None,
         dsh_session_id: None,
     };
     let selected =
@@ -470,8 +476,8 @@ fn archived_route_recovery_reads_without_calling_back() {
     assert_eq!(selected.token, original.token);
     let mut committed = route.clone();
     committed.endpoint_generation += 1;
-    committed.session_id = SessionId::new("session-new").unwrap();
-    committed.native_thread_id = NativeThreadId::new("thread-new").unwrap();
+    committed.session_id = Some(SessionId::new("session-new").unwrap());
+    committed.native_thread_id = Some(NativeThreadId::new("thread-new").unwrap());
     assert_eq!(
         recover_archived_pane_at(&host_paths, &scope, &candidate, Some(&committed))
             .unwrap()
@@ -481,8 +487,17 @@ fn archived_route_recovery_reads_without_calling_back() {
     );
     let mut wrong_generation = route.clone();
     wrong_generation.endpoint_generation += 2;
-    assert!(
+    assert_eq!(
         recover_archived_pane_at(&host_paths, &scope, &candidate, Some(&wrong_generation))
+            .unwrap()
+            .unwrap()
+            .worker_id,
+        "pane-worker"
+    );
+    let mut wrong_owner = wrong_generation;
+    wrong_owner.binding_id = BindingId::new("binding-another-owner").unwrap();
+    assert!(
+        recover_archived_pane_at(&host_paths, &scope, &candidate, Some(&wrong_owner))
             .unwrap()
             .is_none()
     );

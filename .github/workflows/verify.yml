@@ -253,6 +253,45 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Build Collab public test binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_log="$RUNNER_TEMP/collab-cargo-artifacts.jsonl"
+          cargo build --manifest-path collab/Cargo.toml --locked \
+            --features context-cancel-test-hooks \
+            --bin collab --bin collab-mcp --message-format=json \
+            | tee "$artifact_log"
+          python3 - "$artifact_log" <<'PY'
+          import json
+          import os
+          import sys
+
+          required = {"collab": None, "collab-mcp": None}
+          with open(sys.argv[1], encoding="utf-8") as artifact_log:
+              for line in artifact_log:
+                  try:
+                      message = json.loads(line)
+                  except json.JSONDecodeError:
+                      continue
+                  if message.get("reason") != "compiler-artifact":
+                      continue
+                  target = message.get("target") or {}
+                  name = target.get("name")
+                  executable = message.get("executable")
+                  if name in required and executable:
+                      required[name] = executable
+
+          missing = [name for name, executable in required.items() if not executable]
+          if missing:
+              raise SystemExit(
+                  "missing executable compiler-artifact record(s): " + ", ".join(missing)
+              )
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as github_env:
+              github_env.write(f"COLLAB_TEST_BINARY={required['collab']}\n")
+              github_env.write(f"COLLAB_TEST_MCP_BINARY={required['collab-mcp']}\n")
+          PY
       - run: cargo test --manifest-path collab/Cargo.toml --locked --features context-cancel-test-hooks -- --test-threads=1
 
   installer:

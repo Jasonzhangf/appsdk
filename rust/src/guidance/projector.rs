@@ -124,17 +124,6 @@ pub(super) fn project_status(
             }
         });
     };
-    if let Some(reason) = compiled_context_drift(root, &project, &compiled) {
-        return serde_json::json!({
-            "harness": "appsdk-development-process-control",
-            "enforcement": enforcement,
-            "lifecycle": lifecycle,
-            "readiness": "blocked",
-            "reason_code": format!("GUIDANCE_COMPILED_CONTEXT_DRIFT:{}", reason),
-            "first_failing_gate": "guidance_compile",
-            "next": {"command": "appsdk guide compile"}
-        });
-    }
     if let Some(task) = task {
         let path = plan_file(root, task);
         let events = read_events(root, task);
@@ -148,10 +137,7 @@ pub(super) fn project_status(
             let tour_review = review_state(root, task);
             if let Some(reason) = context_drift(root, &project, &compiled, &plan) {
                 let revision_reason = match reason {
-                    "source" => "source_drift",
                     "goal" | "rule_context" => "rule_context_changed",
-                    "project_contract" => "project_contract_changed",
-                    "guidance_manifest" => "guidance_manifest_changed",
                     "owner" => "owner_changed",
                     "scope" => "scope_changed",
                     _ => "rule_context_changed",

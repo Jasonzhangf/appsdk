@@ -336,6 +336,15 @@ fn sdk_source_registry_result(
     modules: Value,
     source_paths: &[&str],
 ) -> std::process::Output {
+    sdk_source_registry_result_with_contents(name, modules, source_paths, &[])
+}
+
+fn sdk_source_registry_result_with_contents(
+    name: &str,
+    modules: Value,
+    source_paths: &[&str],
+    source_contents: &[(&str, &str)],
+) -> std::process::Output {
     let root = temp_root(name);
     fs::create_dir_all(root.join("contracts/maps")).unwrap();
     fs::write(
@@ -350,12 +359,47 @@ fn sdk_source_registry_result(
     for source_path in source_paths {
         let path = root.join(source_path);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, "").unwrap();
+        let content = source_contents
+            .iter()
+            .find_map(|(candidate, content)| (*candidate == *source_path).then_some(*content))
+            .unwrap_or("");
+        fs::write(path, content).unwrap();
     }
     init_git(&root);
     let output = run_in(&root, &["verify-sdk-source-registry", "."]);
     fs::remove_dir_all(root).unwrap();
     output
+}
+
+#[test]
+fn sdk_source_registry_accepts_oversized_owned_rust_source() {
+    let content = "// source registry line limit was retired\n".repeat(3501);
+    let source_path = "rust/src/long_horizon_policy.rs";
+    let result = sdk_source_registry_result_with_contents(
+        "sdk-source-registry-oversized-owned",
+        serde_json::json!([{
+            "module_id": "architecture-registry",
+            "status": "active",
+            "owner": "appsdk::architecture",
+            "owned_paths": ["contracts/maps/**"],
+            "forbidden_paths": ["active/lib/**", "protected/**"]
+        }, {
+            "module_id": "runtime-core",
+            "status": "active",
+            "owner": "appsdk::runtime",
+            "owned_paths": [source_path],
+            "forbidden_paths": ["active/lib/**", "protected/**"]
+        }]),
+        &[source_path],
+        &[(source_path, &content)],
+    );
+    assert!(
+        result.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(String::from_utf8_lossy(&result.stdout).contains("\"gate\":\"sdk_source_registry\""));
 }
 
 #[test]
@@ -407,7 +451,7 @@ fn sdk_source_registry_enforces_single_active_owner_for_long_horizon_sources() {
     let multiply_owned = sdk_source_registry_result(
         "sdk-source-registry-multiply-owned",
         serde_json::json!([
-            architecture_registry,
+            architecture_registry.clone(),
             {
                 "module_id": "runtime-core-a",
                 "status": "active",
@@ -429,6 +473,24 @@ fn sdk_source_registry_enforces_single_active_owner_for_long_horizon_sources() {
     assert!(String::from_utf8_lossy(&multiply_owned.stderr).contains(
         "SDK_SOURCE_OWNER_CARDINALITY:rust/src/long_horizon_role.rs:runtime-core-a,runtime-core-b"
     ));
+
+    let forbidden = sdk_source_registry_result(
+        "sdk-source-registry-forbidden",
+        serde_json::json!([
+            architecture_registry,
+            {
+                "module_id": "runtime-core",
+                "status": "active",
+                "owner": "appsdk::runtime",
+                "owned_paths": ["rust/src/**"],
+                "forbidden_paths": ["rust/src/forbidden.rs"]
+            }
+        ]),
+        &["rust/src/forbidden.rs"],
+    );
+    assert!(!forbidden.status.success());
+    assert!(String::from_utf8_lossy(&forbidden.stderr)
+        .contains("SDK_SOURCE_FORBIDDEN_PATH:runtime-core:rust/src/forbidden.rs"));
 }
 
 #[test]

@@ -156,7 +156,7 @@ while IFS= read -r path; do
       rust_platform_lock_cli=true
       windows_appsdk=true
       ;;
-    rust/src/guidance.rs|rust/src/guidance/*)
+    rust/src/guidance.rs|rust/src/guidance/*|rust/tests/guidance_ablation_cli.rs)
       rust_guidance=true
       windows_appsdk=true
       ;;

@@ -185,11 +185,13 @@ Required proposal fields:
 ```
 
 The proposal must not contain `current_node`, `next_transition`, source hashes,
-or a rule-context hash. AppSDK derives them. Nodes must form one adjacent path
+or a rule-context hash. AppSDK derives the current node and next transition.
+Nodes must form one adjacent path
 from the selected domain entry. Owner must match the node's resolved canonical
 owner. Scope must remain inside the module's owned/contract paths.
 
-The persisted PlanRecord adds a RuleContextSnapshot and a canonical plan hash.
+The persisted PlanRecord adds goal, owner, and declared rule-source context,
+plus a canonical plan hash for execution-record revision selection.
 The first release stores active plans in `.appsdk-control`; it does not make an
 unfinished plan part of the committed project truth.
 
@@ -207,7 +209,9 @@ gate_contract_changed | dependency_input_changed
 
 AppSDK appends a PlanRevisionRecord, retains the old PlanRecord and events, and
 replaces only the active projection. Existing history is never overwritten.
-Scope, owner, source, manifest, or forbidden-rule drift cannot be auto-admitted.
+Goal or declared owner changes require an explicit revision. Ordinary scoped
+file edits and Git commits do not freeze the active Plan or require a revision.
+The listed revision reasons remain available for explicit revisions.
 
 ## 6. Execution event ledger
 
@@ -232,8 +236,10 @@ Only the projected next step may be updated. `pass` on a node requiring
 evidence needs at least one evidence ID. `fail` or `blocked` records evidence
 and keeps the workflow blocked. Scope or owner changes require a plan revision.
 
-Before append, AppSDK recomputes the rule context. Drift rejects the update and
-returns the required revision reason. Event append is atomic and idempotent.
+Before appending a new event, AppSDK checks the current goal and declared owner.
+A change rejects the update and returns the required revision reason. An
+identical accepted-event retry remains idempotent, including after goal drift;
+conflicting input for the same event ID is rejected. Event append is atomic.
 
 ## 7. Lifecycle bridge
 

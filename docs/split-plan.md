@@ -1,11 +1,17 @@
-# Split oversized files to <=1500 lines
+# Retired physical source-line split plan
+
+Status: retired. Physical source-line limits no longer apply. Source registry
+verification retains unique active ownership and forbidden-path checks.
+The inventory and split order below are historical planning evidence, not
+current work or a required split loop. Refactoring must follow actual module
+responsibilities and behavior needs.
 
 Owner: appsdk master (codex-%3)
 Worktree: playground/split-large-files-1500
 Branch: fix/split-large-files-1500
-Limit: 1500 lines per tracked .rs file, enforced in `verify-sdk-source-registry`.
+Historical limit: 1500 lines per tracked .rs file (retired).
 
-## Current oversized .rs files (>1500)
+## Historical oversized .rs inventory (>1500)
 
 | lines | file |
 |---|---:|
@@ -30,7 +36,7 @@ Limit: 1500 lines per tracked .rs file, enforced in `verify-sdk-source-registry`
 | 1524 | collab/src/reset.rs |
 | 1506 | collab/src/server/mailbox.rs |
 
-## Split order (by owner, smallest first)
+## Historical split order (by owner, smallest first)
 
 1. collab/src/server/mailbox.rs -> mailbox/ (mailbox module dir)
 2. collab/src/reset.rs -> reset/ (reset module dir)
@@ -52,24 +58,7 @@ Limit: 1500 lines per tracked .rs file, enforced in `verify-sdk-source-registry`
 18. rust/src/main.rs -> extract governance/lifecycle/verification into modules
 19. rust/tests/cli_smoke.rs -> split by CLI subcommand area
 
-## Verify loop
-
-After each split:
-
-```sh
-cargo build --release --manifest-path rust/Cargo.toml
-rust/target/release/appsdk verify-sdk-source-registry .
-cargo test --manifest-path rust/Cargo.toml
-cargo fmt --manifest-path rust/Cargo.toml -- --check
-```
-
-For collab-only splits also run:
-
-```sh
-cargo test --manifest-path collab/Cargo.toml -- --test-threads=1
-```
-
-## Owner map (module-registry)
+## Historical owner map (module-registry)
 
 - rust/src/main.rs: runtime-core
 - rust/src/communication.rs: communication
@@ -79,6 +68,6 @@ cargo test --manifest-path collab/Cargo.toml -- --test-threads=1
 - collab/** : collab-runtime
 - rust/tests/** : verification-tests
 
-Splitting must keep every new file owned by the same module in
-`contracts/maps/module-registry.json`, so add the new module dirs/files to the
-owned_paths when needed.
+Current source ownership remains declared in
+`contracts/maps/module-registry.json`. Use the project development Skill for
+checks that apply to a concrete behavior change.

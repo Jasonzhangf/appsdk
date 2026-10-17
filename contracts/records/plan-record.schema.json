@@ -33,17 +33,11 @@
     },
     "rule_context": {
       "type": "object",
-      "required": ["project_contract_hash", "goal_hash", "guidance_manifest_hash", "rule_sources", "source_commit", "source_tree_hash", "scope_hash", "scope_state_hash", "owner"],
+      "required": ["goal_hash", "rule_sources", "owner"],
       "additionalProperties": false,
       "properties": {
-        "project_contract_hash": {"type": "string", "pattern": "^sha256:"},
         "goal_hash": {"type": "string", "pattern": "^sha256:"},
-        "guidance_manifest_hash": {"type": "string", "pattern": "^sha256:"},
         "rule_sources": {"type": "array"},
-        "source_commit": {"type": "string", "minLength": 1},
-        "source_tree_hash": {"type": "string", "minLength": 1},
-        "scope_hash": {"type": "string", "pattern": "^sha256:"},
-        "scope_state_hash": {"type": "string", "pattern": "^sha256:"},
         "owner": {"type": "string", "minLength": 1}
       }
     },

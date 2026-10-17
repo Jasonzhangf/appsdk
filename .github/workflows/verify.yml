@@ -136,6 +136,9 @@ jobs:
           cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke guidance_
           cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke existing_governance_without_guide_gets_read_only_setup_proposal -- --exact
           cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke repeated_init_
+      - name: Guidance ablation tests
+        if: needs.changes.outputs.rust_guidance == 'true'
+        run: cargo test --manifest-path rust/Cargo.toml --locked --test guidance_ablation_cli
       - name: Resource consumer tests
         if: |
           needs.changes.outputs.resources == 'true' &&

@@ -1,0 +1,63 @@
+{
+  "id": "appsdk-sdk-resource-refresh-v1",
+  "version": "0.1.0",
+  "description": "资源刷新对象流：读取项目声明与已安装资源基线，在写入前校验全部目标，只刷新 embedded Bundle 的 docs、rules、skills，最后发布局部资源清单。静态治理图，不声明可执行 Operator；核心合同、pin、lock、项目业务资料和 Guidance 编译属于保留或下游流程。",
+  "inputs": [
+    {
+      "id": "resource_refresh_request",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "resolve_project_baseline",
+      "semantic_label": "解析项目声明、已安装资源清单与 Bundle 映射",
+      "operator": "appsdk.sdk_resource_refresh.resolve_project_baseline",
+      "operator_version": "1",
+      "inputs": ["resource_refresh_request"],
+      "output": {"id": "resource_baseline", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "preflight_refresh_targets",
+      "semantic_label": "写入前校验资源结构、分类、路径与文件类型",
+      "operator": "appsdk.sdk_resource_refresh.preflight_targets",
+      "operator_version": "1",
+      "inputs": ["resource_baseline"],
+      "output": {"id": "validated_targets", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "write_refresh_resources",
+      "semantic_label": "刷新选定资源并报告已写范围",
+      "operator": "appsdk.sdk_resource_refresh.write_resources",
+      "operator_version": "1",
+      "inputs": ["validated_targets"],
+      "output": {"id": "resource_write_result", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "publish_resource_record",
+      "semantic_label": "最后发布局部资源清单并区分核心基线与资源版本",
+      "operator": "appsdk.sdk_resource_refresh.publish_record",
+      "operator_version": "1",
+      "inputs": ["resource_write_result"],
+      "output": {"id": "resource_refresh_result", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {"from": "resolve_project_baseline", "to": "preflight_refresh_targets", "arc_id": "resource_baseline"},
+    {"from": "preflight_refresh_targets", "to": "write_refresh_resources", "arc_id": "validated_targets"},
+    {"from": "write_refresh_resources", "to": "publish_resource_record", "arc_id": "resource_write_result"}
+  ],
+  "outputs": ["resource_refresh_result"]
+}

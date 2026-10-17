@@ -42,6 +42,13 @@ fn guidance_plan_update_is_evidence_bound_idempotent_and_drift_safe() {
     assert!(root
         .join(".appsdk-control/guidance/task-2/plan.json")
         .is_file());
+    let record: Value = serde_json::from_slice(&fs::read(root.join(".appsdk-control/guidance/task-2/plan.json")).unwrap()).unwrap();
+    assert!(record["rule_context"].get("project_contract_hash").is_none());
+    assert!(record["rule_context"].get("guidance_manifest_hash").is_none());
+    for source in record["rule_context"]["rule_sources"].as_array().unwrap() {
+        assert!(source.get("digest").is_none());
+        assert!(source.get("contract_digest").is_none());
+    }
 
     fs::write(
         root.join("result.json"),
@@ -1258,7 +1265,7 @@ fn optional_memory_does_not_block_governance_initialization() {
 }
 
 #[test]
-fn guidance_detects_declared_rule_source_drift_and_symlink() {
+fn guidance_explicit_compile_adopts_rules_and_rejects_symlink() {
     let root = temp_root("guidance-rule-source-drift");
     let root_text = root.to_str().unwrap();
     assert!(run(&["new", root_text]).status.success());
@@ -1346,24 +1353,42 @@ fn guidance_detects_declared_rule_source_drift_and_symlink() {
     let status = run(&["guide", "next", root_text, "--task", "task-rule-drift"]);
     assert!(status.status.success());
     let status_json: Value = serde_json::from_slice(&status.stdout).unwrap();
-    assert_eq!(
-        status_json["reason_code"],
-        "GUIDANCE_COMPILED_CONTEXT_DRIFT:rule_sources"
-    );
-    assert_eq!(status_json["next"]["command"], "appsdk guide compile");
+    assert_eq!(status_json["reason_code"], "NEXT_STEP_READY");
 
+    let project: Value = serde_json::from_slice(&fs::read(root.join(".appsdk/project.json")).unwrap()).unwrap();
+    let contract_path = root.join(project["guidance"]["rule_sources"].as_array().unwrap()
+        .iter().find_map(|source| source["contract_path"].as_str()).unwrap());
+    let mut contract: Value = serde_json::from_slice(&fs::read(&contract_path).unwrap()).unwrap();
+    let debug = contract["workflows"].as_array_mut().unwrap().iter_mut()
+        .find(|workflow| workflow["domain"] == "debug").unwrap();
+    debug["nodes"].as_array_mut().unwrap().iter_mut()
+        .find(|node| node["node_id"] == "orient").unwrap()["evidence"]
+        .as_array_mut().unwrap().push(serde_json::json!("new-orientation-evidence"));
+    fs::write(&contract_path, serde_json::to_vec_pretty(&contract).unwrap()).unwrap();
+    // Changed declarations do not alter the loaded rules until explicit compile.
+    let before = run(&["guide", "next", root_text, "--task", "task-rule-drift"]);
+    assert!(before.status.success());
+    assert_eq!(serde_json::from_slice::<Value>(&before.stdout).unwrap()["reason_code"], "NEXT_STEP_READY");
     assert!(run(&["guide", "compile", root_text]).status.success());
     let revised_status = run(&["guide", "next", root_text, "--task", "task-rule-drift"]);
     assert!(revised_status.status.success());
     let revised_json: Value = serde_json::from_slice(&revised_status.stdout).unwrap();
-    assert_eq!(
-        revised_json["reason_code"],
-        "GUIDANCE_CONTEXT_DRIFT:guidance_manifest"
-    );
-    assert_eq!(
-        revised_json["next"]["revision_reason"],
-        "guidance_manifest_changed"
-    );
+    assert_eq!(revised_json["reason_code"], "NEXT_STEP_READY");
+    let mut proposal: Value = serde_json::from_slice(&fs::read(root.join("plan.json")).unwrap()).unwrap();
+    proposal["revision_reason"] = serde_json::json!("new_evidence");
+    fs::write(root.join("plan.json"), serde_json::to_vec_pretty(&proposal).unwrap()).unwrap();
+    let missing = run(&["guide", "plan", root_text, "--task", "task-rule-drift", "--input", "plan.json"]);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("GUIDANCE_EXPECTED_EVIDENCE_MISSING:debug-1"));
+    proposal["steps"][0]["expected_evidence"].as_array_mut().unwrap().push(serde_json::json!("new-orientation-evidence"));
+    fs::write(root.join("plan.json"), serde_json::to_vec_pretty(&proposal).unwrap()).unwrap();
+    assert!(run(&["guide", "plan", root_text, "--task", "task-rule-drift", "--input", "plan.json"]).status.success());
+
+    contract["schema_version"] = serde_json::json!(2);
+    fs::write(&contract_path, serde_json::to_vec_pretty(&contract).unwrap()).unwrap();
+    let invalid = run(&["guide", "compile", root_text]);
+    assert!(!invalid.status.success());
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("GUIDANCE_MANIFEST_SCHEMA_INVALID"));
 
     fs::remove_dir_all(root).unwrap();
 }

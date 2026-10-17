@@ -13,7 +13,7 @@ mod ledger;
 mod projector;
 mod review;
 
-use compiler::{compile, compiled_context_drift, current_rule_sources, load_compiled};
+use compiler::{compile, load_compiled};
 use help::help;
 use intake::initialize;
 use ledger::{atomic_write, event_file, lock_task, plan_file, read_events, read_plan};
@@ -307,106 +307,10 @@ fn workflow<'a>(compiled: &'a Value, domain: &str) -> &'a Value {
         })
 }
 
-fn git(root: &Path, args: &[&str], code: &str) -> String {
-    let result = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .output()
-        .unwrap_or_else(|_| fail(code, "run guidance in a Git owner worktree"));
-    if !result.status.success() {
-        fail(code, "run guidance in a Git owner worktree");
-    }
-    String::from_utf8_lossy(&result.stdout).trim().to_string()
-}
-
-fn scope_entry_state(path: &Path, out: &mut Vec<(String, String)>) {
-    let rel = path
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_else(|| path.to_string_lossy().to_string());
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_dir() => {
-            let mut entries = fs::read_dir(path)
-                .unwrap_or_else(|_| {
-                    fail("GUIDANCE_SCOPE_READ_FAILED", "restore the declared scope")
-                })
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap_or_else(|_| {
-                    fail("GUIDANCE_SCOPE_READ_FAILED", "restore the declared scope")
-                });
-            entries.sort_by_key(|entry| entry.file_name());
-            for entry in entries {
-                scope_entry_state(&entry.path(), out);
-            }
-            out.push((format!("{}/", rel), "dir".into()));
-        }
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            let target = fs::read_link(path)
-                .unwrap_or_else(|_| {
-                    fail("GUIDANCE_SCOPE_READ_FAILED", "restore the declared scope")
-                })
-                .to_string_lossy()
-                .to_string();
-            out.push((rel, format!("symlink:{}", target)));
-        }
-        Ok(_) => {
-            let bytes = fs::read(path).unwrap_or_else(|_| {
-                fail("GUIDANCE_SCOPE_READ_FAILED", "restore the declared scope")
-            });
-            out.push((rel, digest_bytes(&bytes)));
-        }
-        Err(_) => {
-            out.push((rel, "missing".into()));
-        }
-    }
-}
-
-fn scope_state(root: &Path, paths: &[String]) -> String {
-    let mut entries = Vec::new();
-    for raw in paths {
-        let relative = safe_relative(normalize_surface(raw), "GUIDANCE_SCOPE_PATH_ESCAPE");
-        scope_entry_state(&root.join(relative), &mut entries);
-    }
-    entries.sort();
-    entries.dedup();
-    let mut state = String::new();
-    for (rel, digest) in entries {
-        state.push_str(&format!("{rel}={digest}\n"));
-    }
-    digest_bytes(state.as_bytes())
-}
-
-fn rule_context(
-    root: &Path,
-    project: &Value,
-    goal: &Value,
-    compiled: &Value,
-    module: &Value,
-    scope_paths: &[String],
-) -> Value {
-    let commit = git(
-        root,
-        &["rev-parse", "HEAD"],
-        "GUIDANCE_SOURCE_GIT_UNAVAILABLE",
-    );
-    let tree = git(
-        root,
-        &["rev-parse", "HEAD^{tree}"],
-        "GUIDANCE_SOURCE_GIT_UNAVAILABLE",
-    );
-    let mut sorted_scope = scope_paths.to_vec();
-    sorted_scope.sort();
-    sorted_scope.dedup();
+fn rule_context(goal: &Value, compiled: &Value, module: &Value) -> Value {
     serde_json::json!({
-        "project_contract_hash": digest_value(project),
         "goal_hash": digest_value(goal),
-        "guidance_manifest_hash": required_string(compiled, "manifest_hash", "GUIDANCE_COMPILED_INVALID"),
-        "rule_sources": current_rule_sources(root, compiled),
-        "source_commit": commit,
-        "source_tree_hash": tree,
-        "scope_hash": digest_value(&serde_json::json!(sorted_scope)),
-        "scope_state_hash": scope_state(root, scope_paths),
+        "rule_sources": compiled["sources"],
         "owner": required_string(module, "source_owner", "GUIDANCE_MODULE_OWNER_INVALID")
     })
 }
@@ -440,12 +344,6 @@ fn plan(root: &Path, task: &str, input: &str) {
     let project = read_project(root);
     let compiled = load_compiled(root, &project)
         .unwrap_or_else(|| fail("GUIDANCE_NOT_COMPILED", "run appsdk guide compile"));
-    if let Some(reason) = compiled_context_drift(root, &project, &compiled) {
-        fail(
-            format!("GUIDANCE_COMPILED_CONTEXT_DRIFT:{}", reason),
-            "run appsdk guide compile",
-        );
-    }
     let input_relative = safe_relative(input, "GUIDANCE_INPUT_PATH_ESCAPE");
     assert_no_symlink(root, &input_relative, "GUIDANCE_INPUT_SYMLINK");
     let proposal = read_json(&root.join(input_relative), "GUIDANCE_PLAN_INPUT_INVALID");
@@ -589,14 +487,7 @@ fn plan(root: &Path, task: &str, input: &str) {
         }
         previous = Some(node_id);
     }
-    let context = rule_context(
-        root,
-        &project,
-        &goal,
-        &compiled,
-        selected_module,
-        &scope_paths,
-    );
+    let context = rule_context(&goal, &compiled, selected_module);
     let existing_path = plan_file(root, task);
     let existing = existing_path.is_file().then(|| read_plan(root, task));
     let revision_reason = proposal.get("revision_reason").and_then(Value::as_str);
@@ -669,39 +560,21 @@ fn context_drift(
     let goal = read_goal(root);
     let module_id = required_string(plan, "module_id", "GUIDANCE_PLAN_INVALID");
     let selected_module = module(project, Some(module_id));
-    let scope_paths = required_array(plan, "scope_paths", "GUIDANCE_PLAN_INVALID")
-        .iter()
-        .map(|value| {
-            value
-                .as_str()
-                .unwrap_or_else(|| fail("GUIDANCE_PLAN_INVALID", "revise the active plan"))
-                .to_string()
-        })
-        .collect::<Vec<_>>();
-    let current = rule_context(
-        root,
-        project,
-        &goal,
-        compiled,
-        selected_module,
-        &scope_paths,
-    );
+    let current = rule_context(&goal, compiled, selected_module);
     let recorded = plan
         .get("rule_context")
         .unwrap_or_else(|| fail("GUIDANCE_PLAN_INVALID", "revise the active plan"));
-    for (key, reason) in [
-        ("project_contract_hash", "project_contract"),
-        ("goal_hash", "goal"),
-        ("guidance_manifest_hash", "guidance_manifest"),
-        ("rule_sources", "rule_context"),
-        ("owner", "owner"),
-        ("scope_hash", "scope"),
-        ("source_commit", "source"),
-        ("source_tree_hash", "source"),
-        ("scope_state_hash", "source"),
-    ] {
+    for (key, reason) in [("goal_hash", "goal"), ("owner", "owner")] {
         if current.get(key) != recorded.get(key) {
             return Some(reason);
+        }
+    }
+    for path in required_array(plan, "scope_paths", "GUIDANCE_PLAN_INVALID") {
+        let path = path
+            .as_str()
+            .unwrap_or_else(|| fail("GUIDANCE_PLAN_INVALID", "scope paths must be strings"));
+        if !scope_allowed(selected_module, path) {
+            return Some("scope");
         }
     }
     None

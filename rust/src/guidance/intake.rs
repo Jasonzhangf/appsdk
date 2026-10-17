@@ -562,7 +562,6 @@ pub(super) fn initialize(
                 "source_id": source["source_id"],
                 "kind": source["kind"],
                 "path": source["path"],
-                "digest": source["digest"],
                 "precedence": source["precedence"]
             })
         })

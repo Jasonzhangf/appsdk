@@ -13,7 +13,7 @@
     {"rule_id": "changed-scope-single-owner", "severity": "forbidden", "description": "New or changed behavior must retain one semantic owner and one implementation, with no duplicate path, fallback, or temporary bypass."},
     {"rule_id": "changed-scope-configured-orchestration", "severity": "forbidden", "description": "Preserve fixed operation/hook/gate boundaries only where the project declares them. Missing required capabilities fail explicitly; never mock success."},
     {"rule_id": "changed-scope-ablation-and-sharing", "severity": "advisory", "description": "Compare deletion, reuse and direct implementation by actual complexity. Optional simplification does not block; concrete quality, safety or ownership regressions remain forbidden."},
-    {"rule_id": "historical-architecture-debt", "severity": "advisory", "description": "Report untouched historical violations as recommendations; do not block the candidate unless they enter changed scope or affect safety, ownership, evidence truth, or required delivery."},
+    {"rule_id": "historical-architecture-debt", "severity": "advisory", "description": "Report untouched historical violations as recommendations; do not block the change unless they enter changed scope or affect safety, ownership, evidence truth, or required delivery."},
     {"rule_id": "project-context-binding", "severity": "warning", "description": "Locate feature and debug work in the declared function and verification maps before implementation."},
     {"rule_id": "debug-notes-required", "severity": "warning", "description": "During debug exploration, append observations, hypotheses, and evidence to the active run notes before resolution."},
     {"rule_id": "map-gate-update", "severity": "advisory", "description": "Update function ownership and verification gates in the same change when the implementation changes them."},
@@ -58,7 +58,7 @@
     },
     {
       "domain": "develop",
-      "objective": "Develop features through project context, proportionate design, exact validation, and verified cleanup.",
+      "objective": "Develop features through project context, proportionate design, proportionate validation, and verified cleanup.",
       "entry_node": "requirements",
       "nodes": [
         {"node_id": "requirements", "instruction": "Define the user-visible contract, scope, non-goals, acceptance, and required evidence; reuse an existing confirmed decision when present.", "owner": "project", "evidence": ["requirements"]},
@@ -66,24 +66,20 @@
         {"node_id": "architecture", "instruction": "For a new project or meaningful cross-module or semantic change, close top-down modules, resources, boundaries, and mainline flow; otherwise record why existing architecture is sufficient.", "owner": "project", "evidence": ["architecture-design"]},
         {"node_id": "detailed_design", "instruction": "When the change introduces non-trivial behavior, close calls, data, errors, and verification mapping before implementation.", "owner": "project", "evidence": ["detailed-design"]},
         {"node_id": "implementation", "instruction": "Implement the smallest change through the mapped owner in a clean owner worktree.", "owner": "project", "evidence": ["source-diff", "worktree-record"]},
-        {"node_id": "candidate", "instruction": "Create and bind the exact candidate commit and tree.", "owner": "project", "evidence": ["candidate-record"]},
         {"node_id": "validation", "instruction": "Run focused tests and mapped gates, then add build, install, restart, and same-entry replay only when the change affects those surfaces.", "owner": "project", "evidence": ["validation-record"]},
         {"node_id": "map_update", "instruction": "Update declared function ownership, paths, call edges, and verification gates when the validated change altered them.", "owner": "project", "evidence": ["function-map-binding", "verification-map-binding"]},
-        {"node_id": "review", "instruction": "Review the validated candidate against applicable quality, safety, evidence and owner contracts. Block concrete regressions; optional simplification and unrelated historical debt are advisory.", "owner": "project", "evidence": ["architecture-conformance", "review-record"], "reminders": [{"kind": "memory_review", "blocking": false, "command": "project-memory review --run <run-id>"}]},
-        {"node_id": "effectiveness", "instruction": "Check effectiveness identity and freshness; reuse valid unchanged candidate evidence and rerun only affected checks on drift.", "owner": "project", "evidence": ["effectiveness-record"]},
-        {"node_id": "integration", "instruction": "Integrate on latest main and verify the exact integration tree.", "owner": "project", "evidence": ["mainline-receipt"]},
-        {"node_id": "promotion", "instruction": "Compile, publish Active, archive Protected, and freeze when required.", "owner": "project", "evidence": ["freeze-record"]},
+        {"node_id": "review", "instruction": "Review the validated change against applicable quality, safety, evidence and owner contracts. Block concrete regressions; optional simplification and unrelated historical debt are advisory.", "owner": "project", "evidence": ["architecture-conformance", "review-record"], "reminders": [{"kind": "memory_review", "blocking": false, "command": "project-memory review --run <run-id>"}]},
+        {"node_id": "integration", "instruction": "Integrate on latest main.", "owner": "project", "evidence": ["mainline-receipt"]},
         {"node_id": "cleanup", "instruction": "Record actual retained resources and owner or verified authorized removal. Delivery can complete with retention; do not claim Collab resource close before its cleanup requirements pass.", "owner": "project", "evidence": ["cleanup-record"]}
       ],
       "edges": [
         {"from": "requirements", "to": "map_check"},
         {"from": "map_check", "to": "architecture"}, {"from": "map_check", "to": "implementation"},
         {"from": "architecture", "to": "detailed_design"}, {"from": "architecture", "to": "implementation"},
-        {"from": "detailed_design", "to": "implementation"}, {"from": "implementation", "to": "candidate"},
-        {"from": "candidate", "to": "validation"}, {"from": "validation", "to": "map_update"},
-        {"from": "validation", "to": "review"}, {"from": "map_update", "to": "review"},
-        {"from": "review", "to": "effectiveness"}, {"from": "effectiveness", "to": "integration"},
-        {"from": "integration", "to": "promotion"}, {"from": "integration", "to": "cleanup"}, {"from": "promotion", "to": "cleanup"}
+        {"from": "detailed_design", "to": "implementation"}, {"from": "implementation", "to": "validation"},
+        {"from": "validation", "to": "map_update"}, {"from": "map_update", "to": "review"},
+        {"from": "review", "to": "integration"},
+        {"from": "integration", "to": "cleanup"}
       ]
     },
     {
@@ -94,29 +90,26 @@
         {"node_id": "orient", "instruction": "Read project AGENTS, declared function and verification maps, and existing run notes and records; bind the failing request to an owner and required gates.", "owner": "project", "evidence": ["orientation-record", "function-map-binding", "verification-map-binding"]},
         {"node_id": "explore", "instruction": "Append observations, one active hypothesis, confirmation and falsification signals, and evidence to run notes; reproduce when feasible and locate the first semantic divergence.", "owner": "project", "evidence": ["exploration-record", "debug-notes"]},
         {"node_id": "resolve", "instruction": "After causal evidence, fix the unique mapped owner, add proportionate regression coverage, and update maps or gates when their truth changed.", "owner": "project", "evidence": ["resolution-record", "red-green-test"]},
-        {"node_id": "candidate", "instruction": "Create and bind the exact fix candidate.", "owner": "project", "evidence": ["candidate-record"]},
         {"node_id": "validation", "instruction": "Run focused tests and mapped gates, then choose build, install, restart, and original-input replay according to runtime impact.", "owner": "project", "evidence": ["validation-record"]},
         {"node_id": "review", "instruction": "Review the validated fix against applicable quality, safety, evidence and owner contracts. Block concrete regressions; optional simplification and unrelated historical debt are advisory.", "owner": "project", "evidence": ["architecture-conformance", "review-record"], "reminders": [{"kind": "memory_review", "blocking": false, "command": "project-memory review --run <run-id>"}]},
-        {"node_id": "integration", "instruction": "Integrate on latest main and verify the exact tree.", "owner": "project", "evidence": ["mainline-receipt"]},
+        {"node_id": "integration", "instruction": "Integrate on latest main.", "owner": "project", "evidence": ["mainline-receipt"]},
         {"node_id": "cleanup", "instruction": "Record evidence and actual retained resources or verified authorized removal; delivery and resource closure are separate.", "owner": "project", "evidence": ["cleanup-record"]}
       ],
       "edges": [
         {"from": "orient", "to": "explore"}, {"from": "explore", "to": "resolve"},
-        {"from": "resolve", "to": "candidate"}, {"from": "candidate", "to": "validation"},
+        {"from": "resolve", "to": "validation"},
         {"from": "validation", "to": "review"}, {"from": "review", "to": "integration"},
         {"from": "integration", "to": "cleanup"}
       ]
     },
     {
       "domain": "review",
-      "objective": "Admit and review the exact evidence-bound candidate.",
-      "entry_node": "review_admission",
+      "objective": "Review a completed milestone against quality, safety, contract, and structural truth.",
+      "entry_node": "architecture_review",
       "nodes": [
-        {"node_id": "review_admission", "instruction": "Pass AppSDK review admission for the exact candidate.", "owner": "project", "evidence": ["pre-review-validation"]},
-        {"node_id": "architecture_review", "instruction": "Run the user-selected or configured review route. Block concrete quality, safety, contract and material structural regressions; optional simplifications are advisory.", "owner": "project", "evidence": ["architecture-conformance", "review-record"], "reminders": [{"kind": "memory_review", "blocking": false, "command": "project-memory review --run <run-id>"}]},
-        {"node_id": "unchanged_effectiveness", "instruction": "Replay effectiveness without source drift.", "owner": "project", "evidence": ["effectiveness-record"]}
+        {"node_id": "architecture_review", "instruction": "Run the user-selected or configured review route on the completed milestone. Block concrete quality, safety, contract and material structural regressions; optional simplifications are advisory.", "owner": "project", "evidence": ["architecture-conformance", "review-record"], "reminders": [{"kind": "memory_review", "blocking": false, "command": "project-memory review --run <run-id>"}]}
       ],
-      "edges": [{"from": "review_admission", "to": "architecture_review"}, {"from": "architecture_review", "to": "unchanged_effectiveness"}]
+      "edges": []
     },
     {
       "domain": "delivery",

@@ -1,7 +1,7 @@
 use super::{
-    assert_id, assert_mutation_worktree, assert_no_symlink, compiled_relative, digest_bytes,
-    digest_value, fail, guidance_contract, output, read_json, read_project, required_array,
-    required_string, safe_relative,
+    assert_id, assert_mutation_worktree, assert_no_symlink, compiled_relative, fail,
+    guidance_contract, output, read_json, read_project, required_array, required_string,
+    safe_relative,
 };
 use crate::guidance::ledger::atomic_write;
 use serde_json::Value;
@@ -213,8 +213,7 @@ pub(super) fn compile(root: &Path) {
             "path": relative_text,
             "required": required,
             "precedence": precedence,
-            "present": bytes.is_some(),
-            "digest": bytes.as_ref().map(|content| digest_bytes(content))
+            "present": bytes.is_some()
         });
         if let Some(contract_text) = source.get("contract_path").and_then(Value::as_str) {
             let contract_relative =
@@ -239,7 +238,6 @@ pub(super) fn compile(root: &Path) {
                 required_array(&manifest, "workflows", "GUIDANCE_MANIFEST_INVALID").clone(),
             );
             compiled_source["contract_path"] = Value::String(contract_text.to_string());
-            compiled_source["contract_digest"] = Value::String(digest_bytes(&contract_bytes));
         }
         compiled_sources.push(compiled_source);
     }
@@ -249,17 +247,14 @@ pub(super) fn compile(root: &Path) {
             "declare at least one Skill machine contract",
         );
     }
-    let mut compiled = serde_json::json!({
+    let compiled = serde_json::json!({
         "schema_version": 1,
         "harness": "appsdk-development-process-control",
         "enforcement": enforcement,
-        "project_contract_digest": digest_value(&project),
         "sources": compiled_sources,
         "rules": rules,
         "workflows": workflows
     });
-    let hash = digest_value(&compiled);
-    compiled["manifest_hash"] = Value::String(hash);
     let relative = compiled_relative(&project);
     assert_no_symlink(root, &relative, "GUIDANCE_COMPILED_SYMLINK");
     atomic_write(&root.join(relative), &compiled);
@@ -274,72 +269,21 @@ pub(super) fn load_compiled(root: &Path, project: &Value) -> Option<Value> {
         return None;
     }
     let mut value = read_json(&path, "GUIDANCE_COMPILED_INVALID");
-    let recorded = value
-        .get("manifest_hash")
-        .and_then(Value::as_str)
-        .unwrap_or_else(|| {
-            fail(
-                "GUIDANCE_COMPILED_HASH_MISSING",
-                "rerun appsdk guide compile",
-            )
-        })
-        .to_string();
-    value.as_object_mut().unwrap().remove("manifest_hash");
-    if digest_value(&value) != recorded {
-        fail(
-            "GUIDANCE_COMPILED_HASH_MISMATCH",
-            "rerun appsdk guide compile",
-        );
+    if value.get("schema_version").and_then(Value::as_u64) != Some(1) {
+        fail("GUIDANCE_COMPILED_INVALID", "rerun appsdk guide compile");
     }
-    value["manifest_hash"] = Value::String(recorded);
+    for field in ["sources", "rules", "workflows"] {
+        required_array(&value, field, "GUIDANCE_COMPILED_INVALID");
+    }
+    // Retired identity fields from older artifacts are not projected to consumers.
+    let object = value.as_object_mut().unwrap();
+    object.remove("manifest_hash");
+    object.remove("project_contract_digest");
+    for source in object["sources"].as_array_mut().unwrap() {
+        if let Some(source) = source.as_object_mut() {
+            source.remove("digest");
+            source.remove("contract_digest");
+        }
+    }
     Some(value)
-}
-
-pub(super) fn current_rule_sources(root: &Path, compiled: &Value) -> Value {
-    let sources = required_array(compiled, "sources", "GUIDANCE_COMPILED_INVALID");
-    Value::Array(
-        sources
-            .iter()
-            .map(|source| {
-                let mut current = source.clone();
-                let path_text = required_string(source, "path", "GUIDANCE_COMPILED_INVALID");
-                let relative = safe_relative(path_text, "GUIDANCE_RULE_SOURCE_PATH_ESCAPE");
-                assert_no_symlink(root, &relative, "GUIDANCE_RULE_SOURCE_SYMLINK");
-                let bytes = fs::read(root.join(relative)).ok();
-                current["present"] = Value::Bool(bytes.is_some());
-                current["digest"] = bytes
-                    .as_ref()
-                    .map(|bytes| Value::String(digest_bytes(bytes)))
-                    .unwrap_or(Value::Null);
-                if let Some(contract_text) = source.get("contract_path").and_then(Value::as_str) {
-                    let contract_relative =
-                        safe_relative(contract_text, "GUIDANCE_RULE_SOURCE_PATH_ESCAPE");
-                    assert_no_symlink(root, &contract_relative, "GUIDANCE_RULE_SOURCE_SYMLINK");
-                    current["contract_digest"] = fs::read(root.join(contract_relative))
-                        .ok()
-                        .map(|bytes| Value::String(digest_bytes(&bytes)))
-                        .unwrap_or(Value::Null);
-                }
-                current
-            })
-            .collect(),
-    )
-}
-
-pub(super) fn compiled_context_drift(
-    root: &Path,
-    project: &Value,
-    compiled: &Value,
-) -> Option<&'static str> {
-    if compiled
-        .get("project_contract_digest")
-        .and_then(Value::as_str)
-        != Some(digest_value(project).as_str())
-    {
-        return Some("project_contract");
-    }
-    if compiled.get("sources") != Some(&current_rule_sources(root, compiled)) {
-        return Some("rule_sources");
-    }
-    None
 }

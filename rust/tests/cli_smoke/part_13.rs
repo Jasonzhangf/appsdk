@@ -878,7 +878,7 @@ fn bundled_guidance_uses_project_neutral_feature_and_debug_context() {
         ("architecture", "detailed_design"),
         ("architecture", "implementation"),
         ("validation", "map_update"),
-        ("validation", "review"),
+        ("map_update", "review"),
     ] {
         assert!(
             develop["edges"]
@@ -906,7 +906,6 @@ fn bundled_guidance_uses_project_neutral_feature_and_debug_context() {
             "orient",
             "explore",
             "resolve",
-            "candidate",
             "validation",
             "review",
             "integration",

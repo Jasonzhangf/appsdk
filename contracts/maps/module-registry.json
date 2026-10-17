@@ -174,8 +174,6 @@
         "assert_sdk_migration_record": "appsdk::delivery",
         "install_current_governance_maps": "appsdk::delivery",
         "install_bundle_resources": "appsdk::delivery",
-        "refresh_project_resources": "appsdk::delivery",
-        "resource_refresh::run_cli": "appsdk::delivery",
         "write_current_sdk_lock": "appsdk::delivery",
         "install_standard_template_reference": "appsdk::delivery",
         "write_project_agent_contract": "appsdk::delivery",
@@ -529,8 +527,6 @@
       "entry_symbols": [
         "pin_lock",
         "install_bundle_resources",
-        "resource_refresh::run_cli",
-        "refresh_project_resources",
         "write_current_sdk_lock",
         "install_standard_template_reference",
         "write_project_agent_contract",
@@ -543,7 +539,6 @@
       "verification_gates": [
         "contract_valid",
         "sdk_source_registry",
-        "sdk_resource_refresh",
         "sdk_migration",
         "sdk_lock_integrity",
         "record_graph",

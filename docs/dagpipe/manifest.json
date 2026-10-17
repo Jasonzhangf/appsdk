@@ -42,6 +42,10 @@
       "path": "docs/dagpipe/sdk-pin-history.graph.json"
     },
     {
+      "id": "appsdk-sdk-resource-refresh",
+      "path": "docs/dagpipe/sdk-resource-refresh.graph.json"
+    },
+    {
       "id": "appsdk-collab-dashboard-operation",
       "path": "docs/dagpipe/collab-dashboard.graph.json"
     },

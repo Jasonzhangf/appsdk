@@ -1,8 +1,8 @@
 # Review and Delivery
 
-Apply this runtime lifecycle when runtime delivery is in scope. Documentation
-and rule edits use targeted checks; they do not invent a runtime deployment,
-Active artifact or freeze ceremony.
+Ordinary work uses relevant diffs, behavior results and normal Git delivery.
+The release boundary and prohibited checks are owned by
+[the governance Skill](../SKILL.md#purpose-and-mandatory-boundary).
 
 ## Authoritative requirement review packet
 
@@ -14,10 +14,9 @@ dispatch must provide or clearly reference:
   effective version;
 - the user original text, acceptance criteria, applicable scope, and any
   explicit user change instruction with its prior version;
-- the exact candidate, base, review stage, allowed/forbidden paths, and current
+- the work branch or diff, base, review stage, allowed/forbidden paths, and current
   stage evidence; and
-- the existing AppSDK EvidenceRecord and ReviewRecord references and the
-  backend-supplied review output schema.
+- the existing behavior results and backend-supplied review output schema.
 
 The executing agent fills only observed project facts and evidence references.
 It must not replace the source with a plan or author summary, edit the template
@@ -29,31 +28,26 @@ sources, stale versions, unauthorized requirement changes, reduced acceptance,
 and candidate/scope mismatches block the review. Do not create a second review
 schema or a second requirement store.
 
-## Candidate to review
+## Ordinary review and delivery
 
 ```text
-candidate commit/tree/scope
--> development whitebox
--> exact artifact build
--> install receipt when required
--> restart receipt when required
--> deployed public-entrypoint blackbox
--> PreReviewValidationRecord
--> appsdk verify --review-admission
--> selected architecture review PASS
+diff and affected public-entrypoint behavior checks
+-> applicable independent milestone review
+-> combine with latest mainline
+-> protected merge/push and Git receipt
+-> release owned resources
 ```
 
-Review tool follows user choice; otherwise use configured default. Review is
-read-only and bound to exact candidate, scope, maps, artifact, and evidence.
+Follow the host contract for review timing and backend choice. One complete,
+significant milestone receives one independent review after author validation
+at its integration boundary. Internal nodes and ordinary commits do not
+trigger another review. Documents and Skills use targeted checks.
 
-Required service operations come from module `deployment_operations`:
-`["install", "restart"]`, `["install"]`, `["restart"]`, or `[]`. An omitted
-field preserves the legacy install/restart requirement. The declaration is
-artifact-bound; changing it invalidates existing validation. Every supplied
-receipt is checked even when optional. Public-entrypoint blackbox and candidate,
-artifact, environment and producer identity remain required. The legacy
-`deployed_blackbox` label includes a library/CLI artifact's real consumer entry;
-mock or source-only checks cannot stand in for that artifact.
+Install or restart only when the affected behavior requires that operation.
+Use its ordinary receipt and observe the affected public entrypoint. A library
+uses a real consumer. Whitebox checks help locate relevant failures; do not add
+them as a second mandatory admission layer. Do not add binary or configuration
+hashes to these results.
 
 Changed-scope architecture review must verify:
 
@@ -74,54 +68,38 @@ historical violations are reported as recommendations and do not block unless
 they affect changed scope, safety, ownership, evidence truth, or required
 delivery.
 
-Any source, test, build config, environment, artifact, scope, owner, or required
-rule change invalidates affected evidence. Refresh only affected evidence;
+Material changes to behavior, dependencies or the tested environment reopen
+only affected checks. A new phase, log entry or Git identifier does not by
+itself require a rerun or review. Reuse valid results directly;
 revise the plan only when goal, scope, acceptance, key approach, or dependencies
 materially change. Follow the host contract for review triggers and finding
 re-checks; internal progress does not dispatch another review.
 
-## Review to mainline
+Conflict returns to the owner worktree. Failed and unknown results stay visible.
 
-```text
-verify evidence freshness; reuse unchanged candidate evidence
--> fetch latest origin/main
--> exact integration build/test
--> protected merge/push
--> remote main receipt
-```
+## Existing publication-record implementation
 
-Conflict returns to owner worktree. Do not resolve inside a serial merge queue
-and keep stale review evidence.
+The current runtime still implements `PreReviewValidationRecord`,
+`EffectivenessRecord` and the hash-bound lifecycle graph. Commands such as
+`produce-lifecycle-chain`, `verify --review-admission`, promotion and freeze
+consume those records. A procedure edit does not remove their program checks.
 
-EffectivenessRecord can reference pre-review candidate interventions and the
-validated blackbox when input hashes, artifact and candidate identity match
-and evidence has not expired. No mandatory rerun just because review finished.
-Environment or dependency/configuration changes require affected evidence to
-be refreshed. The full lifecycle still validates the current artifact and
-pre-review graph before accepting reused effectiveness.
+Do not add this record chain to ordinary work. If a requested operation still
+depends on it before release preparation, identify and change the enforcing
+owner; do not fabricate PASS, edit records or suppress the error. Current
+implementation details are in the SDK source at `docs/design/fix-lifecycle-v2.md`
+and `docs/design/lifecycle-records.md`.
 
-## Promotion and freeze
-
-```text
-RegressionReport on merged source
--> appsdk compile
--> publish immutable Active
--> archive source/contracts/artifact in Protected
--> FreezeRecord
--> appsdk verify
-```
-
-Merge alone is not lifecycle completion. Active/Protected are immutable; use
-canonical version/open/rehydrate flows instead of manual edits or copies.
+External release preparation may use promotion, Active/Protected and freeze
+only when the actual distribution requires them. Select necessary final
+artifact and source checks once. Existing fields, historical contracts and
+available commands do not justify a full protection suite. Published history
+remains unchanged.
 
 ## Cleanup
 
-Resource close is separate from engineering delivery. Retain an owned worktree
-with purpose recorded when needed; keep its cleanup obligation open. When
-cleanup is authorized and required delivery/retention evidence exists:
-
-1. archive required evidence;
-2. create CleanupRecord or project equivalent;
-3. remove only the owned merged worktree and branch;
-4. verify removal;
-5. release claim.
+Preserve needed evidence and remove only owned resources after delivery. Use
+the removal result to close the cleanup obligation. Do not create archive
+hashes, frozen patches or byte-comparison manifests. Preserve dirty or active
+resources when removal would lose work; report the path, owner, reason and next
+action. Delivery and resource closure remain distinct results.

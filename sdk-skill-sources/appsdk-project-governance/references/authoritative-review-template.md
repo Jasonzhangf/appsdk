@@ -8,6 +8,11 @@ runtime command, or a second review schema.
 The SDK bundle distributes this source as an installed resource. The user's
 explicit conversation instruction authorizes the specified change.
 
+Locate work by its diff, branch or ordinary Git receipt. Follow
+[the governance Skill's release boundary](../SKILL.md#purpose-and-mandatory-boundary).
+The fields below describe scope and evidence. Ordinary review does not require
+lifecycle producer records merely to assemble material.
+
 ## Authority and roles
 
 | Artifact | Authority |
@@ -37,15 +42,15 @@ The executing agent must satisfy these duties before dispatch:
 3. Load the prior reviewed version when a change is claimed. Record the exact
    user change instruction and source for every changed, replaced, revoked, or
    removed requirement item.
-4. Bind the packet to the exact review stage, candidate, base, scope, allowed
+4. State the review stage, work branch or diff, base, scope, allowed
    paths, forbidden paths, and applicable evidence.
 5. Map every applicable requirement item to its design or implementation
    reference and to the available stage evidence.
 6. Leave missing, conflicting, or unreadable required sources visible. Do not
    fill the gap with an agent-authored interpretation.
-7. Reuse the backend-supplied JSON output contract and the existing AppSDK
-   EvidenceRecord and ReviewRecord contracts. Do not add a local review schema
-   or a second evidence store.
+7. Use the review backend's output contract and existing behavior evidence.
+   Do not create lifecycle records for an ordinary review, add a local review
+   schema or create a second evidence store.
 8. For a design review, provide the design, DAG, owner/path mapping, capability
    evidence, and planned acceptance path. Do not require tests for code that is
    not implemented yet.
@@ -78,11 +83,9 @@ reason and evidence. Do not invent a command, path, version, or approval.
 ```markdown
 # Authoritative Requirement Review Packet
 
-## 1. Review identity
+## 1. Review scope and authority
 
 - Stage: design | architecture
-- AppSDK architecture context_id (exact public review-context output):
-- Architecture observation acknowledgement: requirements_review with that context_id and checked: true. With a fixed backend JSON schema, the reviewer records the exact context_id and explicit check in the existing evidence fields; the lifecycle adapter may map that received acknowledgement into the observation. It must not invent a check or add fields to the backend schema. The executing agent must not fill the reviewer's acknowledgement.
 - Project:
 - Task/issue:
 - Requirement owner:
@@ -94,14 +97,13 @@ reason and evidence. Do not invent a command, path, version, or approval.
 ## 2. Candidate and scope
 
 - Review mode: base | commit | uncommitted
-- Candidate commit/tree:
+- Work branch, diff or ordinary Git receipt:
 - Base:
 - Scope paths:
 - Allowed paths:
 - Forbidden paths:
 - Applicable modules/owners:
-- AppSDK candidate/evidence records:
-- Existing ReviewRecord target or reference:
+- Existing behavior result references:
 
 ## 3. Authoritative requirement
 
@@ -148,15 +150,15 @@ claimed.`
 
 ### Architecture review
 
-- Exact candidate artifact/build reference:
+- Tested entrypoint and applicable build result:
 - Author development test evidence:
 - Author E2E/public-entry evidence:
 - Black-box success, failure, and side-effect evidence:
 - Install/restart/runtime evidence, when applicable:
-- Evidence freshness and candidate binding:
+- Necessary environment context and material changes since testing:
 - Known blockers or unavailable sources:
 
-## 7. Backend and AppSDK record mapping
+## 7. Backend output
 
 - Backend-supplied JSON schema reference:
 - `contract_version`:
@@ -164,13 +166,15 @@ claimed.`
 - `module_boundary_evidence[].resources` authority source/version:
 - `module_boundary_evidence[].edges` requirement-to-design/implementation mapping:
 - `module_boundary_evidence[].gates` requirement-to-evidence mapping:
-- AppSDK EvidenceRecord references:
-- AppSDK ReviewRecord reference:
 - Any existing-contract gap:
 
 Do not add fields to the supplied backend schema. If the existing AppSDK
 records cannot express a required fact, report the gap to the AppSDK review
 governance owner.
+
+Only a selected external publication-record path consumes AppSDK `context_id`,
+EvidenceRecord and ReviewRecord. Use that command's actual output; never invent
+the reviewer's acknowledgement. Ordinary review does not generate these fields.
 
 ## 8. Reviewer instruction
 
@@ -205,8 +209,7 @@ Return a blocking finding when any applicable condition is true:
   evidence for the exact candidate.
 - An applicable requirement item has no design, implementation, or evidence
   mapping.
-- The backend output is missing, invalid, uses a new schema, or cannot be tied
-  to the existing AppSDK evidence and ReviewRecord.
+- The backend output is missing, invalid or uses an invented schema.
 - The packet asks the reviewer to approve a requirement change, edit the
   template, or invent a user instruction.
 

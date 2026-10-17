@@ -300,7 +300,7 @@ fn ensure_graph_nodes_use_registered_operators(
 mod notification;
 use notification::{register_notification_operator, validate_notification_objects};
 
-fn embedded_graph_paths() -> [(&'static str, &'static str); 17] {
+fn embedded_graph_paths() -> [(&'static str, &'static str); 18] {
     [
         (
             "contracts/dagpipe/fix-lifecycle.graph.json",
@@ -370,10 +370,14 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 17] {
             "docs/dagpipe/user-requirement-consumption.graph.json",
             include_str!("../../docs/dagpipe/user-requirement-consumption.graph.json"),
         ),
+        (
+            "docs/dagpipe/sdk-resource-refresh.graph.json",
+            include_str!("../../docs/dagpipe/sdk-resource-refresh.graph.json"),
+        ),
     ]
 }
 
-fn design_graph_ids() -> [&'static str; 15] {
+fn design_graph_ids() -> [&'static str; 16] {
     [
         "appsdk-collab-context",
         "appsdk-collab-subagent-command",
@@ -390,10 +394,11 @@ fn design_graph_ids() -> [&'static str; 15] {
         "appsdk-collab-peer-lifecycle",
         "appsdk-user-requirement-change",
         "appsdk-user-requirement-consumption",
+        "appsdk-sdk-resource-refresh",
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 79] {
+fn design_graph_operator_names() -> [&'static str; 83] {
     [
         "appsdk.collab_context.resolve_root",
         "appsdk.collab_context.ensure_baseline",
@@ -474,6 +479,10 @@ fn design_graph_operator_names() -> [&'static str; 79] {
         "appsdk.requirements.assemble_review_packet",
         "appsdk.requirements.evaluate_evidence",
         "appsdk.requirements.publish_admission",
+        "appsdk.sdk_resource_refresh.resolve_project_baseline",
+        "appsdk.sdk_resource_refresh.preflight_targets",
+        "appsdk.sdk_resource_refresh.write_resources",
+        "appsdk.sdk_resource_refresh.publish_record",
     ]
 }
 

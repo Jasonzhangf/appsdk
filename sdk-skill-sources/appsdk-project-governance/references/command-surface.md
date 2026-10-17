@@ -14,6 +14,7 @@ appsdk reset-governance . --discard-legacy
                                        lower-level AppSDK control-plane reset
 appsdk new <dir>                       create an empty new governed project
 appsdk verify .                        verify current governance contract/baseline
+appsdk resources refresh [project]     refresh docs/rules/skills; retain core pin/lock
 appsdk compile .                       compile project modules
 appsdk compile-module . --module <id>  compile one module
 appsdk pin-lock . --binary <path>      pin project to a binary and write sdk.lock

@@ -625,6 +625,8 @@ use governance::canonical_map::*;
 use governance::*;
 #[path = "main/registry.rs"]
 mod registry;
+#[path = "main/resource_refresh.rs"]
+mod resource_refresh;
 use registry::*;
 #[path = "main/compile.rs"]
 mod compile;
@@ -1072,6 +1074,7 @@ fn main() {
         }
         Some("verify") => verify_cli(&mut args),
         Some("requirements") => requirements::requirements_cli(&mut args),
+        Some("resources") => resource_refresh::run_cli(&mut args),
         Some("review-context") => {
             let root = project_root_or_cwd(&mut args);
             if args.next().as_deref() != Some("--module") {

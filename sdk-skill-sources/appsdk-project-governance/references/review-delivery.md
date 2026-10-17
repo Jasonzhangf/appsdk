@@ -68,11 +68,14 @@ historical violations are reported as recommendations and do not block unless
 they affect changed scope, safety, ownership, evidence truth, or required
 delivery.
 
-Any source, test, build config, environment, artifact, scope, owner, or required
-rule change invalidates affected evidence. Refresh only affected evidence;
+Material changes to behavior, dependencies or the tested environment reopen
+only affected checks. A new phase, log entry or Git identifier does not by
+itself require a rerun or review. Reuse valid results directly;
 revise the plan only when goal, scope, acceptance, key approach, or dependencies
 materially change. Follow the host contract for review triggers and finding
 re-checks; internal progress does not dispatch another review.
+
+Conflict returns to the owner worktree. Failed and unknown results stay visible.
 
 ## Existing publication-record implementation
 

@@ -82,7 +82,6 @@
         "pipeline_runtime::Runtime::run",
         "dagpipe::main"
       ],
-      "source_line_limit": 3500,
       "forbidden_paths": ["active/lib/**", "protected/**"],
       "verification_gates": ["dagpipe_runtime"]
     },

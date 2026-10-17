@@ -29,6 +29,14 @@ assert_workflow_contains() {
 assert_workflow_contains 'bash scripts/ci/select-verify-scope.sh'
 assert_workflow_contains 'workflow_contract: ${{ steps.scope.outputs.workflow_contract }}'
 assert_workflow_contains 'npm: ${{ steps.scope.outputs.npm }}'
+if ! awk '
+  /^      - / { guidance = 0 }
+  $0 == "        if: needs.changes.outputs.rust_guidance == '\''true'\''" { guidance = 1 }
+  guidance && $0 == "        run: cargo test --manifest-path rust/Cargo.toml --locked --test guidance_ablation_cli" { found = 1 }
+  END { exit !found }
+' "$workflow"; then
+  fail "workflow is missing guidance_ablation_cli under the Guidance condition"
+fi
 for job in workflow-contract npm macos-appsdk package-appsdk npm-consumers; do
   assert_workflow_contains "  $job:"
 done
@@ -216,6 +224,15 @@ expect_only "docs"
 # 14. Workflow-only change on a pull_request event also selects the contract gate.
 run_scenario "pr-workflow" "pull_request" "branch" "1" ".github/workflows/verify.yml"
 expect_only "workflow_contract"
+
+# 15. The public Guidance ablation CLI target selects its exact product owners.
+run_scenario "guidance-ablation-cli" "pull_request" "branch" "1" "rust/tests/guidance_ablation_cli.rs"
+expect_only "rust_guidance windows_appsdk"
+
+# 16. The Guidance milestone keeps its resource, installer, and workflow owners.
+run_scenario "guidance-selector-milestone" "pull_request" "branch" "1" \
+  $'rust/tests/guidance_ablation_cli.rs\nrust/src/guidance/compiler.rs\nsdk-skill-sources/appsdk-project-governance/appsdk-guidance.json\nscripts/ci/select-verify-scope.sh\nscripts/tests/test-verify-selector.sh\n.github/workflows/verify.yml'
+expect_only "rust_guidance windows_appsdk resources installer workflow_contract"
 
 if ((failures > 0)); then
   printf 'selector contract: %d failure(s)\n' "$failures" >&2

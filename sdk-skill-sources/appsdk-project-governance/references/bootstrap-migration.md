@@ -1,5 +1,77 @@
 # Bootstrap and Migration
 
+## Existing project: governance ablation
+
+适用：已有项目收到消融授权，要采用 2026-10-16 版规则，删除过度保护、无独立
+行为保障的检查及旧流程。这里迁移规则与执行入口，不重置项目控制面。
+总禁令由 [治理 Skill](../SKILL.md#purpose-and-mandatory-boundary) 维护。
+
+### 区分安装、项目迁移与程序修复
+
+全局安装更新本机 `appsdk`、`project-memory` 与三个 SDK-managed Skills，不会
+自动修改项目 AGENTS、Skills、CI/hooks。项目执行者读取本节，再修改实际生效
+入口。旧命令仍强制退役检查时，要修唯一程序 owner；改文档不等于程序已修好。
+全局正式入口为 AppSDK 仓库的 `scripts/install-global-appsdk.sh`，各项目不必重装。
+
+### 删除旧要求及实际调用
+
+先读当前项目需求、AGENTS、相关 Skill、受影响图和实际 CI/hooks。复用现有
+笔记，只定位受影响入口，不全仓扫无关事实，不新建逐条审计账本。
+
+| 旧要求 | 迁移动作 |
+| --- | --- |
+| 日常提取/核对 SHA、checksum、文件或补丁摘要 | 删除命令、必填字段及调用；使用必要 diff、行为结果与普通 Git/安装回执 |
+| 候选身份清单、冻结材料、逐字节对账、补丁正反重建 | 删除日常入口和专属脚本、fixture、生成物引用；不以来源或交接完整性加回 |
+| 每阶段再次校验记录摘要、完整性、任意有效期或未变输入 | 直接复用有效结果；实际行为、依赖或环境变化时仅补受影响验证 |
+| 日常完成必须走 promotion、Active/Protected、FreezeRecord 或发布记录链 | 从日常路径移除；仅对外 release 准备且实际分发需要时使用 |
+| 局部改动默认全仓/全平台测试、每节点 Review、差异证明账本 | 按实际失败模式选测；沿宿主 milestone Review 时点；关键取舍写现有笔记 |
+| 只锁源码文本、私有结构、历史输出，或重复已有保障的测试/校验 | 确认用途后物理删除，清理专属脚本、fixture、依赖与失效引用 |
+| 缺辅助状态阻断独立开发，或规则升级触发 Collab reset/重启 | 解除无关依赖；仅真实缺失能力阻断其下游 |
+
+这是正式退役旧要求。同步修改规则正文、实际 CI/hook 调用和相关设计，不能仅
+加一段相反说明。不得用 `--no-verify`、skip、吞错或补造 PASS 代替迁移。
+保留同一入口中防止实际行为错误、安全问题或数据丢失的检查。
+
+### 已有项目副本与程序门禁
+
+- 项目 AGENTS 与自有 Skill 由项目修改。`.appsdk/skills/`、`.appsdk/templates/`
+  是受管分发资源；需要刷新时走 SDK 正常升级入口，不手写 sdk.lock、pin、摘要、
+  ReviewRecord 或迁移见证。不为规则消融运行 fresh/reset。
+- `appsdk init` 只负责其初始化/资源刷新，不自动迁移项目 CI/hooks。仅在确需
+  刷新资源且满足准入时使用。遇到 pin/版本等兼容错误保留原错并交 SDK owner
+  修复，不反复 init 或删除目录。
+- 现有 `produce-lifecycle-chain`、`verify --review-admission` 仍可能检查旧哈希
+  记录。若调用只为日常身份包装服务，从项目 gate 正式退役该调用；若同时承担
+  必需行为，则先在唯一 owner 消融冗余校验并保留该行为。不得将命令失败改报
+  通过；SDK 缺陷沿现有 upstream bug 入口处理。
+- 历史记录与已发布资产保持原状。退役要求和旧失败不改写成 PASS，不把旧证据
+  复制成当前验收。业务数据或控制状态删除须有该操作的明确授权。
+
+纯规则/文档走快速路径。程序、CI/hook 行为按项目现有开发流程，使用外置独占
+worktree，先核对受影响 DAG，再做必要红测与公开入口回归。不另建治理框架。
+
+### 完成条件
+
+在日常任务实际入口确认：退役检查不再调用；受影响成功、失败和副作用符合需求；
+有效证据可直接复用。只做受影响验证，不新增只检查规则关键词的测试。
+普通提交/集成仍走正式保护入口。现有笔记记录关键删除项、保留保障、实际入口
+结果和未完成项即可；项目副本或程序未改好时，明确列出 owner 与缺口，不能仅凭
+全局安装成功结案。达到条件后交付并回收自有资源，不追加包装检查。
+
+### 给项目执行者的启动提示词
+
+```text
+读取全局 appsdk-project-governance Skill 及 bootstrap-migration.md 的
+“Existing project: governance ablation”章节，按当前项目需求执行旧治理消融。
+检查实际生效的 AGENTS、Skills、设计、CI/hooks 和程序入口，删除对外 release
+准备前的 SHA/checksum、候选身份包装、冻结材料、重复检查及无独立行为保障的
+测试与治理。同步修改唯一 owner 和调用，不只改说明。
+保留真实公开入口行为、安全和数据正确性验证，复用有效结果。纯文档直接改；
+代码和 gate 行为走项目现有外置 worktree、DAG、红测及公开入口回归流程。
+不要 reset/fresh、清空控制面、重启无关 daemon、伪造 PASS 或绕过 hook。
+完成后报告实际删除项、保留的行为保障、入口结果和剩余缺口，按项目授权交付。
+```
+
 ## New project
 
 ```text
@@ -67,10 +139,11 @@ questions must be answered or removed before `init`. Never confirm the record
 on behalf of the user, and never replace the preparation gate by editing
 `.appsdk/project.json` before initialization.
 
-For an existing project with prior `.appsdk/` or `.agent-collab/`, do not use
-this ordinary new-project path. Use
-[Existing project: remove old governance](#existing-project-remove-old-governance)
-and keep AppSDK and Collab reset/migration in separate transactions.
+For an existing project, ordinary rule upgrades use
+[governance ablation](#existing-project-governance-ablation), not the new-project
+or reset path. Only an explicitly authorized control-plane discard uses
+[Existing project: remove old governance](#existing-project-remove-old-governance),
+with AppSDK and Collab transactions kept separate.
 
 AppSDK preserves the launching environment and does not pass a project path to
 Collab. The daemon resolves project scope from the exact process cwd. Without a
@@ -221,8 +294,12 @@ never copied into a Skill automatically.
 
 ## Existing project
 
-Inventory AppSDK roots, maps, records, Active/Protected, local control state,
-claims, and worktrees. Choose one route:
+Use this section only when retained control state needs a canonical migration or
+the user explicitly authorizes a named destructive reset. An ordinary rule
+upgrade uses [governance ablation](#existing-project-governance-ablation).
+
+For that migration or reset scope, inventory AppSDK roots, maps, records,
+Active/Protected, local control state, claims, and worktrees. Choose one route:
 
 ### Preserve and migrate
 
@@ -325,7 +402,7 @@ hash or receipt.
 Do not force release/freeze evidence onto unfinished work.
 
 ```text
-snapshot current source and task state
+read current effective source and task state
 -> initialize advisory governance
 -> bind current goal/module/owner/worktree
 -> if Guide is missing, complete the user-approved setup proposal first

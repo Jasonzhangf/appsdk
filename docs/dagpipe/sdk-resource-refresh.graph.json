@@ -1,5 +1,5 @@
 {
-  "id": "appsdk-sdk-resource-refresh-v1",
+  "id": "appsdk-sdk-resource-refresh",
   "version": "0.1.0",
   "description": "资源刷新对象流：读取项目声明与已安装资源基线，在写入前校验全部目标，只刷新 embedded Bundle 的 docs、rules、skills，最后发布局部资源清单。静态治理图，不声明可执行 Operator；核心合同、pin、lock、项目业务资料和 Guidance 编译属于保留或下游流程。",
   "inputs": [

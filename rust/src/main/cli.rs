@@ -47,6 +47,7 @@ pub(super) fn print_cli_help(command: Option<&str>) {
         }
         Some("review-context") => "Usage: appsdk review-context [project] --module <id>",
         Some("requirements") => "Usage: appsdk requirements <show|history|verify> [project]\n       appsdk requirements apply [project] --input <json>",
+        Some("resources") => "Usage: appsdk resources refresh [project]",
         Some("compile") => "Usage: appsdk compile [project] [--module <id>]",
         Some("compile-module") => "Usage: appsdk compile-module [project] --module <id>",
         Some("produce-lifecycle-records") => {

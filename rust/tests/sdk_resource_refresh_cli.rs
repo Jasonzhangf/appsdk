@@ -1,11 +1,53 @@
 use serde_json::{json, Value};
 use std::env;
 use std::fs;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
+struct TestRoot {
+    path: PathBuf,
+}
+
+impl Deref for TestRoot {
+    type Target = Path;
+
+    fn deref(&self) -> &Self::Target {
+        &self.path
+    }
+}
+
+impl Drop for TestRoot {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        restore_directory_permissions(&self.path);
+        let _ = fs::remove_dir_all(&self.path);
+        let _ = fs::remove_dir_all(global_registry_root(&self.path));
+    }
+}
+
+#[cfg(unix)]
+fn restore_directory_permissions(path: &Path) {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return;
+    };
+    if metadata.file_type().is_symlink() {
+        return;
+    }
+    if metadata.is_dir() {
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+        if let Ok(entries) = fs::read_dir(path) {
+            for entry in entries.flatten() {
+                restore_directory_permissions(&entry.path());
+            }
+        }
+    }
+}
 
 fn binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_appsdk"))
@@ -52,7 +94,7 @@ fn write_file(root: &Path, relative: &str, content: &str) {
     fs::write(path, content).unwrap();
 }
 
-fn create_project(name: &str, core_version: &str) -> PathBuf {
+fn create_project(name: &str, core_version: &str) -> TestRoot {
     let root = temp_root(name);
     for directory in [
         ".appsdk/contracts/records",
@@ -297,16 +339,11 @@ fn create_project(name: &str, core_version: &str) -> PathBuf {
     ] {
         write_file(&root, relative, content);
     }
-    root
+    TestRoot { path: root }
 }
 
 fn refresh(root: &Path) -> Output {
     run_for(root, &["resources", "refresh", root.to_str().unwrap()])
-}
-
-fn cleanup(root: &Path) {
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(global_registry_root(root));
 }
 
 fn assert_refreshed_resources(root: &Path) {
@@ -361,8 +398,12 @@ fn resource_refresh_updates_selected_resources_and_schema2_record_is_readable() 
     let root = create_project("normal", "0.1.7");
     let project_before = fs::read(root.join(".appsdk/project.json")).unwrap();
     let lock_before = fs::read(root.join(".appsdk/sdk.lock")).unwrap();
-    let contract_before =
-        fs::read(root.join(".appsdk/contracts/records/evidence-record.schema.json")).unwrap();
+    let contract_before = b"opaque historical contract bytes\n".to_vec();
+    fs::write(
+        root.join(".appsdk/contracts/records/evidence-record.schema.json"),
+        &contract_before,
+    )
+    .unwrap();
 
     let refreshed = refresh(&root);
     assert!(
@@ -377,7 +418,16 @@ fn resource_refresh_updates_selected_resources_and_schema2_record_is_readable() 
     assert_eq!(record["schema_version"], json!(2));
     assert_eq!(record["version"], json!("0.1.7"));
     assert_eq!(record["resource_version"], json!(env!("APPSDK_VERSION")));
-    assert!(!record.to_string().contains("digest"));
+    assert_eq!(
+        record["resources"][0]["digest"],
+        json!("opaque historical contract identity")
+    );
+    assert!(record["resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["class"] != "contracts")
+        .all(|entry| entry.get("digest").is_none()));
 
     let repeated = refresh(&root);
     assert!(
@@ -389,7 +439,6 @@ fn resource_refresh_updates_selected_resources_and_schema2_record_is_readable() 
     assert_refreshed_resources(&root);
     assert_preserved_truth(&root, &project_before, &lock_before, &contract_before);
     assert_eq!(read_json(&root.join(".appsdk/sdk-resources.json")), record);
-    cleanup(&root);
 }
 
 #[test]
@@ -413,7 +462,7 @@ fn resource_refresh_uses_structure_not_core_version_and_preserves_legacy_contrac
     assert_eq!(record["version"], json!("0.1.7"));
     assert!(record["resources"].as_array().unwrap().iter().any(|entry| {
         entry["source"] == "contracts/records/evidence-record.schema.json"
-            && entry.get("digest").is_none()
+            && entry["digest"] == "opaque historical contract identity"
     }));
 
     let other = create_project("other-version", "0.1.8");
@@ -428,8 +477,6 @@ fn resource_refresh_uses_structure_not_core_version_and_preserves_legacy_contrac
         read_json(&other.join(".appsdk/sdk-resources.json"))["version"],
         json!("0.1.8")
     );
-    cleanup(&root);
-    cleanup(&other);
 }
 
 #[test]
@@ -472,7 +519,6 @@ fn resource_refresh_preflights_every_target_and_rejects_invalid_baseline() {
     assert!(!invalid.status.success());
     assert!(String::from_utf8_lossy(&invalid.stderr).contains("INVALID_SDK_RESOURCES"));
     assert_eq!(fs::read(&first_target).unwrap(), first_before);
-    cleanup(&root);
 }
 
 #[test]
@@ -525,5 +571,55 @@ fn resource_refresh_preserves_project_guidance_for_existing_consumers() {
     let rejected = run_for(&root, &["guide", "compile", root.to_str().unwrap()]);
     assert!(!rejected.status.success());
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("GUIDANCE_MANIFEST_SCHEMA_INVALID"));
-    cleanup(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn resource_refresh_reports_partial_write_and_does_not_publish_record() {
+    let effective_uid = Command::new("id")
+        .arg("-u")
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|uid| uid.trim().parse::<u32>().ok());
+    if effective_uid == Some(0) {
+        eprintln!("UNVERIFIED: SDK resource write failure requires a non-root Unix user");
+        return;
+    }
+
+    let root = create_project("write-failure", "0.1.7");
+    let record_path = root.join(".appsdk/sdk-resources.json");
+    let record_before = fs::read(&record_path).unwrap();
+    let blocked_directory = root.join(".appsdk/skills/project-memory");
+    let original_permissions = fs::metadata(&blocked_directory).unwrap().permissions();
+    fs::set_permissions(&blocked_directory, fs::Permissions::from_mode(0o500)).unwrap();
+
+    let failed = refresh(&root);
+    let stdout = String::from_utf8_lossy(&failed.stdout);
+    let stderr = String::from_utf8_lossy(&failed.stderr);
+    assert!(!failed.status.success(), "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("SDK_RESOURCE_WRITE_FAILED"),
+        "stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("refreshed .appsdk/docs/"),
+        "stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        !stdout.contains("resource refresh complete:"),
+        "stdout={stdout} stderr={stderr}"
+    );
+    assert_eq!(fs::read(&record_path).unwrap(), record_before);
+
+    fs::set_permissions(&blocked_directory, original_permissions).unwrap();
+    let retried = refresh(&root);
+    assert!(
+        retried.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&retried.stdout),
+        String::from_utf8_lossy(&retried.stderr)
+    );
+    assert_refreshed_resources(&root);
+    assert_eq!(read_json(&record_path)["schema_version"], json!(2));
 }

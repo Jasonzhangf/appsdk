@@ -31,16 +31,17 @@ Then:
 latest origin/main
 -> clean owner worktree
 -> minimal implementation
--> candidate commit
--> verification/review/delivery
+-> affected behavior checks
+-> applicable milestone review
 -> latest-main integration
 -> remote receipt
--> lifecycle close
 -> worktree/claim cleanup
 ```
 
-Candidate commit binds tree/artifact/evidence. It is not a delivery commit and
-does not authorize merge.
+Use normal Git commits for integration when needed. Do not create an early
+commit, tree/diff digest, frozen snapshot or identity packet just to admit
+development or review. The release boundary is owned by
+[the governance Skill](../SKILL.md#purpose-and-mandatory-boundary).
 
 Before adding behavior, perform an ablation check: confirm that the behavior is
 necessary, no declared owner already provides it, and common semantics can

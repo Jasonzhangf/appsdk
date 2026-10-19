@@ -119,19 +119,15 @@ impl Fixture {
 
     fn registered_context(&self) -> Value {
         let script_path = self.root.join("participant.sh");
-        let initial = self.root.join("participant.initial");
         let result = self.root.join("participant.result");
         let error = self.root.join("participant.error");
         let done = self.root.join("participant.done");
         let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
         let script = format!(
-            "set -e\ncd {}\nunset COLLAB_SOCKET_PATH COLLAB_HOST_SOCKET COLLAB_LOCK_PATH COLLAB_HOST_LOCK COLLAB_APPSERVER_SOCKET CODEX_APP_SERVER_SOCKET COLLAB_APPSERVER_NAMESPACE COLLAB_WORKER DSH_SESSION_ID\nexport COLLAB_STATE_DIR={} CODEX_HOME={} CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex TUI' CODEX_SESSION_ID='mcp-fixture-session' CODEX_THREAD_ID='mcp-fixture-thread'\n{} context --op mcp-authority-seed >{} 2>{} || true\nIFS= read -r challenge\ncase \"$challenge\" in 'COLLAB_REGISTER_CHALLENGE '{{*) ;; *) exit 3 ;; esac\n{} context --return-challenge \"${{challenge#COLLAB_REGISTER_CHALLENGE }}\" >{} 2>>{}\nprintf done >{}\nsleep 600\n",
+            "set -e\ncd {}\nunset COLLAB_SOCKET_PATH COLLAB_HOST_SOCKET COLLAB_LOCK_PATH COLLAB_HOST_LOCK COLLAB_APPSERVER_SOCKET CODEX_APP_SERVER_SOCKET COLLAB_APPSERVER_NAMESPACE COLLAB_WORKER DSH_SESSION_ID\nexport COLLAB_STATE_DIR={} CODEX_HOME={} CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex TUI' CODEX_SESSION_ID='mcp-fixture-session' CODEX_THREAD_ID='mcp-fixture-thread'\n{} context --op mcp-authority-seed >{} 2>{}\nprintf done >{}\nsleep 600\n",
             quote(&self.root.to_string_lossy()),
             quote(&self.root.join("h").to_string_lossy()),
             quote(&self.root.join("home").to_string_lossy()),
-            quote(&self.cli.to_string_lossy()),
-            quote(&initial.to_string_lossy()),
-            quote(&error.to_string_lossy()),
             quote(&self.cli.to_string_lossy()),
             quote(&result.to_string_lossy()),
             quote(&error.to_string_lossy()),
@@ -151,9 +147,9 @@ impl Fixture {
         }
         assert!(
             done.exists(),
-            "actual MCP participant did not return: {} {}",
+            "actual MCP participant did not return: stderr={} stdout={}",
             std::fs::read_to_string(&error).unwrap_or_default(),
-            std::fs::read_to_string(&result).unwrap_or_default()
+            std::fs::read_to_string(&result).unwrap_or_default(),
         );
         let response: Value = serde_json::from_slice(&std::fs::read(result).unwrap()).unwrap();
         assert_eq!(response["ok"], true, "{response}");

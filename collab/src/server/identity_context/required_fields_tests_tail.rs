@@ -173,7 +173,6 @@ fn serve_fake_appserver(
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let flag = Arc::clone(&stop);
     let handle = std::thread::spawn(move || {
-        let mut registration: Option<(String, String, String, i64)> = None;
         while !flag.load(std::sync::atomic::Ordering::SeqCst) {
             let Ok((mut stream, _)) = listener.accept() else {
                 return;
@@ -211,28 +210,6 @@ fn serve_fake_appserver(
                         }}
                     }),
                     "thread/read" => {
-                        let turns = if request["params"]["includeTurns"].as_bool() == Some(true) {
-                            registration
-                                .as_ref()
-                                .map(|(turn_id, client_message_id, marker, completed_at)| {
-                                    json!([{
-                                        "id": turn_id,
-                                        "status": "completed",
-                                        "completedAt": completed_at,
-                                        "items": [
-                                            {
-                                                "type": "userMessage",
-                                                "id": client_message_id,
-                                                "clientMessageId": client_message_id
-                                            },
-                                            {"type": "agentMessage", "text": marker}
-                                        ]
-                                    }])
-                                })
-                                .unwrap_or_else(|| json!([]))
-                        } else {
-                            json!([])
-                        };
                         json!({
                             "id": id,
                             "result": {"thread": {
@@ -240,7 +217,7 @@ fn serve_fake_appserver(
                                 "sessionId": session,
                                 "cwd": cwd,
                                 "status": {"type": "idle"},
-                                "turns": turns
+                                "turns": []
                             }}
                         })
                     }
@@ -248,40 +225,17 @@ fn serve_fake_appserver(
                         json!({"id": id, "error": {"code": -32601, "message": "unsupported"}})
                     }
                     "turn/start" => {
-                        let thread_id = request["params"]["threadId"].as_str().unwrap_or_default();
-                        if thread_id.is_empty() {
-                            json!({
-                                "id": id,
-                                "result": {"turn": {"id": "probe-turn", "status": "inProgress"}}
-                            })
-                        } else {
-                            let output = request["params"]["toolOutput"]["output"]
+                        assert!(
+                            request["params"]["threadId"]
                                 .as_str()
-                                .expect("registration dispatch carries the delegated prompt");
-                            let start = output
-                                .find("COLLAB_REGISTER_CHALLENGE ")
-                                .expect("delegated prompt carries the registration challenge");
-                            let raw = &output[start + "COLLAB_REGISTER_CHALLENGE ".len()..];
-                            let mut values = serde_json::Deserializer::from_str(raw)
-                                .into_iter::<serde_json::Value>();
-                            let challenge = values.next().unwrap().unwrap();
-                            let marker = challenge["challenge"]
-                                .as_str()
-                                .expect("registration challenge carries its marker")
-                                .to_owned();
-                            let client_message_id = request["params"]["clientUserMessageId"]
-                                .as_str()
-                                .expect("registration dispatch carries its command id")
-                                .to_owned();
-                            let turn_id = format!("registration-turn-{thread_id}");
-                            let completed_at = chrono::Utc::now().timestamp();
-                            registration =
-                                Some((turn_id.clone(), client_message_id, marker, completed_at));
-                            json!({
-                                "id": id,
-                                "result": {"turn": {"id": turn_id, "status": "inProgress"}}
-                            })
-                        }
+                                .unwrap_or_default()
+                                .is_empty(),
+                            "admission fixture does not dispatch participant turns"
+                        );
+                        json!({
+                            "id": id,
+                            "result": {"turn": {"id": "probe-turn", "status": "inProgress"}}
+                        })
                     }
                     "turn/steer" => {
                         let thread_id = request["params"]["threadId"].as_str().unwrap_or_default();
@@ -306,10 +260,6 @@ fn serve_fake_appserver(
                 if method == "thread/turns/list"
                     || (method == "thread/read"
                         && request["params"]["includeTurns"].as_bool() == Some(true))
-                    || (method == "turn/start"
-                        && request["params"]["threadId"]
-                            .as_str()
-                            .is_some_and(|thread_id| !thread_id.is_empty()))
                 {
                     break;
                 }

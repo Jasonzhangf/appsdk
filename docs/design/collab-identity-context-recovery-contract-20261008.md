@@ -2,47 +2,22 @@
 
 ## 1. Status, authority, and boundaries
 
-This document is the D2-B design contract for `collab context`. It freezes the
-public invocation schemas, daemon owner decisions, operation phases, restart
-readback, and failure terminals. It does not assert that any missing phase,
-receipt, query, or recovery seam already exists. It also does not implement
-them and does not authorize product code.
+This document owns the `collab context` invocation, daemon ownership,
+operation, restart readback, and failure contracts. Current applicable
+requirements are the effective project `.appsdk/requirements.json` and
+subsequent explicit user instructions. Section 2 records the 2026-10-18
+registration and manual communication restore distinction.
 
-Authority order (canonical requirements ledger at `.appsdk/requirements.json`
-v8 / communication v4 is authoritative and supersedes older Goal/plan
-interpretations within affected scope; older Goal and plan documents retain
-their historical scope elsewhere):
+The D2-B status, admission, and material statements below record that
+historical design stage. They are not current development, review, or
+implementation-admission gates. Daily work does not require material hash
+comparisons. Historical goals and accepted plans retain their original scope;
+they do not override current requirements. Design acceptance alone does not
+prove implementation or live behavior.
 
-1. The user's four requested Collab capabilities as persisted in the canonical
-   task Goal at
-   `/Users/fanzhang/Documents/github/appsdk/docs/goals/collab-context-identity-peer-crud-remediation-20261008.md`.
-   The candidate worktree keeps a byte-for-byte review copy at
-   `docs/goals/collab-context-identity-peer-crud-remediation-20261008.md`;
-   both copies must have the same SHA-256 before a design review. The exact
-   source SHA-256 for this correction is
-   `1e266b371e7ba296d3431fc8a4a8eb5ef09b754219f78da519b8cad57c672aab`.
-2. Accepted bounded plan and acceptance
-   `plan-resume-20261009.md` /
-   `plan-resume-20261009-acceptance.md`.
-3. Accepted D2-A source map
-   `d2-admission-receipt-map-20261009.md` and its acceptance.
-4. This D2-B contract for invocation, approval, phase, result, and query
-   semantics.
-5. `collab-anchor-restore-model.md` for automatic anchor recovery and its
-   recovery ladder.
-6. The master authority contract for grant state and grant changes.
-
-If a lower document conflicts with a higher one, the higher source wins. A
-conflict that cannot be resolved inside the four D2-B design files is a
-`BLOCKED` design condition, not permission to invent a product owner.
-
-Scope boundary:
-
-- A6 Create remains `BLOCKED`; this document does not define or admit it.
-- D3-RUC, peer Create/Update/Close, product code, daemon writes, identity
-  operations, and live tests are out of scope.
-- A design-only acceptance of this document means `READY_FOR_DESIGN_REVIEW`,
-  never `PASS`, implementation admission, or product completion.
+Automatic anchor recovery is defined in
+[the anchor restore model](collab-anchor-restore-model.md). Master grant state
+and grant changes remain owned by the master authority contract.
 
 ## 2. Terms and exact owner map
 
@@ -957,9 +932,9 @@ The following statements remain authoritative:
 - Secrets never enter snapshots, logs, messages, query projection, or Skill
   text.
 
-## 12. Implementation gaps and review boundary
+## 12. Historical D2-B implementation gaps and review boundary
 
-This contract requires new code for:
+At the D2-B design stage, this contract identified the following code gaps:
 
 - an outer operation record and query projection owned by the identity gate;
 - caller-retained operation ids in CLI/MCP;
@@ -970,15 +945,16 @@ This contract requires new code for:
 - one discriminated result/transition implementation;
 - graph and registry updates by the parent owner.
 
-None of these is claimed as implemented here. A separate B23 implementation
-contract must be accepted after independent design review. Until then, F2,
-D3-RUC, Create, and all runtime identity writes remain unadmitted.
+At that stage, these items were not claimed as implemented, and F2, D3-RUC,
+Create, and runtime identity writes awaited a separate B23 implementation
+contract. This is a historical admission record. Current implementation and
+live acceptance must be established from the applicable feature contracts,
+source, and behavior evidence.
 
 ## 13. S23-B03 implementation delta v1 — 2026-10-09
 
 This versioned implementation note is accepted by the parent decision in
-`planner-s23-b03-replan-20261009/acceptance.md` (plan SHA-256
-`c02b0691ab100bb8e87c9984c2a5b687461709149952fbea558b716c0423bc8f`). It
+`planner-s23-b03-replan-20261009/acceptance.md`. It
 does not revise the public request/result schema or the semantic requirements
 above.
 

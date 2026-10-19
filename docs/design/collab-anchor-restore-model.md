@@ -148,9 +148,10 @@ grant 或 lease；若需要 repair，必须提交带新 operation intent 的显�
 
 ## 6. 与既有设计的关系
 
-- `collab-identity-context-recovery-contract-20261008.md` 是 D2-B 的规范契约，
-  规范承载 participant gate 与续交合同；当前适用需求以主 ledger v8/v4 为准。
-  `collab-identity-minimal-interaction.md` 保留为兼容镜像，引用该规范正文。
+- 当前注册与显式手动通信恢复的区分见
+  [规范合同第 2 节](collab-identity-context-recovery-contract-20261008.md#2-terms-and-exact-owner-map)。
+  当前适用需求以项目 `.appsdk/requirements.json` 的有效记录及用户后续明确指令为准。
+  `collab-identity-minimal-interaction.md` 仅保留为兼容入口，引用规范正文。
 - `docs/dagpipe/collab-context.graph.json` v0.7.0 的 `identity_gate` 节点是本文件的图化。
 - DSH 通道契约（gateway `agent-facts` challenge）见
   `dsh-gateway/b-stage-collab-client/docs/COLLAB-DSH-CHANNEL-DESIGN.md`。本文件只声明

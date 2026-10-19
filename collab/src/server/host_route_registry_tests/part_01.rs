@@ -184,7 +184,7 @@ fn test_candidates_at(thread_id: &str, cwd: &Path) -> Option<TransportCandidates
         let mut fixture = fixture.borrow_mut();
         let (tmux, endpoint_index) = fixture.get_or_insert_with(|| {
             (
-                super::peer_tests::IsolatedTmux::start_registration_participant(cwd),
+                super::peer_tests::IsolatedTmux::start(cwd),
                 0,
             )
         });

@@ -456,10 +456,7 @@ fn tmux_anchor_alone_requires_no_appserver_fields() {
     assert!(required_fields(&facts).is_empty());
 }
 
-/// An observed App Server endpoint selects the App Server candidate, which
-/// reads all four fields unconditionally. The anchor must not short-circuit
-/// that request: doing so reaches `expect("complete native facts")` and
-/// panics the daemon handler instead of asking the caller.
+/// Native selection requires four fields; the higher-priority pane does not.
 #[test]
 fn an_observed_endpoint_still_requires_the_four_appserver_fields() {
     let facts = IdentityFacts {
@@ -476,10 +473,7 @@ fn an_observed_endpoint_still_requires_the_four_appserver_fields() {
         endpoint: Some("unix:///tmp/appserver.sock".into()),
         ..IdentityFacts::default()
     };
-    assert_eq!(
-        required_fields(&facts),
-        vec!["session_id", "thread_id", "namespace"]
-    );
+    assert!(required_fields(&facts).is_empty());
 }
 
 /// With no anchor and no endpoint all four facts are requested.
@@ -756,7 +750,6 @@ fn s23_b03_outer_sync_failure_prevents_register_consume() {
         false,
         None,
         Some(&mut before_consume),
-        None,
     );
     assert!(!response.ok, "{response:?}");
     assert!(

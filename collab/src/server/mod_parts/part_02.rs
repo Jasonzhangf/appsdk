@@ -51,103 +51,6 @@ pub(crate) struct PreparedRegisterEnvelope {
     pub(crate) nested_command_id: String,
     pub(crate) nested_operation_id: String,
     pub(crate) typed: TypedEnvelope,
-    #[serde(default)]
-    precondition: Option<RegisterPrecondition>,
-}
-
-/// Only identity resources touched by Register. Classification, activity and
-/// endpoint observations are deliberately absent from this private fence.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct RegisterPrecondition {
-    worker_credential: Option<(String, String)>,
-    binding: Option<RuntimeBinding>,
-    app_owners: std::collections::BTreeSet<String>,
-    claimants: Vec<(RuntimeBinding, Option<(String, String)>)>,
-    target_grant: Option<global_state::MasterGrant>,
-}
-
-impl RegisterPrecondition {
-    fn capture(
-        st: &State,
-        worker_id: &str,
-        scope: &RouteScope,
-        binding_id: &BindingId,
-        endpoint: Option<&crate::proto::TmuxEndpoint>,
-    ) -> Self {
-        let stable_binding = |mut binding: RuntimeBinding| {
-            if let Some(endpoint) = binding.tmux_endpoint.as_mut() {
-                endpoint.server_pid = 0;
-                endpoint.pane_pid = 0;
-                endpoint.tmux_session_id.clear();
-                endpoint.codex_session_id = None;
-                endpoint.codex_thread_id = None;
-            }
-            binding
-        };
-        let credential = |id: &str| {
-            st.workers
-                .get(id)
-                .map(|worker| (worker.token.clone(), worker.cwd.clone()))
-        };
-        let mut app_owners = st
-            .global
-            .lookup_project(&scope.project_scope_id)
-            .map(|project| {
-                let owners = project
-                    .runtime_bindings
-                    .values()
-                    .map(|binding| binding.app_scope_id.as_str().to_owned())
-                    .collect::<std::collections::BTreeSet<_>>();
-                if owners.is_empty() {
-                    project
-                        .registrations
-                        .values()
-                        .map(|registration| registration.app_scope_id.as_str().to_owned())
-                        .collect()
-                } else {
-                    owners
-                }
-            })
-            .unwrap_or_default();
-        // A concurrent first registrant establishing this same app owner is
-        // compatible. Only a different/ambiguous app owner conflicts.
-        app_owners.remove(scope.app_scope_id.as_str());
-        let mut claimants = endpoint
-            .map(|endpoint| pane_claimants(st, worker_id, scope, endpoint))
-            .unwrap_or_default()
-            .into_iter()
-            .map(|binding| {
-                let worker = credential(binding.agent_id.as_str());
-                (stable_binding(binding), worker)
-            })
-            .collect::<Vec<_>>();
-        claimants.sort_by(|a, b| {
-            (
-                a.0.project_scope.as_str(),
-                a.0.app_scope_id.as_str(),
-                a.0.binding_id.as_str(),
-            )
-                .cmp(&(
-                    b.0.project_scope.as_str(),
-                    b.0.app_scope_id.as_str(),
-                    b.0.binding_id.as_str(),
-                ))
-        });
-        Self {
-            worker_credential: credential(worker_id),
-            binding: st
-                .global
-                .lookup_binding_for(scope, binding_id)
-                .cloned()
-                .map(stable_binding),
-            app_owners,
-            claimants,
-            target_grant: st
-                .global
-                .lookup_master_grant_for(scope, binding_id)
-                .cloned(),
-        }
-    }
 }
 
 /// Daemon-issued admission proof for one approved stale-credential recovery.
@@ -483,7 +386,6 @@ impl Server {
             expected_revision,
             base_command,
             prior_attempt,
-            precondition,
         ) = {
             let st = self.state.lock().unwrap();
             let (runtime_text, generation) =
@@ -586,13 +488,6 @@ impl Server {
                 st.revision,
                 base_command,
                 prior_attempt,
-                RegisterPrecondition::capture(
-                    &st,
-                    worker_id,
-                    &route_scope,
-                    &binding_id,
-                    transport.tmux_endpoint.as_ref(),
-                ),
             )
         };
         let agent_id = AgentId::new(worker_id.to_string()).map_err(|error| error.to_string())?;
@@ -658,7 +553,6 @@ impl Server {
         Ok(PreparedRegisterEnvelope {
             nested_command_id,
             nested_operation_id,
-            precondition: Some(precondition),
             typed: TypedEnvelope {
                 command: TypedCommand::RegisterWorker {
                     registration,
@@ -701,30 +595,7 @@ impl Server {
         approval: Option<&RegisterApprovalProof>,
         outer_binding: Option<&RegisterOuterBinding>,
     ) -> Result<state::TypedOutcome, notification_contract::JournalError> {
-        self.typed_dispatch_register(typed, approval, outer_binding, None)
-    }
-
-    /// Private continuation seam: the original durable reply owner must prove
-    /// the exact command and genuine return before selecting this fence.
-    fn consume_verified_register(
-        &self,
-        record: &register_reply::Record,
-        approval: Option<&RegisterApprovalProof>,
-    ) -> Result<state::TypedOutcome, notification_contract::JournalError> {
-        register_reply::verified_for_commit(self.host_paths.state_root(), record)
-            .map_err(notification_contract::JournalError::InvalidCommand)?;
-        let precondition = record.prepared.precondition.as_ref().ok_or_else(|| {
-            notification_contract::JournalError::InvalidCommand(
-                "REGISTER_REPLY_PRECONDITION_MISSING: original pending predates scoped prepare"
-                    .into(),
-            )
-        })?;
-        self.typed_dispatch_register(
-            record.prepared.typed.clone(),
-            approval,
-            None,
-            Some(precondition),
-        )
+        self.typed_dispatch_register(typed, approval, outer_binding)
     }
 
     fn typed_dispatch_register(
@@ -732,56 +603,18 @@ impl Server {
         typed: TypedEnvelope,
         approval: Option<&RegisterApprovalProof>,
         outer_binding: Option<&RegisterOuterBinding>,
-        precondition: Option<&RegisterPrecondition>,
     ) -> Result<state::TypedOutcome, notification_contract::JournalError> {
         typed.envelope.validate().map_err(|error| {
             notification_contract::JournalError::InvalidCommand(error.to_string())
         })?;
         let mut st = self.state.lock().unwrap();
-        self.validate_typed_register(&st, &typed, approval, precondition.is_some())?;
-        if let Some(expected) = precondition {
-            let TypedCommand::RegisterWorker {
-                worker, binding, ..
-            } = &typed.command;
-            // Completed receipt replay belongs to commit_command_locked. Its
-            // command/operation ownership check remains authoritative.
-            if !st
-                .command_receipts
-                .contains_key(typed.envelope.command_id.as_str())
-                && st
-                    .global
-                    .lookup_command_receipt(&typed.envelope.command_id)
-                    .is_none()
-                && *expected
-                    != RegisterPrecondition::capture(
-                        &st,
-                        &worker.id,
-                        &binding.route_scope(),
-                        &binding.binding_id,
-                        binding.tmux_endpoint.as_ref(),
-                    )
-            {
-                return Err(notification_contract::JournalError::InvalidCommand(
-                    "REGISTER_REPLY_RESOURCE_CONFLICT: prepared target resources changed".into(),
-                ));
-            }
-        }
+        self.validate_typed_register(&st, &typed, approval)?;
         let mut events = Vec::new();
         let TypedCommand::RegisterWorker { worker, .. } = &typed.command;
         for global_event in typed.command.global_events() {
             match global_event {
                 GlobalEvent::ProjectRegistered { registration } => {
-                    if precondition.is_none()
-                        || st
-                            .global
-                            .lookup_registration(
-                                &registration.project_scope,
-                                &registration.app_scope_id,
-                            )
-                            .is_none()
-                    {
-                        events.push(Event::GlobalProjectRegistered { registration })
-                    }
+                    events.push(Event::GlobalProjectRegistered { registration })
                 }
                 GlobalEvent::RuntimeBound { binding } => {
                     let previous = st
@@ -926,11 +759,7 @@ impl Server {
             typed.envelope.operation_id.as_str(),
             &events,
             outcome,
-            if precondition.is_some() {
-                None
-            } else {
-                typed.envelope.expected_revision
-            },
+            typed.envelope.expected_revision,
             outer_binding,
         )?;
         Ok(state::TypedOutcome {
@@ -951,7 +780,6 @@ impl Server {
         st: &State,
         typed: &TypedEnvelope,
         approval: Option<&RegisterApprovalProof>,
-        scoped: bool,
     ) -> Result<(), notification_contract::JournalError> {
         let TypedCommand::RegisterWorker {
             registration,
@@ -1050,12 +878,6 @@ impl Server {
         }
         let mut next = st.global.clone();
         for event in typed.command.global_events() {
-            if scoped
-                && matches!(&event, GlobalEvent::ProjectRegistered { registration }
-                if st.global.lookup_registration(&registration.project_scope, &registration.app_scope_id).is_some())
-            {
-                continue;
-            }
             event.apply(&mut next).map_err(|error| {
                 notification_contract::JournalError::InvalidCommand(error.to_string())
             })?;
@@ -1173,129 +995,4 @@ mod scoped_register_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[test]
-    fn scoped_register_allows_unrelated_revision_and_same_app_owner() {
-        let (server, root) = peer_tests::test_server();
-        let first = prepared(&server, &root, "first");
-        server.typed_dispatch(first.typed).unwrap();
-        let pending = prepared(&server, &root, "second");
-        server
-            .typed_dispatch(prepared(&server, &root, "third").typed)
-            .unwrap();
-        let ordinary_error = server
-            .typed_dispatch(pending.typed.clone())
-            .unwrap_err()
-            .to_string();
-        assert!(
-            ordinary_error.contains("compare-and-swap"),
-            "{ordinary_error}"
-        );
-        let result = server
-            .typed_dispatch_register(
-                pending.typed.clone(),
-                None,
-                None,
-                pending.precondition.as_ref(),
-            )
-            .unwrap();
-        assert!(!result.replayed);
-        assert!(
-            server
-                .typed_dispatch_register(pending.typed, None, None, pending.precondition.as_ref())
-                .unwrap()
-                .replayed
-        );
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn scoped_register_allows_first_same_app_registration_while_pending() {
-        let (server, root) = peer_tests::test_server();
-        let pending = prepared(&server, &root, "second");
-        server
-            .typed_dispatch(prepared(&server, &root, "first").typed)
-            .unwrap();
-        server
-            .typed_dispatch_register(pending.typed, None, None, pending.precondition.as_ref())
-            .unwrap();
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn scoped_register_rejects_target_binding_and_credential_conflicts() {
-        for conflict in ["binding", "credential", "app"] {
-            let (server, root) = peer_tests::test_server();
-            let pending = prepared(&server, &root, "target");
-            if conflict == "credential" {
-                let TypedCommand::RegisterWorker { mut worker, .. } = pending.typed.command.clone();
-                worker.token = "new-owner-token".into();
-                server
-                    .commit_checked(&[Event::Registered { worker }])
-                    .unwrap();
-            } else {
-                let mut concurrent = prepared(
-                    &server,
-                    &root,
-                    if conflict == "app" { "other" } else { "target" },
-                );
-                if conflict == "app" {
-                    let app = AppServerId::new("other-app").unwrap();
-                    let TypedCommand::RegisterWorker {
-                        binding,
-                        registration,
-                        ..
-                    } = &mut concurrent.typed.command;
-                    binding.app_scope_id = app.clone();
-                    registration.app_scope_id = app.clone();
-                    concurrent.typed.envelope.scope.app_scope_id = app;
-                }
-                server.typed_dispatch(concurrent.typed).unwrap();
-            }
-            let mut pending = pending;
-            // Keep this a genuinely uncommitted original command: a completed
-            // command's exact receipt replay must remain valid.
-            pending.typed.envelope.command_id = CommandId::new("pending-original").unwrap();
-            pending.typed.envelope.operation_id = OperationId::new("pending-original-op").unwrap();
-            let error = server
-                .typed_dispatch_register(pending.typed, None, None, pending.precondition.as_ref())
-                .unwrap_err()
-                .to_string();
-            assert!(
-                error.contains("RESOURCE_CONFLICT")
-                    || error.contains("different or ambiguous")
-                    || error.contains("worker token does not belong"),
-                "{conflict}: {error}"
-            );
-            std::fs::remove_dir_all(root).unwrap();
-        }
-    }
-
-    #[test]
-    fn scoped_register_excludes_unrelated_revision_and_master() {
-        let (server, root) = peer_tests::test_server();
-        let pending = prepared(&server, &root, "target");
-        let TypedCommand::RegisterWorker { binding, .. } = &pending.typed.command;
-        let mut state = server.state.lock().unwrap();
-        let before = RegisterPrecondition::capture(
-            &state,
-            "target",
-            &binding.route_scope(),
-            &binding.binding_id,
-            None,
-        );
-        state.revision += 20;
-        state.master_worker_id = Some("unrelated-master".into());
-        assert_eq!(
-            before,
-            RegisterPrecondition::capture(
-                &state,
-                "target",
-                &binding.route_scope(),
-                &binding.binding_id,
-                None
-            )
-        );
-        drop(state);
-        std::fs::remove_dir_all(root).unwrap();
-    }
 }

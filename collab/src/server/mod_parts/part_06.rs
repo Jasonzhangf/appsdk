@@ -749,7 +749,7 @@ fn consume_prepared_register_typed(
     prepared: PreparedRegisterEnvelope,
     approval: Option<&RegisterApprovalProof>,
 ) -> Resp {
-    consume_register_typed(server, worker_id, transport, prepared, approval, None)
+    consume_register_typed(server, worker_id, transport, prepared, approval)
 }
 
 fn consume_register_typed(
@@ -758,16 +758,12 @@ fn consume_register_typed(
     transport: &SelectedTransport,
     prepared: PreparedRegisterEnvelope,
     approval: Option<&RegisterApprovalProof>,
-    verified: Option<&register_reply::Record>,
 ) -> Resp {
     let registered_at = match &prepared.typed.command {
         TypedCommand::RegisterWorker { worker, .. } => worker.registered_ms,
     };
     let command = prepared.typed.command.clone();
-    let committed = match verified {
-        Some(record) => server.consume_verified_register(record, approval),
-        None => server.consume_prepared_register_with_approval(prepared, approval),
-    };
+    let committed = server.consume_prepared_register_with_approval(prepared, approval);
     match committed {
         Ok(outcome) => {
             let (role_brief, _) = {
@@ -855,78 +851,25 @@ fn register_typed_observed(
     reuse_existing: bool,
     register_approval: Option<&RegisterApprovalProof>,
     before_consume: Option<&mut dyn FnMut(&PreparedRegisterEnvelope) -> Result<(), String>>,
-    outer_binding: Option<&RegisterOuterBinding>,
 ) -> Resp {
-    let root = server.host_paths.state_root();
-    let retained = outer_binding
-        .and_then(|binding| register_reply::read(root, &binding.operation_id).transpose());
-    let prepared = match retained {
-        Some(Ok(record)) => record.prepared,
-        Some(Err(error)) => return Resp::err(error),
-        None => match prepare_register_typed(
-            server,
-            worker_id,
-            token,
-            transport,
-            cwd,
-            project_scope,
-            app_scope,
-            reuse_existing,
-        ) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                return Resp::err(format!("typed registrar failed to build command: {error}"))
-            }
-        },
+    let prepared = match prepare_register_typed(
+        server,
+        worker_id,
+        token,
+        transport,
+        cwd,
+        project_scope,
+        app_scope,
+        reuse_existing,
+    ) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return Resp::err(format!("typed registrar failed to build command: {error}"))
+        }
     };
     if let Some(before_consume) = before_consume {
         if let Err(error) = before_consume(&prepared) {
             return Resp::err(error);
-        }
-    }
-    let TypedCommand::RegisterWorker {
-        binding, worker, ..
-    } = &prepared.typed.command;
-    let persisted_restore = {
-        let state = server.state.lock().unwrap();
-        state
-            .global
-            .lookup_binding_for(&binding.route_scope(), &binding.binding_id)
-            .is_some_and(|current| current.same_principal(binding))
-            && state.workers.get(&worker.id).is_some_and(|existing| {
-                existing.token == worker.token
-                    || approved_register_authorized(
-                        register_approval,
-                        &worker.id,
-                        Some(&binding.project_scope),
-                        Some(&binding.app_scope_id),
-                    )
-            })
-    };
-    let mut verified = None;
-    if !persisted_restore && !register_reply::committed(server, &prepared.nested_command_id) {
-        let gate = register_reply::ensure_pending(
-            root,
-            worker_id,
-            transport,
-            &prepared,
-            outer_binding,
-            register_reply::Purpose::InitialRegister,
-        )
-        .and_then(|record| {
-            register_reply::enforce(root, record.clone())?;
-            let record = register_reply::read(root, &record.operation_id)?
-                .ok_or("REGISTER_REPLY_PENDING_MISSING")?;
-            register_reply::verified_for_commit(root, &record)?;
-            Ok(record)
-        });
-        match gate {
-            Ok(record) => verified = Some(record),
-            Err(error) => {
-                clear_context_cancel_operation();
-                crate::server::clear_context_register_start_binding();
-                return Resp::err(error);
-            }
         }
     }
     let response = consume_register_typed(
@@ -935,7 +878,6 @@ fn register_typed_observed(
         transport,
         prepared,
         register_approval,
-        verified.as_ref(),
     );
     clear_context_cancel_operation();
     crate::server::clear_context_register_start_binding();
@@ -976,7 +918,6 @@ pub(crate) fn register_created_peer(
         Some(context.project_scope.clone()),
         Some(context.app_scope_id.clone()),
         false,
-        None,
         None,
         None,
     );
@@ -1398,7 +1339,6 @@ fn handle_register_with_app_scope_inner_bound(
             reuse_existing,
             outer_binding.and_then(RegisterOuterBinding::approval),
             Some(&mut before_consume),
-            outer_binding,
         );
         if resp.ok {
             if reuse_existing {
@@ -1429,7 +1369,6 @@ fn handle_register_with_app_scope_inner_bound(
         false,
         outer_binding.and_then(RegisterOuterBinding::approval),
         Some(&mut before_consume),
-        outer_binding,
     )
 }
 

@@ -782,6 +782,25 @@ fn peer_lifecycle_r1_authenticated_self_read_is_pure() {
 fn peer_lifecycle_r2_unknown_observation_is_pure() {
     let (fixture, host, identity) = lifecycle_native_fixture("peer-r2");
     drop(host);
+    // Let the resident ledger classify the dropped host before taking the
+    // pure-Read baseline. Keep the full surface comparison below: Read must
+    // not append anything, including another ledger event.
+    assert!(
+        wait_until(Duration::from_secs(10), || {
+            read_lines(&fixture.project_journal())
+                .iter()
+                .rev()
+                .find(|row| {
+                    row["ev"] == "GlobalRuntimeBindingLedgerClassified"
+                        && row["record"]["agent_id"] == identity["worker_id"]
+                })
+                .is_some_and(|row| {
+                    row["record"]["state"] == "RepairRequired"
+                        && row["record"]["probe_state"] == "RepairRequired"
+                })
+        }),
+        "the resident ledger must classify this dropped host before the pure-Read baseline"
+    );
     let before = lifecycle_surfaces(&fixture, &identity);
     let read = lifecycle_read(&fixture, &identity, None);
     assert_eq!(read["result"]["outcome"], "unknown", "{read}");

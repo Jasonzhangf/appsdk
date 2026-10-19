@@ -46,8 +46,8 @@ Scope boundary:
 
 ## 2. Terms and exact owner map
 
-Initial registration participant gate and continuation contracts are normatively
-defined in `collab-identity-context-recovery-contract-20261008.md` Section 2.
+One-step registration and explicit manual communication continuation are defined
+in `collab-identity-context-recovery-contract-20261008.md` Section 2.
 This document acts as a compatibility mirror and references that owner.
 
 | Term | Exact meaning | Owner |

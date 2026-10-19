@@ -734,72 +734,11 @@ fn scope_registration_participant(
     worker: &str,
     token: &str,
 ) -> Value {
-    let script = fixture.root.join(format!("{worker}.py"));
-    let result = fixture.root.join(format!("{worker}.reply"));
-    let done = fixture.root.join(format!("{worker}.done"));
-    let context = json!({"app_scope_id":app,"canonical_root":root.canonicalize().unwrap(),
-        "project_scope":root.canonicalize().unwrap()});
-    // This participant reads the actual selected pane input. The parent does
-    // not obtain the marker from capture output or the evidence journal.
-    std::fs::write(
-        &script,
-        r#"import json, os, socket, sys, time
-line = sys.stdin.readline()
-prefix = 'COLLAB_REGISTER_CHALLENGE '
-assert line.startswith(prefix), line
-reply = json.loads(line[len(prefix):])
-reply['anchor'] = {'socket_path': os.environ['TMUX'].rsplit(',', 2)[0], 'pane_id': os.environ['TMUX_PANE']}
-request = {'op': 'RegisterReply', 'reply': reply, 'project_context': json.loads(sys.argv[2])}
-with socket.socket(socket.AF_UNIX) as client:
-    client.connect(sys.argv[1])
-    client.sendall((json.dumps(request) + '\n').encode())
-    response = json.loads(client.makefile().readline())
-with open(sys.argv[3], 'w') as output:
-    json.dump(response, output)
-with open(sys.argv[4], 'w') as output:
-    output.write('done')
-time.sleep(600)
-"#,
-    )
-    .unwrap();
-    let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
-    tmux(
-        &fixture.tmux_socket,
-        &[
-            "respawn-pane",
-            "-k",
-            "-t",
-            &pane.pane_id,
-            &format!(
-                "python3 {} {} {} {} {}",
-                quote(&script.to_string_lossy()),
-                quote(&fixture.host_state.join("server.sock").to_string_lossy()),
-                quote(&context.to_string()),
-                quote(&result.to_string_lossy()),
-                quote(&done.to_string_lossy())
-            ),
-        ],
-    );
     let mut register = tmux_register_request(worker, token, root, pane, &fixture.tmux_socket);
     register["project_context"]["app_scope_id"] = json!(app);
-    let pending = wire_request(&fixture.host_state.join("server.sock"), &register);
-    assert_eq!(
-        pending["ok"], false,
-        "initial register must await return: {pending}"
-    );
-    assert!(
-        pending["error"]
-            .as_str()
-            .unwrap_or_default()
-            .starts_with("REGISTER_REPLY_PENDING:"),
-        "{pending}"
-    );
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while !done.exists() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(25));
-    }
-    assert!(done.exists(), "scope participant did not return: {pending}");
-    serde_json::from_slice(&std::fs::read(result).unwrap()).unwrap()
+    let registered = wire_request(&fixture.host_state.join("server.sock"), &register);
+    assert_eq!(registered["ok"], true, "{registered}");
+    registered
 }
 
 #[test]

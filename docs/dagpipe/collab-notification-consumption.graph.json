@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-notification-consumption",
   "version": "0.2.0",
-  "description": "SESE consumption graph. It starts independently from a recipient consume request, consumes durable mailbox entries, and never mutates route, subscription, or transport truth.",
+  "description": "SESE consumption graph. A recipient consume request returns payloads and commits ReceiveCommitted with Delivered/Acked in the same transaction. The existing subscription owner may idempotently advance its occurrence. Consumption does not change route, transport or binding truth.",
   "inputs": [
     {
       "id": "recipient_consume_request",

@@ -164,6 +164,30 @@ fn c05_minimal_approval_reads_current_incumbent_without_second_approval() {
         true,
         "a new explicit recovery operation must append its durable projection"
     );
+    // Let the resident timer classify the newly recovered generation before
+    // measuring replay purity. Its scan receipt is a separate journal event.
+    let current_binding = &changed_payload["result"]["snapshot"]["binding"];
+    assert!(
+        wait_until(Duration::from_secs(10), || {
+            let rows = read_lines(&fixture.project_journal());
+            rows.iter()
+                .rev()
+                .find(|row| {
+                    row["ev"] == "GlobalRuntimeBindingLedgerClassified"
+                        && row["record"]["binding_id"] == current_binding["binding_id"]
+                })
+                .is_some_and(|row| {
+                    row["record"]["endpoint_generation"] == current_binding["endpoint_generation"]
+                        && row["record"]["state"] == "Live"
+                        && row["record"]["probe_state"] == "Live"
+                        && rows.iter().any(|receipt| {
+                            receipt["ev"] == "GlobalLedgerScanReceiptRecorded"
+                                && receipt["receipt"]["scanned_ms"] == row["record"]["classified_ms"]
+                        })
+                })
+        }),
+        "the recovered binding must have its real resident classification and scan receipt"
+    );
     let before_replay = (
         fs::read(fixture.host_journal()).unwrap(),
         fs::read(fixture.project_journal()).unwrap(),

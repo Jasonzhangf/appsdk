@@ -499,16 +499,7 @@ impl ProjectRuntimeManager {
                 Err(error) => return (self.host.clone(), Resp::err(error)),
             };
         let Some(continuation) = record.continuation.clone() else {
-            let completion_context = record
-                .completion
-                .as_ref()
-                .map(|completion| &completion.context)
-                .unwrap_or(&context);
-            let runtime = match self.select_runtime(completion_context) {
-                Ok(runtime) => runtime,
-                Err(error) => return (self.host.clone(), Resp::err(error)),
-            };
-            return self.complete_participant_registration(runtime, &context, record);
+            return (self.host.clone(), Resp::err("COMMUNICATION_RESTORE_CONTINUATION_MISSING"));
         };
         // The exact admitted intent and prepared envelope come from the one
         // control owner, never from return payload or query projection.

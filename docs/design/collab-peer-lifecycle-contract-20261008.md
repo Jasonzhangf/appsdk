@@ -6,9 +6,9 @@ This contract defines the peer lifecycle surface for:
 
 - `Read`: an authoritative, side-effect-free view of peer lifecycle state.
 - `Update`: a peer-owned mutation of mutable lifecycle intent.
-- `Close`: a fenced lifecycle operation that must stop or retire the host-side
-  runtime and the Collab control-plane responsibility set without inventing a
-  successful terminal state.
+- `Close`: a fenced lifecycle operation that retires the exact Collab
+  control-plane identity. Closing another peer also requires the selected
+  host terminal; self-unregister leaves the host running, as specified in §4.
 
 `Create` is deliberately out of scope and remains blocked. This document does
 not add a Create command, API, graph node, or implementation permission.
@@ -28,7 +28,8 @@ not add a Create command, API, graph node, or implementation permission.
 ### 1.2 Out of scope
 
 - Creating a peer, a host thread, a managed subagent, or a new identity.
-- Replacing or promoting master authority.
+- Replacing or promoting master authority. Self-unregister only revokes the
+  retiring identity's exact grant; it never grants or transfers authority.
 - Changing a worker token, binding generation, scope, or route ownership.
 - Deleting task history, mailbox history, or worktree history.
 - Editing the Collab journal or a host route journal directly.
@@ -243,6 +244,28 @@ rebuilt, replaced, or re-registered to make the response green.
 
 ## 4. Close Contract
 
+Current self-unregister contract (2026-10-18): the existing `worker close`
+entry accepts an authenticated caller targeting itself, whether peer or master.
+`server/peer_lifecycle/handlers.rs::handle_close` skips host archive for this
+case. `server/peer_lifecycle.rs::retire_control_plane` retires the exact binding
+generation, current-thread route, worker, and applicable subscriptions, and
+revokes only that binding's master grant through `GlobalMasterRevoked`.
+The pane/thread keeps running. A complete self-unregister reports
+`runtime_archive=not-applicable`; it requires no host terminal.
+
+Existing task, scheduler, managed-subagent, and worktree responsibility checks
+still apply. A conflict refuses before retirement. Mailbox, task claims,
+pending merges, and history retain their existing owners; unread messages are
+not consumed or deleted. No second responsibility table is introduced.
+The persisted-identity recovery owner treats the retired worker as rebuild
+input. A later context at the same live anchor publishes one active binding
+at a new generation as a default peer, without restoring the retired grant.
+Explicit manual communication recovery remains a separate path.
+
+Closing another peer retains its existing authority and host-archive contract.
+The host-terminal requirements below apply to that path. Historical source
+observations elsewhere in this document describe the pre-implementation gaps.
+
 ### 4.1 Close target identity
 
 Close must bind all of the following before admission:
@@ -309,21 +332,21 @@ At minimum, Close classifies:
 | --- | --- |
 | Unfinished task | Reject close or require an explicit task lifecycle resolution first. |
 | Unread notification | Preserve, retire, or require explicit disposition; never silently claim delivery. |
-| Running host instance | Stop only through the exact selected host action. |
+| Running host instance | Self-unregister leaves the host running. Closing another peer stops only through the exact selected host action. |
 | Registration | Retire only the exact target binding/generation. |
 | Binding/route | Retire through the binding/route owner and preserve a tombstone or explicit missing state. |
 | Applicable lease/subscription | Retire through its owner where the contract applies. |
-| Grant | Do not change master authority as a side effect of ordinary Close. |
+| Grant | Self-unregister revokes only its exact binding's grant. Closing another peer does not change master authority as a side effect. |
 | Task/mailbox/history/worktree/receipt | Preserve; Close does not delete history. |
 
-The source currently proves unfinished-task and self-close rejection in
-`handle_worker_close`. It does not prove a complete notification, lease,
-subscription, binding, route, or host-instance fence. Those are implementation
-gaps, not waived requirements.
+The historical `handle_worker_close` observation above predates the current
+lifecycle owner and the self-unregister split. Current source and public tests
+must be assessed against the exact target and responsibility fence, including
+the no-host-effect self-unregister branch.
 
 ### 4.3 Host stop and control-plane retirement are separate owners
 
-Close has two terminal obligations:
+Closing another peer has two terminal obligations:
 
 1. **Host terminal**: stop the exact selected host instance or archive its
    thread through the real adapter. The App Server adapter has
@@ -357,7 +380,7 @@ The result is one of:
 
 | Result | Meaning |
 | --- | --- |
-| `complete` | Host terminal and all required control-plane retirements are durably read back for the exact operation and generation. |
+| `complete` | All required control-plane retirements are durably read back for the exact operation and generation. Closing another peer also requires its host terminal; self-unregister records host archive as not applicable. |
 | `refused` | A responsibility or authorization rule rejects the request before the mutation. |
 | `partial` | At least one required stage committed, but another stage is known incomplete. |
 | `unknown` | A host or journal boundary was crossed without a provable terminal outcome. |

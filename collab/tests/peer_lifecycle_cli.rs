@@ -295,6 +295,117 @@ fn peer_lifecycle_create_cli_and_mcp_round_trip_through_isolated_daemon() {
 }
 
 #[test]
+fn peer_lifecycle_self_unregister_public_cli_rebuilds_and_keeps_pane() {
+    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (fixture, pane) = Fixture::isolated("peer-self-unregister");
+    let seeded = fixture.registered_context("peer-self-unregister-seed", &pane);
+    assert_eq!(seeded["result"]["outcome"], "completed", "{seeded}");
+    let worker_id = seeded["result"]["snapshot"]["identity"]["worker_id"]
+        .as_str()
+        .expect("registered self has a worker id")
+        .to_owned();
+    let binding_before = seeded["result"]["snapshot"]["binding"].clone();
+
+    let promoted = fixture.run_ok(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "isolated self-unregister acceptance",
+        ],
+        Some(&pane),
+    );
+    assert_eq!(promoted["role_brief"]["role"], "master", "{promoted}");
+
+    let pane_pid_before = tmux(
+        &fixture.tmux_socket,
+        &["display-message", "-p", "-t", &pane.pane_id, "#{pane_pid}"],
+    )
+    .stdout;
+    let closed = fixture.command(
+        &[
+            "worker",
+            "close",
+            &worker_id,
+            "--reason",
+            "self-unregister while keeping this pane alive",
+        ],
+        Some(&pane),
+    );
+    assert!(
+        closed.status.success(),
+        "self-unregister failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&closed.stdout),
+        String::from_utf8_lossy(&closed.stderr)
+    );
+    let closed: Value = serde_json::from_slice(&closed.stdout).unwrap();
+    assert_eq!(closed["result"]["outcome"], "complete", "{closed}");
+    assert_eq!(
+        closed["result"]["close"]["runtime_archive"]["state"], "not-applicable",
+        "{closed}"
+    );
+    assert_eq!(
+        closed["result"]["close"]["binding_retirement"]["state"], "verified",
+        "{closed}"
+    );
+    assert_eq!(
+        closed["result"]["close"]["route_retirement"]["state"], "verified",
+        "{closed}"
+    );
+
+    let pane_pid_after = tmux(
+        &fixture.tmux_socket,
+        &["display-message", "-p", "-t", &pane.pane_id, "#{pane_pid}"],
+    )
+    .stdout;
+    assert_eq!(
+        pane_pid_after, pane_pid_before,
+        "self-unregister must not archive or replace the real pane"
+    );
+
+    let rebuilt = fixture.context(Some("peer-self-unregister-rebuild"), Some(&pane));
+    assert_eq!(rebuilt["result"]["outcome"], "completed", "{rebuilt}");
+    assert_eq!(
+        rebuilt["result"]["snapshot"]["identity"]["worker_id"], worker_id,
+        "{rebuilt}"
+    );
+    assert_eq!(
+        rebuilt["result"]["snapshot"]["identity"]["role"], "worker",
+        "a rebuilt self-unregistered identity must not inherit master authority: {rebuilt}"
+    );
+    let binding_after = rebuilt["result"]["snapshot"]["binding"].clone();
+    assert_ne!(
+        binding_after["endpoint_generation"], binding_before["endpoint_generation"],
+        "rebuild must publish a new runtime generation: {rebuilt}"
+    );
+    assert_ne!(
+        rebuilt["result"]["snapshot"]["master"]["worker_id"], worker_id,
+        "the retired master grant must not survive rebuild: {rebuilt}"
+    );
+
+    let sent = fixture.run_ok(
+        &[
+            "sendmessage",
+            "--to",
+            &worker_id,
+            "--subject",
+            "self-unregister rebuild receipt",
+            "--delivery",
+            "queued",
+            "communication after rebuild",
+        ],
+        Some(&pane),
+    );
+    let msg_id = sent["msg_id"]
+        .as_str()
+        .expect("self-unregister rebuild send has a message id");
+    let received = fixture.run_ok(&["recv", "--timeout", "1"], Some(&pane));
+    assert_eq!(received["messages"][0]["id"], msg_id, "{received}");
+    let receipt = fixture.run_ok(&["msg", msg_id], Some(&pane));
+    assert_eq!(receipt["consumed_by_recv"], true, "{receipt}");
+}
+
+#[test]
 fn verified_public_create_can_be_bound_and_read_back_as_managed() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
     let fixture = Fixture::without_tmux("subagent-bind-public");

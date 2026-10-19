@@ -68,56 +68,112 @@ fn peer_lifecycle_c1_unfinished_task_refuses_close_without_archive() {
     assert_eq!(before, lifecycle_surfaces(&fixture, &master));
 }
 
-// C7: the current master cannot close itself; the refusal leaves no operation
-// record and neither the master route nor its child changes state.
+// C7: the current master can unregister itself without archiving its live
+// thread. Control-plane retirement is the whole close effect.
 #[test]
-fn peer_lifecycle_c7_current_master_cannot_close_itself() {
+fn peer_lifecycle_c7_current_master_can_unregister_itself() {
     let (fixture, master_host, child_host, master, _child) =
         lifecycle_native_pair_fixture("peer-c7", "ack_only");
     let own = lifecycle_read(&fixture, &master, None);
     assert_eq!(own["result"]["outcome"], "ok", "{own}");
     let target = own["result"]["target"].clone();
 
-    let refused = lifecycle_close(
+    let closed = lifecycle_close(
         &fixture,
         &master,
         "peer-c7-close",
         "peer-c7-capability",
         &target,
-        "close self",
+        "unregister self without archiving the live thread",
+    );
+    assert_eq!(closed["result"]["outcome"], "complete", "{closed}");
+    assert_eq!(
+        closed["result"]["close"]["runtime_archive"]["state"], "not-applicable",
+        "{closed}"
+    );
+    assert_eq!(
+        closed["result"]["close"]["worker_retirement"]["state"], "verified",
+        "{closed}"
+    );
+    assert_eq!(
+        closed["result"]["close"]["binding_retirement"]["state"], "verified",
+        "{closed}"
+    );
+    assert_eq!(
+        closed["result"]["close"]["route_retirement"]["state"], "verified",
+        "{closed}"
+    );
+    assert_eq!(
+        closed["result"]["close"]["subscription_retirement"]["state"], "verified",
+        "{closed}"
+    );
+    let query = lifecycle_query(&fixture, &master, "peer-c7-close", "peer-c7-capability");
+    assert_eq!(
+        query["result"], closed["result"],
+        "the retained self-unregister receipt must be queryable"
+    );
+    assert_eq!(
+        master_host.archive_request_count(),
+        0,
+        "self-unregister must not archive the live master thread"
+    );
+    assert_eq!(
+        child_host.archive_request_count(),
+        0,
+        "self-unregister must not touch an unrelated child host"
+    );
+}
+
+// C7 responsibility counterexample: self-unregister uses the same durable
+// responsibility snapshot as host close. An owned task refuses the operation
+// before archive or control-plane retirement.
+#[test]
+fn peer_lifecycle_c7_self_unregister_with_task_is_refused_without_retirement() {
+    let (mut fixture, master_host, master) = lifecycle_native_fixture("peer-c7-responsibility");
+    let worker_id = master["worker_id"].as_str().unwrap().to_owned();
+    lifecycle_replay_events(
+        &mut fixture,
+        &master,
+        &[json!({
+            "ev": "TaskCreated",
+            "task": {
+                "id": "peer-c7-self-task",
+                "owner": worker_id,
+                "created_by": worker_id,
+                "created_ms": 1,
+                "updated_ms": 1
+            }
+        })],
+    );
+    let target = lifecycle_target(&fixture, &master);
+    let before = lifecycle_surfaces(&fixture, &master);
+
+    let refused = lifecycle_close(
+        &fixture,
+        &master,
+        "peer-c7-responsibility-close",
+        "peer-c7-responsibility-capability",
+        &target,
+        "attempt self-unregister with an owned task",
     );
     assert_eq!(refused["ok"], false, "{refused}");
     assert_eq!(refused["result"]["outcome"], "refused", "{refused}");
     assert!(
         refused["error"]
             .as_str()
-            .expect("a self-close is a typed refusal")
-            .contains("CLOSE_UNAUTHORIZED"),
+            .expect("an open responsibility is a typed refusal")
+            .contains("RESPONSIBILITY_CONFLICT"),
         "{refused}"
     );
-    let query = lifecycle_query(&fixture, &master, "peer-c7-close", "peer-c7-capability");
-    assert_eq!(query["result"]["outcome"], "unknown", "{query}");
-    assert!(
-        query["error"]
-            .as_str()
-            .expect("an absent operation query is a typed failure")
-            .contains("OPERATION_UNKNOWN"),
-        "{query}"
-    );
     assert_eq!(
-        lifecycle_read(&fixture, &master, None)["result"]["outcome"],
-        "ok",
-        "the master route must survive its own refused close"
+        refused["result"]["requires"]["kind"], "peer_responsibility",
+        "{refused}"
     );
+    assert_eq!(master_host.archive_request_count(), 0);
     assert_eq!(
-        master_host.archive_request_count(),
-        0,
-        "a self-close refusal must not reach the master host"
-    );
-    assert_eq!(
-        child_host.archive_request_count(),
-        0,
-        "a self-close refusal must not reach the child host"
+        before,
+        lifecycle_surfaces(&fixture, &master),
+        "a refused self-unregister must not retire or mutate the target"
     );
 }
 

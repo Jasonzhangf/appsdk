@@ -112,6 +112,16 @@ fn single_context_master_peer_intent_overrides_and_replays_after_restart() {
             .as_array()
             .unwrap()
             .contains(&json!("grant")));
+        assert_eq!(result["result"]["snapshot"]["identity"]["worker_id"], fence.worker_id);
+        if step == 0 {
+            fixture.run_ok(&["task", "register", "role-preserved-task", "--next", "retain responsibility"], Some(&pane));
+            fixture.run_ok(&["sendmessage", "--to", &fence.worker_id, "--subject", "role preserved mailbox", "--delivery", "queued", "retain unread message"], Some(&pane));
+        } else {
+            let task = fixture.run_ok(&["task", "status", "role-preserved-task"], Some(&pane));
+            assert_eq!(task["owner"], fence.worker_id, "{task}");
+            assert!(result["result"]["snapshot"]["inbox"]["messages"].as_array().unwrap().iter()
+                .any(|message| message["subject"] == "role preserved mailbox"), "{result}");
+        }
         assert_eq!(
             result["result"]["snapshot"]["identity"]["role"],
             if role == "master" { "master" } else { "worker" }
@@ -351,19 +361,14 @@ fn b04_restart_query_replays_every_durable_phase_without_mutation() {
         let seed_worker = seed["result"]["snapshot"]["identity"]["worker_id"].clone();
         let seed_operation = operation_records(&fixture.host_journal(), "ctxop-v23-b04-seed");
         let seed_receipt = seed_operation.last().expect("completed seed operation");
-        assert!(seed_receipt["nested_command_id"].is_string(), "initial participant binds its own command");
-        assert!(seed_receipt["nested_operation_id"].is_string(), "initial participant binds its own operation");
+        assert!(seed_receipt["nested_command_id"].is_string(), "typed initial registration binds its own command");
+        assert!(seed_receipt["nested_operation_id"].is_string(), "typed initial registration binds its own operation");
         let project_effects_before_reuse =
             project_register_effect_counts(&fixture.project_journal());
-        // RLIMIT_FSIZE also caps the participant-evidence ledger. Leave room
-        // for seed, calibration, and target registration so only the outer
-        // operation journal reaches the calibrated failure boundary.
-        let reply_journal = fixture.host_state.join("register-reply-evidence.jsonl");
-        let reply_budget = fs::metadata(&reply_journal).unwrap().len() * 3 + 16 * 1024;
         for index in 0..100 {
             let host_len = fs::metadata(fixture.host_journal()).unwrap().len();
             let project_len = fs::metadata(fixture.project_journal()).unwrap().len();
-            if host_len > (project_len + 16 * 1024).max(reply_budget) {
+            if host_len > project_len + 16 * 1024 {
                 break;
             }
             let operation_id = format!("ctxop-v23-b04-pad-{index:04}");
@@ -421,7 +426,6 @@ fn b04_restart_query_replays_every_durable_phase_without_mutation() {
         );
 
         let calibration_id = "ctxop-v23-b04-calibrate";
-        let reply_len_before_calibration = fs::metadata(&reply_journal).unwrap().len();
         let calibration_host = TestAppServer::start_with_effect_at(&fixture.root, "calibration.sock",
             "b04-calibrate-session", "b04-calibrate-thread", "ack_only");
         let calibration_facts = json!({"session_id":"b04-calibrate-session", "thread_id":"b04-calibrate-thread",
@@ -439,12 +443,6 @@ fn b04_restart_query_replays_every_durable_phase_without_mutation() {
         assert_eq!(calibration_id.len(), target_id.len());
         let journal_len = fs::metadata(fixture.host_journal()).unwrap().len();
         let file_limit = journal_len + calibration_lengths[..allowed_records].iter().sum::<u64>();
-        let reply_len = fs::metadata(&reply_journal).unwrap().len();
-        let reply_growth = reply_len - reply_len_before_calibration;
-        assert!(
-            file_limit > reply_len + reply_growth,
-            "outer journal cap must leave room for the measured participant registration: limit={file_limit} evidence={reply_len} growth={reply_growth}"
-        );
         let project_len = fs::metadata(fixture.project_journal()).unwrap().len();
         assert!(
             file_limit > project_len + 4 * 1024,

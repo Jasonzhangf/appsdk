@@ -267,8 +267,7 @@ impl Fixture {
         self.run_ok(&args, pane)
     }
 
-    /// Seed a real participant before testing durable identity recovery.
-    /// Challenge bytes travel only through the selected pane's stdin.
+    /// Seed through one public context invocation before testing recovery.
     pub fn registered_context(&self, operation_id: &str, pane: &Pane) -> Value {
         self.registered_participant(Some(operation_id), operation_id, pane)
     }
@@ -283,7 +282,7 @@ impl Fixture {
         let result = self.root.join(format!("{label}.participant-result"));
         let invocation = operation_id.map(|id| format!("--op {}", shell_quote(id))).unwrap_or_default();
         let script = format!(
-            "\"$COLLAB_BINARY\" context {} >\"$PANE_STDOUT\" 2>\"$PANE_STDERR\" || true\nIFS= read -r challenge || exit 3\ncase \"$challenge\" in 'COLLAB_REGISTER_CHALLENGE '{{*) ;; *) exit 4 ;; esac\n\"$COLLAB_BINARY\" context --return-challenge \"${{challenge#COLLAB_REGISTER_CHALLENGE }}\" >{} 2>>\"$PANE_STDERR\"\nprintf done >{}\nsleep 600\n",
+            "\"$COLLAB_BINARY\" context {} >{} 2>\"$PANE_STDERR\"\nprintf done >{}\nsleep 600\n",
             invocation, shell_quote(&result.to_string_lossy()), shell_quote(&done.to_string_lossy())
         );
         let consumer = self.run_in_pane(pane, label, &script);
@@ -297,7 +296,7 @@ impl Fixture {
         assert_eq!(result["ok"], true, "{result}");
         assert_eq!(result["result"]["outcome"], "completed", "{result}");
         if operation_id.is_none() {
-            let initial: Value = serde_json::from_slice(&std::fs::read(&consumer.stdout).unwrap()).unwrap();
+            let initial = &result;
             let emitted_id = initial["operation_id"].as_str().expect("automatic public context emitted operation id");
             return self.context(Some(emitted_id), Some(pane));
         }

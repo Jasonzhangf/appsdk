@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-master-authority",
   "version": "0.2.0",
-  "description": "一次明确授权请求到一次授权回执。本图保留三节点 SESE 形状，业务节点映射为：解析认证主体与授权作用域 -> 原子替换或清除授权 -> 返回持久回执或明确错误。作用域固定为现有 (project_scope, app_scope_id)，不迁移 schema。Node 1 复用已注册身份、token、当前 binding、scope 和 endpoint generation 校验；approval 必须是非空文本，不是身份凭据。Node 2 是唯一显式授权变更事务；同主体恢复仍由现有 part_02 注册事务负责。Node 2 按本次意图原子处理 promote、clear、delegate：promote 撤销该精确作用域的现有 typed grant 并在同一提交签发新 grant；clear 使用现有 typed revoke 事件撤销该精确作用域的现有 typed grant，允许重复调用并返回已为空回执，不新增 clear event、request_id、操作账本或计数器；delegate 只改变授权，目标通信检查与发送结果另行返回。旧 holder 的通信状态 unknown/cold/missing 不阻断 promote、clear 或本地授权操作；真实 reducer、scope、binding、approval 或持久化失败必须显式返回。Node 3 复用同一授权投影与现有提交回执；提交后响应丢失时读取当前 route status，不自动重放。实现代码边当前待实现。Contracts: docs/design/collab-master-authority-contract-20261007.md。",
+  "description": "一次明确授权请求到一次授权回执。三节点 SESE：解析认证主体与授权作用域、原子替换或清除授权、返回持久回执或明确错误。作用域为现有 (project_scope, app_scope_id)，不迁移 schema。入口保留身份、token、binding、scope 和 endpoint generation 校验；approval 为非空授权文本，不是凭据。现有 authority owner 原子处理 promote、clear、delegate：promote 撤销精确旧 grant 并签发新 grant；clear 复用 typed revoke，可重复返回已为空回执；delegate 只改变授权，通信结果单独返回。普通恢复保留 grant；显式 peer 覆盖不继承精确旧 grant，不动无关 scope。旧 holder 的通信 unknown/cold/missing 不阻断本地授权；真实 reducer、scope、binding、approval 或持久化失败显式返回。出口复用现有投影和提交回执；丢失响应后读 route status，不自动重放。Contracts: docs/design/collab-master-authority-contract-20261007.md。",
   "inputs": [{"id": "authority_request", "schema": "Object"}],
   "nodes": [
     {
@@ -12,6 +12,7 @@
     },
     {
       "id": "transfer_master_authority", "operator": "appsdk.collab_authority.transfer_master", "operator_version": "1",
+      "description": "现有 authority owner 已实现 transfer/revoke/grant。普通恢复保留现有 grant；显式 peer 覆盖不继承精确旧 grant，不改变无关 scope；显式 master 意图仍由本 owner 提交。",
       "inputs": ["authority_scope"], "output": {"id": "master_authority", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
       "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"

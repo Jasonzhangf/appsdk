@@ -1,53 +1,31 @@
-    /// A selected participant receives the real challenge through pane stdin.
-    /// Its output is a public RegisterReply request, forwarded by the fixture.
-    /// No pending record, nonce, or prepared command is read by the test.
+    /// Observe the selected pane facts and dispatch registration once.
     pub(super) fn register_host_fixture(
         manager: &ProjectRuntimeManager,
         context: Option<ProjectContext>,
         request: Req,
     ) -> (Arc<Server>, Resp) {
-        register_participant_fixture(manager, context, request,
-            |context, request| manager.dispatch_sync(Some(context), request), None)
-    }
-
-    fn register_host_fixture_intercept(
-        manager: &ProjectRuntimeManager,
-        context: Option<ProjectContext>,
-        request: Req,
-        on_received: &mut dyn FnMut(&ProjectContext, &Req, &Arc<Server>),
-    ) -> (Arc<Server>, Resp) {
-        register_participant_fixture(manager, context, request,
-            |context, request| manager.dispatch_sync(Some(context), request), Some(on_received))
+        register_participant_fixture(context, request,
+            |context, request| manager.dispatch_sync(Some(context), request))
     }
 
     async fn register_wire_fixture(server: Arc<Server>, context: Option<ProjectContext>, request: Req) -> Resp {
         let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
         let context = context.expect("wire participant context");
         manager.install_runtime(&ProjectRuntimeManager::route_key(&context), server.clone(), None);
-        register_participant_fixture(&manager, Some(context), request, move |context, request| {
-            let selected = server.clone();
-            let response = std::thread::spawn(move || {
-                tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
-                    .block_on(dispatch_wire(server, Some(context), request))
-            }).join().unwrap();
-            (selected, response)
-        }, None).1
+        register_host_fixture(&manager, Some(context), request).1
     }
 
     fn register_participant_fixture(
-        manager: &ProjectRuntimeManager,
         context: Option<ProjectContext>,
         mut request: Req,
         dispatch: impl FnOnce(ProjectContext, Req) -> (Arc<Server>, Resp),
-        on_received: Option<&mut dyn FnMut(&ProjectContext, &Req, &Arc<Server>)>,
     ) -> (Arc<Server>, Resp) {
         let context = context.expect("participant project context");
-        let context_readback = matches!(request, Req::IdentityContext { .. });
-        let (candidate, cwd) = match &mut request {
-            Req::Register { candidates: Some(candidates), cwd, .. } =>
-                (candidates.tmux.as_mut().expect("selected tmux participant"), cwd.clone()),
+        let candidate = match &mut request {
+            Req::Register { candidates: Some(candidates), .. } =>
+                candidates.tmux.as_mut().expect("selected tmux participant"),
             Req::IdentityContext { facts, identity_context: None } =>
-                (facts.tmux.as_mut().expect("selected context participant"), context.canonical_root.clone()),
+                facts.tmux.as_mut().expect("selected context participant"),
             _ => panic!("initial fixture requires selected Register or legacy context"),
         };
         let observed = std::process::Command::new("tmux").args([
@@ -56,44 +34,7 @@
         ]).output().unwrap();
         assert!(observed.status.success(), "inspect selected participant");
         candidate.cwd = String::from_utf8(observed.stdout).unwrap().trim().to_owned();
-        let reply_file = Path::new(&candidate.cwd).join(format!("registration-{}-{}.reply.json",
-            Path::new(&candidate.endpoint.socket_path).file_name().unwrap().to_string_lossy(),
-            candidate.endpoint.pane_id));
-        match std::fs::remove_file(&reply_file) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => panic!("remove previous owned participant output: {error}"),
-        }
-        let original_request = request.clone();
-        let (runtime, response) = dispatch(context.clone(), request);
-        if !response.error.as_deref().is_some_and(|error| error.contains("REGISTER_REPLY_PENDING:")) {
-            return (runtime, response);
-        }
-        assert_eq!(std::fs::canonicalize(&cwd).unwrap(), std::fs::canonicalize(
-            match &original_request {
-                Req::Register { candidates: Some(candidates), .. } => &candidates.tmux.as_ref().unwrap().cwd,
-                Req::IdentityContext { facts, .. } => &facts.tmux.as_ref().unwrap().cwd,
-                _ => unreachable!(),
-            }).unwrap(), "actual participant cwd must match its declared project");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !reply_file.exists() {
-            assert!(std::time::Instant::now() < deadline, "selected participant did not return: {response:?}");
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        let reply: Req = serde_json::from_slice(&std::fs::read(&reply_file).unwrap()).unwrap();
-        std::fs::remove_file(&reply_file).unwrap();
-        assert!(matches!(reply, Req::RegisterReply { .. }));
-        if let Some(on_received) = on_received {
-            on_received(&context, &reply, &runtime);
-        }
-        let returned = manager.dispatch_sync(Some(context.clone()), reply);
-        if context_readback && returned.1.ok {
-            // The returned participant committed the owner. Read the context
-            // through its actual public durable-restoration path.
-            manager.dispatch_sync(Some(context), original_request)
-        } else {
-            returned
-        }
+        dispatch(context, request)
     }
 
     fn runtime_fixture_for_host(host: &Arc<Server>) -> (Arc<Server>, PathBuf, PathBuf) {
@@ -833,37 +774,14 @@
         let shared_thread = "thread-shared-across-panes";
 
         let initial_candidates = test_candidates_at(shared_thread, &root).unwrap();
-        let mut received_ids = None;
-        let (_, first_registration) = register_host_fixture_intercept(&manager,
+        let (_, first_registration) = register_host_fixture(&manager,
             Some(context.clone()),
             Req::register("thread-owner-a".into(),
                  "token-thread-owner-a".into(),
                  root.display().to_string(),
                  Some(initial_candidates.clone())),
-            &mut |returned_context, returned, runtime| {
-                let Req::RegisterReply { reply } = returned else { panic!("actual participant reply"); };
-                received_ids = Some((reply.command_id.clone(), reply.operation_id.clone()));
-                let before = mutation_snapshot(runtime);
-                let journal_before = std::fs::read(&runtime.journal_path).unwrap();
-                let changed_target = test_candidates_at("pending-changed-target", &root).unwrap();
-                for (token, candidates) in [
-                    ("changed-token", initial_candidates.clone()),
-                    ("token-thread-owner-a", changed_target),
-                ] {
-                    let (_, conflict) = manager.dispatch_sync(Some(returned_context.clone()),
-                        Req::register("thread-owner-a".into(), token.into(), root.display().to_string(), Some(candidates)));
-                    assert!(!conflict.ok, "changed pending intent must fail: {conflict:?}");
-                    assert!(conflict.error.as_deref().is_some_and(|error|
-                        error.starts_with("REGISTER_REPLY_PENDING_MISMATCH:")), "{conflict:?}");
-                    assert_eq!(mutation_snapshot(runtime), before);
-                    assert_eq!(std::fs::read(&runtime.journal_path).unwrap(), journal_before);
-                }
-            },
         );
         assert!(first_registration.ok, "{first_registration:?}");
-        let (command_id, operation_id) = received_ids.unwrap();
-        assert_eq!(first_registration.data["command_id"], command_id);
-        assert_eq!(first_registration.data["operation_id"], operation_id);
         assert_eq!(server.state.lock().unwrap().workers["thread-owner-a"].token, "token-thread-owner-a");
         let before = std::fs::read(&journal_path).unwrap();
 

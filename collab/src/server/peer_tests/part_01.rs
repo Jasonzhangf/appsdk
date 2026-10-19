@@ -14,26 +14,6 @@ impl IsolatedTmux {
         Self::start_with_spare_pane(root, false, "sleep 60")
     }
 
-    pub(crate) fn start_registration_participant(root: &Path) -> Self {
-        let script = root.join("registration-participant.py");
-        std::fs::write(&script, r#"import json, os, pathlib, sys
-for line in sys.stdin:
-    prefix = 'COLLAB_REGISTER_CHALLENGE '
-    if not line.startswith(prefix):
-        continue
-    reply = json.loads(line[len(prefix):])
-    socket = os.environ['TMUX'].split(',')[0]
-    pane = os.environ['TMUX_PANE']
-    reply['anchor'] = {'socket_path': socket, 'pane_id': pane}
-    path = pathlib.Path.cwd() / ('registration-' + pathlib.Path(socket).name + '-' + pane + '.reply.json')
-    temporary = path.with_suffix('.pending')
-    temporary.write_text(json.dumps({'op': 'RegisterReply', 'reply': reply}))
-    temporary.replace(path)
-"#).unwrap();
-        let command = format!("python3 '{}'", script.display().to_string().replace('\'', "'\\''"));
-        Self::start_with_spare_pane(root, true, &command)
-    }
-
     fn start_with_spare_pane(root: &std::path::Path, spare_pane: bool, pane_command: &str) -> Self {
         static SOCKET_SEQ: AtomicU64 = AtomicU64::new(0);
         let socket = std::env::temp_dir().join(format!(
@@ -723,7 +703,7 @@ fn fixture_peer_endpoint(server: &Server, thread_id: &str) -> crate::proto::Tmux
             *fixture = None;
         }
         let (tmux, endpoint_index) =
-            fixture.get_or_insert_with(|| (IsolatedTmux::start_registration_participant(&server.root), 0));
+            fixture.get_or_insert_with(|| (IsolatedTmux::start(&server.root), 0));
         let endpoint = if *endpoint_index == 0 {
             tmux.endpoints().remove(0)
         } else {

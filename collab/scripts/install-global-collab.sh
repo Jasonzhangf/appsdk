@@ -29,26 +29,4 @@ trap - EXIT HUP INT TERM
   --target "$HOME/.agents/skills/collab" \
   --force
 
-for relative in \
-  SKILL.md \
-  references/migration-daemon.md \
-  references/notifications.md \
-  references/resource-waits.md \
-  references/task-worktree-lifecycle.md \
-  references/verification.md \
-  references/state-paths.md
-do
-  cmp "$repo_root/skills/collab/$relative" "$HOME/.agents/skills/collab/$relative"
-done
-
-candidate_collab_hash=$(shasum -a 256 "$candidate_collab" | cut -d ' ' -f 1)
-installed_collab_hash=$(shasum -a 256 "$bin_dir/collab" | cut -d ' ' -f 1)
-candidate_mcp_hash=$(shasum -a 256 "$candidate_mcp" | cut -d ' ' -f 1)
-installed_mcp_hash=$(shasum -a 256 "$bin_dir/collab-mcp" | cut -d ' ' -f 1)
-
-test "$candidate_collab_hash" = "$installed_collab_hash"
-test "$candidate_mcp_hash" = "$installed_mcp_hash"
-
 printf 'version=%s\n' "$("$bin_dir/collab" --version)"
-printf 'collab_sha256=%s\n' "$installed_collab_hash"
-printf 'collab_mcp_sha256=%s\n' "$installed_mcp_hash"

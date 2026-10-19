@@ -24,6 +24,7 @@
     },
     {
       "id": "identity_gate", "operator": "appsdk.collab_context.identity_gate", "operator_version": "2",
+      "description": "普通持久恢复读回原身份、角色和 binding，不 Register 或验证通信。首次注册和显式当前 anchor 覆盖复用 typed prepare/consume、receipt replay 及安全取消边界；可用 tmux 优先，未选 AppServer 事实不参与准入，不追加 InitialRegister challenge。手动通信恢复仍独立验证。真实提交错误和 partial 保留 committed phases，query 纯读。",
       "inputs": ["daemon_ready"], "output": {"id": "identity_operation_result", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
       "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"

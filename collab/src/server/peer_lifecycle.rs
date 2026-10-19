@@ -768,16 +768,16 @@ fn close_responsibility_requires(
 }
 
 fn close_authorized(server: &Server, state: &State, actor: &str, target: &str) -> bool {
-    actor != target
-        && (current_master_holder(server, state)
+    actor == target
+        || current_master_holder(server, state)
             .ok()
             .flatten()
             .as_deref()
             == Some(actor)
-            || state
-                .subagents
-                .values()
-                .any(|record| record.peer == target && record.parent == actor))
+        || state
+            .subagents
+            .values()
+            .any(|record| record.peer == target && record.parent == actor)
 }
 
 fn stage_readback(state: PeerLifecycleStage) -> PeerLifecycleStageReadback {
@@ -935,6 +935,7 @@ fn retire_control_plane(
 ) -> PeerLifecycleClose {
     let mut close = close_readback("cleanup-open");
     close.runtime_archive.state = runtime_archive.clone();
+    let self_unregister = record.actor_id == record.exact_target().worker_id;
     let Some(snapshot) = record.responsibility_snapshot.clone() else {
         close.worker_retirement.state = PeerLifecycleStage::Unknown;
         close.binding_retirement.state = PeerLifecycleStage::Unknown;
@@ -1007,6 +1008,12 @@ fn retire_control_plane(
             snapshot_captured_ms,
             at_ms: now,
         });
+        if self_unregister {
+            events.push(state::Event::GlobalMasterRevoked {
+                project_scope: record.exact_target().project_scope.clone(),
+                binding_id: record.exact_target().binding_id.clone(),
+            });
+        }
         (events, binding)
     };
     if let Err(error) = server.try_commit(&events) {
@@ -1078,6 +1085,11 @@ fn retire_control_plane(
     } else {
         PeerLifecycleStage::Failed
     };
+    let self_master_retired = !self_unregister
+        || state
+            .global
+            .lookup_master_grant_for(&route_scope, &record.exact_target().binding_id)
+            .is_none();
     let control_complete = matches!(close.worker_retirement.state, PeerLifecycleStage::Verified)
         && matches!(close.binding_retirement.state, PeerLifecycleStage::Verified)
         && matches!(
@@ -1087,11 +1099,13 @@ fn retire_control_plane(
         && matches!(
             close.subscription_retirement.state,
             PeerLifecycleStage::Verified | PeerLifecycleStage::NotApplicable
-        );
+        )
+        && self_master_retired;
     let host_complete = matches!(
         close.runtime_archive.state,
         PeerLifecycleStage::Verified | PeerLifecycleStage::Missing
-    );
+    ) || (self_unregister
+        && close.runtime_archive.state == PeerLifecycleStage::NotApplicable);
     close.close_outcome = if control_complete && host_complete {
         "complete".into()
     } else {

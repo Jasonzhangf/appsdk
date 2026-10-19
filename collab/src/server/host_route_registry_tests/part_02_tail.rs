@@ -657,14 +657,12 @@
             .fail_current_thread_route_publish
             .store(true, std::sync::atomic::Ordering::SeqCst);
 
-        let mut actual_return = None;
-        let (_, response) = register_host_fixture_intercept(&manager,
+        let (_, response) = register_host_fixture(&manager,
             Some(context.clone()),
             Req::register(worker_id.into(),
                  token.into(),
                  root.display().to_string(),
                  test_candidates("thread-first-route-compensation")),
-            &mut |_, reply, _| actual_return = Some(reply.clone()),
         );
         assert!(!response.ok, "{response:?}");
         assert!(
@@ -694,25 +692,9 @@
                 .all(|binding| binding.agent_id.as_str() != worker_id));
         }
 
-        let actual_return = actual_return.expect("actual selected participant return");
-        let before_replay = mutation_snapshot(&server);
-        let journal_before_replay = std::fs::read(&server.journal_path).unwrap();
-        let (_, repeated_failure) = manager.dispatch_sync(Some(context.clone()), actual_return.clone());
-        assert!(!repeated_failure.ok, "{repeated_failure:?}");
-        assert_eq!(repeated_failure.error, response.error, "repeat must preserve the terminal error");
-        assert_eq!(mutation_snapshot(&server), before_replay);
-        assert_eq!(std::fs::read(&server.journal_path).unwrap(), journal_before_replay);
-
         drop(manager);
         let replayed_server = replay_owned_test_server(&server);
         let replayed = ProjectRuntimeManager::new(replayed_server.clone(), &host_paths).unwrap();
-        let after_startup = mutation_snapshot(&replayed_server);
-        let journal_after_startup = std::fs::read(&replayed_server.journal_path).unwrap();
-        let (_, restarted_failure) = replayed.dispatch_sync(Some(context), actual_return);
-        assert!(!restarted_failure.ok, "{restarted_failure:?}");
-        assert_eq!(restarted_failure.error, response.error, "restart must preserve the terminal error");
-        assert_eq!(mutation_snapshot(&replayed_server), after_startup);
-        assert_eq!(std::fs::read(&replayed_server.journal_path).unwrap(), journal_after_startup);
         let missing = replayed
             .resolve_route_by_native_thread(
                 "session-thread-first-route-compensation",

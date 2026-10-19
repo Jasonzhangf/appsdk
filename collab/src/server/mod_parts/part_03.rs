@@ -28,7 +28,7 @@ fn validate_transport_candidates(
                 thread_id: candidate.endpoint.codex_thread_id.clone(),
                 tmux_endpoint: Some(candidate.endpoint.clone()),
                 capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
-                self_check: "daemon verified current pane; participant reply required".into(),
+                self_check: "daemon verified current pane".into(),
             }),
             crate::client::adapters::tmux::PanePresence::Missing => {},
             crate::client::adapters::tmux::PanePresence::Unknown => return Err("TMUX_PANE_UNKNOWN".into()),

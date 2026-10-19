@@ -140,12 +140,11 @@ baseline, starts the daemon unless an explicit `DOWN` marker exists, observes
 the available runtime facts, and sends a typed identity request to the daemon.
 The daemon owns identity selection, creation, recovery, update, credential and
 binding persistence, route publication, and default direct-message lease
-restoration. Initial registration commits only after a matching participant
-reply on the daemon-selected path. A verified current pane selects tmux even
-when adjacent AppServer facts are reported. Paste, Enter, probe and terminal
-echo prove no participant reply. Missing wait capability cannot waive this
-gate. It returns a registered snapshot, pending reply or explicit missing
-facts. The active contract is
+restoration. Initial registration uses the selected adapter's basic capability
+and the existing typed Register commit without another participant challenge.
+A current valid pane selects tmux; unselected AppServer facts do not block it.
+It returns a registered snapshot or an explicit incomplete/error result.
+The active contract is
 [`docs/design/collab-identity-minimal-interaction.md`](../../../docs/design/collab-identity-minimal-interaction.md)
 with recovery semantics in
 [`docs/design/collab-anchor-restore-model.md`](../../../docs/design/collab-anchor-restore-model.md).
@@ -154,32 +153,13 @@ with recovery semantics in
 collab context
 ```
 
-For tmux, the initial context releases the pane with a pending operation.
-The participant reads `COLLAB_REGISTER_CHALLENGE <JSON>` from that selected
-pane and invokes `collab context --return-challenge '<JSON>'` from its own
-environment. The JSON is the exact received challenge, not a value copied
-from a parent, query, capture or private ledger. The daemon checks purpose,
-operation, command, project/app scope, challenge and socket + pane before
-continuing the original prepared operation once. Duplicate return reuses the
-same receipt; cancelled or mismatched return cannot commit. `--query` stays
-read-only and never discloses the challenge. Pending and verified evidence
-survive daemon restart under the existing register reply owner.
-
-AppServer and DSH participants receive the same structured challenge through
-their selected adaptor. A late native typed return supplies the exact received
-association and the participant's own native facts. The daemon verifies those
-facts through the existing native adaptor, then resumes the original operation.
-AppServer participants can use `--return-challenge` from their native environment;
-the DSH participant uses the public `RegisterReply` interface with its gateway
-candidate. DSH initial admission remains the existing public `Register` entry.
-Neither ACK nor a first pending history snapshot completes registration.
-The private verified-pending Register owner preserves the original command
-and checks only its target resources under the reducer lock. Unrelated ledger
-classification cannot invalidate that wait. Ordinary typed commands retain CAS.
-See the normative [continuation contract](../../../docs/design/collab-identity-context-recovery-contract-20261008.md).
-
 `collab context --recover-communication` explicitly checks a restored
-communication path through the same reply gate. A failed reply retains the
+communication path through the reply gate. Only this explicit operation sends
+`COLLAB_REGISTER_CHALLENGE <JSON>`. The participant reads it through the selected
+adapter and invokes `collab context --return-challenge '<JSON>'` from its own
+environment (or the public native `RegisterReply` interface). The daemon checks
+scope, purpose, operation, command, nonce and selected target. Query is read-only;
+restart and duplicate return reuse the same evidence. A failed reply retains the
 existing identity, role, grant, anchor and binding. Ordinary context restore
 does not trigger this check.
 
@@ -1156,8 +1136,17 @@ does not establish project identity.
 | Create a peer | `collab worker create <peer-id> --cwd <existing-project-dir-or-linked-worktree> --op <stable-operation-id> [--model <model>]` | `outcome=complete`; response identifies the real thread, route, registration, and verified ready turn. Reuse the same operation ID to recover a retry; never create a replacement ID after an unknown result. |
 | Inspect a peer | `collab worker read <peer-id>` | `outcome=ok` with the exact peer lifecycle projection. `collab worker read` with no ID reads the caller. |
 | Move a peer's AppServer cwd | `collab worker update <peer-id> --cwd <existing-project-dir-or-linked-worktree>` | First call omits `--op`. `outcome=complete` requires settings update and cwd readback. Supply `--op <returned-operation-id>` only to retry/query that retained update after an uncertain result. |
-| Close a peer | `collab worker close <peer-id> --reason "<auditable reason>"` | First call omits `--op`. `outcome=complete` requires verified runtime archive and peer, binding, route, lease, and subscription retirement. Open responsibilities are refused. Use `--op <returned-operation-id>` only for its retained retry/query. |
+| Unregister yourself | `collab worker close <your-peer-id> --reason "<auditable reason>"` | An authenticated peer or master can retire its own identity without closing or archiving its pane/thread. Open responsibilities are refused. `outcome=complete` requires exact control-plane retirement; `runtime_archive=not-applicable`. Only this identity's exact master grant is revoked. |
+| Close another peer | `collab worker close <peer-id> --reason "<auditable reason>"` | First call omits `--op`. `outcome=complete` requires verified runtime archive and peer, binding, route, lease, and subscription retirement. Open responsibilities are refused. Use `--op <returned-operation-id>` only for its retained retry/query. |
 | Read an uncertain operation | `collab worker query --op <returned-operation-id>` | Reads the retained outcome without repeating a host effect. Do not start a replacement operation while the result is unknown. |
+
+For self-unregister, the first call also omits `--op`; use the returned operation
+ID for query or retained retry. Tasks, messages, claims, pending merges, and
+history stay with their existing owners. Resolve named open responsibilities
+before retrying. Unread messages remain durable; unregister does not consume
+them. A later `collab context` at the same live anchor rebuilds a default peer
+with one active binding and a new generation. It does not restore the retired
+master grant. This is identity rebuild, not manual communication recovery.
 
 For `refused`, `partial`, or `unknown`, keep the typed response and its
 operation ID. A responsibility or project-scope refusal has no lifecycle
@@ -1184,16 +1173,15 @@ DAGpipe 顺序执行：解析项目根 → 检查/创建基线 → 检查/启动
 恢复、更新身份，持久化 credential/binding/lease，并返回完整快照。缺失事实是本次
 调用的终态：`registered=false`、`identity=null`，`requires_identity_update`
 给出精确 `required_fields`、`reason`、`action` 和 `exact_error`。Agent 只按
-`required_fields` 使用一次 `collab context --provide` 补充真实事实；若处于
-participant challenge pending，按前文 participant continuation 从自身环境续交，
-pending 阶段尚未完成注册。根解析失败和显式冲突/错误保持原错，不伪装为成功快照：
+`required_fields` 使用一次 `collab context --provide` 补充真实事实。
+首次注册不等待 challenge。根解析失败和显式冲突/错误保持原错，不伪装为成功快照：
 
 | 状态/终态 | 含义 | Agent 动作 |
 | --- | --- | --- |
 | `state_snapshot` 且 `registered=true` | 注册成功；含 role/operations/master/peers/peer_count/summary/master_wake/subagents/inbox/worktrees/tasks/env | 读快照执行已注册角色的 `operations`；无需再跑 who/status/master status |
 | 陈旧/他人的 pane claim 已被顶掉 | 默认路径的一部分，不产生额外终态 | 无；不需要第二条命令，也不参与裁决 |
 | `identity_update` | daemon 需要缺失事实或报告显式身份冲突；`registered=false`，`requires_identity_update.required=true` | 只读 `required_fields`/`reason`/`action`/`exact_error`；已授权初始化或已注册身份恢复中，若 action 是 factual supplement，可用一次 `collab context --provide` 补真实事实。成功注册前不执行角色协议；显式冲突保留原错，不选择 worker，不把 `collab init` 当第二次修复尝试 |
-| `participant challenge pending` | 初始选择路径等待挑战应答；`registered=false`，尚未完成注册 | 参见前述 participant continuation：participant 从所选 pane 读取挑战并于自身环境调用 `collab context --return-challenge` 续交；`--query` 保持只读且不泄露挑战 |
+| 手动通信恢复 pending | 原身份仍保留；显式通信验证未完成 | participant 从所选 adapter 读取 challenge 并从自身环境回传；`--query` 保持只读 |
 | `COLLAB_CONTEXT_UNRESOLVED` | 无 route、无 baseline、无 git 根（非零退出） | 保留原错，不自动换 cwd 重试；首次注册失败则独立继续，已注册者报告受影响协作，保留已领任务/claim |
 | 拒绝在 playground 创建基线 | 在 worktree 内引导（非零退出） | 保留原错，不改主树或删除旧身份；首次注册失败则独立继续，已注册者保留已有职责并报告协作缺口 |
 | 默认订阅已停 | owner 显式 unsubscribe 持久生效 | 需要再收消息时用 `collab notify subscribe --event direct-message` 重订阅 |
@@ -1204,8 +1192,8 @@ permission to select a worker. The supplement has exactly the four scalar fields
 with an automatically observed fact is `IDENTITY_FACT_CONFLICT`, not an override.
 Explicit conflicts, token rejection, route failure, runtime-binding failure, and
 transport failure keep their original error and non-zero exit; unapproved
-automatic resolution cannot bypass them, while true challenge pending remains
-an incomplete state awaiting participant return.
+automatic resolution cannot bypass them. Only explicit communication restore
+can await a participant return; ordinary identity restoration never does.
 
 完整语义图、转移表和 owner 映射见 `docs/collab-context-state-machine.md`；
 机器可校验 SESE 图见 `docs/dagpipe/collab-context.graph.json`

@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-subscription-lifecycle",
   "version": "0.2.0",
-  "description": "SESE subscription lifecycle graph for registered workers. The daemon owns default lease creation, transport realignment, and durable active subscription state; explicit unsubscribe starts a later lifecycle epoch.",
+  "description": "SESE subscription lifecycle graph for registered workers. Consume the committed binding without selecting or probing communication again. The existing subscription owner commits default lease creation, alignment and durable active state; explicit unsubscribe starts a later lifecycle epoch.",
   "inputs": [
     {
       "id": "worker_transport_registration",

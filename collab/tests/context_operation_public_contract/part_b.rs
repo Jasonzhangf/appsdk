@@ -112,6 +112,16 @@ fn single_context_master_peer_intent_overrides_and_replays_after_restart() {
             .as_array()
             .unwrap()
             .contains(&json!("grant")));
+        assert_eq!(result["result"]["snapshot"]["identity"]["worker_id"], fence.worker_id);
+        if step == 0 {
+            fixture.run_ok(&["task", "register", "role-preserved-task", "--next", "retain responsibility"], Some(&pane));
+            fixture.run_ok(&["sendmessage", "--to", &fence.worker_id, "--subject", "role preserved mailbox", "--delivery", "queued", "retain unread message"], Some(&pane));
+        } else {
+            let task = fixture.run_ok(&["task", "status", "role-preserved-task"], Some(&pane));
+            assert_eq!(task["owner"], fence.worker_id, "{task}");
+            assert!(result["result"]["snapshot"]["inbox"]["messages"].as_array().unwrap().iter()
+                .any(|message| message["subject"] == "role preserved mailbox"), "{result}");
+        }
         assert_eq!(
             result["result"]["snapshot"]["identity"]["role"],
             if role == "master" { "master" } else { "worker" }

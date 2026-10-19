@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-peer-lifecycle",
   "version": "0.1.0",
-  "description": "一次 Collab peer Read/Update/Close 生命周期请求到一次生命周期结果。图中只建模请求分类、责任准入、一个互斥分支调度、阶段读回和唯一结果出口；Read、Update、Close 由分支调度选择其一，Create 只保留阻断守卫，不执行创建。唯一结果统一分类为成功、拒绝、缺事实、partial、unknown、cancelled（仅真实安全边界）或 cleanup-open。图不建模自动重试、fallback、第二状态 owner、宿主进程或实现准入。",
+  "description": "一次 Collab peer Create/Read/Update/Close 请求到一次生命周期结果。请求分类、责任准入、互斥分支调度、阶段读回和唯一结果出口构成 SESE。Create 复用已有创建和注册 owner。Close 在同一入口区分两种终态：既有他人宿主关闭按所选 host adapter 归档线程并分类真实宿主终态；已认证主体注销自身只走控制面退役，跳过宿主 archive，保留真实 pane/thread 运行，并撤销该精确身份自身的 master grant。自注销的责任冲突明确拒绝且不丢失。唯一结果区分成功、拒绝、缺事实、partial、unknown、cancelled（仅真实安全边界）或 cleanup-open。不引入自动重试、fallback 或第二状态 owner。",
   "inputs": [
     {
       "id": "peer_lifecycle_request",
@@ -79,7 +79,7 @@
       "iterator": "Whole"
     },
     {
-      "id": "执行读、更新、关闭或创建阻断分支",
+      "id": "执行生命周期互斥分支",
       "operator": "appsdk.collab_peer_lifecycle.execute_lifecycle_branch",
       "operator_version": "1",
       "inputs": [
@@ -161,11 +161,11 @@
     },
     {
       "from": "准入身份授权与责任边界",
-      "to": "执行读、更新、关闭或创建阻断分支",
+      "to": "执行生命周期互斥分支",
       "arc_id": "已准入生命周期意图"
     },
     {
-      "from": "执行读、更新、关闭或创建阻断分支",
+      "from": "执行生命周期互斥分支",
       "to": "读回并分类生命周期结果",
       "arc_id": "生命周期分支阶段结果"
     },

@@ -38,6 +38,10 @@ include!("identity_context/operations.rs");
 include!("identity_context/recovery.rs");
 
 fn validate_facts(facts: &IdentityFacts) -> anyhow::Result<()> {
+    // Native facts are not admission inputs when the current pane is selected.
+    if facts.tmux.is_some() {
+        return Ok(());
+    }
     for (name, value) in [
         ("session_id", facts.session_id.as_deref()),
         ("thread_id", facts.thread_id.as_deref()),
@@ -236,7 +240,7 @@ fn missing_facts_result(
 /// facts are still demanded: the endpoint selects the App Server candidate
 /// below, which reads all four fields unconditionally.
 fn required_fields(facts: &IdentityFacts) -> Vec<&'static str> {
-    if (facts.tmux.is_some() || facts.dsh_session_id.is_some()) && facts.endpoint.is_none() {
+    if facts.tmux.is_some() || (facts.dsh_session_id.is_some() && facts.endpoint.is_none()) {
         return Vec::new();
     }
     [

@@ -23,6 +23,5 @@ fn register_typed(
         reuse_existing,
         None,
         None,
-        None,
     )
 }

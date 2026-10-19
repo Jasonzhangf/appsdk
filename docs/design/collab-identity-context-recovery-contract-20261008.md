@@ -46,65 +46,33 @@ Scope boundary:
 
 ## 2. Terms and exact owner map
 
-Initial registration now includes a selected-path participant gate. The
-daemon verifies the caller's capability facts and prefers a verified current
-tmux pane. Every selected initial path requires an actual matching reply;
-missing capability or caller wait policy cannot skip it. The existing
-`server/register_reply.rs` owns durable pending and verified evidence. The
-Register transaction owns business commit, and the identity operation journal
-owns continuation, cancellation and query. No business payload mirrors this
-control state.
+The 2026-10-18 capability-registration instruction supersedes the former
+InitialRegister participant gate. The daemon selects the current valid tmux
+pane first. Unselected AppServer facts do not impose native required fields or
+protocol validation on that pane. Selected native adapters retain their own
+admission checks. Scope and actual anchor ownership remain authoritative.
 
-Tmux dispatch sends `COLLAB_REGISTER_CHALLENGE <JSON>` and returns pending to
-release the initiating pane. Its participant reads the challenge from that
-pane stdin and invokes the typed return from its own environment. The daemon
-checks project/app scope, purpose, outer operation, nested command, nonce and
-selected socket/pane before continuing the exact saved prepared envelope.
-The runtime route reservation is persisted and installed before this pause;
-it does not imply a Registered effect or verified communication. Query only
-projects durable progress and never reveals the nonce. Restart and duplicate
-return reuse the original evidence and receipt, without redispatch or a new
-command. Cancellation rejects a later return.
-
-New Register command and operation IDs use one bounded key over the typed
-project scope, app scope, binding and generation. Saved IDs remain unchanged.
-A participant return completes the original manager publication and
-compensation path. The same pending control record retains the previous scoped
-state and the terminal publication result. A definite failure restores that
-state; an ambiguous publication outcome preserves the journals and reports the
-actual error. Repeated returns cannot publish a compensated registration.
-
-AppServer and DSH receive the same structured challenge through their selected
-native adaptor. A first history or agent-reply observation may remain pending.
-The actual participant later returns the received operation, command, purpose
-and nonce with its own native candidate through `RegisterReply`. AppServer
-thread/read and the existing DSH agent-facts admission validate the exact
-selected endpoint, namespace/runtime, session, thread/agent and project root.
-The return resumes the original context operation or, for the existing DSH
-`Register` entry, its original nested operation. An ACK, echo or query cannot
-complete it. No new gateway, polling, retry or context admission surface exists.
-
-The private verified-pending Register path consumes the exact saved command
-using its prepare-time target-resource precondition. The same reducer lock
-checks identity/credential, binding principal/generation, effective app owner,
-stable anchor claimants and the relevant target grant, then commits. Normal
-ledger classification, PID/activity observations and an unrelated master do
-not invalidate it. A compatible first publication of the same app scope does
-not repeat ProjectRegistered. True resource conflicts and cancellation reject.
-Ordinary public typed dispatch and recovery retain their existing whole-revision
-CAS. No caller flag can select the private fence; no reprepare or new IDs occur.
-Pending records predating the scoped precondition fail explicitly rather than
-reconstructing a fence from logs or a current snapshot.
+Initial registration consumes the existing typed prepared Register envelope
+without a second challenge, pending ledger or participant continuation. The
+Register owner retains command/operation IDs, revision CAS, receipt replay,
+credential/binding/scope checks and durable commit errors. The outer operation
+still binds nested IDs before consume. Existing route/credential/grant/lease
+publication and compensation remain with their owners. Failed publication
+retains the actual committed phases and reports partial or failure.
 
 Ordinary durable identity/role/anchor/binding restoration and authenticated
-staged completion remain separate and perform no loopback. Explicit manual
-communication restore uses the same gate on the restored binding; failure
-retains identity, role and grant. No timer or retry policy is added.
-Existing-principal moves and exact approved identity recovery retain the
-authenticated typed Register owner without initial challenge admission. This
-is derived from the existing scoped same-principal binding plus its credential
-or approval proof. Caller wait/capability flags cannot select this path, and
-typed fence and frozen revision checks remain mandatory.
+staged completion perform no new Register or communication validation.
+Explicit role intent remains distinct from ordinary restoration. Peer-only
+replacement cannot inherit the precise old grant or discard existing work.
+
+Only explicit manual communication restore uses `server/register_reply.rs`.
+It dispatches `COLLAB_REGISTER_CHALLENGE <JSON>` through the restored adapter.
+A participant returns the exact association and its own anchor/native facts.
+The owner checks scope, purpose, operation, command, nonce and selected target.
+Pending evidence survives restart; duplicate return reuses the result; cancelled
+operations cannot continue. Query stays read-only. This continuation never
+commits Register. Failure preserves identity, role, grant and binding. No new
+gateway, queue, timer or retry policy is added.
 
 | Term | Exact meaning | Owner |
 | --- | --- | --- |

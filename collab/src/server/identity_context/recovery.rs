@@ -785,22 +785,21 @@ impl ProjectRuntimeManager {
                     ));
                 }
                 if !approved_move || anchor_agrees {
-                    return Err(anyhow::anyhow!("RECOVERY_RECONCILE_REQUIRED: durable identity binding is not published at its saved generation").into());
+                    let retired = {
+                        let state = runtime.state.lock().unwrap();
+                        state.worker_closures.contains_key(&ident.worker_id)
+                            && !state.workers.contains_key(&ident.worker_id)
+                    };
+                    if retired {
+                        // The persisted receipt belongs to a peer that
+                        // unregistered itself. Rebuild from the live anchor
+                        // instead of restoring the retired generation.
+                        ident.runtime = None;
+                        ident.transport = None;
+                    } else {
+                        return Err(anyhow::anyhow!("RECOVERY_RECONCILE_REQUIRED: durable identity binding is not published at its saved generation").into());
+                    }
                 }
-            }
-        }
-        if let Some(binding) = outer_binding.as_ref() {
-            if let Some(record) =
-                register_reply::read(self.host.host_paths.state_root(), &binding.operation_id)
-                    .map_err(anyhow::Error::msg)?
-            {
-                let TypedCommand::RegisterWorker { worker, .. } = &record.prepared.typed.command;
-                if ident.worker_id != worker.id {
-                    return Err(anyhow::anyhow!("REGISTER_REPLY_WORKER_MISMATCH").into());
-                }
-                // This is the original prepared credential, never a caller
-                // token. An uncommitted draft is not yet in the identity store.
-                ident.token = worker.token.clone();
             }
         }
         let (runtime, receipt, staged_registration) = if let Some((runtime, binding)) = staged_owner
@@ -863,13 +862,17 @@ impl ProjectRuntimeManager {
             (runtime, receipt, Some((staged_runtime, transport)))
         } else {
             let candidates = TransportCandidates {
-                appserver: facts.endpoint.as_ref().map(|endpoint| AppServerCandidate {
-                    endpoint: endpoint.clone(),
-                    namespace: facts.namespace.clone().expect("complete native facts"),
-                    session_id: facts.session_id.clone().expect("complete native facts"),
-                    thread_id: facts.thread_id.clone().expect("complete native facts"),
-                    cwd: context.canonical_root.clone(),
-                }),
+                // A pane needs no native IDs. Only construct the adjacent
+                // candidate when all its facts exist; selected native paths
+                // already require these fields in preflight.
+                appserver: match (&facts.endpoint, &facts.namespace, &facts.session_id, &facts.thread_id) {
+                    (Some(endpoint), Some(namespace), Some(session_id), Some(thread_id)) => Some(AppServerCandidate {
+                        endpoint: endpoint.clone(), namespace: namespace.clone(),
+                        session_id: session_id.clone(), thread_id: thread_id.clone(),
+                        cwd: context.canonical_root.clone(),
+                    }),
+                    _ => None,
+                },
                 tmux: facts.tmux,
                 dsh: None,
             };

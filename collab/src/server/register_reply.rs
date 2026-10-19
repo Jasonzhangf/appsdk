@@ -1,5 +1,5 @@
-//! Single durable pending/evidence owner. Typed Register owns business commit.
-use super::{PreparedRegisterEnvelope, RegisterOuterBinding, Server};
+//! Durable evidence for explicit communication restoration; never registers identities.
+use super::{PreparedRegisterEnvelope, RegisterOuterBinding};
 use crate::proto::{IdentityContextRequest, ProjectContext, SelectedTransport, TransportKind};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -18,27 +18,7 @@ pub(crate) struct Continuation {
     pub request: IdentityContextRequest,
 }
 
-/// Material owned by the manager's original publication/compensation edge.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RegistrationCompletion {
-    pub context: ProjectContext,
-    pub previous_binding: Option<super::RuntimeBinding>,
-    pub previous_grant: Option<super::global_state::MasterGrant>,
-    pub previous_worker: Option<super::WorkerRec>,
-    pub previous_subscriptions: Vec<super::NotificationSubscription>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct PublicationOutcome {
-    pub ok: bool,
-    pub error: Option<String>,
-    pub data: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct Record {
     pub purpose: Purpose,
     pub operation_id: String,
@@ -46,10 +26,6 @@ pub(crate) struct Record {
     pub transport: SelectedTransport,
     pub prepared: PreparedRegisterEnvelope,
     pub continuation: Option<Continuation>,
-    #[serde(default)]
-    pub completion: Option<RegistrationCompletion>,
-    #[serde(default)]
-    pub publication_outcome: Option<PublicationOutcome>,
     marker: String,
     dispatched_ms: i64,
     /// Sync before I/O; a lost dispatch response never causes a resend.
@@ -80,9 +56,18 @@ fn records(root: &Path) -> Result<Vec<Record>, String> {
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
         .map(|line| {
-            serde_json::from_slice(line)
+            let value: Value = serde_json::from_slice(line)
+                .map_err(|error| format!("REGISTER_REPLY_LEDGER_CORRUPT: {error}"))?;
+            // Retired initial records are history only. They can neither
+            // resume Register nor block explicit communication restoration.
+            if value["purpose"] == "initial_register" {
+                return Ok(None);
+            }
+            serde_json::from_value(value)
+                .map(Some)
                 .map_err(|error| format!("REGISTER_REPLY_LEDGER_CORRUPT: {error}"))
         })
+        .filter_map(Result::transpose)
         .collect()
 }
 
@@ -100,31 +85,6 @@ fn append(root: &Path, record: &Record) -> Result<(), String> {
         std::fs::File::open(root)?.sync_all()
     };
     write().map_err(|error| format!("REGISTER_REPLY_LEDGER_WRITE_FAILED: {error}"))
-}
-
-pub(crate) fn save_completion(
-    root: &Path,
-    record: &mut Record,
-    completion: RegistrationCompletion,
-) -> Result<(), String> {
-    if record.completion.is_none() {
-        record.completion = Some(completion);
-        append(root, record)?;
-    }
-    Ok(())
-}
-
-pub(crate) fn save_publication_outcome(
-    root: &Path,
-    record: &mut Record,
-    response: &super::Resp,
-) -> Result<(), String> {
-    record.publication_outcome = Some(PublicationOutcome {
-        ok: response.ok,
-        error: response.error.clone(),
-        data: response.data.clone(),
-    });
-    append(root, record)
 }
 
 fn fresh_marker() -> String {
@@ -151,7 +111,6 @@ pub(crate) fn ensure_pending(
             || serde_json::to_value(&record.transport).unwrap()
                 != serde_json::to_value(transport).unwrap()
             || record.prepared.typed != prepared.typed
-            || record.prepared.precondition != prepared.precondition
         {
             return Err("REGISTER_REPLY_PENDING_MISMATCH: exact prepared intent changed".into());
         }
@@ -164,8 +123,6 @@ pub(crate) fn ensure_pending(
         transport: transport.clone(),
         prepared: prepared.clone(),
         continuation: outer.and_then(|binding| binding.continuation.clone()),
-        completion: None,
-        publication_outcome: None,
         marker: fresh_marker(),
         dispatched_ms: super::now_ms(),
         dispatch_started: false,
@@ -174,31 +131,6 @@ pub(crate) fn ensure_pending(
     };
     append(root, &record)?;
     Ok(record)
-}
-
-pub(crate) fn committed(server: &Server, command_id: &str) -> bool {
-    let state = server.state.lock().unwrap();
-    state.command_receipts.contains_key(command_id)
-        || crate::identity::CommandId::new(command_id.to_owned())
-            .ok()
-            .is_some_and(|id| state.global.lookup_command_receipt(&id).is_some())
-}
-
-/// A runtime reservation does not commit the saved Register's project event.
-pub(crate) fn pending_initial_for_scope(
-    server: &Server,
-    project: &str,
-    app: &str,
-) -> Result<bool, String> {
-    Ok(records(server.host_paths.state_root())?
-        .iter()
-        .any(|record| {
-            let scope = &record.prepared.typed.envelope.scope;
-            record.purpose == Purpose::InitialRegister
-                && scope.project_scope_id.as_str() == project
-                && scope.app_scope_id.as_str() == app
-                && !committed(server, &record.prepared.nested_command_id)
-        }))
 }
 
 pub(crate) fn enforce(root: &Path, mut record: Record) -> Result<(), String> {
@@ -481,7 +413,6 @@ pub(crate) fn accept(
 pub(crate) fn verified_for_commit(root: &Path, record: &Record) -> Result<(), String> {
     let saved = read(root, &record.operation_id)?.ok_or("REGISTER_REPLY_PENDING_MISSING")?;
     if saved.prepared.typed != record.prepared.typed
-        || saved.prepared.precondition != record.prepared.precondition
         || saved.purpose != record.purpose
         || saved.worker_id != record.worker_id
         || saved.marker != record.marker

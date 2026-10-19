@@ -624,6 +624,7 @@ fn handle_close(
         refused.operation_id = Some(operation_id.clone());
         return response(refused, Some("PEER_LIFECYCLE_REASON_REQUIRED"));
     }
+    let self_unregister = worker_id == &target.worker_id;
     let digest = close_intent_digest(operation_id, target, reason);
     let capability_hash = capability_hash(query_capability);
     let (record, snapshot_captured_ms) = {
@@ -704,8 +705,14 @@ fn handle_close(
                 .map(|receipt| receipt.captured_ms)
         });
         let now = now_ms();
-        let mut close = close_readback("intent-persisted");
-        close.runtime_archive.state = PeerLifecycleStage::Pending;
+        let mut close = close_readback(if self_unregister {
+            "self-unregister-intent-persisted"
+        } else {
+            "intent-persisted"
+        });
+        if !self_unregister {
+            close.runtime_archive.state = PeerLifecycleStage::Pending;
+        }
         (
             state::PeerLifecycleOperationRecord {
                 operation_id: operation_id.clone(),
@@ -746,7 +753,7 @@ fn handle_close(
             Some(&format!("PEER_LIFECYCLE_DURABILITY_FAILED: {error}")),
         );
     }
-    let host_terminal = archive_terminal(record.exact_target());
+    let host_terminal = (!self_unregister).then(|| archive_terminal(record.exact_target()));
     let target_unchanged = {
         let state = server.state.lock().unwrap();
         verify(&state, worker_id, token).is_ok()
@@ -781,59 +788,73 @@ fn handle_close(
             Some("PEER_LIFECYCLE_TARGET_CHANGED"),
         );
     }
-    let (close, phase, error) = match host_terminal {
-        HostTerminal::Verified => {
-            let close = retire_control_plane(
-                server,
-                &record,
-                PeerLifecycleStage::Verified,
-                None,
-                snapshot_captured_ms,
-            );
-            let phase = close_phase(&close);
-            let error = (phase != PeerLifecyclePhase::Complete)
-                .then_some("PEER_LIFECYCLE_CONTROL_RETIREMENT_INCOMPLETE".to_owned());
-            (close, phase, error)
-        }
-        HostTerminal::Missing => {
-            let close = retire_control_plane(
-                server,
-                &record,
-                PeerLifecycleStage::Missing,
-                None,
-                snapshot_captured_ms,
-            );
-            let phase = close_phase(&close);
-            let error = (phase != PeerLifecyclePhase::Complete)
-                .then_some("PEER_LIFECYCLE_CONTROL_RETIREMENT_INCOMPLETE".to_owned());
-            (close, phase, error)
-        }
-        HostTerminal::Unsupported(detail) => {
-            let mut close = close_readback("cleanup-open");
-            close.runtime_archive.state = PeerLifecycleStage::Refused;
-            close.worker_retirement.state = PeerLifecycleStage::NotAttempted;
-            close.binding_retirement.state = PeerLifecycleStage::NotAttempted;
-            close.route_retirement.state = PeerLifecycleStage::NotAttempted;
-            close.subscription_retirement.state = PeerLifecycleStage::NotAttempted;
-            (close, PeerLifecyclePhase::CleanupOpen, Some(detail))
-        }
-        HostTerminal::Refused(detail) => {
-            let mut close = close_readback("refused");
-            close.runtime_archive.state = PeerLifecycleStage::Refused;
-            close.worker_retirement.state = PeerLifecycleStage::NotAttempted;
-            close.binding_retirement.state = PeerLifecycleStage::NotAttempted;
-            close.route_retirement.state = PeerLifecycleStage::NotAttempted;
-            close.subscription_retirement.state = PeerLifecycleStage::NotAttempted;
-            (close, PeerLifecyclePhase::Refused, Some(detail))
-        }
-        HostTerminal::Unknown(detail) => {
-            let mut close = close_readback("unknown");
-            close.runtime_archive.state = PeerLifecycleStage::Unknown;
-            close.worker_retirement.state = PeerLifecycleStage::NotAttempted;
-            close.binding_retirement.state = PeerLifecycleStage::NotAttempted;
-            close.route_retirement.state = PeerLifecycleStage::NotAttempted;
-            close.subscription_retirement.state = PeerLifecycleStage::NotAttempted;
-            (close, PeerLifecyclePhase::Unknown, Some(detail))
+    let (close, phase, error) = if self_unregister {
+        let close = retire_control_plane(
+            server,
+            &record,
+            PeerLifecycleStage::NotApplicable,
+            None,
+            snapshot_captured_ms,
+        );
+        let phase = close_phase(&close);
+        let error = (phase != PeerLifecyclePhase::Complete)
+            .then_some("PEER_LIFECYCLE_CONTROL_RETIREMENT_INCOMPLETE".to_owned());
+        (close, phase, error)
+    } else {
+        match host_terminal.expect("host close must classify its archive obligation") {
+            HostTerminal::Verified => {
+                let close = retire_control_plane(
+                    server,
+                    &record,
+                    PeerLifecycleStage::Verified,
+                    None,
+                    snapshot_captured_ms,
+                );
+                let phase = close_phase(&close);
+                let error = (phase != PeerLifecyclePhase::Complete)
+                    .then_some("PEER_LIFECYCLE_CONTROL_RETIREMENT_INCOMPLETE".to_owned());
+                (close, phase, error)
+            }
+            HostTerminal::Missing => {
+                let close = retire_control_plane(
+                    server,
+                    &record,
+                    PeerLifecycleStage::Missing,
+                    None,
+                    snapshot_captured_ms,
+                );
+                let phase = close_phase(&close);
+                let error = (phase != PeerLifecyclePhase::Complete)
+                    .then_some("PEER_LIFECYCLE_CONTROL_RETIREMENT_INCOMPLETE".to_owned());
+                (close, phase, error)
+            }
+            HostTerminal::Unsupported(detail) => {
+                let mut close = close_readback("cleanup-open");
+                close.runtime_archive.state = PeerLifecycleStage::Refused;
+                close.worker_retirement.state = PeerLifecycleStage::NotAttempted;
+                close.binding_retirement.state = PeerLifecycleStage::NotAttempted;
+                close.route_retirement.state = PeerLifecycleStage::NotAttempted;
+                close.subscription_retirement.state = PeerLifecycleStage::NotAttempted;
+                (close, PeerLifecyclePhase::CleanupOpen, Some(detail))
+            }
+            HostTerminal::Refused(detail) => {
+                let mut close = close_readback("refused");
+                close.runtime_archive.state = PeerLifecycleStage::Refused;
+                close.worker_retirement.state = PeerLifecycleStage::NotAttempted;
+                close.binding_retirement.state = PeerLifecycleStage::NotAttempted;
+                close.route_retirement.state = PeerLifecycleStage::NotAttempted;
+                close.subscription_retirement.state = PeerLifecycleStage::NotAttempted;
+                (close, PeerLifecyclePhase::Refused, Some(detail))
+            }
+            HostTerminal::Unknown(detail) => {
+                let mut close = close_readback("unknown");
+                close.runtime_archive.state = PeerLifecycleStage::Unknown;
+                close.worker_retirement.state = PeerLifecycleStage::NotAttempted;
+                close.binding_retirement.state = PeerLifecycleStage::NotAttempted;
+                close.route_retirement.state = PeerLifecycleStage::NotAttempted;
+                close.subscription_retirement.state = PeerLifecycleStage::NotAttempted;
+                (close, PeerLifecyclePhase::Unknown, Some(detail))
+            }
         }
     };
     let terminal = advance_record_with_close(&record, phase, None, Some(close));

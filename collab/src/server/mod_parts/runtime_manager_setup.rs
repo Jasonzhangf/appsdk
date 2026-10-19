@@ -139,10 +139,7 @@ impl ProjectRuntimeManager {
                     .global
                     .lookup_registration(&registration.project_scope, &registration.app_scope_id)
                     .is_none();
-                if registration_missing
-                    && !register_reply::pending_initial_for_scope(&host, &key.1, &key.0)
-                        .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?
-                {
+                if registration_missing {
                     host.commit_checked(&[Event::GlobalProjectRegistered { registration }])
                         .map_err(|error| {
                             format!(

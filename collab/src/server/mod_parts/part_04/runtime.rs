@@ -1,4 +1,32 @@
 impl ProjectRuntimeManager {
+    fn ensure_resident_identity_context_route(
+        &self,
+        context: &ProjectContext,
+        request: &IdentityContextRequest,
+    ) -> Result<(), String> {
+        if request.query
+            || request.action == "cancel"
+            || context.app_scope_id.as_str() != crate::identity::CLI_APP_SERVER_ID
+        {
+            return Ok(());
+        }
+        let context_root = Path::new(&context.canonical_root);
+        if !storage_roots_equal(context_root, &self.host_root)
+            .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))?
+        {
+            return Ok(());
+        }
+
+        let key = Self::route_key(context);
+        let _admission = self.materialization_gate.lock().unwrap();
+        if self.routes.lock().unwrap().contains_key(&key) {
+            return Ok(());
+        }
+        self.append_resident_route_record(context)?;
+        self.install_runtime(&key, self.host.clone(), None);
+        Ok(())
+    }
+
     fn build_runtime(
         &self,
         root: &Path,
@@ -178,6 +206,7 @@ impl ProjectRuntimeManager {
         storage_root: &Path,
         allow_resident_storage: bool,
     ) -> Result<(), String> {
+        let _publication = self.register_gate.lock().unwrap();
         if allow_resident_storage {
             let project_root = Path::new(&context.canonical_root);
             let resident_root = storage_roots_equal(project_root, &self.host_root)
@@ -203,10 +232,31 @@ impl ProjectRuntimeManager {
         let existing_records = load_host_route_records(&self.route_journal).map_err(|error| {
             format!("HOST_ROUTE_DURABILITY_FAILED: validate route journal: {error}")
         })?;
-        if let Some(owner) = self
+        if allow_resident_storage {
+            for existing in &existing_records {
+                if storage_roots_equal(Path::new(&existing.storage_root), &storage_root)
+                    .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))?
+                {
+                    return Err(format!(
+                        "HOST_ROUTE_DURABILITY_FAILED: runtime storage root {} is already owned by route ({}, {})",
+                        record.storage_root, existing.app_scope_id, existing.project_scope
+                    ));
+                }
+            }
+            let routes = self.routes.lock().unwrap();
+            for ((app_scope, project_scope), route) in routes.iter() {
+                if storage_roots_equal(&route.storage_root, &storage_root)
+                    .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))?
+                {
+                    return Err(format!(
+                        "HOST_ROUTE_DURABILITY_FAILED: runtime storage root {} is already owned by route ({}, {})",
+                        record.storage_root, app_scope, project_scope
+                    ));
+                }
+            }
+        } else if let Some(owner) = self
             .storage_owner(&storage_root, &existing_records)
             .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))?
-            .filter(|_| !allow_resident_storage)
         {
             return Err(format!(
                 "HOST_ROUTE_DURABILITY_FAILED: runtime storage root {} is already owned by {}",
@@ -447,9 +497,15 @@ impl ProjectRuntimeManager {
         {
             let identity_context =
                 identity_context.unwrap_or_else(|| IdentityContextRequest::legacy(facts));
-            if identity_context.action == "prepare_invocation"
-                || identity_context.action == "cancel"
-            {
+            if identity_context.action == "prepare_invocation" {
+                if let Err(error) =
+                    self.ensure_resident_identity_context_route(&context, &identity_context)
+                {
+                    return (self.host.clone(), Resp::err(error));
+                }
+                return self.identity_context(context, identity_context);
+            }
+            if identity_context.action == "cancel" {
                 return self.identity_context(context, identity_context);
             }
             if is_identity_query_request(&identity_context) {

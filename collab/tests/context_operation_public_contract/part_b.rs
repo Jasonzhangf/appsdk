@@ -1,4 +1,76 @@
 #[test]
+fn public_context_bootstraps_an_empty_resident_route() {
+    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (fixture, pane) = Fixture::isolated("resident-route-empty");
+    let root = canonical_root(&fixture);
+    let output = fixture.command(
+        &["context", "--op", "ctxop-resident-route-empty"],
+        Some(&pane),
+    );
+    assert!(
+        output.status.success(),
+        "fresh public context must bootstrap the resident route: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let records = fs::read_to_string(fixture.host_routes())
+        .expect("fresh public context must publish a host route journal");
+    let records: Vec<Value> = records
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("route journal record is JSON"))
+        .collect();
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0]["op"], "register");
+    assert_eq!(records[0]["project_scope"], root);
+    assert_eq!(records[0]["canonical_root"], root);
+    assert_eq!(records[0]["storage_root"], root);
+}
+
+#[test]
+fn public_context_rebuilds_a_missing_resident_route_after_restart() {
+    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (mut fixture, pane) = Fixture::isolated("resident-route-bootstrap");
+    let seed = fixture.registered_context("ctxop-resident-route-seed", &pane);
+    let worker_id = seed["result"]["snapshot"]["identity"]["worker_id"]
+        .clone();
+    let root = canonical_root(&fixture);
+
+    fixture.stop_daemon();
+    fs::remove_file(fixture.host_routes()).expect("remove isolated route journal");
+    fixture.restart_daemon();
+
+    let recovered = success_payload(&fixture.command(
+        &["context", "--op", "ctxop-resident-route-recover"],
+        Some(&pane),
+    ));
+    assert_eq!(
+        recovered["result"]["snapshot"]["identity"]["worker_id"],
+        worker_id
+    );
+    let records = fs::read_to_string(fixture.host_routes())
+        .expect("public context must recreate the host route journal");
+    let records: Vec<Value> = records
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("route journal record is JSON"))
+        .collect();
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0]["op"], "register");
+    assert_eq!(records[0]["project_scope"], root);
+    assert_eq!(records[0]["canonical_root"], root);
+    assert_eq!(records[0]["storage_root"], root);
+
+    fixture.restart_daemon();
+    let replay = success_payload(&fixture.command(
+        &["context", "--op", "ctxop-resident-route-recover"],
+        Some(&pane),
+    ));
+    assert_eq!(
+        replay["result"]["snapshot"]["identity"]["worker_id"],
+        worker_id
+    );
+}
+
+#[test]
 fn persisted_context_restores_without_live_collection_or_admission() {
     use std::os::unix::fs::PermissionsExt;
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();

@@ -282,6 +282,267 @@ fn single_context_master_peer_intent_overrides_and_replays_after_restart() {
     }
 }
 
+fn same_session_pane(fixture: &Fixture, label: &str, server_pid: u32, base: &Pane) -> Pane {
+    let session_id = String::from_utf8(
+        tmux(
+            &fixture.tmux_socket,
+            &["display-message", "-p", "-t", &base.pane_id, "#{session_id}"],
+        )
+        .stdout,
+    )
+    .expect("tmux session id is UTF-8")
+    .trim()
+    .to_owned();
+    let output = tmux(
+        &fixture.tmux_socket,
+        &[
+            "new-window",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            &session_id,
+            "sleep 600",
+        ],
+    );
+    let pane_id = String::from_utf8(output.stdout)
+        .expect("same-session pane id is UTF-8")
+        .trim()
+        .to_owned();
+    Pane {
+        server_pid,
+        pane_id: pane_id.clone(),
+        session_anchor: format!("session-{label}-{pane_id}"),
+        thread_anchor: format!("thread-{label}-{pane_id}"),
+    }
+}
+
+fn registered_context_in(
+    fixture: &Fixture,
+    project_root: &Path,
+    operation_id: &str,
+    pane: &Pane,
+) -> Value {
+    let done = fixture.root.join(format!("{operation_id}.participant-done"));
+    let result_path = fixture
+        .root
+        .join(format!("{operation_id}.participant-result"));
+    let script = format!(
+        "cd {}\n\"$COLLAB_BINARY\" context --op {} >{} 2>\"$PANE_STDERR\"\nprintf done >{}\nsleep 600\n",
+        shell_quote(&project_root.to_string_lossy()),
+        shell_quote(operation_id),
+        shell_quote(&result_path.to_string_lossy()),
+        shell_quote(&done.to_string_lossy())
+    );
+    let consumer = fixture.run_in_pane(pane, operation_id, &script);
+    assert!(
+        wait_until(Duration::from_secs(15), || done.exists()),
+        "external project participant did not complete: {} {}",
+        consumer.output(),
+        std::fs::read_to_string(&result_path).unwrap_or_default()
+    );
+    let result: Value = serde_json::from_slice(
+        &std::fs::read(result_path).expect("read external participant result"),
+    )
+    .expect("external participant emits JSON");
+    assert_eq!(result["ok"], true, "{result}");
+    assert_eq!(result["result"]["outcome"], "completed", "{result}");
+    result
+}
+
+fn context_without_native_ids(
+    fixture: &Fixture,
+    project_root: &Path,
+    operation_id: &str,
+    pane: &Pane,
+) -> std::process::Output {
+    fixture
+        .configured_command(&["context", "--op", operation_id], Some(pane))
+        .current_dir(project_root)
+        .env_remove("CODEX_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .output()
+        .expect("run public context without native IDs")
+}
+
+fn identity_tree(root: &Path) -> Vec<(String, Vec<u8>)> {
+    fn visit(root: &Path, path: &Path, entries: &mut Vec<(String, Vec<u8>)>) {
+        for entry in fs::read_dir(path).expect("read isolated identity tree") {
+            let entry = entry.expect("read isolated identity entry");
+            let entry_path = entry.path();
+            if entry.file_type().expect("identity entry type").is_dir() {
+                visit(root, &entry_path, entries);
+            } else {
+                entries.push((
+                    entry_path
+                        .strip_prefix(root)
+                        .expect("identity entry under root")
+                        .to_string_lossy()
+                        .into_owned(),
+                    fs::read(&entry_path).expect("read isolated identity entry"),
+                ));
+            }
+        }
+    }
+
+    let root = root.join("identities");
+    let mut entries = Vec::new();
+    visit(&root, &root, &mut entries);
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    entries
+}
+
+fn seed_shared_session_identities(fixture: &Fixture, pane: &Pane) {
+    let facts = tmux_identity_facts(fixture, pane);
+    let endpoint = facts["tmux"]["endpoint"].clone();
+    for suffix in ["ambiguous-a", "ambiguous-b"] {
+        let worker_id = format!("codex-session-fixture-{suffix}");
+        let identity_path = fixture
+            .host_state
+            .join("identities")
+            .join(&worker_id)
+            .join("identity.json");
+        fs::create_dir_all(identity_path.parent().unwrap())
+            .expect("create isolated fixture identity");
+        fs::write(
+            &identity_path,
+            serde_json::to_vec_pretty(&json!({
+                "worker_id": worker_id,
+                "token": format!("fixture-token-{suffix}"),
+                "project_scope": canonical_root(fixture),
+                "transport": {
+                    "kind": "tmux",
+                    "endpoint": fixture.tmux_socket.to_string_lossy(),
+                    "namespace": endpoint["tmux_session_id"],
+                    "tmux_endpoint": endpoint,
+                    "capabilities": ["send_message_to_pane", "probe_pane"],
+                    "self_check": "isolated ambiguity fixture"
+                }
+            }))
+            .expect("serialize isolated fixture identity"),
+        )
+        .expect("write isolated fixture identity");
+    }
+}
+
+#[test]
+fn public_context_prefers_current_project_for_a_shared_tmux_session() {
+    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (fixture, pane) = Fixture::isolated("shared-tmux-current");
+    let current = fixture.registered_context("shared-tmux-current-seed", &pane);
+    let current_id = current["result"]["snapshot"]["identity"]["worker_id"]
+        .as_str()
+        .expect("current project identity")
+        .to_owned();
+
+    let foreign_root = fixture.root.join("foreign-project");
+    seed_baseline(&foreign_root);
+    let foreign_pane = same_session_pane(
+        &fixture,
+        "shared-tmux-foreign",
+        pane.server_pid,
+        &pane,
+    );
+    let foreign = registered_context_in(
+        &fixture,
+        &foreign_root,
+        "shared-tmux-foreign-seed",
+        &foreign_pane,
+    );
+    let foreign_id = foreign["result"]["snapshot"]["identity"]["worker_id"]
+        .as_str()
+        .expect("foreign project identity")
+        .to_owned();
+    assert_ne!(current_id, foreign_id);
+    let task = fixture
+        .configured_command(
+            &["task", "register", "foreign-preserved-task", "--next", "keep"],
+            Some(&foreign_pane),
+        )
+        .current_dir(&foreign_root)
+        .output()
+        .expect("register foreign project task");
+    assert!(
+        task.status.success(),
+        "foreign task setup failed: {}",
+        String::from_utf8_lossy(&task.stderr)
+    );
+
+    let recovered = context_without_native_ids(
+        &fixture,
+        &fixture.root,
+        "shared-tmux-current-restore",
+        &pane,
+    );
+    let recovered = success_payload(&recovered);
+    assert_eq!(
+        recovered["result"]["snapshot"]["identity"]["worker_id"],
+        current_id,
+        "{recovered}"
+    );
+
+    let foreign_restore = fixture
+        .configured_command(
+            &["context", "--op", "shared-tmux-foreign-readback"],
+            Some(&foreign_pane),
+        )
+        .current_dir(&foreign_root)
+        .output()
+        .expect("restore foreign project context");
+    let foreign_restore = success_payload(&foreign_restore);
+    assert_eq!(
+        foreign_restore["result"]["snapshot"]["identity"]["worker_id"],
+        foreign_id,
+        "{foreign_restore}"
+    );
+    let status = fixture
+        .configured_command(
+            &["task", "status", "foreign-preserved-task"],
+            Some(&foreign_pane),
+        )
+        .current_dir(&foreign_root)
+        .output()
+        .expect("read foreign task status");
+    assert!(
+        status.status.success(),
+        "foreign task readback failed: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let status = json_stdout(&status);
+    assert_eq!(status["owner"], foreign_id, "{status}");
+}
+
+#[test]
+fn public_context_rejects_ambiguous_current_project_shared_tmux_session() {
+    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (fixture, pane) = Fixture::isolated("shared-tmux-ambiguous");
+    seed_shared_session_identities(&fixture, &pane);
+    let identities_before = identity_tree(&fixture.host_state);
+
+    let output = context_without_native_ids(
+        &fixture,
+        &fixture.root,
+        "shared-tmux-ambiguous-restore",
+        &pane,
+    );
+    let payload = typed_failure(&output);
+    assert_eq!(payload["result"]["outcome"], "failed", "{payload}");
+    assert_eq!(payload["result"]["failed_phase"], "failed", "{payload}");
+    assert_eq!(payload["result"]["committed_phases"], json!([]), "{payload}");
+    assert!(
+        payload["result"]["owner_readback"]["error"]
+            .as_str()
+            .is_some_and(|error| error.starts_with("IDENTITY_RESTORE_AMBIGUOUS:")),
+        "{payload}"
+    );
+    assert_eq!(
+        identity_tree(&fixture.host_state),
+        identities_before,
+        "ambiguous recovery must not create, remove, or change identity credentials"
+    );
+}
+
 #[test]
 fn b01_automatic_context_persists_proof_before_effect_and_redacts_capability() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();

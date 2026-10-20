@@ -250,7 +250,7 @@ fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Va
             },
             "blocked_boundary": "Investigate and unblock first; only pause for a true external approval or dependency gate.",
             "completion_action": "Drive the project to verified merge, cleanup, task closure, and final acceptance.",
-            "next_action": "Run `appsdk longhorizon show`, audit current facts, and keep eligible capacity saturated peer-first. Route long-horizon goals through the public board to suitable, consenting peers; route bounded one-shot execution or observation to independent `codex exec --profile gcm` workers only when every eligible peer is busy. Converge owned worktrees and stale resources, close or park each P0/P1 with evidence, report protected holds (PROTECTED_HOLDs), verify delivery, integrate, and re-arm a consumed one-shot wake before ending when scheduling must continue.",
+            "next_action": "Run `appsdk longhorizon show`, audit current facts, and keep eligible capacity saturated peer-first. Route long-horizon goals through the public board to suitable, consenting peers; route bounded one-shot execution or observation to independent `codex exec --profile gcm` workers only when every eligible peer is busy. Converge owned worktrees and stale resources, close or park each P0/P1 with evidence, run each new production issue through project-canonical intake, report protected holds (PROTECTED_HOLDs), verify delivery, integrate, and re-arm a consumed one-shot wake before ending when scheduling must continue.",
             "notification_rule": "A notification is an interrupt, not completion. Do its P0/P1/P2 action, then resume scheduling; never stop on ACK/read/summary."
         });
     }

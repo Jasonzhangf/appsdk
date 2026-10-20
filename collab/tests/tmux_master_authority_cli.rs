@@ -276,10 +276,29 @@ fn master_authority_tmux_unknown_holder_keeps_control_and_projection() {
     assert!(master_responsibilities.contains("codex exec --profile gcm"));
     assert!(master_responsibilities.contains("no inherited master authority"));
     assert!(!master_responsibilities.contains("saturate every live present peer first"));
+    let next_action = context["role_brief"]["next_action"]
+        .as_str()
+        .expect("master next action");
     assert_eq!(
         context["next_actions"],
-        serde_json::json!(["run `appsdk longhorizon show`; route long-horizon goals to autonomous peers and bounded one-shot execution or observation to `codex exec --profile gcm` subworkers; state goal, scope, authorized actions, resource owner, delivery/test evidence, report and stop conditions; peers plan, dispatch, verify, resolve blockers, integrate assigned work, and clean owned resources without inheriting master authority; master retains project, cross-peer, and final integration"])
+        serde_json::json!([next_action]),
+        "idle master next_actions must project role_brief.next_action: {context}"
     );
+    let next_action_lower = next_action.to_lowercase();
+    assert!(next_action_lower.contains("peer-first"), "{next_action}");
+    assert!(
+        next_action_lower.contains("codex exec --profile gcm"),
+        "{next_action}"
+    );
+    assert!(
+        next_action_lower.contains("canonical intake"),
+        "{next_action}"
+    );
+    assert!(
+        next_action_lower.contains("protected_holds"),
+        "{next_action}"
+    );
+    assert!(next_action_lower.contains("re-arm"), "{next_action}");
     // Durable identity stays Present for the registered pane; endpoint
     // reachability and agent activity are separate observations.
     assert_eq!(context["liveness"]["presence"], "present");

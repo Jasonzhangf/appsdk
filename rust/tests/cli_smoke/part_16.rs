@@ -349,8 +349,8 @@ esac
 }
 
 #[test]
-fn longhorizon_show_rejects_invalid_worker_before_master_match() {
-    let root = temp_root("longhorizon-invalid-master-worker");
+fn longhorizon_show_separates_stale_identity_from_unreachable_worker() {
+    let root = temp_root("longhorizon-stale-identity-worker");
     fs::create_dir_all(&root).unwrap();
     let fake_bin = root.join("fake-bin");
     fs::create_dir_all(&fake_bin).unwrap();
@@ -360,14 +360,15 @@ fn longhorizon_show_rejects_invalid_worker_before_master_match() {
         r#"#!/bin/sh
 case "$1 $2" in
   "status --all")
-    case "${STATUS_VARIANT:-endpoint}" in
-      endpoint) printf '%s\n' '{"workers":[{"id":"current-peer","endpoint_live":false,"identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[]}' ;;
-      identity) printf '%s\n' '{"workers":[{"id":"current-peer","endpoint_live":true,"identity_valid":false,"suspected_offline":false}],"tasks":[],"subagents":[]}' ;;
-      offline) printf '%s\n' '{"workers":[{"id":"current-peer","endpoint_live":true,"identity_valid":true,"suspected_offline":true}],"tasks":[],"subagents":[]}' ;;
+    case "${STATUS_VARIANT:-stale_identity}" in
+      endpoint) printf '%s\n' '{"workers":[{"id":"current-peer","role":"peer","endpoint_live":false,"identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[]}' ;;
+      stale_identity) printf '%s\n' '{"workers":[{"id":"current-peer","role":"peer","active_task":"stale-route-invite","endpoint_live":true,"identity_valid":false,"suspected_offline":false}],"tasks":[{"id":"stale-route-invite","status":"working","owner":"current-peer","next_step":"continue orchestration"}],"subagents":[]}' ;;
+      offline) printf '%s\n' '{"workers":[{"id":"current-peer","role":"peer","endpoint_live":true,"identity_valid":true,"suspected_offline":true}],"tasks":[],"subagents":[]}' ;;
+      missing_worker) printf '%s\n' '{"workers":[],"tasks":[],"subagents":[]}' ;;
     esac
     ;;
-  "master status") printf '%s\n' '{"master":{"worker_id":"current-peer","endpoint_live":true}}' ;;
-  "context ") printf '%s\n' '{"identity":{"worker_id":"current-peer","kind":"peer","transport":{"kind":"appserver","thread_id":"thread-current-peer"}},"liveness":{"live":true,"transport_kind":"appserver"}}' ;;
+  "master status") printf '%s\n' '{"master":{"worker_id":"other-master","endpoint_live":true}}' ;;
+  "context ") printf '%s\n' '{"identity":{"worker_id":"current-peer","kind":"peer","role":"worker","transport":{"kind":"appserver","thread_id":"thread-current-peer"}},"liveness":{"live":true,"transport_kind":"appserver"}}' ;;
   *) exit 64 ;;
 esac
 "#,
@@ -375,7 +376,12 @@ esac
     .unwrap();
     fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
 
-    for variant in ["endpoint", "identity", "offline"] {
+    for (variant, expected_role) in [
+        ("endpoint", "unknown"),
+        ("stale_identity", "worker"),
+        ("offline", "unknown"),
+        ("missing_worker", "unknown"),
+    ] {
         let result = Command::new(binary())
             .args(["longhorizon", "show", "--json"])
             .current_dir(&root)
@@ -386,7 +392,11 @@ esac
             .unwrap();
         assert!(result.status.success(), "variant={variant}");
         let payload: Value = serde_json::from_slice(&result.stdout).unwrap();
-        assert_eq!(payload["role"], "unknown", "variant={variant}");
+        assert_eq!(payload["role"], expected_role, "variant={variant}");
+        if variant == "stale_identity" {
+            assert_eq!(payload["assigned"][0]["id"], "stale-route-invite");
+            assert!(payload["charter"].as_str().unwrap().contains("独立 worker"));
+        }
     }
 
     fs::remove_dir_all(root).unwrap();

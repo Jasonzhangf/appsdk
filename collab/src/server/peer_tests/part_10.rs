@@ -315,6 +315,21 @@ fn board_invitation_uses_authoritative_binding_when_identity_projection_is_stale
     assert_eq!(accepted.data["task"]["owner"], "peer");
     assert_eq!(accepted.data["task"]["status"], "working");
 
+    let accepted_context = handle_context(&server, "peer".into(), "token-peer".into());
+    assert!(accepted_context.ok, "{:?}", accepted_context.error);
+    assert_eq!(
+        accepted_context.data["role_brief"]["role"], "worker",
+        "the durable invitation must not be revoked by stale status identity"
+    );
+    assert!(
+        accepted_context.data["role_brief"]["next_action"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("accepted goal's orchestrator"),
+        "{}",
+        accepted_context.data["role_brief"]
+    );
+
     std::fs::remove_dir_all(root).ok();
 }
 

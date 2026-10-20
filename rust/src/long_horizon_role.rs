@@ -45,10 +45,13 @@ pub(crate) fn execution_role(root: &Path, status: &Option<Value>) -> ExecutionRo
     }) else {
         return ExecutionRole::Unknown;
     };
-    let worker_is_live = worker["endpoint_live"].as_bool() == Some(true)
-        && worker["identity_valid"].as_bool() == Some(true)
+    // `status.identity_valid` is a lagging projection. The authenticated
+    // context and the durable binding decide identity and role; a stale status
+    // row must not revoke an already accepted peer. Reachability is still a
+    // live observation gate, and an unavailable context probe returns Unknown.
+    let worker_is_reachable = worker["endpoint_live"].as_bool() == Some(true)
         && worker["suspected_offline"].as_bool() == Some(false);
-    if !worker_is_live {
+    if !worker_is_reachable {
         return ExecutionRole::Unknown;
     }
 
@@ -62,12 +65,14 @@ pub(crate) fn execution_role(root: &Path, status: &Option<Value>) -> ExecutionRo
     if master_matches_context == Some(true) {
         return ExecutionRole::Master;
     }
-    if context["identity"]["role"].as_str() == Some("managed-subagent") {
-        return ExecutionRole::ManagedSubagent;
-    }
 
-    match worker["role"].as_str() {
-        Some("peer") | Some("worker") => ExecutionRole::Worker,
+    match context["identity"]["role"].as_str() {
+        Some("master") => ExecutionRole::Unknown,
+        Some("managed-subagent") => ExecutionRole::ManagedSubagent,
+        Some("worker") => ExecutionRole::Worker,
+        _ if matches!(worker["role"].as_str(), Some("peer") | Some("worker")) => {
+            ExecutionRole::Worker
+        }
         _ if master_matches_context == Some(false) => ExecutionRole::Worker,
         _ => ExecutionRole::Unknown,
     }

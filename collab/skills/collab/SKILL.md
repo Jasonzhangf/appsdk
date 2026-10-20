@@ -9,6 +9,10 @@ description: "仅约束已成功注册 Collab 的 peer；master 权限需另行�
 
 Collab 只有一个全局、由用户管理的 daemon。agent 不启动、关闭或重启它，也不为身份恢复申请维护窗口。用户维护命令、参数和凭据不属于 agent 接口。
 
+Collab/AppSDK 与 tmux 使用独立生命周期。Collab 安装、重启、注册、身份恢复、
+巡检或 daemon 不可达，都不得触发 tmux server 的重启或停止，也不得关闭、
+终止宿主 pane。现有共享 Collab daemon 继续由用户管理。
+
 默认使用 `collab context`。当前 `cwd` 决定 project，当前 tmux session 决定本次身份上下文；历史 pane 绑定到谁都不阻断恢复。当前 project 没有 master 时自动恢复为 peer；已有 master 时询问用户是否授权当前身份恢复为 master，授权后直接替换现有 master，未授权则继续作为 peer。不按任务内容、worktree、旧角色或 master 派单增加身份准入校验，不要求重新注册或通信回环。daemon 不可达时保留身份和任务，返回服务不可用；不启动第二个服务或修改 journal、route、credential 文件。
 
 明确恢复授权覆盖当前 pane 的历史 peer/master；旧绑定和旧 route 自动失效，不再要求旧身份批准。agent 可以移除当前 pane 自身的 agent 绑定和 route，不关闭宿主。daemon 自动清理失效 route。当前项目 master 可以 reset 本项目的 Collab，移除历史消息、route、任务、资产和负载；只清当前项目，不操作其他项目或全局 daemon 生命周期。实际 I/O 错误保留原错，不用历史身份保护拒绝当前授权，也不伪造成功。
@@ -53,6 +57,29 @@ closure is a long-horizon goal.
 - A managed subagent completes only its bounded assignment. It reports evidence
   or BLOCKED and stops. It does not own the long-horizon goal, create a global
   schedule, recursively dispatch, register Collab, or expand permissions.
+
+### Registered patrol duties
+
+Registration returns a patrol reminder, and every dispatch repeats it. On the
+next authorized activation after registration, promotion, delegation, or
+recovery, update the existing scope; context restoration does not fabricate
+board tasks, timers, or subscriptions.
+
+- `master` reconciles patrol tasks for open buglist P0/P1 work, peer progress
+  evidence, owned worktree/runtime cleanup, and currently supported monitored
+  events. Use durable board, task, delivery, and cleanup evidence; inactivity,
+  heartbeat, and ACK do not prove progress or completion. Dispatch ready P0/P1
+  work before ending the scheduling turn.
+- An ordinary peer is the autonomous goal orchestrator for its accepted scope.
+  It owns scoped patrol of task progress, blockers, owned worktree/runtime
+  resources, cleanup, and only the explicit event subscriptions needed for
+  that scope. On a blocker, first report to the current master with the task
+  ID, evidence, attempted actions, proposed solution, and help needed. If the
+  master is unavailable, record the blocker and continue safe independent work
+  instead of waiting indefinitely.
+- A managed subagent stays bounded to its assignment, reports evidence or
+  BLOCKED, and creates no global patrol task or subscription. Its peer parent
+  or master owns that patrol.
 
 Every sender states the goal, scope, authorized actions, resource owner,
 delivery and test evidence, report channel, and stop conditions. A receiver
@@ -899,8 +926,9 @@ Task liveness is an obligation, not an ACK ceremony. A worker owns its assigned
 tasks and drives them to verified cleanup/close during its working cycle. This
 is a task-bound inspect obligation, not a transport activation schedule: it
 does not wake idle workers and does not generate worker transport input. If an actionable
-task is open, continue it; if it is blocked, find a concrete solution first,
-then report it to the current master in the same activation. Do not leave a task
+task is open, continue it; if an ordinary peer is blocked, first ask the current
+master for help with the available evidence and decision needed. A proven root
+cause or fix is not a prerequisite for that request. Do not leave a task
 at `assigned`, `working`, `blocked`, `waiting`, `delivered`, or
 `cleanup_pending` merely because the last direct message was acknowledged.
 After delivery or merge, perform the real cleanup and close the task; a
@@ -1140,12 +1168,18 @@ daemon 生命周期由用户管理，agent 不执行维护动作、不索取凭�
 - 边界：只回收已确认 stale 且有 owner 证据的资源，不得跨节点直接删除他人资源、共享 playground、共享进程或未经核销的候选；
 - 失败：任何回收失败必须显式报告原因并标为未收口，不允许静默跳过。
 
-A worker or subagent executes only the approved assignment, owns that
-task's full lifecycle, and returns evidence. It has no global schedule.
-On a blocker: find a concrete solution first, then report it to the current
-master immediately. Do not wait. Do not lazy-think (symptoms without a
-fix, or idle hoping master will design it). Copy parent if parent is not
-master. If delivery or test conditions are unclear, propose the missing
+巡检可以只读检查其他 owner 的 worktree、进程和 runtime，但检查不等于所有权：
+不得删除他人资源或 worktree/branch，也不得终止共享 runtime。Collab 安装、重启、
+注册、恢复和巡检都不得重启或停止 tmux server，也不得关闭或终止宿主 pane。
+
+A peer orchestrates only its accepted scope, owns that goal's full lifecycle,
+and maintains its own scoped patrol subscriptions. A managed subagent executes
+only its bounded assignment and has no independent patrol schedule.
+On a peer blocker, first ask the current master for help with the task,
+evidence, attempted actions, proposed next step, and decision needed. Do not
+delay the request while seeking a proven fix. If master is unavailable, record
+it and continue safe in-scope work. Managed subagents report within their
+assignment to parent/master. If delivery or test conditions are unclear, propose the missing
 conditions instead of guessing. Only an explicit `collab notify unsubscribe
 <subscription-id>` stops a default direct-message lease; finishing or closing
 the last task never cancels it, so a registered peer stays wakeable. There is

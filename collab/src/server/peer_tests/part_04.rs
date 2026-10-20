@@ -1,4 +1,29 @@
 #[test]
+fn managed_subworker_cannot_create_a_patrol_deadline() {
+    let (server, root) = test_server();
+    register(&server, "parent", "%parent");
+    register(&server, "child", "%child");
+    let now = now_ms();
+    let record = bind_test_subagent_record(&server, crate::subagent::Record {
+        id: "patrol-child".into(), parent: "parent".into(), peer: "child".into(),
+        status: "idle".into(), thread_id: Some("thread-child".into()),
+        profile: None, created_ms: now, ready_deadline_ms: now + 90_000,
+        last_message: None, error: None, probe_failures: Vec::new(), runtime: None,
+        create_operation_id: None, binding_id: None, endpoint_generation: None,
+    });
+    server.commit(&[Event::SubagentUpdated { subagent: record }]);
+    let response = handle_notification_subscribe(
+        &server, "child".into(), "token-child".into(), "deadline".into(),
+        Some("patrol:child".into()), None, Vec::new(), Some(100), 2, 30,
+    );
+    assert!(!response.ok);
+    assert!(response.error.unwrap().contains("managed subworkers"));
+    assert!(!server.state.lock().unwrap().notification_subscriptions.values()
+        .any(|subscription| subscription.event == "deadline"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn managed_direct_dispatch_accepts_master_and_continues_after_blocked() {
     use crate::subagent::{Action, Record};
     let (server, root) = test_server();

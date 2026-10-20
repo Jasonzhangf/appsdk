@@ -60,8 +60,11 @@ fn handle_notification_subscribe(
     if let Err(error) = verify(&state, &worker_id, &token) {
         return error;
     }
-    if matches!(event.as_str(), "deadline" | "master-idle") {
-        // Deadline and master-idle eligibility follow the current typed grant.
+    if event == "deadline" && is_managed_subagent(&state, &worker_id) {
+        return Resp::err("managed subworkers cannot create independent deadline schedules");
+    }
+    if event == "master-idle" || (event == "deadline" && goal_deadline) {
+        // Project goal deadlines and master-idle follow the current typed grant.
         // Whether that holder is reachable is a separate communication fact and
         // must not decide authority.
         let holder = match current_master_holder(server, &state) {

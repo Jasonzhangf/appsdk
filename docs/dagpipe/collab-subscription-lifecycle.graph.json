@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-subscription-lifecycle",
   "version": "0.2.0",
-  "description": "SESE subscription lifecycle graph for registered workers. Consume the committed binding without selecting or probing communication again. The existing subscription owner commits default lease creation, alignment and durable active state; explicit unsubscribe starts a later lifecycle epoch.",
+  "description": "SESE subscription lifecycle for registered workers. Consume the committed binding without selecting or probing communication again. The existing subscription owner commits default lease creation, explicit admission, alignment and durable active state; explicit unsubscribe starts a later lifecycle epoch. Ordinary peers may explicitly create finite owner-scoped generic deadline subscriptions for assigned patrol work. Master-idle and project goal deadlines require current master authority; managed subworkers cannot create independent deadline schedules. Schedule and TTL validation precede persistence. Role reminders require masters and peers to update patrol tasks and subscriptions without inventing schedules during registration or context restoration.",
   "inputs": [
     {
       "id": "worker_transport_registration",
@@ -11,6 +11,7 @@
   "nodes": [
     {
       "id": "select_registered_transport",
+      "description": "Use the authenticated owner's committed transport. Explicit subscription admission validates event class, finite schedule and TTL before persistence; ordinary peer deadlines remain owner-scoped, while master-idle and goal deadlines retain current master authority.",
       "operator": "appsdk.collab_subscription.select_transport",
       "operator_version": "1",
       "inputs": ["worker_transport_registration"],

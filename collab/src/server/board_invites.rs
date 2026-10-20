@@ -58,10 +58,16 @@ fn board_invite(server: &Server, actor: String, token: String, id: String, to: S
     details.last_response = None;
     details.revision += 1;
     task.status = "invited".into(); task.updated_ms = now;
+    let recipient_brief = role_brief(server, &state, &to);
+    let recipient_responsibilities = recipient_brief["responsibilities"]
+        .as_array().into_iter().flatten().filter_map(serde_json::Value::as_str)
+        .collect::<Vec<_>>().join("\n- ");
+    let reminder = format!("Role task: {}\nResponsibilities:\n- {}",
+        recipient_brief["role_task"].as_str().unwrap_or_default(), recipient_responsibilities);
     let message = Message {
         id: message_id.clone(), from: actor.clone(), to: to.clone(), mtype: "request".into(),
         subject: Some(format!("task-invitation:{id}")),
-        body: format!("{}\n{}\nDelivery condition: {}\nTest condition: {}\nRead the durable message with collab recv, then observe your invitation with collab board show. Respond using collab board respond <task-id> --accept|--decline --expected-revision <observed-revision>, taking the task ID and revision from the typed task view, not this message. You may decline; an invitation alone does not transfer ownership.", details.title, details.description, details.delivery_condition, details.test_condition),
+        body: format!("{}\n{}\nDelivery condition: {}\nTest condition: {}\n{}\nRead the durable message with collab recv, then observe your invitation with collab board show. Respond using collab board respond <task-id> --accept|--decline --expected-revision <observed-revision>, taking the task ID and revision from the typed task view, not this message. You may decline; an invitation alone does not transfer ownership.", details.title, details.description, details.delivery_condition, details.test_condition, reminder),
         in_reply_to: None, created_ms: now, state: "pending".into(),
         wake_attempt_count: 0, last_wake_attempt_ms: 0, retry_attempted: false,
     };

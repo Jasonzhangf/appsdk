@@ -41,6 +41,72 @@ fn publish(fixture: &AppFixture, id: &str) -> Value {
     )
 }
 
+fn role_patrol_text(context: &Value) -> String {
+    let brief = &context["role_brief"];
+    let responsibilities = brief["responsibilities"]
+        .as_array()
+        .expect("role_brief responsibilities are explicit")
+        .iter()
+        .filter_map(Value::as_str);
+    let next_action = brief["next_action"]
+        .as_str()
+        .expect("role_brief next_action is explicit");
+    responsibilities
+        .chain(std::iter::once(next_action))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn assert_role_patrol_mentions(label: &str, context: &Value, role: &str, keywords: &[&str]) {
+    assert_eq!(context["role_brief"]["role"], role, "{label}: {context}");
+    let text = role_patrol_text(context);
+    let haystack = text.to_ascii_lowercase();
+    for keyword in keywords {
+        assert!(
+            haystack.contains(keyword.to_ascii_lowercase().as_str()),
+            "{label}: role_brief responsibilities/next_action must mention {keyword:?}: {text}"
+        );
+    }
+}
+
+fn notification_subscription_count(fixture: &AppFixture, thread: &str, label: &str) -> usize {
+    let status = fixture.run_public(&["notify", "status"], thread);
+    let subscriptions = status["subscriptions"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{label}: notify status lists subscriptions: {status}"));
+    subscriptions.len()
+}
+
+fn assert_no_serialized_role_control(label: &str, value: &Value) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                let normalized = key.to_ascii_lowercase();
+                assert!(
+                    !matches!(
+                        normalized.as_str(),
+                        "authority"
+                            | "derivation"
+                            | "token"
+                            | "role_brief"
+                            | "managed_subagent"
+                            | "must_obey_master"
+                            | "may_decline_master_invite"
+                    ),
+                    "{label}: serialized role control surface leaked through key {key:?}: {value}"
+                );
+                assert_no_serialized_role_control(label, child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                assert_no_serialized_role_control(label, item);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[test]
 fn display_name_defaults_follow_current_master_without_renaming_identity() {
     let (fixture, master, peer) = setup();
@@ -661,4 +727,190 @@ fn peer_may_start_independent_work_while_an_invitation_is_pending() {
     let independent = fixture.run_public(&["task", "status", "independent"], THREAD_B);
     assert_eq!(independent["owner"], peer);
     assert_eq!(independent["next_step"], "用户自己的任务");
+}
+
+#[test]
+fn role_patrol_context_reminders_follow_master_and_peer_roles_across_restoration() {
+    let mut fixture = AppFixture::new();
+    let first_peer = fixture.run_public(&["context"], THREAD_B);
+    assert_role_patrol_mentions(
+        "first peer context",
+        &first_peer,
+        "worker",
+        &["patrol", "subscription", "scope", "master", "block"],
+    );
+
+    fixture.run_public(&["context"], THREAD_A);
+    let promoted = fixture.run_public(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "isolated role patrol fixture promotion",
+        ],
+        THREAD_A,
+    );
+    let master_keywords = [
+        "buglist",
+        "p0",
+        "p1",
+        "peer",
+        "progress",
+        "worktree",
+        "runtime",
+        "cleanup",
+        "registr",
+        "promot",
+        "restor",
+        "inspect",
+        "monitor",
+        "event",
+        "subscription",
+    ];
+    assert_role_patrol_mentions("master promotion", &promoted, "master", &master_keywords);
+    let repeated_master = fixture.run_public(&["context"], THREAD_A);
+    assert_role_patrol_mentions(
+        "repeated master context",
+        &repeated_master,
+        "master",
+        &master_keywords,
+    );
+
+    fixture.run_public(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "isolated role patrol fixture replacement",
+        ],
+        THREAD_B,
+    );
+    let demoted_peer = fixture.run_public(&["context"], THREAD_A);
+    assert_role_patrol_mentions(
+        "demoted peer context",
+        &demoted_peer,
+        "worker",
+        &["patrol", "subscription", "scope", "master", "block"],
+    );
+
+    let tasks_before = fixture.run_public(&["board", "show"], THREAD_A)["tasks"]
+        .as_array()
+        .expect("board show lists tasks")
+        .len();
+    assert_eq!(
+        tasks_before, 0,
+        "role context must not fabricate inspection tasks"
+    );
+    let master_subscriptions_before =
+        notification_subscription_count(&fixture, THREAD_B, "master before restoration");
+    let peer_subscriptions_before =
+        notification_subscription_count(&fixture, THREAD_A, "peer before restoration");
+
+    fixture.restart_daemon();
+
+    let restored_master = fixture.run_public(&["context"], THREAD_B);
+    assert_role_patrol_mentions(
+        "restored master context",
+        &restored_master,
+        "master",
+        &master_keywords,
+    );
+    let restored_peer = fixture.run_public(&["context"], THREAD_A);
+    assert_role_patrol_mentions(
+        "restored peer context",
+        &restored_peer,
+        "worker",
+        &["patrol", "subscription", "scope", "master", "block"],
+    );
+    assert_eq!(
+        notification_subscription_count(&fixture, THREAD_B, "master after restoration"),
+        master_subscriptions_before,
+        "context restoration must not create master patrol subscriptions"
+    );
+    assert_eq!(
+        notification_subscription_count(&fixture, THREAD_A, "peer after restoration"),
+        peer_subscriptions_before,
+        "context restoration must not create peer patrol subscriptions"
+    );
+    let tasks_after = fixture.run_public(&["board", "show"], THREAD_A)["tasks"]
+        .as_array()
+        .expect("board show lists tasks")
+        .len();
+    assert_eq!(
+        tasks_after, tasks_before,
+        "context restoration must not fabricate board tasks"
+    );
+}
+
+#[test]
+fn role_patrol_board_invitation_is_durable_without_serialized_control_state() {
+    let (fixture, master, peer) = setup();
+    publish(&fixture, "role-patrol-invitation");
+    let invited = fixture.run_public(
+        &[
+            "board",
+            "invite",
+            "role-patrol-invitation",
+            "--to",
+            &peer,
+            "--expected-revision",
+            "1",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(invited["task"]["owner"], master);
+    assert_eq!(invited["task"]["status"], "invited");
+
+    let received = fixture.run_public(&["recv", "--timeout", "1"], THREAD_B);
+    let invitation = received["messages"]
+        .as_array()
+        .expect("recv lists durable messages")
+        .iter()
+        .find(|message| message["subject"] == "task-invitation:role-patrol-invitation")
+        .expect("recipient receives the board invitation");
+    assert_eq!(invitation["id"], invited["msg_id"]);
+    assert_no_serialized_role_control("board invitation", invitation);
+
+    let body = invitation["body"]
+        .as_str()
+        .expect("board invitation carries a text body");
+    let body_lower = body.to_ascii_lowercase();
+    for keyword in [
+        "role task",
+        "responsibilit",
+        "orchestrat",
+        "patrol",
+        "subscription",
+        "master",
+        "block",
+    ] {
+        assert!(
+            body_lower.contains(keyword),
+            "board invitation body must mention {keyword:?}: {body}"
+        );
+    }
+
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let task = board["tasks"]
+        .as_array()
+        .expect("board show lists tasks")
+        .iter()
+        .find(|task| task["id"] == "role-patrol-invitation")
+        .expect("invited task remains visible");
+    assert_eq!(task["owner"], master);
+    assert_eq!(task["status"], "invited");
+
+    let accepted = fixture.run_public(
+        &[
+            "board",
+            "respond",
+            "role-patrol-invitation",
+            "--accept",
+            "--expected-revision",
+            "2",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(accepted["task"]["owner"], peer);
+    assert_eq!(accepted["task"]["status"], "working");
 }

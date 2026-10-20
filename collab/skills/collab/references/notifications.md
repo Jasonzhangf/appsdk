@@ -10,14 +10,56 @@ collab sendmessage --to <peer> --subject <short-topic> "<original message>"
 ## Subscription commands
 
 ```sh
+collab notify methods
 collab notify subscribe --event direct-message --ttl-seconds <bounded>
 collab notify subscribe --event resource-released --subject <resource-id> \
   --ttl-seconds <bounded>
 collab notify subscribe --event deadline --subject <timer-id> \
-  --ttl-seconds <bounded>
+  --at-ms <epoch-ms> --ttl-seconds <bounded>
+collab notify subscribe --event deadline --subject <timer-id> \
+  --every-ms <interval-ms> --repeat-count <1..=100> --ttl-seconds <bounded>
 collab notify status
 collab notify unsubscribe <subscription-id>
 ```
+
+## Patrol duties and finite schedules
+
+A registration or dispatch reminder is not a schedule. It requires the role to
+reconcile its existing scope on the next authorized activation. Do not create
+empty board tasks, a fixed polling loop, or duplicate subscriptions during
+context restoration. Update tasks and subscriptions when scope changes, reuse
+an active valid subscription, and retire only the caller's obsolete
+task-scoped subscriptions by ID.
+
+- Master patrol covers open buglist P0/P1 work, peer progress evidence, owned
+  worktree/runtime cleanup, and currently supported monitored events. Progress
+  and completion require durable board, task, delivery, or cleanup evidence;
+  inactivity, heartbeat, and ACK prove neither.
+- An ordinary peer owns patrol only for its accepted goal and resources. It may
+  use a finite owner-scoped generic `deadline` subscription for that patrol
+  when a concrete later check is needed. The direct-message lease is separate.
+- Managed subagents do not create global patrol subscriptions or independent
+  deadline schedules. Their parent or master owns the patrol.
+
+Run `collab notify methods` against the current daemon before selecting an
+event or schedule. The current source defines `direct-message`,
+`resource-released`, `deadline`, and `master-idle`; the loaded runtime's
+`methods` response is authoritative. An absent event requires implementation
+in its owning source, not a fake event, synthetic subject, or polling loop.
+Up to three active subscriptions exist per agent.
+
+- `direct-message` requires no subject and is reusable. `resource-released` and
+  `deadline` require a non-empty exact subject. Master-idle and goal deadlines
+  require the current registered master. Managed subagents cannot create
+  independent deadline schedules.
+- A deadline uses repeated `--at-ms` values or `--every-ms`; the modes are
+  mutually exclusive. Absolute times must be in the future and before TTL
+  expiry. `--every-ms` must be positive and fire before expiry.
+  `--repeat-count` is 1 through 100. TTL is 1 second through seven days.
+- The command examples show syntax only, not a default patrol cadence. Do not
+  invent a patrol interval or wake schedule. A finite subscription is created
+  only for a concrete supported event and expires or consumes without
+  automatic rearm.
 
 - AppSDK project initialization creates/refreshes the seven-day reusable default
   `direct-message` lease through the daemon identity context. Re-registering a peer
@@ -26,14 +68,17 @@ collab notify unsubscribe <subscription-id>
   unsubscribe of that lease stays cancelled; later `register` / `context` /
   `ack` must not silently re-arm it. Only an explicit unsubscribe stops the
   default lease. Finishing or closing the last task never cancels it, so a
-  registered peer stays wakeable across task lifecycles and `mailbox-only`
-  cannot appear silently. There is no `collab notify close` command; cancel a
+  registered peer stays wakeable across task lifecycles. Task-scoped cleanup
+  must not cancel or replace that default lease, so `mailbox-only` cannot
+  appear silently. There is no `collab notify close` command; cancel a
   specific owner-scoped lease with
   `collab notify unsubscribe <subscription-id>`. After an explicit
   unsubscribe, `collab notify subscribe --event direct-message` re-arms it for
   the next collaboration.
 - Direct-message leases are owner-scoped and reusable until expiry. Resource
-  and deadline subscriptions are exact-subject and one-shot.
+  subscriptions are exact-subject and one-shot. Generic deadline subscriptions
+  consume their explicit finite occurrence count; `goal:` deadlines remain
+  one-shot and current-master-only.
 - Success consumes only a one-shot event subscription. Expiry or unsubscribe
   ends any subscription; one attempted batch exhausts only its messages on a
   reusable direct-message lease.

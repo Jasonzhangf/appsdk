@@ -14,6 +14,42 @@ fn test_root(name: &str) -> PathBuf {
     root
 }
 
+async fn assert_query_only_server(socket: &std::path::Path) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !crate::client::alive(socket) && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        crate::client::alive(socket),
+        "host queries must remain available"
+    );
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let stream = tokio::net::UnixStream::connect(socket).await.unwrap();
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+    writer.write_all(b"{\"op\":\"Ping\"}\n").await.unwrap();
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
+        .await
+        .unwrap()
+        .unwrap();
+    let ping: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(
+        ping["degraded"], true,
+        "an unavailable legacy source must not activate a blank reducer: {ping}"
+    );
+    writer
+        .write_all(b"{\"op\":\"MasterStatus\"}\n")
+        .await
+        .unwrap();
+    line.clear();
+    tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(line.contains("PROJECT_RUNTIME_UNAVAILABLE"), "{line}");
+}
+
 #[test]
 fn legacy_host_fence_is_isolated_with_a_custom_state_root() {
     let root = test_root("legacy-fence-path");
@@ -101,7 +137,7 @@ async fn pid_publication_failure_removes_the_owned_socket() {
 }
 
 #[tokio::test]
-async fn startup_rejects_a_reachable_legacy_project_daemon() {
+async fn reachable_legacy_project_daemon_keeps_new_host_query_only() {
     let _startup_test_lock = startup_test_lock();
     let root = test_root("legacy-socket");
     let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
@@ -109,20 +145,26 @@ async fn startup_rejects_a_reachable_legacy_project_daemon() {
     let legacy_socket = root.join(".agent-collab/server/server.sock");
     let listener = UnixListener::bind(&legacy_socket).expect("bind legacy socket");
 
-    let error = run_with_host_paths(Scope { root: root.clone() }, host_paths.clone())
-        .await
-        .expect_err("a reachable legacy daemon must be fenced");
-    assert!(error.to_string().contains("DAEMON_MIGRATION_REQUIRED"));
-    assert!(error.to_string().contains("legacy project daemon"));
-    assert!(!host_paths.socket_path().exists());
+    let running = tokio::spawn(run_with_host_paths(
+        Scope { root: root.clone() },
+        host_paths.clone(),
+    ));
+    assert_query_only_server(&host_paths.socket_path()).await;
     assert!(legacy_socket.exists());
+    let central = host_paths.app_storage_root(
+        std::fs::canonicalize(&root).unwrap().to_str().unwrap(),
+        crate::identity::CLI_APP_SERVER_ID,
+    );
+    assert!(!central.join(".agent-collab/server/journal.jsonl").exists());
+    running.abort();
+    let _ = running.await;
 
     drop(listener);
     std::fs::remove_dir_all(root).expect("remove startup test root");
 }
 
 #[tokio::test]
-async fn startup_rejects_a_held_legacy_project_lock() {
+async fn held_legacy_project_lock_serves_only_host_queries_without_a_fresh_reducer() {
     let _startup_test_lock = startup_test_lock();
     let root = test_root("legacy-lock");
     let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
@@ -138,15 +180,88 @@ async fn startup_rejects_a_held_legacy_project_lock() {
     let rc = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     assert_eq!(rc, 0, "test must hold the legacy lock");
 
-    let error = run_with_host_paths(Scope { root: root.clone() }, host_paths.clone())
-        .await
-        .expect_err("a held legacy writer lock must be fenced");
-    assert!(error.to_string().contains("DAEMON_MIGRATION_REQUIRED"));
-    assert!(error.to_string().contains("legacy project daemon lock"));
-    assert!(!host_paths.socket_path().exists());
+    let journal = root.join(".agent-collab/server/journal.jsonl");
+    std::fs::write(&journal, b"").unwrap();
+    let running = tokio::spawn(run_with_host_paths(
+        Scope { root: root.clone() },
+        host_paths.clone(),
+    ));
+    assert_query_only_server(&host_paths.socket_path()).await;
+    assert_eq!(std::fs::read(&journal).unwrap(), b"");
+    let central = host_paths.app_storage_root(
+        std::fs::canonicalize(&root).unwrap().to_str().unwrap(),
+        crate::identity::CLI_APP_SERVER_ID,
+    );
+    assert!(!central.join(".agent-collab/server/journal.jsonl").exists());
+    running.abort();
+    let _ = running.await;
 
     drop(lock_file);
     std::fs::remove_dir_all(root).expect("remove startup test root");
+}
+
+#[tokio::test]
+async fn established_central_store_is_not_blocked_by_a_retired_legacy_lock() {
+    let _startup_test_lock = startup_test_lock();
+    let root = test_root("retired-legacy-lock");
+    let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+    host_paths.ensure_root().unwrap();
+    let scope = std::fs::canonicalize(&root).unwrap();
+    let central =
+        host_paths.app_storage_root(scope.to_str().unwrap(), crate::identity::CLI_APP_SERVER_ID);
+    let journal = central.join(".agent-collab/server/journal.jsonl");
+    std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+    let original = serde_json::to_vec(&Event::Registered {
+        worker: WorkerRec {
+            id: "central-owner-peer".into(),
+            token: "private-fixture-token".into(),
+            cwd: scope.to_string_lossy().into_owned(),
+            registered_ms: now_ms(),
+            transport: None,
+        },
+    })
+    .unwrap();
+    let mut history = original.clone();
+    history.push(b'\n');
+    std::fs::write(&journal, &history).unwrap();
+    let legacy = root.join(".agent-collab/server/journal.jsonl");
+    std::fs::write(&legacy, b"").unwrap();
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(root.join(".agent-collab/server/daemon.lock"))
+        .unwrap();
+    use std::os::unix::io::AsRawFd;
+    assert_eq!(
+        unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+    let running = tokio::spawn(run_with_host_paths(
+        Scope { root: root.clone() },
+        host_paths.clone(),
+    ));
+    let socket = host_paths.socket_path();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !crate::client::alive(&socket) && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let ping = tokio::task::spawn_blocking(move || {
+        crate::client::call::<serde_json::Value>(&socket, &Req::Ping)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        ping["workers"], 1,
+        "retired local storage must not veto the established central owner: {ping}"
+    );
+    assert_eq!(std::fs::read(&legacy).unwrap(), b"");
+    assert!(std::fs::read(&journal).unwrap().starts_with(&history));
+    running.abort();
+    let _ = running.await;
+    drop(lock);
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[tokio::test]
@@ -173,7 +288,11 @@ async fn running_host_daemon_holds_legacy_writer_fence() {
 
     let legacy_socket = root.join(".agent-collab/server/server.sock");
     let legacy_project_lock = root.join(".agent-collab/server/daemon.lock");
-    let journal = root.join(".agent-collab/server/journal.jsonl");
+    let storage = host_paths.app_storage_root(
+        std::fs::canonicalize(&root).unwrap().to_str().unwrap(),
+        crate::identity::CLI_APP_SERVER_ID,
+    );
+    let journal = storage.join(".agent-collab/server/journal.jsonl");
     let journal_before = std::fs::read(&journal).expect("host daemon must open project journal");
 
     let old_host_attempt = acquire_daemon_lock(&legacy_host_lock, &legacy_socket);

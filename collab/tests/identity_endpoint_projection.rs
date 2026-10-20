@@ -21,13 +21,19 @@ fn peer_endpoint_live(value: &Value, worker_id: &str) -> Value {
 }
 
 fn assert_not_live_consistent(fixture: &Fixture, pane: &Pane, worker_id: &str, grant_id: &Value) {
-    let status = fixture.run_ok(&["master", "status"], Some(pane));
+    let run = |args: &[&str]| fixture.run_ok(args, Some(pane));
+    let status = run(&["master", "status"]);
     assert_eq!(status["master"]["worker_id"], worker_id, "{status}");
     assert_eq!(&status["master"]["grant_id"], grant_id, "{status}");
     let observed = status["master"]["endpoint_live"].clone();
     assert!(observed.is_null() || observed == false, "{status}");
 
-    let context = fixture.run_context(&["context"], Some(pane));
+    let context = run(&["context"]);
+    let context = context
+        .get("result")
+        .and_then(|result| result.get("snapshot"))
+        .cloned()
+        .unwrap_or(context);
     assert_eq!(context["master"]["worker_id"], worker_id, "{context}");
     assert_eq!(&context["master"]["grant_id"], grant_id, "{context}");
     assert_eq!(context["master"]["endpoint_live"], observed, "{context}");
@@ -45,7 +51,7 @@ fn assert_not_live_consistent(fixture: &Fixture, pane: &Pane, worker_id: &str, g
     assert_eq!(master_peer["role"], "master", "{context}");
     assert_eq!(master_peer["presence"], "present", "{context}");
 
-    let workers = fixture.run_ok(&["who"], Some(pane));
+    let workers = run(&["who"]);
     assert_eq!(endpoint_live(&workers, worker_id), observed, "{workers}");
     let master_row = workers["workers"]
         .as_array()
@@ -56,7 +62,7 @@ fn assert_not_live_consistent(fixture: &Fixture, pane: &Pane, worker_id: &str, g
     assert_eq!(master_row["identity_valid"], true, "{workers}");
     assert_eq!(master_row["role"], "master", "{workers}");
 
-    let board = fixture.run_ok(&["board", "show"], Some(pane));
+    let board = run(&["board", "show"]);
     assert_eq!(board["master"]["worker_id"], worker_id, "{board}");
     assert_eq!(&board["master"]["grant_id"], grant_id, "{board}");
     assert_eq!(board["master"]["endpoint_live"], observed, "{board}");
@@ -148,7 +154,7 @@ fn live_pane_reports_endpoint_live_true_and_output_keeps_identity() {
 #[test]
 fn missing_pane_and_lost_socket_report_not_live() {
     let label = "collab-endpoint-missing";
-    let (fixture, master_pane) = single_pane_fixture(label);
+    let (mut fixture, master_pane) = single_pane_fixture(label);
     let master = fixture.registered_context(&master_pane, true);
     let master_id = master["identity"]["worker_id"]
         .as_str()
@@ -209,16 +215,63 @@ fn missing_pane_and_lost_socket_report_not_live() {
         &fixture.tmux_socket,
         &["kill-session", "-t", &format!("{label}-peer")],
     );
-    assert_not_live_consistent(&fixture, &peer_pane, &master_id, &grant_id);
+    // Observe the lost endpoint from a real independent caller, rather than
+    // impersonating a process in the session that was just closed.
+    let lost_socket = fixture.tmux_socket.clone();
+    let observer_socket = fixture.root.join("observer.sock");
+    let observer_session = format!("{label}-observer");
+    let observer_seed = format!("{label}-observer-seed");
+    tmux(
+        &observer_socket,
+        &["new-session", "-d", "-s", &observer_seed, "sleep 600"],
+    );
+    tmux(
+        &observer_socket,
+        &["new-session", "-d", "-s", &observer_session, "sleep 600"],
+    );
+    tmux(&observer_socket, &["kill-session", "-t", &observer_seed]);
+    fixture.owned_sessions.push(observer_session);
+    std::fs::write(
+        fixture.host_state.join("tmux-endpoints.json"),
+        serde_json::to_vec(&json!({
+            "endpoints": [lost_socket.to_string_lossy(), observer_socket.to_string_lossy()]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fixture.tmux_socket = observer_socket;
+    let observer = Pane {
+        server_pid: String::from_utf8(
+            tmux(&fixture.tmux_socket, &["display-message", "-p", "#{pid}"]).stdout,
+        )
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap(),
+        pane_id: String::from_utf8(
+            tmux(
+                &fixture.tmux_socket,
+                &["display-message", "-p", "#{pane_id}"],
+            )
+            .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_owned(),
+        session_anchor: "observer-session".into(),
+        thread_anchor: "observer-thread".into(),
+    };
+    fixture.registered_context(&observer, true);
+    assert_not_live_consistent(&fixture, &observer, &master_id, &grant_id);
 
     // An actual non-socket endpoint produces a connection/probe error. No
     // mocked presence, transport substitution, or journal mutation is used.
     // Tmux may leave its unserved socket node after the official shutdown.
-    match std::fs::remove_file(&fixture.tmux_socket) {
+    match std::fs::remove_file(&lost_socket) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => panic!("remove owned stopped tmux socket: {error}"),
     }
-    std::fs::write(&fixture.tmux_socket, b"not a tmux socket").unwrap();
-    assert_not_live_consistent(&fixture, &peer_pane, &master_id, &grant_id);
+    std::fs::write(&lost_socket, b"not a tmux socket").unwrap();
+    assert_not_live_consistent(&fixture, &observer, &master_id, &grant_id);
 }

@@ -138,7 +138,19 @@ fn manual_restore_case(returns: bool) {
     let challenge_file = fixture.root.join("challenge.json");
     let returned_file = fixture.root.join("returned.json");
     let endpoint_file = fixture.root.join("current-endpoint.json");
+    let after_file = fixture.root.join("after-endpoint.json");
     let endpoint_output = shell_quote(&endpoint_file.to_string_lossy());
+    let finish = format!(
+        "{}\n\"$COLLAB_BINARY\" context --op '{}-after' >{} 2>>\"$PANE_STDERR\"\n{}",
+        if returns {
+            format!("\"$COLLAB_BINARY\" context --return-challenge \"$CHALLENGE\" >{} 2>>\"$PANE_STDERR\"", shell_quote(&returned_file.to_string_lossy()))
+        } else {
+            String::new()
+        },
+        label,
+        shell_quote(&after_file.to_string_lossy()),
+        if returns { "" } else { "exec sleep 600" }
+    );
     let script = format!(
         r#"set -e
 "$COLLAB_BINARY" context --op 'manual-current-endpoint' >{endpoint_output}
@@ -148,14 +160,12 @@ case "$challenge" in COLLAB_REGISTER_CHALLENGE\ {{*) ;; *) exit 3 ;; esac
 CHALLENGE="${{challenge#COLLAB_REGISTER_CHALLENGE }}"
 printf '%s' "$CHALLENGE" >{}
 {}
-"$COLLAB_BINARY" context --return-challenge "$CHALLENGE" >{} 2>>"$PANE_STDERR"
 sleep 600
 "#,
         shell_quote(&challenge_file.to_string_lossy()),
-        if returns { "" } else { "exec sleep 600" },
-        shell_quote(&returned_file.to_string_lossy())
+        finish
     );
-    let consumer = fixture.run_in_pane(&pane, label, &script);
+    let consumer = fixture.run_interactive_in_pane(&pane, label, &script);
     assert!(
         wait_until(Duration::from_secs(15), || challenge_file.exists()),
         "{}",
@@ -182,18 +192,24 @@ sleep 600
         assert_eq!(returned["result"]["outcome"], "completed", "{returned}");
         assert!(!challenge_record(&fixture, label)["verified"].is_null());
         assert_eq!(
-            fixture.context_query(label, Some(&pane))["result"]["queried_operation"]["phase"],
+            fixture.context_query(label, None)["result"]["queried_operation"]["phase"],
             "completed"
         );
     } else {
         assert!(challenge_record(&fixture, label)["verified"].is_null());
         assert_ne!(
-            fixture.context_query(label, Some(&pane))["result"]["queried_operation"]["phase"],
+            fixture.context_query(label, None)["result"]["queried_operation"]["phase"],
             "completed"
         );
     }
     assert_eq!(registration_effects(&fixture), effects);
-    let after = fixture.context(Some("manual-after"), Some(&pane));
+    assert!(
+        wait_until(Duration::from_secs(15), || std::fs::read(&after_file)
+            .is_ok_and(|bytes| serde_json::from_slice::<Value>(&bytes).is_ok())),
+        "{}",
+        consumer.output()
+    );
+    let after: Value = serde_json::from_slice(&std::fs::read(after_file).unwrap()).unwrap();
     assert_eq!(after["result"]["snapshot"]["identity"], identity);
     assert_eq!(after["result"]["snapshot"]["binding"], binding);
     assert_eq!(after["result"]["snapshot"]["master"], master);

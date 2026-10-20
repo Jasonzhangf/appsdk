@@ -81,12 +81,10 @@ fn persisted_runtime_matches_scope(scope: &Scope, ident: &Identity) -> anyhow::R
         let Some(persisted_endpoint) = transport.tmux_endpoint.as_ref() else {
             return Ok(false);
         };
-        let Ok(current) = crate::client::adapters::tmux::anchor_from_env() else {
+        let Ok(current) = crate::client::adapters::tmux::candidate_from_env() else {
             return Ok(false);
         };
-        if current.socket_path != persisted_endpoint.socket_path
-            || current.pane_id != persisted_endpoint.pane_id
-        {
+        if current.endpoint.tmux_session_id != persisted_endpoint.tmux_session_id {
             return Ok(false);
         }
     } else if runtime.native_thread_id.is_some() {

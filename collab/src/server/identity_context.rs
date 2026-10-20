@@ -50,6 +50,13 @@ fn add_optional_master_choice(snapshot: &mut serde_json::Value) {
 }
 
 fn validate_facts(facts: &IdentityFacts) -> anyhow::Result<()> {
+    if facts.caller_pid == Some(0) {
+        anyhow::bail!("IDENTITY_FACT_INVALID: caller_pid must be non-zero");
+    }
+    if let Some(hint) = facts.pane_hint.as_deref() {
+        crate::client::adapters::tmux::validate_pane_id(hint)
+            .map_err(|error| anyhow::anyhow!("IDENTITY_FACT_INVALID: {error}"))?;
+    }
     // Native facts are not admission inputs when the current pane is selected.
     if facts.tmux.is_some() {
         return Ok(());
@@ -87,6 +94,16 @@ fn validate_facts(facts: &IdentityFacts) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Facts that define the durable intent. A caller process id and pane hint are
+/// invocation-local observation inputs, so retries from another process keep
+/// the same intent and approval digest.
+fn digest_facts(facts: &IdentityFacts) -> IdentityFacts {
+    let mut normalized = facts.clone();
+    normalized.caller_pid = None;
+    normalized.pane_hint = None;
+    normalized
+}
+
 fn identity_operation_intent_digest(
     context: &ProjectContext,
     request: &IdentityContextRequest,
@@ -97,7 +114,7 @@ fn identity_operation_intent_digest(
         "target_identity": null,
         "action": request.action,
         "invocation": request.invocation,
-        "facts": request.facts,
+        "facts": digest_facts(&request.facts),
         "approval": request.approval,
         "grant_approval": request.grant_approval,
     });
@@ -525,7 +542,7 @@ fn approval_digest(approval: &serde_json::Value, facts: &IdentityFacts) -> Strin
         object.remove("decided_by");
         object.remove("approved_at_ms");
     }
-    let normalized = json!({"approval": approval, "facts": facts});
+    let normalized = json!({"approval": approval, "facts": digest_facts(facts)});
     let mut digest = Sha256::new();
     digest.update(serde_json::to_vec(&normalized).unwrap_or_default());
     format!("sha256:{:x}", digest.finalize())

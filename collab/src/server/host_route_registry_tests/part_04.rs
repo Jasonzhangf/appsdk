@@ -474,7 +474,7 @@
     }
 
     #[test]
-    fn legacy_multiple_app_routes_fail_replay_before_opening_a_second_reducer() {
+    fn legacy_multiple_app_routes_keep_one_resident_reducer() {
         let (server, root, journal_path) = test_server();
         register_known_project_with_app(&server, &root, "app-a");
         assert!(
@@ -497,12 +497,23 @@
         let before_route_journal = std::fs::read(&route_journal).unwrap();
         let before_resident_journal = std::fs::read(&journal_path).unwrap();
 
-        let error = match ProjectRuntimeManager::new(server.clone(), &host_paths) {
-            Ok(_) => panic!("legacy pending route must not open a second reducer"),
-            Err(error) => error,
-        };
-        assert!(error.starts_with("HOST_ROUTE_REPLAY_FAILED:"), "{error}");
-        assert!(error.contains("resident host"), "{error}");
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths)
+            .expect("legacy resident and pending app routes must replay without a second reducer");
+        assert_eq!(manager.runtimes().len(), 1);
+        let project_scope =
+            GlobalState::canonical_project_scope(&root).unwrap().as_str().to_owned();
+        let routes = manager.routes.lock().unwrap();
+        let resident = routes
+            .get(&("app-a".into(), project_scope.clone()))
+            .expect("the resident app route must remain indexed");
+        assert!(resident
+            .runtime
+            .as_ref()
+            .is_some_and(|runtime| Arc::ptr_eq(runtime, &server)));
+        let pending = routes
+            .get(&("app-b".into(), project_scope))
+            .expect("the secondary app route must remain explicit metadata");
+        assert!(pending.runtime.is_none());
         assert_eq!(std::fs::read(&route_journal).unwrap(), before_route_journal);
         assert_eq!(
             std::fs::read(&journal_path).unwrap(),
@@ -813,7 +824,6 @@
             host_root.file_name().unwrap().to_string_lossy()
         ));
         std::fs::create_dir_all(&external_root).unwrap();
-        let canonical_project_root = project_root.canonicalize().unwrap();
         let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
         let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
         let seed_context = context_with_app(&project_root, "runtime-seed");
@@ -827,7 +837,11 @@
         assert!(seed_response.ok, "{seed_response:?}");
 
         let escape_context = context_with_app(&project_root, "runtime-escape");
-        let escape_storage_root = app_scope_storage_path(&canonical_project_root, "runtime-escape");
+        let escape_storage_root = host_paths.app_storage_root(
+            escape_context.project_scope.as_str(),
+            escape_context.app_scope_id.as_str(),
+        );
+        std::fs::create_dir_all(escape_storage_root.parent().unwrap()).unwrap();
         symlink(&external_root, &escape_storage_root).unwrap();
         let route_journal = host_paths.state_root().join("routes.jsonl");
         let before_route_journal = std::fs::read(&route_journal).unwrap();
@@ -893,9 +907,12 @@
         ));
         std::fs::create_dir_all(&external_root).unwrap();
         let canonical_project_root = project_root.canonicalize().unwrap();
-        let storage_root = app_scope_storage_path(&canonical_project_root, "replay-escape");
-        symlink(&external_root, &storage_root).unwrap();
+        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
         let project_scope = GlobalState::canonical_project_scope(&canonical_project_root).unwrap();
+        let storage_root =
+            host_paths.app_storage_root(project_scope.as_str(), "replay-escape");
+        std::fs::create_dir_all(storage_root.parent().unwrap()).unwrap();
+        symlink(&external_root, &storage_root).unwrap();
         let record = HostRouteRecord {
             version: 1,
             op: "register".into(),
@@ -905,7 +922,6 @@
             storage_root: storage_root.to_string_lossy().into_owned(),
             registered_ms: 1,
         };
-        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
         std::fs::create_dir_all(host_paths.state_root()).unwrap();
         let route_journal = host_paths.state_root().join("routes.jsonl");
         std::fs::write(
@@ -938,15 +954,22 @@
         use std::os::unix::fs::symlink;
 
         let (server, root, _) = test_server();
-        let runtimes = root.join(".agent-collab/server/runtimes");
-        let real_parent = runtimes.join("real-parent");
-        let alias_parent = runtimes.join("alias-parent");
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let central_apps = host_paths
+            .app_storage_root(
+                GlobalState::canonical_project_scope(&root).unwrap().as_str(),
+                "existing-app",
+            )
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let real_parent = central_apps.join("real-parent");
+        let alias_parent = central_apps.join("alias-parent");
         std::fs::create_dir_all(&real_parent).unwrap();
         symlink(&real_parent, &alias_parent).unwrap();
 
         let real_storage_root = real_parent.join("future");
         let aliased_storage_root = alias_parent.join("future");
-        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
         let route_journal = host_paths.state_root().join("routes.jsonl");
         std::fs::create_dir_all(host_paths.state_root()).unwrap();
         std::fs::write(&route_journal, b"").unwrap();

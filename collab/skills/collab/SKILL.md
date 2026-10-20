@@ -17,6 +17,10 @@ Collab/AppSDK 与 tmux 使用独立生命周期。Collab 安装、重启、注�
 
 明确恢复授权覆盖当前 pane 的历史 peer/master；旧绑定和旧 route 自动失效，不再要求旧身份批准。agent 可以移除当前 pane 自身的 agent 绑定和 route，不关闭宿主。daemon 自动清理失效 route。当前项目 master 可以 reset 本项目的 Collab，移除历史消息、route、任务、资产和负载；只清当前项目，不操作其他项目或全局 daemon 生命周期。实际 I/O 错误保留原错，不用历史身份保护拒绝当前授权，也不伪造成功。
 
+context 恢复还会把当前身份已存在且仍有效的订阅对齐到当前投递位置。
+这不新增巡检周期，不重置触发时间、次数或到期时间；显式取消和已到期的订阅不恢复。
+peer 仍负责按自己的目标创建或续订所需的巡检范围。
+
 ## 适用身份
 
 只有当前执行者已在本项目成功注册为 Collab peer，后文的协作规则才适用；各角色规则只约束该角色。master 规则还要求当前 peer 持有经明确授权的 master 权限。未注册的 `codex exec --profile gcm` worker 不因受托而成为 Collab peer，也不适用本 Skill 的协作协议。加载本 Skill、任务提到 Collab、看到 master 名称或启动多个 worker，都不代表已注册或取得 master 权限。
@@ -32,12 +36,20 @@ Collab daemon. Transport selection is decided by the daemon based on runtime
 facts; initial registration prefers a verified current tmux pane. Persisted
 restoration reuses the durable selected binding. Once an AppServer binding is
 selected, tmux is never a message, wake, presence, or status fallback. Its
-observed tmux socket + pane may also be stored as the durable identity anchor,
-independently of native runtime IDs.
+observed tmux endpoint is delivery placement only. cwd selects the project,
+and the current tmux session selects that project's peer. Socket paths, server
+PIDs, pane history and old native addresses do not select or protect identity.
 Production projects use the globally installed Collab v1.
 Production tmux launchers must place sockets in a stable private user directory.
 Configure the launcher, preserve existing live endpoints, and verify the actual
 new socket path; see [state paths](references/state-paths.md#production-tmux-sockets).
+
+When the user explicitly asks the current peer to become master, that request
+is the approval. Run `collab master promote --approval "<user's approval text>"`
+from that peer's current project. Do not request approval again, pass an empty
+`--approve-grant`, inspect historical journals, or reset the project to obtain
+authority. If current context cannot recover, preserve the exact error and fix
+that recovery path; do not claim promotion or communication succeeded.
 
 ## Task routing and role responsibilities
 

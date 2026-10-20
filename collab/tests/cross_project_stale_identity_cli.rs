@@ -58,12 +58,14 @@ fn create_session(fixture: &Fixture, label: &str) -> Pane {
     .trim()
     .parse::<u32>()
     .expect("tmux server pid is numeric");
-    Pane {
+    let pane = Pane {
         server_pid,
         pane_id: pane_id.clone(),
         session_anchor: format!("session-{pane_id}"),
         thread_anchor: format!("thread-{pane_id}"),
-    }
+    };
+    fixture.start_pane_runner_on_socket(&fixture.tmux_socket, &pane.pane_id, "sleep 600");
+    pane
 }
 
 fn create_external_project(fixture: &Fixture, name: &str) -> PathBuf {

@@ -26,6 +26,10 @@ pub const HOST_JOURNAL: &str = "journal.jsonl";
 pub const HOST_LOG: &str = "log.txt";
 pub const HOST_EVENTS: &str = "events.jsonl";
 
+fn pane_cli_script() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/support/pane_cli.py")
+}
+
 pub fn collab_test_binary() -> PathBuf {
     std::env::var_os("COLLAB_TEST_BINARY")
         .map(PathBuf::from)
@@ -122,6 +126,11 @@ impl Fixture {
             &tmux_socket,
             &["new-session", "-d", "-s", label, pane_command],
         );
+        std::fs::write(
+            fixture.host_state.join("tmux-endpoints.json"),
+            serde_json::to_vec(&json!({"endpoints": [tmux_socket]})).unwrap(),
+        )
+        .unwrap();
         let server_pid =
             String::from_utf8(tmux(&tmux_socket, &["display-message", "-p", "#{pid}"]).stdout)
                 .expect("tmux server pid is utf8")
@@ -133,6 +142,7 @@ impl Fixture {
                 .expect("pane id is utf8")
                 .trim()
                 .to_owned();
+        fixture.start_pane_runner_on_socket(&tmux_socket, &pane_id, pane_command);
         fixture.start_daemon();
         let pane = Pane {
             server_pid,
@@ -144,32 +154,155 @@ impl Fixture {
     }
 
     pub fn run_in_pane(&self, pane: &Pane, label: &str, script: &str) -> PaneConsumer {
+        self.run_script_in_pane_on_socket(&self.tmux_socket, pane, label, script)
+    }
+
+    /// A participant that reads a challenge must own the private pane's tty.
+    pub fn run_interactive_in_pane(&self, pane: &Pane, label: &str, script: &str) -> PaneConsumer {
         let stdout = self.root.join(format!("{label}.stdout"));
         let stderr = self.root.join(format!("{label}.stderr"));
         let script_path = self.root.join(format!("{label}.sh"));
-        std::fs::write(&script_path, script).expect("write selected-pane consumer");
-        let hook_env = self.hook_socket.as_ref().map(|socket| format!(
-            "COLLAB_CONTEXT_CANCEL_HOOK_SOCKET={} ", shell_quote(&socket.to_string_lossy())
-        )).unwrap_or_default();
-        let command = format!(
-            "cd {} && unset COLLAB_SOCKET_PATH COLLAB_HOST_SOCKET COLLAB_LOCK_PATH COLLAB_HOST_LOCK COLLAB_APPSERVER_SOCKET CODEX_APP_SERVER_SOCKET COLLAB_APPSERVER_NAMESPACE COLLAB_WORKER DSH_SESSION_ID; {}COLLAB_BINARY={} PROJECT_ROOT={} COLLAB_STATE_DIR={} CODEX_HOME={} CODEX_SESSION_ID={} CODEX_THREAD_ID={} CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex TUI' PANE_STDOUT={} PANE_STDERR={} sh {}",
-            shell_quote(&self.root.to_string_lossy()),
-            hook_env,
-            shell_quote(&self.binary.to_string_lossy()),
-            shell_quote(&self.root.to_string_lossy()),
-            shell_quote(&self.host_state.to_string_lossy()),
-            shell_quote(&self.root.join("home").to_string_lossy()),
-            shell_quote(&pane.session_anchor),
-            shell_quote(&pane.thread_anchor),
-            shell_quote(&stdout.to_string_lossy()),
-            shell_quote(&stderr.to_string_lossy()),
-            shell_quote(&script_path.to_string_lossy())
-        );
+        let mut launch = String::from("unset COLLAB_APPSERVER_SOCKET CODEX_APP_SERVER_SOCKET COLLAB_APPSERVER_NAMESPACE DSH_SESSION_ID\n");
+        for (key, value) in [
+            ("COLLAB_BINARY", self.binary.to_string_lossy().into_owned()),
+            ("PROJECT_ROOT", self.root.to_string_lossy().into_owned()),
+            (
+                "COLLAB_STATE_DIR",
+                self.host_state.to_string_lossy().into_owned(),
+            ),
+            (
+                "HOME",
+                self.root.join("home").to_string_lossy().into_owned(),
+            ),
+            (
+                "CODEX_HOME",
+                self.root.join("home").to_string_lossy().into_owned(),
+            ),
+            ("CODEX_SESSION_ID", pane.session_anchor.clone()),
+            ("CODEX_THREAD_ID", pane.thread_anchor.clone()),
+            ("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex TUI".into()),
+            ("PANE_STDOUT", stdout.to_string_lossy().into_owned()),
+            ("PANE_STDERR", stderr.to_string_lossy().into_owned()),
+        ] {
+            launch.push_str(&format!("export {key}={}\n", shell_quote(&value)));
+        }
+        launch.push_str(&format!(
+            "cd {}\n",
+            shell_quote(&self.root.to_string_lossy())
+        ));
+        launch.push_str(script);
+        std::fs::write(&script_path, launch).unwrap();
+        let command = format!("exec sh {}", shell_quote(&script_path.to_string_lossy()));
         tmux(
             &self.tmux_socket,
             &["respawn-pane", "-k", "-t", &pane.pane_id, &command],
         );
         PaneConsumer { stdout, stderr }
+    }
+
+    pub fn run_script_in_pane_on_socket(
+        &self,
+        socket: &Path,
+        pane: &Pane,
+        label: &str,
+        script: &str,
+    ) -> PaneConsumer {
+        self.ensure_pane_runner_on_socket(socket, &pane.pane_id);
+        let stdout = self.root.join(format!("{label}.stdout"));
+        let stderr = self.root.join(format!("{label}.stderr"));
+        let script_path = self.root.join(format!("{label}.sh"));
+        std::fs::write(&script_path, script).expect("write selected-pane consumer");
+        let mut command = self.pane_cli_script_command("script", socket, pane);
+        command
+            .arg("--script")
+            .arg(&script_path)
+            .env("COLLAB_BINARY", &self.binary)
+            .env("PROJECT_ROOT", &self.root)
+            .env("COLLAB_STATE_DIR", &self.host_state)
+            .env("HOME", self.root.join("home"))
+            .env("CODEX_HOME", self.root.join("home"))
+            .env("CODEX_SESSION_ID", &pane.session_anchor)
+            .env("CODEX_THREAD_ID", &pane.thread_anchor)
+            .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex TUI")
+            .env("PANE_STDOUT", &stdout)
+            .env("PANE_STDERR", &stderr);
+        if let Some(hook_socket) = &self.hook_socket {
+            command.env("COLLAB_CONTEXT_CANCEL_HOOK_SOCKET", hook_socket);
+        }
+        let output = command.output().expect("send private pane script request");
+        assert!(
+            output.status.success(),
+            "private pane script request failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        PaneConsumer { stdout, stderr }
+    }
+
+    pub fn start_pane_runner_on_socket(&self, socket: &Path, pane_id: &str, initial_command: &str) {
+        let ready = self.root.join(format!(
+            "pane-runner-{}.ready",
+            pane_id.trim_start_matches('%')
+        ));
+        std::fs::remove_file(&ready).ok();
+        let command = format!(
+            "{} {} runner --socket {} --pane-id {} --root {} --initial-command {}",
+            shell_quote("python3"),
+            shell_quote(&pane_cli_script().to_string_lossy()),
+            shell_quote(&socket.to_string_lossy()),
+            shell_quote(pane_id),
+            shell_quote(&self.root.to_string_lossy()),
+            shell_quote(initial_command),
+        );
+        tmux(socket, &["respawn-pane", "-k", "-t", pane_id, &command]);
+        assert!(
+            wait_until(Duration::from_secs(10), || {
+                self.pane_runner_is_current(socket, pane_id)
+            }),
+            "private pane runner did not become ready for {pane_id}"
+        );
+    }
+
+    fn pane_runner_is_current(&self, socket: &Path, pane_id: &str) -> bool {
+        let ready = self.root.join(format!(
+            "pane-runner-{}.ready",
+            pane_id.trim_start_matches('%')
+        ));
+        let recorded = std::fs::read_to_string(ready).unwrap_or_default();
+        let output = Command::new("tmux")
+            .arg("-S")
+            .arg(socket)
+            .args(["display-message", "-p", "-t", pane_id, "#{pane_pid}"])
+            .output();
+        output.is_ok_and(|output| {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).trim() == recorded.trim()
+        })
+    }
+
+    fn ensure_pane_runner_on_socket(&self, socket: &Path, pane_id: &str) {
+        if !self.pane_runner_is_current(socket, pane_id) {
+            self.start_pane_runner_on_socket(socket, pane_id, "sleep 600");
+        }
+    }
+
+    pub fn declare_tmux_endpoint(&self, socket: &Path) {
+        let path = self.host_state.join("tmux-endpoints.json");
+        let mut declaration: Value = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_else(|| json!({"endpoints": []}));
+        let endpoint = socket.to_string_lossy().into_owned();
+        let endpoints = declaration["endpoints"]
+            .as_array_mut()
+            .expect("tmux endpoint declaration");
+        if !endpoints
+            .iter()
+            .any(|value| value.as_str() == Some(endpoint.as_str()))
+        {
+            endpoints.push(Value::String(endpoint));
+        }
+        std::fs::write(&path, serde_json::to_vec(&declaration).unwrap())
+            .expect("declare private tmux endpoint");
     }
 
     pub fn without_tmux(label: &str) -> Self {
@@ -192,44 +325,72 @@ impl Fixture {
     }
 
     pub fn configured_command(&self, args: &[&str], pane: Option<&Pane>) -> Command {
+        if let Some(pane) = pane {
+            return self.command_on_socket(&self.tmux_socket, args, pane);
+        }
         let mut command = Command::new(&self.binary);
         command
             .args(args)
             .current_dir(&self.root)
-            .env("COLLAB_STATE_DIR", &self.host_state)
+            .env_clear()
+            .env(
+                "PATH",
+                std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin:/usr/sbin:/sbin".into()),
+            )
+            .env("LC_ALL", "en_US.UTF-8")
+            .env("HOME", self.root.join("home"))
             .env("CODEX_HOME", self.root.join("home"))
-            .env_remove("COLLAB_SOCKET_PATH")
-            .env_remove("COLLAB_HOST_SOCKET")
-            .env_remove("COLLAB_LOCK_PATH")
-            .env_remove("COLLAB_HOST_LOCK")
-            .env_remove("COLLAB_APPSERVER_SOCKET")
-            .env_remove("CODEX_APP_SERVER_SOCKET")
-            .env_remove("COLLAB_APPSERVER_NAMESPACE")
-            .env_remove("COLLAB_WORKER")
-            .env_remove("DSH_SESSION_ID")
+            .env("COLLAB_STATE_DIR", &self.host_state)
             .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex TUI");
+        for (key, value) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("COLLAB_TEST_") {
+                command.env(key, value);
+            }
+        }
         if let Some(hook_socket) = &self.hook_socket {
             command.env("COLLAB_CONTEXT_CANCEL_HOOK_SOCKET", hook_socket);
         }
-        match pane {
-            Some(pane) => {
-                command
-                    .env(
-                        "TMUX",
-                        format!("{},{},0", self.tmux_socket.display(), pane.server_pid),
-                    )
-                    .env("TMUX_PANE", &pane.pane_id)
-                    .env("CODEX_SESSION_ID", &pane.session_anchor)
-                    .env("CODEX_THREAD_ID", &pane.thread_anchor);
-            }
-            None => {
-                command
-                    .env_remove("TMUX")
-                    .env_remove("TMUX_PANE")
-                    .env_remove("CODEX_SESSION_ID")
-                    .env_remove("CODEX_THREAD_ID");
-            }
+        command
+    }
+
+    pub fn command_on_socket(&self, socket: &Path, args: &[&str], pane: &Pane) -> Command {
+        self.ensure_pane_runner_on_socket(socket, &pane.pane_id);
+        let mut command = self.pane_cli_script_command("client", socket, pane);
+        command
+            .arg("--")
+            .args(args)
+            .env("HOME", self.root.join("home"))
+            .env("CODEX_HOME", self.root.join("home"))
+            .env("CODEX_SESSION_ID", &pane.session_anchor)
+            .env("CODEX_THREAD_ID", &pane.thread_anchor)
+            .env_remove("CODEX_APP_TOOLS_PIPE_PATH");
+        if let Some(hook_socket) = &self.hook_socket {
+            command.env("COLLAB_CONTEXT_CANCEL_HOOK_SOCKET", hook_socket);
         }
+        command
+    }
+
+    fn pane_cli_script_command(&self, mode: &str, socket: &Path, pane: &Pane) -> Command {
+        let mut command = Command::new("python3");
+        command
+            .arg(pane_cli_script())
+            .arg(mode)
+            .arg("--socket")
+            .arg(socket)
+            .arg("--pane-id")
+            .arg(&pane.pane_id)
+            .arg("--root")
+            .arg(&self.root)
+            .arg("--binary")
+            .arg(&self.binary)
+            .current_dir(&self.root)
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env(
+                "PANE_CONTROL_PATH",
+                std::env::var_os("PATH").unwrap_or_default(),
+            )
+            .env("COLLAB_STATE_DIR", &self.host_state)
+            .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex TUI");
         command
     }
 
@@ -322,11 +483,19 @@ impl Fixture {
         self.registered_participant(None, "automatic-registration", pane)
     }
 
-    fn registered_participant(&self, operation_id: Option<&str>, label: &str, pane: &Pane) -> Value {
+    fn registered_participant(
+        &self,
+        operation_id: Option<&str>,
+        label: &str,
+        pane: &Pane,
+    ) -> Value {
         let done = self.root.join(format!("{label}.participant-done"));
         let result = self.root.join(format!("{label}.participant-result"));
-        let invocation = operation_id.map(|id| format!("--op {}", shell_quote(id))).unwrap_or_default();
-        let script = format!(
+        let invocation = operation_id
+            .map(|id| format!("--op {}", shell_quote(id)))
+            .unwrap_or_default();
+        let script =
+            format!(
             "\"$COLLAB_BINARY\" context {} >{} 2>\"$PANE_STDERR\"\nprintf done >{}\nsleep 600\n",
             invocation, shell_quote(&result.to_string_lossy()), shell_quote(&done.to_string_lossy())
         );
@@ -342,8 +511,10 @@ impl Fixture {
         assert_eq!(result["result"]["outcome"], "completed", "{result}");
         if operation_id.is_none() {
             let initial = &result;
-            let emitted_id = initial["operation_id"].as_str().expect("automatic public context emitted operation id");
-            return self.context(Some(emitted_id), Some(pane));
+            let emitted_id = initial["operation_id"]
+                .as_str()
+                .expect("automatic public context emitted operation id");
+            return self.registered_participant(Some(emitted_id), "automatic-readback", pane);
         }
         result
     }
@@ -366,7 +537,47 @@ impl Fixture {
     }
 
     pub fn project_journal(&self) -> PathBuf {
-        self.root.join(PROJECT_JOURNAL)
+        let project_root = std::fs::canonicalize(&self.root).unwrap_or_else(|_| self.root.clone());
+        let routes = std::fs::read_to_string(self.host_routes()).unwrap_or_default();
+        let route = routes
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find(|record| {
+                record["op"] == "register"
+                    && record["project_scope"] == project_root.to_string_lossy().as_ref()
+            });
+        if let Some(route) = route {
+            return PathBuf::from(
+                route["storage_root"]
+                    .as_str()
+                    .expect("central route storage"),
+            )
+            .join(PROJECT_JOURNAL);
+        }
+
+        let mut journals = Vec::new();
+        fn visit(path: &Path, journals: &mut Vec<PathBuf>) {
+            let entries = match std::fs::read_dir(path) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                Err(error) => panic!("read central runtime root {}: {error}", path.display()),
+            };
+            for entry in entries {
+                let path = entry.expect("read central runtime entry").path();
+                if path.is_dir() {
+                    visit(&path, journals);
+                } else if path.ends_with(PROJECT_JOURNAL) {
+                    journals.push(path);
+                }
+            }
+        }
+        visit(&self.host_state.join("projects"), &mut journals);
+        assert_eq!(
+            journals.len(),
+            1,
+            "fixture needs one initial central journal: {journals:?}"
+        );
+        journals.pop().expect("one initial central journal")
     }
 
     pub fn host_journal(&self) -> PathBuf {
@@ -610,10 +821,7 @@ impl Drop for DaemonPause {
 
 impl Fixture {
     pub fn track_tmux_session(&self, session: impl Into<String>) {
-        self.owned_sessions
-            .lock()
-            .unwrap()
-            .push(session.into());
+        self.owned_sessions.lock().unwrap().push(session.into());
     }
 }
 

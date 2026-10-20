@@ -4,7 +4,7 @@ impl ProjectRuntimeManager {
         context: ProjectContext,
         request: IdentityContextRequest,
     ) -> (Arc<Server>, Resp) {
-        self.identity_context_continue(context, request, false)
+        self.identity_context_continue(context, request, false, None)
     }
 
     fn identity_context_continue(
@@ -12,6 +12,7 @@ impl ProjectRuntimeManager {
         context: ProjectContext,
         request: IdentityContextRequest,
         continuing: bool,
+        continuation_facts: Option<IdentityFacts>,
     ) -> (Arc<Server>, Resp) {
         if request.action == "prepare_invocation" {
             return self.prepare_context_invocation(&context, request);
@@ -45,7 +46,7 @@ impl ProjectRuntimeManager {
                         let completed = existing.result.outcome == "completed";
                         let (runtime, snapshot) = if completed && request.action == "context"
                         {
-                            match self.completed_context_readback(&context, &request.facts) {
+                            match self.completed_context_readback(&context, continuation_facts.as_ref().unwrap_or(&request.facts)) {
                                 Ok((runtime, snapshot)) => (runtime, Some(snapshot)),
                                 Err(error) => {
                                     return (
@@ -114,7 +115,7 @@ impl ProjectRuntimeManager {
                 return (self.host.clone(), Resp::err(error));
             }
         };
-        let facts = match self.preflight_identity_facts(&context, request.facts.clone()) {
+        let facts = match self.preflight_identity_facts(&context, continuation_facts.unwrap_or_else(|| request.facts.clone())) {
             Ok(facts) => facts,
             Err(PreflightIdentityError::MissingFacts(data)) => {
                 // missing_facts is reported before admission: no operation
@@ -513,7 +514,19 @@ impl ProjectRuntimeManager {
         };
         // The exact admitted intent and prepared envelope come from the one
         // control owner, never from return payload or query projection.
-        self.identity_context_continue(continuation.context, continuation.request, true)
+        // The initiating CLI has exited by the time its participant replies.
+        // Continue from the selected transport just verified by accept(),
+        // while keeping the original request intact for operation idempotence.
+        let mut facts = continuation.request.facts.clone();
+        facts.caller_pid = None;
+        facts.pane_hint = None;
+        if record.transport.kind == TransportKind::Tmux {
+            facts.tmux = record.transport.tmux_endpoint.clone().map(|endpoint| crate::proto::TmuxCandidate {
+                endpoint, cwd: continuation.context.canonical_root.clone(),
+            });
+            facts.tmux_anchor = None;
+        }
+        self.identity_context_continue(continuation.context, continuation.request, true, Some(facts))
     }
 
     /// Read current typed owners without loading a runtime or replaying any
@@ -531,6 +544,7 @@ impl ProjectRuntimeManager {
             );
         }
         let mut facts = facts.clone();
+        facts = self.observe_identity_facts(context, &facts)?;
         self.complete_persisted_tmux_facts(context, &mut facts)?;
         validate_facts(&facts)?;
         let scope = Scope {
@@ -799,6 +813,9 @@ impl ProjectRuntimeManager {
             .map_err(PreflightIdentityError::Error)?;
         validate_project_registration_cwd(&context.canonical_root, &root)
             .map_err(|error| PreflightIdentityError::Error(anyhow::Error::msg(error)))?;
+        facts = self
+            .observe_identity_facts(context, &facts)
+            .map_err(PreflightIdentityError::Error)?;
         self.complete_persisted_tmux_facts(context, &mut facts)
             .map_err(PreflightIdentityError::Error)?;
         validate_facts(&facts).map_err(PreflightIdentityError::Error)?;

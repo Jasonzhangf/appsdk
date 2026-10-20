@@ -10,8 +10,10 @@ $COLLAB_STATE_DIR for isolated tests, else $HOME/.collab
   daemon.lock
   server.pid
   events.jsonl
+  journal.jsonl
   log.txt
   routes.jsonl
+  projects/<encoded-project>/apps/<encoded-app>/.agent-collab/server/
 ```
 
 Usage:
@@ -21,8 +23,10 @@ Usage:
 - `daemon.lock` prevents a second daemon. Do not delete or edit it.
 - `server.pid` is the current daemon PID. Read it through `collab context` or
   `collab status --all`; do not use it to control the user-managed service.
-- `events.jsonl` is the append-only durable daemon event stream. Do not edit or
-  delete it.
+- `events.jsonl` records service lifecycle diagnostics. It does not select an
+  identity or reconstruct task state.
+- `journal.jsonl` stores context operation receipts. Runtime reducer journals
+  live in the central project/app namespace. Do not edit either journal.
 - `log.txt` is diagnostic output. Read it for exact errors; never use it as a
   source of truth for task or identity state.
 - `routes.jsonl` is the host-wide admission/storage index for app
@@ -55,67 +59,34 @@ are outside the agent interface.
 
 ## Production tmux sockets
 
-Production tmux sockets also belong in a stable, private user directory, not
-`/tmp`, `/private/tmp`, or the OS temporary directory. The tmux launcher owns
-this setting. Collab observes the current socket through `TMUX` and uses that
-exact address; it does not create or relocate the production tmux server.
+The tmux launcher owns its sockets and lifecycle. A socket is an IPC address,
+not a durable identity. Collab maintenance does not relocate, stop or restart
+tmux. The path of an existing socket never blocks identity recovery.
 
-For shell-launched tmux, create the directory once:
+Production CLI observation does not parse `TMUX` to inject a socket path. The
+daemon observes the caller's actual pane and session through its known runtime
+endpoints. cwd selects the project; the current tmux session selects that
+project's peer. The observed socket and pane locate delivery only. A stale
+environment value or historical pane binding cannot override that observation.
 
-```sh
-install -d -m 700 "$HOME/.tmux/run"
-```
+## Project discovery and centralized persistence
 
-Export this setting in the startup file used by the launcher (`~/.zshenv` for
-zsh, including noninteractive shells):
+The project `.agent-collab/` marker discovers a project. It is not a second
+runtime truth. Project journals, mailbox, tasks, claims and bindings persist
+under the global host root's project/app namespace. The project cwd remains
+the logical scope even though its data is stored beneath `~/.collab`.
 
-```sh
-export TMUX_TMPDIR="$HOME/.tmux/run"
-```
-
-A new tmux server then uses `$HOME/.tmux/run/tmux-<uid>/default`. `-L <name>`
-changes the socket name within that directory. An explicit `-S <path>` bypasses
-this default and must itself use a stable user path. GUI and service launchers
-that bypass shell startup must configure their own launch environment. Do not
-claim that a shell edit changes those launchers.
-
-Verify a new, isolated server through `display-message -p '#{socket_path}'`.
-The socket is an IPC endpoint; a stable pathname does not preserve processes or
-sessions after a reboot.
-
-This setting affects future server creation. Existing servers keep their actual
-socket paths. Clients inside an existing tmux session may still select its
-socket through `TMUX`; outside clients can use its observed `-S` address until
-the user migrates that server. Do not move a live socket, substitute a symlink,
-rewrite Collab routes to an unobserved address, or reject current identity
-recovery because an existing server still uses a temporary path. Changing the
-default alone is not live migration. Use `collab context` to restore identity
-and communication from the real current endpoint.
-
-## Project-local registration input
-
-Each registered project root has its own `.agent-collab/`:
-
-```text
-<project>/.agent-collab/
-  server/
-  runs/
-  mailbox/
-  messages/
-```
-
-`.agent-collab/` is the project registration input and the project runtime
-reducer's durable store. The global `~/.collab/` state owns the host socket,
-route table, and global identity/liveness records; the project reducer owns
-its project-scoped journal, mailbox projection, tasks, claims, and bindings.
+The daemon's storage owner transfers valid legacy project-local data before
+activating the centralized route. It preserves data on failure and reports the
+affected project. Do not copy or edit journals to repair an active service.
 No command may reconstruct the current peer from a legacy
 `runs/<worker-id>/identity.json`. AppSDK reset must never delete
 `.agent-collab/`; use `collab migrate` or the explicit reset lifecycle rather
 than deleting files by hand.
 
-For a new project, initialize from the current global version and do not copy
-or replay old project-local control files. An old local directory is ignored
-unless the operator explicitly chooses the owner's migration or reset route.
+For a new project, use the installed `collab context`. Existing tasks and
+messages belong to the storage owner; ordinary version installation or
+identity recovery is not authorization to discard them.
 
 ## Identity and role
 

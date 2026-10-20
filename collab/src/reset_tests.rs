@@ -8,6 +8,20 @@ fn temp_root(name: &str) -> PathBuf {
     ))
 }
 
+fn seed_legacy_runtime(root: &Path) {
+    std::fs::create_dir_all(root.join(".agent-collab/server")).unwrap();
+}
+
+fn assert_current_project_marker(root: &Path) {
+    let marker = root.join(".agent-collab");
+    assert!(marker.is_dir(), "current baseline marker is missing");
+    assert!(
+        std::fs::read_dir(&marker).unwrap().next().is_none(),
+        "the current baseline is a discovery marker, not project-local runtime state"
+    );
+    assert!(!marker.join("server").exists());
+}
+
 #[test]
 fn tree_digest_is_stable_and_content_sensitive() {
     let root = temp_root("digest");
@@ -172,9 +186,9 @@ fn reset_requires_explicit_authorization() {
 }
 
 #[test]
-fn reset_retires_nonempty_runtime_files_in_current_scaffold() {
+fn reset_retires_nonempty_legacy_runtime_files() {
     let root = temp_root("nonempty-runtime");
-    scope::init(&root).unwrap();
+    seed_legacy_runtime(&root);
     std::fs::write(root.join(".agent-collab/server/events.jsonl"), b"{}\n").unwrap();
     std::fs::write(root.join(".agent-collab/server/log.txt"), b"old log\n").unwrap();
 
@@ -196,6 +210,7 @@ fn reset_retires_nonempty_runtime_files_in_current_scaffold() {
 
     assert!(!root.join(".agent-collab/server/events.jsonl").exists());
     assert!(!root.join(".agent-collab/server/log.txt").exists());
+    assert_current_project_marker(&root);
     let record = read_last_reset_record(&state);
     assert_eq!(record["already_reset"], json!(false));
     assert_eq!(record["archive_durable"], json!(true));
@@ -256,7 +271,8 @@ fn reset_does_not_mutate_unrelated_project_or_global_configuration() {
 #[test]
 fn reset_does_not_treat_nonempty_project_state_as_empty_baseline() {
     let root = temp_root("nonempty-baseline");
-    scope::init(&root).unwrap();
+    seed_legacy_runtime(&root);
+    std::fs::create_dir_all(root.join(".agent-collab/runs")).unwrap();
     std::fs::write(root.join(".agent-collab/runs/stale.jsonl"), b"{}\n").unwrap();
     std::fs::create_dir_all(root.join(".agent-collab/server/runtimes/old")).unwrap();
     std::fs::write(
@@ -283,6 +299,7 @@ fn reset_does_not_treat_nonempty_project_state_as_empty_baseline() {
 
     assert!(!root.join(".agent-collab/runs/stale.jsonl").exists());
     assert!(!root.join(".agent-collab/server/runtimes").exists());
+    assert_current_project_marker(&root);
     let record = read_last_reset_record(&state);
     assert_eq!(record["already_reset"], json!(false));
     assert_eq!(record["delivery_verified"], json!(false));
@@ -579,7 +596,7 @@ fn reset_rebuilds_an_uninitialized_project_root() {
     )
     .unwrap();
 
-    assert!(root.join(".agent-collab/server").is_dir());
+    assert_current_project_marker(&root);
     assert!(!root.join(".agent-collab/server/journal.jsonl").exists());
     let record = read_last_reset_record(&state);
     assert_eq!(record["already_reset"], json!(true));
@@ -675,8 +692,8 @@ fn reset_retires_legacy_control_plane_and_rebuilds_baseline() {
     )
     .unwrap();
 
-    // Current empty baseline exists and the legacy journal is gone.
-    assert!(root.join(".agent-collab/server").is_dir());
+    // The current discovery marker replaces the retired local control plane.
+    assert_current_project_marker(&root);
     assert!(!root.join(".agent-collab/server/journal.jsonl").exists());
 
     // The audit record is explicit that this proves reset only.
@@ -703,10 +720,11 @@ fn reset_retires_legacy_control_plane_and_rebuilds_baseline() {
     assert_eq!(record["archive_durable"], json!(false));
     assert_eq!(record["delivery_verified"], json!(false));
     assert!(record["archive_root"].is_null());
+    assert_current_project_marker(&root);
 
     // Non-empty runtime artifacts are historical state too. They must be
-    // archived and cleared rather than being accepted as a current empty
-    // baseline.
+    // archived and cleared rather than being accepted as an empty baseline.
+    seed_legacy_runtime(&root);
     std::fs::write(root.join(".agent-collab/server/journal.jsonl"), b"").unwrap();
     std::fs::write(root.join(".agent-collab/server/events.jsonl"), b"{}\n").unwrap();
     std::fs::write(root.join(".agent-collab/server/log.txt"), b"started\n").unwrap();
@@ -726,6 +744,7 @@ fn reset_retires_legacy_control_plane_and_rebuilds_baseline() {
     assert!(!record["retired"].as_array().unwrap().is_empty());
     assert!(!root.join(".agent-collab/server/events.jsonl").exists());
     assert!(!root.join(".agent-collab/server/log.txt").exists());
+    assert_current_project_marker(&root);
     assert_eq!(record["delivery_verified"], json!(false));
 
     std::fs::remove_dir_all(root).ok();
@@ -839,7 +858,7 @@ fn reset_level_flags_are_gated_per_level() {
 /// payload and its resident `.agent-collab/server/` index, leaves every other
 /// project alone, and keeps the host-level audit trail.
 #[test]
-fn reset_project_retires_the_root_that_holds_the_live_index() {
+fn reset_project_retires_a_legacy_resident_index() {
     let root = temp_root("project-guard");
     let project = root.join("project");
     let other = root.join("other");
@@ -929,7 +948,7 @@ fn reset_project_retires_the_root_that_holds_the_live_index() {
     assert!(!project.join(".agent-collab/server/log.txt").exists());
     assert!(!project.join(".agent-collab/mailbox/old.jsonl").exists());
     assert!(!project.join(".agent-collab/runs/old.jsonl").exists());
-    assert!(is_current_empty_baseline(&project.join(".agent-collab")));
+    assert_current_project_marker(&project);
     let archive_root = PathBuf::from(record["archive_root"].as_str().unwrap());
     assert_eq!(
         std::fs::read(archive_root.join(".agent-collab/server/journal.jsonl")).unwrap(),
@@ -1270,10 +1289,7 @@ fn reset_project_refuses_an_unresolvable_resident_index_descriptor() {
         },
     )
     .unwrap();
-    assert!(
-        is_current_empty_baseline(&project.join(".agent-collab")),
-        "without a descriptor the project level rebuilds an empty baseline"
-    );
+    assert_current_project_marker(&project);
 
     std::fs::remove_dir_all(root).ok();
 }

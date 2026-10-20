@@ -29,6 +29,8 @@ impl Drop for EnvVarGuard {
     fn drop(&mut self) {
         if let Some(previous) = self.previous.take() {
             std::env::set_var(self.key, previous);
+        } else {
+            std::env::remove_var(self.key);
         }
     }
 }
@@ -1084,26 +1086,22 @@ fn default_host_endpoint_uses_dot_collab_in_home() {
 }
 
 #[test]
-fn host_endpoint_rejects_split_socket_root() {
+fn host_endpoint_ignores_legacy_socket_and_lock_injection() {
+    let _env_guard = TEST_ENV_LOCK.lock().unwrap();
     let root = test_root("host-socket-split");
-    let mut paths = HostPaths::for_state_root(&root).unwrap();
-    let error = apply_endpoint_overrides(
-        &mut paths,
-        Some(root.join("nested").join("server.sock")),
-        None,
-    )
-    .unwrap_err();
-    assert!(error.to_string().contains("inside host state root"));
-    std::fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn host_endpoint_rejects_split_lock_owner() {
-    let root = test_root("host-lock-split");
-    let mut paths = HostPaths::for_state_root(&root).unwrap();
-    let error =
-        apply_endpoint_overrides(&mut paths, None, Some(root.join("other.lock"))).unwrap_err();
-    assert!(error.to_string().contains("one lock owner"));
+    let _state = EnvVarGuard::without("COLLAB_STATE_DIR");
+    let _socket = EnvVarGuard::without("COLLAB_SOCKET_PATH");
+    let _host_socket = EnvVarGuard::without("COLLAB_HOST_SOCKET");
+    let _lock = EnvVarGuard::without("COLLAB_LOCK_PATH");
+    let _host_lock = EnvVarGuard::without("COLLAB_HOST_LOCK");
+    std::env::set_var("COLLAB_STATE_DIR", &root);
+    std::env::set_var("COLLAB_SOCKET_PATH", root.join("nested/server.sock"));
+    std::env::set_var("COLLAB_HOST_SOCKET", root.join("other/server.sock"));
+    std::env::set_var("COLLAB_LOCK_PATH", root.join("nested/daemon.lock"));
+    std::env::set_var("COLLAB_HOST_LOCK", root.join("other/daemon.lock"));
+    let paths = HostPaths::resolve_from_env().unwrap();
+    assert_eq!(paths.socket_path(), root.join("server.sock"));
+    assert_eq!(paths.lock_path(), root.join("daemon.lock"));
     std::fs::remove_dir_all(root).ok();
 }
 

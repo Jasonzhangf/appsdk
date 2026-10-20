@@ -1,5 +1,14 @@
 impl ProjectRuntimeManager {
+    #[cfg(test)]
     fn ensure_resident_identity_context_route(
+        &self,
+        context: &ProjectContext,
+        request: &IdentityContextRequest,
+    ) -> Result<(), String> {
+        self.ensure_identity_context_route(context, request)
+    }
+
+    fn ensure_identity_context_route(
         &self,
         context: &ProjectContext,
         request: &IdentityContextRequest,
@@ -11,19 +20,79 @@ impl ProjectRuntimeManager {
             return Ok(());
         }
         let context_root = Path::new(&context.canonical_root);
-        if !storage_roots_equal(context_root, &self.host_root)
-            .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))?
+        let key = Self::route_key(context);
+        if self
+            .routes
+            .lock()
+            .unwrap()
+            .get(&key)
+            .and_then(|route| route.runtime.as_ref())
+            .is_some()
         {
             return Ok(());
         }
-
-        let key = Self::route_key(context);
+        if !storage_roots_equal(context_root, &self.host_root)
+            .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))?
+        {
+            self.reserve_external_route(
+                context,
+                &self.storage_root_for_new(
+                    context_root,
+                    context.project_scope.as_str(),
+                    context.app_scope_id.as_str(),
+                ),
+            )?;
+            let storage_root = self
+                .routes
+                .lock()
+                .unwrap()
+                .get(&key)
+                .map(|route| route.storage_root.clone())
+                .unwrap_or_else(|| {
+                    self.storage_root_for_new(
+                        context_root,
+                        context.project_scope.as_str(),
+                        context.app_scope_id.as_str(),
+                    )
+                });
+            self.ensure_runtime(&key, context_root, &storage_root)?;
+            return Ok(());
+        }
         let _admission = self.materialization_gate.lock().unwrap();
         if self.routes.lock().unwrap().contains_key(&key) {
             return Ok(());
         }
         self.append_resident_route_record(context)?;
         self.install_runtime(&key, self.host.clone(), None);
+        Ok(())
+    }
+
+    fn reserve_external_route(
+        &self,
+        context: &ProjectContext,
+        central_storage_root: &Path,
+    ) -> Result<(), String> {
+        let key = Self::route_key(context);
+        let project_root = Path::new(&context.canonical_root);
+        let pending = self
+            .routes
+            .lock()
+            .unwrap()
+            .get(&key)
+            .map(|route| (route.root.clone(), route.storage_root.clone()));
+        if pending.is_some() {
+            return Ok(());
+        }
+        let reservation = legacy_runtime_storage_source(
+            &self.host.host_paths,
+            &self.route_journal,
+            &key,
+            central_storage_root,
+        )
+        .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))?
+        .unwrap_or_else(|| central_storage_root.to_path_buf());
+        self.append_route_record(context, &reservation)?;
+        self.install_pending_route(&key, project_root, &reservation);
         Ok(())
     }
 
@@ -44,6 +113,7 @@ impl ProjectRuntimeManager {
         let storage_root = validate_runtime_storage_root(
             &root,
             storage_root,
+            self.host.host_paths.state_root(),
             "PROJECT_ROUTE_NOT_READY/UNSUPPORTED",
         )?;
         let server_dir = storage_root.join(".agent-collab").join("server");
@@ -57,11 +127,8 @@ impl ProjectRuntimeManager {
             None
         } else {
             Some(
-                acquire_legacy_writer_lock(
-                    &root.join(".agent-collab/server/daemon.lock"),
-                    "project daemon",
-                )
-                .map_err(|error| format!("PROJECT_ROUTE_NOT_READY/UNSUPPORTED: {error}"))?,
+                acquire_legacy_writer_lock(&server_dir.join("daemon.lock"), "project daemon")
+                    .map_err(|error| format!("PROJECT_ROUTE_NOT_READY/UNSUPPORTED: {error}"))?,
             )
         };
         let journal_path = server_dir.join("journal.jsonl");
@@ -117,7 +184,11 @@ impl ProjectRuntimeManager {
             .lock()
             .unwrap()
             .entry(key.clone())
-            .and_modify(|route| route.runtime = Some(runtime.clone()))
+            .and_modify(|route| {
+                route.root = runtime.root.clone();
+                route.storage_root = runtime.storage_root.clone();
+                route.runtime = Some(runtime.clone());
+            })
             .or_insert(RuntimeRoute {
                 root: runtime.root.clone(),
                 storage_root: runtime.storage_root.clone(),
@@ -181,6 +252,7 @@ impl ProjectRuntimeManager {
         let storage_root = validate_runtime_storage_root(
             project_root,
             storage_root,
+            self.host.host_paths.state_root(),
             "HOST_ROUTE_DURABILITY_FAILED",
         )?;
         self.append_route_record_validated(context, &storage_root, false)
@@ -207,6 +279,15 @@ impl ProjectRuntimeManager {
         allow_resident_storage: bool,
     ) -> Result<(), String> {
         let _publication = self.register_gate.lock().unwrap();
+        let project_root = storage_owner_path(Path::new(&context.canonical_root))
+            .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))?;
+        let host_state_root = storage_owner_path(self.host.host_paths.state_root())
+            .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))?;
+        if project_root.starts_with(&host_state_root)
+            && !storage_roots_equal(&project_root, &self.host_root)?
+        {
+            return Err("HOST_ROUTE_DURABILITY_FAILED: project root is inside the daemon runtime storage root; it cannot own another project's runtime assets".into());
+        }
         if allow_resident_storage {
             let project_root = Path::new(&context.canonical_root);
             let resident_root = storage_roots_equal(project_root, &self.host_root)
@@ -357,7 +438,7 @@ impl ProjectRuntimeManager {
                 .workers
                 .get(from)
                 .and_then(selected_transport_for_worker)
-                .and_then(|transport| transport.thread_id)
+                .and_then(|transport| notification_target(&transport).map(str::to_owned))
                 .ok_or_else(|| {
                     "CROSS_PROJECT_SOURCE_REJECTED: source master has no registered route address"
                         .to_string()
@@ -467,19 +548,38 @@ impl ProjectRuntimeManager {
             );
         }
         if let Req::UnregisterSelf { worker_id, token } = &req {
-            let runtime = self.routes.lock().unwrap().get(&Self::route_key(&context))
+            let runtime = self
+                .routes
+                .lock()
+                .unwrap()
+                .get(&Self::route_key(&context))
                 .and_then(|route| route.runtime.clone());
             let Some(runtime) = runtime else {
                 return (self.host.clone(), Resp::err("SELF_ROUTE_UNAVAILABLE"));
             };
-            let owned_routes: Vec<_> = self.host.state.lock().unwrap().global
-                .current_thread_routes.values().filter(|binding|
-                    binding.project_scope == context.project_scope && binding.app_scope_id == context.app_scope_id
-                        && binding.agent_id.as_str() == worker_id).cloned().collect();
-            let mut response = peer_lifecycle::unregister_self(&runtime, Some(&context), worker_id, token);
+            let owned_routes: Vec<_> = self
+                .host
+                .state
+                .lock()
+                .unwrap()
+                .global
+                .current_thread_routes
+                .values()
+                .filter(|binding| {
+                    binding.project_scope == context.project_scope
+                        && binding.app_scope_id == context.app_scope_id
+                        && binding.agent_id.as_str() == worker_id
+                })
+                .cloned()
+                .collect();
+            let mut response =
+                peer_lifecycle::unregister_self(&runtime, Some(&context), worker_id, token);
             if response.ok && !Arc::ptr_eq(&runtime, &self.host) {
                 for binding in owned_routes {
-                    if let Err(error) = self.host.commit_checked(&[Event::GlobalCurrentThreadRouteRetired { binding }]) {
+                    if let Err(error) = self
+                        .host
+                        .commit_checked(&[Event::GlobalCurrentThreadRouteRetired { binding }])
+                    {
                         response.ok = false;
                         response.error = Some(format!("SELF_ROUTE_CLEANUP_FAILED: {error}"));
                     }
@@ -519,8 +619,7 @@ impl ProjectRuntimeManager {
             let identity_context =
                 identity_context.unwrap_or_else(|| IdentityContextRequest::legacy(facts));
             if identity_context.action == "prepare_invocation" {
-                if let Err(error) =
-                    self.ensure_resident_identity_context_route(&context, &identity_context)
+                if let Err(error) = self.ensure_identity_context_route(&context, &identity_context)
                 {
                     return (self.host.clone(), Resp::err(error));
                 }
@@ -766,14 +865,20 @@ impl ProjectRuntimeManager {
             context.project_scope.as_str(),
             context.app_scope_id.as_str(),
         );
+        if let Err(error) = self.reserve_external_route(&context, &storage_root) {
+            return (self.host.clone(), Resp::err(error));
+        }
+        let storage_root = self
+            .routes
+            .lock()
+            .unwrap()
+            .get(&key)
+            .map(|route| route.storage_root.clone())
+            .unwrap_or(storage_root);
         // Admit the project route before opening or mutating its reducer. The
         // host journal is the durable transaction boundary: if it cannot be
         // published, this request must not create or mutate a project
         // journal that would be unreachable after a restart.
-        if let Err(error) = self.append_route_record(&context, &storage_root) {
-            return (self.host.clone(), Resp::err(error));
-        }
-        self.install_pending_route(&key, &context_root, &storage_root);
         let runtime = match self.ensure_runtime(&key, &context_root, &storage_root) {
             Ok(runtime) => runtime,
             Err(error) => return (self.host.clone(), Resp::err(error)),

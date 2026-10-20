@@ -396,7 +396,7 @@ async fn manager_external_register_is_durable_and_replayed_in_its_runtime() {
     assert_eq!(route_records.len(), 1);
     assert_eq!(route_records[0].app_scope_id, "manager-external-app");
     assert!(
-        !std::fs::read(external_root.join(".agent-collab/server/journal.jsonl"))
+        !std::fs::read(&runtime.journal_path)
             .unwrap()
             .is_empty()
     );

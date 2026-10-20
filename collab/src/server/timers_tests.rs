@@ -1,4 +1,5 @@
 use super::*;
+use crate::proto::SelectedTransport;
 use crate::server::keepalive::Record;
 use crate::server::state::{
     Event, MigrationRecord, NotificationSubscription, State, TaskRec, WaitSpec,

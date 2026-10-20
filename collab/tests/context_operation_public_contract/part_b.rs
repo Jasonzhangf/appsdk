@@ -23,7 +23,9 @@ fn public_context_bootstraps_an_empty_resident_route() {
     assert_eq!(records[0]["op"], "register");
     assert_eq!(records[0]["project_scope"], root);
     assert_eq!(records[0]["canonical_root"], root);
-    assert_eq!(records[0]["storage_root"], root);
+    let storage = std::path::Path::new(records[0]["storage_root"].as_str().unwrap());
+    assert!(storage.starts_with(std::fs::canonicalize(&fixture.host_state).unwrap().join("projects")));
+    assert!(storage.join(PROJECT_JOURNAL).is_file());
 }
 
 #[test]
@@ -57,7 +59,9 @@ fn public_context_rebuilds_a_missing_resident_route_after_restart() {
     assert_eq!(records[0]["op"], "register");
     assert_eq!(records[0]["project_scope"], root);
     assert_eq!(records[0]["canonical_root"], root);
-    assert_eq!(records[0]["storage_root"], root);
+    let storage = std::path::Path::new(records[0]["storage_root"].as_str().unwrap());
+    assert!(storage.starts_with(std::fs::canonicalize(&fixture.host_state).unwrap().join("projects")));
+    assert!(storage.join(PROJECT_JOURNAL).is_file());
 
     fixture.restart_daemon();
     let replay = success_payload(&fixture.command(
@@ -71,7 +75,7 @@ fn public_context_rebuilds_a_missing_resident_route_after_restart() {
 }
 
 #[test]
-fn persisted_context_restores_without_live_collection_or_admission() {
+fn persisted_context_uses_daemon_observation_without_adjacent_admission() {
     use std::os::unix::fs::PermissionsExt;
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (mut fixture, pane) = Fixture::isolated("restore-offline");
@@ -119,8 +123,8 @@ fn persisted_context_restores_without_live_collection_or_admission() {
             .output()
             .unwrap();
         assert!(
-            String::from_utf8_lossy(&output.stderr).contains("fixture display/capture I/O failed"),
-            "actual collection failure must remain explicit"
+            !String::from_utf8_lossy(&output.stderr).contains("fixture display/capture I/O failed"),
+            "caller PATH must not replace the daemon's placement observer"
         );
         let result = success_payload(&output);
         assert_eq!(result["result"]["outcome"], "completed", "{result}");
@@ -357,13 +361,29 @@ fn context_without_native_ids(
     operation_id: &str,
     pane: &Pane,
 ) -> std::process::Output {
-    fixture
-        .configured_command(&["context", "--op", operation_id], Some(pane))
-        .current_dir(project_root)
-        .env_remove("CODEX_SESSION_ID")
-        .env_remove("CODEX_THREAD_ID")
-        .output()
-        .expect("run public context without native IDs")
+    current_pane_command(fixture, project_root, operation_id, pane, &["context", "--op", operation_id])
+}
+
+fn current_pane_command(
+    fixture: &Fixture, project_root: &Path, label: &str, pane: &Pane, args: &[&str],
+) -> std::process::Output {
+    use std::os::unix::process::ExitStatusExt;
+    let done = fixture.root.join(format!("{label}.exit"));
+    let result = fixture.root.join(format!("{label}.result"));
+    if done.exists() { fs::remove_file(&done).unwrap(); }
+    let command = args.iter().map(|arg| shell_quote(arg)).collect::<Vec<_>>().join(" ");
+    let script = format!(
+        "cd {}\nunset CODEX_SESSION_ID CODEX_THREAD_ID\n\"$COLLAB_BINARY\" {} >{} 2>\"$PANE_STDERR\"\nprintf '%s' \"$?\" >{}\nsleep 600\n",
+        shell_quote(&project_root.to_string_lossy()), command,
+        shell_quote(&result.to_string_lossy()), shell_quote(&done.to_string_lossy()),
+    );
+    let consumer = fixture.run_in_pane(pane, label, &script);
+    assert!(wait_until(Duration::from_secs(15), || done.exists()), "pane command did not finish: {}", consumer.output());
+    let code: i32 = fs::read_to_string(done).unwrap().parse().unwrap();
+    std::process::Output {
+        status: std::process::ExitStatus::from_raw(code << 8),
+        stdout: fs::read(result).unwrap(), stderr: fs::read(consumer.stderr).unwrap_or_default(),
+    }
 }
 
 fn identity_tree(root: &Path) -> Vec<(String, Vec<u8>)> {
@@ -455,14 +475,8 @@ fn public_context_prefers_current_project_for_a_shared_tmux_session() {
         .expect("foreign project identity")
         .to_owned();
     assert_ne!(current_id, foreign_id);
-    let task = fixture
-        .configured_command(
-            &["task", "register", "foreign-preserved-task", "--next", "keep"],
-            Some(&foreign_pane),
-        )
-        .current_dir(&foreign_root)
-        .output()
-        .expect("register foreign project task");
+    let task = current_pane_command(&fixture, &foreign_root, "foreign-task-create", &foreign_pane,
+        &["task", "register", "foreign-preserved-task", "--next", "keep"]);
     assert!(
         task.status.success(),
         "foreign task setup failed: {}",
@@ -482,28 +496,15 @@ fn public_context_prefers_current_project_for_a_shared_tmux_session() {
         "{recovered}"
     );
 
-    let foreign_restore = fixture
-        .configured_command(
-            &["context", "--op", "shared-tmux-foreign-readback"],
-            Some(&foreign_pane),
-        )
-        .current_dir(&foreign_root)
-        .output()
-        .expect("restore foreign project context");
+    let foreign_restore = context_without_native_ids(&fixture, &foreign_root, "shared-tmux-foreign-readback", &foreign_pane);
     let foreign_restore = success_payload(&foreign_restore);
     assert_eq!(
         foreign_restore["result"]["snapshot"]["identity"]["worker_id"],
         foreign_id,
         "{foreign_restore}"
     );
-    let status = fixture
-        .configured_command(
-            &["task", "status", "foreign-preserved-task"],
-            Some(&foreign_pane),
-        )
-        .current_dir(&foreign_root)
-        .output()
-        .expect("read foreign task status");
+    let status = current_pane_command(&fixture, &foreign_root, "foreign-task-status", &foreign_pane,
+        &["task", "status", "foreign-preserved-task"]);
     assert!(
         status.status.success(),
         "foreign task readback failed: {}",
@@ -514,7 +515,7 @@ fn public_context_prefers_current_project_for_a_shared_tmux_session() {
 }
 
 #[test]
-fn public_context_rejects_ambiguous_current_project_shared_tmux_session() {
+fn public_context_restores_current_session_with_historical_identity_duplicates() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (fixture, pane) = Fixture::isolated("shared-tmux-ambiguous");
     seed_shared_session_identities(&fixture, &pane);
@@ -526,21 +527,25 @@ fn public_context_rejects_ambiguous_current_project_shared_tmux_session() {
         "shared-tmux-ambiguous-restore",
         &pane,
     );
-    let payload = typed_failure(&output);
-    assert_eq!(payload["result"]["outcome"], "failed", "{payload}");
-    assert_eq!(payload["result"]["failed_phase"], "failed", "{payload}");
-    assert_eq!(payload["result"]["committed_phases"], json!([]), "{payload}");
-    assert!(
-        payload["result"]["owner_readback"]["error"]
-            .as_str()
-            .is_some_and(|error| error.starts_with("IDENTITY_RESTORE_AMBIGUOUS:")),
-        "{payload}"
-    );
-    assert_eq!(
-        identity_tree(&fixture.host_state),
-        identities_before,
-        "ambiguous recovery must not create, remove, or change identity credentials"
-    );
+    let payload = success_payload(&output);
+    assert_eq!(payload["result"]["outcome"], "completed", "{payload}");
+    let snapshot = &payload["result"]["snapshot"];
+    assert_eq!(snapshot["registered"], true);
+    assert!(snapshot["master"].is_null(), "history must not grant master authority");
+    let worker = snapshot["identity"]["worker_id"].as_str().unwrap();
+    let selected_path = format!("{worker}/identity.json");
+    let identities_after = identity_tree(&fixture.host_state);
+    assert_eq!(identities_after.len(), identities_before.len());
+    for (path, before) in identities_before {
+        let after = &identities_after.iter().find(|(candidate, _)| candidate == &path).unwrap().1;
+        if path == selected_path {
+            let before: Value = serde_json::from_slice(&before).unwrap();
+            let after: Value = serde_json::from_slice(after).unwrap();
+            assert_eq!(after["token"], before["token"]);
+        } else {
+            assert_eq!(after, &before, "unrelated historical identity must remain intact");
+        }
+    }
 }
 
 #[test]

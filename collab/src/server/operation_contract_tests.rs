@@ -610,10 +610,14 @@ async fn healthy_startup_serves_host_query_before_project_route_admission() {
     ));
     wait_for_socket(&socket).await;
 
-    let project_journal = root.join(".agent-collab/server/journal.jsonl");
+    let storage = host_paths.app_storage_root(
+        context.project_scope.as_str(),
+        crate::identity::CLI_APP_SERVER_ID,
+    );
+    let project_journal = storage.join(".agent-collab/server/journal.jsonl");
     let project_before = std::fs::read(&project_journal).unwrap();
     let host_before = std::fs::read(host_paths.journal_path()).unwrap();
-    let activity_path = root.join(".agent-collab/server/events.jsonl");
+    let activity_path = storage.join(".agent-collab/server/events.jsonl");
     let activity_before = std::fs::read(&activity_path).ok();
     let response = send_request(
         &socket,

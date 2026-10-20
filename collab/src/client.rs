@@ -1334,6 +1334,44 @@ mod tests {
     }
 
     #[test]
+    fn password_shutdown_is_understood_by_the_legacy_daemon() {
+        #[derive(serde::Deserialize)]
+        #[serde(tag = "op")]
+        enum LegacyRequest {
+            Shutdown { operator: bool },
+        }
+        let fixture = TempServerDir::new("legacy-shutdown");
+        let listener = UnixListener::bind(fixture.socket()).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            std::io::BufReader::new(&mut stream)
+                .read_line(&mut line)
+                .unwrap();
+            let accepted = matches!(
+                serde_json::from_str::<LegacyRequest>(&line),
+                Ok(LegacyRequest::Shutdown { operator: true })
+            );
+            let response = if accepted {
+                b"{\"ok\":true,\"down\":true}\n".as_slice()
+            } else {
+                b"{\"ok\":false,\"error\":\"missing field operator\"}\n".as_slice()
+            };
+            stream.write_all(response).unwrap();
+        });
+        let response: anyhow::Result<serde_json::Value> = call(
+            &fixture.socket(),
+            &Req::Shutdown {
+                password: Some(crate::proto::MaintenancePassword::new(
+                    "fixture-maintenance-password",
+                )),
+            },
+        );
+        server.join().unwrap();
+        assert_eq!(response.unwrap()["down"], true);
+    }
+
+    #[test]
     fn call_active_socket_round_trips_without_starting_a_daemon() {
         let fixture = TempServerDir::new("round-trip");
         let listener = UnixListener::bind(fixture.socket()).expect("bind active socket");

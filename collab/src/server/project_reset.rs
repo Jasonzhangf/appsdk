@@ -278,11 +278,10 @@ pub(super) fn remove_project_tree(path: &Path, preserved: &[PathBuf]) -> Result<
 }
 
 pub(super) fn finish_reset(host: &Server, route_journal: &Path, scope: &str) -> Result<(), String> {
-    for record in load_host_route_records(route_journal)? {
-        if record.project_scope == scope {
-            delete_route(route_journal, &record)?;
-        }
-    }
+    let project_records = load_host_route_records(route_journal)?
+        .into_iter()
+        .filter(|record| record.project_scope == scope)
+        .collect::<Vec<_>>();
     remove_host_identities(&host.host_paths, scope)?;
     remove_archived_identities(&host.host_paths, scope)?;
     crate::context_operation::remove_project_proofs(&host.host_paths, scope)
@@ -297,6 +296,18 @@ pub(super) fn finish_reset(host: &Server, route_journal: &Path, scope: &str) -> 
     .collect::<Result<Vec<_>, _>>()?;
     remove_project_tree(&Path::new(scope).join(".agent-collab"), &preserved)?;
     remove_project_tree(&Path::new(scope).join(".agent-collab-v2"), &preserved)?;
+    for record in &project_records {
+        let central = host
+            .host_paths
+            .app_storage_root(scope, &record.app_scope_id);
+        let central = storage_owner_path(&central)?;
+        remove_project_tree(&central, &preserved)?;
+    }
+    // Route records are the durable discovery source for app-scoped central
+    // storage. Keep them until every fallible deletion above has succeeded.
+    for record in &project_records {
+        delete_route(route_journal, record)?;
+    }
     // The resident journal mixes projects. Compact its cleared reducer under
     // the writer's state lock, retaining the pending intent until completion.
     {

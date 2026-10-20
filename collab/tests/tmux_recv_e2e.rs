@@ -641,17 +641,9 @@ fn implicit_context_repairs_a_rejected_same_pane_credential() {
 
     // Implicit: no `--worker`, and COLLAB_WORKER is deliberately removed while
     // the tmux anchor stays, so the identity is resolved from the anchor alone.
-    let output = Command::new(&fixture.binary)
-        .arg("context")
-        .current_dir(&fixture.root)
-        .env("COLLAB_STATE_DIR", &fixture.host_state)
-        .env(
-            "TMUX",
-            format!("{},{},0", tmux_socket.display(), pane.server_pid),
-        )
-        .env("TMUX_PANE", &pane.pane_id)
-        .env("CODEX_SESSION_ID", &pane.session_anchor)
-        .env("CODEX_THREAD_ID", &pane.thread_anchor)
+    let output = fixture
+        .configured_command(&["context"], Some(&pane), "Codex TUI")
+        .env_remove("COLLAB_WORKER")
         .output()
         .expect("run implicit collab context");
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -797,10 +789,12 @@ fn context_returns_the_binding_receipt_that_addresses_the_route() {
         Some(&pane),
     );
     assert!(
-        !constrained.status.success(),
-        "actual native constraint must not accept null IDs"
+        constrained.status.success(),
+        "native environment facts must not veto the current project/session route: {}",
+        String::from_utf8_lossy(&constrained.stderr)
     );
-    assert!(String::from_utf8_lossy(&constrained.stderr).contains("ROUTE_RESOLVE_INVALID"));
+    let constrained: Value = serde_json::from_slice(&constrained.stdout).unwrap();
+    assert_eq!(constrained["binding_id"], binding["binding_id"]);
     fixture.restart_daemon();
     let restarted = pane_only_context(&fixture, &pane, &["context"]);
     assert_eq!(restarted["identity"]["worker_id"], worker_id);

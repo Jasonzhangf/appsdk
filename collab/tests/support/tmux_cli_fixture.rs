@@ -29,6 +29,15 @@ struct Fixture {
 
 impl Fixture {
     fn start_daemon(&mut self) {
+        std::fs::create_dir_all(&self.host_state).unwrap();
+        std::fs::write(
+            self.host_state.join("tmux-endpoints.json"),
+            serde_json::to_vec(&json!({
+                "endpoints": [self.tmux_socket.to_string_lossy()]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         let daemon_log = std::fs::File::create(self.root.join("test-daemon.log")).unwrap();
         self.daemon = Some(
             self.configured_command(&["serve"], None, "Codex TUI")
@@ -86,10 +95,33 @@ impl Fixture {
     /// Long-running subcommands such as `dashboard` need a spawned `Child`, not
     /// a captured `Output`.
     fn configured_command(&self, args: &[&str], pane: Option<&Pane>, originator: &str) -> Command {
-        let mut command = Command::new(&self.binary);
+        let mut command = if let Some(pane) = pane {
+            self.ensure_pane_runner(pane);
+            let mut command = Command::new("python3");
+            command
+                .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/pane_cli.py"))
+                .arg("client")
+                .arg("--socket")
+                .arg(&self.tmux_socket)
+                .arg("--pane-id")
+                .arg(&pane.pane_id)
+                .arg("--root")
+                .arg(&self.root)
+                .arg("--binary")
+                .arg(&self.binary)
+                .arg("--");
+            command
+        } else {
+            Command::new(&self.binary)
+        };
         command
             .args(args)
             .current_dir(&self.root)
+            .env("HOME", self.root.join("home"))
+            .env(
+                "PANE_CONTROL_PATH",
+                std::env::var_os("PATH").unwrap_or_default(),
+            )
             .env("COLLAB_STATE_DIR", &self.host_state)
             .env("CODEX_HOME", self.root.join("home"))
             .env_remove("COLLAB_SOCKET_PATH")
@@ -116,6 +148,40 @@ impl Fixture {
                 .env("CODEX_THREAD_ID", &pane.thread_anchor);
         }
         command
+    }
+
+    fn ensure_pane_runner(&self, pane: &Pane) {
+        let ready = self.root.join(format!(
+            "pane-runner-{}.ready",
+            pane.pane_id.trim_start_matches('%')
+        ));
+        let observed = tmux(
+            &self.tmux_socket,
+            &["display-message", "-p", "-t", &pane.pane_id, "#{pane_pid}"],
+        );
+        let pid = String::from_utf8(observed.stdout).unwrap();
+        if std::fs::read_to_string(&ready).is_ok_and(|stored| stored.trim() == pid.trim()) {
+            return;
+        }
+        let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+        let helper = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/pane_cli.py");
+        let start = format!(
+            "exec python3 {} runner --socket {} --pane-id {} --root {}",
+            quote(&helper.to_string_lossy()),
+            quote(&self.tmux_socket.to_string_lossy()),
+            quote(&pane.pane_id),
+            quote(&self.root.to_string_lossy())
+        );
+        std::fs::remove_file(&ready).ok();
+        tmux(
+            &self.tmux_socket,
+            &["respawn-pane", "-k", "-t", &pane.pane_id, &start],
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(ready.exists(), "test-owned pane runner did not start");
     }
 
     fn run_ok(&self, args: &[&str], pane: Option<&Pane>) -> Value {
@@ -153,50 +219,26 @@ impl Fixture {
         native_ids: bool,
         originator: &str,
     ) -> Value {
-        let label = format!("participant-{}", pane.pane_id.trim_start_matches('%'));
-        let script_path = self.root.join(format!("{label}.sh"));
-        let result = self.root.join(format!("{label}.result"));
-        let error = self.root.join(format!("{label}.error"));
-        let done = self.root.join(format!("{label}.done"));
-        let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
-        let native = if native_ids {
-            format!(
-                "export CODEX_SESSION_ID={} CODEX_THREAD_ID={}\n",
-                quote(&pane.session_anchor),
-                quote(&pane.thread_anchor)
-            )
-        } else {
-            "unset CODEX_SESSION_ID CODEX_THREAD_ID CODEX_THREAD\n".into()
-        };
-        let script = format!(
-            "set -e\ncd {}\nunset COLLAB_SOCKET_PATH COLLAB_HOST_SOCKET COLLAB_LOCK_PATH COLLAB_HOST_LOCK COLLAB_APPSERVER_SOCKET CODEX_APP_SERVER_SOCKET COLLAB_APPSERVER_NAMESPACE COLLAB_WORKER DSH_SESSION_ID\nexport COLLAB_STATE_DIR={} CODEX_HOME={} CODEX_INTERNAL_ORIGINATOR_OVERRIDE={}\n{native}{} context --op {} >{} 2>{}\nprintf done >{}\nsleep 600\n",
-            quote(&self.root.to_string_lossy()), quote(&self.host_state.to_string_lossy()),
-            quote(&self.root.join("home").to_string_lossy()), quote(originator), quote(&self.binary.to_string_lossy()),
-            quote(&label), quote(&result.to_string_lossy()),
-            quote(&error.to_string_lossy()), quote(&done.to_string_lossy())
+        let label = format!(
+            "participant-{}-{}",
+            pane.server_pid,
+            pane.pane_id.trim_start_matches('%')
         );
-        std::fs::write(&script_path, script).unwrap();
-        tmux(
-            &self.tmux_socket,
-            &[
-                "respawn-pane",
-                "-k",
-                "-t",
-                &pane.pane_id,
-                &format!("sh {}", quote(&script_path.to_string_lossy())),
-            ],
-        );
-        let deadline = Instant::now() + Duration::from_secs(15);
-        while !done.exists() && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(25));
+        let mut command =
+            self.configured_command(&["context", "--op", &label], Some(pane), originator);
+        if !native_ids {
+            command
+                .env_remove("CODEX_SESSION_ID")
+                .env_remove("CODEX_THREAD_ID");
         }
+        let output = command.output().unwrap();
         assert!(
-            done.exists(),
+            output.status.success(),
             "participant setup failed: {} {}",
-            std::fs::read_to_string(&error).unwrap_or_default(),
-            std::fs::read_to_string(&result).unwrap_or_default()
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
         );
-        let value: Value = serde_json::from_slice(&std::fs::read(result).unwrap()).unwrap();
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(value["ok"], true, "{value}");
         assert_eq!(value["result"]["outcome"], "completed", "{value}");
         value["result"]["snapshot"].clone()
@@ -278,6 +320,14 @@ fn single_pane_fixture(label: &str) -> (Fixture, Pane) {
     let host_state = root.join("h");
     let tmux_socket = root.join("t.sock");
     std::fs::create_dir_all(&host_state).expect("create isolated host state root");
+    std::fs::write(
+        host_state.join("tmux-endpoints.json"),
+        serde_json::to_vec(&json!({
+            "endpoints": [tmux_socket.to_string_lossy()]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
     seed_baseline(&root);
     let mut fixture = Fixture {
         binary: collab_test_binary(),

@@ -116,7 +116,11 @@ async fn dispatch_wire_routed(
             let response = tokio::task::spawn_blocking(move || match project_context {
                 Some(context) => reset_manager.reset_project(&context, &worker_id, &token),
                 None => Resp::err("PROJECT_CONTEXT_REQUIRED"),
-            }).await.unwrap_or_else(|error| Resp::err(format!("RESET_INCOMPLETE: handler failed: {error}")));
+            })
+            .await
+            .unwrap_or_else(|error| {
+                Resp::err(format!("RESET_INCOMPLETE: handler failed: {error}"))
+            });
             (manager.host.clone(), response)
         }
         Req::Shutdown { password } => {
@@ -398,8 +402,9 @@ async fn conn_task_degraded(
                             Ok(result) => {
                                 let mut result =
                                     serde_json::to_value(result).unwrap_or(serde_json::Value::Null);
-                                if let Some(projection) =
-                                    result.get_mut("result").and_then(|value| value.as_object_mut())
+                                if let Some(projection) = result
+                                    .get_mut("result")
+                                    .and_then(|value| value.as_object_mut())
                                 {
                                     if projection.contains_key("nested_command_id")
                                         || projection.contains_key("nested_operation_id")
@@ -980,6 +985,7 @@ pub(crate) struct LegacyWriterFence {
     // insufficient to prevent it from opening the same journal after startup.
     _host_lock: Option<std::fs::File>,
     _project_lock: Option<std::fs::File>,
+    project_error: Option<String>,
 }
 
 /// Reject a reachable pre-host-endpoint socket after all compatible legacy
@@ -1006,6 +1012,21 @@ pub(crate) fn acquire_legacy_writer_fence(
     scope: &Scope,
     host_paths: &HostPaths,
 ) -> anyhow::Result<LegacyWriterFence> {
+    acquire_legacy_writer_fence_mode(scope, host_paths, true)
+}
+
+fn acquire_daemon_legacy_writer_fence(
+    scope: &Scope,
+    host_paths: &HostPaths,
+) -> anyhow::Result<LegacyWriterFence> {
+    acquire_legacy_writer_fence_mode(scope, host_paths, false)
+}
+
+fn acquire_legacy_writer_fence_mode(
+    scope: &Scope,
+    host_paths: &HostPaths,
+    strict_project: bool,
+) -> anyhow::Result<LegacyWriterFence> {
     let legacy_host_lock = legacy_host_daemon_lock_path(host_paths);
     let project_server_dir = scope.server_dir();
     let host_lock = if legacy_host_lock != host_paths.lock_path() {
@@ -1018,22 +1039,31 @@ pub(crate) fn acquire_legacy_writer_fence(
     };
 
     let legacy_project_lock = project_server_dir.join("daemon.lock");
-    let project_lock = if legacy_project_lock != host_paths.lock_path()
+    let project_guard_required = legacy_project_lock != host_paths.lock_path()
         && legacy_project_lock != legacy_host_lock
-        && project_server_dir.is_dir()
-    {
-        Some(acquire_legacy_writer_lock(
-            &legacy_project_lock,
-            "project daemon",
-        )?)
+        && project_server_dir.is_dir();
+    let (project_lock, project_error) = if project_guard_required {
+        match acquire_legacy_writer_lock(&legacy_project_lock, "project daemon") {
+            Ok(lock) => (Some(lock), None),
+            Err(error) if strict_project => return Err(error),
+            Err(error) => (None, Some(format!("{error:#}"))),
+        }
     } else {
-        None
+        (None, None)
     };
 
-    ensure_legacy_socket_absent(scope, host_paths)?;
+    let project_error = match ensure_legacy_socket_absent(scope, host_paths) {
+        Ok(()) => project_error,
+        Err(error) if strict_project => return Err(error),
+        Err(error) => Some(match project_error {
+            Some(previous) => format!("{previous}; {error:#}"),
+            None => format!("{error:#}"),
+        }),
+    };
     Ok(LegacyWriterFence {
         _host_lock: host_lock,
         _project_lock: project_lock,
+        project_error,
     })
 }
 
@@ -1141,9 +1171,14 @@ async fn run_timer_scheduler<T, R, F>(
 }
 
 async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Result<()> {
+    let scope = Scope { root: std::fs::canonicalize(&scope.root)? };
     host_paths.ensure_root()?;
     let sock_path = host_paths.socket_path();
-    let project_server_dir = scope.server_dir();
+    let runtime_storage_root = host_paths.app_storage_root(
+        &scope.root.to_string_lossy(),
+        crate::identity::CLI_APP_SERVER_ID,
+    );
+    let project_server_dir = runtime_storage_root.join(".agent-collab").join("server");
     std::fs::create_dir_all(&project_server_dir)?;
 
     // The host lock is the only writable daemon admission gate.  Project
@@ -1155,7 +1190,83 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
     // the compatibility fixture uses the legacy path as its host path, the
     // normal duplicate-daemon error remains authoritative; a real host-path
     // migration reaches this persistent fence because its locks are distinct.
-    let _legacy_writer_fence = acquire_legacy_writer_fence(&scope, &host_paths)?;
+    let legacy_writer_fence = acquire_daemon_legacy_writer_fence(&scope, &host_paths)?;
+    let project_scope = GlobalState::canonical_project_scope(&scope.root)
+        .map_err(|error| anyhow::anyhow!("PROJECT_SCOPE_UNKNOWN: {error}"))?;
+    let resident_key = (
+        crate::identity::CLI_APP_SERVER_ID.to_owned(),
+        project_scope.as_str().to_owned(),
+    );
+    let route_journal = host_paths.state_root().join("routes.jsonl");
+    let resident_source = legacy_runtime_storage_source(
+        &host_paths,
+        &route_journal,
+        &resident_key,
+        &runtime_storage_root,
+    )
+    .map_err(anyhow::Error::msg)?;
+    let central_is_authoritative = resident_source.is_none()
+        && project_server_dir.join("journal.jsonl").exists();
+    let mut resident_migration_failure = if central_is_authoritative {
+        None
+    } else {
+        legacy_writer_fence.project_error.clone()
+    };
+    if let Some(error) = resident_migration_failure.as_deref() {
+        append_log(
+            &host_paths.log_path(),
+            &format!(
+                "PROJECT_STORAGE_MIGRATION_UNAVAILABLE: project {}: {error}",
+                scope.root.display()
+            ),
+        );
+    }
+    if legacy_writer_fence.project_error.is_none() {
+        if let Some(source_root) = resident_source {
+            let source_is_fenced = storage_roots_equal(&source_root, &scope.root)
+                .map_err(|error| anyhow::anyhow!("CENTRAL_STORAGE_MIGRATION_FAILED: {error}"))?;
+            let _source_lock = if source_is_fenced {
+                None
+            } else {
+                Some(acquire_legacy_writer_lock(
+                    &source_root.join(".agent-collab/server/daemon.lock"),
+                    "project daemon",
+                )?)
+            };
+            match migrate_legacy_runtime_storage(
+                &host_paths,
+                &route_journal,
+                &scope.root,
+                &resident_key,
+                &source_root,
+                &runtime_storage_root,
+            ) {
+                Ok(true) => append_log(
+                    &host_paths.log_path(),
+                    &format!(
+                        "CENTRAL_STORAGE_MIGRATED: project {} moved from {} to {}",
+                        project_scope.as_str(),
+                        source_root.display(),
+                        runtime_storage_root.display()
+                    ),
+                ),
+                Ok(false) => {}
+                Err(error) => {
+                    append_log(
+                        &host_paths.log_path(),
+                        &format!(
+                            "PROJECT_STORAGE_MIGRATION_FAILED: project {} from {}: {error}",
+                            project_scope.as_str(), source_root.display()
+                        ),
+                    );
+                    // This legacy journal also owns the resident host index.
+                    // Do not turn its failed transfer into a fresh identity
+                    // store or activate a conflicting destination.
+                    resident_migration_failure = Some(error);
+                }
+            }
+        }
+    }
 
     prepare_socket_path(&sock_path)?;
 
@@ -1163,7 +1274,12 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
         crate::server::operation_journal::OperationJournal::open(host_paths.journal_path())
             .map_err(|error| anyhow::anyhow!("OPERATION_JOURNAL_REPLAY_FAILED: {error}"))?,
     );
-    let state = match replay(&scope.root) {
+    let journal_path = project_server_dir.join("journal.jsonl");
+    let replayed = match resident_migration_failure {
+        Some(error) => Err(anyhow::anyhow!(error)),
+        None => replay_from_journal(&scope.root, &journal_path),
+    };
+    let state = match replayed {
         Ok(state) => state,
         Err(error) => {
             let project_replay_failure = format!("{error:#}");
@@ -1251,15 +1367,15 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
     let journal_file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(project_server_dir.join("journal.jsonl"))?;
+        .open(&journal_path)?;
 
     append_log(&host_paths.log_path(), "server starting");
 
     let server = Arc::new(Server {
         config: crate::config::load(&scope.root)?,
         root: scope.root.clone(),
-        storage_root: scope.root.clone(),
-        journal_path: project_server_dir.join("journal.jsonl"),
+        storage_root: runtime_storage_root,
+        journal_path,
         host_paths: host_paths.clone(),
         state: Mutex::new(state),
         journal: Mutex::new(journal_file),
@@ -1304,7 +1420,7 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
     let pid_metadata = std::fs::symlink_metadata(&pid_path)?;
     let state_root_metadata = std::fs::symlink_metadata(host_paths.state_root())?;
     let _ = record_activity(
-        &scope.root,
+        &server.storage_root,
         "daemon_start",
         json!({"pid": std::process::id()}),
     );

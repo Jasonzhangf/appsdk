@@ -1,0 +1,92 @@
+{
+  "id": "appsdk-collab-stewardship-patrol",
+  "version": "0.1.0",
+  "description": "One authorized Collab stewardship patrol activation reads current role, task, capacity, worktree, resource, P0/P1, and issue facts; classifies actionable work and protected holds; selects a suitable peer before a master-owned independent GCM worker; executes through the public board or one-shot `codex exec --profile gcm`; verifies behavior and closure or an explicit park; re-arms a consumed one-shot wake when continued scheduling is required; and emits one result with next action. Every failure or ambiguous ownership state reaches the same result sink without becoming success.",
+  "inputs": [
+    {
+      "id": "authorized_patrol_activation",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "read_current_facts",
+      "operator": "appsdk.collab_stewardship.read_current_facts",
+      "operator_version": "1",
+      "inputs": ["authorized_patrol_activation"],
+      "output": {"id": "current_facts", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "classify_work_and_holds",
+      "operator": "appsdk.collab_stewardship.classify_work_and_holds",
+      "operator_version": "1",
+      "inputs": ["current_facts"],
+      "output": {"id": "classified_patrol_work", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "select_execution_owner",
+      "operator": "appsdk.collab_stewardship.select_execution_owner",
+      "operator_version": "1",
+      "inputs": ["classified_patrol_work"],
+      "output": {"id": "owner_decision", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "execute_authorized_work",
+      "operator": "appsdk.collab_stewardship.execute_authorized_work",
+      "operator_version": "1",
+      "inputs": ["owner_decision"],
+      "output": {"id": "execution_outcome", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "verify_closure_or_park",
+      "operator": "appsdk.collab_stewardship.verify_closure_or_park",
+      "operator_version": "1",
+      "inputs": ["execution_outcome"],
+      "output": {"id": "verified_patrol_outcome", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "rearm_one_shot_wake",
+      "operator": "appsdk.collab_stewardship.rearm_one_shot_wake",
+      "operator_version": "1",
+      "inputs": ["verified_patrol_outcome"],
+      "output": {"id": "wake_outcome", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "emit_patrol_result",
+      "operator": "appsdk.collab_stewardship.emit_patrol_result",
+      "operator_version": "1",
+      "inputs": ["wake_outcome"],
+      "output": {"id": "patrol_result", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {"from": "read_current_facts", "to": "classify_work_and_holds", "arc_id": "current_facts"},
+    {"from": "classify_work_and_holds", "to": "select_execution_owner", "arc_id": "classified_patrol_work"},
+    {"from": "select_execution_owner", "to": "execute_authorized_work", "arc_id": "owner_decision"},
+    {"from": "execute_authorized_work", "to": "verify_closure_or_park", "arc_id": "execution_outcome"},
+    {"from": "verify_closure_or_park", "to": "rearm_one_shot_wake", "arc_id": "verified_patrol_outcome"},
+    {"from": "rearm_one_shot_wake", "to": "emit_patrol_result", "arc_id": "wake_outcome"}
+  ],
+  "outputs": ["patrol_result"]
+}

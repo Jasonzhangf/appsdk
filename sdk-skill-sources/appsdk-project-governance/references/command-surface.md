@@ -36,12 +36,8 @@ appsdk bug show ... --upstream         read an upstream AppSDK defect
 appsdk bug show <id> --json            read a bug record
 appsdk bug close <id> -m <solution> --receipt-id <receipt>
                                        close a bug with solution evidence
-appsdk subagent start --id <id>        start a managed subagent
-appsdk subagent status                 inspect managed subagents
-appsdk subagent send <id> --subject <topic> "<assignment>"
-                                       dispatch a managed subagent task
-appsdk subagent close <id>             close a managed subagent
-appsdk subworker <action>              compatibility entry for Collab subagent flow
+appsdk subagent <action>               legacy managed compatibility; no new production work
+appsdk subworker <action>              legacy Collab subagent compatibility
 appsdk communication reset-runtime-registry --discard-legacy --approval "<text>"
                                        archive legacy ~/.appsdk/runtimes.jsonl and rebuild current baseline
 project-memory entry                   append memory entry and regenerate projections
@@ -66,8 +62,19 @@ collab master promote --approval "<text>"
 collab master delegate <peer>          transfer live master authority
 collab master send --project <target> --to <target-master> --subject <topic> "<body>"
                                        cross-project master-to-master send
+collab board publish <id> --title <title> --description <scope>
+  --delivery-condition <result> --test-condition <check>
+                                       publish a long-horizon task
+collab board claim <id> --expected-revision <observed>
+                                       claim pending public work
+collab board invite <id> --to <peer> --expected-revision <observed>
+                                       offer pending work to one peer
+collab board respond <id> --accept|--decline --expected-revision <observed>
+                                       accept or decline an invitation
 collab subagent dispatch --request-id <id> --subject <topic> "<assignment>"
-                                       scheduler-reserved dispatch
+                                       legacy managed compatibility only
+collab snapshot <peer-id> --lines <1..200>
+                                       read bounded live tmux buffer without input
 collab task accept <task-id>           accept assigned task (assigned -> working)
 collab task update --status <state>    update task state
 collab task block <id>                 block with concrete cause/owner/unblock condition
@@ -79,8 +86,6 @@ collab migrate apply                   freeze admission and persist snapshot
 collab migrate verify                  verify migration/retirement continuity
 collab reset --project --discard-legacy --approval "<text>"
                                        retire/rebuild Collab-owned local control plane
-collab down                            controlled daemon stop
-collab up                              controlled daemon start
 ```
 
 The commands below are read-only operator diagnostics. They are not
@@ -96,6 +101,13 @@ collab who                             registered peers and liveness
 collab worker status <peer-id>         one peer's identity/liveness/transport
 collab notify status                   own subscriptions
 ```
+
+The global daemon is user-managed. Agent commands do not start, stop, or restart
+it, including during installation, identity recovery, Collab reset, or this
+governance flow. Long-horizon work belongs to a consenting peer assigned through
+the public board. That peer orchestrates independent
+`codex exec --profile gcm` workers. A master-owned GCM worker is a capacity
+fallback only when every eligible peer is busy.
 
 ## Do not guess
 

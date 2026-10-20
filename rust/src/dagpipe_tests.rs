@@ -111,6 +111,7 @@ fn graph_manifest_covers_every_embedded_graph_and_validate_reports_contracted_de
     assert!(graph_ids.contains(&"appsdk-fix-lifecycle"));
     assert!(graph_ids.contains(&"appsdk-notification-object"));
     assert!(graph_ids.contains(&"appsdk-collab-subagent-command"));
+    assert!(graph_ids.contains(&"appsdk-collab-stewardship-patrol"));
     assert!(graph_ids.contains(&"appsdk-collab-peer-lifecycle"));
     assert!(graph_ids.contains(&"appsdk-collab-appserver-route-repair"));
     assert!(graph_ids.contains(&"appsdk-collab-subscription-lifecycle"));

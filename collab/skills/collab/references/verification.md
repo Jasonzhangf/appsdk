@@ -47,15 +47,16 @@ Before review, prove the affected subset and every changed invariant:
 - release clears obsolete wait state and does not wake an unsubscribed Agent;
 - no daemon-generated periodic continuation, inferred waiting, progress/ACK
   loop, implicit first-register master, treating Codex root as Collab
-  master, dispatch, heartbeat, or `/goal` semantics; skill-level owner checks
+  master, legacy managed production dispatch, heartbeat, or `/goal` semantics; skill-level owner checks
   run only on supported timer/wake or direct wake and then continue or escalate
   real unfinished tasks; explicit user-approved `master promote` replaces the
   current holder independent of liveness, only the current master grant holder
   may delegate, and an authenticated peer with explicit approval may clear the
-  scoped grant; independent peers may decline a master invite. Delegated
-  subagents follow their task contract and this Collab protocol only when they
-  are themselves registered peers; master-only rules require an explicitly
-  authorized master grant.
+  scoped grant; independent peers may decline a master invite. Ordinary
+  long-horizon work uses board publish/claim/invite; bounded execution and
+  observation uses independent `codex exec --profile gcm`. Legacy managed
+  records grant no new production execution authority; master-only rules
+  require an explicitly authorized master grant.
 
 Review only after tests and runtime evidence pass. Post-review source/config/test
 changes invalidate review and affected runtime evidence. Integrate the reviewed

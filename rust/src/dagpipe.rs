@@ -300,7 +300,7 @@ fn ensure_graph_nodes_use_registered_operators(
 mod notification;
 use notification::{register_notification_operator, validate_notification_objects};
 
-fn embedded_graph_paths() -> [(&'static str, &'static str); 19] {
+fn embedded_graph_paths() -> [(&'static str, &'static str); 20] {
     [
         (
             "contracts/dagpipe/fix-lifecycle.graph.json",
@@ -317,6 +317,10 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 19] {
         (
             "docs/dagpipe/collab-subagent-command.graph.json",
             include_str!("../../docs/dagpipe/collab-subagent-command.graph.json"),
+        ),
+        (
+            "docs/dagpipe/collab-stewardship-patrol.graph.json",
+            include_str!("../../docs/dagpipe/collab-stewardship-patrol.graph.json"),
         ),
         (
             "docs/dagpipe/appserver-route-repair.graph.json",
@@ -381,10 +385,11 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 19] {
     ]
 }
 
-fn design_graph_ids() -> [&'static str; 17] {
+fn design_graph_ids() -> [&'static str; 18] {
     [
         "appsdk-collab-context",
         "appsdk-collab-subagent-command",
+        "appsdk-collab-stewardship-patrol",
         "appsdk-collab-appserver-route-repair",
         "appsdk-collab-subscription-lifecycle",
         "appsdk-collab-notification-consumption",
@@ -403,7 +408,7 @@ fn design_graph_ids() -> [&'static str; 17] {
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 90] {
+fn design_graph_operator_names() -> [&'static str; 97] {
     [
         "appsdk.collab_context.resolve_root",
         "appsdk.collab_context.require_daemon",
@@ -416,6 +421,13 @@ fn design_graph_operator_names() -> [&'static str; 90] {
         "appsdk.collab_subagent.admit_request",
         "appsdk.collab_subagent.apply_action",
         "appsdk.collab_subagent.emit_result",
+        "appsdk.collab_stewardship.read_current_facts",
+        "appsdk.collab_stewardship.classify_work_and_holds",
+        "appsdk.collab_stewardship.select_execution_owner",
+        "appsdk.collab_stewardship.execute_authorized_work",
+        "appsdk.collab_stewardship.verify_closure_or_park",
+        "appsdk.collab_stewardship.rearm_one_shot_wake",
+        "appsdk.collab_stewardship.emit_patrol_result",
         "appsdk.collab_appserver_route.discover_live_thread",
         "appsdk.collab_appserver_route.rebind_current_route",
         "appsdk.collab_appserver_route.refresh_worker_transport_lease",

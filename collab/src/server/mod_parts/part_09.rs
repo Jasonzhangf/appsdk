@@ -1303,10 +1303,9 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
         .collect();
     if next_actions.is_empty() {
         if master["worker_id"].as_str() == Some(worker_id.as_str()) {
-            next_actions.push(
-                "run `appsdk longhorizon show`; route long-horizon goals to autonomous peers and bounded one-shot execution or observation to `codex exec --profile gcm` subworkers; state goal, scope, authorized actions, resource owner, delivery/test evidence, report and stop conditions; peers plan, dispatch, verify, resolve blockers, integrate assigned work, and clean owned resources without inheriting master authority; master retains project, cross-peer, and final integration"
-                    .into(),
-            );
+            if let Some(action) = current_role_brief["next_action"].as_str() {
+                next_actions.push(action.into());
+            }
         } else {
             next_actions
                 .push("no assigned task action; remain available for an explicit dispatch".into());

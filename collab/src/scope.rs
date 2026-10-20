@@ -896,20 +896,25 @@ server snapshot plus `operations`. The default agent flow does not start with
 `collab master status`, `appsdk init .`, or `collab route resolve`.
 Daemon lifecycle is outside the agent interface and is never identity recovery.
 
-Live master dispatch uses `collab subagent dispatch --request-id <id>
---subject <topic> "<body>"` with optional
-`--feature-id/--worktree-path/--branch/--base-commit/--priority/--next-step`.
-`--request-id` is ASCII `[A-Za-z0-9_-]`, max 80 bytes, and idempotent.
-`--worktree-path` must match the configured `[worktree].base` layout when set
-(for example `<base>/<project-key>/<short-slug>`); legacy
-`<project-main>/playground/<short-slug>` records stay valid during the
-transition. Leaf max 32 ASCII bytes, no `..`. Only the live registered master
-can dispatch; the selected peer must be registered, present, non-managed, and
-inactive. Success returns `request_id`, `message_id`, `task_id`, `target`,
-`status: assigned`, `admission.*`, and `notification` (`sent` |
-`subscribed-not-sent` | `mailbox-only-no-subscription`). `sent` is not
-consumption; verify with `collab msg <id>` (`consumed_by_recv`) and
-`collab task status <task-id>`.
+Ordinary peer assignment uses the public board:
+`collab board publish` with delivery/test conditions, then claim or invitation
+with the observed revision. The recipient is a registered, consenting peer.
+Long-horizon work belongs to that peer; bounded execution or observation uses
+an independent `codex exec --profile gcm` worker. The master starts its own
+GCM worker only when every eligible peer is busy.
+
+`collab subagent dispatch` and managed-subagent records are legacy
+compatibility for diagnosis or migration. They do not authorize new production
+work and are not a fallback when board admission fails. A durable send or
+dispatch receipt is not consumption or completion; verify with `collab msg
+<id>` and the owning task record.
+
+Every standing patrol checks owned worktrees and stale resources, open P0/P1
+work, and new production issues. Remove only unneeded owned worktrees after
+recoverable extraction. Preserve dirty, active, shared, or unknown resources as
+PROTECTED_HOLD. Run each production issue through the project's canonical
+intake before repair. Re-arm a consumed one-shot goal or deadline wake before
+the cycle ends when continued scheduling is required.
 
 Peers never share worktrees. Each task owner starts from latest main in one
 declared clean configured worktree path (`<base>/<project-key>/<short-slug>`

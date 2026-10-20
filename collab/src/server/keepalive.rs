@@ -324,7 +324,7 @@ fn flush_idle_batches_if_ready(server: &Server, now: i64) {
         "master-wake-batch".to_string()
     };
     let body = format!(
-        "newly_idle={} live_idle={} blocked={} pending_merges={} goal_due={}. Task-kind routing: send long-horizon goals to autonomous peers; send bounded one-shot execution or observation to `codex exec --profile gcm` subworkers. Sender supplies goal, scope, authorized actions, resource owner, delivery/test evidence, report and stop conditions. Peers independently orchestrate, split, dispatch, verify, resolve blockers, integrate assigned work, and clean owned resources without inheriting master authority. Master retains project/cross-peer/final integration. Inspect the task graph, liveness, capacity, blockers, and pending merges; dispatch the next ready non-overlapping P0/P1 work by task kind, resolve and reassign blockers, and merge accepted pending candidates. Cancel only iff no actionable task, dependency, resolvable blocker, or authorized open bug remains, using collab notify unsubscribe {} and record the receipt. If the goal is complete, report the evidence to the user.",
+        "newly_idle={} live_idle={} blocked={} pending_merges={} goal_due={}. Peer-first routing: assign long-horizon goals through the public board to a suitable consenting peer; that peer owns the goal without inheriting master authority and orchestrates bounded one-shot execution or observation through independent `codex exec --profile gcm` workers. Start a master-owned independent GCM worker only when every eligible peer is busy. For every assignment, state goal, scope, authorized actions, resource owner, delivery/test evidence, report and stop conditions. Standing patrol: remove unneeded owned worktrees after recoverable extraction; reclaim owned stale resources; close each open P0/P1 with evidence or explicitly park it with owner, cause, and unblock condition; run every new production issue through the project's canonical intake; preserve and report protected holds (dirty, active, shared, or unknown resources). Verify evidence and integrate accepted pending candidates. Before ending the patrol, re-arm a consumed one-shot goal or deadline wake with `appsdk goal subscribe` when continued scheduling is required; a read, ACK, summary, or dispatch receipt is not completion. Managed subagent records and `collab subagent dispatch` are legacy compatibility for diagnosis or migration only. Cancel scheduling only when no actionable task, dependency, resolvable blocker, or authorized open issue remains, using collab notify unsubscribe {} and recording the receipt.",
         newly_idle.join(","),
         live_idle.join(","),
         blocked.join(","),
@@ -701,6 +701,9 @@ mod tests {
         let body = &batch[0].body;
         assert!(body.contains("newly_idle=subagent:managed"), "{body}");
         assert!(body.contains("live_idle=subagent:managed"), "{body}");
+        assert!(body.contains("every eligible peer is busy"), "{body}");
+        assert!(body.contains("protected holds"), "{body}");
+        assert!(body.contains("one-shot goal or deadline wake"), "{body}");
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -775,7 +778,7 @@ mod tests {
         let batch = state
             .msgs
             .values()
-            .find(|message| message.to == "master" && message.body.contains("Task-kind routing"))
+            .find(|message| message.to == "master" && message.body.contains("Peer-first routing"))
             .expect("master idle batch");
         assert!(
             batch.body.contains("pending_merges=task-merge"),

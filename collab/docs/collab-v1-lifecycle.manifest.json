@@ -6,7 +6,7 @@
   "return_path": "Resp",
   "lifecycle_rules": {
     "loop": "Every master goal, bug report/fix, master-to-subagent assignment, and peer task follows Trigger -> Work -> Gate -> State -> Stop.",
-    "sequence": "Declare board work and queue pending tasks -> claim or accept -> Verify -> Persist -> close applicable duties or record blocker -> inspect remaining work and blocker release -> continue eligible work or idle. Recheck on the next authorized activation; no new periodic worker wake.",
+    "sequence": "Declare board work and queue pending tasks -> claim or accept -> Verify -> Persist -> close applicable duties or record blocker -> inspect remaining work and blocker release -> continue eligible work or idle. Re-arm a consumed one-shot goal or deadline wake before the patrol ends when scheduling must continue. Recheck on the next authorized activation; no new periodic worker wake.",
     "role_default": "Default identity is peer; master authority is user-authorized through explicit promotion or delegation by the current live master.",
     "wake": "Only master has long-horizon wake; workers are not long-horizon wake targets and are not automatically woken from idle.",
     "worker_idle_fact": "On each worker working -> idle transition, emit one idempotent worker-idle fact to the live master; this fact does not count or control the master idle reminder episode.",
@@ -15,7 +15,7 @@
     "bug_backlog": "Bugs enter AppSDK or git-bug backlog with investigation evidence; P0 blocks the affected project.",
     "desktop": "Desktop does not register goal subscribe.",
     "unknown_failure": "Unknown, timeout, and failure are preserved explicitly; no ACK/fallback fake success.",
-    "review_gates": "AGY review is not used for Collab v1 lifecycle gates; ordinary review uses an independent review path, and a milestone may use Astra when required.",
+    "review_gates": "AGY review is not used for Collab v1 lifecycle gates; ordinary and milestone review use an independent Codex OAuth gpt-6.1-sol medium Reviewer.",
     "legacy": "Any 15-minute periodic worker liveness wording is deprecated and non-authoritative; current v1 contract uses the task-bound inspect obligation and master-only long-horizon wake."
   },
   "canonical_docs": [
@@ -62,12 +62,12 @@
   ],
   "review_policy": {
     "ordinary": "independent-review",
-    "milestone": "Astra when required",
+    "milestone": "independent Codex OAuth gpt-6.1-sol medium review",
     "excluded": "AGY review"
   },
   "gate_descriptions": {
     "independent-review": "Ordinary Collab v1 review uses an independent review path; AGY review is not used.",
-    "milestone-review": "A milestone review may use Astra when required; it is not an ordinary lifecycle gate.",
+    "milestone-review": "At the formal integration boundary, use an independent Codex OAuth gpt-6.1-sol medium Reviewer; AGY and Astra are not review backends.",
     "loop-rules": "Documented gate: each lifecycle is Trigger -> Work -> Gate -> State -> Stop and follows Discover -> durable dispatch intent -> Hand off -> Verify -> Persist -> Schedule.",
     "bug-backlog": "Documented gate: bugs are tracked in AppSDK/git-bug backlog and P0 blocks affected projects.",
     "role-default": "Documented gate: default identity is peer; master is explicit and user-approved.",

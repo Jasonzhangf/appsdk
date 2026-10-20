@@ -81,11 +81,14 @@ esac
 
     // Charter, fleet rules and notification rules all travel with the wake.
     assert!(text.contains("不要空转，不要假装完成"));
-    assert!(text.contains("`[subagent].max_concurrent`（默认 8）"));
-    assert!(text.contains("普通 peer 不计入该额度"));
+    assert!(text.contains("Peer-first"));
+    assert!(text.contains("只有所有合适 peer 都忙"));
+    assert!(!text.contains("`[subagent].max_concurrent`（默认 8）"));
     assert!(text.contains("绝不能以 ACK、已读或一段总结结束一轮"));
-    assert!(text.contains("collab worker close"));
-    assert!(text.contains("appsdk subworker status"));
+    assert!(text.contains("collab subagent"));
+    assert!(text.contains("旧状态诊断"));
+    assert!(text.contains("PROTECTED_HOLD"));
+    assert!(text.contains("重新武装"));
 
     // Goal objective is read out of the markdown, past the frontmatter.
     assert!(text.contains("# Ship It"));
@@ -108,15 +111,20 @@ esac
     assert!(payload["charter"]
         .as_str()
         .unwrap()
-        .contains("先饱和每一个 live+present 的空闲普通 peer"));
+        .contains("Peer-first"));
+    assert!(payload["charter"].as_str().unwrap().contains("Peer-first"));
     assert!(payload["charter"]
         .as_str()
         .unwrap()
-        .contains("长等待仍并发派单"));
+        .contains("只有所有合适 peer 都忙"));
+    assert!(payload["notification_rules"]
+        .as_str()
+        .unwrap()
+        .contains("重新武装"));
     assert!(payload["fleet_rules"]
         .as_str()
         .unwrap()
-        .contains("`[subagent].max_concurrent`（默认 8）"));
+        .contains("PROTECTED_HOLD"));
     assert!(payload["notification_rules"]
         .as_str()
         .unwrap()
@@ -322,7 +330,7 @@ esac
         ("master", "master"),
         ("tmux-master", "master"),
         ("worker", "unknown"),
-        ("subagent", "managed-subagent"),
+        ("subagent", "unknown"),
         ("missing", "unknown"),
         ("mismatch", "worker"),
         ("transport-missing", "unknown"),

@@ -18,6 +18,10 @@
       "path": "docs/dagpipe/collab-subagent-command.graph.json"
     },
     {
+      "id": "appsdk-collab-stewardship-patrol",
+      "path": "docs/dagpipe/collab-stewardship-patrol.graph.json"
+    },
+    {
       "id": "appsdk-collab-appserver-route-repair",
       "path": "docs/dagpipe/appserver-route-repair.graph.json"
     },

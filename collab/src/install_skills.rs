@@ -172,6 +172,17 @@ mod tests {
             )
             .unwrap_or_else(|e| panic!("read {rel}: {e}"));
             assert_eq!(on_disk, *embedded, "drift in {rel}");
+            if *rel == "SKILL.md" {
+                assert!(embedded.contains("Peer-first"));
+                assert!(embedded.contains("PROTECTED_HOLD"));
+                assert!(embedded.contains("one-shot wake"));
+            }
+            if *rel == "references/task-worktree-lifecycle.md" {
+                assert!(embedded.contains("PROTECTED_HOLD"));
+            }
+            if *rel == "references/notifications.md" {
+                assert!(embedded.contains("one-shot wake"));
+            }
         }
     }
 }

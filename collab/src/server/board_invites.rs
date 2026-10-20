@@ -27,9 +27,10 @@ fn board_invite(server: &Server, actor: String, token: String, id: String, to: S
         };
         (peer, binding)
     };
-    // Invitation admission proves identity; endpoint uncertainty does not
-    // prevent durable delivery. The notification owner reports wake failure.
-    if worker_presence(server, &peer) != IdentityPresence::Present { return Resp::err("BOARD_PEER_NOT_LIVE: invite a registered peer with valid identity"); }
+    // The target snapshot and authoritative binding are the admission facts.
+    // A separate `who` identity_valid projection can lag route maintenance; it
+    // must not turn a durable invitation into a transport-liveness rejection.
+    // The notification owner reports binding or delivery failure explicitly.
     let mut state = server.state.lock().unwrap();
     if let Err(error) = board_check_actor(&state, &actor, &token)
         .and_then(|()| board_check_master_locked(server, &state, &actor)) { return error; }
@@ -93,13 +94,12 @@ fn board_invite(server: &Server, actor: String, token: String, id: String, to: S
 
 fn board_respond(server: &Server, actor: String, token: String, id: String, expected_revision: u64, accept: bool, reason: Option<String>) -> Resp {
     if !accept && reason.as_deref().is_none_or(|reason| reason.trim().is_empty()) { return Resp::err("decline requires a nonempty --reason"); }
-    let peer = {
+    {
         let state = server.state.lock().unwrap();
         if let Err(error) = board_check_actor(&state, &actor, &token) { return error; }
-        state.workers.get(&actor).cloned().expect("verified actor")
-    };
-    // Task ownership admission is independent of current endpoint activity.
-    if accept && worker_presence(server, &peer) != IdentityPresence::Present { return Resp::err("BOARD_PEER_NOT_LIVE: accepting peer must have valid identity"); }
+    }
+    // The authenticated actor and execution binding are the ownership
+    // admission facts. Endpoint activity and `who` projection remain separate.
     let mut state = server.state.lock().unwrap();
     if let Err(error) = board_check_actor(&state, &actor, &token) { return error; }
     let mut details = match board_check_revision(&state, &id, expected_revision) { Ok(details) => details, Err(error) => return error };

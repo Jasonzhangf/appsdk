@@ -92,19 +92,30 @@ The master then owns orchestration:
 
 1. Query `collab context` once. It must show the identity, liveness, tasks,
    inbox, `next_actions`, `role_brief`, and master/authority state.
-2. Split the confirmed goal by dependency and unique write scope. Dispatch
-   through `collab subagent dispatch` or `appsdk subagent send`; every
-   assignment needs done-iff, artifacts, forbidden paths, exact tests, and
-   evidence location.
+2. Split the confirmed goal by dependency and unique write scope. Offer each
+   long-horizon slice through `collab board publish` and a revision-checked
+   claim or invitation. The consenting peer owns planning, independent
+   `codex exec --profile gcm` execution/observation, verification, integration,
+   and cleanup for that slice. Every assignment needs goal, scope, authorized
+   actions, resource owner, done-iff, artifacts, forbidden paths, exact tests,
+   evidence location, report channel, and stop conditions.
 3. Before execution or dispatch, run `appsdk bug intake --input <json>` and
    bind the returned `issue_id`; read-only conversation skips this path.
-4. Keep workers saturated from the approved task graph, then from
-   `appsdk bug list --status open --json` in `P0 > P1 > P2` order.
-5. Own blockers, re-dispatch or auditable force-close stuck tasks, integrate
+4. Keep eligible capacity saturated peer-first from the approved task graph,
+   then from `appsdk bug list --status open --json` in `P0 > P1 > P2` order.
+   Start a master-owned independent GCM worker only when every eligible peer is
+   busy. Do not start a new managed subagent for production work.
+5. Every patrol converges owned worktrees and stale resources, open P0/P1 work,
+   canonical issue intake, and PROTECTED_HOLD reporting. Close each P0/P1 with
+   evidence or park it with owner, cause, and unblock condition.
+6. Own blockers, re-dispatch or auditable force-close stuck tasks, integrate
    reviewed commits on latest main, and keep source/review/merge/install/
    restart/live-replay evidence separate.
-6. Remove only resources created by this round. Preserve other peers'
-   worktrees, processes, and evidence.
+7. Before a patrol cycle ends, explicitly re-arm a consumed one-shot goal or
+   deadline wake when continued scheduling is required. A read, ACK, summary,
+   or dispatch receipt is not completion.
+8. Remove only resources created by this round after recoverable extraction.
+   Preserve dirty, active, shared, or unknown resources and report them.
 
 Stop normal setup here. Do not run operator diagnostics, read `routes.jsonl`,
 inspect processes, or list `.agent-collab/`. If context explicitly reports
@@ -158,8 +169,8 @@ collab context
 # if required_fields are present, provide only those facts once
 ```
 
-If context reports `role=master`, stop and report the conflict to the master;
-do not promote yourself and do not start a second daemon.
+If context reports `role=master`, continue as the accepted goal's orchestrator.
+Do not promote another peer and do not start a second daemon.
 
 Read master/authority state from the same context snapshot. A live master
 exists iff the returned `master` is an object with `endpoint_live=true`.
@@ -180,16 +191,13 @@ AppSDK line is a reset/reinitialize operation, not ordinary initialization:
 ```sh
 # AppSDK-owned project control plane, from a clean non-main owner worktree
 appsdk init <project> --fresh --discard-legacy
-
-# Collab-owned project control plane, during a controlled maintenance window
-collab down
-collab reset --project --discard-legacy --approval "<user authorization>"
-collab up
-collab context
 ```
 
-Neither reset removes the other owner's state or proves delivery, review,
-install, restart, or live communication.
+Collab reset or daemon lifecycle maintenance is outside the agent interface.
+When the user explicitly authorizes and performs that separate operation, use
+the Collab owner's current command contract. AppSDK reset does not remove Collab
+state. Neither owner's reset proves delivery, review, install, restart, or live
+communication.
 
 ## Identity and route reconciliation
 

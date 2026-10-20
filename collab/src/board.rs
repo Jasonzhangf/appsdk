@@ -28,7 +28,7 @@ pub enum BoardCommand {
         #[arg(long)]
         expected_revision: u64,
     },
-    /// Invite one live idle ordinary peer; ownership transfers only on accept.
+    /// Invite one registered idle ordinary peer; ownership transfers only on accept.
     Invite {
         id: String,
         #[arg(long)]

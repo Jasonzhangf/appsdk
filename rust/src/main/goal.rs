@@ -263,10 +263,10 @@ pub(super) fn longhorizon_show(root: &Path, format_json: bool) {
     match role {
         ExecutionRole::Master => {
             println!("从以下四项中选一项并立即执行，不要以 ACK 或\"已读\"结束本轮：");
-            println!("1. 派发 ready 工作给空闲 worker（优先消除空闲产能）；");
-            println!("2. 解决一个 blocker 或介入一个失联 worker；");
+            println!("1. Peer-first 派发 ready 长程工作给合适 peer；只有所有合适 peer 都忙时才启动独立 GCM worker；");
+            println!("2. 收敛一个 worktree、resource、P0/P1 或 canonical issue blocker；受保护资源显式保留；");
             println!("3. 合并一个 pending merge（accepted 任务）并记录 collab task integrated，再关闭 worktree；");
-            println!("4. 用证据宣告某个阶段完成，并推动 verify / merge / close worktree。");
+            println!("4. 用行为证据关闭阶段；仍需调度时在结束前重新武装一次性 wake。");
             println!("\n若确为外部门禁（需人类批准的不可逆操作、发布、成本、新范围）：");
             println!("  collab master wake hold --reason \"<门禁与解除条件>\" --ttl-seconds <n>");
         }
@@ -277,7 +277,7 @@ pub(super) fn longhorizon_show(root: &Path, format_json: bool) {
             println!("不在任务范围内不要尝试全局调度或关闭其他 worker。");
         }
         ExecutionRole::ManagedSubagent => {
-            println!("回到 parent 分配的 assignment；完成后向 parent/master 返回证据，不进入全局 backlog。");
+            println!("这是旧 managed-subagent 兼容记录，没有生产执行授权；不接新任务、不递归派发，向 peer/master 报告兼容限制后停止。");
         }
         ExecutionRole::Unknown => {
             println!("身份未验证；先运行 `collab context` 确认当前 session/peer，恢复绑定后再做正常任务动作。");

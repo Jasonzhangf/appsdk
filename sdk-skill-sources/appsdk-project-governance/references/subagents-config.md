@@ -1,19 +1,54 @@
-# Persistent subworkers and shared policy
+# Legacy managed children and independent GCM workers
 
-This reference describes the persistent **subworker** policy. The `[subagent]`
-tables and `appsdk-subagent` MCP name are compatibility protocol tokens. They
-do not mean that Codex Desktop should use a native task/thread spawn command.
+This reference records the compatibility boundary for legacy managed-child
+configuration and the active execution rule for bounded workers.
 
-Only `~/.appsdk/config.toml` owns startup/notification/timer policy. Run
-`appsdk config` from the project cwd to validate and inspect effective values.
-Global defaults work when the file is absent; project overrides stay in
-`[[projects]]` tables in that same file. Git worktrees inherit their main
-project's policy. Never copy Codex credentials or rewrite its profiles.
+## Active execution rule
+
+Long-horizon work belongs to a consenting peer assigned through the public
+Collab board. That peer orchestrates bounded execution and observation with
+independent `codex exec --profile gcm` workers. Use the documented fallback only
+when GCM is unavailable. Do not use Codex built-in spawn/fork/session Agent
+slots or managed subagents as the production concurrency path.
+
+A master-owned independent GCM worker is a capacity fallback only when every
+eligible peer is busy. The master retains audit, dispatch, verification,
+integration, and final acceptance. It does not replace the delivery owner for
+ordinary scoped implementation.
+
+Each bounded worker contract states:
+
+- goal and scope;
+- allowed and forbidden paths;
+- authorized operations;
+- resource owner;
+- delivery and exact test conditions;
+- evidence and report location;
+- stop conditions.
+
+## Legacy compatibility boundary
+
+The `[subagent]` configuration tables, `appsdk-subagent` MCP name,
+`collab subagent`, and `appsdk subworker` commands are compatibility protocol
+tokens. Existing records may be inspected for diagnosis or migration. They
+grant no new production execution authority.
+
+Do not start, dispatch, send new work to, bind, or rearm a managed child for a
+current goal. Do not convert a refused board invitation or failed GCM launch
+into a managed-child fallback. Preserve historical records, tasks, mailboxes,
+and cleanup obligations; retire them only through their owning compatibility
+flow.
+
+Only `~/.appsdk/config.toml` owns compatibility startup, notification, and
+timer policy for records that still consume that configuration. Run
+`appsdk config` from the project cwd to validate effective values. Project
+overrides stay in `[[projects]]` tables in that same file. Git worktrees inherit
+their main project's policy. Do not copy Codex credentials or rewrite profiles.
 
 ```toml
 [notifications]
 enabled = true
-mode = "batch" # immediate or batch
+mode = "batch"
 batch_window_seconds = 60
 transport = "appserver"
 submit_enter = true
@@ -24,111 +59,51 @@ enabled = true
 tick_interval_ms = 1000
 [keepalive]
 enabled = true
-interval_seconds = 900 # minimum 15 minutes
-max_unacked = 3 # legacy delivery throttle; recv consumes notifications
+interval_seconds = 900
+max_unacked = 3
 [subagent]
 profile_priority = ["gcm", "oauth"]
 persistent = true
 close_on_task_complete = false
-[subagent.profiles.gcm]
-codex_profile = "gcm"
-[subagent.profiles.oauth]
-codex_profile = "oauth"
-model = "gpt-5.6-luna"
 [subagent.health]
 timeout_seconds = 45
 attempts_per_profile = 1
 expected_response = "OK"
 [subagent.startup]
 ready_timeout_seconds = 90
-# Optional:
-# [[projects]]
-# root = "/absolute/project/root"
-# [projects.notifications]
-# mode = "immediate"
 ```
 
-Event keys: `direct_message`, `resource_released`, `deadline`;
-each accepts `mode = "inherit" | "immediate" | "batch"`. A fixed batch window
-does not slide when new messages arrive. Disabled timers suppress deadline
-notification generation, not task timeout safety checks. New subworkers read
-config at creation; existing daemons read policy at startup. Use controlled
-daemon restart after a policy change. Existing tasks/mailboxes remain intact.
+Event keys are `direct_message`, `resource_released`, and `deadline`. A fixed
+batch window does not slide when new messages arrive. Disabled timers suppress
+deadline notification generation, not task timeout safety checks. Configuration
+changes affect only newly started compatible records. The global daemon remains
+user-managed; agents do not restart it.
 
-From a registered Codex App Server parent:
+## Legacy commands
+
+The compatibility commands are:
 
 ```text
-appsdk subworker start --id <unique-request-id>
-appsdk subworker list
-appsdk subworker status <id>
-appsdk subworker snapshot <id> --lines 40
-appsdk subworker send <id> --subject <topic> "<task>"
-appsdk subworker close <id>
+appsdk subworker <start|list|status|snapshot|send|close|rearm> ...
+collab subagent <start|dispatch|list|status|snapshot|rearm|send|ready|working|close|bind> ...
 ```
 
-`start` probes each configured profile once, bounded by timeout, then launches
-one Codex session. Reusing an ID returns the existing record, never restarts
-it. `starting` is not `idle`: Codex may require trust/auth/approval interaction.
-Use status; do not inject automatic confirmation or keep re-sending tasks.
-All profiles failing returns a failed record with reasons and no launch.
+`status` and `snapshot` may preserve historical diagnostic facts. They do not
+authorize execution. `snapshot` is transient screen output, not task truth.
+`rearm` requires an explicit operator request after exhaustion and never makes
+the record valid for new production work.
 
-An already trusted cwd and healthy authenticated profile should start without
-new trust/auth interaction. Repeated prompts on that path are a startup bug,
-not an instruction to reinitialize credentials or accept prompts automatically.
+Existing records and journals must be preserved during upgrade. Do not
+downgrade to an older reader after a newer writer appended events. Do not edit
+journal, mailbox, route, identity, token, or configuration state by hand.
 
-## Finite task keepalive and observation
+## Cleanup and recovery
 
-`send` creates the canonical `task-<message-id>` task in the Collab task list.
-Child `working` claims it; bind code work with `collab_task_relocate`, not a
-duplicate task registration. Complete the real task lifecycle; `ready` changes
-session availability only and never marks unfinished tasks complete.
+An existing managed record can keep a historical task and cleanup obligation.
+Complete or explicitly park that obligation with durable evidence. Do not
+delete a dirty, active, shared, or unknown worktree. Extract recoverable commits
+and untracked content before any authorized removal.
 
-Unfinished actionable tasks are grouped by worker. Explicit idle for 15 minutes
-allows one activation. Read the notification with `collab recv`; reading consumes
-it atomically, so a normal follow-up ACK is not required. Messages sent by the
-worker and positive working observations count as activity. Unknown remains
-unknown; absent/unknown/working receive no activation. Blocked/waiting tasks
-follow their declared wait, not this continuation path.
-
-Three consecutive unconfirmed attempts exhaust the durable budget. After the
-third response window, status marks `suspected_offline`; it does not claim the
-process is dead. Failed/uncertain sends count, restart does not reset the budget,
-and no process is respawned. Only an explicit parent/operator request may use
-`appsdk subworker rearm <id>`; never rearm automatically to bypass exhaustion.
-
-`status` returns observed state, task list, parent mailbox, keepalive counters
-and notification/ACK history. `snapshot` is optional diagnostic output only;
-it never sends a notice or becomes task/control truth. Snapshot may contain
-sensitive output: request only when relevant, do not republish it by default.
-
-An agent without a live App Server native thread may use local project
-`list/status/snapshot` without registering a fake peer. Initialization and
-queries explicitly report `notification_channel: none`: no push channel exists
-for that observer. Check the mailbox in `status` yourself; do not wait for an
-automatic completion notification. This is not a quality gate or a reason to
-stop independent work. Mutating parent operations retain authenticated
-ownership checks.
-
-The child uses the injected `appsdk-subagent` MCP: `collab_init`, then
-`collab_subagent` with `action=ready, id=<id>`. The launcher forwards the live
-Codex App Server native-thread binding automatically; do not ask the user to
-set environment variables. Use MCP, not sandboxed shell registration. Only its
-bound identity may report ready. It accepts a dispatched task with `action=working`, manages its
-own task/worktree lifecycle, sends results to the parent, and calls `ready`
-when done. Repeated idle reports are no-ops. Remain idle, not an ACK/poll loop.
-Task progress stays in Collab task records; no second task queue exists here.
-Before assigned execution, use the same `appsdk bug intake --input <json>`
-contract or the parent's returned `issue_id`; no ID means no governed
-completion claim. Read-only conversation stays outside intake.
-
-Only the creating parent may send/close; a user-requested early close may
-interrupt work, but never deletes worktrees or marks tasks complete. Closing
-uses the exact registered peer identity. It does not stop the project daemon.
-Daemon restart replays records without automatically respawning or redispatching.
-If startup was interrupted, preserve the record/session and inspect status;
-do not reuse its ID to create another process.
-
-Upgrade: install reviewed Collab and AppSDK releases, then `collab down` /
-`collab up` per already-running project. No migration/reset/init of old tasks
-is required. Preserve journals and running subworker sessions. Do not downgrade
-to an older reader after new subworker events have been written to the journal.
+When upgraded Collab or AppSDK projections change, install through the official
+entry and report installed, daemon-loaded, and live behavior separately. An
+installed binary alone does not prove the user-managed daemon loaded it.

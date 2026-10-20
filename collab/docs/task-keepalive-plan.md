@@ -1,9 +1,11 @@
 # Task-bound inspect obligation
 
-Scope: the Collab task/message journal is the sole owner. Managed sends create
-an assigned task, child registration claims it, and there is no second task
-list. Existing claimed tasks participate under this task-bound inspect
-obligation; blocked/waiting tasks do not get continuation wakes.
+Scope: the Collab task/message journal is the sole owner. Ordinary long-horizon
+work uses public board publish/claim or invitation. Bounded execution and
+observation use independent `codex exec --profile gcm` workers. Legacy managed
+records remain diagnostic compatibility and create no new execution authority.
+Existing claimed tasks participate under this task-bound inspect obligation;
+blocked/waiting tasks do not get continuation wakes.
 
 Wake model:
 
@@ -31,8 +33,8 @@ Failure and evidence:
 - Unknown, timeout, and failure stay explicit; no ACK, fallback, or retry may
   fabricate success.
 - No ACK-to-ACK response, automatic process respawn, task redispatch, or
-  automatic subagent rearm; an explicit operator rearm remains a separate
-  command.
+  automatic subagent rearm. If a consumed one-shot goal or deadline wake must
+  continue scheduling, explicitly re-arm it before the patrol cycle ends.
 - Bugs enter the AppSDK or git-bug backlog with investigation evidence; P0
   blocks the affected project.
 - Tests use injected time/probes/sender, never a production runtime.

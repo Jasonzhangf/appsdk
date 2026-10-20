@@ -27,6 +27,10 @@ Use this Skill only when an AppSDK-managed project performs governance bootstrap
    - Work in an exclusive clean external worktree (`/Volumes/Intel/playground/<project-key>/<task-slug>`) following the SESE Close-Before-Open lifecycle.
    - Check affected DAG completeness and SESE closure first (`dagpipe graph validate`), then run red test -> unique owner fix -> real public-entrypoint black-box regression.
    - Trigger one independent architecture/milestone review at the milestone integration boundary after author verification passes. Ordinary internal nodes and commits do not trigger review.
+4. **Collaboration ownership**:
+   - Long-horizon work belongs to a consenting peer assigned through the public Collab board. That peer orchestrates independent `codex exec --profile gcm` execution and observation workers.
+   - A master-owned GCM worker is a capacity fallback only when every eligible peer is busy. Managed-subagent commands and records are legacy compatibility for diagnosis or migration, not a production execution surface.
+   - Fleet, patrol, worktree-hold, and one-shot rearm rules belong to the Collab Skill. This governance Skill owns AppSDK intake, DAG, gates, review, and goal commands.
 
 ## Reference router (load on demand)
 
@@ -40,6 +44,6 @@ Read only the reference matching the current action; do not preload all files:
 | `appsdk` CLI command surface and exit semantics | [references/command-surface.md](references/command-surface.md) |
 | Development & debug workflow mapping | [references/development-debug.md](references/development-debug.md) |
 | Error contracts and failure classification | [references/contracts-and-failures.md](references/contracts-and-failures.md) |
-| Host subagent / worker configuration and process harness | [references/subagents-config.md](references/subagents-config.md) & [references/process-control-harness.md](references/process-control-harness.md) |
+| Legacy managed-child compatibility, independent GCM workers, and process harness | [references/subagents-config.md](references/subagents-config.md) & [references/process-control-harness.md](references/process-control-harness.md) |
 | Initializer and long-horizon goal prompt templates | [references/init-prompts.md](references/init-prompts.md) & [references/goal-prompt.md](references/goal-prompt.md) |
 | Control-plane migration, daemon maintenance, or authorized state reset | [`appsdk-migration`](../appsdk-migration/SKILL.md) |

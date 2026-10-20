@@ -38,15 +38,6 @@ pub(crate) fn execution_role(root: &Path, status: &Option<Value>) -> ExecutionRo
     let Some(status) = status.as_ref() else {
         return ExecutionRole::Unknown;
     };
-    if let Some(subagents) = status["subagents"].as_array() {
-        if subagents.iter().any(|sub| {
-            sub["peer"].as_str() == Some(peer.as_str())
-                && sub["status"].as_str().unwrap_or("") != "closed"
-        }) {
-            return ExecutionRole::ManagedSubagent;
-        }
-    }
-
     let Some(worker) = status["workers"].as_array().and_then(|workers| {
         workers
             .iter()
@@ -70,6 +61,9 @@ pub(crate) fn execution_role(root: &Path, status: &Option<Value>) -> ExecutionRo
     };
     if master_matches_context == Some(true) {
         return ExecutionRole::Master;
+    }
+    if context["identity"]["role"].as_str() == Some("managed-subagent") {
+        return ExecutionRole::ManagedSubagent;
     }
 
     match worker["role"].as_str() {

@@ -32,14 +32,21 @@ an active valid subscription, and retire only the caller's obsolete
 task-scoped subscriptions by ID.
 
 - Master patrol covers open buglist P0/P1 work, peer progress evidence, owned
-  worktree/runtime cleanup, and currently supported monitored events. Progress
-  and completion require durable board, task, delivery, or cleanup evidence;
-  inactivity, heartbeat, and ACK prove neither.
+  worktree/runtime cleanup, canonical issue intake, and currently supported
+  monitored events. Progress and completion require durable board, task,
+  delivery, cleanup, or issue evidence; inactivity, heartbeat, and ACK prove
+  neither. Close each P0/P1 with evidence or park it with owner, cause, and
+  unblock condition.
 - An ordinary peer owns patrol only for its accepted goal and resources. It may
   use a finite owner-scoped generic `deadline` subscription for that patrol
   when a concrete later check is needed. The direct-message lease is separate.
-- Managed subagents do not create global patrol subscriptions or independent
-  deadline schedules. Their parent or master owns the patrol.
+- Legacy managed records create no new patrol subscription, deadline schedule,
+  dispatch, or execution authority.
+- Dirty, active, shared, or unknown resources are PROTECTED_HOLD. Preserve and
+  report them; never remove another owner's resource.
+- A consumed one-shot wake for a goal or deadline does not renew itself. When the
+  patrol must continue, explicitly re-arm it before the cycle ends. A read,
+  ACK, summary, or dispatch receipt is not completion.
 
 Run `collab notify methods` against the current daemon before selecting an
 event or schedule. The current source defines `direct-message`,
@@ -50,7 +57,7 @@ Up to three active subscriptions exist per agent.
 
 - `direct-message` requires no subject and is reusable. `resource-released` and
   `deadline` require a non-empty exact subject. Master-idle and goal deadlines
-  require the current registered master. Managed subagents cannot create
+  require the current registered master. Legacy managed records cannot create
   independent deadline schedules.
 - A deadline uses repeated `--at-ms` values or `--every-ms`; the modes are
   mutually exclusive. Absolute times must be in the future and before TTL

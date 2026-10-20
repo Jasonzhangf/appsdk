@@ -186,10 +186,12 @@ switch that binding to tmux on failure. See
 ## Deprecated commands
 
 Never use implicit first-register master, master recovery, transfer-master,
-legacy central dispatch (`collab task dispatch`), task claim queue,
-remove-worker, or heartbeat recovery. The current master may use the
-explicit scheduler assignment (`collab subagent dispatch`) to create one
-durable task/message reservation for an eligible peer. Collab master is a
+legacy central dispatch (`collab task dispatch`), or heartbeat recovery.
+Ordinary peer assignment uses the public board publish/claim/invite workflow.
+`collab subagent dispatch` and managed-subagent records are legacy compatibility
+for diagnosis or migration only; they grant no new production execution
+authority and are not a fallback after board refusal or admission failure.
+Collab master is a
 separate explicit user-approved authority
 decision, not Codex root, migration, or daemon recovery. The authority owner is
 the current typed grant in the exact project and app scope, with only empty or
@@ -201,9 +203,8 @@ Journal `RootAssigned` events become `MasterAssigned` on daemon replay.
 Hidden `collab root ...` commands run the same master protocol. AppSDK init and
 fresh governance init never clear master authority and are not an implicit
 authority reset. Independent peers may decline a master collaboration invite.
-A delegated subagent follows its task contract and this Skill's Collab protocol
-only when it is itself a registered peer; master-only rules also require an
-explicitly authorized master grant:
+Master-only rules require an explicitly authorized master grant. Legacy managed
+records do not create execution authority:
 
 ```text
 collab master status

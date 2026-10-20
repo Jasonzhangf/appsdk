@@ -20,10 +20,10 @@ wake is a bounded preview; the durable mailbox remains authoritative.
   brief from server role truth; promotion and delegation return the new brief.
   The brief defines role, authority, derivation, blocked boundary, completion
   action, and next action without a second prompt contract.
-- Registered masters and peers publish pending work on the board. Peers and
-  registered managed children claim eligible work under their own identity;
-  peers may publish and claim their own work. Master may also invite an
-  ordinary peer. Private managed dispatch retains its existing protocol.
+- Registered masters and peers publish pending work on the board. A peer may
+  publish and claim its own work, and the master may invite a suitable peer.
+  Legacy managed-subagent records preserve historical facts only; they grant
+  no new production execution authority.
 - Each peer owns its task lifecycle after acceptance: latest-main sync, private
   worktree, implementation, tests, exact commit, candidate verification, short
   integration lease, main merge/verification/push, and cleanup.
@@ -63,10 +63,12 @@ execution. The [Collab Skill](skills/collab/SKILL.md#continue-the-queue-and-rech
 defines each role's steps. Managed private queues are visible only to the child
 and its parent; the public board shows parent responsibility for public work.
 
-Subworkers normally receive assignments directly from their peer parent or
-master through the owning executor. A bound child's parent or current master
-can use `collab subagent send`. Board claim remains optional for a subworker;
-an existing assignment does not require a second publish/claim sequence.
+Long-horizon goals belong to the invited or claiming peer. That peer
+orchestrates bounded execution and observation through independent
+`codex exec --profile gcm` workers. A master-owned GCM worker is a capacity
+fallback only when every eligible peer is busy. `collab subagent dispatch`,
+`collab subagent send`, and managed-subagent records are legacy compatibility
+for diagnosis or migration, not a production assignment path.
 
 ## Display names
 
@@ -131,16 +133,15 @@ The context bootstrap also merges the shared `collab-mcp` server into project
 so `collab` can reach the App Server socket without a sandbox prompt. The
 `collab` CLI is a complete fallback when MCP tools are not listed.
 
-Use `collab subagent dispatch` from the live master for a real
-assignment, then `collab task accept <task-id>` from the assigned peer.
-Collab master is not Codex root.
-Protocol: `collab master status`, `collab master promote --approval` when no
-live master exists, and `collab master delegate` by the current live master.
-Init and register never create a master; a recorded identity without a live
-App Server thread is not a live master. Independent peers may decline a master
-collaboration invite. A delegated subagent follows its task contract and this
-Collab protocol only when it is itself a registered peer; master-only rules
-also require an explicitly authorized master grant.
+For an ordinary long-horizon assignment, publish the task with delivery and
+test conditions, then claim it or invite a suitable peer and respond with the
+observed board revision. Collab master is not Codex root. Protocol:
+`collab master status`, user-authorized `collab master promote --approval`, and
+`collab master delegate` by the current master grant holder. Init and register
+never create a master. Independent peers may decline a master collaboration
+invite. A legacy managed-subagent record does not turn its holder into an
+active production worker; master-only rules still require an explicitly
+authorized master grant.
 
 ## Independent task lifecycle
 
@@ -160,12 +161,13 @@ read latest main
 → close performs mandatory cleanup and persists a cleanup receipt
 ```
 
-The master assignment prefix is durable and idempotent by request ID:
+The ordinary peer assignment path uses the public board:
 
 ```text
-collab subagent dispatch --request-id <id> --subject <topic> <body>
-→ peer reads task-<message-id>
-→ collab task accept task-<message-id>
+collab board publish <id> --title <topic> <conditions>
+→ collab board claim <id> --expected-revision <revision>
+  or collab board invite <id> --to <peer> --expected-revision <revision>
+→ the invited peer responds with the observed revision
 → task update/deliver/review/integrated/close
 ```
 
@@ -271,8 +273,10 @@ may hold at most three active subscriptions. A deadline uses either one or
 more absolute `--at-ms` values, or a periodic `--every-ms` schedule with a
 finite `--repeat-count` from 1 through 100. These modes are mutually exclusive.
 The final delivery says it is the last reminder and instructs the Agent to
-explicitly subscribe again; no automatic rearm exists. The default
-`direct-message` lease accepts later peer messages until expiry; resource,
+explicitly subscribe again; no automatic rearm exists. When a consumed
+one-shot goal or deadline wake is followed by continued scheduling, the owner
+must explicitly re-arm it before the patrol cycle ends. The default
+`direct-message` lease accepts later peer messages until expiry; resource and
 deadline event matching remains owner-scoped and finite.
 App Server receives `COLLAB_NOTIFY <message-id> [<subject>]
 <original-body-preview>` through the registered native thread. The Agent first

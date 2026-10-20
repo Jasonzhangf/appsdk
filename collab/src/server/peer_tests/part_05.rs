@@ -48,7 +48,8 @@ fn role_contract_is_identical_across_context_workers_and_status() {
         );
         let role_task = context.data["role_brief"]["role_task"]
             .as_str()
-            .expect("role task is explicit");
+            .expect("role task is explicit")
+            .to_lowercase();
         let responsibilities = context.data["role_brief"]["responsibilities"]
             .as_array()
             .expect("role responsibilities are explicit")
@@ -62,7 +63,10 @@ fn role_contract_is_identical_across_context_workers_and_status() {
                 assert!(role_task.contains("long-horizon"));
                 assert!(role_task.contains("bounded"));
                 assert!(responsibilities.contains("codex exec --profile gcm"));
-                assert!(responsibilities.contains("autonomous peers"));
+                assert!(responsibilities.contains("peer-first"));
+                assert!(responsibilities.contains("every eligible peer"));
+                assert!(responsibilities.contains("protected_hold"));
+                assert!(responsibilities.contains("re-arm"));
                 assert!(responsibilities.contains("no inherited master authority"));
                 assert!(!responsibilities.contains("saturate every live present peer first"));
             }
@@ -83,15 +87,15 @@ fn role_contract_is_identical_across_context_workers_and_status() {
                 assert_eq!(context.data["role_brief"]["derivation"]["kind"], "peer");
             }
             "managed-subagent" => {
-                assert!(role_task.contains("bounded"));
-                assert!(role_task.contains("not the goal orchestrator"));
-                assert!(responsibilities.contains("recursively dispatch"));
-                assert!(responsibilities.contains("register collab"));
+                assert!(role_task.contains("legacy"));
+                assert!(role_task.contains("no production execution authority"));
+                assert!(responsibilities.contains("compatibility"));
+                assert!(responsibilities.contains("do not accept new work"));
                 assert_eq!(
                     context.data["role_brief"]["authority"],
                     serde_json::json!({
-                        "managed_subagent": true,
-                        "must_obey_master": true,
+                        "managed_subagent": false,
+                        "must_obey_master": false,
                         "may_decline_master_invite": false
                     })
                 );

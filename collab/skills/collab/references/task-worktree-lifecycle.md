@@ -64,9 +64,8 @@ it whether to keep waiting, escalate, or steer through the normal input path.
 The buffer does not prove busy/idle, Codex turn state, message consumption, or
 task completion, and it writes no durable receipt.
 
-Last owned close cancels this peer's direct-message auto-notify. A leftover
-keepalive after the task is done is stopped by task close; a specific
-owner-scoped lease can be cancelled with
+Closing the last owned task does not cancel this peer's default direct-message
+lease. A specific owner-scoped lease can be cancelled with
 `collab notify unsubscribe <subscription-id>`.
 
 - One issue owns one clean worktree. New work must use the configured
@@ -89,6 +88,9 @@ owner-scoped lease can be cancelled with
   may close a task whose owner registered transport identity is lost.
 - A bound worktree creates a mandatory cleanup obligation. Keep its exact path
   and branch bound until close.
+- Before any removal, extract recoverable commits and untracked content that
+  the task still needs. Dirty, active, shared, or unknown worktrees are
+  PROTECTED_HOLD. Preserve and report them; never force-remove them.
 - `delivered`/`merged` are not cleanup. Close requires a clean, removed,
   verified-absent worktree plus durable cleanup receipt.
 - Close rejects unmerged commits, dirty paths, path escape, wrong branch,
@@ -138,16 +140,14 @@ wait/block state, then take the next actionable step. Continue execution when
 work is available, resolve a blocker when it can, and record/escalate when it
 cannot. ACKing a wake is not progress and does not satisfy liveness.
 
-Route escalation by worker type:
+Route escalation by role:
 
-- A managed subagent and an ordinary worker both report blockers to the current
-  Collab master immediately. First find a concrete solution (root cause,
-  proposed change, authorization needed); send that, not a symptom. Do not
-  wait. A subagent copies its parent when parent is not the master, and may
-  not decline a master collaboration request. Independent peers may
-  temporarily decline a master collaboration invite to protect their own
-  task. If no current master exists, report to the collaborator that initiated
-  the task.
+- An ordinary worker reports blockers to the current Collab master immediately.
+  First find a concrete solution (root cause, proposed change, authorization
+  needed); send that, not a symptom. Do not wait. Independent peers may
+  temporarily decline a master collaboration invite to protect their own task.
+  If no current master exists, report to the collaborator that initiated the
+  task. Legacy managed records grant no new execution authority.
 - A peer becomes master only after explicit user approval for that peer and
   project; the caller must hold an authenticated current binding. An approved
   `collab master promote --approval` replaces any recorded holder and is
@@ -158,19 +158,24 @@ Route escalation by worker type:
   current agent. A dead recorded thread does not remove the current holder's
   authority. Codex root is not Collab master.
 - Master compiles the goal into a dependency graph, then parallel unique-write
-  scopes. It assigns registered peers with `collab sendmessage` only when
-  delivery conditions (done-iff, artifacts, in/out of
-  scope, forbidden edits) and test conditions (exact commands, expected
+  scopes. It publishes each long-horizon task and claims or invites a suitable
+  consenting peer only when delivery conditions (done-iff, artifacts, in/out
+  of scope, forbidden edits) and test conditions (exact commands, expected
   results, evidence location) are unambiguous. Do not equally split a large
-  goal or share a write scope. Workers execute only the approved assignment
-  and return evidence. On a blocker they find a solution first, then report
-  master immediately.
+  goal or share a write scope. Bounded execution or observation uses an
+  independent `codex exec --profile gcm` worker. Workers execute only the
+  approved assignment and return evidence. On a blocker they find a solution
+  first, then report master immediately.
 
 For every escalation include `task_id`, current durable status, exact blocker or
 wait target, proposed solution, attempted resolution, and the decision/action
 needed. Keep the task blocked or waiting truth durable; do not create a
 duplicate task, silently release a claim, or wait without a next check and
 escalation path.
+
+Before a patrol cycle ends, preserve and report PROTECTED_HOLD resources. If
+continued scheduling is required, explicitly re-arm a consumed one-shot goal
+or deadline wake. A read, ACK, summary, or dispatch receipt is not completion.
 
 ## Lifecycle recovery
 

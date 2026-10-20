@@ -1034,7 +1034,7 @@ const GOAL_MIN_INTERVAL_MS: u64 = GOAL_COLLAB_WRITE_TIMEOUT.as_secs() * 1000;
 #[path = "main/goal_collab_command_tests.rs"]
 mod goal_collab_command_tests;
 
-const CLI_USAGE: &str = "Usage: appsdk <command> [project] [options]\n\nProject-scoped commands default to the current working directory. An explicit project path remains optional.\nManaged child compatibility entry: appsdk subworker <start|list|status|snapshot|send|close> ...";
+const CLI_USAGE: &str = "Usage: appsdk <command> [project] [options]\n\nProject-scoped commands default to the current working directory. An explicit project path remains optional.\nLegacy managed-child compatibility only; do not use for new production work: appsdk subworker <start|list|status|snapshot|send|close> ...";
 
 fn main() {
     let argv = env::args().skip(1).collect::<Vec<_>>();

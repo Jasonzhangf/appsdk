@@ -91,11 +91,10 @@ fn context_is_read_only_and_does_not_consume_notifications() {
         }),
         "no-live-master context must expose the user-approved promote operation"
     );
-    assert!(operations
-        .iter()
-        .any(|operation| operation["kind"] == "next_action"
-            && operation["action"]
-                .as_str().is_some_and(|action| action.contains("Continue the accepted goal"))));
+    assert!(operations.iter().any(|operation| {
+        operation["kind"] == "next_action"
+            && operation["action"] == context.data["role_brief"]["next_action"]
+    }));
     assert_eq!(
         context.data["identity"]["transport"]["tmux_endpoint"],
         serde_json::to_value(expected_tmux_endpoint).unwrap()
@@ -142,9 +141,20 @@ fn context_gives_an_idle_master_one_canonical_scheduling_action() {
     assert_eq!(context.data["agent"]["thread_state"], "unknown");
     assert!(context.data["recorded_unusable"].is_null());
     assert_eq!(
-        context.data["next_actions"],
-        serde_json::json!(["run `appsdk longhorizon show`; route long-horizon goals to autonomous peers and bounded one-shot execution or observation to `codex exec --profile gcm` subworkers; state goal, scope, authorized actions, resource owner, delivery/test evidence, report and stop conditions; peers plan, dispatch, verify, resolve blockers, integrate assigned work, and clean owned resources without inheriting master authority; master retains project, cross-peer, and final integration"])
+        context.data["next_actions"].as_array().unwrap().len(),
+        1
     );
+    let next_action = context.data["next_actions"][0].as_str().unwrap();
+    let next_action_lower = next_action.to_ascii_lowercase();
+    assert!(
+        next_action_lower.contains("every eligible peer is busy"),
+        "{next_action}"
+    );
+    assert!(
+        next_action_lower.contains("protected hold"),
+        "{next_action}"
+    );
+    assert!(next_action_lower.contains("re-arm"), "{next_action}");
     let operations = context.data["operations"].as_array().expect("operations");
     assert!(
         !operations.is_empty(),
@@ -154,8 +164,12 @@ fn context_gives_an_idle_master_one_canonical_scheduling_action() {
         operations
             .iter()
             .any(|operation| operation["kind"] == "next_action"
-                && operation["action"]
-                    == "Run `appsdk longhorizon show`; route long-horizon goals to autonomous peers and bounded one-shot execution or observation to `codex exec --profile gcm` subworkers; state goal, scope, authorized actions, resource owner, delivery/test evidence, report and stop conditions; verify peer evidence and blockers; peers independently plan, dispatch, integrate assigned work, and clean owned resources without inheriting master authority; retain project, cross-peer, and final integration.")
+                && operation["action"].as_str().is_some_and(|action| {
+                    let action = action.to_ascii_lowercase();
+                    action.contains("every eligible peer is busy")
+                        && action.contains("protected_hold")
+                        && action.contains("re-arm")
+                }))
     );
     assert!(context.data["role_brief"]["responsibilities"]
         .as_array()
@@ -164,10 +178,15 @@ fn context_gives_an_idle_master_one_canonical_scheduling_action() {
     assert!(context.data["role_brief"]["responsibilities"]
         .as_array()
         .unwrap()
-        .contains(&serde_json::json!("Keep useful capacity loaded by task kind: peers for long-horizon goals, GCM subworkers for bounded execution and observation; never require filling peers first.")));
+        .iter()
+        .any(|line| {
+            line.as_str().is_some_and(|line| {
+                line.contains("Every standing patrol") && line.contains("PROTECTED_HOLD")
+            })
+        }));
     assert_eq!(
         context.data["role_brief"]["next_action"],
-        "Run `appsdk longhorizon show`; route long-horizon goals to autonomous peers and bounded one-shot execution or observation to `codex exec --profile gcm` subworkers; state goal, scope, authorized actions, resource owner, delivery/test evidence, report and stop conditions; verify peer evidence and blockers; peers independently plan, dispatch, integrate assigned work, and clean owned resources without inheriting master authority; retain project, cross-peer, and final integration."
+        context.data["next_actions"][0]
     );
     assert!(!context
         .data
@@ -188,7 +207,7 @@ fn master_context_routes_work_by_task_kind() {
     assert_eq!(context.data["identity"]["role"], "master");
     assert_eq!(
         context.data["next_actions"],
-        serde_json::json!(["run `appsdk longhorizon show`; route long-horizon goals to autonomous peers and bounded one-shot execution or observation to `codex exec --profile gcm` subworkers; state goal, scope, authorized actions, resource owner, delivery/test evidence, report and stop conditions; peers plan, dispatch, verify, resolve blockers, integrate assigned work, and clean owned resources without inheriting master authority; master retains project, cross-peer, and final integration"])
+        serde_json::json!([context.data["role_brief"]["next_action"].clone()])
     );
     let responsibilities = context.data["role_brief"]["responsibilities"]
         .as_array()
@@ -206,6 +225,96 @@ fn master_context_routes_work_by_task_kind() {
         .data
         .to_string()
         .contains("saturate live present peers first"));
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn board_invitation_uses_authoritative_binding_when_identity_projection_is_stale() {
+    let (server, root) = test_server();
+    let server = Arc::new(server);
+    register(&server, "master", "%master");
+    register(&server, "peer", "%peer");
+    promote_master(&server, "master", "user-approved");
+
+    let peer_binding = {
+        let state = server.state.lock().unwrap();
+        state
+            .global
+            .projects
+            .values()
+            .flat_map(|project| project.runtime_bindings.values())
+            .find(|binding| binding.agent_id.as_str() == "peer")
+            .cloned()
+            .expect("peer authoritative binding")
+    };
+    server
+        .commit_checked(&[Event::GlobalCurrentThreadRouteRetired {
+            binding: peer_binding,
+        }])
+        .expect("retire only the current route projection");
+
+    let context = handle_context(&server, "peer".into(), "token-peer".into());
+    assert!(context.ok, "{:?}", context.error);
+    assert_eq!(context.data["registered"], true);
+    assert_eq!(context.data["liveness"]["live"], true);
+
+    let status = dispatch_with_route_context(&server, Req::StatusAll, None);
+    assert!(status.ok, "{:?}", status.error);
+    let peer_status = status.data["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|worker| worker["id"] == "peer")
+        .expect("peer status");
+    assert_eq!(peer_status["identity_valid"], false);
+    assert_eq!(peer_status["status"], "identity-mismatch");
+    assert_eq!(peer_status["presence"], "missing");
+    assert_eq!(peer_status["endpoint_live"], true);
+
+    let published = handle_board_command(
+        &server,
+        "master".into(),
+        "token-master".into(),
+        crate::board::BoardCommand::Publish {
+            id: "stale-route-invite".into(),
+            title: "stale route invite".into(),
+            description: "durable invitation admission".into(),
+            delivery_condition: "invite and acceptance are defined".into(),
+            test_condition: "two peer regression passes".into(),
+            priority: "p1".into(),
+        },
+    );
+    assert!(published.ok, "{:?}", published.error);
+
+    let invited = handle_board_command(
+        &server,
+        "master".into(),
+        "token-master".into(),
+        crate::board::BoardCommand::Invite {
+            id: "stale-route-invite".into(),
+            to: "peer".into(),
+            expected_revision: 1,
+        },
+    );
+    assert!(invited.ok, "{:?}", invited.error);
+    assert_eq!(invited.data["task"]["status"], "invited");
+
+    let accepted = handle_board_command(
+        &server,
+        "peer".into(),
+        "token-peer".into(),
+        crate::board::BoardCommand::Respond {
+            id: "stale-route-invite".into(),
+            accept: true,
+            decline: false,
+            expected_revision: 2,
+            reason: None,
+        },
+    );
+    assert!(accepted.ok, "{:?}", accepted.error);
+    assert_eq!(accepted.data["task"]["owner"], "peer");
+    assert_eq!(accepted.data["task"]["status"], "working");
+
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -1097,7 +1206,7 @@ fn worker_freed_transitions_notify_live_master() {
     let alert = idle_alert.unwrap();
     assert!(alert.body.contains("newly_idle=subagent:managed-worker"));
     assert!(alert.body.contains("live_idle=subagent:managed-worker"));
-    assert!(alert.body.contains("send long-horizon goals to autonomous peers"));
+    assert!(alert.body.contains("long-horizon goals"));
     assert!(
         alert
             .body

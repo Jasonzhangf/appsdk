@@ -19,7 +19,7 @@ Collab/AppSDK 与 tmux 使用独立生命周期。Collab 安装、重启、注�
 
 ## 适用身份
 
-只有当前执行者已在本项目成功注册为 Collab peer，后文的协作规则才适用；各角色规则只约束该角色。master 规则还要求当前 peer 持有经明确授权的 master 权限。未注册的 subworker 不因受托而成为 Collab peer，也不适用本 Skill 的协作协议。加载本 Skill、任务提到 Collab、看到 master 名称或启动多个 worker，都不代表已注册或取得 master 权限。
+只有当前执行者已在本项目成功注册为 Collab peer，后文的协作规则才适用；各角色规则只约束该角色。master 规则还要求当前 peer 持有经明确授权的 master 权限。未注册的 `codex exec --profile gcm` worker 不因受托而成为 Collab peer，也不适用本 Skill 的协作协议。加载本 Skill、任务提到 Collab、看到 master 名称或启动多个 worker，都不代表已注册或取得 master 权限。
 
 当前项目没有注册身份、状态为 `registered=false`，或初始化无法完成时，不需要遵从本 Skill 的协作协议：独立完成用户任务，不寻找、等待或服从 Collab master，也不因注册失败而阻塞。只有用户明确要求注册时才执行初始化；失败保留原错，并继续独立工作。成功注册后的通信故障按对应故障规则处理，不抹除已有身份或职责。
 
@@ -46,17 +46,20 @@ fixed command that runs for hours is still bounded work. A goal that needs
 planning, delegation, evidence review, unblocking, integration, and resource
 closure is a long-horizon goal.
 
-- `master` routes long-horizon goals to autonomous peers and bounded one-shot
-  execution or observation to `codex exec --profile gcm` subworkers. Master
-  retains project coordination, cross-peer dependencies, and final integration.
+- `master` audits, dispatches, verifies, and integrates. It offers each
+  long-horizon goal through the public board to a suitable, consenting peer.
+  Start a master-owned independent `codex exec --profile gcm` worker only when
+  every eligible peer is busy. Master retains project coordination, cross-peer
+  dependencies, final integration, and the delivery owner's ordinary scope.
 - An ordinary peer keeps the code-compatible wire role `worker` and derivation
   `peer`. It is the long-horizon orchestrator for an accepted goal: split and
-  plan, dispatch bounded subworkers, verify evidence, resolve blockers,
+  plan, run bounded work through independent `codex exec --profile gcm`
+  execution or observation workers, verify evidence, resolve blockers,
   integrate assigned work, close owned resources, and report to the sender. It
   does not inherit master authority.
-- A managed subagent completes only its bounded assignment. It reports evidence
-  or BLOCKED and stops. It does not own the long-horizon goal, create a global
-  schedule, recursively dispatch, register Collab, or expand permissions.
+- A managed-subagent record is legacy compatibility state. It preserves
+  historical facts for diagnosis or migration and grants no new production
+  execution authority.
 
 ### Registered patrol duties
 
@@ -66,31 +69,40 @@ recovery, update the existing scope; context restoration does not fabricate
 board tasks, timers, or subscriptions.
 
 - `master` reconciles patrol tasks for open buglist P0/P1 work, peer progress
-  evidence, owned worktree/runtime cleanup, and currently supported monitored
-  events. Use durable board, task, delivery, and cleanup evidence; inactivity,
-  heartbeat, and ACK do not prove progress or completion. Dispatch ready P0/P1
-  work before ending the scheduling turn.
+  evidence, owned worktree and stale-resource convergence, project-canonical
+  issue intake, and currently supported monitored events. Use durable board,
+  task, delivery, cleanup, and issue evidence; inactivity, heartbeat, and ACK
+  do not prove progress or completion. Close each P0/P1 with applicable
+  evidence or park it with owner, cause, and unblock condition. Dispatch ready
+  P0/P1 work before ending the scheduling turn.
 - An ordinary peer is the autonomous goal orchestrator for its accepted scope.
   It owns scoped patrol of task progress, blockers, owned worktree/runtime
-  resources, cleanup, and only the explicit event subscriptions needed for
-  that scope. On a blocker, first report to the current master with the task
-  ID, evidence, attempted actions, proposed solution, and help needed. If the
-  master is unavailable, record the blocker and continue safe independent work
-  instead of waiting indefinitely.
-- A managed subagent stays bounded to its assignment, reports evidence or
-  BLOCKED, and creates no global patrol task or subscription. Its peer parent
-  or master owns that patrol.
+  resources, canonical issue intake, cleanup, and only the explicit event
+  subscriptions needed for that scope. On a blocker, first report to the
+  current master with the task ID, evidence, attempted actions, proposed
+  solution, and help needed. If the master is unavailable, record the blocker
+  and continue safe independent work instead of waiting indefinitely.
+- Dirty, active, shared, or unknown resources are PROTECTED_HOLD. Preserve and
+  report them; never remove another owner's resource or perform broad process,
+  daemon, tmux, or host-pane termination.
+- Before a patrol cycle ends, explicitly re-arm a consumed one-shot goal or
+  deadline wake when continued scheduling is required. A read, ACK, status
+  summary, or dispatch receipt is not completion and does not renew a wake.
+- A legacy managed-subagent record creates no new patrol task, subscription,
+  dispatch, or execution authority. Its parent or master preserves it only for
+  diagnosis or migration.
 
 Every sender states the goal, scope, authorized actions, resource owner,
 delivery and test evidence, report channel, and stop conditions. A receiver
 checks that contract against current responsibility, then accepts, rejects, or
 negotiates before work starts.
 
-Use the board invitation lifecycle to offer a long-horizon goal to an ordinary
-peer. Use the existing child-private managed-subagent lifecycle only for a
-bounded direct assignment. Planner and Reviewer remain independent roles with
-their existing model routing; the bounded child rule does not turn them into
-GCM execution workers.
+Use the board publish/invite lifecycle to offer a long-horizon goal to an
+ordinary peer. Bounded execution or observation uses an independent
+`codex exec --profile gcm` worker. The legacy child-private managed lifecycle
+is compatibility only. Planner and Reviewer remain independent roles with
+their existing model routing; the bounded GCM rule does not turn them into
+execution workers.
 
 ## Display names
 
@@ -437,16 +449,18 @@ It is the registration-time projection; `collab context` returns the current
 brief, and promotion or delegation returns the replacement brief. Do not
 maintain a separate role prompt:
 
-- `master`: dispatch and allocate resources, keep workers loaded, own blockers,
-  route long-horizon goals to peers, route bounded work to GCM subworkers, and
-  drive verify/merge/cleanup/close. Implementation is not the primary job.
+- `master`: audit and dispatch through the public board, keep eligible capacity
+  loaded peer-first, own blockers, run a master-owned GCM worker only when every
+  eligible peer is busy, and drive verify/merge/cleanup/close. Ordinary scoped
+  implementation remains with its delivery owner.
 - `worker` with derivation `peer`: orchestrate the accepted long-horizon goal,
-  dispatch bounded GCM subworkers, verify evidence, resolve blockers, integrate
-  assigned work, and report to the sender. Evaluate master invitations against
-  current ownership and capacity. Do not inherit master authority.
-- `managed-subagent`: complete the assigned bounded execution or observation,
-  obey master/parent for that assignment, return evidence, and stop rather than
-  build a global schedule or take a follow-on goal.
+  run bounded work through independent `codex exec --profile gcm` workers,
+  verify evidence, resolve blockers, integrate assigned work, and report to the
+  sender. Evaluate master invitations against current ownership and capacity.
+  Do not inherit master authority.
+- `managed-subagent`: legacy compatibility only. Preserve historical facts;
+  accept no new work and create no schedule, dispatch, registration, or
+  expanded authority.
 
 The default identity is peer. Master authority is explicit and
 user-authorized: an approved `master promote` replaces the recorded holder,
@@ -517,13 +531,10 @@ selection and sends only through the selected adapter.
 
 ## Public task board and read-only dashboard
 
-The task board is the shared work surface for registered masters, peers, and
-subworkers. Each role declares its current work and may queue later work here.
-An unregistered subworker does not inherit its parent's identity or token;
-its registered parent declares and tracks that assignment. Subworkers normally
-receive a scoped assignment directly from their peer parent or master. They
-do not need to claim board work in daily use; claim remains available when
-explicitly needed. The public view carries
+The task board is the shared work surface for registered masters and peers.
+Each active role declares its current work and may queue later work here.
+Legacy managed records remain visible only through their existing
+compatibility scope; they receive no new assignment. The public view carries
 task identity, lifecycle status, owner, and the typed delivery/test conditions.
 It never exposes worker tokens, runtime endpoints, role briefs, managed-child
 identity, private assignments, or raw journal events. A published task does not
@@ -546,13 +557,12 @@ collab board claim <task-id> --expected-revision <observed>
 ```
 
 Claim starts one pending task in the caller's own identity. A peer may claim
-its own publication or another authorized task. A registered managed subworker
-may also claim. Read the current revision from `board show`. Claim atomically
-checks that the task is still pending and that the caller can start execution;
-it records the actual executor as owner. A stale or competing claim fails
-without taking the task. Do not update a pending task to `working` to bypass
-claim. Never claim outside the user's authorized goal or take another owner's
-working or blocked task.
+its own publication or another authorized task. Read the current revision from
+`board show`. Claim atomically checks that the task is still pending and that
+the caller can start execution; it records the actual executor as owner. A
+stale or competing claim fails without taking the task. Do not update a
+pending task to `working` to bypass claim. Never claim outside the user's
+authorized goal or take another owner's working or blocked task.
 
 For a long-horizon goal, master may instead offer a public task to one ordinary
 peer:
@@ -589,10 +599,11 @@ reason; withdrawal never reclaims peer-owned execution:
 collab board withdraw <task-id> --expected-revision <observed> --reason "<text>"
 ```
 
-Ordinary peers do not receive scheduler dispatch. `collab subagent dispatch`
-targets the private managed path only; public work uses claim or the board
-invitation above. If a peer or its peer node refuses an invitation, that refusal
-is explicit and there is no silent fallback to a private child.
+Public work uses claim or the board invitation above. `collab subagent
+dispatch` is a legacy private managed path and grants no new production work.
+If a peer declines an invitation, that refusal is explicit and there is no
+fallback to a private child. If every eligible peer is busy, master may start
+an independent master-owned `codex exec --profile gcm` worker.
 
 `collab dashboard` opens a read-only loopback Web observer for the same public
 board. It requires a registered identity, does not bootstrap or restart the
@@ -625,13 +636,10 @@ The observer rejects a request whose `Host` is not its own bound authority with
 board endpoint answers 503 with the exact daemon error instead of an empty
 board. Static assets carry no state and no token.
 
-Managed subworkers participate through their own registered identity. Their
-internal assignments and queued publications remain private to the child and
-its parent. Public tasks claimed by a child remain visible; the public view
-shows the parent's responsibility, while the durable task keeps the actual
-child executor. Managed member identities and internal task references stay
-out of the public dashboard. `collab subagent dispatch` retains its private
-assignment protocol; board claim does not create or bind a child.
+Legacy managed identities and private child tasks remain compatibility facts.
+They do not receive new public assignments. Preserve their historical privacy
+and visibility semantics; do not create or bind another child from current
+work. New bounded execution or observation uses an independent GCM worker.
 
 An owner edits the descriptive part of its own independent task without
 changing lifecycle. Every flag is required and the revision is checked:
@@ -654,19 +662,16 @@ response:` line before retrying: a durable outcome is not a retryable failure.
 
 ### Continue the queue and recheck blockers
 
-Use this sequence for master, peer, and registered subworker work. Master also
-checks the public queue and its coordination tasks. A parent checks its child's
-remaining tasks and helps resolve child blockers.
+Use this sequence for master and peer work. Master also checks the public queue
+and its coordination tasks. Legacy managed records are inspection or migration
+inputs only.
 
 1. Before peer/master board work starts, publish its goal, delivery condition,
-   and test condition, then claim it or accept its invitation. For a subworker,
-   the peer parent or master declares the assignment and its conditions, then
-   dispatches it through the owning executor. A bound managed child's parent
-   or current master can use `collab subagent send <id> --subject <topic>
-   "<scope; delivery; tests>"`; its existing task assignment stays authoritative.
-   Do not add a board claim to every child assignment. Reuse an existing
-   assigned or registered task; describe it if
-   conditions are missing. Do not register a duplicate task for the same work.
+   and test condition, then claim it or accept its invitation. For bounded
+   execution or observation, give an independent `codex exec --profile gcm`
+   worker the same goal, scope, delivery/test evidence, and stop conditions.
+   Reuse an existing assigned or registered task; describe it if conditions
+   are missing. Do not register a duplicate task for the same work.
    Bind a claimed task's execution worktree through `collab task relocate
    <task-id> --worktree <owned-worktree> [--branch <branch>]`; queue entries
    do not reserve another task's resources.
@@ -675,7 +680,7 @@ remaining tasks and helps resolve child blockers.
    Read `collab board show` and check for unfinished work before stopping.
 3. On a blocker, keep ownership and record the cause, release condition, and
    next action with `board update --status blocked --next "<facts>"`. Report it
-   to master and, for a child, its parent. For an actual resource conflict use
+   to master. For an actual resource conflict use
    `collab task wait <task-id> --for <holder-task-id>`; it is not a
    general dependency queue.
 4. Check owned blocked/waiting tasks against current evidence. If a blocker
@@ -686,15 +691,17 @@ remaining tasks and helps resolve child blockers.
 5. If current work cannot proceed, select another authorized, nonconflicting
    pending task and claim it. Prefer priority p0 through p4, then task ID for
    equal priority. Pending queue entries do not occupy execution capacity.
-   A subworker normally takes the next assignment from its peer parent or
-   master; it picks and claims board work only when that mode is authorized.
    Blocked/waiting tasks keep their resources and unfinished responsibility;
    starting another task does not release or cancel them.
 6. Before entering idle, check remaining work, pending close/cleanup duties,
-   and each blocker again. If any action is possible, continue it. Otherwise
-   record what is blocked and the event or responsible actor needed to resume.
-   Repeat this check on the next message, dispatch, supported notification, or
-   other authorized activation. Consume applicable messages with `collab recv`.
+   each blocker, owned worktrees and stale resources, open P0/P1 work, and any
+   new production issue requiring canonical intake. If any action is possible,
+   continue it. Otherwise record what is blocked and the event or responsible
+   actor needed to resume. Preserve dirty, active, shared, or unknown resources
+   as PROTECTED_HOLD. If continued scheduling is required, explicitly re-arm a
+   consumed one-shot goal or deadline wake before this cycle ends. Repeat this
+   check on the next message or supported notification. Consume applicable
+   messages with `collab recv`.
 
 These are agent actions within an activation. The board does not automatically
 claim, execute, or resume work. Idle peers and children have no new periodic
@@ -703,20 +710,18 @@ Existing subscriptions, master wake, and one worker-idle fact remain unchanged.
 
 ## Common command card
 
-Managed subagent thread creation is unsupported in the production path and
-fails explicitly. Registered peer status and thread state use the owning
-AppServer RPC. Use peers for long-horizon goals and `codex exec --profile gcm`
-subworkers for bounded one-shot execution or observation. The existing
-child-private managed-subagent records remain bounded direct assignments and may
-be inspected with `status`, `send <id> --subject <topic> "<task>"`, and explicit
-`close <id>`.
+Legacy managed-subagent records grant no new production execution authority.
+Registered peer status and thread state use the owning AppServer RPC. Use peers
+for long-horizon goals. Use independent `codex exec --profile gcm` workers for
+bounded execution or observation. Legacy records may be inspected only for
+diagnosis or migration.
 For registered participants, `collab-mcp` and the `collab` CLI expose the same
 collaboration protocol. Listed `collab_*` tools alone do not prove registration.
 If MCP is missing, unsupported, aborted, or unknown, run the same
 actions with the CLI in the inherited project cwd:
 `collab context`, `collab recv`, `collab ack <id>` / `collab ack --all`,
 `collab msg <id>`,
-`collab inbox`, `collab worker status [id]`, `collab subagent ready|working <id>`,
+`collab inbox`, `collab worker status [id]`,
 `collab sendmessage --to <parent> --subject <topic> "<body>"`.
 The CLI is a complete protocol path. Missing MCP is not a blocker and
 does not justify skipping receive or waiting. `collab context` is the only
@@ -726,87 +731,14 @@ worker or project) is resolved by the daemon inside that same one call, so you
 never adjudicate a pane conflict and never need a second command for it.
 `collab init` is not the default agent entry, but it drives the same daemon
 identity gate and remains the entry for existing AppSDK init consumers.
-Child results go to the parent with
-`collab sendmessage`, not the parent-only `subagent send` action.
-No ACK loops, automatic respawn or redispatch.
+Ordinary peer assignment never uses `collab subagent dispatch`. Publish the
+public board task, then claim it or invite the selected peer with the observed
+revision. Bounded execution or observation goes to an independent
+`codex exec --profile gcm` worker. `collab subagent dispatch`, managed-child
+`send`, and managed `working` are legacy compatibility only and do not become
+a fallback when board admission fails.
 
-The current master grant holder is the sole scheduler assignment owner.
-Dispatch through the durable scheduler path with a stable request ID:
-
-```sh
-collab subagent dispatch --request-id <id> --subject <topic> "<assignment>" \
-  [--feature-id <feature>] [--worktree-path <path>] [--branch <branch>] \
-  [--base-commit <sha>] [--priority p0|p1|p2|p3|p4] [--next-step "<step>"]
-```
-
-Flag and body rules:
-
-- `--request-id` is required. ASCII letters/digits, `-`, or `_`, at most 80
-  bytes. Stable and idempotent: after an audit interruption, retrying the same
-  ID recovers the existing reservation and never creates a second task or
-  message.
-- `--subject` is required and non-empty.
-- The body is required and must contain Goal, Scope (allowed/forbidden paths),
-  Delivery iff, Tests (commands + expected + evidence path), Deliverables,
-  Forbidden, and Flow. Ordinary peers receive only this body.
-- `--feature-id` is optional: stable feature slug.
-- `--worktree-path` is optional. When `[worktree].base` is configured it must
-  be the rendered configured base path, for example
-  `<base>/<project-key>/<short-slug>`; otherwise legacy
-  `<project-main>/playground/<short-slug>` records remain valid while the
-  transition is active. The leaf is at most 32 ASCII
-  letters/digits/`.`/`-`/`_` and `..` is forbidden. The persisted field is
-  `worktree`, not `worktree_path`.
-- `--branch` is optional; prefer `codex/<short-slug>`.
-- `--base-commit` is optional; prefer the current `origin/main` SHA.
-- `--priority` defaults to `p2`; legal values are `p0|p1|p2|p3|p4`.
-- `--next-step` is optional and tells the peer the first concrete action.
-
-Only the current master grant holder may dispatch; the holder's control does
-not depend on its own transport liveness. The scheduler selects an eligible
-peer automatically: registered, non-requester, non-managed-subagent, presence
-present, and no active task. A peer holds only one active task. If no eligible
-peer is available the exact error is:
-
-```text
-MANAGED_SUBAGENT_UNSUPPORTED: no live registered tmux peer is available for dispatch
-```
-
-Do not create a fake peer or mark an ordinary peer as managed to bypass that
-error.
-
-Successful dispatch response fields:
-
-- `request_id`, `message_id`, `task_id`, `target`, `status: assigned`.
-- `admission.{request_id,message_id,task_id,worker_id,decision,status,reason}`:
-  scheduler admission audit.
-- `notification`: `sent` (transport accepted submission), `subscribed-not-sent`
-  (subscription exists but notification was not accepted), or
-  `mailbox-only-no-subscription` (no subscription; durable mailbox only).
-
-`notification: sent` proves the sending side accepted the operation, not that
-the peer consumed it. Check consumption on disk:
-
-- `collab msg <message-id>`: `consumed_by_recv` false means not consumed.
-- `collab task status <task-id>`: read `status`, `worktree`, `branch`,
-  `base_commit`.
-- A normal peer must run `collab task accept <task-id>` to change
-  `assigned -> working`; `collab task update --status working` is rejected for
-  an assigned task.
-
-The scheduler reserves one message/task pair for an eligible peer, binds the
-peer's active direct-message lease, records the admission audit, persists its
-succeeded or failed status, and only then attempts one bounded notification on
-success. An ordinary assigned peer must authenticate
-with its own worker token and run `collab task accept <task-id>`; that command
-atomically records `assigned -> working` and is the only receive entry for this
-assignment. `collab task update --status working` is rejected for an assigned
-task. A managed child accepts through `collab subagent working <id>`. Reusing a
-request ID after an audit interruption recovers the existing reservation and
-must never create a second task or message. The legacy `collab task dispatch`
-and `collab task claim` commands remain deprecated and fail explicitly.
-
-## Dispatch template
+## Assignment template
 
 Copy and fill this template for a normal scoped assignment:
 
@@ -843,25 +775,17 @@ Flow:
   Deliver evidence to master; report root cause + proposed fix if blocked.
 ```
 
-Dispatch example:
+Board assignment example:
 
 ```sh
-collab subagent dispatch \
-  --request-id fix-notify-lost-recv \
-  --subject "recover lost recv delivery" \
-  --feature-id notify-recovery \
-  --worktree-path /path/to/appsdk/playground/notify-lost-recv \
-  --branch codex/notify-lost-recv \
-  --base-commit <origin/main sha> \
-  --priority p1 \
-  --next-step "collab context; reproduce lost recv; patch and test" \
-  "Goal: ...
-  Scope: ...
-  Delivery iff: ...
-  Tests: ...
-  Deliverables: ...
-  Forbidden: ...
-  Flow: ..."
+collab board publish fix-notify-lost-recv \
+  --title "recover lost recv delivery" \
+  --description "Goal, scope, forbidden paths, flow, and deliverable" \
+  --delivery-condition "Observable behavior and required evidence" \
+  --test-condition "Exact command, expected result, and evidence path" \
+  --priority p1
+collab board invite fix-notify-lost-recv --to <peer> \
+  --expected-revision <observed>
 ```
 
 Consume notifications promptly with `collab recv`. A successful receive delivers
@@ -892,18 +816,11 @@ consecutive attempts without an observed `working` change, the episode stops.
 Worker-idle facts do not count toward this budget, and there is no
 scheduling-turn counter or automatic rearm.
 
-Managed subagents do not get child-targeted periodic liveness ACK loops. Their
-state is persisted by the daemon; a `working` -> `idle` transition contributes
-one durable `subagent-status` fact to the current master. The master, not the
-child, owns the outcome and checks the child's remaining board tasks and
-blocker release conditions before re-dispatching, closing, or leaving it idle.
-An activated child also follows the board queue and blocker checks. A subagent
-with an unfinished task is not repeatedly
-woken just because its task is not closed. `subagent status` reports durable
-task state and native thread state. Managed subagent creation remains
-unsupported; commands fail explicitly. Codex thread history is read only from
-the owning AppServer when supported and is never fabricated. A tmux pane is a
-last-resort identity anchor, not a status observation or snapshot receipt.
+Legacy managed records do not receive child-targeted liveness work or new
+assignments. Their historical `subagent-status` facts remain diagnostic input.
+Codex thread history is read only from the owning AppServer when supported and
+is never fabricated. A tmux pane is a last-resort identity anchor, not a status
+observation or snapshot receipt.
 
 ## Cross-project master communication
 
@@ -938,16 +855,14 @@ Enter idle only after the remaining-work and blocker checks above.
 
 Escalation routing is explicit:
 
-- A managed subagent and an ordinary worker both report blockers to the current
-  Collab master immediately. Do not wait for the next liveness cycle or for
-  master to invent the fix. First find a concrete solution (root cause,
-  proposed change, authorization needed); escalate that, not a symptom.
-  Lazy thinking is forbidden: do not dump "I'm blocked" and idle. If the
-  assignment's delivery or test conditions are ambiguous, do not guess;
-  propose the missing conditions and send them to master. A subagent must
-  also copy its parent when parent is not the master, and may not decline a
-  master collaboration request. Independent peers may temporarily decline a
-  master collaboration invite to protect their own current task. If no current
+- An ordinary worker reports blockers to the current Collab master immediately.
+  Do not wait for the next liveness cycle or for master to invent the fix.
+  First find a concrete solution (root cause, proposed change, authorization
+  needed); escalate that, not a symptom. Lazy thinking is forbidden: do not
+  dump "I'm blocked" and idle. If the assignment's delivery or test conditions
+  are ambiguous, do not guess; propose the missing conditions and send them to
+  master. Independent peers may temporarily decline a master collaboration
+  invite to protect their own current task. If no current
   master exists, report to the collaborator that initiated the task. Include
   the task ID, exact blocker, proposed solution, attempted actions, and
   requested decision.
@@ -1029,16 +944,15 @@ Master operates under two prime directives:
    worker must produce root-cause evidence and proposed fixes for master
    arbitration; master must actively close the lifecycle rather than patch
    output symptoms.
-2. **Task-kind Capacity**: Master must keep the entire worker fleet
-   fully loaded by task kind without idle time or serial bottlenecks. Route
-   long-horizon goals to autonomous peers and bounded one-shot execution or
-   observation to `codex exec --profile gcm` subworkers within the configured
-   `subagent.max_concurrent` cap. Peers do not consume that cap. Do not fill
-   peers first merely because they are idle. Before ending each scheduling
-   turn, inspect ready work and both receiver kinds: dispatch long-horizon
-   goals and bounded work to the correct idle or new receiver. Delivery, merge,
-   review, task close, and cleanup are lifecycle steps, never reasons to leave
-   eligible work undispatched.
+2. **Peer-first Capacity**: Master must keep eligible capacity saturated
+   without serial bottlenecks. Offer long-horizon goals through the public
+   board to suitable, consenting peers. Each peer orchestrates independent
+   `codex exec --profile gcm` workers for bounded execution or observation.
+   Master starts its own independent GCM worker only when every eligible peer
+   is busy. Before ending each scheduling turn, inspect ready work, peer
+   capacity, protected holds, P0/P1 work, and the active issue backlog.
+   Delivery, merge, review, task close, and cleanup are lifecycle steps, never
+   reasons to leave eligible work undispatched.
 
 **Sovereignty and Backlog Priority**:
 - **No autonomous technical debt refactoring**: When assigned tasks complete
@@ -1057,19 +971,22 @@ Master operates under two prime directives:
 When a worker transitions from `working` to `idle`, it emits one idempotent
 worker-idle fact to the current master. The master has long-horizon wake; the
 worker does not. On an idle fact, master must:
-1. Check the active task graph for unblocked downstream tasks and dispatch;
+1. Check the active task graph for unblocked downstream tasks and offer them
+   peer-first through the public board;
 2. If the main graph is clear, pull the highest-priority open issue from the
    bug backlog (`appsdk bug list --status open`), with P0 first; P0 blocks the
    affected project;
-3. If all tasks and bugs are closed, report completion and propose next
-   steps to the user.
+3. Inspect owned worktrees and stale resources, preserve PROTECTED_HOLDs, and
+   re-arm a consumed one-shot wake if continued scheduling is required;
+4. If all tasks and issues are closed, report evidence-backed completion and
+   propose next steps to the user.
 
 Do not stop after consuming a report or closing a task while authorized ready
-work has no correct receiver. Send long-horizon goals to autonomous peers and
-bounded one-shot execution or observation to `codex exec --profile gcm`
-subworkers within the configured cap. Dispatch the next ready non-overlapping
-P0/P1 work before the scheduling turn ends. Idle peers alone are not a reason
-to convert bounded work into a peer goal.
+work has no correct receiver. Offer long-horizon goals to peers through the
+board. Use independent `codex exec --profile gcm` workers for bounded execution
+or observation. Dispatch the next ready non-overlapping P0/P1 work before the
+scheduling turn ends. A master-owned GCM worker is a capacity fallback only
+when every eligible peer is busy.
 
 Master idle reminders are level-triggered. Within the same master idle episode,
 each reminder attempt consumes the shared episode-local budget, up to three
@@ -1077,7 +994,9 @@ attempts. An observed change to `working` ends that episode; after three
 consecutive attempts without an observed `working` change, the episode stops.
 Worker-idle facts do not count toward this budget, and there is no
 scheduling-turn counter.
-Master must not expect workers to be woken periodically.
+Master must not expect workers to be woken periodically. A read, ACK, status
+summary, or dispatch receipt does not complete a patrol or renew a one-shot
+wake.
 
 **Unacknowledged Workers & Pane Diagnostic Closure**:
 If a worker fails to acknowledge notifications or remains unresponsive across
@@ -1094,13 +1013,14 @@ without the receive receipt. A tmux screen cannot establish task completion,
 peer consumption, or Codex turn state. Do not infer those facts or restart a
 shared runtime from a pane probe.
 
-Master keeps architecture, dispatch, integration, critical repair, and
-final acceptance. Use a board invitation for a long-horizon peer goal. Use the
-existing child-private lifecycle for a bounded managed-subagent assignment.
-Managed Codex subagent thread creation is unsupported and fails explicitly.
-Give each peer and subworker its own worktree and file scope. Independent peers
-may decline an invite to protect their current task. Wait for evidence
-summaries, verify them, then integrate. Chat tone is not completion.
+Master keeps architecture, dispatch, integration, critical repair, and final
+acceptance. Use a board invitation for a long-horizon peer goal. Use an
+independent `codex exec --profile gcm` worker for bounded execution or
+observation. Legacy managed-subagent records grant no new execution authority
+and fail closed for unsupported thread creation. Give each peer and GCM worker
+its own worktree and file scope. Independent peers may decline an invite to
+protect their current task. Wait for evidence summaries, verify them, then
+integrate. Chat tone is not completion.
 
 Delivery and review are not lifecycle endpoints. `task review --accept`
 registers a daemon-owned pending merge and notifies the current master; the
@@ -1111,11 +1031,11 @@ text, and `task close` fails with `TASK_MERGE_PENDING` until the master records
 After a delivered candidate, either the peer merges and pushes the verified candidate under the next section’s conditions, or the current master drives review, integration,
 cleanup, task close, and then the next ready assignment. Do not leave a peer
 idle merely because its last task returned `delivered`, `merged`, or a review
-verdict. Route the next non-overlapping P0/P1 work by task kind: reuse an
-autonomous peer for another long-horizon goal, or start a bounded GCM subworker
-for execution or observation. Closing or force-closing a stale task is a
-scheduling decision that must preserve evidence, not a reason to stop
-dispatching.
+verdict. Route the next non-overlapping P0/P1 work peer-first. Reuse an
+autonomous peer for another long-horizon goal. Start a master-owned independent
+GCM worker only when every eligible peer is busy. Closing or force-closing a
+stale task is a scheduling decision that must preserve evidence, not a reason
+to stop dispatching.
 
 ### Verified merge and resource cleanup DAG（单源单汇）
 
@@ -1173,14 +1093,13 @@ daemon 生命周期由用户管理，agent 不执行维护动作、不索取凭�
 注册、恢复和巡检都不得重启或停止 tmux server，也不得关闭或终止宿主 pane。
 
 A peer orchestrates only its accepted scope, owns that goal's full lifecycle,
-and maintains its own scoped patrol subscriptions. A managed subagent executes
-only its bounded assignment and has no independent patrol schedule.
+and maintains its own scoped patrol subscriptions. A legacy managed-subagent
+record grants no new execution or patrol authority.
 On a peer blocker, first ask the current master for help with the task,
 evidence, attempted actions, proposed next step, and decision needed. Do not
 delay the request while seeking a proven fix. If master is unavailable, record
-it and continue safe in-scope work. Managed subagents report within their
-assignment to parent/master. If delivery or test conditions are unclear, propose the missing
-conditions instead of guessing. Only an explicit `collab notify unsubscribe
+it and continue safe in-scope work. If delivery or test conditions are unclear,
+propose the missing conditions instead of guessing. Only an explicit `collab notify unsubscribe
 <subscription-id>` stops a default direct-message lease; finishing or closing
 the last task never cancels it, so a registered peer stays wakeable. There is
 no separate `collab notify close` command. Do not unsubscribe another peer's
@@ -1489,19 +1408,18 @@ register it.
   liveness. An explicitly user-approved `collab master promote` replaces the
   recorded holder, and only the current master grant holder may
   `collab master delegate`. Independent peers may
-  decline a master collaboration invite. A delegated subagent follows its
-  task contract; it follows this Skill's Collab protocol only if it is itself a
-  registered peer. Master splits by dependency then unique write scope, assigns
-  subagents with unambiguous delivery and test conditions, and keeps
-  architecture/integration/acceptance; it does not take another peer's
-  task. Workers and subagents find a solution first, then report blockers
-  to master immediately; they do not wait or dump symptoms. Last owned
+  decline a master collaboration invite. Master splits by dependency then
+  unique write scope, offers long-horizon work to a consenting peer through the
+  public board with unambiguous delivery and test conditions, and keeps
+  architecture/integration/acceptance; it does not take another peer's task.
+  Workers find a solution first, then report blockers to master immediately;
+  they do not wait or dump symptoms. Legacy managed records grant no new task
+  authority. Last owned
   task close keeps that owner's auto-notify armed; use
   `collab notify unsubscribe <subscription-id>` for a specific leftover
   lease. Only an explicit unsubscribe stops it. AGY review is not a Collab v1 gate; ordinary review is independent,
-  and milestone review uses Codex Review (`oauth`, `gpt-6.1-sol`). Explicit managed subagent tasks
-  use the task-bound inspect obligation above; it is not a free-form task queue
-  and does not create worker transport input.
+  and milestone review uses Codex Review (`oauth`, `gpt-6.1-sol`). Legacy
+  managed records remain diagnostic compatibility facts only.
 - Each peer owns its complete task/worktree/integration/resource/cleanup
   lifecycle. Never mutate or close another peer's work.
 - Send only explicit notices, shared-resource coordination, or subscribed async

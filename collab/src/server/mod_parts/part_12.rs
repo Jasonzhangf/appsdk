@@ -552,6 +552,21 @@ pub fn replay_host_index(storage_root: &Path) -> anyhow::Result<State> {
 /// The project root remains the semantic scope used by worktree and identity
 /// validation; the journal path may be an appserver-specific runtime store.
 fn replay_from_journal(root: &Path, journal: &Path) -> anyhow::Result<State> {
+    replay_from_journal_mode(root, journal, true)
+}
+
+/// Read-only replay for startup discovery. It parses the same committed state
+/// but never rewrites a legacy journal; any rewrite requires the writer lock
+/// that normal materialization takes before opening the route.
+fn replay_from_journal_read_only(root: &Path, journal: &Path) -> anyhow::Result<State> {
+    replay_from_journal_mode(root, journal, false)
+}
+
+fn replay_from_journal_mode(
+    root: &Path,
+    journal: &Path,
+    allow_journal_rewrite: bool,
+) -> anyhow::Result<State> {
     let mut st = State::default();
     if !journal.exists() {
         return Ok(st);
@@ -807,7 +822,7 @@ fn replay_from_journal(root: &Path, journal: &Path) -> anyhow::Result<State> {
     st.global.validate().map_err(|error| {
         anyhow::anyhow!("journal replay failed: global state validation: {error}")
     })?;
-    if convert_root {
+    if convert_root && allow_journal_rewrite {
         let mut body = String::new();
         for event in events {
             body.push_str(&serde_json::to_string(&event)?);

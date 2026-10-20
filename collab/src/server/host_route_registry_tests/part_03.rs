@@ -1615,10 +1615,12 @@
         let resident_context = context_with_app(&root, crate::identity::CLI_APP_SERVER_ID);
         let before_journal = std::fs::read(&journal_path).unwrap();
 
+        std::fs::create_dir_all(server.host_paths.state_root()).unwrap();
+
         let response = dispatch_wire(
             server.clone(),
             Some(resident_context.clone()),
-            Req::Shutdown { operator: true },
+            Req::Shutdown { password: Some(crate::proto::MaintenancePassword::new(server.config.maintenance.password.clone())) },
         )
         .await;
         assert!(response.ok, "{response:?}");
@@ -1638,7 +1640,7 @@
         std::fs::create_dir_all(&wrong_root).unwrap();
         let wrong_root_error = validate_request_context(
             &server,
-            &Req::Shutdown { operator: true },
+            &Req::Shutdown { password: Some(crate::proto::MaintenancePassword::new(server.config.maintenance.password.clone())) },
             Some(&context_with_app(
                 &wrong_root,
                 crate::identity::CLI_APP_SERVER_ID,
@@ -1649,7 +1651,7 @@
 
         let wrong_app_error = validate_request_context(
             &server,
-            &Req::Shutdown { operator: true },
+            &Req::Shutdown { password: Some(crate::proto::MaintenancePassword::new(server.config.maintenance.password.clone())) },
             Some(&context_with_app(&root, "other-app")),
         )
         .unwrap_err();
@@ -1657,11 +1659,11 @@
 
         let non_operator_error = validate_request_context(
             &server,
-            &Req::Shutdown { operator: false },
+            &Req::Shutdown { password: None },
             Some(&resident_context),
         )
         .unwrap_err();
-        assert!(non_operator_error.starts_with("PROJECT_SCOPE_UNKNOWN:"));
+        assert!(non_operator_error.starts_with("MAINTENANCE_AUTHENTICATION_FAILED"));
 
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_dir_all(wrong_root).unwrap();

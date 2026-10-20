@@ -27,6 +27,7 @@ use main_cli::*;
 
 mod main_context;
 use main_context::*;
+mod main_maintenance;
 
 #[cfg(feature = "context-cancel-test-hooks")]
 mod context_cancel_test_hooks;
@@ -411,10 +412,11 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     "collab init must run from the project main tree, not a ./playground worktree"
                 );
             }
-            let _base = scope::init(&project_root)?;
             let scope = Scope { root: project_root };
-            let started = !client::alive(&scope.sock_path());
-            client::ensure_server(&scope.sock_path())?;
+            // Ordinary init observes the user-managed daemon before any
+            // baseline or identity write and never launches it.
+            client::require_server(&scope.sock_path())?;
+            scope::init(&scope.root)?;
             let facts = collect_identity_facts(None)?;
             let (snapshot, ident) = identity_context_response(&scope, facts)?;
             let ident = ident.ok_or_else(|| identity_context_required(&snapshot))?;
@@ -433,7 +435,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 "identity_kind": "peer",
                 "runtime": runtime,
                 "transport_selected": ident.transport,
-                "daemon_started": started,
+                "daemon_started": false,
                 "role_brief": snapshot["role_brief"],
                 "task_board": task_board["tasks"],
                 "recovery_action": snapshot["role_brief"]["communication_recovery"]
@@ -448,6 +450,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             rt.block_on(server::run(scope))
         }
         Cmd::Up => {
+            let _terminal = main_maintenance::user_terminal()?;
             let project_root = scope::lifecycle_project_root()?;
             if !project_root.join(".agent-collab").is_dir() {
                 scope::init(&project_root)?;
@@ -468,71 +471,19 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Down => {
+            let password = main_maintenance::read_password()?;
+            if password.expose() != config::maintenance_password()? {
+                anyhow::bail!("MAINTENANCE_AUTHENTICATION_FAILED");
+            }
             let scope = Scope {
                 root: scope::lifecycle_project_root()?,
             };
-            if client::alive(&scope.sock_path()) {
-                let _: serde_json::Value = client::call_with_context(
-                    &scope.sock_path(),
-                    &Req::Shutdown { operator: true },
-                    Some(cli_project_context(&scope.root)?),
-                )?;
-            }
-            let server_dir = scope.host_server_dir();
-            std::fs::create_dir_all(&server_dir)?;
-            std::fs::write(server_dir.join("DOWN"), b"explicitly stopped\n")?;
-            client::record_event(
+            let _: Value = client::call(
                 &scope.sock_path(),
-                "daemon_down_requested",
-                json!({"pid": std::process::id()}),
-            );
-            let pid_path = server_dir.join("server.pid");
-            if client::alive(&scope.sock_path()) {
-                let mut socket_pids = Vec::new();
-                let output = std::process::Command::new("lsof")
-                    .args(["-t", scope.sock_path().to_str().unwrap_or_default()])
-                    .output()?;
-                for line in String::from_utf8_lossy(&output.stdout).lines() {
-                    if let Ok(pid) = line.trim().parse::<i32>() {
-                        socket_pids.push(pid);
-                    }
-                }
-                let daemon_pid = std::fs::read_to_string(&pid_path)
-                    .ok()
-                    .and_then(|pid| pid.trim().parse::<i32>().ok());
-                let pid = match (socket_pids.is_empty(), daemon_pid) {
-                    (true, Some(pid)) => Some(pid),
-                    (false, Some(pid)) if socket_pids.contains(&pid) => Some(pid),
-                    (false, Some(pid)) => {
-                        anyhow::bail!(
-                            "recorded collab daemon pid {} does not own socket {}",
-                            pid,
-                            scope.sock_path().display()
-                        );
-                    }
-                    (_, None) => None,
-                };
-                if let Some(pid) = pid.filter(|pid| *pid > 1 && *pid != std::process::id() as i32) {
-                    let status = std::process::Command::new("kill")
-                        .args(["-TERM", &pid.to_string()])
-                        .status()?;
-                    if !status.success() {
-                        anyhow::bail!("failed to stop collab daemon pid {}", pid);
-                    }
-                }
-                for _ in 0..40 {
-                    if !client::alive(&scope.sock_path()) {
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-                if client::alive(&scope.sock_path()) {
-                    anyhow::bail!(
-                        "collab daemon did not stop at {}",
-                        scope.sock_path().display()
-                    );
-                }
-            }
+                &Req::Shutdown {
+                    password: Some(password),
+                },
+            )?;
             out(&json!({"ok": true, "down": true, "server": scope.sock_path()}));
             Ok(())
         }
@@ -772,7 +723,17 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Worker { cmd } => {
-            let scope = Scope::resolve()?;
+            let scope = if matches!(
+                &cmd,
+                WorkerCmd::Close {
+                    self_current: true,
+                    ..
+                }
+            ) {
+                resolve_context_root(&scope::HostPaths::resolve()?, &std::env::current_dir()?)?.0
+            } else {
+                Scope::resolve()?
+            };
             match cmd {
                 WorkerCmd::Name { name, reset: _ } => {
                     let ident = registered_board_identity(&scope)?;
@@ -846,15 +807,31 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 }
                 WorkerCmd::Close {
                     target_id,
+                    self_current,
                     reason,
                     operation_id,
                 } => {
+                    if self_current {
+                        let ident = me(&scope)?;
+                        let response = client::call_with_context_response(
+                            &scope.sock_path(),
+                            &Req::UnregisterSelf {
+                                worker_id: ident.worker_id.clone(),
+                                token: ident.token.clone(),
+                            },
+                            Some(proto::ProjectContext::for_registered_route(
+                                &scope.root,
+                                runtime_for_request(&ident)?,
+                            )?),
+                        )?;
+                        return emit_lifecycle_response(response);
+                    }
                     let ident = lifecycle_identity(&scope)?;
                     emit_lifecycle_response(peer_lifecycle_close(
                         &scope,
                         &ident,
-                        &target_id,
-                        &reason,
+                        target_id.as_deref().expect("clap requires a target"),
+                        reason.as_deref().expect("clap requires a reason"),
                         operation_id,
                     )?)
                 }
@@ -873,6 +850,23 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             include_runs,
         } => {
             let level = reset::ResetLevel::select(project, host)?;
+            if project {
+                let scope =
+                    resolve_context_root(&scope::HostPaths::resolve()?, &std::env::current_dir()?)?
+                        .0;
+                client::require_server(&scope.sock_path())?;
+                let ident = me(&scope)?;
+                let value: Value = call_project(
+                    &scope,
+                    &ident,
+                    &Req::ProjectReset {
+                        worker_id: ident.worker_id.clone(),
+                        token: ident.token.clone(),
+                    },
+                )?;
+                out(&value);
+                return Ok(());
+            }
             let root = scope::project_root_for_init()?;
             let scope = Scope { root };
             let host_paths = scope::HostPaths::resolve()?;

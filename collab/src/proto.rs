@@ -6,6 +6,29 @@ use crate::identity::{
 };
 use crate::scope::{ProjectScopeId, RouteScope};
 
+/// User maintenance credential for the hidden daemon lifecycle command. It is
+/// serialized only into the authenticated wire request; `Debug` is redacted so
+/// diagnostics cannot expose the value.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct MaintenancePassword(String);
+
+impl MaintenancePassword {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for MaintenancePassword {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MaintenancePassword(<redacted>)")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TransportKind {
     #[serde(rename = "appserver")]
@@ -594,6 +617,14 @@ pub enum Req {
         reply: RegisterParticipantReply,
     },
     BoardShow,
+    UnregisterSelf {
+        worker_id: String,
+        token: String,
+    },
+    ProjectReset {
+        worker_id: String,
+        token: String,
+    },
     Board {
         worker_id: String,
         token: String,
@@ -911,7 +942,9 @@ pub enum Req {
         confirm: bool,
     },
     Shutdown {
-        operator: bool,
+        /// User maintenance credential; removed from activity records.
+        #[serde(default)]
+        password: Option<MaintenancePassword>,
     },
     Ping,
     StatusAll,

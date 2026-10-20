@@ -175,7 +175,7 @@ pub(crate) struct HostRouteRecord {
     pub(crate) registered_ms: i64,
 }
 
-pub(crate) const ROUTE_RESOLVE_NOT_FOUND_RECOVERY: &str = "recovery: run `collab context` from the canonical project main checkout; it resolves the canonical root, restores identity and registration, starts the daemon when no explicit DOWN marker exists, and returns the current role's operations. Do not re-register a worktree, edit routes.jsonl, copy identity tokens, start a second daemon, or use mailbox state as transport delivery";
+pub(crate) const ROUTE_RESOLVE_NOT_FOUND_RECOVERY: &str = "recovery: run `collab context` from the current project; it restores identity, registration and the current delivery route through the user-managed daemon, and returns the current role's operations. Do not edit routes.jsonl, copy identity tokens, or use mailbox state as transport delivery";
 
 struct RuntimeRoute {
     root: PathBuf,

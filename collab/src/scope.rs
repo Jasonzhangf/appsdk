@@ -276,6 +276,10 @@ fn narrow_routes_for_git_worktree(
     mut matches: Vec<CanonicalProjectRoute>,
 ) -> anyhow::Result<(Vec<CanonicalProjectRoute>, Option<GitWorktreeRoots>)> {
     let git_roots = git_worktree_roots_if_any(cwd)?;
+    if matches.iter().any(|route| route.root == cwd) {
+        matches.retain(|route| route.root == cwd);
+        return Ok((matches, git_roots));
+    }
     matches.retain(|route| {
         cwd.starts_with(&route.root)
             || git_roots
@@ -794,27 +798,30 @@ the installed independent binaries are `~/.cargo/bin/collab` and
 `scripts/install-global-collab.sh`; do not build a second copy from an external
 Collab checkout.
 
-The daemon is detached. Normal commands may start it when no explicit `DOWN`
-marker exists. `collab context` creates a missing local baseline, observes
-available runtime facts, and asks the daemon to establish or recover identity.
+There is one global user-managed daemon. Agent commands never start, stop or
+restart it. `collab context` uses the current cwd project and current tmux
+session; historical pane ownership never blocks identity restoration. A project
+without a master restores a peer automatically. If a master already exists,
+offer the user a choice to authorize replacing it with the current identity;
+without approval, peer restoration remains available. Work content, task
+ownership and worktree checks are not identity admission conditions.
 If it returns `requires_identity_update.required_fields`, supply only those
 real facts once with `collab context --provide '<JSON>'`. The daemon completes
-the binding and lease; do not choose a worker or run a recovery command. Use
-`collab down` only for an explicit stop; use `collab up` to clear that stop and
-start it again. Never start a second daemon.
+the binding and lease; do not choose a worker or run another recovery command.
+If the service is unavailable, preserve the identity and report that boundary.
+User maintenance commands and credentials are outside the agent interface.
 Existing projects migrate through `collab migrate inspect`, `plan`, `apply`,
-controlled daemon upgrade/restart, daemon identity reconciliation through
-`collab context`, and `verify`;
+daemon identity reconciliation through `collab context`, and `verify`;
 deleting `.agent-collab`, editing JSON state, clearing mailboxes, copying
 tokens, mixed runtime writes, and guessing thread identity are deprecated.
 
 ## Runtime boundary
 
-- Every peer registration must include a server-verified App Server candidate.
+- The daemon selects the current supported adapter from observed runtime facts.
 - Registration owns one deterministic seven-day default direct-message lease;
-  daemon restart restores it only while the registered App Server thread still
-  matches the peer identity. A shorter explicit lease cannot suppress it.
-- App Server is the only registered notification transport.
+  context restores its current binding, route and lease together. A shorter
+  explicit lease cannot suppress it.
+- Recovery acceptance includes actual send, receive and reply for both roles.
 - Server state, journal, and mailbox are durable truth; a failed wake cannot
   roll back state or fabricate success.
 - The runtime is part of the worker identity boundary, not a task preference.
@@ -861,14 +868,12 @@ Task records use a fixed shape:
 ## Common commands
 
 ```sh
-collab up                         # clear explicit down and start daemon
-collab down                       # explicit stop; disables auto-restart
 collab who                        # registered peers + local state projection
 collab task status [task-id]      # durable task registry
 collab notify methods             # discover opt-in notification methods
 collab notify subscribe --event direct-message --ttl-seconds 600
 collab notify status
-collab context                    # single automatic state entry: baseline/daemon/identity/registration + role operations
+collab context                    # restore current identity and communication route + role operations
 collab master status              # live master, or recorded-but-dead identity
 collab master promote --approval "<user text>"
 collab master delegate <peer>     # live master only
@@ -885,11 +890,11 @@ collab task close <id> --force --reason "..."  # master/approved fallback close
 
 `collab context` is the single automatic agent state entry. It resolves the
 canonical project root (live route, registered route, or local baseline),
-creates a missing `.agent-collab` baseline, starts the daemon unless an explicit
-`DOWN` marker exists, restores/registers the peer identity, and returns the
+connects to the existing user-managed daemon, creates a missing `.agent-collab`
+baseline when applicable, restores/registers the peer identity, and returns the
 server snapshot plus `operations`. The default agent flow does not start with
-`collab master status`, `appsdk init .`, `collab down`/`up`, or
-`collab route resolve`; those remain explicit human diagnostics only.
+`collab master status`, `appsdk init .`, or `collab route resolve`.
+Daemon lifecycle is outside the agent interface and is never identity recovery.
 
 Live master dispatch uses `collab subagent dispatch --request-id <id>
 --subject <topic> "<body>"` with optional
@@ -957,7 +962,7 @@ impl Scope {
         Self::resolve_from_cwd(&cwd)
     }
 
-    fn local_baseline_is_authoritative(cwd: &Path) -> anyhow::Result<bool> {
+    pub(crate) fn local_baseline_is_authoritative(cwd: &Path) -> anyhow::Result<bool> {
         if !cwd.join(".agent-collab").is_dir() {
             return Ok(false);
         }
@@ -1006,17 +1011,6 @@ impl Scope {
         cwd: &Path,
         host_paths: &HostPaths,
     ) -> anyhow::Result<Self> {
-        // A live Codex session/thread is the authoritative route key. The
-        // tmux pane is only a last-resort recovery anchor when both Codex
-        // runtime IDs are absent, so a tmux-hosted TUI must not prefer the
-        // pane route over its native thread.
-        if std::env::var_os("CODEX_THREAD_ID").is_some() {
-            return Self::resolve_from_cwd_without_thread(cwd, host_paths);
-        }
-        if std::env::var_os("TMUX_PANE").is_some() {
-            let route = route_for_tmux_pane(host_paths)?;
-            return Ok(Scope { root: route.root });
-        }
         Self::resolve_from_cwd_without_thread(cwd, host_paths)
     }
 

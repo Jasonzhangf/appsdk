@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-context",
-  "version": "0.11.0",
-  "description": "一次 context 请求到一次判别结果。CLI/MCP 只收集真实事实、保留 caller 生成的稳定 operation key，并提交 typed intent；daemon identity_gate 是唯一身份决策、approved recovery admission、外层 operation record 和 pure read query owner。四类互斥 invocation 共用本图：automatic context/recovery、fact supplement、approved identity recovery、operation query。只有 approved invocation 可携带精确 project/app scope、target identity、action、intent_digest 与 expected incumbent binding/generation 的批准；批准不是 token、endpoint 或 scope 所有权证明。approved replacement 在普通 Register token admission 前进入 daemon-owned transaction：从 project reducer/worker/credential owner 读取权威事实，本地 identity receipt 只作 cache；验证端点后只退役精确 incumbent，并由既有 Register owner 提交真实 binding。内部 admission proof 不是 token，也不伪造 actor_binding_id。普通 Register 与 authenticated command 仍保留 token/binding/generation/scope 校验，TOKEN_MISMATCH 只描述这些非批准路径。stable operation key 在首个身份副作用前持久化，绑定 project_scope、app_scope_id、target_identity、action、intent_digest；同 key 同意图复用，同 key 不同意图拒绝。phase 为 admitted、approval_decision、nested_register、route、credential、grant（仅显式 grant approval）、lease、context_complete；nested Register 的 command_id/operation_id 在 dispatch 前写入外层记录。nested receipt 只证明内层注册；route、credential、grant、lease、snapshot 各自仍由原 owner 提交。结果使用同一 discriminated schema，区分 missing_facts、approval_required、denied、partial、unknown、failed、completed、cancelled；automatic/supplement 在提交后阶段未完成时必须可返回 partial，终态失败保留 committed_phases，cancelled 只在安全边界出现。query 只读 durable phase projection 与 owner readback，需保留的 operation key 和完整 proof/read capability，不要求失效旧 token，永不 repair 或续写 credential、binding、route、grant、lease。repair 是单独显式 context invocation，新 key 与新 intent。identity/binding/route/credential/grant/lease owner 不合并；恢复 master identity 不隐式 grant/clear/promote，authority 流程仍属于 docs/dagpipe/collab-master-authority.graph.json。歧义、跨项目、伪造端点和真实冲突继续 fail closed。Cancellation is governed by this same identity operation owner: a context-only prepare_invocation reservation binds the operation key, canonical project/app scope, intent digest, and retained capability before mutation dispatch; admission and pre-admission cancellation arbitrate the pending ticket, and a winning cancellation leaves no durable operation. After admission, CLI SIGINT and the exact active MCP tools/call cancellation reach this owner without acquiring the identity_gate execution mutex. Cancellation may commit only at safe boundaries before a durable owner start or between completed owners; once Register CommandStarted or the authority journal grant-start event is synced, the invocation never claims cancelled. The context operation owner and its short arbitration lock govern cancellation; identity_gate only serializes identity execution. Register-start and grant-start evidence each remain owned by their existing durable journal. Implementation mapping (S23-B03 delta accepted 2026-10-09): outer admission/phase sync and authorized query remain owned by operation_journal.rs and its existing B23 dispatch; identity_context.rs binds the prepared Register envelope's nested IDs before consume and performs exact receipt readback; part_02.rs prepares the typed envelope from one consistent reducer snapshot; part_06.rs and part_11.rs route legacy and internal Register callers through the same prepare/consume owner; part_04.rs coordinates durable outer Validating (including nested IDs) before consuming that same envelope and queries the exact already-loaded runtime receipt. No operator topology or business semantics change. This is an implementation map, not evidence that the behavior is complete.",
+  "version": "0.12.0",
+  "description": "一次 context 请求到一次结果的 SESE 流程。current cwd 及现有 worktree 映射确定项目；require_daemon 在所有 baseline、identity、route、journal 写入之前，只观察用户管理的服务，不启动或重启。daemon 按当前项目与 tmux socket/server/session 选择身份，非 tmux 保持既有 native 路径；pane 历史、task、worktree、邀请和通信回环不参与恢复准入。持久身份复用 worker/token，不重复 Register；端点移动由现有 binding、transport、route 和 credential owner 更新。首次建立复用 typed Register owner。授权的当前 pane 恢复退役旧项目或旧身份的 binding、route 和 grant，保留普通任务与消息。无 master 直接为 peer；另有 master 时成功恢复为可用 peer，提供一个可选替换操作；当前项目/session 已是 master 时保留授权且不重复询问。显式 approve_grant 仅需 action restore_master 与 authorization，当前身份及 incumbent 由服务端推导，不要求旧 target/token、generation、digest、lease 或第二次批准；授权提交沿 collab-master-authority 图的现有 authority owner。operation key 及 retained capability 复用既有 journal；同 key 同意图重放不重复提交。query 只读投影，不修复、不续写。缺事实、真实 I/O 错误、partial 与取消均返回真实结果及已提交 owner 证据。取消仅在首个 durable owner start 之前或已完成 owner 之间的安全边界获胜；Register/grant-start 后不得声称 cancelled。identity_gate 仅串行化身份执行；既有 operation journal 和各 owner 继续负责其 durable 记录，不增加身份注册表、审批层或维护密码入口。",
   "inputs": [{"id": "context_request", "schema": "Object"}],
   "nodes": [
     {
@@ -11,21 +11,21 @@
       "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"
     },
     {
-      "id": "ensure_baseline", "operator": "appsdk.collab_context.ensure_baseline", "operator_version": "1",
-      "inputs": ["resolved_scope"], "output": {"id": "baseline_ready", "schema": "Object"},
+      "id": "require_daemon", "operator": "appsdk.collab_context.require_daemon", "operator_version": "1",
+      "inputs": ["resolved_scope"], "output": {"id": "daemon_ready", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
       "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"
     },
     {
-      "id": "ensure_daemon", "operator": "appsdk.collab_context.ensure_daemon", "operator_version": "1",
-      "inputs": ["baseline_ready"], "output": {"id": "daemon_ready", "schema": "Object"},
+      "id": "ensure_baseline", "operator": "appsdk.collab_context.ensure_baseline", "operator_version": "1",
+      "inputs": ["daemon_ready"], "output": {"id": "baseline_ready", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
       "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"
     },
     {
       "id": "identity_gate", "operator": "appsdk.collab_context.identity_gate", "operator_version": "2",
-      "description": "普通持久恢复读回原身份、角色和 binding，不 Register 或验证通信。首次注册和显式当前 anchor 覆盖复用 typed prepare/consume、receipt replay 及安全取消边界；可用 tmux 优先，未选 AppServer 事实不参与准入，不追加 InitialRegister challenge。手动通信恢复仍独立验证。真实提交错误和 partial 保留 committed phases，query 纯读。",
-      "inputs": ["daemon_ready"], "output": {"id": "identity_operation_result", "schema": "Object"},
+      "description": "当前 cwd 的项目与 tmux socket/server/session 选择身份，历史 pane 身份不享有保护。恢复复用 worker/token，同时恢复当前 binding、transport、route 和收信订阅；pane 移动同步投递事实并使旧 route 失效。完成验收包含 peer 与 master 的真实发送、接收和回复，不以角色字段代替通信，不要求用户另做恢复。授权恢复退役当前 pane 旧绑定、route 和 grant，包括旧项目；保留普通任务与消息。无 master 时直接为 peer；另有 master 时 peer 仍可通信，并提供可选替换。approve_grant 只需 action restore_master 与 authorization，直接替换服务端当前 incumbent；已是 master 不重复询问。首次建立复用 Register owner。真实 I/O 错误与 partial 显式返回，query 纯读。",
+      "inputs": ["baseline_ready"], "output": {"id": "identity_operation_result", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
       "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"
     },
@@ -43,9 +43,9 @@
     }
   ],
   "edges": [
-    {"from": "resolve_context_root", "to": "ensure_baseline", "arc_id": "resolved_scope"},
-    {"from": "ensure_baseline", "to": "ensure_daemon", "arc_id": "baseline_ready"},
-    {"from": "ensure_daemon", "to": "identity_gate", "arc_id": "daemon_ready"},
+    {"from": "resolve_context_root", "to": "require_daemon", "arc_id": "resolved_scope"},
+    {"from": "require_daemon", "to": "ensure_baseline", "arc_id": "daemon_ready"},
+    {"from": "ensure_baseline", "to": "identity_gate", "arc_id": "baseline_ready"},
     {"from": "identity_gate", "to": "env_view", "arc_id": "identity_operation_result"},
     {"from": "env_view", "to": "输出含显示名的权威快照", "arc_id": "env_projection"}
   ],

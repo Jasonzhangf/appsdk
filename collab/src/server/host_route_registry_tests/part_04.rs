@@ -535,7 +535,7 @@
         let manager = ProjectRuntimeManager::new(server, &host_paths).unwrap();
 
         assert!(manager.routes.lock().unwrap().is_empty());
-        assert_eq!(std::fs::read_to_string(&route_journal).unwrap(), contents);
+        assert!(load_host_route_records(&route_journal).unwrap().is_empty());
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -751,7 +751,7 @@
         let manager = ProjectRuntimeManager::new(server, &host_paths).unwrap();
 
         assert!(manager.routes.lock().unwrap().is_empty());
-        assert_eq!(std::fs::read_to_string(&route_journal).unwrap(), contents);
+        assert!(load_host_route_records(&route_journal).unwrap().is_empty());
 
         std::fs::remove_dir_all(root).unwrap();
     }

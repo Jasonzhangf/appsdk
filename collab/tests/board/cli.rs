@@ -3,7 +3,6 @@ use super::*;
 fn setup() -> (AppFixture, String, String) {
     let mut fixture = AppFixture::new();
     let first = fixture.run_public(&["context"], THREAD_A);
-    fixture.initialized = true;
     let second = fixture.run_public(&["context"], THREAD_B);
     fixture.run_public(
         &[
@@ -76,7 +75,7 @@ fn display_name_defaults_follow_current_master_without_renaming_identity() {
 
 #[test]
 fn display_name_changes_persist_and_preserve_task_and_message_identity() {
-    let (fixture, master, peer) = setup();
+    let (mut fixture, master, peer) = setup();
     let named = fixture.run_public(&["worker", "name", "Alice"], THREAD_B);
     assert_eq!(named["worker_id"], peer);
     assert_eq!(named["display_name"], "Alice");
@@ -125,14 +124,14 @@ fn display_name_changes_persist_and_preserve_task_and_message_identity() {
             .status
             .success());
     }
-    fixture.restart_daemon(THREAD_A);
+    fixture.restart_daemon();
     let restored = fixture.run_public(&["context"], THREAD_B);
     assert_eq!(restored["identity"]["display_name"], "Alice");
     assert_eq!(restored["master"]["display_name"], "June");
     let reset = fixture.run_public(&["worker", "name", "--reset"], THREAD_A);
     assert_eq!(reset["display_name"], "Jenny");
     fixture.run_public(&["worker", "name", "--reset"], THREAD_B);
-    fixture.restart_daemon(THREAD_A);
+    fixture.restart_daemon();
     assert_eq!(
         fixture.run_public(&["context"], THREAD_B)["identity"]["display_name"],
         peer
@@ -400,7 +399,7 @@ fn blocked_task_keeps_responsibility_but_does_not_block_next_work_or_resume() {
 
 #[test]
 fn claimed_and_queued_tasks_survive_daemon_replay() {
-    let (fixture, _, peer) = setup();
+    let (mut fixture, _, peer) = setup();
     publish(&fixture, "replay-active");
     fixture.run_public(
         &[
@@ -430,7 +429,7 @@ fn claimed_and_queued_tasks_survive_daemon_replay() {
     );
     assert_eq!(queued["task"]["revision"], 1);
 
-    fixture.restart_daemon(THREAD_A);
+    fixture.restart_daemon();
 
     let active = fixture.run_public(&["task", "status", "replay-active"], THREAD_A);
     assert_eq!(active["owner"], peer);

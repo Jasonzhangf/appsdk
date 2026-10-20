@@ -739,8 +739,7 @@ fn run_project(
         crate::server::acquire_legacy_writer_fence(&Scope { root: root.clone() }, host_paths)?;
     if crate::client::alive(&host_paths.socket_path()) {
         anyhow::bail!(
-            "RESET_DAEMON_LIVE: a Collab daemon is reachable at {}; run `collab down` \
-             before retiring the project control plane",
+            "RESET_DAEMON_LIVE: offline maintenance is unavailable while the user-managed service is running at {}",
             host_paths.socket_path().display()
         );
     }
@@ -1071,8 +1070,7 @@ fn run_host(scope: &Scope, host_paths: &HostPaths, request: &ResetRequest) -> an
         crate::server::acquire_reset_lock(&host_paths.lock_path(), &host_paths.socket_path())?;
     if crate::client::alive(&host_paths.socket_path()) {
         anyhow::bail!(
-            "RESET_DAEMON_LIVE: a Collab daemon is reachable at {}; run `collab down` \
-             before rebuilding the host control plane",
+            "RESET_DAEMON_LIVE: offline maintenance is unavailable while the user-managed service is running at {}",
             host_paths.socket_path().display()
         );
     }

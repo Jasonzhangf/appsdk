@@ -3,9 +3,9 @@ fn role_contract_is_identical_across_context_workers_and_status() {
     use crate::subagent::Record;
 
     let (server, root) = test_server();
-    register(&server, "master", "%master");
-    register(&server, "worker", "%worker");
-    register(&server, "child", "%child");
+    register_synthetic_peer(&server, "master", "%master");
+    register_synthetic_peer(&server, "worker", "%worker");
+    register_synthetic_peer(&server, "child", "%child");
     promote_master(&server, "master", "user approved master");
     server.commit(&[Event::SubagentUpdated {
         subagent: Record {
@@ -46,6 +46,58 @@ fn role_contract_is_identical_across_context_workers_and_status() {
             context.data["role_brief"]["derivation"]["parent"].as_str(),
             (expected_role == "managed-subagent").then_some("master")
         );
+        let role_task = context.data["role_brief"]["role_task"]
+            .as_str()
+            .expect("role task is explicit");
+        let responsibilities = context.data["role_brief"]["responsibilities"]
+            .as_array()
+            .expect("role responsibilities are explicit")
+            .iter()
+            .filter_map(|line| line.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        match expected_role {
+            "master" => {
+                assert!(role_task.contains("long-horizon"));
+                assert!(role_task.contains("bounded"));
+                assert!(responsibilities.contains("codex exec --profile gcm"));
+                assert!(responsibilities.contains("autonomous peers"));
+                assert!(responsibilities.contains("no inherited master authority"));
+                assert!(!responsibilities.contains("saturate every live present peer first"));
+            }
+            "worker" => {
+                assert!(role_task.contains("long-horizon"));
+                assert!(role_task.contains("orchestrator"));
+                assert!(responsibilities.contains("codex exec --profile gcm"));
+                assert!(responsibilities.contains("verify subworker evidence"));
+                assert!(responsibilities.contains("do not claim master grants"));
+                assert_eq!(
+                    context.data["role_brief"]["authority"],
+                    serde_json::json!({
+                        "managed_subagent": false,
+                        "must_obey_master": false,
+                        "may_decline_master_invite": true
+                    })
+                );
+                assert_eq!(context.data["role_brief"]["derivation"]["kind"], "peer");
+            }
+            "managed-subagent" => {
+                assert!(role_task.contains("bounded"));
+                assert!(role_task.contains("not the goal orchestrator"));
+                assert!(responsibilities.contains("recursively dispatch"));
+                assert!(responsibilities.contains("register collab"));
+                assert_eq!(
+                    context.data["role_brief"]["authority"],
+                    serde_json::json!({
+                        "managed_subagent": true,
+                        "must_obey_master": true,
+                        "may_decline_master_invite": false
+                    })
+                );
+            }
+            other => panic!("unexpected role {other}"),
+        }
     }
 
     let workers = dispatch_with_route_context(&server, Req::Workers, None);

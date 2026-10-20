@@ -111,6 +111,18 @@ async fn dispatch_wire_routed(
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> (Arc<Server>, Resp) {
     match req {
+        Req::ProjectReset { worker_id, token } => {
+            let reset_manager = manager.clone();
+            let response = tokio::task::spawn_blocking(move || match project_context {
+                Some(context) => reset_manager.reset_project(&context, &worker_id, &token),
+                None => Resp::err("PROJECT_CONTEXT_REQUIRED"),
+            }).await.unwrap_or_else(|error| Resp::err(format!("RESET_INCOMPLETE: handler failed: {error}")));
+            (manager.host.clone(), response)
+        }
+        Req::Shutdown { password } => {
+            let response = handle_user_shutdown(&manager.host, password.as_ref());
+            (manager.host.clone(), response)
+        }
         Req::RouteResolve { tmux_endpoint } => {
             let response = match manager.resolve_route_by_tmux_endpoint(&tmux_endpoint) {
                 Ok(route) => match serde_json::to_value(route) {
@@ -271,6 +283,7 @@ async fn conn_task_routed(
     manager: Arc<ProjectRuntimeManager>,
     stream: tokio::net::UnixStream,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
+    user_shutdown: Option<tokio::sync::mpsc::Sender<()>>,
 ) {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let (reader, mut writer) = stream.into_split();
@@ -286,14 +299,17 @@ async fn conn_task_routed(
         if line.trim().is_empty() {
             continue;
         }
+        let mut close_daemon = false;
         let resp = match parse_wire_request(&line) {
             Ok((project_context, req)) => {
                 let query_activity = is_identity_query_intent(&req);
+                let maintenance = matches!(&req, Req::Shutdown { .. });
                 let activity_req = req.clone();
                 let (runtime, resp) =
                     dispatch_wire_routed(manager.clone(), project_context, req, shutdown.clone())
                         .await;
-                if !query_activity {
+                close_daemon = maintenance && resp.ok;
+                if !query_activity && !maintenance {
                     let _ = record_activity(
                         &runtime.storage_root,
                         "request",
@@ -315,6 +331,12 @@ async fn conn_task_routed(
         let mut out = serde_json::to_string(&resp).expect("serialize resp");
         out.push('\n');
         if writer.write_all(out.as_bytes()).await.is_err() {
+            break;
+        }
+        if close_daemon {
+            if let Some(sender) = &user_shutdown {
+                let _ = sender.send(()).await;
+            }
             break;
         }
     }
@@ -1325,7 +1347,9 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
 
     let mut connection_tasks = tokio::task::JoinSet::new();
     let (connection_shutdown, connection_shutdown_rx) = tokio::sync::watch::channel(false);
+    let (user_shutdown_tx, mut user_shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
     tokio::select! {
+        _ = user_shutdown_rx.recv() => {}
         _ = interrupt.as_mut() => {}
         _ = terminate.as_mut() => {}
         _ = state_root_removed.as_mut() => {}
@@ -1338,6 +1362,7 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
                             manager,
                             stream,
                             connection_shutdown_rx.clone(),
+                            Some(user_shutdown_tx.clone()),
                         ));
                     }
                     Err(e) => append_log(&host_paths.log_path(), &format!("accept error: {}", e)),

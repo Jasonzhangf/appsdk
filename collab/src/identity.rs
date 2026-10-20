@@ -754,6 +754,34 @@ fn identity_by_current_anchors_at(
     if !identities_root.is_dir() {
         return Ok(None);
     }
+    if let Some(candidate) = observed.tmux.as_ref() {
+        let project = scope
+            .route_scope(AppServerId::new(CLI_APP_SERVER_ID)?)?
+            .project_scope_id;
+        let mut identities = BTreeMap::new();
+        for entry in std::fs::read_dir(&identities_root)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let Some(identity) = read_identity(&entry.path().join("identity.json"))? else {
+                continue;
+            };
+            if identity.project_scope.as_ref() == Some(&project)
+                && identity
+                    .transport
+                    .as_ref()
+                    .and_then(|transport| transport.tmux_endpoint.as_ref())
+                    .is_some_and(|saved| same_tmux_session(saved, &candidate.endpoint))
+            {
+                identities.insert(identity.worker_id.clone(), identity);
+            }
+        }
+        return Ok(identities
+            .into_values()
+            .next()
+            .map(AnchorResolution::CurrentScope));
+    }
     let mut anchors = Vec::new();
     if let Some(anchor) = observed.tmux_anchor.as_ref() {
         // Pane ownership is the only identity selector when tmux is observed.
@@ -886,6 +914,15 @@ fn identity_by_current_anchors_at(
             "IDENTITY_RESTORE_CONFLICT: supplied tmux/Codex anchors identify different peers"
         ),
     }
+}
+
+pub(crate) fn same_tmux_session(
+    left: &crate::proto::TmuxEndpoint,
+    right: &crate::proto::TmuxEndpoint,
+) -> bool {
+    left.socket_path == right.socket_path
+        && left.server_pid == right.server_pid
+        && left.tmux_session_id == right.tmux_session_id
 }
 
 /// Test-only adapter for the subagent launch harness, which names its child

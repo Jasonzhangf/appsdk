@@ -46,7 +46,11 @@ impl AnchorObservation {
         Ok(Self {
             session_id: non_empty(session_env.as_deref()),
             thread_id: non_empty(thread_env.as_deref()),
-            tmux: None,
+            tmux: if tmux_anchor.is_some() {
+                crate::client::adapters::tmux::candidate_from_env().ok()
+            } else {
+                None
+            },
             tmux_anchor,
             dsh_session_id: non_empty(std::env::var("DSH_SESSION_ID").ok().as_deref()),
         })
@@ -141,7 +145,7 @@ pub(crate) fn resolve_for_daemon_with_route_at(
     host_paths: &HostPaths,
     scope: &Scope,
     facts: &crate::proto::IdentityFacts,
-    route: Option<&crate::proto::RouteResolution>,
+    _route: Option<&crate::proto::RouteResolution>,
 ) -> anyhow::Result<Identity> {
     let observed = AnchorObservation::from_facts(facts);
     if !observed.has_anchor() {
@@ -155,12 +159,13 @@ pub(crate) fn resolve_for_daemon_with_route_at(
     {
         return Ok(identity);
     }
-    if let Some(candidate) = observed.tmux.as_ref() {
-        if let Some(identity) = recover_archived_pane_at(host_paths, scope, candidate, route)? {
-            return Ok(identity);
-        }
-    }
-    let worker_id = draft_worker_id_at(&observed)?;
+    let worker_id = if observed.tmux.is_some() {
+        // A fresh project/session has no persisted identity yet. Pane names
+        // are host-wide addresses and can belong to a former project.
+        format!("codex-session-{}", hex(12))
+    } else {
+        draft_worker_id_at(&observed)?
+    };
     // Preserve an existing draft's exact token; never remint a stored credential.
     if let Some(existing) = read_identity(&identity_path_at(host_paths, &worker_id)?)? {
         let expected_scope = scope

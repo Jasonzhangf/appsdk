@@ -174,10 +174,9 @@ escalation path.
 
 ## Lifecycle recovery
 
-Read project rules, maps, own notes/task/worktree records, journal tail,
-mailbox, migration state, socket, and exact daemon PID ownership. If
-`.agent-collab/server/DOWN` exists, keep it stopped. Reconstruct only the
-calling peer's work with `collab context`; other peer state is read-only except
-for resolving a shared-resource notice.
-
-Match daemon ownership by exact project socket and cwd, never process name.
+Run `collab context` from the current project. The existing global daemon
+restores the current session identity and usable binding, route and lease
+together. Historical pane owners, old tasks, journals and project socket
+records do not gate restoration. User authorization directly replaces the
+project master. Agents never start, stop or restart the service.
+Read task notes separately to resume work; they are not identity proof.

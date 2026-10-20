@@ -44,6 +44,8 @@ fn dispatch_with_route_context_bound(
         .as_ref()
         .map(|context| context.app_scope_id.clone());
     match req {
+        Req::UnregisterSelf { worker_id, token } => peer_lifecycle::unregister_self(server, project_context.as_ref(), &worker_id, &token),
+        Req::ProjectReset { .. } => Resp::err("PROJECT_RESET_HOST_REQUIRED"),
         Req::RegisterReply { .. } => Resp::err("REGISTER_REPLY_HOST_REQUIRED"),
         Req::PeerLifecycle { request } => peer_lifecycle::handle(server, project_context.as_ref(), request),
         Req::IdentityContext { .. } => Resp::err("IDENTITY_CONTEXT_HOST_REQUIRED: identity reconciliation belongs to the host daemon"),
@@ -604,11 +606,7 @@ fn dispatch_with_route_context_bound(
         Req::ResetBindings { confirm: _ } => Resp::err(
             "binding reset is deprecated; preserve journal/mailbox and use migration rebind",
         ),
-        Req::Shutdown { operator } if operator => Resp::data(json!({
-            "authorized": true,
-            "capability": "daemon-operator",
-        })),
-        Req::Shutdown { .. } => Resp::err("shutdown requires an explicit daemon-operator action"),
+        Req::Shutdown { password } => handle_user_shutdown(server, password.as_ref()),
         Req::Ping => {
             let st = server.state.lock().unwrap();
             Resp::data(json!({
@@ -970,6 +968,16 @@ fn validate_wire_route_principals(
 /// may register its exact canonical root with the resident daemon even when it
 /// is not the daemon's startup project. Operations for that route remain
 /// explicitly not-ready until a project reducer/journal owner is available.
+fn handle_user_shutdown(server: &Server, password: Option<&crate::proto::MaintenancePassword>) -> Resp {
+    if !password.is_some_and(|value| value.expose() == server.config.maintenance.password) {
+        return Resp::err("MAINTENANCE_AUTHENTICATION_FAILED");
+    }
+    if let Err(error) = std::fs::write(server.host_paths.state_root().join("DOWN"), b"user stopped\n") {
+        return Resp::err(format!("DAEMON_SHUTDOWN_FAILED: {error}"));
+    }
+    Resp::data(json!({"authorized": true, "capability": "user-maintenance"}))
+}
+
 pub(crate) fn validate_request_context(
     server: &Server,
     req: &Req,
@@ -984,6 +992,15 @@ pub(crate) fn validate_request_context_with_register_approval(
     project_context: Option<&ProjectContext>,
     register_approval: Option<&RegisterApprovalProof>,
 ) -> Result<(), String> {
+    if let Req::Shutdown { password } = req {
+        if !password.as_ref().is_some_and(|value| value.expose() == server.config.maintenance.password) {
+            return Err("MAINTENANCE_AUTHENTICATION_FAILED".into());
+        }
+        return match project_context {
+            Some(context) => validate_host_operator_route(server, context),
+            None => Ok(()),
+        };
+    }
     let Some(project_context) = project_context else {
         if request_requires_project_context(req) {
             return Err(
@@ -996,9 +1013,6 @@ pub(crate) fn validate_request_context_with_register_approval(
     project_context
         .validate()
         .map_err(|error| format!("PROJECT_CONTEXT_INVALID: {error}"))?;
-    if matches!(req, Req::Shutdown { operator: true }) {
-        return validate_host_operator_route(server, project_context);
-    }
     let registry = HostRouteRegistry::for_server(server)?;
     let route_scope = RouteScope {
         app_scope_id: project_context.app_scope_id.clone(),

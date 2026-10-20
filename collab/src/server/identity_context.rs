@@ -37,6 +37,18 @@ impl From<anyhow::Error> for ReconcileError {
 include!("identity_context/operations.rs");
 include!("identity_context/recovery.rs");
 
+fn add_optional_master_choice(snapshot: &mut serde_json::Value) {
+    let Some(holder) = snapshot["master"]["worker_id"].as_str() else {
+        return;
+    };
+    if snapshot["identity"]["worker_id"].as_str() == Some(holder) {
+        return;
+    }
+    if let Some(actions) = snapshot["next_actions"].as_array_mut() {
+        actions.push(json!("Peer restoration succeeded. Optionally replace the project master with explicit user authorization: collab context --approve-grant '{\"action\":\"restore_master\",\"authorization\":\"<user authorization>\"}'"));
+    }
+}
+
 fn validate_facts(facts: &IdentityFacts) -> anyhow::Result<()> {
     // Native facts are not admission inputs when the current pane is selected.
     if facts.tmux.is_some() {

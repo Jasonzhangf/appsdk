@@ -1,6 +1,6 @@
 # Verification
 
-Read this for Collab source changes, release, install, restart, or protocol
+Read this for Collab source changes, release, install, or live protocol
 verification—not ordinary command use.
 
 Every official release compile uses `scripts/build-collab.sh`, which increments
@@ -13,10 +13,10 @@ paths, and refreshed embedded Skill byte-for-byte. Refresh the Skill with the
 exact `$CARGO_HOME/bin/collab` binary, not a bare command that may resolve an
 older PATH entry. Remove only legacy copies whose binary identity proves they
 are matching Collab artifacts, then validate the new baseline only: do not
-migrate or replay old local control-plane history. For a Collab runtime
-delivery, installation is not the endpoint: run one controlled `collab down`
-and `collab up` window, then verify installed binary digest, daemon PID/socket,
-`collab context`, MCP initialize, identity, durable state, and live replay.
+migrate or replay old local control-plane history. The global daemon is managed
+by the user. Agents do not operate its lifecycle or request maintenance credentials.
+Installation and live activation are separate results. After user activation,
+verify `collab context`, MCP initialize, identity, durable state and live replay.
 
 Before review, prove the affected subset and every changed invariant:
 
@@ -26,9 +26,12 @@ Before review, prove the affected subset and every changed invariant:
   a message, native RPC starts/steers/queues the recipient thread, receiver runs
   `collab recv`, and sender observes the durable consumption receipt. Never
   inject a test notice into an existing production project or Agent conversation;
+- restored peer and restored master each complete send, receive and reply
+  through the current route; durable send acceptance and role assignment alone
+  do not prove message consumption;
 - retain the isolated tmux-only compatibility e2e for peers with no AppServer
   candidate; it cannot serve as fallback evidence for an AppServer-bound peer;
-- migration down/up/replay with durable-state preservation;
+- applicable migration replay with durable-state preservation;
 - duplicate-daemon rejection without PID/socket corruption;
 - no wake for shell/absent/unknown; working Agents receive a due batch;
 - explicit messages remain durable without active subscription;
@@ -56,5 +59,5 @@ Before review, prove the affected subset and every changed invariant:
 
 Review only after tests and runtime evidence pass. Post-review source/config/test
 changes invalidate review and affected runtime evidence. Integrate the reviewed
-commit into latest main, rerun main verification, install globally, restart
-once, and replay the installed path.
+commit into latest main, rerun main verification, and install globally. After
+user-managed runtime activation when applicable, replay the installed path.

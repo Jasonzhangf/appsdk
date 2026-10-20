@@ -945,6 +945,135 @@ fn close_phase(close: &PeerLifecycleClose) -> PeerLifecyclePhase {
     }
 }
 
+fn binding_for_authenticated_self(
+    state: &State,
+    context: &ProjectContext,
+    worker_id: &str,
+) -> Option<RuntimeBinding> {
+    state
+        .global
+        .lookup_project(&context.project_scope)?
+        .runtime_bindings
+        .values()
+        .filter(|binding| {
+            binding.app_scope_id == context.app_scope_id && binding.agent_id.as_str() == worker_id
+        })
+        .max_by_key(|binding| binding.endpoint_generation)
+        .cloned()
+}
+
+fn target_for_self_binding(state: &State, binding: &RuntimeBinding) -> PeerLifecycleTarget {
+    let selected = state
+        .workers
+        .get(binding.agent_id.as_str())
+        .and_then(|worker| worker.transport.clone());
+    let kind = binding
+        .tmux_endpoint
+        .as_ref()
+        .map(|_| TransportKind::Tmux)
+        .or_else(|| selected.as_ref().map(|transport| transport.kind.clone()))
+        .unwrap_or(TransportKind::AppServer);
+    PeerLifecycleTarget {
+        worker_id: binding.agent_id.as_str().to_owned(),
+        project_scope: binding.project_scope.clone(),
+        app_scope_id: binding.app_scope_id.clone(),
+        binding_id: binding.binding_id.clone(),
+        endpoint_generation: binding.endpoint_generation,
+        transport: PeerLifecycleTransport {
+            kind,
+            endpoint: selected
+                .as_ref()
+                .and_then(|transport| transport.endpoint.clone()),
+            namespace: selected
+                .as_ref()
+                .and_then(|transport| transport.namespace.clone()),
+            session_id: binding.session_id.as_ref().map(|id| id.as_str().to_owned()),
+            thread_id: binding
+                .native_thread_id
+                .as_ref()
+                .map(|id| id.as_str().to_owned()),
+            tmux_endpoint: binding.tmux_endpoint.clone(),
+        },
+    }
+}
+
+fn self_removal_failure(error: impl Into<String>, outcome: PeerLifecycleOutcome) -> Resp {
+    let error = error.into();
+    response(result(PeerLifecycleAction::Close, outcome), Some(&error))
+}
+
+/// Remove only the automatically recovered caller's control plane. No target,
+/// historical credential or generation is accepted from the user. Current
+/// request authentication prevents supplied foreign pane facts from granting
+/// authority. Tasks, messages and the host process remain.
+pub(super) fn unregister_self(
+    server: &Server,
+    context: Option<&ProjectContext>,
+    worker_id: &str,
+    token: &str,
+) -> Resp {
+    let Some(context) = context else {
+        return self_removal_failure("PROJECT_CONTEXT_REQUIRED", PeerLifecycleOutcome::Refused);
+    };
+    if let Err(error) = context.validate() {
+        return self_removal_failure(
+            format!("PROJECT_CONTEXT_INVALID: {error}"),
+            PeerLifecycleOutcome::Refused,
+        );
+    }
+    let (binding, snapshot, snapshot_captured_ms, target) = {
+        let state = server.state.lock().unwrap();
+        if let Err(response) = verify(&state, worker_id, token) {
+            return response;
+        }
+        let binding = binding_for_authenticated_self(&state, context, worker_id);
+        let Some(binding) = binding else {
+            let mut already_absent =
+                result(PeerLifecycleAction::Close, PeerLifecycleOutcome::Complete);
+            already_absent.source = PeerLifecycleSource::CommittedProjection;
+            return response(already_absent, None);
+        };
+        let target = target_for_self_binding(&state, &binding);
+        let snapshot = state::responsibility_snapshot(&state, binding.agent_id.as_str());
+        let snapshot_captured_ms = state
+            .workers
+            .get(binding.agent_id.as_str())
+            .and_then(|worker| worker.transport.as_ref())
+            .and_then(|transport| transport.thread_id.as_deref())
+            .and_then(|thread_id| {
+                state
+                    .worker_snapshots
+                    .get(binding.agent_id.as_str())
+                    .filter(|receipt| receipt.thread_id == thread_id)
+                    .map(|receipt| receipt.captured_ms)
+            });
+        (binding, snapshot, snapshot_captured_ms, target)
+    };
+    let operation_id = format!("self-unregister:{}", binding.binding_id.as_str());
+    let close = retire_control_plane_target(
+        server,
+        binding.agent_id.as_str(),
+        &target,
+        &operation_id,
+        &snapshot,
+        PeerLifecycleStage::NotApplicable,
+        None,
+        snapshot_captured_ms,
+    );
+    let phase = close_phase(&close);
+    let error = (phase != PeerLifecyclePhase::Complete).then(|| {
+        format!(
+            "PEER_LIFECYCLE_CONTROL_RETIREMENT_INCOMPLETE: {}",
+            close.close_outcome
+        )
+    });
+    let mut completed = result(PeerLifecycleAction::Close, phase_outcome(&phase));
+    completed.target = Some(target);
+    completed.source = PeerLifecycleSource::LifecycleOperation;
+    completed.close = Some(close);
+    response(completed, error.as_deref())
+}
+
 fn retire_control_plane(
     server: &Server,
     record: &state::PeerLifecycleOperationRecord,
@@ -952,29 +1081,53 @@ fn retire_control_plane(
     runtime_archive_detail: Option<String>,
     snapshot_captured_ms: Option<i64>,
 ) -> PeerLifecycleClose {
-    let mut close = close_readback("cleanup-open");
-    close.runtime_archive.state = runtime_archive.clone();
-    let self_unregister = record.actor_id == record.exact_target().worker_id;
     let Some(snapshot) = record.responsibility_snapshot.clone() else {
+        let mut close = close_readback("cleanup-open");
+        close.runtime_archive.state = runtime_archive;
         close.worker_retirement.state = PeerLifecycleStage::Unknown;
         close.binding_retirement.state = PeerLifecycleStage::Unknown;
         close.route_retirement.state = PeerLifecycleStage::Unknown;
         close.subscription_retirement.state = PeerLifecycleStage::Unknown;
         return close;
     };
+    retire_control_plane_target(
+        server,
+        &record.actor_id,
+        record.exact_target(),
+        &record.operation_id,
+        &snapshot,
+        runtime_archive,
+        runtime_archive_detail,
+        snapshot_captured_ms,
+    )
+}
+
+fn retire_control_plane_target(
+    server: &Server,
+    actor_id: &str,
+    target: &PeerLifecycleTarget,
+    operation_id: &str,
+    snapshot: &state::ResponsibilitySnapshot,
+    runtime_archive: PeerLifecycleStage,
+    runtime_archive_detail: Option<String>,
+    snapshot_captured_ms: Option<i64>,
+) -> PeerLifecycleClose {
+    let mut close = close_readback("cleanup-open");
+    close.runtime_archive.state = runtime_archive.clone();
+    let self_unregister = actor_id == target.worker_id;
     let now = now_ms();
     let (events, route_binding) = {
         let state = server.state.lock().unwrap();
         let route_scope = RouteScope {
-            app_scope_id: record.exact_target().app_scope_id.clone(),
-            project_scope_id: record.exact_target().project_scope.clone(),
+            app_scope_id: target.app_scope_id.clone(),
+            project_scope_id: target.project_scope.clone(),
         };
         let Some(binding) = state
             .global
-            .lookup_binding_for(&route_scope, &record.exact_target().binding_id)
+            .lookup_binding_for(&route_scope, &target.binding_id)
             .filter(|binding| {
-                binding.agent_id.as_str() == record.exact_target().worker_id
-                    && binding.endpoint_generation == record.exact_target().endpoint_generation
+                binding.agent_id.as_str() == target.worker_id
+                    && binding.endpoint_generation == target.endpoint_generation
             })
             .cloned()
         else {
@@ -1011,7 +1164,7 @@ fn retire_control_plane(
                 events.push(state::Event::NotificationSuppressed {
                     subscription_id: subscription_id.clone(),
                     status: "cancelled".into(),
-                    reason: format!("peer lifecycle close {}", record.operation_id),
+                    reason: format!("peer lifecycle close {operation_id}"),
                     updated_ms: now,
                 });
             }
@@ -1021,16 +1174,16 @@ fn retire_control_plane(
         });
         events.push(state::Event::GlobalRuntimeBound { binding: retired });
         events.push(state::Event::WorkerClosed {
-            worker_id: record.exact_target().worker_id.clone(),
-            closed_by: record.actor_id.clone(),
-            reason: format!("peer lifecycle close {}", record.operation_id),
+            worker_id: target.worker_id.clone(),
+            closed_by: actor_id.to_owned(),
+            reason: format!("peer lifecycle close {operation_id}"),
             snapshot_captured_ms,
             at_ms: now,
         });
         if self_unregister {
             events.push(state::Event::GlobalMasterRevoked {
-                project_scope: record.exact_target().project_scope.clone(),
-                binding_id: record.exact_target().binding_id.clone(),
+                project_scope: target.project_scope.clone(),
+                binding_id: target.binding_id.clone(),
             });
         }
         (events, binding)
@@ -1044,27 +1197,24 @@ fn retire_control_plane(
         return close;
     }
     let state = server.state.lock().unwrap();
-    close.worker_retirement.state = if state
-        .worker_closures
-        .contains_key(&record.exact_target().worker_id)
-        && !state.workers.contains_key(&record.exact_target().worker_id)
+    close.worker_retirement.state = if state.worker_closures.contains_key(&target.worker_id)
+        && !state.workers.contains_key(&target.worker_id)
     {
         PeerLifecycleStage::Verified
     } else {
         PeerLifecycleStage::Failed
     };
     let route_scope = RouteScope {
-        app_scope_id: record.exact_target().app_scope_id.clone(),
-        project_scope_id: record.exact_target().project_scope.clone(),
+        app_scope_id: target.app_scope_id.clone(),
+        project_scope_id: target.project_scope.clone(),
     };
     close.binding_retirement.state = match state
         .global
-        .lookup_binding_for(&route_scope, &record.exact_target().binding_id)
+        .lookup_binding_for(&route_scope, &target.binding_id)
     {
         Some(binding)
-            if binding.agent_id.as_str() == record.exact_target().worker_id
-                && binding.endpoint_generation
-                    == record.exact_target().endpoint_generation.saturating_add(1)
+            if binding.agent_id.as_str() == target.worker_id
+                && binding.endpoint_generation == target.endpoint_generation.saturating_add(1)
                 && binding.native_thread_id.is_none()
                 && binding.tmux_endpoint.is_none() =>
         {
@@ -1107,7 +1257,7 @@ fn retire_control_plane(
     let self_master_retired = !self_unregister
         || state
             .global
-            .lookup_master_grant_for(&route_scope, &record.exact_target().binding_id)
+            .lookup_master_grant_for(&route_scope, &target.binding_id)
             .is_none();
     let control_complete = matches!(close.worker_retirement.state, PeerLifecycleStage::Verified)
         && matches!(close.binding_retirement.state, PeerLifecycleStage::Verified)
@@ -1138,3 +1288,7 @@ fn retire_control_plane(
 
 include!("peer_lifecycle/handlers.rs");
 include!("peer_lifecycle/create_query.rs");
+
+#[cfg(test)]
+#[path = "peer_lifecycle/self_removal_tests.rs"]
+mod self_removal_tests;

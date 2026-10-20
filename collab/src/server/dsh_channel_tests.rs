@@ -49,10 +49,11 @@ fn dsh_must_not_be_combined_with_a_pane_candidate() {
     // than ranked, so neither candidate can silently shadow the other.
     let root = scratch("mutex");
     let tmux_socket = root.join("mutex.sock");
+    let session = "dsh-mutex";
     let started = std::process::Command::new("tmux")
         .arg("-S")
         .arg(&tmux_socket)
-        .args(["new-session", "-d", "-s", "dsh-mutex", "sleep", "60"])
+        .args(["new-session", "-d", "-s", session, "sleep", "60"])
         .output()
         .expect("start isolated tmux server");
     assert!(
@@ -116,7 +117,7 @@ fn dsh_must_not_be_combined_with_a_pane_candidate() {
     let _ = std::process::Command::new("tmux")
         .arg("-S")
         .arg(&tmux_socket)
-        .arg("kill-server")
+        .args(["kill-session", "-t", session])
         .output();
     assert!(error.starts_with("DSH_ENDPOINT_REJECTED:"), "{error}");
     let _ = std::fs::remove_dir_all(&root);

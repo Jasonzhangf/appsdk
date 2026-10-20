@@ -163,6 +163,65 @@ struct OperationJournalState {
 }
 
 impl OperationJournal {
+    /// Scoped invalidation for the project reset owner. It uses this journal's
+    /// writer and replay reducer, so old context operations cannot resume.
+    pub(crate) fn reset_project(&self, project_scope: &str) -> Result<(), String> {
+        let mut state = self.state.lock().unwrap();
+        if let Some(error) = &state.append_poisoned {
+            return Err(format!("{ERR_OPERATION_APPEND}: {error}"));
+        }
+        let mut file = self.file.lock().unwrap();
+        let bytes = std::fs::read(&self.path).map_err(|e| e.to_string())?;
+        let mut body = Vec::new();
+        let mut sequence = 0_u64;
+        let mut retained_sequences = BTreeMap::new();
+        for line in bytes[..state.valid_prefix_bytes as usize].split(|byte| *byte == b'\n') {
+            if line.is_empty() {
+                continue;
+            }
+            let mut record: serde_json::Value =
+                serde_json::from_slice(line).map_err(|e| e.to_string())?;
+            if record["project_scope"].as_str() == Some(project_scope) {
+                continue;
+            }
+            record["sequence"] = sequence.into();
+            if let Some(id) = record["operation_id"].as_str() {
+                retained_sequences.insert(id.to_owned(), sequence);
+            }
+            serde_json::to_writer(&mut body, &record).map_err(|e| e.to_string())?;
+            body.push(b'\n');
+            sequence += 1;
+        }
+        let temporary = self.path.with_extension("reset-tmp");
+        let mut replacement = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&temporary)
+            .map_err(|e| e.to_string())?;
+        replacement
+            .write_all(&body)
+            .and_then(|_| replacement.sync_all())
+            .map_err(|e| e.to_string())?;
+        std::fs::rename(&temporary, &self.path).map_err(|e| e.to_string())?;
+        *file = replacement;
+        forget_project_operations(&mut state, project_scope);
+        for (id, record) in &mut state.operations {
+            if let Some(sequence) = retained_sequences.get(id) {
+                record.sequence = *sequence;
+            }
+        }
+        state.next_sequence = sequence;
+        state.valid_prefix_bytes = body.len() as u64;
+        state.incomplete_tail = false;
+        if let Err(error) = super::sync_parent_dir(&self.path) {
+            state.append_poisoned = Some(error.to_string());
+            return Err(format!("{ERR_OPERATION_APPEND}: {error}"));
+        }
+        Ok(())
+    }
+
     pub(crate) fn open(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
@@ -750,6 +809,28 @@ fn replay_operation_journal(file: &mut File) -> anyhow::Result<OperationJournalS
             break;
         };
         let line = &bytes[offset..line_end];
+        let control: serde_json::Value = serde_json::from_slice(line).map_err(|error| {
+            anyhow::anyhow!("operation journal replay failed at byte {offset}: malformed complete record: {error}")
+        })?;
+        if control.get("record_type").and_then(|v| v.as_str()) == Some("project_reset") {
+            let scope = control
+                .get("project_scope")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("project reset record missing scope"))?;
+            crate::scope::ProjectScopeId::new(scope)?;
+            anyhow::ensure!(
+                control.get("schema_version").and_then(|v| v.as_u64())
+                    == Some(OPERATION_JOURNAL_SCHEMA_VERSION as u64)
+                    && control.get("sequence").and_then(|v| v.as_u64())
+                        == Some(state.next_sequence),
+                "invalid project reset journal sequence/version"
+            );
+            forget_project_operations(&mut state, scope);
+            state.next_sequence = state.next_sequence.saturating_add(1);
+            offset = line_end;
+            state.valid_prefix_bytes = offset as u64;
+            continue;
+        }
         let record: OperationJournalRecord = serde_json::from_slice(line).map_err(|error| {
             anyhow::anyhow!(
                 "operation journal replay failed at byte {offset}: malformed complete record: {error}"
@@ -842,6 +923,18 @@ fn replay_operation_journal(file: &mut File) -> anyhow::Result<OperationJournalS
         }
     }
     Ok(state)
+}
+
+fn forget_project_operations(state: &mut OperationJournalState, scope: &str) {
+    let ids: std::collections::BTreeSet<String> = state
+        .operations
+        .values()
+        .filter(|op| op.project_scope == scope)
+        .map(|op| op.operation_id.clone())
+        .collect();
+    state.operations.retain(|_, op| op.project_scope != scope);
+    state.pending.retain(|_, op| op.project_scope != scope);
+    state.live.retain(|id, _| !ids.contains(id));
 }
 
 fn validate_record(record: &OperationJournalRecord, expected_sequence: u64) -> anyhow::Result<()> {

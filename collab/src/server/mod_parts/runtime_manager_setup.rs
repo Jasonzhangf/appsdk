@@ -47,6 +47,29 @@ impl ProjectRuntimeManager {
         let host_root = GlobalState::canonical_project_scope(&host.root)
             .map_err(|error| format!("PROJECT_SCOPE_UNKNOWN: {error}"))?;
         let route_journal = host_paths.state_root().join("routes.jsonl");
+        // Finish committed deletion before indexes or project journals can
+        // materialize old state. A real deletion failure stays explicit.
+        let pending: Vec<String> = host
+            .state
+            .lock()
+            .unwrap()
+            .pending_project_resets
+            .keys()
+            .cloned()
+            .collect();
+        for scope in pending {
+            operation_journal.reset_project(&scope)?;
+            project_reset::finish_reset(&host, &route_journal, &scope)
+                .map_err(|e| format!("RESET_INCOMPLETE: {e}"))?;
+        }
+        // Remove invalid records durably before the resident registry can
+        // interpret them as recoverable registrations.
+        for record in load_host_route_records(&route_journal)? {
+            if project_reset::route_is_deinitialized(Path::new(&record.canonical_root))? {
+                project_reset::retire_stale_project_routes(&host, &record.project_scope)?;
+                project_reset::delete_route(&route_journal, &record)?;
+            }
+        }
         let mut routes = std::collections::BTreeMap::new();
 
         // Preserve the resident route discovered from its own reducer.  Old
@@ -55,6 +78,10 @@ impl ProjectRuntimeManager {
         // runtime can be opened.
         let registry = HostRouteRegistry::for_server(&host)?;
         for ((app_scope, project_scope), owner) in registry.routes {
+            if project_reset::route_is_deinitialized(Path::new(&project_scope))? {
+                project_reset::retire_stale_project_routes(&host, &project_scope)?;
+                continue;
+            }
             match owner {
                 HostRouteOwner::ResidentProject { root, .. } => {
                     routes.insert(
@@ -224,6 +251,7 @@ impl ProjectRuntimeManager {
             #[cfg(test)]
             materialization_build_delay_ms: std::sync::atomic::AtomicU64::new(0),
         });
+        manager.prune_stale_routes()?;
 
         // A durable route record is not itself an active runtime. A route
         // needs a reducer at startup when the host index already addresses it,
@@ -304,6 +332,7 @@ impl ProjectRuntimeManager {
                 );
             }
         }
+        manager.prune_stale_routes()?;
         manager.reconcile_started_thread_routes()?;
         manager.reconcile_same_pane_master_routes()?;
         Ok(manager)
@@ -473,6 +502,7 @@ impl ProjectRuntimeManager {
     /// Recovery must not fail because another project has an unrelated stale
     /// route. The same pane and native-address conflicts still fail closed.
     fn reconcile_binding_publication(&self, binding: &RuntimeBinding) -> Result<(), String> {
+        self.prune_stale_routes()?;
         if let Some(owner) = self.pane_owner_other_than(binding) {
             return Err(format!(
                 "RECOVERY_RECONCILE_REQUIRED: pane for {} belongs to {} binding {}",
@@ -706,7 +736,6 @@ impl ProjectRuntimeManager {
             }
         }
         let mut pane_claims: Vec<(Arc<Server>, RuntimeBinding)> = Vec::new();
-        let mut foreign_thread_matches = Vec::new();
         for runtime in runtimes {
             let state = runtime.state.lock().unwrap();
             for binding in state
@@ -729,53 +758,7 @@ impl ProjectRuntimeManager {
                     }
                     continue;
                 }
-                // The Codex ids are not an anchor, but they still name one live
-                // thread. Another worker holding this thread on a *different*
-                // pane is a conflict, not a takeover: only a pane changes owner
-                // here, so this stays refused and nothing is committed.
-                if binding.agent_id.as_str() != worker_id {
-                    let same_codex_session =
-                        endpoint.codex_session_id.as_deref().is_some_and(|session| {
-                            binding
-                                .session_id
-                                .as_ref()
-                                .map(crate::identity::SessionId::as_str)
-                                == Some(session)
-                        });
-                    let same_codex_thread =
-                        endpoint.codex_thread_id.as_deref().is_some_and(|thread| {
-                            binding
-                                .native_thread_id
-                                .as_ref()
-                                .map(NativeThreadId::as_str)
-                                == Some(thread)
-                        });
-                    if (same_codex_session || same_codex_thread)
-                        && !foreign_thread_matches
-                            .iter()
-                            .any(|existing| existing == binding)
-                    {
-                        foreign_thread_matches.push(binding.clone());
-                    }
-                }
             }
-        }
-        if let Some(conflict) = foreign_thread_matches.first() {
-            let identity = conflict
-                .native_thread_id
-                .as_ref()
-                .map(NativeThreadId::as_str)
-                .or_else(|| {
-                    conflict
-                        .session_id
-                        .as_ref()
-                        .map(crate::identity::SessionId::as_str)
-                })
-                .unwrap_or("<unknown>");
-            return Err(format!(
-                "RUNTIME_BINDING_REJECTED: Codex thread {identity} is already bound to worker {} on another pane",
-                conflict.agent_id
-            ));
         }
         // The pane scan above only answers the conflict question. Ownership of
         // the pane itself is settled by the registration commit, because both
@@ -856,13 +839,13 @@ impl ProjectRuntimeManager {
                 Ok(events) => events,
                 Err(error) => {
                     return Resp::err(format!(
-                        "SUPERSEDED_CLAIMANT_RETIREMENT_FAILED: {error}; the pane now belongs to the later registration; restart the affected daemon so the lagged claimant is reconciled"
+                        "SUPERSEDED_CLAIMANT_RETIREMENT_FAILED: {error}; the current authorization supersedes the earlier claimant; daemon reconciliation owns cleanup"
                     ))
                 }
             };
             if let Err(error) = runtime.commit_checked(&events) {
                 return Resp::err(format!(
-                    "SUPERSEDED_CLAIMANT_RETIREMENT_FAILED: {error}; the pane now belongs to the later registration; restart the affected daemon so the lagged claimant is reconciled"
+                    "SUPERSEDED_CLAIMANT_RETIREMENT_FAILED: {error}; the current authorization supersedes the earlier claimant; daemon reconciliation owns cleanup"
                 ));
             }
         }

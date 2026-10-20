@@ -1,158 +1,36 @@
-# Collab 身份恢复：锚点阶梯（Anchor Ladder）
+# Collab 身份恢复：当前项目与 session
 
-**状态**：权威锚点模型。与 `collab-identity-context-recovery-contract-20261008.md` 配套；锚点阶梯以本文件为准。
-**唯一恢复代码路径**：`identity_resolver.rs::resolve_for_daemon_with_route_at`。
+本文件是身份选择的唯一设计正文。2026-10-20 用户明确要求以当前 cwd 和 tmux session 为准，替换历史 pane 归属、歧义拒绝和多重批准流程。实现入口是 `identity_resolver.rs::resolve_for_daemon_with_route_at`，提交仍由现有身份和 master authority owner 完成。
 
----
+## 默认 context
 
-## 1. 原则：锚点是 adapter 设计出来的
+`collab context` 读取当前 cwd 所属 project 和当前 tmux session。历史 pane 绑定到哪个 worker 或 project 都不能改变当前 project，也不能阻断恢复。已有 worktree 的项目映射可用于解析 cwd；worktree 中的任务和工作内容不参与身份准入。
 
-锚点不是猜的。每个 transport 的锚点由该 transport 的 adapter 在适配时**设计并选定**，
-来源是明确的环境变量或协议字段。锚点选定后写入持久化 identity，后续调用据此直恢，
-不再重新猜测。
+tmux session 由观测到的 socket/server 和 `tmux_session_id` 区分。pane、pane PID、Codex thread、旧任务和旧角色不是身份选择依据。同 project/session 已有身份直接复用，切换 pane 只更新投递地址。历史额外记录不产生新的用户裁决门禁。
 
-| transport | 锚点值 | anchor kind | adapter 设计来源 | 持久化位置 |
-|---|---|---|---|---|
-| tmux | `socket_path` + `pane_id` | `tmux_pane` | `anchor_from_env` 读 `TMUX` / `TMUX_PANE`；live endpoint enrichment 独立 | `transport.tmux_endpoint` |
-| appserver | `session_id` | `codex_session_id` | env `CODEX_SESSION_ID` | `runtime.session_id` |
-| appserver | `native_thread_id` | `codex_thread_id` | env `CODEX_THREAD_ID` | `runtime.native_thread_id` |
-| dsh | `session_id` | `dsh_session_id` | env `DSH_SESSION_ID` | `runtime.session_id` |
+| 当前状态 | context 的结果 |
+| --- | --- |
+| 当前 project 没有 master | 自动恢复或建立当前 session 的 peer，不申请批准 |
+| 其他身份是 master | peer 恢复成功，并给用户一个可选的 master 替换选择；未授权时 peer 仍可使用 |
+| 当前 project/session 已是 master | 复用身份与现有授权，不重复询问 |
+| 用户明确授权当前身份恢复为 master | 读取当前身份与 incumbent，通过既有 authority owner 直接替换 master |
 
-锚点值必须是**非空的稳定标识**，且可被 `validate_id` 接受（持久化到身份目录名）。
+master 替换不要求调用方提供旧 token、旧 target snapshot、intent digest、lease 或 grant generation。当前事实由 daemon 读取。现有 `approve_grant` 可承载 `action=restore_master` 与用户授权原文；不要求第二份身份批准。未获 master 授权不使普通 peer 恢复失败。
 
-**tmux 只用一对**。`session_id` 单独匹配会让同一个 tmux session 的两个 pane 命中同一条
-身份，从而在跨 pane 场景下产生歧义或直接吞掉另一个 pane 的身份。因此 tmux 锚点是
-「同 socket、同 pane」的组合，由 `same_owned_pane` 和 `same_pane_route` 判定。
-session、server/pane PID、native IDs、runtime、activity 与 capture 都不参与身份选择。
+## 持久化和通信
 
-## 2. 恢复阶梯
+有效身份复用已有身份记录和 token，并同步恢复当前通信端点、route 与收信订阅。切换 pane 时更新所有投递事实，旧 route 自动失效。首次建立身份仍通过原 Register owner 提交真实记录。相同操作的回放复用已提交结果，不重复 master 转移。身份、master 授权、消息、任务各自由现有 owner 管理，不手工编辑 journal 或文件制造恢复结果。
 
-```
-observed anchors
-  │
-  ├─ 1. 锚点直恢    锚点值 == 某条持久化 identity 的锚点值
-  │         tmux owned pane 配对 / codex session|thread 命中 / dsh session 命中
-  │         → 恢复该 identity，token、runtime、binding 全部沿用
-  │         → 读取 durable selected binding 与 authority，直接投影；不重选、不 Register、不回环
-  │
-  ├─ 2. 无匹配起草  无任何持久化锚点命中
-  │         tmux      → worker_id = codex-<pane_id>
-  │         appserver → worker_id = codex-thread-<thread_hex>
-  │         dsh       → worker_id = dsh-thread-<session_hex>
-  │         → 已有草稿沿用其 token；不存在则 mint 新身份
-  │
-  └─ 3. 失败关闭    无法唯一归属
-            同一锚点匹配多条 → IDENTITY_RESTORE_AMBIGUOUS
-            唯一匹配到别的 project → IDENTITY_RESTORE_CROSS_PROJECT
-            完全没有锚点 → COLLAB_IDENTITY_ANCHOR_MISSING
-            均不回退猜测，均不产生身份
-```
+身份恢复不检查工作内容、任务、claim、worktree、master 派单或历史 pane 所有权。恢复的结果必须可通信，不能仅凭角色字段宣称完成。实际持久化、端点或 I/O 错误保留原错，不伪造成功；它们不授权 agent 操作 daemon 生命周期。恢复验收通过真实发送、接收和回复完成，不增加用户必须手动执行的通信恢复步骤。
 
-阶梯第 3 级不是错误回退。歧义和跨项目是**归属无法唯一确定**，只有用户能裁决。
+Collab 是一个全局、由用户管理的 daemon。agent 只连接现有服务。服务不可用时保留身份与任务，返回服务不可用。维护命令和凭据不属于 agent 接口，身份恢复不申请维护窗口。
 
-### 2.1 锚点直恢
+## 其他宿主
 
-**唯一条件**：观测到的锚点值等于某条已持久化 identity 的持久化锚点值。
+非 tmux 的 AppServer 仍使用其观测到的 session/thread，DSH 使用 `DSH_SESSION_ID`。缺失事实只按实际 adapter 所需字段补充一次。不借其他宿主的历史 pane 选择身份，不要求用户额外证明历史身份或完成第二次恢复。
 
-- 不需要任何额外理由（runtime 状态、liveness probe、`endpoint_generation` 一概不需要）。
-- 不需要额外证据。
-- 恢复后沿用 durable 身份、角色、anchor 与 selected binding。live display/capture 失败不阻断稳定 socket+pane 请求；daemon 从 durable owner 补全已保存字段，不填造 PID/native IDs。
-- 普通恢复不重新准入 adaptor、不 Register、不回环。合法相邻 generation 的 staged publication 收尾继续走既有 typed Register owner，并保留 token、scope、generation 与 publication guards。
-- 同一条锚点匹配多条 → `IDENTITY_RESTORE_AMBIGUOUS`。
-- 唯一匹配到其他项目 → `IDENTITY_RESTORE_CROSS_PROJECT`。
+## 验收边界
 
-### 2.2 无匹配起草
+公开 `context` 用例覆盖：旧 pane 属于 A 时当前 cwd B 仍恢复为 B 的 peer；同 project/session 换 pane 保持身份；已有 master 时 peer 可用；一次用户授权直接替换 master；重复 context 不再询问或 Register；daemon PID 不变。peer 恢复与 master 恢复分别实际发送、接收并回复，检查消费回执。项目任务与旧记录保留，不成为身份恢复的拒绝条件。
 
-无任何持久化锚点命中时，按当前观察到的锚点起草新身份。worker id 由锚点值确定性生成，
-因此同一个无历史锚点重复调用得到同一条身份；已有草稿沿用其 token，不重新签发。
-
-### 2.3 用户裁决
-
-自动锚点阶梯先处理身份归属。没有唯一可采纳锚点时，只有用户批准裁决可以覆盖
-身份选择。裁决命名 target identity、action 和用户覆盖意图；scope 从当前 invocation
-确定。daemon 在身份锁内读取当前冲突集合和执行 fence，不要求用户查询旧 fence。
-普通 peer 注册不需要批准，它就是普通 Register 的结果；唯一锚点直恢也不需要
-额外批准。
-
-用户批准恢复和 master grant 是不同的控制决定，属于不同的 owner：
-
-- 批准身份恢复只授权对该精确目标和 scope 的身份/binding 裁决。它不是 token、
-  endpoint 或 scope 的所有权证明。daemon 验证持久归属、地址结构和实际提交效果，
-  不重复 live probe。批准提交在首个身份副作用前持久化外层 operation id。
-  当前 incumbent 漂移由同一次 invocation 在锁内确定，不要求第二次批准。
-- 唯一同 pane 归属自动同步旧 credential、binding 与 daemon 漂移。冲突覆盖走
-  显式批准的既有 replacement transaction；普通 Register 和普通
-  authenticated command 继续保留 token、binding、generation 与 scope 拒绝，
-  `TOKEN_MISMATCH` 只描述这些普通 admission 路径，不描述已批准的恢复事务。
-- 恢复事务的真实 binding id 由 Register owner 提交，内部 admission proof 不是
-  token，也不会伪造 `actor_binding_id`。
-- `collab master promote --approval <text>` 只变更 master authority，不隐式改变
-  身份，也不隐式 clear 或 transfer 其他授权；authority 合同见
-  `collab-master-authority-contract-20261007.md`。
-- 恢复原 master 身份不自动 grant、clear 或 replace。若同一次用户意图同时包含
-  身份恢复和 master 授权替换，设计合同要求两个 owner 的步骤分别提交并在外层
-  operation 中并列为两个 phase，而不是互相冒充。
-
-批准裁决持久化后，下一次调用走阶梯第 1 级直恢。liveness、runtime state、
-recency 和 pane 名称都不是批准依据，也不影响裁决记录是否有效。
-
-D2-B 为批准恢复冻结完整的外层 operation、phase/replay/query 和拒绝终点，
-见 `collab-identity-context-recovery-contract-20261008.md` 的
-“3. One invocation, one discriminated result”及
-“5. Approved stale-credential recovery seam”。本节的批准语义是该合同的
-恢复部分权威正文；两份文档冲突时以该合同为准。
-
----
-
-## 3. 不变式
-
-1. **恢复结果唯一**：同一锚点匹配多条 → `IDENTITY_RESTORE_AMBIGUOUS`，不猜测。
-2. **项目隔离**：跨项目锚点匹配 → `IDENTITY_RESTORE_CROSS_PROJECT`，失败关闭。
-3. **裁决即终态**：master 裁决持久化后，下次调用直接恢复，无需再次裁决。
-4. **锚点不可观测不阻断**：某个 transport 的锚点不可观测（env 缺失）不阻断其他 transport 的恢复。
-5. **无锚点不得有身份**：三种 transport 的锚点都缺失 → `COLLAB_IDENTITY_ANCHOR_MISSING`。
-
----
-
-## 4. CLI 接口
-
-| 命令 | 作用 |
-|---|---|
-| `collab context --op <operation-id>` | 唯一入口的自动路径。CLI 观察锚点，daemon 走阶梯并返回判别结果 |
-| `collab context --op <operation-id> --provide '<JSON>'` | 一次补齐缺失事实；只接受 `session_id`、`thread_id`、`endpoint`、`namespace` |
-| `collab context --op <operation-id> --approve-identity '<JSON>'` | 一次显式批准身份恢复或覆盖；JSON 命名 target、action 和用户意图，daemon 读取当前 incumbent |
-| `collab context --op <operation-id> --approve-grant '<JSON>'` | 既有 grant replacement；也可承载明确 `restore_master` / `restore_peer` 的单次用户意图，实际角色效果由 authority owner 提交 |
-| `collab context --op <retained-operation-id> --query` | 纯读取外层 operation 的 durable phase projection；旧 credential 失效时仍可用保留的 key 和 proof 查询，不允许 repair |
-| `collab master promote --approval <text>` | 携带用户 master authority 裁决，不是身份恢复 |
-
-`DSH_SESSION_ID` 由 CLI 自动观察，**不在 `--provide` 里**。锚点是观测事实，不是 agent 提供的
-参数。D2-B 不新增第二个用户选择命令；批准恢复通过同一 `collab context` 入口的 typed
-invocation 提交，并由 daemon 身份门持有。CLI 仍不提供 `--restore-as` 这种直接指定并接管
-身份的旁路。`collab context --query` 不返回 token，也不修复 credential、binding、route、
-grant 或 lease；若需要 repair，必须提交带新 operation intent 的显式 `collab context`
-调用，不能把 query 当作写入口。`collab init` 不是第二条身份路径：它与 `collab context` 共用同一 daemon 身份门
-（`identity_gate`），只是为既有 AppSDK init 消费者输出既有响应形状；歧义与跨项目在两条入口
-上都保持 fail-closed，见 `docs/design/collab-identity-shortest-path.md`。
-
-## 5. `required_fields` 语义
-
-`required_fields` 只对 AppServer 路径返回非空。tmux 候选与 dsh 锚点各自自带完整锚点，
-返回空列表。一个只带着 `DSH_SESSION_ID` 的调用者不会被要求补 AppServer 的四件套。
-
-**DSH 身份创建仍由 gateway 拥有，CLI 不能绕过它。** `DSH_SESSION_ID` 只解决"我是谁"
-（锚点观测与 `required_fields`），不解决"我如何注册"。`DshCandidate` 需要 gateway 的
-`endpoint`、`runtime_id`、`agent_id` 三件套，CLI 只能观测 session id，没有 gateway 就无法
-构造 candidate。新 dsh 身份在 gateway 缺席时失败于 `TRANSPORT_NONE`——这是 gateway 的
-失败，不是身份缺失。已持久化的 dsh 身份由锚点直恢（阶梯第 1 级）判定身份归属；presence
-与注册仍需 gateway 在线。
-
-## 6. 与既有设计的关系
-
-- 当前注册与显式手动通信恢复的区分见
-  [规范合同第 2 节](collab-identity-context-recovery-contract-20261008.md#2-terms-and-exact-owner-map)。
-  当前适用需求以项目 `.appsdk/requirements.json` 的有效记录及用户后续明确指令为准。
-  `collab-identity-minimal-interaction.md` 仅保留为兼容入口，引用规范正文。
-- `docs/dagpipe/collab-context.graph.json` v0.7.0 的 `identity_gate` 节点是本文件的图化。
-- DSH 通道契约（gateway `agent-facts` challenge）见
-  `dsh-gateway/b-stage-collab-client/docs/COLLAB-DSH-CHANNEL-DESIGN.md`。本文件只声明
-  dsh 的锚点是 `session_id`。
+外层 operation/query/cancellation 的持久化实现见 [context 合同](collab-identity-context-recovery-contract-20261008.md)。其中历史 pane/fence 设计不覆盖本文件的当前身份选择规则。图入口为 `docs/dagpipe/collab-context.graph.json` 与独立 master authority 图。

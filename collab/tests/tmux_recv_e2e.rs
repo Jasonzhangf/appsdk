@@ -7,6 +7,34 @@ fn context_snapshot(value: &Value) -> &Value {
         .unwrap_or(value)
 }
 
+fn pane_only_context(fixture: &Fixture, pane: &Pane, args: &[&str]) -> Value {
+    let output = fixture
+        .configured_command(args, Some(pane), "Codex TUI")
+        .env_remove("CODEX_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("CODEX_THREAD")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["result"]["outcome"], "completed", "{value}");
+    for receipt in ["route", "credential", "lease"] {
+        assert!(
+            value["result"]["committed_phases"]
+                .as_array()
+                .unwrap_or_else(|| panic!("missing public committed phases: {value}"))
+                .contains(&json!(receipt)),
+            "missing {receipt}: {value}"
+        );
+    }
+    context_snapshot(&value).clone()
+}
+
 #[test]
 fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
     let root = unique_root();
@@ -15,31 +43,40 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
     std::fs::create_dir_all(&root).expect("create isolated project root");
     std::fs::create_dir_all(&host_state).expect("create isolated host state root");
     seed_baseline(&root);
+    let sender_session = "collab-tmux-recv-sender";
+    let receiver_session = "collab-tmux-recv-receiver";
     let mut fixture = Fixture {
         binary: collab_test_binary(),
         root: root.clone(),
         host_state,
         tmux_socket: tmux_socket.clone(),
-        initialized: false,
+        daemon: None,
+        owned_sessions: vec![sender_session.into(), receiver_session.into()],
     };
 
-    tmux(
+    let sender_pane = tmux(
         &tmux_socket,
         &[
             "new-session",
             "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
             "-s",
-            "collab-tmux-recv-e2e",
+            sender_session,
             "sleep 600",
         ],
     );
-    tmux(
+    let receiver_pane = tmux(
         &tmux_socket,
         &[
-            "split-window",
+            "new-session",
             "-d",
-            "-t",
-            "collab-tmux-recv-e2e:0",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-s",
+            receiver_session,
             "sleep 600",
         ],
     );
@@ -49,21 +86,18 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
             .trim()
             .parse::<u32>()
             .expect("tmux server pid is numeric");
-    let pane_ids =
-        String::from_utf8(tmux(&tmux_socket, &["list-panes", "-a", "-F", "#{pane_id}"]).stdout)
-            .expect("pane list is utf8");
-    let pane_ids = pane_ids.lines().collect::<Vec<_>>();
-    assert_eq!(pane_ids.len(), 2, "fixture owns exactly two panes");
     let pane = |pane_id: &str| Pane {
         server_pid,
         pane_id: pane_id.to_owned(),
         session_anchor: format!("session-{pane_id}"),
         thread_anchor: format!("thread-{pane_id}"),
     };
-    let sender = pane(pane_ids[0]);
-    let receiver = pane(pane_ids[1]);
+    let sender_pane_id = String::from_utf8(sender_pane.stdout).unwrap();
+    let receiver_pane_id = String::from_utf8(receiver_pane.stdout).unwrap();
+    let sender = pane(sender_pane_id.trim());
+    let receiver = pane(receiver_pane_id.trim());
 
-    fixture.initialized = true;
+    fixture.start_daemon();
     fixture.registered_context_with_originator(&sender, true, "Codex future host");
     let unknown_host =
         fixture.command_with_originator(&["context"], Some(&sender), "Codex future host");
@@ -210,15 +244,9 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
     // return the same worker and generation without a fresh identity.
     let sender_identity = sender_context["identity"].clone();
     let sender_generation = sender_context["binding"]["endpoint_generation"].clone();
-    let down = fixture.command_without_pane(&["down"]);
-    assert!(down.status.success(), "isolated fixture down must succeed");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline && fixture.host_state.join("server.sock").exists() {
-        thread::sleep(Duration::from_millis(50));
-    }
+    fixture.stop_daemon();
     std::fs::remove_dir_all(fixture.host_state.join("identities")).unwrap();
-    let up = fixture.command_without_pane(&["up"]);
-    assert!(up.status.success(), "isolated fixture up must succeed");
+    fixture.start_daemon();
     let restart_envelope = fixture.run_ok(&["context"], Some(&sender));
     assert_eq!(
         restart_envelope["result"]["outcome"], "completed",
@@ -323,7 +351,8 @@ fn context_recovers_archived_master_in_the_same_live_pane() {
         root: root.clone(),
         host_state,
         tmux_socket: tmux_socket.clone(),
-        initialized: false,
+        daemon: None,
+        owned_sessions: vec!["collab-pane-recovery".into()],
     };
     tmux(
         &tmux_socket,
@@ -352,20 +381,7 @@ fn context_recovers_archived_master_in_the_same_live_pane() {
         session_anchor: "session-before-restart".into(),
         thread_anchor: "thread-before-restart".into(),
     };
-    fixture.initialized = true;
-    // The host route index and this project's reducer are distinct owners.
-    // This is also the shape of a daemon serving multiple real projects.
-    let resident = root.join("resident");
-    seed_baseline(&resident);
-    let up = fixture
-        .configured_command(&["up"], None, "Codex TUI")
-        .current_dir(&resident)
-        .output()
-        .unwrap();
-    assert!(
-        up.status.success(),
-        "isolated nonresident daemon up must succeed"
-    );
+    fixture.start_daemon();
     // The daemon owns the worker id; the fixture must not assume a naming
     // scheme. Read the concrete worker from the registration receipt.
     fixture.registered_context(&old, true);
@@ -402,21 +418,7 @@ fn context_recovers_archived_master_in_the_same_live_pane() {
             "recorded_unusable": status["recorded_unusable"],
         })
     };
-    let down = fixture.command_without_pane(&["down"]);
-    assert!(down.status.success(), "isolated fixture down must succeed");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline && fixture.host_state.join("server.sock").exists() {
-        thread::sleep(Duration::from_millis(50));
-    }
-    let up = fixture
-        .configured_command(&["up"], None, "Codex TUI")
-        .current_dir(&resident)
-        .output()
-        .unwrap();
-    assert!(
-        up.status.success(),
-        "isolated nonresident daemon restart must succeed"
-    );
+    fixture.restart_daemon();
     let restarted = fixture.run_ok(&["context"], Some(&old));
     assert_eq!(restarted["result"]["outcome"], "completed", "{restarted}");
     assert_eq!(context_snapshot(&restarted)["identity"], before["identity"]);
@@ -462,9 +464,12 @@ fn context_recovers_archived_master_in_the_same_live_pane() {
         recovered["binding"]["runtime_id"],
         before["binding"]["runtime_id"]
     );
-    assert_eq!(
-        recovered["binding"]["endpoint_generation"], before["binding"]["endpoint_generation"],
-        "ordinary archived identity restore retains its durable generation"
+    assert!(
+        recovered["binding"]["endpoint_generation"]
+            .as_u64()
+            .unwrap()
+            > before["binding"]["endpoint_generation"].as_u64().unwrap(),
+        "changed current native facts must refresh the delivery endpoint"
     );
     let receipt: Value = serde_json::from_slice(
         &std::fs::read(
@@ -579,7 +584,8 @@ fn implicit_context_repairs_a_rejected_same_pane_credential() {
         root: root.clone(),
         host_state: host_state.clone(),
         tmux_socket: tmux_socket.clone(),
-        initialized: false,
+        daemon: None,
+        owned_sessions: vec!["collab-implicit-context".into()],
     };
     tmux(
         &tmux_socket,
@@ -608,7 +614,7 @@ fn implicit_context_repairs_a_rejected_same_pane_credential() {
         session_anchor: "session-implicit".into(),
         thread_anchor: "thread-implicit".into(),
     };
-    fixture.initialized = true;
+    fixture.start_daemon();
     // The daemon owns the worker id; read the concrete value from the init
     // receipt instead of re-deriving the old naming scheme.
     fixture.registered_context(&pane, true);
@@ -690,7 +696,8 @@ fn context_returns_the_binding_receipt_that_addresses_the_route() {
         root: root.clone(),
         host_state,
         tmux_socket: tmux_socket.clone(),
-        initialized: false,
+        daemon: None,
+        owned_sessions: vec!["collab-context-binding".into()],
     };
     tmux(
         &tmux_socket,
@@ -719,42 +726,15 @@ fn context_returns_the_binding_receipt_that_addresses_the_route() {
         session_anchor: "session-binding".into(),
         thread_anchor: "thread-binding".into(),
     };
-    fixture.initialized = true;
+    fixture.start_daemon();
     fixture.registered_context(&pane, false);
-    let pane_only = |args: &[&str]| {
-        let output = fixture
-            .configured_command(args, Some(&pane), "Codex TUI")
-            .env_remove("CODEX_SESSION_ID")
-            .env_remove("CODEX_THREAD_ID")
-            .env_remove("CODEX_THREAD")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{} {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(value["result"]["outcome"], "completed", "{value}");
-        for receipt in ["route", "credential", "lease"] {
-            assert!(
-                value["result"]["committed_phases"]
-                    .as_array()
-                    .unwrap_or_else(|| panic!("missing public committed phases: {value}"))
-                    .contains(&json!(receipt)),
-                "missing {receipt}: {value}"
-            );
-        }
-        context_snapshot(&value).clone()
-    };
-    let registered = pane_only(&["context"]);
+    let registered = pane_only_context(&fixture, &pane, &["context"]);
     let worker_id = registered["identity"]["worker_id"]
         .as_str()
         .expect("daemon receipt names the registered worker")
         .to_owned();
 
-    let context = pane_only(&["context"]);
+    let context = pane_only_context(&fixture, &pane, &["context"]);
     let binding = &context["binding"];
     let canonical_root = root.canonicalize().unwrap().to_string_lossy().into_owned();
     assert_eq!(binding["agent_id"], worker_id);
@@ -790,7 +770,7 @@ fn context_returns_the_binding_receipt_that_addresses_the_route() {
 
     // The receipt is the daemon's record, not a copy of the caller's local
     // state: reading it again returns the same binding.
-    let again = pane_only(&["context"]);
+    let again = pane_only_context(&fixture, &pane, &["context"]);
     assert_eq!(again["binding"], *binding);
     let route_output = fixture
         .configured_command(
@@ -821,14 +801,8 @@ fn context_returns_the_binding_receipt_that_addresses_the_route() {
         "actual native constraint must not accept null IDs"
     );
     assert!(String::from_utf8_lossy(&constrained.stderr).contains("ROUTE_RESOLVE_INVALID"));
-    let down = fixture.command_without_pane(&["down"]);
-    assert!(down.status.success());
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline && fixture.host_state.join("server.sock").exists() {
-        thread::sleep(Duration::from_millis(50));
-    }
-    assert!(fixture.command_without_pane(&["up"]).status.success());
-    let restarted = pane_only(&["context"]);
+    fixture.restart_daemon();
+    let restarted = pane_only_context(&fixture, &pane, &["context"]);
     assert_eq!(restarted["identity"]["worker_id"], worker_id);
     assert_eq!(restarted["binding"], *binding);
 }
@@ -844,9 +818,10 @@ fn context_missing_facts_and_invalid_supplement_have_no_identity_side_effect() {
         root: root.clone(),
         host_state: host_state.clone(),
         tmux_socket: root.join("unused.sock"),
-        initialized: false,
+        daemon: None,
+        owned_sessions: Vec::new(),
     };
-    fixture.initialized = true;
+    fixture.start_daemon();
 
     // A caller with no anchor at all: no tmux pane, no session/thread, and an
     // unsupported originator so no namespace is observed either. The daemon

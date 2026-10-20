@@ -161,7 +161,8 @@ fn start_is_rejected_before_identity_coordination() {
         root: root.clone(),
         host_state: root.join("h"),
         tmux_socket: root.join("t.sock"),
-        initialized: false,
+        daemon: None,
+        owned_sessions: Vec::new(),
     };
 
     let output = fixture.command(&["subagent", "start", "--id", "child"], None);
@@ -279,7 +280,8 @@ fn mcp_rejects_empty_or_invalid_success_output_for_subagent_only() {
         root: root.clone(),
         host_state: root.join("h"),
         tmux_socket: root.join("t.sock"),
-        initialized: false,
+        daemon: None,
+        owned_sessions: Vec::new(),
     };
     std::fs::create_dir_all(&fixture.root).expect("create MCP test root");
 

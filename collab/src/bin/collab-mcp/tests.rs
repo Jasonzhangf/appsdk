@@ -1,6 +1,27 @@
 use super::*;
 
 #[test]
+fn scoped_cleanup_adapters_have_no_target_or_daemon_controls() {
+    assert_eq!(
+        build_argv("collab_worker_close_self", &json!({})).unwrap(),
+        ["worker", "close", "--self"]
+    );
+    assert_eq!(
+        build_argv("collab_project_reset", &json!({})).unwrap(),
+        ["reset", "--project"]
+    );
+    for name in ["collab_worker_close_self", "collab_project_reset"] {
+        for args in [
+            json!({"target_id":"another-pane"}),
+            json!({"host":true}),
+            json!({"password":"supplied"}),
+        ] {
+            assert!(build_argv(name, &args).is_err());
+        }
+    }
+}
+
+#[test]
 fn worker_name_adapter_requires_exactly_one_user_action() {
     assert_eq!(
         build_argv("collab_worker_name", &json!({"name":"Alice"})).unwrap(),

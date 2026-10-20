@@ -5,6 +5,14 @@ description: "仅约束已成功注册 Collab 的 peer；master 权限需另行�
 
 # Collab
 
+## 全局 daemon 与默认身份恢复
+
+Collab 只有一个全局、由用户管理的 daemon。agent 不启动、关闭或重启它，也不为身份恢复申请维护窗口。用户维护命令、参数和凭据不属于 agent 接口。
+
+默认使用 `collab context`。当前 `cwd` 决定 project，当前 tmux session 决定本次身份上下文；历史 pane 绑定到谁都不阻断恢复。当前 project 没有 master 时自动恢复为 peer；已有 master 时询问用户是否授权当前身份恢复为 master，授权后直接替换现有 master，未授权则继续作为 peer。不按任务内容、worktree、旧角色或 master 派单增加身份准入校验，不要求重新注册或通信回环。daemon 不可达时保留身份和任务，返回服务不可用；不启动第二个服务或修改 journal、route、credential 文件。
+
+明确恢复授权覆盖当前 pane 的历史 peer/master；旧绑定和旧 route 自动失效，不再要求旧身份批准。agent 可以移除当前 pane 自身的 agent 绑定和 route，不关闭宿主。daemon 自动清理失效 route。当前项目 master 可以 reset 本项目的 Collab，移除历史消息、route、任务、资产和负载；只清当前项目，不操作其他项目或全局 daemon 生命周期。实际 I/O 错误保留原错，不用历史身份保护拒绝当前授权，也不伪造成功。
+
 ## 适用身份
 
 只有当前执行者已在本项目成功注册为 Collab peer，后文的协作规则才适用；各角色规则只约束该角色。master 规则还要求当前 peer 持有经明确授权的 master 权限。未注册的 subworker 不因受托而成为 Collab peer，也不适用本 Skill 的协作协议。加载本 Skill、任务提到 Collab、看到 master 名称或启动多个 worker，都不代表已注册或取得 master 权限。
@@ -23,6 +31,36 @@ selected, tmux is never a message, wake, presence, or status fallback. Its
 observed tmux socket + pane may also be stored as the durable identity anchor,
 independently of native runtime IDs.
 Production projects use the globally installed Collab v1.
+
+## Task routing and role responsibilities
+
+Choose the receiver by task kind, not by idle capacity or expected duration. A
+fixed command that runs for hours is still bounded work. A goal that needs
+planning, delegation, evidence review, unblocking, integration, and resource
+closure is a long-horizon goal.
+
+- `master` routes long-horizon goals to autonomous peers and bounded one-shot
+  execution or observation to `codex exec --profile gcm` subworkers. Master
+  retains project coordination, cross-peer dependencies, and final integration.
+- An ordinary peer keeps the code-compatible wire role `worker` and derivation
+  `peer`. It is the long-horizon orchestrator for an accepted goal: split and
+  plan, dispatch bounded subworkers, verify evidence, resolve blockers,
+  integrate assigned work, close owned resources, and report to the sender. It
+  does not inherit master authority.
+- A managed subagent completes only its bounded assignment. It reports evidence
+  or BLOCKED and stops. It does not own the long-horizon goal, create a global
+  schedule, recursively dispatch, register Collab, or expand permissions.
+
+Every sender states the goal, scope, authorized actions, resource owner,
+delivery and test evidence, report channel, and stop conditions. A receiver
+checks that contract against current responsibility, then accepts, rejects, or
+negotiates before work starts.
+
+Use the board invitation lifecycle to offer a long-horizon goal to an ordinary
+peer. Use the existing child-private managed-subagent lifecycle only for a
+bounded direct assignment. Planner and Reviewer remain independent roles with
+their existing model routing; the bounded child rule does not turn them into
+GCM execution workers.
 
 ## Display names
 
@@ -68,7 +106,7 @@ sink DAG. Every applicable node must finish before claiming delivery:
 ```text
 latest_main_candidate
   -> targeted_tests + build/install
-  -> if runtime/daemon is affected: collab down -> collab up (one maintenance window)
+  -> user-managed runtime activation when applicable (outside the agent interface)
   -> installed binary + collab context + collab-mcp initialize live checks
   -> black-box live behavior replay + author debug complete
   -> applicable independent architecture review PASS
@@ -105,22 +143,17 @@ verified pair. A path that cannot prove that identity is a collision: preserve
 it and report the exact path. Never delete `~/.local/bin/collab*` or
 `~/.local/lib/collab/*` merely because the pathname matches.
 
-Installing a new binary does not itself replace a running daemon. Do not run
-`collab down` or `collab up` merely to refresh a peer identity. For a verified
-runtime delivery, use one controlled maintenance window and preserve old/new
-PID/socket, binary version/digest, identity, journal/mailbox, context, MCP, and
-live replay evidence:
+Installing a binary does not replace the running user-managed daemon. Agents
+never perform its lifecycle actions or request maintenance credentials. After
+user-managed activation, verify the available service:
 
 ```sh
-collab down
-collab up
 collab context
 printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"codex","version":"0.0.0"}}}\n' | collab-mcp
 ```
 
-Never use a broad process kill or a second daemon. If `collab context` reports
-a daemon PID that predates the maintenance window, the runtime node is
-`INCOMPLETE`, not delivered.
+Never use a broad process kill or a second daemon. If the live service reports
+an older installed version, runtime activation is `INCOMPLETE`, not delivered.
 
 Before changing the installed binary, inspect the current source version,
 installed version, canonical paths, and daemon PID/socket:
@@ -162,9 +195,9 @@ affected project.
 ### 1. Recovery
 
 Start with the one-step bootstrap. `collab context` is the single automatic
-state entry. The CLI resolves the canonical project root, creates a missing
-baseline, starts the daemon unless an explicit `DOWN` marker exists, observes
-the available runtime facts, and sends a typed identity request to the daemon.
+state entry. The CLI resolves the current cwd project, connects to the existing
+user-managed daemon, creates a missing baseline when applicable, observes
+runtime facts, and sends a typed identity request to the daemon.
 The daemon owns identity selection, creation, recovery, update, credential and
 binding persistence, route publication, and default direct-message lease
 restoration. Initial registration uses the selected adapter's basic capability
@@ -180,53 +213,44 @@ with recovery semantics in
 collab context
 ```
 
-`collab context --recover-communication` explicitly checks a restored
-communication path through the reply gate. Only this explicit operation sends
-`COLLAB_REGISTER_CHALLENGE <JSON>`. The participant reads it through the selected
-adapter and invokes `collab context --return-challenge '<JSON>'` from its own
-environment (or the public native `RegisterReply` interface). The daemon checks
-scope, purpose, operation, command, nonce and selected target. Query is read-only;
-restart and duplicate return reuse the same evidence. A failed reply retains the
-existing identity, role, grant, anchor and binding. Ordinary context restore
-does not trigger this check.
+An optional explicit diagnostic may check the restored route through
+`collab context --recover-communication` and a challenge/reply. It is not a
+recovery prerequisite, and ordinary `collab context` does not wait for it.
+When used, the participant reads `COLLAB_REGISTER_CHALLENGE <JSON>` through the
+selected adapter and returns it with
+`collab context --return-challenge '<JSON>'` from its own environment. The
+daemon checks scope, purpose, operation, command, nonce and selected target as
+factual transport-safety checks; they do not establish historical identity or
+authority. Query remains read-only. A failed diagnostic leaves the restored
+identity and current binding intact.
 
-The daemon recovers identity by anchor. Each transport has one designed anchor:
-the tmux owned pane, the AppServer session/thread, or the dsh session. An anchor
-that matches a persisted identity restores it directly, with no probe, no
-runtime state and no generation requirement. An anchor with no match drafts a
-new identity. Matching is never guessed: an ambiguous anchor or a cross-project
-match fails explicitly unless the user supplies an explicit recovery decision
-through the same `collab context --approve-identity` invocation. That decision
-names the target and action; the daemon reads the current incumbent inside its
-identity lock. No old fence lookup or second approval is required.
+For tmux, use the current cwd project and current tmux session. Reuse that
+identity regardless of historical pane ownership; a new pane changes the
+delivery address, not the identity. With no project master, context restores a
+peer automatically. With another master, the peer remains usable and the user
+may authorize replacing the incumbent. Reuse the current project/session
+master without repeated approval. Other native transports retain their own
+session/thread identity facts.
 
-Ordinary persisted restore reads the durable selected adaptor and binding. It
-does not run initial selection, Register, admission or loopback. A legitimate
-adjacent-generation staged publication completes through the existing typed
-Register recovery owner with its token, generation and scope guards. Stable
-socket + pane collection reaches the daemon when live display/capture fails;
-the daemon supplies saved fields and actual I/O errors remain explicit.
-An authenticated existing-principal binding move or exact approved identity
-restore also retains that typed owner. It does not enter initial reply
-admission. The daemon derives this boundary from the existing scoped binding
-and credential or approval proof; a caller capability or wait flag cannot
-declare a restore. Typed fences and the frozen-command CAS still apply.
+Ordinary persisted restore reuses the identity and restores its current
+communication binding, route and default lease without another Register or
+mandatory communication challenge. Task content, worktree and old pane
+claimants do not gate restoration; historical pane identities and routes are
+retired. Actual I/O or persistence errors remain explicit without daemon
+lifecycle steps. Acceptance of a restored peer and a restored master requires
+each to send, receive and reply through the current route. A durable send or
+role alone does not prove message consumption.
 
-For an exact user master/peer request, one context approval names
-`decision=approved`, `target_identity`, `action=restore_master|restore_peer`, and
-`authorization` containing the user's words. Either `--approve-identity` or
-`--approve-grant` carries that one explicit intent. The daemon reads current
-fences and uses the authority owner: master transfers authority atomically;
-peer clears only the target's grant and preserves an unrelated master.
-`restore_identity` alone does not authorize a role change.
+For the optional master choice, `--approve-grant` carries `action=restore_master`
+and `authorization` containing the user's words. The daemon derives the
+current identity, project/session and incumbent and uses the authority owner to
+replace it directly. Do not require target snapshots, old credentials, digests,
+grant generations or a second identity approval. Omitted approval leaves peer
+restoration successful and the incumbent unchanged.
 
-Tmux identity uses socket path + pane ID. Session, PID, native IDs, activity,
-capture and endpoint probe do not gate restoration or validity.
-Unique persisted ownership repairs stale credentials and restart drift
-automatically. `identity_valid` and identity presence come from the current
-worker/binding/pane owner; retired records remain invalid. Endpoint and activity
-status retain actual missing, unknown and I/O errors. A valid identity proves
-neither agent readiness nor transport submission or consumption.
+Tmux identity uses current project and socket/server/session facts. Pane, pane
+PID, native thread, activity and capture do not select the identity. Endpoint
+status and message delivery remain separate from identity restoration.
 
 You observe nothing by hand. `DSH_SESSION_ID`, `CODEX_SESSION_ID`,
 `CODEX_THREAD_ID` and the tmux pane are all read by the CLI. A gateway control
@@ -262,9 +286,8 @@ comes from the daemon ledger when the caller has a unique binding.
 
 If `collab context` fails explicitly, preserve the original error and affected
 scope. Do not retry automatically, edit route/identity files, copy tokens,
-start another daemon, or invent a fallback. Daemon restart remains a separate
-controlled maintenance action after a verified runtime delivery. Ordinary
-identity recovery uses `collab context` only.
+start another daemon, or invent a fallback. Daemon lifecycle is outside the
+agent interface. Ordinary identity recovery uses `collab context` only.
 
 Master authority is separate from identity. The authority owner is the current
 typed grant in the exact project and app scope, with only two states: empty (no
@@ -318,47 +341,21 @@ and independent.
 
 ### 3. Reset
 
-Use reset only when the operator explicitly authorizes discarding the named
-control-plane state. Reset is offline, transactional, and requires an explicit
-level; it is not migration and it does not preserve the state it retires:
+The current project master may reset the project's Collab state online:
 
-```text
-collab down/up -> controlled daemon restart; journal/mailbox survive
-collab migrate -> authenticated migration and identity rebind
-collab reset --project -> retire the project control plane and rebuild
-collab reset --host    -> rebuild the host control plane
+```sh
+collab reset --project
 ```
 
-Every level takes the same host writer lock as the daemon, requires the daemon
-to be down, stages the bytes it will remove under `~/.collab/archives/`, verifies
-the archive, and appends one record to `~/.collab/reset.jsonl` that carries the
-approval text. A level is required: a run with no level, or with two, fails with
-`RESET_LEVEL_REQUIRED`, and a flag the selected level does not use fails with
-`RESET_LEVEL_FLAG_MISMATCH` rather than being ignored. Reset is idempotent, and
-it never imports old PASS or delivery claims.
-
-`--project` is the historical level. It retires the current project's
-`.agent-collab/` and `.agent-collab-v2/` bytes, rebuilds the current empty
-scaffold, and refuses when that project root holds the live host index
-(`RESET_PROJECT_HOLDS_HOST_INDEX`). It takes no path argument; run it from the
-project root.
-
-`--host` retires the host control plane under `~/.collab/` (`routes.jsonl`,
-`journal.jsonl`, `events.jsonl`, `log.txt`, `identities/`, `projects/`) and the
-resident project's `.agent-collab/server/` journal, events, and log. It keeps
-`~/.collab/reset.jsonl` and `~/.collab/archives/`, because they are the audit
-trail, and it keeps the external service descriptor and the daemon's own socket
-and lock files. The project business payload under
-`.agent-collab/{mailbox,messages,handoff,merge-queue,runs,mailboxes}` belongs to
-`--project`, not here. `~/.collab/runs/` survives unless `--include-runs` is
-given. No baseline is rebuilt: the next `collab up` starts from empty. `--host`
-requires `--storage-root <project root>`, the root that owns the live host
-index, and fails with `RESET_STORAGE_ROOT_REQUIRED` when it is absent.
-
-The routes level was removed: one pane owns one route binding host-wide
-(`docs/design/collab-pane-route-ownership-20261006.md`). Every level records
-`delivery_verified: false`. Reset alone is not delivery, review, install,
-restart, or live-communication evidence.
+Run it from the current project. The daemon authenticates the current scoped
+master, clears project messages, tasks, bindings, routes, subscriptions,
+operations and assets, and deletes project history. It preserves other projects
+and the global daemon. Historical pane owners, open work and resident host
+storage do not block this authorized project reset. The next `collab context`
+creates a peer with no inherited master grant. Real deletion or durability
+errors return incomplete and retain the scoped reset intent for recovery.
+No legacy discard mode or separate approval argument exists for this project
+reset. Host maintenance is outside the agent interface.
 
 `.appsdk/` and `.appsdk-control/` are AppSDK-owned and are not removed by
 `collab reset`. The host-wide runtime truth remains `~/.collab/`
@@ -376,7 +373,7 @@ An AppSDK `reset-governance` or `appsdk init --fresh --discard-legacy` is not
 Collab reset/migration and must not remove `.agent-collab/`. AppSDK's reset owner
 explicitly treats `.agent-collab/` as a reserved root. If the project also
 needs to move or retire Collab state, follow
-[Migration and Daemon Maintenance](references/migration-daemon.md); the two
+[Migration and User-Managed Daemon Boundary](references/migration-daemon.md); the two
 operations have separate transactions and separate completion evidence.
 
 ### 4. Regression recognition
@@ -392,7 +389,7 @@ After a fix, verify the same user path again and classify the first divergence:
 - task remains open: inspect owner identity, master responsibility, cleanup
   receipt, and notification supersession.
 
-Record the tested source commit, binary digest, daemon PID/socket, exact
+Record the tested source commit, installed version, daemon PID/socket, exact
 commands, and live replay result in the bug system. A test pass without
 latest-main merge, installed-binary verification, or applicable live replay
 does not close the bug.
@@ -411,13 +408,15 @@ brief, and promotion or delegation returns the replacement brief. Do not
 maintain a separate role prompt:
 
 - `master`: dispatch and allocate resources, keep workers loaded, own blockers,
-  and drive verify/merge/cleanup/close. Implementation is not the primary job.
-- `worker`: complete the independently owned task end to end, evaluate master
-  collaboration requests against current ownership/capacity, and explicitly
-  accept or negotiate rather than ignore.
-- `managed-subagent`: execute the assigned scoped task, obey master/parent for
-  that assignment, and return root-cause/evidence rather than build a global
-  schedule.
+  route long-horizon goals to peers, route bounded work to GCM subworkers, and
+  drive verify/merge/cleanup/close. Implementation is not the primary job.
+- `worker` with derivation `peer`: orchestrate the accepted long-horizon goal,
+  dispatch bounded GCM subworkers, verify evidence, resolve blockers, integrate
+  assigned work, and report to the sender. Evaluate master invitations against
+  current ownership and capacity. Do not inherit master authority.
+- `managed-subagent`: complete the assigned bounded execution or observation,
+  obey master/parent for that assignment, return evidence, and stop rather than
+  build a global schedule or take a follow-on goal.
 
 The default identity is peer. Master authority is explicit and
 user-authorized: an approved `master promote` replaces the recorded holder,
@@ -475,8 +474,8 @@ recipient is working.
 If delivered-but-unconsumed notifications reach the throttle threshold (default
 3), further push knocks pause until `collab recv` consumes them, preventing
 terminal pollution and storms. Each batch has one attempt; the default window
-is 120 seconds. Policy changes require controlled daemon restart, not task
-reset.
+is 120 seconds. Policy changes take effect through user-managed runtime
+activation, not task reset.
 
 Explicit `collab sendmessage` is immediate. Idle, progress, delivery, bug, and
 worker-idle notices are auto-merged by the daemon in the 120-second batch
@@ -525,7 +524,8 @@ without taking the task. Do not update a pending task to `working` to bypass
 claim. Never claim outside the user's authorized goal or take another owner's
 working or blocked task.
 
-Master may instead offer a public task to one ordinary peer:
+For a long-horizon goal, master may instead offer a public task to one ordinary
+peer:
 
 ```sh
 collab board invite <task-id> --to <peer> --expected-revision <observed>
@@ -675,9 +675,11 @@ Existing subscriptions, master wake, and one worker-idle fact remain unchanged.
 
 Managed subagent thread creation is unsupported in the production path and
 fails explicitly. Registered peer status and thread state use the owning
-AppServer RPC. Use registered peers for concurrent work. Existing subagent
-records may be inspected with `status`, `send <id> --subject <topic> "<task>"`,
-and explicit `close <id>`.
+AppServer RPC. Use peers for long-horizon goals and `codex exec --profile gcm`
+subworkers for bounded one-shot execution or observation. The existing
+child-private managed-subagent records remain bounded direct assignments and may
+be inspected with `status`, `send <id> --subject <topic> "<task>"`, and explicit
+`close <id>`.
 For registered participants, `collab-mcp` and the `collab` CLI expose the same
 collaboration protocol. Listed `collab_*` tools alone do not prove registration.
 If MCP is missing, unsupported, aborted, or unknown, run the same
@@ -996,15 +998,16 @@ Master operates under two prime directives:
    worker must produce root-cause evidence and proposed fixes for master
    arbitration; master must actively close the lifecycle rather than patch
    output symptoms.
-2. **Worker Capacity Saturation**: Master must keep the entire worker fleet
-   fully saturated without idle time or serial bottlenecks. Saturate every
-   live present ordinary peer first, then schedule managed subagents within
-   the configured `subagent.max_concurrent` cap. Peers do not consume that
-   cap. Before ending each scheduling turn, inspect every live peer and
-   managed subagent: if any eligible worker is idle and an authorized P0/P1
-   task is ready, dispatch the next non-overlapping assignment immediately.
-   Delivery, merge, review, task close, and cleanup are lifecycle steps, never
-   reasons to leave capacity idle.
+2. **Task-kind Capacity**: Master must keep the entire worker fleet
+   fully loaded by task kind without idle time or serial bottlenecks. Route
+   long-horizon goals to autonomous peers and bounded one-shot execution or
+   observation to `codex exec --profile gcm` subworkers within the configured
+   `subagent.max_concurrent` cap. Peers do not consume that cap. Do not fill
+   peers first merely because they are idle. Before ending each scheduling
+   turn, inspect ready work and both receiver kinds: dispatch long-horizon
+   goals and bounded work to the correct idle or new receiver. Delivery, merge,
+   review, task close, and cleanup are lifecycle steps, never reasons to leave
+   eligible work undispatched.
 
 **Sovereignty and Backlog Priority**:
 - **No autonomous technical debt refactoring**: When assigned tasks complete
@@ -1030,11 +1033,12 @@ worker does not. On an idle fact, master must:
 3. If all tasks and bugs are closed, report completion and propose next
    steps to the user.
 
-Do not stop after consuming a report or closing a task while another live,
-eligible peer has no assignment. Saturate live peers first, then use managed
-subagents only within the configured cap. Dispatch the next ready
-non-overlapping P0/P1 task before the scheduling turn ends. A fleet with idle
-capacity is not a completed scheduling cycle.
+Do not stop after consuming a report or closing a task while authorized ready
+work has no correct receiver. Send long-horizon goals to autonomous peers and
+bounded one-shot execution or observation to `codex exec --profile gcm`
+subworkers within the configured cap. Dispatch the next ready non-overlapping
+P0/P1 work before the scheduling turn ends. Idle peers alone are not a reason
+to convert bounded work into a peer goal.
 
 Master idle reminders are level-triggered. Within the same master idle episode,
 each reminder attempt consumes the shared episode-local budget, up to three
@@ -1060,11 +1064,12 @@ peer consumption, or Codex turn state. Do not infer those facts or restart a
 shared runtime from a pane probe.
 
 Master keeps architecture, dispatch, integration, critical repair, and
-final acceptance. Use registered peers and `collab sendmessage` for
-assignments. Managed Codex subagent thread creation is unsupported and fails
-explicitly. Give each peer its own worktree and file
-scope. Independent peers may decline an invite to protect their current task.
-Wait for evidence summaries, then integrate. Chat tone is not completion.
+final acceptance. Use a board invitation for a long-horizon peer goal. Use the
+existing child-private lifecycle for a bounded managed-subagent assignment.
+Managed Codex subagent thread creation is unsupported and fails explicitly.
+Give each peer and subworker its own worktree and file scope. Independent peers
+may decline an invite to protect their current task. Wait for evidence
+summaries, verify them, then integrate. Chat tone is not completion.
 
 Delivery and review are not lifecycle endpoints. `task review --accept`
 registers a daemon-owned pending merge and notifies the current master; the
@@ -1075,10 +1080,11 @@ text, and `task close` fails with `TASK_MERGE_PENDING` until the master records
 After a delivered candidate, either the peer merges and pushes the verified candidate under the next section’s conditions, or the current master drives review, integration,
 cleanup, task close, and then the next ready assignment. Do not leave a peer
 idle merely because its last task returned `delivered`, `merged`, or a review
-verdict. Reuse the same live peer
-or a fresh managed subagent for the next non-overlapping P0/P1 assignment
-whenever capacity exists. Closing or force-closing a stale task is a scheduling
-decision that must preserve evidence, not a reason to stop dispatching.
+verdict. Route the next non-overlapping P0/P1 work by task kind: reuse an
+autonomous peer for another long-horizon goal, or start a bounded GCM subworker
+for execution or observation. Closing or force-closing a stale task is a
+scheduling decision that must preserve evidence, not a reason to stop
+dispatching.
 
 ### Verified merge and resource cleanup DAG（单源单汇）
 
@@ -1104,9 +1110,8 @@ runtime 节点未完成时必须报 `INCOMPLETE`。
 入口: latest_origin_main_candidate
   -> applicable_targeted_tests_pass
   -> scripts/install-global-collab.sh
-  -> installed_binary_version_digest_verified
-  -> collab_down_exact
-  -> collab_up_exact
+  -> installed_binary_version_verified
+  -> user_managed_runtime_activation_if_applicable
   -> collab_context_registered_live
   -> collab_mcp_initialize_matches_version
   -> live_replay_or_explicit_non_applicable_reason
@@ -1115,10 +1120,8 @@ runtime 节点未完成时必须报 `INCOMPLETE`。
 终点: cleanup_verified
 ```
 
-维护窗口只使用 `collab down` 和 `collab up`。不得用 broad kill、第二个 daemon、
-旧 binary、跳过重启或手工 route/identity 文件替代节点。重启后必须同时记录旧/新
-PID/socket、installed binary SHA256、MCP version、context worker/role/transport、
-pending_merges/worktrees 状态；任一项不匹配都不能声称交付完成。
+daemon 生命周期由用户管理，agent 不执行维护动作、不索取凭据，也不为身份恢复
+申请维护窗口。安装、源码测试与 live 验收分别报告；用户激活后验证受影响行为。
 
 **peer 资源回收单源单汇：**
 
@@ -1192,8 +1195,8 @@ registration explicitly requested by the user. It does not activate Collab
 merely because an agent enters a project.
 
 `collab context` is the single agent entry. It resolves the canonical root,
-creates a missing baseline, starts a stopped daemon, restores identity and
-registration, re-arms the default direct-message lease, and returns the
+connects to the existing daemon, creates a missing baseline when applicable,
+restores peer identity, re-arms the default direct-message lease, and returns the
 authoritative snapshot plus the current role's `operations`.
 
 That one snapshot is also the agent's complete state read. It carries the
@@ -1217,7 +1220,7 @@ projections that used to require separate calls, so no agent flow needs to run
 | Another worker or project claims your tmux pane, or the recorded pane route is stale | `collab context`; the daemon replaces the claim by default | inspect routes or archives, pick a worker id, or edit any route/identity file |
 | Master authority must move to this peer | `collab master promote --approval "<user text>"` | promote without explicit user approval |
 | Master authority must be cleared for this project scope | `collab master clear --approval "<user text>"` | clear without explicit user approval; or expect clear to delete tasks, messages, peers, or bindings |
-| Thread/session changed, or after daemon restart | `collab context` (daemon reconciles identity in place) | a manual identity recovery command, `collab down`/`up` |
+| Thread/session changed, or after daemon restart | `collab context` (daemon reconciles identity in place) | manual identity or daemon lifecycle commands |
 | Need peer list, master state, scheduling state, or env | read them from the single `collab context` snapshot | call `collab who`, `collab status --all`, `collab master status`, or grep the environment as a separate step |
 | `requires_identity_update` is present | read `required_fields` and `exact_error`; when the returned action is the factual supplement, run that one action with only the requested `session_id`, `thread_id`, `endpoint`, or `namespace` from their real source | select or guess a worker; run an identity selection or recovery command, or a status/route/init hunt; set an identity override or approval supplement |
 | `collab context` exits non-zero with `COLLAB_CONTEXT_UNRESOLVED` | preserve the error; failed initial registration continues independently; existing registered participants report the affected coordination without clearing owned tasks/claims | automatically retry from another cwd; edit routes/token state, copy identity, reset the project |
@@ -1243,17 +1246,16 @@ does not establish project identity.
 | Create a peer | `collab worker create <peer-id> --cwd <existing-project-dir-or-linked-worktree> --op <stable-operation-id> [--model <model>]` | `outcome=complete`; response identifies the real thread, route, registration, and verified ready turn. Reuse the same operation ID to recover a retry; never create a replacement ID after an unknown result. |
 | Inspect a peer | `collab worker read <peer-id>` | `outcome=ok` with the exact peer lifecycle projection. `collab worker read` with no ID reads the caller. |
 | Move a peer's AppServer cwd | `collab worker update <peer-id> --cwd <existing-project-dir-or-linked-worktree>` | First call omits `--op`. `outcome=complete` requires settings update and cwd readback. Supply `--op <returned-operation-id>` only to retry/query that retained update after an uncertain result. |
-| Unregister yourself | `collab worker close <your-peer-id> --reason "<auditable reason>"` | An authenticated peer or master can retire its own identity without closing or archiving its pane/thread. Open responsibilities are refused. `outcome=complete` requires exact control-plane retirement; `runtime_archive=not-applicable`. Only this identity's exact master grant is revoked. |
+| Unregister yourself | `collab worker close --self --reason "<auditable reason>"` | The authenticated current pane may retire its own identity even with outstanding tasks. `outcome=complete` requires self binding and route retirement; `runtime_archive=not-applicable`. The host process, tasks, messages and history are preserved. Only this identity's exact master grant is revoked. |
 | Close another peer | `collab worker close <peer-id> --reason "<auditable reason>"` | First call omits `--op`. `outcome=complete` requires verified runtime archive and peer, binding, route, lease, and subscription retirement. Open responsibilities are refused. Use `--op <returned-operation-id>` only for its retained retry/query. |
 | Read an uncertain operation | `collab worker query --op <returned-operation-id>` | Reads the retained outcome without repeating a host effect. Do not start a replacement operation while the result is unknown. |
 
 For self-unregister, the first call also omits `--op`; use the returned operation
-ID for query or retained retry. Tasks, messages, claims, pending merges, and
-history stay with their existing owners. Resolve named open responsibilities
-before retrying. Unread messages remain durable; unregister does not consume
-them. A later `collab context` at the same live anchor rebuilds a default peer
-with one active binding and a new generation. It does not restore the retired
-master grant. This is identity rebuild, not manual communication recovery.
+ID for query or retained retry. Self-close does not stop the host process or
+delete tasks, messages, claims, pending merges or history. Unread messages
+remain durable. A later `collab context` at the same live anchor rebuilds a
+default peer with a current binding and route. It does not restore the retired
+master grant.
 
 ### Peer observation
 
@@ -1275,21 +1277,21 @@ success; fix the named condition before a new operation. An unknown or partial
 result is not success: query that operation and do not claim the peer was
 created, updated, or closed until its verified terminal receipt says so.
 
-Read-only operator diagnostics remain available for human maintenance and
-audit: `collab who`, `collab status --all`, `collab worker status`, `collab
+Read-only operator diagnostics remain available for human audit: `collab who`,
+`collab status --all`, `collab worker status`, `collab
 route resolve`, and `collab master status`. They are not agent identity
-recovery steps. `collab down`/`up` require explicit human authorization.
+recovery steps. User daemon maintenance is outside the agent interface.
 `collab init` is not an agent bootstrap and not a second identity algorithm: it
 drives the same daemon identity gate as `collab context`, and it remains the
-documented entry for existing AppSDK init consumers. Unapproved ambiguous and
-cross-project anchor matches stay fail-closed on both entries without automatic
-guessing; a single explicit user approval intent overrides current mapping as
-specified in the recovery contract.
+documented entry for existing AppSDK init consumers. Historical pane claims
+do not override the current cwd/session or block peer
+restoration. Optional user authorization replaces the current project master
+through the existing authority owner.
 
 ### Context 状态与终点（DAGpipe：单源单汇）
 
 `context_request` 是唯一入口，`state_snapshot` 是唯一成功出口，中间节点按
-DAGpipe 顺序执行：解析项目根 → 检查/创建基线 → 检查/启动守护 → daemon 身份门
+DAGpipe 顺序执行：解析当前 cwd 项目 → 连接已有 daemon → 检查/创建基线 → daemon 身份门
 → 环境投影 → 输出快照。CLI 自动观察可用事实；daemon 身份门负责选择、创建、
 恢复、更新身份，持久化 credential/binding/lease，并返回完整快照。缺失事实是本次
 调用的终态：`registered=false`、`identity=null`，`requires_identity_update`
@@ -1302,7 +1304,7 @@ DAGpipe 顺序执行：解析项目根 → 检查/创建基线 → 检查/启动
 | `state_snapshot` 且 `registered=true` | 注册成功；含 role/operations/master/peers/peer_count/summary/master_wake/subagents/inbox/worktrees/tasks/env | 读快照执行已注册角色的 `operations`；无需再跑 who/status/master status |
 | 陈旧/他人的 pane claim 已被顶掉 | 默认路径的一部分，不产生额外终态 | 无；不需要第二条命令，也不参与裁决 |
 | `identity_update` | daemon 需要缺失事实或报告显式身份冲突；`registered=false`，`requires_identity_update.required=true` | 只读 `required_fields`/`reason`/`action`/`exact_error`；已授权初始化或已注册身份恢复中，若 action 是 factual supplement，可用一次 `collab context --provide` 补真实事实。成功注册前不执行角色协议；显式冲突保留原错，不选择 worker，不把 `collab init` 当第二次修复尝试 |
-| 手动通信恢复 pending | 原身份仍保留；显式通信验证未完成 | participant 从所选 adapter 读取 challenge 并从自身环境回传；`--query` 保持只读 |
+| 可选通信诊断 pending | 原身份与当前 route 仍可用；诊断 reply 未完成 | 该诊断不是恢复前提；若显式使用，participant 从所选 adapter 读取 challenge 并从自身环境回传；`--query` 保持只读 |
 | `COLLAB_CONTEXT_UNRESOLVED` | 无 route、无 baseline、无 git 根（非零退出） | 保留原错，不自动换 cwd 重试；首次注册失败则独立继续，已注册者报告受影响协作，保留已领任务/claim |
 | 拒绝在 playground 创建基线 | 在 worktree 内引导（非零退出） | 保留原错，不改主树或删除旧身份；首次注册失败则独立继续，已注册者保留已有职责并报告协作缺口 |
 | 默认订阅已停 | owner 显式 unsubscribe 持久生效 | 需要再收消息时用 `collab notify subscribe --event direct-message` 重订阅 |
@@ -1313,8 +1315,8 @@ permission to select a worker. The supplement has exactly the four scalar fields
 with an automatically observed fact is `IDENTITY_FACT_CONFLICT`, not an override.
 Explicit conflicts, token rejection, route failure, runtime-binding failure, and
 transport failure keep their original error and non-zero exit; unapproved
-automatic resolution cannot bypass them. Only explicit communication restore
-can await a participant return; ordinary identity restoration never does.
+automatic resolution cannot bypass them. A communication diagnostic can await
+a participant return; ordinary identity restoration does not.
 
 完整语义图、转移表和 owner 映射见 `docs/collab-context-state-machine.md`；
 机器可校验 SESE 图见 `docs/dagpipe/collab-context.graph.json`
@@ -1468,7 +1470,7 @@ register it.
 - Send only explicit notices, shared-resource coordination, or subscribed async
   results—not routine progress, heartbeat, ACK, review, or completion reports.
 - A wake is only a signal. It cannot change task/resource truth, fabricate
-  success, authorize maintenance, or create an ACK loop.
+  success, authorize external actions, or create an ACK loop.
 - `absent` or `unknown` liveness for the selected binding produces no transport
   input. If its endpoint is unreachable, unowned, or mismatched, the
   subscription enters its explicit unavailable state to prevent storms. There
@@ -1483,9 +1485,9 @@ register it.
   [references/task-worktree-lifecycle.md](references/task-worktree-lifecycle.md)
 - Resource conflicts and bounded waits:
   [references/resource-waits.md](references/resource-waits.md)
-- Migration, daemon stop/start, deprecated commands:
+- Migration, user-managed daemon boundary, deprecated commands:
   [references/migration-daemon.md](references/migration-daemon.md)
-- Source/release/install/restart verification:
+- Source/release/install/live verification:
   [references/verification.md](references/verification.md)
 
 Do not load references for ordinary `sendmessage`, `msg`, or `inbox`.

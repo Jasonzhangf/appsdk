@@ -43,17 +43,24 @@ impl ProjectRuntimeManager {
                 return match self.admit_identity_operation(&context, &request) {
                     Ok(_) => {
                         let completed = existing.result.outcome == "completed";
-                        let (runtime, snapshot) = if completed && request.invocation == "automatic" {
+                        let (runtime, snapshot) = if completed && request.action == "context"
+                        {
                             match self.completed_context_readback(&context, &request.facts) {
                                 Ok((runtime, snapshot)) => (runtime, Some(snapshot)),
-                                Err(error) => return (self.host.clone(), Resp::err(format!(
-                                    "IDENTITY_CONTEXT_READBACK_FAILED: {error:#}"
-                                ))),
+                                Err(error) => {
+                                    return (
+                                        self.host.clone(),
+                                        Resp::err(format!(
+                                            "IDENTITY_CONTEXT_READBACK_FAILED: {error:#}"
+                                        )),
+                                    )
+                                }
                             }
                         } else {
                             (self.host.clone(), None)
                         };
-                        let result = operation_result(&request, existing.result, completed, snapshot);
+                        let result =
+                            operation_result(&request, existing.result, completed, snapshot);
                         (runtime, typed_operation_resp(result))
                     }
                     Err(error) if error.starts_with("IDENTITY_OPERATION_INTENT_CONFLICT") => (
@@ -499,7 +506,10 @@ impl ProjectRuntimeManager {
                 Err(error) => return (self.host.clone(), Resp::err(error)),
             };
         let Some(continuation) = record.continuation.clone() else {
-            return (self.host.clone(), Resp::err("COMMUNICATION_RESTORE_CONTINUATION_MISSING"));
+            return (
+                self.host.clone(),
+                Resp::err("COMMUNICATION_RESTORE_CONTINUATION_MISSING"),
+            );
         };
         // The exact admitted intent and prepared envelope come from the one
         // control owner, never from return payload or query projection.
@@ -516,26 +526,37 @@ impl ProjectRuntimeManager {
         if context.app_scope_id.as_str() != identity::CLI_APP_SERVER_ID
             || context.runtime_context.is_some()
         {
-            anyhow::bail!("bootstrap requires the CLI project scope without a caller-selected identity");
+            anyhow::bail!(
+                "bootstrap requires the CLI project scope without a caller-selected identity"
+            );
         }
         let mut facts = facts.clone();
         self.complete_persisted_tmux_facts(context, &mut facts)?;
         validate_facts(&facts)?;
-        let scope = Scope { root: PathBuf::from(&context.canonical_root) };
+        let scope = Scope {
+            root: PathBuf::from(&context.canonical_root),
+        };
         if facts.tmux.is_none() {
             self.complete_persisted_native_facts(&scope, &mut facts)?;
         }
-        let host_binding = self.current_anchor_binding(&facts)?;
+        let host_binding = self.current_anchor_binding(context, &facts)?;
         let (app_scope, binding_id) = if let Some(binding) = host_binding.as_ref() {
             if binding.project_scope != context.project_scope {
                 anyhow::bail!("current anchor belongs to another project");
             }
             (binding.app_scope_id.clone(), binding.binding_id.clone())
         } else {
-            let persisted = identity::existing_for_daemon_at(&self.host.host_paths, &scope, &facts)?;
-            let saved = persisted.as_ref().and_then(|identity| identity.runtime.as_ref())
+            let persisted =
+                identity::existing_for_daemon_at(&self.host.host_paths, &scope, &facts)?;
+            let saved = persisted
+                .as_ref()
+                .and_then(|identity| identity.runtime.as_ref())
                 .ok_or_else(|| anyhow::anyhow!("current anchor has no typed runtime binding"))?;
-            if persisted.as_ref().and_then(|identity| identity.project_scope.as_ref()) != Some(&context.project_scope) {
+            if persisted
+                .as_ref()
+                .and_then(|identity| identity.project_scope.as_ref())
+                != Some(&context.project_scope)
+            {
                 anyhow::bail!("persisted anchor belongs to another project");
             }
             (saved.appserver_id.clone(), saved.binding_id.clone())
@@ -544,24 +565,41 @@ impl ProjectRuntimeManager {
             app_scope_id: app_scope.clone(),
             project_scope_id: context.project_scope.clone(),
         };
-        let key = (app_scope.as_str().to_owned(), context.project_scope.as_str().to_owned());
-        let runtime = self.routes.lock().unwrap().get(&key)
+        let key = (
+            app_scope.as_str().to_owned(),
+            context.project_scope.as_str().to_owned(),
+        );
+        let runtime = self
+            .routes
+            .lock()
+            .unwrap()
+            .get(&key)
             .and_then(|route| route.runtime.clone())
             .ok_or_else(|| anyhow::anyhow!("current project runtime is not loaded"))?;
         let (binding, worker, target) = {
             let state = runtime.state.lock().unwrap();
-            let binding = state.global.lookup_binding_for(&route_scope, &binding_id)
-                .ok_or_else(|| anyhow::anyhow!("current project binding is missing"))?.clone();
+            let binding = state
+                .global
+                .lookup_binding_for(&route_scope, &binding_id)
+                .ok_or_else(|| anyhow::anyhow!("current project binding is missing"))?
+                .clone();
             if host_binding.as_ref().is_some_and(|host| host != &binding) {
                 anyhow::bail!("current host and project bindings differ");
             }
-            let worker = state.workers.get(binding.agent_id.as_str())
-                .ok_or_else(|| anyhow::anyhow!("current binding worker is missing"))?.clone();
+            let worker = state
+                .workers
+                .get(binding.agent_id.as_str())
+                .ok_or_else(|| anyhow::anyhow!("current binding worker is missing"))?
+                .clone();
             let transport = selected_transport_for_worker(&worker)
                 .ok_or_else(|| anyhow::anyhow!("current worker selected transport is missing"))?;
             if transport.tmux_endpoint != binding.tmux_endpoint
                 || (transport.kind == TransportKind::AppServer
-                    && transport.thread_id.as_deref() != binding.native_thread_id.as_ref().map(NativeThreadId::as_str))
+                    && transport.thread_id.as_deref()
+                        != binding
+                            .native_thread_id
+                            .as_ref()
+                            .map(NativeThreadId::as_str))
             {
                 anyhow::bail!("current selected transport differs from binding");
             }
@@ -570,7 +608,10 @@ impl ProjectRuntimeManager {
         };
         let response = context_projection(&runtime, worker.id.clone(), worker.token.clone());
         if !response.ok {
-            anyhow::bail!("current context projection failed: {}", response.error.unwrap_or_default());
+            anyhow::bail!(
+                "current context projection failed: {}",
+                response.error.unwrap_or_default()
+            );
         }
         if response.data.get("binding") != Some(&json!(binding)) {
             anyhow::bail!("current context binding is ambiguous or changed");
@@ -580,11 +621,14 @@ impl ProjectRuntimeManager {
             close_endpoint_target(&state, &worker.id)
         };
         if current_target != target
-            || (host_binding.is_some() && self.current_anchor_binding(&facts)? != host_binding)
+            || (host_binding.is_some()
+                && self.current_anchor_binding(context, &facts)? != host_binding)
         {
             anyhow::bail!("current readback owner or binding changed");
         }
-        Ok((runtime, response.data))
+        let mut snapshot = response.data;
+        add_optional_master_choice(&mut snapshot);
+        Ok((runtime, snapshot))
     }
 
     fn manual_communication_gate(

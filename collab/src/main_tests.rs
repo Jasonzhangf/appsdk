@@ -811,6 +811,34 @@ fn context_root_resolution_prefers_cwd_baseline_for_local_project() {
 }
 
 #[test]
+fn context_root_resolution_ignores_a_historical_pane_route_for_current_cwd() {
+    let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+    let root = test_root("context-root-current-cwd");
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    let previous = std::env::current_dir().unwrap();
+    let previous_tmux = std::env::var_os("TMUX");
+    let previous_pane = std::env::var_os("TMUX_PANE");
+    std::env::set_current_dir(&root).unwrap();
+    std::env::set_var("TMUX", "/tmp/historical-pane.sock,4242,0");
+    std::env::set_var("TMUX_PANE", "%99");
+    let host_paths = scope::HostPaths::resolve().unwrap();
+    let resolved = resolve_context_root(&host_paths, &root);
+    std::env::set_current_dir(previous).unwrap();
+    match previous_tmux {
+        Some(value) => std::env::set_var("TMUX", value),
+        None => std::env::remove_var("TMUX"),
+    }
+    match previous_pane {
+        Some(value) => std::env::set_var("TMUX_PANE", value),
+        None => std::env::remove_var("TMUX_PANE"),
+    }
+    let (scope, resolution) = resolved.expect("current cwd must win over historical pane state");
+    assert_eq!(resolution, "cwd");
+    assert_eq!(scope.root, root.canonicalize().unwrap());
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn context_daemon_down_marker_fails_closed_and_preserves_marker() {
     let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
     let root = test_root("context-down-marker");

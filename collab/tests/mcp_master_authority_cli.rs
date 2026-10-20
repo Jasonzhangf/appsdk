@@ -34,8 +34,10 @@ struct Fixture {
     root: PathBuf,
     cli: PathBuf,
     mcp: PathBuf,
+    session: String,
     server_pid: String,
     pane: String,
+    daemon: Option<Child>,
     finished: bool,
 }
 
@@ -50,11 +52,13 @@ impl Fixture {
             root,
             cli,
             mcp,
+            session: "mcp-authority".to_owned(),
             server_pid: String::new(),
             pane: String::new(),
+            daemon: None,
             finished: false,
         };
-        fixture.tmux(&["new-session", "-d", "-s", "mcp-authority", "sleep 600"]);
+        fixture.tmux(&["new-session", "-d", "-s", &fixture.session, "sleep 600"]);
         let observation = fixture.tmux(&["display-message", "-p", "#{pid} #{pane_id}"]);
         let observation = String::from_utf8(observation.stdout).unwrap();
         let mut facts = observation.split_whitespace();
@@ -66,6 +70,7 @@ impl Fixture {
             fixture.server_pid,
             fixture.pane
         );
+        fixture.start_daemon();
         fixture
     }
 
@@ -102,6 +107,72 @@ impl Fixture {
             .env("TMUX_PANE", &self.pane)
             .env("CODEX_SESSION_ID", "mcp-fixture-session")
             .env("CODEX_THREAD_ID", "mcp-fixture-thread");
+    }
+
+    fn start_daemon(&mut self) {
+        assert!(self.daemon.is_none(), "fixture daemon already owned");
+        let log_path = self.root.join("test-daemon.log");
+        let log = std::fs::File::create(&log_path).unwrap();
+        let mut command = Command::new(&self.cli);
+        command.arg("serve");
+        self.environment(&mut command);
+        self.daemon = Some(
+            command
+                .stdin(Stdio::null())
+                .stdout(log.try_clone().unwrap())
+                .stderr(log)
+                .spawn()
+                .expect("spawn owned fixture serve"),
+        );
+        let socket = self.root.join("h/server.sock");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !socket.exists() && Instant::now() < deadline {
+            if let Some(status) = self.daemon.as_mut().unwrap().try_wait().unwrap() {
+                panic!(
+                    "owned fixture serve exited before readiness: {status}: {}",
+                    std::fs::read_to_string(log_path).unwrap_or_default()
+                );
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        assert!(socket.exists(), "owned fixture serve did not create socket");
+    }
+
+    fn stop_daemon(&mut self) {
+        if let Err(error) = self.terminate_daemon() {
+            panic!(
+                "stop owned fixture serve: {error}: {}",
+                std::fs::read_to_string(self.root.join("test-daemon.log")).unwrap_or_default()
+            );
+        }
+    }
+
+    fn terminate_daemon(&mut self) -> std::io::Result<()> {
+        let Some(mut child) = self.daemon.take() else {
+            return Ok(());
+        };
+        if child.try_wait()?.is_none() {
+            let result = unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+            if result != 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(error);
+                }
+            }
+        }
+        child.wait()?;
+        let socket = self.root.join("h/server.sock");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while socket.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(25));
+        }
+        if socket.exists() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "owned fixture serve still owns its socket",
+            ));
+        }
+        Ok(())
     }
 
     fn cli(&self, args: &[&str]) -> Value {
@@ -190,12 +261,12 @@ impl Fixture {
     }
 
     fn finish(mut self) {
-        self.cli(&["down"]);
+        self.stop_daemon();
         assert!(
             !self.root.join("h/server.sock").exists(),
             "daemon socket not released"
         );
-        self.tmux(&["kill-server"]);
+        self.tmux(&["kill-session", "-t", &self.session]);
         std::fs::remove_dir_all(&self.root).expect("remove only owned successful fixture");
         assert!(!self.root.exists());
         self.finished = true;
@@ -207,16 +278,13 @@ impl Drop for Fixture {
         if self.finished {
             return;
         }
-        let mut down = Command::new(&self.cli);
-        self.environment(&mut down);
-        match down.arg("down").output() {
-            Ok(output) if output.status.success() => {}
-            result => eprintln!("failed fixture daemon cleanup: {result:?}"),
+        if let Err(error) = self.terminate_daemon() {
+            eprintln!("failed fixture daemon cleanup: {error}");
         }
         match Command::new("tmux")
             .arg("-S")
             .arg(self.root.join("t.sock"))
-            .arg("kill-server")
+            .args(["kill-session", "-t", &self.session])
             .output()
         {
             Ok(output) if output.status.success() => {}

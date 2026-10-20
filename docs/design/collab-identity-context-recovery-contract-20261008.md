@@ -2,6 +2,18 @@
 
 ## 1. Status, authority, and boundaries
 
+The 2026-10-20 instruction replaces historical pane selection and approval
+admission on ordinary tmux recovery. The current project comes from cwd and
+the current tmux session selects its identity. With no master, context restores
+a peer automatically. With another master, peer restoration succeeds and the
+user may authorize direct replacement. The current project/session master is
+reused without repeated approval. Task contents, worktree, old pane claims and
+incumbent token/digest/generation fences do not gate this path. The current
+selection contract is [the session restore model](collab-anchor-restore-model.md).
+Historical sections below document operation mechanics, not a second identity
+admission policy. The global daemon is user-managed; identity restoration never
+starts, stops or restarts it and never requests maintenance credentials.
+
 This document owns the `collab context` invocation, daemon ownership,
 operation, restart readback, and failure contracts. Current applicable
 requirements are the effective project `.appsdk/requirements.json` and

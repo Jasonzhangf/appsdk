@@ -203,9 +203,12 @@ fn missing_pane_and_lost_socket_report_not_live() {
 
     assert_not_live_consistent(&fixture, &peer_pane, &master_id, &grant_id);
 
-    // Killing the tmux server removes the socket, so the probe can no longer
-    // decide and the endpoint must report `null`, never `true`.
-    tmux(&fixture.tmux_socket, &["kill-server"]);
+    // Closing the last test-owned session removes the socket, so the probe can
+    // no longer decide and the endpoint must report `null`, never `true`.
+    tmux(
+        &fixture.tmux_socket,
+        &["kill-session", "-t", &format!("{label}-peer")],
+    );
     assert_not_live_consistent(&fixture, &peer_pane, &master_id, &grant_id);
 
     // An actual non-socket endpoint produces a connection/probe error. No

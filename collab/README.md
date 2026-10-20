@@ -298,8 +298,6 @@ collab migrate inspect
 → collab migrate plan
 → collab migrate apply          # admission freeze + deterministic snapshot
 → scripts/install-global-collab.sh
-→ collab down
-→ collab up
 → collab context                # daemon reconciles the current runtime identity
 → collab migrate verify         # verify and resume
 ```
@@ -318,10 +316,10 @@ with source-bound adjacent edges in
 
 ## Daemon maintenance
 
-`collab down` is an explicit, one-invocation daemon-operator capability; it is
-not derived from an agent role or mailbox text. It writes `DOWN`, records the
-request, and stops only the PID holding the project socket. `collab up` clears
-the marker and starts one daemon. A second live socket writer is rejected.
+The global daemon is managed by the user. Agents never start, stop or restart
+it. Maintenance commands and credentials are outside agent help, MCP and Skill
+surfaces. Ordinary context restoration updates the current identity, endpoint,
+route and receive lease together. It never requires a maintenance window.
 
 ## Core invariants
 

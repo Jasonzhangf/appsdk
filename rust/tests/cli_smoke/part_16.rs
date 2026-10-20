@@ -42,7 +42,7 @@ esac
         String::from_utf8_lossy(&bare.stderr)
     );
     let bare_text = String::from_utf8_lossy(&bare.stdout);
-    assert!(bare_text.contains("你的主要任务不是写代码"));
+    assert!(bare_text.contains("你负责审计、派发、核验、集成"));
     assert!(bare_text.contains("goal subscribe"));
 
     // A typo must not be silently swallowed as a project path.
@@ -81,11 +81,13 @@ esac
 
     // Charter, fleet rules and notification rules all travel with the wake.
     assert!(text.contains("不要空转，不要假装完成"));
-    assert!(text.contains("`[subagent].max_concurrent`（默认 8）"));
-    assert!(text.contains("普通 peer 不计入该额度"));
-    assert!(text.contains("绝不能以 ACK、已读或一段总结结束一轮"));
-    assert!(text.contains("collab worker close"));
-    assert!(text.contains("appsdk subworker status"));
+    assert!(text.contains("codex exec --profile gcm"));
+    assert!(text.contains("所有合适 peer 都在执行"));
+    assert!(text.contains("protected hold"));
+    assert!(text.contains("one-shot"));
+    assert!(text.contains("绝不能以 ACK、已读、状态摘要或派单回执结束一轮"));
+    assert!(!text.contains("`[subagent].max_concurrent`（默认 8）"));
+    assert!(!text.contains("appsdk subworker status"));
 
     // Goal objective is read out of the markdown, past the frontmatter.
     assert!(text.contains("# Ship It"));
@@ -104,19 +106,22 @@ esac
     assert_eq!(payload["role"], "master");
     assert_eq!(payload["goal"]["registered"], true);
     assert_eq!(payload["goal"]["interval"], "10m");
-    assert!(payload["charter"].as_str().unwrap().contains("调度"));
     assert!(payload["charter"]
         .as_str()
         .unwrap()
-        .contains("先饱和每一个 live+present 的空闲普通 peer"));
+        .contains("审计、派发、核验、集成"));
     assert!(payload["charter"]
         .as_str()
         .unwrap()
-        .contains("长等待仍并发派单"));
+        .contains("所有合适 peer 都在执行"));
+    assert!(payload["charter"]
+        .as_str()
+        .unwrap()
+        .contains("长等待期间继续派发"));
     assert!(payload["fleet_rules"]
         .as_str()
         .unwrap()
-        .contains("`[subagent].max_concurrent`（默认 8）"));
+        .contains("protected hold"));
     assert!(payload["notification_rules"]
         .as_str()
         .unwrap()
@@ -226,7 +231,7 @@ esac
         .as_str()
         .unwrap()
         .contains("你是本项目的 master"));
-    assert!(payload["charter"].as_str().unwrap().contains("独立 worker"));
+    assert!(payload["charter"].as_str().unwrap().contains("独立 peer"));
 
     fs::write(
         &fake_collab,
@@ -298,6 +303,7 @@ case "$1 $2" in
     case "${ROLE_CASE:-master}" in
       tmux-master) printf '%s\n' '{"identity":{"worker_id":"current-peer","kind":"peer","transport":{"kind":"tmux","tmux_endpoint":{"pane_id":"%1"}}},"liveness":{"live":true,"transport_kind":"tmux"}}' ;;
       transport-missing) printf '%s\n' '{"identity":{"worker_id":"current-peer","kind":"peer","transport":{"kind":"appserver"}},"liveness":{"live":true,"transport_kind":"appserver"}}' ;;
+      subagent) printf '%s\n' '{"identity":{"worker_id":"current-peer","kind":"peer","transport":{"kind":"appserver","thread_id":"thread-current-peer"}},"role_brief":{"role":"legacy-managed-compatibility"},"liveness":{"live":true,"transport_kind":"appserver"}}' ;;
       *) printf '%s\n' '{"identity":{"worker_id":"current-peer","kind":"peer","transport":{"kind":"appserver","thread_id":"thread-current-peer"}},"liveness":{"live":true,"transport_kind":"appserver"}}' ;;
     esac
     ;;
@@ -322,7 +328,7 @@ esac
         ("master", "master"),
         ("tmux-master", "master"),
         ("worker", "unknown"),
-        ("subagent", "managed-subagent"),
+        ("subagent", "legacy-managed-compatibility"),
         ("missing", "unknown"),
         ("mismatch", "worker"),
         ("transport-missing", "unknown"),

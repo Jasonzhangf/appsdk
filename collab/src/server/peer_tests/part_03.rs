@@ -1141,10 +1141,17 @@ fn managed_subagent_is_authenticated_persistent_and_replayable() {
     assert_eq!(replay.subagents["managed"].status, "starting");
     server.commit(&[event]);
     let child_ctx = handle_context(&server, "child".into(), "token-child".into());
-    assert_eq!(child_ctx.data["authority"]["must_obey_master"], true);
+    assert_eq!(child_ctx.data["authority"]["must_obey_master"], false);
     assert_eq!(
         child_ctx.data["authority"]["may_decline_master_invite"],
-        false
+        true
+    );
+    assert_eq!(child_ctx.data["authority"]["managed_subagent"], true);
+    assert_eq!(child_ctx.data["authority"]["may_start_new_work"], false);
+    assert_eq!(child_ctx.data["authority"]["may_dispatch"], false);
+    assert_eq!(
+        child_ctx.data["role_brief"]["role"],
+        "legacy-managed-compatibility"
     );
     let parent_ctx = handle_context(&server, "parent".into(), "token-parent".into());
     assert_eq!(

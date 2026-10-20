@@ -92,19 +92,27 @@ The master then owns orchestration:
 
 1. Query `collab context` once. It must show the identity, liveness, tasks,
    inbox, `next_actions`, `role_brief`, and master/authority state.
-2. Split the confirmed goal by dependency and unique write scope. Dispatch
-   through `collab subagent dispatch` or `appsdk subagent send`; every
-   assignment needs done-iff, artifacts, forbidden paths, exact tests, and
-   evidence location.
+2. Split the confirmed goal by dependency and unique write scope. Publish each
+   ordinary assignment on the public board and invite an eligible registered
+   peer. Long-horizon work goes to a peer first; that peer orchestrates
+   concurrent independent `codex exec --profile gcm` workers. Master starts a
+   GCM worker only when every eligible peer is busy. Every assignment needs
+   done-iff, artifacts, forbidden paths, exact tests, and evidence location.
 3. Before execution or dispatch, run `appsdk bug intake --input <json>` and
-   bind the returned `issue_id`; read-only conversation skips this path.
+   bind the returned `issue_id`; read-only conversation skips this path. Route
+   each new production issue through the same canonical intake before repair.
 4. Keep workers saturated from the approved task graph, then from
    `appsdk bug list --status open --json` in `P0 > P1 > P2` order.
 5. Own blockers, re-dispatch or auditable force-close stuck tasks, integrate
    reviewed commits on latest main, and keep source/review/merge/install/
-   restart/live-replay evidence separate.
-6. Remove only resources created by this round. Preserve other peers'
-   worktrees, processes, and evidence.
+   restart/live-replay evidence separate. Close each open P0/P1 with applicable
+   evidence or park it with owner, cause, and unblock condition.
+6. Remove only unneeded resources owned by this round after recoverable
+   extraction. Preserve dirty, active, shared, or unknown worktrees, processes,
+   identities, journals, mailboxes, and evidence as protected holds with owner
+   and reason. Rearm a consumed one-shot goal/deadline before the patrol ends
+   when scheduling continues. Read, ACK, summary, or dispatch receipt is not
+   completion.
 
 Stop normal setup here. Do not run operator diagnostics, read `routes.jsonl`,
 inspect processes, or list `.agent-collab/`. If context explicitly reports

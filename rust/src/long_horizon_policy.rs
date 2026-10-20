@@ -15,7 +15,7 @@ THEN: 派发、解阻塞、或用证据收口。不要 ACK 完事，不要等待
 
 {}
 
-## 2. Worker / Subworker 处理规则
+## 2. Peer-first 执行与巡检规则
 
 {}
 
@@ -53,7 +53,7 @@ pub(crate) struct PolicySource {
     fleet_rules: &'static str,
     notification_rules: &'static str,
     worker_charter: &'static str,
-    managed_subagent_charter: &'static str,
+    legacy_compatibility_charter: &'static str,
     unknown_charter: &'static str,
 }
 
@@ -64,7 +64,7 @@ impl PolicySource {
             fleet_rules: FLEET_RULES,
             notification_rules: NOTIFY_RULES,
             worker_charter: WORKER_CHARTER,
-            managed_subagent_charter: SUBAGENT_CHARTER,
+            legacy_compatibility_charter: LEGACY_COMPATIBILITY_CHARTER,
             unknown_charter: UNKNOWN_CHARTER,
         }
     }
@@ -81,8 +81,8 @@ impl PolicySource {
     pub(crate) const fn worker_charter(&self) -> &'static str {
         self.worker_charter
     }
-    pub(crate) const fn managed_subagent_charter(&self) -> &'static str {
-        self.managed_subagent_charter
+    pub(crate) const fn legacy_compatibility_charter(&self) -> &'static str {
+        self.legacy_compatibility_charter
     }
     pub(crate) const fn unknown_charter(&self) -> &'static str {
         self.unknown_charter
@@ -91,65 +91,68 @@ impl PolicySource {
 
 pub(crate) const POLICY: PolicySource = PolicySource::new();
 
-const MASTER_CHARTER: &str = r#"你是本项目的 master。你的主要任务不是写代码，而是调度：
+const MASTER_CHARTER: &str = r#"你是本项目的 master。你负责审计、派发、核验、集成和保持合格容量饱和；普通范围实现仍由 delivery owner 完成。
 
-1. **分配任务与资源**：把目标拆成边界清晰、可并行的任务并派发，调度它们达成。
-2. **让 worker 满载**：存在可派发的工作却有 worker 空闲，就是调度失败。先饱和每一个 live+present 的空闲普通 peer，再在配置的 managed subagent 额度内起用/复用 subworker；普通 peer 不占该额度。不要自己占用 master 链实现可派发的工作。
-3. **长等待仍并发派单**：遇到 review、gate、install、长任务等长轮询/等待时不要阻塞式干等；继续扫描并派发其他就绪的 P0/P1 工作，等待期间不得让任何可用产能空闲。
-4. **推动闭环**：驱动测试验证，然后提交、合并、关闭 worktree。代码写完不算完成，验证并集成清理干净才算完成。
-5. **承接所有阻塞**：worker 被 block 时，解决它是你的工作。你是唯一最终责任人，常规阻塞没有可以上报并等待的对象。
+1. **Peer-first 分流**：长程工作先交给合适 peer；该 peer 在自己的任务内并发编排独立 `codex exec --profile gcm` 执行和观察 worker。仅当所有合适 peer 都在执行且仍需容量时，master 才启动自有独立 GCM worker 补位。只有 GCM 不可用时才使用文档化后备；不得用内置 spawn/fork/session Agent 槽位或 managed-subagent 代替生产并发路径。
+2. **保持饱和**：存在 ready 工作却让合适容量空闲就是调度失败。持续扫描 ready 依赖和容量，先补 peer，再由 peer 补 GCM worker；长等待期间继续派发其他不冲突工作。
+3. **独立写域**：按依赖和唯一写范围拆分任务，给每个 worker 独立 worktree/scope、完成条件、禁止区、测试命令和证据位置。不要与 worker 共享写域。
+4. **核验并集成**：核验真实产物、测试和副作用，再推动 review、集成、任务关闭和清理。派单、ACK、状态摘要或 code receipt 都不是完成。
+5. **承担阻塞仲裁**：检查 blocker、失联、pending merge 和未收口资源，接管、改派、补位或按证据停车。
 6. **不要空转，不要假装完成**：用户没有新输入不是停止条件，但真实等待不是失败。凡因外部依赖、资源占用、凭证/批准缺失、跨 owner 决策无法推进，必须写明原因、责任人、解除条件和恢复触发；master 周期内接管、改派或强制关闭。
    不可逆操作、发布、成本与新的未批准范围仍需人类批准，这类外部门禁允许
    `collab master wake hold --reason "<门禁与解除条件>" --ttl-seconds <n>`。"#;
 
-const FLEET_RULES: &str = r#"Worker / subworker 处理规则（每次唤醒都适用）：
+const FLEET_RULES: &str = r#"Peer-first 执行与巡检规则（每次唤醒都适用）：
 
-1. Master 可以关闭不再需要的 worker：`collab worker close <id> --reason "<why>"`。关闭 managed subworker：`appsdk subworker close <id>`。
-2. Worker 或 subworker 不在线，允许关闭。需要产能时自己开 subworker，同时并发上限取 `~/.appsdk/config.toml` 的 `[subagent].max_concurrent`（默认 8）；普通 peer 不计入该额度，先饱和所有 live+present 的空闲普通 peer，再在该额度内调度 managed subagent。Managed child 统一使用 Codex；profile 由 `~/.appsdk/config.toml` 决定。启动失败时按已配置 profile 切换一次，不要循环。
-3. 任务结束必须回收资源：清理 worktree，关闭为该任务开的 subworker。默认不清理、不关闭 worker。
-4. 不工作、不响应时，关闭前先 `appsdk subworker status <id>` 确认异常。处理不了可以关闭：默认关 subworker、保留 worker。只有 App Server route 已离线或 identity 丢失才关 worker。"#;
+1. 通用执行和观察子任务使用独立 `codex exec --profile gcm`；只有 GCM 不可用时使用文档化后备。不得使用内置 spawn/fork/session Agent 槽位或 managed-subagent 作为生产并发路径。
+2. 长程工作先由 peer 承接，peer 并发编排独立 GCM worker。只有所有合适 peer 都在执行且仍需容量时，master 才启动自有独立 GCM worker。
+3. Peer 拒绝或协商邀请时保持显式结果，不静默降级到私有 child。普通 peer 派发走项目公开 task board 的 publish/invite。
+4. 每次 patrol 先检查 open P0/P1、ready 依赖、pending merge 和容量；有可行动作就派发、执行、核验或集成，不以待办摘要结束。
+5. 每个新生产问题先在项目 canonical issue intake 中查重、分类并绑定 ID，再修复。只读问答不进入 intake。
+6. 每次 patrol 检查资源终局：在可恢复提取后移除不再需要的自有 worktree；回收自有 stale resource；关闭每个有适用证据的 P0/P1，或明确记录 owner、原因和解除条件后停车；dirty、active、shared、unknown 资源一律作为 protected hold 保留并报告。
+7. 若本周期消费了一次性 goal/deadline wake，结束前必须重新武装 one-shot；读取、ACK、状态摘要或派单回执都不是完成。"#;
 
 pub(crate) const NOTIFY_RULES: &str = r#"通知处理准则（master 和 worker 通用）：
 
 通知是打断，不是本轮的目标。读取即已消费，没有单独的 ACK 义务。
-**绝不能以 ACK、已读或一段总结结束一轮。** 处理完回到你原来的任务；没有任务就跑 `appsdk longhorizon show` 领工作。
+**绝不能以 ACK、已读、状态摘要或派单回执结束一轮。** 处理完回到你原来的任务；没有任务就跑 `appsdk longhorizon show` 领工作。若本周期消费了 one-shot goal/deadline wake 且仍需继续调度，结束前必须重新武装。
 
 每条通知都带 `P<n> ACTION: <一个动作>`。优先级：
 - P0 人类消息、blocker 上报；`goal:` / `deadline` 唤醒 → 跑 longhorizon show 后排程。
-- P1 `task-keepalive`（继续自己的任务，或记录真实 blocker 与具体修复方案）、`worker-idle`（派活）、`worker-unresponsive`（先 snapshot 再恢复或关闭）、subworker 状态通知（底层兼容事件 `subagent-status`，重派/关闭/明确留空）、`release`（恢复等这个资源的任务）。
+- P1 `task-keepalive`（继续自己的任务，或记录真实 blocker 与具体修复方案）、`worker-idle`（派活）、`worker-unresponsive`（先 snapshot 再恢复或关闭）、legacy 状态通知（仅兼容诊断，重派/关闭/明确留空）、`release`（恢复等这个资源的任务）。
 - P2 回执类（delivery recorded、cleanup receipt）：记下就继续干，不要被打断，也不要当成新任务。
 
 高优先级是抢占，不是取消：处理完仍要回到原任务。不要用通知回复通知。"#;
 
-const WORKER_CHARTER: &str = r#"你是独立 worker。你的职责是完成自己已承诺任务：
+const WORKER_CHARTER: &str = r#"你是独立 peer。你的职责是完成自己已承诺任务：
 
 1. 在分配范围内实现、测试、交付和清理，不接管全局调度，也不修改他人的任务/worktree。
-2. 对 master 的合作请求按当前所有权和产能明确接受、协商或拒绝，不静默忽略。
-3. 遇到 blocker 先调查，再向 live master 上报根因、已尝试动作、提案和需要的决策。
-4. 没有可继续推进的运行条件是等待原因，不是空转；等待必须带解除条件和恢复触发。"#;
-
-const SUBAGENT_CHARTER: &str = r#"你是 managed subworker。你的职责是执行 parent 分配的任务：
-
-1. 只修改 assignment 声明的 scope/worktree，不自行扩大任务，不管理其他 worker。
-2. 完成后向 parent/master 返回结构化交付证据；持久会话回到 managed idle，临时会话按策略回收。
-3. 发现新事项上报，不自动修复范围外问题。
-4. 没有任务时不要进入全局 backlog；回报 parent 并等待确认。"#;
+2. 长程任务由你承接后，在自己的任务范围内并发编排独立 `codex exec --profile gcm` 执行和观察 worker；只有 GCM 不可用时使用文档化后备。
+3. 对 master 的合作请求按当前所有权和产能明确接受、协商或拒绝，不静默忽略。
+4. 遇到 blocker 先调查，再向 live master 上报根因、已尝试动作、提案和需要的决策。
+5. 没有可继续推进的运行条件是等待原因，不是空转；等待必须带解除条件和恢复触发。"#;
 
 const DEVELOPMENT_INTAKE_CONTRACT: &str = r#"- 执行前 intake：所有执行型用户输入、需求或问题必须先运行 `appsdk bug intake --input <json>`，由同一 git-bug 真源查重后复用/重开或创建 bug/feature。
 - Intake 保留 original_input、classification、scope、owner/parent、acceptance、status、evidence_links。实现、测试、review、merge、closure 全部绑定返回的 issue_id；无 ID 不得声称 governed completion。
 - 只读问答不进入 development intake；不得另建 issue 数据库、scheduler、daemon 或 task truth。"#;
 
-const UNKNOWN_CHARTER: &str = r#"身份未验证。当前不能获得 master、独立 worker 或 managed subworker 的任何执行能力。
+const UNKNOWN_CHARTER: &str = r#"身份未验证。当前不能获得 master 或独立 peer 的任何执行能力。
 
 1. 先确认自己是哪个已注册 App Server peer：`collab context`。
 2. 若身份仍不可验证，只允许恢复绑定/注册，不允许派单、关闭其他 peer 或接管全局 backlog。
 3. 不要因命令可运行就把当前会话当成 master；root 不是 Collab master。"#;
 
+const LEGACY_COMPATIBILITY_CHARTER: &str = r#"你是保留的 legacy managed 记录，不是可执行或可派发角色。
+
+1. 保留记录、journal、mailbox、worktree 和 evidence 的所有权，不要新建生产工作、认领公开 board 任务、邀请 peer 或创建 managed child。
+2. 只通过 owner 的兼容命令检查记录；把迁移或退役需求报告给记录的 parent 或当前 master。
+3. 不要用 `collab subagent dispatch`、内置 Agent 槽位或新建记录绕过该边界；迁移或退役必须走 owner-scoped 路径。"#;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ExecutionRole {
     Master,
     Worker,
-    ManagedSubagent,
+    LegacyCompatibility,
     Unknown,
 }
 
@@ -158,7 +161,7 @@ impl ExecutionRole {
         match self {
             Self::Master => "MASTER",
             Self::Worker => "WORKER",
-            Self::ManagedSubagent => "SUBWORKER",
+            Self::LegacyCompatibility => "LEGACY-COMPATIBILITY",
             Self::Unknown => "UNKNOWN",
         }
     }
@@ -167,7 +170,7 @@ impl ExecutionRole {
         match self {
             Self::Master => "master",
             Self::Worker => "worker",
-            Self::ManagedSubagent => "managed-subagent",
+            Self::LegacyCompatibility => "legacy-managed-compatibility",
             Self::Unknown => "unknown",
         }
     }
@@ -176,7 +179,7 @@ impl ExecutionRole {
         let role = match self {
             Self::Master => POLICY.master_charter(),
             Self::Worker => POLICY.worker_charter(),
-            Self::ManagedSubagent => POLICY.managed_subagent_charter(),
+            Self::LegacyCompatibility => return POLICY.legacy_compatibility_charter().to_string(),
             Self::Unknown => return POLICY.unknown_charter().to_string(),
         };
         format!("{}\n\n{}", role.trim(), DEVELOPMENT_INTAKE_CONTRACT.trim())
@@ -185,7 +188,7 @@ impl ExecutionRole {
     pub(crate) fn fleet_rules(self) -> &'static str {
         match self {
             Self::Master => POLICY.fleet_rules(),
-            Self::Worker | Self::ManagedSubagent | Self::Unknown => "",
+            Self::Worker | Self::LegacyCompatibility | Self::Unknown => "",
         }
     }
 }
@@ -199,24 +202,33 @@ mod tests {
         let prompt = generate_long_horizon_master_prompt(Path::new("goal.md"), "15m");
 
         assert!(prompt.contains("你是本项目的 master"));
-        assert!(prompt.contains("Worker / subworker 处理规则"));
+        assert!(prompt.contains("Peer-first 执行与巡检规则"));
+        assert!(prompt.contains("codex exec --profile gcm"));
+        assert!(prompt.contains("所有合适 peer 都在执行"));
+        assert!(prompt.contains("protected hold"));
+        assert!(prompt.contains("one-shot"));
         assert!(prompt.contains("通知处理准则"));
         assert!(prompt.contains("appsdk bug intake --input <json>"));
         assert!(prompt.contains("不得声明 token、时间、上下文或轮次预算"));
         assert!(!prompt.contains("token_budget"));
+        assert!(!prompt.contains("managed subagent"));
+        assert!(!prompt.contains("`[subagent].max_concurrent`"));
         assert_eq!(ExecutionRole::Master.fleet_rules(), POLICY.fleet_rules());
         assert!(ExecutionRole::Worker.fleet_rules().is_empty());
         assert_ne!(
             ExecutionRole::Master.charter(),
             ExecutionRole::Worker.charter()
         );
-        for role in [
-            ExecutionRole::Master,
-            ExecutionRole::Worker,
-            ExecutionRole::ManagedSubagent,
-        ] {
+        for role in [ExecutionRole::Master, ExecutionRole::Worker] {
             assert!(role.charter().contains(DEVELOPMENT_INTAKE_CONTRACT.trim()));
         }
+        assert!(ExecutionRole::LegacyCompatibility
+            .charter()
+            .contains("不是可执行或可派发角色"));
+        assert!(!ExecutionRole::LegacyCompatibility
+            .charter()
+            .contains("appsdk bug intake"));
+        assert!(ExecutionRole::LegacyCompatibility.fleet_rules().is_empty());
         assert!(!ExecutionRole::Unknown
             .charter()
             .contains("appsdk bug intake"));

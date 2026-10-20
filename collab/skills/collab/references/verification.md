@@ -7,15 +7,15 @@ Every official release compile uses `scripts/build-collab.sh`, which increments
 the host-global `~/.collab/build-version` counter under one lock; there is no
 manual patch bump. Direct release builds fail with an instruction to use that
 entry. Use `scripts/install-global-collab.sh` so the release candidate is built
-once and the exact candidate bytes are installed. Verify the semantic source
-baseline, release build version, installed binary versions, canonical command
-paths, and refreshed embedded Skill byte-for-byte. Refresh the Skill with the
+once and installed. Verify the semantic source baseline, release build version,
+installed binary versions, canonical command paths, and refreshed embedded
+Skill source. Refresh the Skill with the
 exact `$CARGO_HOME/bin/collab` binary, not a bare command that may resolve an
 older PATH entry. Remove only legacy copies whose binary identity proves they
 are matching Collab artifacts, then validate the new baseline only: do not
 migrate or replay old local control-plane history. For a Collab runtime
 delivery, installation is not the endpoint: run one controlled `collab down`
-and `collab up` window, then verify installed binary digest, daemon PID/socket,
+and `collab up` window, then verify installed binary version, daemon PID/socket,
 `collab context`, MCP initialize, identity, durable state, and live replay.
 
 Before review, prove the affected subset and every changed invariant:

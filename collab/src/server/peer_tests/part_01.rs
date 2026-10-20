@@ -3,6 +3,7 @@ pub(crate) struct IsolatedTmux {
     socket: PathBuf,
     owner_root: PathBuf,
     pane_command: String,
+    sessions: std::sync::Mutex<Vec<String>>,
 }
 
 impl IsolatedTmux {
@@ -65,6 +66,7 @@ impl IsolatedTmux {
             socket,
             owner_root: root.to_path_buf(),
             pane_command: pane_command.into(),
+            sessions: std::sync::Mutex::new(vec!["worker-snapshot-test".into()]),
         }
     }
 
@@ -144,6 +146,7 @@ impl IsolatedTmux {
             "add isolated tmux session: {}",
             String::from_utf8_lossy(&created.stderr)
         );
+        self.sessions.lock().unwrap().push(session.clone());
         let output = Command::new("tmux")
             .args([
                 "-S",
@@ -197,10 +200,19 @@ impl IsolatedTmux {
         );
     }
 
-    fn kill_server(&self) {
-        let _ = Command::new("tmux")
-            .args(["-S", self.socket.to_str().unwrap(), "kill-server"])
-            .output();
+    fn stop_sessions(&self) {
+        let sessions = self.sessions.lock().unwrap();
+        for session in sessions.iter() {
+            let _ = Command::new("tmux")
+                .args([
+                    "-S",
+                    self.socket.to_str().unwrap(),
+                    "kill-session",
+                    "-t",
+                    session,
+                ])
+                .output();
+        }
     }
 }
 
@@ -210,9 +222,7 @@ thread_local! {
 
 impl Drop for IsolatedTmux {
     fn drop(&mut self) {
-        let _ = Command::new("tmux")
-            .args(["-S", self.socket.to_str().unwrap(), "kill-server"])
-            .output();
+        self.stop_sessions();
         let _ = std::fs::remove_file(&self.socket);
     }
 }
@@ -308,7 +318,7 @@ fn stop_registered_test_tmux_server() {
             .as_ref()
             .expect("test tmux fixture exists")
             .0
-            .kill_server();
+            .stop_sessions();
         *fixture = None;
     });
 }

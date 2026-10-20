@@ -29,11 +29,15 @@ fn role_contract_is_identical_across_context_workers_and_status() {
     let server = Arc::new(server);
 
     let cases = [
-        ("master", "master"),
-        ("worker", "worker"),
-        ("child", "managed-subagent"),
+        ("master", "master", None),
+        ("worker", "worker", None),
+        (
+            "child",
+            "legacy-managed-compatibility",
+            Some("master"),
+        ),
     ];
-    for (worker_id, expected_role) in cases {
+    for (worker_id, expected_role, expected_parent) in cases {
         let context = handle_context(&server, worker_id.into(), format!("token-{worker_id}"));
         assert!(context.ok, "{context:?}");
         assert_eq!(context.data["identity"]["role"], expected_role);
@@ -44,8 +48,15 @@ fn role_contract_is_identical_across_context_workers_and_status() {
         );
         assert_eq!(
             context.data["role_brief"]["derivation"]["parent"].as_str(),
-            (expected_role == "managed-subagent").then_some("master")
+            expected_parent
         );
+        if worker_id == "child" {
+            assert_eq!(
+                context.data["authority"]["may_start_new_work"],
+                false
+            );
+            assert_eq!(context.data["authority"]["may_dispatch"], false);
+        }
     }
 
     let workers = dispatch_with_route_context(&server, Req::Workers, None);

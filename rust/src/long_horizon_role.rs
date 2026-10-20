@@ -34,19 +34,13 @@ pub(crate) fn execution_role(root: &Path, status: &Option<Value>) -> ExecutionRo
     let Some(peer) = context["identity"]["worker_id"].as_str().map(str::to_owned) else {
         return ExecutionRole::Unknown;
     };
+    if context["role_brief"]["role"].as_str() == Some("legacy-managed-compatibility") {
+        return ExecutionRole::LegacyCompatibility;
+    }
 
     let Some(status) = status.as_ref() else {
         return ExecutionRole::Unknown;
     };
-    if let Some(subagents) = status["subagents"].as_array() {
-        if subagents.iter().any(|sub| {
-            sub["peer"].as_str() == Some(peer.as_str())
-                && sub["status"].as_str().unwrap_or("") != "closed"
-        }) {
-            return ExecutionRole::ManagedSubagent;
-        }
-    }
-
     let Some(worker) = status["workers"].as_array().and_then(|workers| {
         workers
             .iter()

@@ -114,9 +114,13 @@ fn dsh_must_not_be_combined_with_a_pane_candidate() {
         String::from_utf8_lossy(&panes.stderr),
     );
     let _ = std::process::Command::new("tmux")
-        .arg("-S")
-        .arg(&tmux_socket)
-        .arg("kill-server")
+        .args([
+            "-S",
+            tmux_socket.to_str().unwrap(),
+            "kill-session",
+            "-t",
+            "dsh-mutex",
+        ])
         .output();
     assert!(error.starts_with("DSH_ENDPOINT_REJECTED:"), "{error}");
     let _ = std::fs::remove_dir_all(&root);

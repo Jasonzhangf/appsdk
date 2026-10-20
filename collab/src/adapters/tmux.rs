@@ -479,7 +479,7 @@ pub(crate) mod tests {
             let _ = Command::new("tmux")
                 .arg("-S")
                 .arg(&self.socket)
-                .args(["kill-server"])
+                .args(["kill-session", "-t", "collab-test"])
                 .output();
             let _ = std::fs::remove_dir_all(&self.root);
         }

@@ -36,12 +36,6 @@ appsdk bug show ... --upstream         read an upstream AppSDK defect
 appsdk bug show <id> --json            read a bug record
 appsdk bug close <id> -m <solution> --receipt-id <receipt>
                                        close a bug with solution evidence
-appsdk subagent start --id <id>        start a managed subagent
-appsdk subagent status                 inspect managed subagents
-appsdk subagent send <id> --subject <topic> "<assignment>"
-                                       dispatch a managed subagent task
-appsdk subagent close <id>             close a managed subagent
-appsdk subworker <action>              compatibility entry for Collab subagent flow
 appsdk communication reset-runtime-registry --discard-legacy --approval "<text>"
                                        archive legacy ~/.appsdk/runtimes.jsonl and rebuild current baseline
 project-memory entry                   append memory entry and regenerate projections
@@ -66,8 +60,9 @@ collab master promote --approval "<text>"
 collab master delegate <peer>          transfer live master authority
 collab master send --project <target> --to <target-master> --subject <topic> "<body>"
                                        cross-project master-to-master send
-collab subagent dispatch --request-id <id> --subject <topic> "<assignment>"
-                                       scheduler-reserved dispatch
+collab board publish <task-id> ...     publish an ordinary assigned task
+collab board invite <task-id> --to <peer> --expected-revision <n>
+                                       invite an eligible registered peer
 collab task accept <task-id>           accept assigned task (assigned -> working)
 collab task update --status <state>    update task state
 collab task block <id>                 block with concrete cause/owner/unblock condition
@@ -82,6 +77,17 @@ collab reset --project --discard-legacy --approval "<text>"
 collab down                            controlled daemon stop
 collab up                              controlled daemon start
 ```
+
+Legacy managed compatibility commands only:
+
+```text
+appsdk subagent start|status|send|close ...
+appsdk subworker <action>
+collab subagent dispatch|send|ready|working|bind ...
+```
+
+These commands diagnose or retire existing managed records. They are not an
+execution surface for new work and do not form a second scheduler.
 
 The commands below are read-only operator diagnostics. They are not
 initialization, route recovery, or agent bootstrap steps. Do not chain them

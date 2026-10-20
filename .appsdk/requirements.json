@@ -1,0 +1,277 @@
+{
+  "changes": [
+    {
+      "request": {
+        "authorization": {
+          "original_text": "本项目的 appsdk 治理是为了帮助用户治理项目，不能拖累项目。治理设计必须是最小必要性，治理要求证明每个测试和治理是必要的，能落地到反面场景，正反都要验证，否则只能无限刷扩大治理规模。",
+          "role": "user",
+          "source": "Codex conversation: direct user instruction in the project requirements ledger initialization request"
+        },
+        "base_version": 0,
+        "operation": "create",
+        "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
+        "request_id": "request-appsdk-ledger-20261012-01",
+        "requirement_id": "req-minimal-governance",
+        "text": "本项目的 appsdk 治理是为了帮助用户治理项目，不能拖累项目。治理设计必须是最小必要性，治理要求证明每个测试和治理是必要的，能落地到反面场景，正反都要验证，否则只能无限刷扩大治理规模。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "本项目的 appsdk 治理是为了帮助用户治理项目，不能拖累项目。治理设计必须是最小必要性，治理要求证明每个测试和治理是必要的，能落地到反面场景，正反都要验证，否则只能无限刷扩大治理规模。",
+          "role": "user",
+          "source": "Codex conversation: direct user instruction in the project requirements ledger initialization request"
+        },
+        "requirement_id": "req-minimal-governance",
+        "status": "active",
+        "text": "本项目的 appsdk 治理是为了帮助用户治理项目，不能拖累项目。治理设计必须是最小必要性，治理要求证明每个测试和治理是必要的，能落地到反面场景，正反都要验证，否则只能无限刷扩大治理规模。",
+        "version": 1
+      },
+      "version": 1
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "collab 是帮助 master 和 peer 沟通的，不要做不必要的权限限制和认证校验等流程，没有意义且阻碍使用。每个注册的身份有唯一锚定的 anchor 就可以用它来恢复身份，不要额外添加条件，并且要自动完成。重启 daemon 是 collab 的事情，不要因为这个原因导致客户端身份失效，必须持久化并且自动恢复，同步漂移。订阅和唤醒等服务需要验证好能力边界，做到后台静默感知覆盖，切换策略，不需要 agent 猜测。",
+          "role": "user",
+          "source": "Codex conversation: direct user instruction in the project requirements ledger initialization request"
+        },
+        "base_version": 0,
+        "operation": "create",
+        "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
+        "request_id": "request-appsdk-ledger-20261012-02",
+        "requirement_id": "req-collab-identity",
+        "text": "collab 是帮助 master 和 peer 沟通的，不要做不必要的权限限制和认证校验等流程，没有意义且阻碍使用。每个注册的身份有唯一锚定的 anchor 就可以用它来恢复身份，不要额外添加条件，并且要自动完成。重启 daemon 是 collab 的事情，不要因为这个原因导致客户端身份失效，必须持久化并且自动恢复，同步漂移。订阅和唤醒等服务需要验证好能力边界，做到后台静默感知覆盖，切换策略，不需要 agent 猜测。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "collab 是帮助 master 和 peer 沟通的，不要做不必要的权限限制和认证校验等流程，没有意义且阻碍使用。每个注册的身份有唯一锚定的 anchor 就可以用它来恢复身份，不要额外添加条件，并且要自动完成。重启 daemon 是 collab 的事情，不要因为这个原因导致客户端身份失效，必须持久化并且自动恢复，同步漂移。订阅和唤醒等服务需要验证好能力边界，做到后台静默感知覆盖，切换策略，不需要 agent 猜测。",
+          "role": "user",
+          "source": "Codex conversation: direct user instruction in the project requirements ledger initialization request"
+        },
+        "requirement_id": "req-collab-identity",
+        "status": "active",
+        "text": "collab 是帮助 master 和 peer 沟通的，不要做不必要的权限限制和认证校验等流程，没有意义且阻碍使用。每个注册的身份有唯一锚定的 anchor 就可以用它来恢复身份，不要额外添加条件，并且要自动完成。重启 daemon 是 collab 的事情，不要因为这个原因导致客户端身份失效，必须持久化并且自动恢复，同步漂移。订阅和唤醒等服务需要验证好能力边界，做到后台静默感知覆盖，切换策略，不需要 agent 猜测。",
+        "version": 1
+      },
+      "version": 2
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "我们需要记录每个项目的命令使用日志和调用的日志，可以 review 流程是否合理可以优化",
+          "role": "user",
+          "source": "Codex conversation: direct user instruction in the project requirements ledger initialization request"
+        },
+        "base_version": 0,
+        "operation": "create",
+        "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
+        "request_id": "request-appsdk-ledger-20261012-03",
+        "requirement_id": "req-command-logs",
+        "text": "我们需要记录每个项目的命令使用日志和调用的日志，可以 review 流程是否合理可以优化"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "我们需要记录每个项目的命令使用日志和调用的日志，可以 review 流程是否合理可以优化",
+          "role": "user",
+          "source": "Codex conversation: direct user instruction in the project requirements ledger initialization request"
+        },
+        "requirement_id": "req-command-logs",
+        "status": "active",
+        "text": "我们需要记录每个项目的命令使用日志和调用的日志，可以 review 流程是否合理可以优化",
+        "version": 1
+      },
+      "version": 3
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "我们的命令需要尽可能少，能放在一个命令里面的不放两个，一次交互能做完不做两次，不要然客户端 agent 消耗注意力和 token",
+          "role": "user",
+          "source": "Codex conversation: direct user instruction in the project requirements ledger initialization request"
+        },
+        "base_version": 0,
+        "operation": "create",
+        "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
+        "request_id": "request-appsdk-ledger-20261012-04",
+        "requirement_id": "req-minimal-command-surface",
+        "text": "我们的命令需要尽可能少，能放在一个命令里面的不放两个，一次交互能做完不做两次，不要然客户端 agent 消耗注意力和 token"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "我们的命令需要尽可能少，能放在一个命令里面的不放两个，一次交互能做完不做两次，不要然客户端 agent 消耗注意力和 token",
+          "role": "user",
+          "source": "Codex conversation: direct user instruction in the project requirements ledger initialization request"
+        },
+        "requirement_id": "req-minimal-command-surface",
+        "status": "active",
+        "text": "我们的命令需要尽可能少，能放在一个命令里面的不放两个，一次交互能做完不做两次，不要然客户端 agent 消耗注意力和 token",
+        "version": 1
+      },
+      "version": 4
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "这些都是先验条件。先验信息不需要探测，是基础能力模块，没有模块就不能用，tmux 的先验能力也是基础模块。这个需要是统一一层能力模块，不做 live probe。\n你重新建模：1. 通信和状态的最低要求是什么，这是统一行为 2.加入 adaptor 后 tmux 和 dsh 行为是什么\n对，这个必须入库为当前的需求资产进行治理，并且基础通信功能有了以后基础的周期通知，长程通知，订阅消息以及通信流程都要画，给我审计后入库",
+          "role": "user",
+          "source": "Codex conversation: direct user instructions in the Collab communication/adaptor modeling and current requirement-asset authorization turns"
+        },
+        "base_version": 0,
+        "operation": "create",
+        "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
+        "request_id": "request-appsdk-collab-communication-20261011-01",
+        "requirement_id": "req-collab-communication-notifications",
+        "text": "Collab 通信以已具备的统一基础能力模块为先验，不做 live probe；缺少必需模块时该通信路径不可用。统一定义身份锚点、adaptor 绑定、消息收发、状态持久化、daemon 重启恢复和漂移同步。tmux 使用当前 pane 作为身份锚点，其 pane 收发能力由 tmux 基础模块保证，注册不重复探测；DSH 使用 sessionID + communication API 作为锚点，由预先验证的 DSH adaptor 提供通信。基础通信建立后，必须治理并画清周期通知、长程通知、订阅消息和端到端通信流程；后台静默感知、订阅匹配、唤醒及 adaptor 切换由系统按已知能力处理，不要求 agent 猜测。持久化入队、adaptor 接受、接收和消费必须按真实回执区分。用户未指定的周期参数、优先级及策略不得由设计臆定。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "这些都是先验条件。先验信息不需要探测，是基础能力模块，没有模块就不能用，tmux 的先验能力也是基础模块。这个需要是统一一层能力模块，不做 live probe。\n你重新建模：1. 通信和状态的最低要求是什么，这是统一行为 2.加入 adaptor 后 tmux 和 dsh 行为是什么\n对，这个必须入库为当前的需求资产进行治理，并且基础通信功能有了以后基础的周期通知，长程通知，订阅消息以及通信流程都要画，给我审计后入库",
+          "role": "user",
+          "source": "Codex conversation: direct user instructions in the Collab communication/adaptor modeling and current requirement-asset authorization turns"
+        },
+        "requirement_id": "req-collab-communication-notifications",
+        "status": "active",
+        "text": "Collab 通信以已具备的统一基础能力模块为先验，不做 live probe；缺少必需模块时该通信路径不可用。统一定义身份锚点、adaptor 绑定、消息收发、状态持久化、daemon 重启恢复和漂移同步。tmux 使用当前 pane 作为身份锚点，其 pane 收发能力由 tmux 基础模块保证，注册不重复探测；DSH 使用 sessionID + communication API 作为锚点，由预先验证的 DSH adaptor 提供通信。基础通信建立后，必须治理并画清周期通知、长程通知、订阅消息和端到端通信流程；后台静默感知、订阅匹配、唤醒及 adaptor 切换由系统按已知能力处理，不要求 agent 猜测。持久化入队、adaptor 接受、接收和消费必须按真实回执区分。用户未指定的周期参数、优先级及策略不得由设计臆定。",
+        "version": 1
+      },
+      "version": 5
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "注册按照提供的能力 daemon 自己判断，不是按照 agent 提供的要求判断：有 tmux pane 就按 tmux 注册，没有就需要根据通信要求完成回环。\ncontext 命令告知当前注册和整个项目的 peer，master 状态，\n通信方式由 daemon 决定，不由 peer 和 master 选择，这是基础能力，daemon 保证可达可探测，agent 只关心找谁\n消息都是 daemon 中心化接收，再派发，不做点对点\n身份确认，恢复，都是 daemon 后台自动做，context 请求和自动定时查询都是方法，但是不需要 agent 自己恢复。\n用户授权是最高优先级\n用户要求为 master 或者 peer，直接覆盖身份，不允许失败和 unknown，除非没有通信能力",
+          "role": "user",
+          "source": "Codex conversation: direct user clarifications on daemon-owned capability selection, centralized routing, context projection, automatic recovery, and authorization precedence"
+        },
+        "base_version": 1,
+        "operation": "replace",
+        "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
+        "request_id": "request-appsdk-collab-daemon-authority-20261011-02",
+        "requirement_id": "req-collab-communication-notifications",
+        "text": "Collab 以统一基础通信能力模块为基础。注册按 daemon 可取得的运行时能力自动决定：存在 tmux pane 就按当前 pane 的 tmux adaptor 注册；没有 tmux pane 时，daemon 按通信要求选择已有 adaptor 并完成通信回环。能力选择、可达性和探测由 daemon 负责，不由 agent 指定或自行执行。tmux 的 pane 收发是基础模块能力。统一通信状态须持久化身份锚点、adaptor 绑定、收发回执，daemon 重启后自动恢复并同步漂移。DSH 复合锚点为 sessionID + communication API。context 返回当前注册身份以及整个项目的 peer/master 状态。所有消息先由 daemon 中心化接收、持久化并派发到目标身份，不做绕过 daemon 的 agent-to-agent 点对点直连；通信方式由 daemon 决定，agent 只指定找谁。身份确认、恢复、可达性维护与 adaptor 切换由 daemon 后台自动完成；context 请求和 daemon 的周期查询均可触发/提供状态更新，但 agent 不负责手工恢复。用户授权优先级最高：用户明确要求 master 或 peer 时，daemon 直接覆盖当前身份/角色映射；除确实没有通信能力外，不因现存身份、角色、可达性瞬态或未知状态拒绝或返回 unknown。基础能力建立后，周期通知、长程通知、订阅消息与通信流程都要持久化、静默感知、自动派发并画明；消息入队、adaptor 接受、收到和消费分别按真实事实记录。用户未指定的周期、重试、聚合和提醒参数不得臆定。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "注册按照提供的能力 daemon 自己判断，不是按照 agent 提供的要求判断：有 tmux pane 就按 tmux 注册，没有就需要根据通信要求完成回环。\ncontext 命令告知当前注册和整个项目的 peer，master 状态，\n通信方式由 daemon 决定，不由 peer 和 master 选择，这是基础能力，daemon 保证可达可探测，agent 只关心找谁\n消息都是 daemon 中心化接收，再派发，不做点对点\n身份确认，恢复，都是 daemon 后台自动做，context 请求和自动定时查询都是方法，但是不需要 agent 自己恢复。\n用户授权是最高优先级\n用户要求为 master 或者 peer，直接覆盖身份，不允许失败和 unknown，除非没有通信能力",
+          "role": "user",
+          "source": "Codex conversation: direct user clarifications on daemon-owned capability selection, centralized routing, context projection, automatic recovery, and authorization precedence"
+        },
+        "requirement_id": "req-collab-communication-notifications",
+        "status": "active",
+        "text": "Collab 以统一基础通信能力模块为基础。注册按 daemon 可取得的运行时能力自动决定：存在 tmux pane 就按当前 pane 的 tmux adaptor 注册；没有 tmux pane 时，daemon 按通信要求选择已有 adaptor 并完成通信回环。能力选择、可达性和探测由 daemon 负责，不由 agent 指定或自行执行。tmux 的 pane 收发是基础模块能力。统一通信状态须持久化身份锚点、adaptor 绑定、收发回执，daemon 重启后自动恢复并同步漂移。DSH 复合锚点为 sessionID + communication API。context 返回当前注册身份以及整个项目的 peer/master 状态。所有消息先由 daemon 中心化接收、持久化并派发到目标身份，不做绕过 daemon 的 agent-to-agent 点对点直连；通信方式由 daemon 决定，agent 只指定找谁。身份确认、恢复、可达性维护与 adaptor 切换由 daemon 后台自动完成；context 请求和 daemon 的周期查询均可触发/提供状态更新，但 agent 不负责手工恢复。用户授权优先级最高：用户明确要求 master 或 peer 时，daemon 直接覆盖当前身份/角色映射；除确实没有通信能力外，不因现存身份、角色、可达性瞬态或未知状态拒绝或返回 unknown。基础能力建立后，周期通知、长程通知、订阅消息与通信流程都要持久化、静默感知、自动派发并画明；消息入队、adaptor 接受、收到和消费分别按真实事实记录。用户未指定的周期、重试、聚合和提醒参数不得臆定。",
+        "version": 2
+      },
+      "version": 6
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "有一个前提，当前的 agent 是主动注册的，注册是根据 skill 报告自己的能力和 tmux pane 等信息，然后 daemon 核实，派发（如果 agent 报告的能力和 daemon 不同，以 daemon 为准），通过环回测试为权威手段",
+          "role": "user",
+          "source": "Codex conversation: direct user clarification on active Skill-based registration reports and authoritative daemon loopback verification"
+        },
+        "base_version": 2,
+        "operation": "replace",
+        "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
+        "request_id": "request-appsdk-collab-agent-reports-loopback-20261011-03",
+        "requirement_id": "req-collab-communication-notifications",
+        "text": "Collab 注册由 agent 主动发起，通过 Skill 报告自己的能力事实、tmux pane 等信息；报告用于 daemon 核实，不授权 agent 选择 transport 或声明要求。daemon 对照自身拥有的能力与运行事实核实报告；报告与 daemon 不一致时 daemon 的事实为准。若当前 pane 经 daemon 核实存在，按 tmux 注册；否则 daemon 根据通信要求选择可用 adaptor 并完成通信回环。回环测试是通信能力和可达性的权威判据；daemon 按回环结果派发并持久化通道，报告、配置或探测意图均不能替代回环成功。daemon 自动尝试/切换已有能力；只有不存在任何经核实且回环成功的通信路径时，才因无通信能力失败或返回 unknown。用户要求 master 或 peer 时，用户授权优先，daemon 直接覆盖已有身份/角色映射。身份恢复、可达性维护、订阅和通知由 daemon 后台自动处理；context 返回当前注册身份和项目全体 peer/master 状态，并可触发状态收敛。所有消息均先由 daemon 中心接收、持久化和派发；agent 只指定收件人，不做 agent-to-agent 直连或 transport 选择。周期通知、长程通知、订阅消息、回环及双向通信按独立事实流持久化；入队、adaptor 接受、接收和消费状态按真实回执区分。用户未指定的周期、重试、聚合和提醒参数不臆定。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "有一个前提，当前的 agent 是主动注册的，注册是根据 skill 报告自己的能力和 tmux pane 等信息，然后 daemon 核实，派发（如果 agent 报告的能力和 daemon 不同，以 daemon 为准），通过环回测试为权威手段",
+          "role": "user",
+          "source": "Codex conversation: direct user clarification on active Skill-based registration reports and authoritative daemon loopback verification"
+        },
+        "requirement_id": "req-collab-communication-notifications",
+        "status": "active",
+        "text": "Collab 注册由 agent 主动发起，通过 Skill 报告自己的能力事实、tmux pane 等信息；报告用于 daemon 核实，不授权 agent 选择 transport 或声明要求。daemon 对照自身拥有的能力与运行事实核实报告；报告与 daemon 不一致时 daemon 的事实为准。若当前 pane 经 daemon 核实存在，按 tmux 注册；否则 daemon 根据通信要求选择可用 adaptor 并完成通信回环。回环测试是通信能力和可达性的权威判据；daemon 按回环结果派发并持久化通道，报告、配置或探测意图均不能替代回环成功。daemon 自动尝试/切换已有能力；只有不存在任何经核实且回环成功的通信路径时，才因无通信能力失败或返回 unknown。用户要求 master 或 peer 时，用户授权优先，daemon 直接覆盖已有身份/角色映射。身份恢复、可达性维护、订阅和通知由 daemon 后台自动处理；context 返回当前注册身份和项目全体 peer/master 状态，并可触发状态收敛。所有消息均先由 daemon 中心接收、持久化和派发；agent 只指定收件人，不做 agent-to-agent 直连或 transport 选择。周期通知、长程通知、订阅消息、回环及双向通信按独立事实流持久化；入队、adaptor 接受、接收和消费状态按真实回执区分。用户未指定的周期、重试、聚合和提醒参数不臆定。",
+        "version": 3
+      },
+      "version": 7
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "理论上恢复不需要回环测试，除非通信不通需要手动恢复才需回环测试",
+          "role": "user",
+          "source": "Codex conversation: direct user correction distinguishing identity restoration from communication recovery loopback"
+        },
+        "base_version": 3,
+        "operation": "replace",
+        "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
+        "request_id": "request-appsdk-collab-identity-recovery-loopback-20261011-04",
+        "requirement_id": "req-collab-communication-notifications",
+        "text": "Collab 注册由 agent 主动发起，通过 Skill 报告自己的能力事实、tmux pane 等信息；报告用于 daemon 核实，不授权 agent 选择 transport 或声明要求。daemon 对照自身拥有的能力与运行事实核实报告；报告与 daemon 不一致时 daemon 的事实为准。若当前 pane 经 daemon 核实存在，按 tmux 注册；否则 daemon 根据通信要求选择可用 adaptor 并完成通信回环。注册时，回环测试是所选通信路径能力和可达性的权威判据；报告、配置或探测意图不能替代成功回环。身份及角色、稳定 anchor 和已选择的 adaptor 绑定均持久化。身份丢失或 daemon 重启后，daemon 仅根据持久化记录自动恢复身份、角色、anchor 和绑定，并更新 context 投影；此身份恢复不要求也不触发回环测试，身份恢复与当前通信可达性分开。仅在通信不通且进入手动通信恢复时，才对恢复路径执行回环测试，并以其结果确认通信可达；回环失败不撤销已恢复身份或角色。daemon 自动处理后台身份恢复、状态同步、订阅和通知；context 返回当前注册身份和项目全体 peer/master 状态。用户要求 master 或 peer 时，用户授权优先，daemon 直接覆盖已有身份/角色映射。所有消息均先由 daemon 中心接收、持久化和派发；agent 只指定收件人，不做 agent-to-agent 直连或 transport 选择。周期通知、长程通知、订阅消息、回环及双向通信按独立事实流持久化；入队、adaptor 接受、接收和消费状态按真实回执区分。用户未指定的周期、重试、聚合和提醒参数不臆定。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "理论上恢复不需要回环测试，除非通信不通需要手动恢复才需回环测试",
+          "role": "user",
+          "source": "Codex conversation: direct user correction distinguishing identity restoration from communication recovery loopback"
+        },
+        "requirement_id": "req-collab-communication-notifications",
+        "status": "active",
+        "text": "Collab 注册由 agent 主动发起，通过 Skill 报告自己的能力事实、tmux pane 等信息；报告用于 daemon 核实，不授权 agent 选择 transport 或声明要求。daemon 对照自身拥有的能力与运行事实核实报告；报告与 daemon 不一致时 daemon 的事实为准。若当前 pane 经 daemon 核实存在，按 tmux 注册；否则 daemon 根据通信要求选择可用 adaptor 并完成通信回环。注册时，回环测试是所选通信路径能力和可达性的权威判据；报告、配置或探测意图不能替代成功回环。身份及角色、稳定 anchor 和已选择的 adaptor 绑定均持久化。身份丢失或 daemon 重启后，daemon 仅根据持久化记录自动恢复身份、角色、anchor 和绑定，并更新 context 投影；此身份恢复不要求也不触发回环测试，身份恢复与当前通信可达性分开。仅在通信不通且进入手动通信恢复时，才对恢复路径执行回环测试，并以其结果确认通信可达；回环失败不撤销已恢复身份或角色。daemon 自动处理后台身份恢复、状态同步、订阅和通知；context 返回当前注册身份和项目全体 peer/master 状态。用户要求 master 或 peer 时，用户授权优先，daemon 直接覆盖已有身份/角色映射。所有消息均先由 daemon 中心接收、持久化和派发；agent 只指定收件人，不做 agent-to-agent 直连或 transport 选择。周期通知、长程通知、订阅消息、回环及双向通信按独立事实流持久化；入队、adaptor 接受、接收和消费状态按真实回执区分。用户未指定的周期、重试、聚合和提醒参数不臆定。",
+        "version": 4
+      },
+      "version": 8
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "对于 collab，你现在做下能力测试：1. 隔离测试你（desktop）和 tmux session codex tui 做注册后的通讯和操作，你是 master 和它是 master 的整个通信流程，包括都能注销身份，重建身份 2. 审计 collab 的行为图，代码和行为图是否一致，图是否满足最小必要性，有哪些节点可以消融，哪些节点可以一步完成而我们做了多步。以消融行为，功能实现为目标，并且需要注册一定能成功（单独能力测试能通过时）进行任务规划：1. tmux 为基础注册成功因素 2. desktop 我们之前测试的成功方式你复现，然后检查如何做唯一能力绑定（可以接受作为 peer only 进行覆盖身份，因为 peer 身份不重要）。落盘目标文件，设置目标后你做编排进行执行",
+          "role": "user",
+          "source": "Codex chat 01a15218-082f-7b23-b626-44f2896f8df3: Collab capability test, ablation planning, saved goal and execution authorization"
+        },
+        "base_version": 4,
+        "operation": "replace",
+        "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
+        "request_id": "request-collab-capability-registration-20261018-01",
+        "requirement_id": "req-collab-communication-notifications",
+        "text": "Collab 注册由 agent 主动发起并报告真实能力事实，daemon 核实并选择自身可调用的既有 adaptor，报告与 daemon 不一致时以 daemon 事实为准。tmux 是基础注册成功因素：当前 pane 真实存在且基础通信能力通过时，一次 context 必须注册成功，不受未选用 AppServer 字段、旧 peer/token/binding 冲突、重复 probe、二次 challenge 或人工批准阻断。Desktop 复用已独立通过的正式 native 通信能力，但必须证实该能力可由所属 daemon adaptor 合法调用；不能以 agent 代发或 registered 字段代替真实能力。Desktop 唯一能力绑定使用现有 project/app scope 与实际 host/thread，pipe 是连接位置，peer 名称可覆盖。覆盖不得继承旧 master grant，不得丢失旧 task/message/merge/claim 或未结责任，不影响无关 scope 或其他 master。身份及角色、稳定 anchor 和所选 adaptor 绑定持久化；普通身份恢复和 daemon 重启恢复不重新 Register 或验证通信，通信可达性单独呈现。仅通信不通且显式手动恢复时对恢复路径执行回环，失败不撤销持久身份或角色。已认证 peer/master 无未结责任时可自行注销 Collab 身份而不关闭或归档宿主；注销后可重建默认 peer 并真实通信，不复活已退役身份或继承旧 master。未结责任须明确处理并保留。context 返回当前身份与项目全体 peer/master 状态。用户明确要求 master 或 peer 时，用户授权优先，daemon 按现有 owner 覆盖当前角色映射。所有消息先由 daemon 中心接收、持久化和派发；agent 只指定收件人，不选择 transport 或绕过 daemon 点对点直连。入队、adaptor 接受、目标接收、回复和消费按真实回执区分。双方分别作为 master 时均须完成真实收发、回复和消费；独立基础测试不替代组合验收。后台身份恢复、同步、订阅和通知由 daemon 负责。用户未指定的周期、重试、聚合及提醒参数不臆定。行为图须与代码一致，并删除无独立保障的重复节点或步骤。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "对于 collab，你现在做下能力测试：1. 隔离测试你（desktop）和 tmux session codex tui 做注册后的通讯和操作，你是 master 和它是 master 的整个通信流程，包括都能注销身份，重建身份 2. 审计 collab 的行为图，代码和行为图是否一致，图是否满足最小必要性，有哪些节点可以消融，哪些节点可以一步完成而我们做了多步。以消融行为，功能实现为目标，并且需要注册一定能成功（单独能力测试能通过时）进行任务规划：1. tmux 为基础注册成功因素 2. desktop 我们之前测试的成功方式你复现，然后检查如何做唯一能力绑定（可以接受作为 peer only 进行覆盖身份，因为 peer 身份不重要）。落盘目标文件，设置目标后你做编排进行执行",
+          "role": "user",
+          "source": "Codex chat 01a15218-082f-7b23-b626-44f2896f8df3: Collab capability test, ablation planning, saved goal and execution authorization"
+        },
+        "requirement_id": "req-collab-communication-notifications",
+        "status": "active",
+        "text": "Collab 注册由 agent 主动发起并报告真实能力事实，daemon 核实并选择自身可调用的既有 adaptor，报告与 daemon 不一致时以 daemon 事实为准。tmux 是基础注册成功因素：当前 pane 真实存在且基础通信能力通过时，一次 context 必须注册成功，不受未选用 AppServer 字段、旧 peer/token/binding 冲突、重复 probe、二次 challenge 或人工批准阻断。Desktop 复用已独立通过的正式 native 通信能力，但必须证实该能力可由所属 daemon adaptor 合法调用；不能以 agent 代发或 registered 字段代替真实能力。Desktop 唯一能力绑定使用现有 project/app scope 与实际 host/thread，pipe 是连接位置，peer 名称可覆盖。覆盖不得继承旧 master grant，不得丢失旧 task/message/merge/claim 或未结责任，不影响无关 scope 或其他 master。身份及角色、稳定 anchor 和所选 adaptor 绑定持久化；普通身份恢复和 daemon 重启恢复不重新 Register 或验证通信，通信可达性单独呈现。仅通信不通且显式手动恢复时对恢复路径执行回环，失败不撤销持久身份或角色。已认证 peer/master 无未结责任时可自行注销 Collab 身份而不关闭或归档宿主；注销后可重建默认 peer 并真实通信，不复活已退役身份或继承旧 master。未结责任须明确处理并保留。context 返回当前身份与项目全体 peer/master 状态。用户明确要求 master 或 peer 时，用户授权优先，daemon 按现有 owner 覆盖当前角色映射。所有消息先由 daemon 中心接收、持久化和派发；agent 只指定收件人，不选择 transport 或绕过 daemon 点对点直连。入队、adaptor 接受、目标接收、回复和消费按真实回执区分。双方分别作为 master 时均须完成真实收发、回复和消费；独立基础测试不替代组合验收。后台身份恢复、同步、订阅和通知由 daemon 负责。用户未指定的周期、重试、聚合及提醒参数不臆定。行为图须与代码一致，并删除无独立保障的重复节点或步骤。",
+        "version": 5
+      },
+      "version": 9
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "Read /Volumes/Intel/playground/appsdk/.worker-runs/collab-skill-globalization-20261020/implementation-task.md completely. Execute the AppSDK Collab Skill globalization contract end to end as an independent GCM execution worker. First run canonical appsdk bug intake and bind its issue ID. Create or reuse only a clean external worktree under /Volumes/Intel/playground/appsdk from latest origin/main; never edit, reset, checkout, restore, stash or clean /Users/fanzhang/Documents/github/appsdk main. Use apply_patch for semantic edits. Apply the six project-generic rules (codex exec --profile gcm, peer-first concurrent orchestration, generic worktree/resource/P0/P1/canonical-intake patrol, protected holds, one-shot rearm) to requirements, Collab Skill/references, Rust prompt/role projections, server projections, governance docs and affected tests. Run the mapped red/green, Rust tests, fmt, embedded consistency, CLI smoke and git diff checks. Perform independent review and deliver a full receipt. Do not restart daemon, edit route/identity/journal/mailbox, bypass hooks, add SHA ceremonies, or claim source PASS as delivery. Write final evidence to /Volumes/Intel/playground/appsdk/.worker-runs/collab-skill-globalization-20261020/impl-gcm/result.md and return only after receipt, tests and remaining blockers are recorded.",
+          "role": "user",
+          "source": "Codex conversation: direct user instruction to execute the AppSDK Collab Skill globalization contract end to end, recorded in implementation-task.md"
+        },
+        "base_version": 0,
+        "operation": "create",
+        "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
+        "request_id": "request-collab-globalized-orchestration-patrol-20261020-01",
+        "requirement_id": "req-collab-globalized-orchestration-patrol",
+        "text": "Collab 编排与巡检采用项目通用契约：1. 通用执行和观察子任务使用独立的 `codex exec --profile gcm`；仅当 GCM 不可用时使用文档化后备，不使用 Codex 内置 spawn/fork/session Agent 槽位或 managed subagent 作为生产并发路径。2. Master 负责审计、派发、核验、集成并保持合格容量饱和，但不替代普通范围实现的 delivery owner。3. 长程工作先交给 peer，由该 peer 并发编排独立 GCM worker；仅当所有合格 peer 都忙时，master 才启动自有独立 GCM worker。4. 每次 standing patrol 必须收敛项目通用对象：在可恢复提取后删除不需要的自有 worktree；回收自有 stale resource；为每个 open P0/P1 记录适用证据关闭，或明确记录 owner、原因与解除条件后停车；每个新生产问题在修复前先进入项目 canonical issue intake；dirty、active、shared、unknown 资源一律作为 protected hold 保留并报告。5. 周期结束且仍需继续调度时，在 patrol 结束前重新武装已消费的一次性 goal/deadline wake；读取、ACK、状态摘要或派发回执都不是完成。6. 以上契约不得包含 RouteCodex 路径、错误码、dashboard 字段或其他项目特定实现细节；项目特定检查留在所属项目 Skill。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "Read /Volumes/Intel/playground/appsdk/.worker-runs/collab-skill-globalization-20261020/implementation-task.md completely. Execute the AppSDK Collab Skill globalization contract end to end as an independent GCM execution worker. First run canonical appsdk bug intake and bind its issue ID. Create or reuse only a clean external worktree under /Volumes/Intel/playground/appsdk from latest origin/main; never edit, reset, checkout, restore, stash or clean /Users/fanzhang/Documents/github/appsdk main. Use apply_patch for semantic edits. Apply the six project-generic rules (codex exec --profile gcm, peer-first concurrent orchestration, generic worktree/resource/P0/P1/canonical-intake patrol, protected holds, one-shot rearm) to requirements, Collab Skill/references, Rust prompt/role projections, server projections, governance docs and affected tests. Run the mapped red/green, Rust tests, fmt, embedded consistency, CLI smoke and git diff checks. Perform independent review and deliver a full receipt. Do not restart daemon, edit route/identity/journal/mailbox, bypass hooks, add SHA ceremonies, or claim source PASS as delivery. Write final evidence to /Volumes/Intel/playground/appsdk/.worker-runs/collab-skill-globalization-20261020/impl-gcm/result.md and return only after receipt, tests and remaining blockers are recorded.",
+          "role": "user",
+          "source": "Codex conversation: direct user instruction to execute the AppSDK Collab Skill globalization contract end to end, recorded in implementation-task.md"
+        },
+        "requirement_id": "req-collab-globalized-orchestration-patrol",
+        "status": "active",
+        "text": "Collab 编排与巡检采用项目通用契约：1. 通用执行和观察子任务使用独立的 `codex exec --profile gcm`；仅当 GCM 不可用时使用文档化后备，不使用 Codex 内置 spawn/fork/session Agent 槽位或 managed subagent 作为生产并发路径。2. Master 负责审计、派发、核验、集成并保持合格容量饱和，但不替代普通范围实现的 delivery owner。3. 长程工作先交给 peer，由该 peer 并发编排独立 GCM worker；仅当所有合格 peer 都忙时，master 才启动自有独立 GCM worker。4. 每次 standing patrol 必须收敛项目通用对象：在可恢复提取后删除不需要的自有 worktree；回收自有 stale resource；为每个 open P0/P1 记录适用证据关闭，或明确记录 owner、原因与解除条件后停车；每个新生产问题在修复前先进入项目 canonical issue intake；dirty、active、shared、unknown 资源一律作为 protected hold 保留并报告。5. 周期结束且仍需继续调度时，在 patrol 结束前重新武装已消费的一次性 goal/deadline wake；读取、ACK、状态摘要或派发回执都不是完成。6. 以上契约不得包含 RouteCodex 路径、错误码、dashboard 字段或其他项目特定实现细节；项目特定检查留在所属项目 Skill。",
+        "version": 1
+      },
+      "version": 10
+    }
+  ],
+  "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
+  "schema_version": 1,
+  "version": 10
+}

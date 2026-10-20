@@ -95,6 +95,14 @@ owner-scoped lease can be cancelled with
   unique unmerged history, or cleanup failure.
 - Cancellation cannot bypass cleanup. Dirty/missing/unproven paths are never
   force-removed. Terminal state without a receipt is an audit failure.
+- Before removing an owned worktree, preserve recoverable commits and
+  untracked content and verify that recovery. Remove and reclaim only resources
+  owned by this task and no longer needed.
+- Treat every dirty, active, shared, or unknown worktree and resource as a
+  protected hold. Record its owner, path, branch, reason, and retention point;
+  report it in the patrol result. Do not delete or reassign it.
+- Route each new production issue through the project's canonical issue intake
+  before repair. A status summary, ACK, or dispatch receipt is not completion.
 
 Delivery and integration are separate durable milestones. `task deliver`
 records candidate evidence; the task owner or current master uses
@@ -138,16 +146,18 @@ wait/block state, then take the next actionable step. Continue execution when
 work is available, resolve a blocker when it can, and record/escalate when it
 cannot. ACKing a wake is not progress and does not satisfy liveness.
 
-Route escalation by worker type:
+Escalation routing:
 
-- A managed subagent and an ordinary worker both report blockers to the current
-  Collab master immediately. First find a concrete solution (root cause,
-  proposed change, authorization needed); send that, not a symptom. Do not
-  wait. A subagent copies its parent when parent is not the master, and may
-  not decline a master collaboration request. Independent peers may
-  temporarily decline a master collaboration invite to protect their own
-  task. If no current master exists, report to the collaborator that initiated
-  the task.
+- A peer that owns a long-horizon task orchestrates independent
+  `codex exec --profile gcm` workers inside its task scope. Those workers are
+  not additional Collab peers. Peer requests and results use the board and
+  mailbox contract.
+- A registered peer reports a blocker to the current Collab master immediately.
+  First find a concrete solution (root cause, proposed change, authorization
+  needed); send that, not a symptom. Do not wait. Independent peers may
+  temporarily decline a master collaboration invite to protect their own task.
+  If no current master exists, report to the collaborator that initiated the
+  task.
 - A peer becomes master only after explicit user approval for that peer and
   project; the caller must hold an authenticated current binding. An approved
   `collab master promote --approval` replaces any recorded holder and is
@@ -158,13 +168,14 @@ Route escalation by worker type:
   current agent. A dead recorded thread does not remove the current holder's
   authority. Codex root is not Collab master.
 - Master compiles the goal into a dependency graph, then parallel unique-write
-  scopes. It assigns registered peers with `collab sendmessage` only when
-  delivery conditions (done-iff, artifacts, in/out of
-  scope, forbidden edits) and test conditions (exact commands, expected
-  results, evidence location) are unambiguous. Do not equally split a large
-  goal or share a write scope. Workers execute only the approved assignment
-  and return evidence. On a blocker they find a solution first, then report
-  master immediately.
+  scopes. It publishes one task per scope, reads the observed revision, and
+  invites the eligible registered peer only when delivery conditions
+  (done-iff, artifacts, in/out of scope, forbidden edits) and test conditions
+  (exact commands, expected results, evidence location) are unambiguous. The
+  peer accepts or declines explicitly. Do not equally split a large goal or
+  share a write scope. Workers execute only the accepted assignment and return
+  evidence. On a blocker they find a solution first, then report master
+  immediately.
 
 For every escalation include `task_id`, current durable status, exact blocker or
 wait target, proposed solution, attempted resolution, and the decision/action

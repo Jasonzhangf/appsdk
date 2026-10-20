@@ -826,6 +826,8 @@ fn wrong_appserver_endpoint_fails_closed() {
         .env("COLLAB_STATE_DIR", &host_state)
         .env("COLLAB_APPSERVER_SOCKET", &missing)
         .env_remove("CODEX_APP_SERVER_SOCKET")
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
         .env_remove("COLLAB_APPSERVER_NAMESPACE")
         .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex TUI")
         .env("CODEX_SESSION_ID", THREAD_A)

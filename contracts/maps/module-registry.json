@@ -507,6 +507,7 @@
       "owner": "appsdk::delivery",
       "owned_paths": [
         "AGENTS.md",
+        ".appsdk/requirements.json",
         ".agents/skills/appsdk-dev/**",
         ".gitattributes",
         ".github/workflows/**",

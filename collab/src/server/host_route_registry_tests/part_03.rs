@@ -1294,6 +1294,170 @@
     }
 
     #[test]
+    fn identity_context_prepare_bootstraps_the_empty_resident_route() {
+        let (host, root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        std::fs::create_dir_all(host_paths.state_root()).unwrap();
+        let manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
+        let context = context_with_app(&root, crate::identity::CLI_APP_SERVER_ID);
+        let request = crate::proto::IdentityContextRequest {
+            operation_id: "ctxop-resident-bootstrap".into(),
+            invocation: "automatic".into(),
+            action: "prepare_invocation".into(),
+            facts: crate::proto::IdentityFacts::default(),
+            approval: None,
+            grant_approval: None,
+            query: false,
+            query_capability: "resident-bootstrap-capability".into(),
+            invocation_ticket: String::new(),
+        };
+
+        let (runtime, response) = manager.dispatch_sync(
+            Some(context.clone()),
+            Req::IdentityContext {
+                facts: crate::proto::IdentityFacts::default(),
+                identity_context: Some(request),
+            },
+        );
+        assert!(response.ok, "{response:?}");
+        assert!(Arc::ptr_eq(&runtime, &host));
+        assert!(manager
+            .routes
+            .lock()
+            .unwrap()
+            .get(&ProjectRuntimeManager::route_key(&context))
+            .and_then(|route| route.runtime.as_ref())
+            .is_some_and(|runtime| Arc::ptr_eq(runtime, &host)));
+        let records =
+            load_host_route_records(&host_paths.state_root().join("routes.jsonl")).unwrap();
+        assert_eq!(records.len(), 1);
+        let canonical_root = root.canonicalize().unwrap().to_string_lossy().into_owned();
+        assert_eq!(records[0].version, 1);
+        assert_eq!(records[0].op, "register");
+        assert_eq!(records[0].app_scope_id, crate::identity::CLI_APP_SERVER_ID);
+        assert_eq!(records[0].project_scope, canonical_root);
+        assert_eq!(records[0].canonical_root, canonical_root);
+        assert_eq!(records[0].storage_root, canonical_root);
+
+        drop(manager);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn identity_context_prepare_rejects_a_foreign_resident_storage_owner_without_corruption() {
+        let (host, root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        std::fs::create_dir_all(host_paths.state_root()).unwrap();
+        let manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
+        let owner = context_with_app(&root, "resident-owner-app");
+        manager.append_resident_route_record(&owner).unwrap();
+        let request = crate::proto::IdentityContextRequest {
+            operation_id: "ctxop-resident-storage-owner".into(),
+            invocation: "automatic".into(),
+            action: "prepare_invocation".into(),
+            facts: crate::proto::IdentityFacts::default(),
+            approval: None,
+            grant_approval: None,
+            query: false,
+            query_capability: "resident-storage-owner-capability".into(),
+            invocation_ticket: String::new(),
+        };
+
+        let (_runtime, response) = manager.dispatch_sync(
+            Some(context_with_app(&root, crate::identity::CLI_APP_SERVER_ID)),
+            Req::IdentityContext {
+                facts: crate::proto::IdentityFacts::default(),
+                identity_context: Some(request),
+            },
+        );
+        assert!(!response.ok, "{response:?}");
+        assert!(
+            response
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("is already owned by")),
+            "{response:?}"
+        );
+        let route_journal = host_paths.state_root().join("routes.jsonl");
+        let records = load_host_route_records(&route_journal).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].app_scope_id, "resident-owner-app");
+        assert_eq!(
+            records[0].storage_root,
+            root.canonicalize().unwrap().to_string_lossy()
+        );
+
+        ProjectRuntimeManager::new(host, &host_paths)
+            .expect("the rejected bootstrap must leave the route journal replayable");
+        drop(manager);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn route_publication_gate_serializes_resident_and_external_appends() {
+        let (host, root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        std::fs::create_dir_all(host_paths.state_root()).unwrap();
+        let manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
+        let resident = context_with_app(&root, crate::identity::CLI_APP_SERVER_ID);
+        let external_root = root.with_file_name(format!(
+            "{}-route-publication",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(external_root.join(".agent-collab/server")).unwrap();
+        let external = context_with_app(&external_root, "external-publication-app");
+        let external_storage = external_root.canonicalize().unwrap();
+        let gate = manager.register_gate.lock().unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+        let resident_manager = manager.clone();
+        let resident_done = done_tx.clone();
+        let resident_thread = std::thread::spawn(move || {
+            let result = resident_manager.append_resident_route_record(&resident);
+            resident_done.send(("resident", result)).unwrap();
+        });
+        let external_manager = manager.clone();
+        let external_done = done_tx;
+        let external_thread = std::thread::spawn(move || {
+            let result =
+                external_manager.append_route_record(&external, &external_storage);
+            external_done.send(("external", result)).unwrap();
+        });
+
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err(),
+            "route publication must wait for the shared writer gate"
+        );
+        drop(gate);
+        let first = done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the first route publication must finish after gate release");
+        let second = done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the second route publication must finish after gate release");
+        resident_thread.join().unwrap();
+        external_thread.join().unwrap();
+        assert!(first.1.is_ok(), "{first:?}");
+        assert!(second.1.is_ok(), "{second:?}");
+
+        let records =
+            load_host_route_records(&host_paths.state_root().join("routes.jsonl")).unwrap();
+        assert_eq!(records.len(), 2);
+        assert!(records
+            .iter()
+            .any(|record| record.app_scope_id == crate::identity::CLI_APP_SERVER_ID));
+        assert!(records
+            .iter()
+            .any(|record| record.app_scope_id == "external-publication-app"));
+
+        drop(manager);
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(external_root).unwrap();
+    }
+
+    #[test]
     fn materialized_runtime_budget_rejects_the_route_above_the_cap() {
         assert!(
             materialized_runtime_budget_error(

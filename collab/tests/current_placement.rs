@@ -11,6 +11,17 @@ fn run_in_pane_with_tmux(
     tmux_value: &str,
     args: &[&str],
 ) -> Value {
+    run_in_pane_at(fixture, pane, label, tmux_value, &fixture.root, args)
+}
+
+fn run_in_pane_at(
+    fixture: &Fixture,
+    pane: &Pane,
+    label: &str,
+    tmux_value: &str,
+    cwd: &Path,
+    args: &[&str],
+) -> Value {
     let script_path = fixture.root.join(format!("{label}.sh"));
     let result_path = fixture.root.join(format!("{label}.json"));
     let error_path = fixture.root.join(format!("{label}.error"));
@@ -29,7 +40,7 @@ fn run_in_pane_with_tmux(
          {binary} {command} >{result} 2>{error}\n\
          printf done >{done}\n\
          sleep 600\n",
-        root = shell_quote(&fixture.root.to_string_lossy()),
+        root = shell_quote(&cwd.to_string_lossy()),
         state = shell_quote(&fixture.host_state.to_string_lossy()),
         home = shell_quote(&fixture.root.join("home").to_string_lossy()),
         tmux_value = shell_quote(tmux_value),
@@ -77,6 +88,107 @@ fn persisted_identity(fixture: &Fixture, worker_id: &str) -> Value {
         .join(worker_id)
         .join("identity.json");
     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+#[test]
+fn external_project_peer_status_uses_its_project_binding() {
+    let (fixture, pane) = single_pane_fixture("external-status-binding");
+    let project = fixture.root.join("peer-project");
+    seed_baseline(&project);
+    let restored = run_in_pane_at(
+        &fixture,
+        &pane,
+        "external-context",
+        "invalid",
+        &project,
+        &["context", "--op", "external-status-context"],
+    );
+    let worker = context_snapshot(&restored)["identity"]["worker_id"]
+        .as_str()
+        .unwrap();
+    let status = run_in_pane_at(
+        &fixture,
+        &pane,
+        "external-status",
+        "invalid",
+        &project,
+        &["worker", "status", worker],
+    );
+    let peer = status["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == worker)
+        .unwrap();
+    assert_eq!(peer["identity_valid"], true, "{peer}");
+    assert_eq!(peer["endpoint_live"], true, "{peer}");
+    assert_eq!(peer["presence"], "present", "{peer}");
+}
+
+#[test]
+fn board_reader_uses_current_route_instead_of_a_historical_session_receipt() {
+    let (fixture, pane) = single_pane_fixture("board-current-reader");
+    let restored = run_in_pane_with_tmux(
+        &fixture,
+        &pane,
+        "reader-context",
+        "invalid",
+        &["context", "--op", "reader-context"],
+    );
+    let worker = context_snapshot(&restored)["identity"]["worker_id"]
+        .as_str()
+        .unwrap();
+    let mut stale = persisted_identity(&fixture, worker);
+    stale["worker_id"] = json!("a-stale-peer");
+    stale["runtime"]["agent_id"] = json!("a-stale-peer");
+    stale["runtime"]["binding_id"] = json!("binding-a-stale-peer");
+    let old = fixture.host_state.join("identities/a-stale-peer");
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::write(
+        old.join("identity.json"),
+        serde_json::to_vec(&stale).unwrap(),
+    )
+    .unwrap();
+    let credential = std::fs::read(
+        fixture
+            .host_state
+            .join("identities")
+            .join(worker)
+            .join("identity.json"),
+    )
+    .unwrap();
+    let operations = std::fs::read(fixture.host_state.join("journal.jsonl")).unwrap();
+    let board = run_in_pane_with_tmux(
+        &fixture,
+        &pane,
+        "reader-board",
+        "invalid",
+        &["board", "show"],
+    );
+    assert!(
+        board["workers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["id"] == worker),
+        "{board}"
+    );
+    assert_eq!(
+        std::fs::read(
+            fixture
+                .host_state
+                .join("identities")
+                .join(worker)
+                .join("identity.json")
+        )
+        .unwrap(),
+        credential
+    );
+    assert_eq!(
+        std::fs::read(fixture.host_state.join("journal.jsonl")).unwrap(),
+        operations,
+        "board must not register, recover or start a context operation"
+    );
 }
 
 struct SecondaryTmux {

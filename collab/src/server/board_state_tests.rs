@@ -91,7 +91,12 @@ fn compact_snapshot_preserves_public_history_and_exact_revision() {
     }
     let view = board_task_view(&restored, &restored.tasks["public-history"]).unwrap();
     assert_eq!(view.revision, 4);
-    assert_eq!(view.owner, "peer");
+    assert_eq!(view.owner, "");
+    assert_eq!(view.owner_display_name, "");
+    assert_eq!(restored.tasks["public-history"].owner, "peer");
+    let mut closed = restored.tasks["public-history"].clone();
+    closed.status = "closed".into();
+    assert_eq!(board_task_view(&restored, &closed).unwrap().owner, "peer");
     assert_eq!(view.next_step.as_deref(), Some("交付"));
     assert!(!restored.workers.contains_key("peer"));
     drop(state);
@@ -214,10 +219,11 @@ fn managed_binding_does_not_hide_a_task_published_for_public_work() {
 
 #[test]
 fn authenticated_managed_queue_is_parent_visible_while_public_output_hides_child_identity() {
-    let mut state = State::default();
-    register_worker(&mut state, "parent");
-    register_worker(&mut state, "child-peer");
-    register_worker(&mut state, "other-peer");
+    let (server, root) = test_server();
+    crate::server::peer_tests::register_synthetic_peer(&server, "parent", "parent-thread");
+    crate::server::peer_tests::register_synthetic_peer(&server, "child-peer", "child-thread");
+    crate::server::peer_tests::register_synthetic_peer(&server, "other-peer", "other-thread");
+    let mut state = server.state.lock().unwrap();
     register_managed_child(&mut state, "child", "parent", "child-peer");
     state
         .apply_checked(&Event::WorkerNamed {
@@ -302,6 +308,8 @@ fn authenticated_managed_queue_is_parent_visible_while_public_output_hides_child
         board_task_view_for(&restored, &restored.tasks["child-private"], Some("parent")).is_some()
     );
     assert!(board_task_view(&restored, &restored.tasks["child-private"]).is_none());
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

@@ -934,21 +934,14 @@ pub(crate) fn load_existing_at(
     // resolves the caller's own anchors (env-derived) to a persisted peer, or
     // reads one exact named worker. The daemon bootstrap uses
     // `resolve_for_daemon_at` instead.
-    let observed = AnchorObservation::from_env_at(host_paths)?;
     let explicit_worker = worker_id.filter(|value| !value.trim().is_empty());
     // A named worker is decided before anchor resolution: an anchor ambiguity
     // is exactly the case an explicit name resolves.
-    if explicit_worker.is_none() {
-        if let Some(identity) =
-            identity_by_current_anchors_same_scope_at(host_paths, scope, &observed)?
-        {
-            return Ok(Some(identity));
-        }
+    if let Some(worker_id) = explicit_worker {
+        return read_identity(&identity_path_at(host_paths, &worker_id)?);
     }
-    let Some(worker_id) = explicit_worker else {
-        return Ok(None);
-    };
-    read_identity(&identity_path_at(host_paths, &worker_id)?)
+    let observed = AnchorObservation::from_env_at(host_paths)?;
+    identity_by_current_anchors_same_scope_at(host_paths, scope, &observed)
 }
 
 include!("identity_resolver.rs");

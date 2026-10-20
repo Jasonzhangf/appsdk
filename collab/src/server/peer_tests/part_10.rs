@@ -266,9 +266,9 @@ fn board_invitation_uses_authoritative_binding_when_identity_projection_is_stale
         .iter()
         .find(|worker| worker["id"] == "peer")
         .expect("peer status");
-    assert_eq!(peer_status["identity_valid"], false);
-    assert_eq!(peer_status["status"], "identity-mismatch");
-    assert_eq!(peer_status["presence"], "missing");
+    assert_eq!(peer_status["identity_valid"], true);
+    assert_ne!(peer_status["status"], "identity-mismatch");
+    assert_eq!(peer_status["presence"], "present");
     assert_eq!(peer_status["endpoint_live"], true);
 
     let published = handle_board_command(
@@ -331,6 +331,72 @@ fn board_invitation_uses_authoritative_binding_when_identity_projection_is_stale
     );
 
     std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn binding_projection_is_scoped_before_same_named_binding_uniqueness() {
+    let (server, root) = test_server();
+    register(&server, "scoped-peer", "%scoped-peer");
+    let (worker, binding) = {
+        let state = server.state.lock().unwrap();
+        (state.workers["scoped-peer"].clone(), state.global.projects.values()
+            .flat_map(|project| project.runtime_bindings.values())
+            .find(|binding| binding.agent_id.as_str() == "scoped-peer").unwrap().clone())
+    };
+    let foreign_root = root.join("foreign-project");
+    std::fs::create_dir_all(&foreign_root).unwrap();
+    let mut foreign = binding.clone();
+    foreign.project_scope = GlobalState::canonical_project_scope(&foreign_root).unwrap();
+    foreign.binding_id = BindingId::new("foreign-binding").unwrap();
+    let mut state = server.state.lock().unwrap();
+    state.apply_checked(&Event::GlobalProjectRegistered {
+        registration: global_state::ProjectRegistration::new(foreign.project_scope.clone(), foreign.app_scope_id.clone()).unwrap(),
+    }).unwrap();
+    state.apply_checked(&Event::GlobalRuntimeBound { binding: foreign }).unwrap();
+    drop(state);
+    assert_eq!(worker_identity_presence(&server, &worker), IdentityPresence::Present,
+        "a same-named foreign binding must not invalidate the local identity");
+    let task = TaskRec {
+        id: "scoped-owner-task".into(), owner: worker.id.clone(), created_by: worker.id.clone(),
+        feature_id: None, worktree_path: None, branch: None, base_commit: None,
+        priority: "p1".into(), status: "working".into(), next_step: None, wait: None,
+        created_ms: now_ms(), updated_ms: now_ms(),
+    };
+    let mut state = server.state.lock().unwrap();
+    state.apply_checked(&Event::TaskCreated { task: task.clone() }).unwrap();
+    state.apply_checked(&Event::BoardDetailsChanged { task_id: task.id.clone(), details:
+        crate::board::BoardTaskDetails { public_visibility: true, revision: 1, ..Default::default() }
+    }).unwrap();
+    assert_eq!(board_task_view(&state, &task).unwrap().owner, worker.id);
+    let mut other_app = binding.clone();
+    other_app.app_scope_id = AppServerId::new("other-app").unwrap();
+    other_app.binding_id = BindingId::new("other-app-binding").unwrap();
+    other_app.runtime_id = RuntimeId::new("other-app-runtime").unwrap();
+    state.apply_checked(&Event::GlobalProjectRegistered {
+        registration: global_state::ProjectRegistration::new(other_app.project_scope.clone(), other_app.app_scope_id.clone()).unwrap(),
+    }).unwrap();
+    state.apply_checked(&Event::GlobalRuntimeBound { binding: other_app.clone() }).unwrap();
+    assert_eq!(board_task_view_with_master(&state, &task, None, None, Some(&binding.route_scope())).unwrap().owner, worker.id,
+        "a same-named binding in another app must not invalidate the requested board owner");
+    state.global.projects.get_mut(binding.project_scope.as_str()).unwrap()
+        .runtime_bindings.remove(other_app.binding_id.as_str());
+    state.global.projects.get_mut(binding.project_scope.as_str()).unwrap()
+        .runtime_bindings.remove(binding.binding_id.as_str());
+    drop(state);
+    assert_eq!(worker_identity_presence(&server, &worker), IdentityPresence::Missing,
+        "a foreign-only binding must not prove a local identity");
+    let mut state = server.state.lock().unwrap();
+    assert_eq!(board_task_view(&state, &task).unwrap().owner, "");
+    state.apply_checked(&Event::GlobalRuntimeBound { binding: binding.clone() }).unwrap();
+    let mut duplicate = binding.clone();
+    duplicate.binding_id = BindingId::new("duplicate-local-binding").unwrap();
+    duplicate.runtime_id = RuntimeId::new("duplicate-local-runtime").unwrap();
+    state.apply_checked(&Event::GlobalRuntimeBound { binding: duplicate }).unwrap();
+    assert_eq!(board_task_view(&state, &task).unwrap().owner, "");
+    drop(state);
+    assert_eq!(worker_identity_presence(&server, &worker), IdentityPresence::Missing,
+        "multiple applicable local bindings must not be guessed");
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

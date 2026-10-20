@@ -319,7 +319,7 @@ fn assert_rejected_without_message(
 }
 
 #[test]
-fn cross_project_stale_identity_enqueue_is_durable_and_replayable() {
+fn cross_project_route_projection_loss_preserves_binding_and_durable_enqueue() {
     let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (mut fixture, source_pane) =
         Fixture::isolated_with_pane_command("cross-project-stale-identity", "sleep 600");
@@ -418,7 +418,8 @@ fn cross_project_stale_identity_enqueue_is_durable_and_replayable() {
 
     let stale_workers = workers_at(&fixture, &target_context);
     let stale_target = worker_row(&stale_workers, &target_id);
-    assert_eq!(stale_target["presence"], "missing", "{stale_target}");
+    assert_eq!(stale_target["presence"], "present", "{stale_target}");
+    assert_eq!(stale_target["identity_valid"], true, "{stale_target}");
     assert_eq!(stale_target["endpoint_live"], true, "{stale_target}");
     assert_eq!(stale_target["role"], "master", "{stale_target}");
 

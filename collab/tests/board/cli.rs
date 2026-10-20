@@ -41,6 +41,76 @@ fn publish(fixture: &AppFixture, id: &str) -> Value {
     )
 }
 
+#[test]
+fn unclosed_task_with_retired_owner_is_visible_without_an_assignee() {
+    let (mut fixture, master, peer) = setup();
+    publish(&fixture, "orphaned-open-task");
+    let claimed = fixture.run_public(
+        &[
+            "board",
+            "claim",
+            "orphaned-open-task",
+            "--expected-revision",
+            "1",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(claimed["task"]["owner"], peer);
+    fixture.stop_daemon();
+    let project = std::fs::canonicalize(&fixture.project).unwrap();
+    let record = std::fs::read_to_string(fixture.host_state.join("routes.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|row| row["project_scope"] == project.to_string_lossy().as_ref())
+        .unwrap();
+    let journal = PathBuf::from(record["storage_root"].as_str().unwrap())
+        .join(".agent-collab/server/journal.jsonl");
+    // Start the read-only consumer from a retained task whose owner has
+    // already retired. Retirement admission itself is not under test here.
+    let retired = json!({"ev": "WorkerClosed", "worker_id": peer,
+        "closed_by": master, "reason": "owned fixture retired identity",
+        "snapshot_captured_ms": null, "at_ms": 1});
+    use std::io::Write;
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&journal)
+            .unwrap(),
+        "{retired}"
+    )
+    .unwrap();
+    let task_records = |path: &std::path::Path| -> Vec<Value> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|row| {
+                row["task"]["id"] == "orphaned-open-task" || row["task_id"] == "orphaned-open-task"
+            })
+            .collect()
+    };
+    let before = task_records(&journal);
+    fixture.start_daemon();
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let task = board["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "orphaned-open-task")
+        .unwrap();
+    assert_eq!(task["owner"], "", "{task}");
+    assert_eq!(task["owner_display_name"], "", "{task}");
+    assert_eq!(task["publisher"], master);
+    assert_eq!(task["status"], "working");
+    assert_eq!(task["revision"], claimed["task"]["revision"]);
+    assert_eq!(
+        task_records(&journal),
+        before,
+        "board must preserve task ownership and history"
+    );
+}
+
 fn role_patrol_text(context: &Value) -> String {
     let brief = &context["role_brief"];
     let responsibilities = brief["responsibilities"]

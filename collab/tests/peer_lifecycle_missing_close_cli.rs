@@ -421,7 +421,8 @@ fn close_retires_a_route_less_tmux_peer_after_its_exact_pane_is_missing() {
 
     let workers = workers_for_route(&fixture, &fixture.root, &app_scope_id);
     let row = worker_row(&workers, &target_id);
-    assert_eq!(row["presence"], "missing", "{row}");
+    assert_eq!(row["presence"], "present", "{row}");
+    assert_eq!(row["identity_valid"], true, "{row}");
     assert_eq!(row["endpoint_live"], true, "{row}");
 
     let route = fixture
@@ -525,7 +526,8 @@ fn close_route_less_present_target_stays_cleanup_open_without_retirement() {
 
     let workers = workers_for_route(&fixture, &fixture.root, &app_scope_id);
     let row = worker_row(&workers, &target_id);
-    assert_eq!(row["presence"], "missing", "{row}");
+    assert_eq!(row["presence"], "present", "{row}");
+    assert_eq!(row["identity_valid"], true, "{row}");
     assert_eq!(row["endpoint_live"], true, "{row}");
 
     let close = close_target(
@@ -595,7 +597,7 @@ fn close_route_less_unknown_target_stays_unknown_without_retirement() {
     target_session.wait_for_server_exit();
     let workers = workers_for_route(&fixture, &fixture.root, &app_scope_id);
     let row = worker_row(&workers, &target_id);
-    assert_eq!(row["identity_valid"], false, "{row}");
+    assert_eq!(row["identity_valid"], true, "{row}");
     assert_eq!(row["endpoint_live"], Value::Null, "{row}");
 
     let close = close_target(

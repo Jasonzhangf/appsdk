@@ -21,6 +21,8 @@ context 恢复还会把当前身份已存在且仍有效的订阅对齐到当前
 这不新增巡检周期，不重置触发时间、次数或到期时间；显式取消和已到期的订阅不恢复。
 peer 仍负责按自己的目标创建或续订所需的巡检范围。
 
+身份恢复不依赖 board、任务分配或空闲产能。worker 状态从所属项目的当前 binding 读取身份事实；端点和活动状态分别观察，不把 host-only route 投影缺失误报为项目身份失效。
+
 ## 适用身份
 
 只有当前执行者已在本项目成功注册为 Collab peer，后文的协作规则才适用；各角色规则只约束该角色。master 规则还要求当前 peer 持有经明确授权的 master 权限。未注册的 `codex exec --profile gcm` worker 不因受托而成为 Collab peer，也不适用本 Skill 的协作协议。加载本 Skill、任务提到 Collab、看到 master 名称或启动多个 worker，都不代表已注册或取得 master 权限。
@@ -542,6 +544,8 @@ status. Never call a transport command directly; the server owns transport
 selection and sends only through the selected adapter.
 
 ## Public task board and read-only dashboard
+
+未关闭任务保留；负责人身份的当前绑定失效时，board 负责人显示为空，由 master 重新安排。读取不恢复旧身份、不自动关闭任务，也不修改历史 owner、资源或证据。已关闭任务保留历史负责人。board 是独立业务读取，不参与身份恢复判定。
 
 The task board is the shared work surface for registered masters and peers.
 Each active role declares its current work and may queue later work here.

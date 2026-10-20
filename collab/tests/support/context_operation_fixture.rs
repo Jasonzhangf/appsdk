@@ -71,6 +71,7 @@ pub struct Fixture {
     pub root: PathBuf,
     pub host_state: PathBuf,
     pub tmux_socket: PathBuf,
+    tmux_session: String,
     active_daemon: bool,
     hidden_project_journal: Option<PathBuf>,
     hook_socket: Option<PathBuf>,
@@ -112,6 +113,7 @@ impl Fixture {
             root,
             host_state,
             tmux_socket: tmux_socket.clone(),
+            tmux_session: label.to_owned(),
             active_daemon: false,
             hidden_project_journal: None,
             hook_socket: None,
@@ -180,6 +182,7 @@ impl Fixture {
             root: root.clone(),
             host_state,
             tmux_socket: root.join("unused.sock"),
+            tmux_session: String::new(),
             // A plain `context` invocation may auto-start the daemon even
             // without a tmux identity anchor, so Drop owns that lifecycle.
             active_daemon: true,
@@ -587,13 +590,17 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         self.restore_project_journal();
         self.stop_daemon();
-        let _ = Command::new("tmux")
-            .args([
-                "-S",
-                self.tmux_socket.to_str().unwrap_or_default(),
-                "kill-server",
-            ])
-            .output();
+        if !self.tmux_session.is_empty() {
+            let _ = Command::new("tmux")
+                .args([
+                    "-S",
+                    self.tmux_socket.to_str().unwrap_or_default(),
+                    "kill-session",
+                    "-t",
+                    &self.tmux_session,
+                ])
+                .output();
+        }
         if std::thread::panicking() {
             eprintln!(
                 "preserving failed public fixture: root={} host_state={}",

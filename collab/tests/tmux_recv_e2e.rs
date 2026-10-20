@@ -20,6 +20,7 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
         root: root.clone(),
         host_state,
         tmux_socket: tmux_socket.clone(),
+        tmux_session: "collab-tmux-recv-e2e".into(),
         initialized: false,
     };
 
@@ -323,6 +324,7 @@ fn context_recovers_archived_master_in_the_same_live_pane() {
         root: root.clone(),
         host_state,
         tmux_socket: tmux_socket.clone(),
+        tmux_session: "collab-pane-recovery".into(),
         initialized: false,
     };
     tmux(
@@ -579,6 +581,7 @@ fn implicit_context_repairs_a_rejected_same_pane_credential() {
         root: root.clone(),
         host_state: host_state.clone(),
         tmux_socket: tmux_socket.clone(),
+        tmux_session: "collab-implicit-context".into(),
         initialized: false,
     };
     tmux(
@@ -690,6 +693,7 @@ fn context_returns_the_binding_receipt_that_addresses_the_route() {
         root: root.clone(),
         host_state,
         tmux_socket: tmux_socket.clone(),
+        tmux_session: "collab-context-binding".into(),
         initialized: false,
     };
     tmux(
@@ -844,6 +848,7 @@ fn context_missing_facts_and_invalid_supplement_have_no_identity_side_effect() {
         root: root.clone(),
         host_state: host_state.clone(),
         tmux_socket: root.join("unused.sock"),
+        tmux_session: String::new(),
         initialized: false,
     };
     fixture.initialized = true;

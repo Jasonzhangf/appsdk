@@ -225,7 +225,8 @@ fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Va
             "responsibilities": [
                 "Run `appsdk longhorizon show` to reconstruct goal, tasks, workers, blockers, and bugs.",
                 "Split work into independent scopes; assign tasks and resources; keep useful worker capacity loaded.",
-                "Before ending each scheduling turn, saturate every live present peer first, then schedule managed subagents within the configured cap; never stay idle while eligible capacity remains.",
+                "Assign long-horizon work to an eligible peer first; that peer orchestrates concurrent independent `codex exec --profile gcm` workers. Start a master-owned GCM worker only when every eligible peer is busy.",
+                "On every patrol, remove only unneeded owned worktrees after recoverable extraction; reclaim stale owned resources; close each open P0/P1 with applicable evidence or explicitly park it with owner, cause, and unblock condition; route each new production issue through the project's canonical intake before repair; preserve protected dirty/active/shared/unknown resources. Rearm a consumed one-shot goal/deadline wake before the patrol ends when scheduling continues. Read, ACK, status, or dispatch receipt is never completion.",
                 "Delivery, merge, or a review verdict is not a lifecycle endpoint; drive review/integration/cleanup/close and assign the next ready P0/P1 task.",
                 "Own worker blockers: investigate, unblock, reassign, or close. Do not wait for someone else.",
                 "Drive test, verification, commit, merge, worktree cleanup, and task closure.",
@@ -243,7 +244,7 @@ fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Va
             },
             "blocked_boundary": "Investigate and unblock first; only pause for a true external approval or dependency gate.",
             "completion_action": "Drive the project to verified merge, cleanup, task closure, and final acceptance.",
-            "next_action": "Run `appsdk longhorizon show`, saturate live peers first, then schedule managed subagents within the configured cap; do not end the scheduling turn while eligible capacity remains idle. Delivery or review triggers review/integration/cleanup/dispatch, not an endpoint.",
+            "next_action": "Run `appsdk longhorizon show`; assign long-horizon work to eligible peers first, keep eligible capacity saturated, verify and integrate delivered work, execute every patrol obligation, and rearm consumed one-shot wakes before ending the patrol. Delivery or review is not an endpoint.",
             "notification_rule": "A notification is an interrupt, not completion. Do its P0/P1/P2 action, then resume scheduling; never stop on ACK/read/summary."
         });
     }
@@ -254,28 +255,29 @@ fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Va
             .find(|record| record.peer == worker_id)
             .map(|record| record.parent.clone());
         return json!({
-            "role": "managed-subagent",
-            "role_task": "Execute the assigned independent task and return evidence to parent/master.",
+            "role": "legacy-managed-compatibility",
+            "role_task": "This is a retained legacy managed record, not an active execution or dispatch surface.",
             "responsibilities": [
-                "Stay inside the assigned task, worktree, file scope, delivery conditions, and tests.",
-                "Accept and execute master/parent instructions for this assignment; do not create a global schedule.",
-                "On trouble, investigate first. Send root cause, attempted actions, proposed fix, and any required decision to the live master; copy parent when different.",
-                "Complete implementation, tests, commit, delivery evidence, and resource cleanup; do not stop at code-written or ACK."
+                "Preserve the record, its journal, mailbox, worktree, and evidence ownership until an explicit owner-scoped migration or retirement.",
+                "Do not start new production work, claim public board tasks, invite peers, or create managed children.",
+                "Inspect the record through the owner's compatibility commands and report migration or retirement needs to the recorded parent or current master."
             ],
             "communication_recovery": communication_recovery_brief(),
             "authority": {
                 "managed_subagent": true,
-                "must_obey_master": true,
-                "may_decline_master_invite": false
+                "must_obey_master": false,
+                "may_decline_master_invite": true,
+                "may_start_new_work": false,
+                "may_dispatch": false
             },
             "derivation": {
-                "kind": "managed-subagent",
+                "kind": "legacy-managed-compatibility",
                 "parent": parent
             },
-            "blocked_boundary": "Stay within the assigned task and report a concrete root cause, proposed fix, and required decision to parent/master.",
-            "completion_action": "Return the completed scoped task with implementation, tests, commit, delivery evidence, and resource cleanup.",
-            "next_action": "Continue the assigned task; report ready when idle.",
-            "notification_rule": "Handle the named priority action, then resume your assigned task. Reading or ACK is never task progress."
+            "blocked_boundary": "Do not execute or dispatch new work; use an owner-scoped migration or retirement path.",
+            "completion_action": "Preserve the record until its owner migrates or retires it.",
+            "next_action": "Run `collab context`; do not start new work. Ask the recorded parent or current master for an owner-scoped migration or retirement.",
+            "notification_rule": "Handle only the named compatibility or migration action; reading, ACK, or status is not execution progress."
         });
     }
     json!({
@@ -283,6 +285,7 @@ fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Va
         "role_task": "Own and complete your independent task; collaborate with the master without abandoning existing ownership.",
         "responsibilities": [
             "Execute your registered task end to end within its worktree and file scope: implement, test, commit, deliver evidence, and close resources.",
+            "When assigned long-horizon work, orchestrate concurrent independent `codex exec --profile gcm` workers inside your task scope; use only the documented fallback when GCM is unavailable.",
             "Evaluate master collaboration requests against current ownership and capacity. Accept ready non-conflicting work; decline or negotiate conflicts explicitly instead of silently ignoring them.",
             "On trouble, investigate first. Report root cause, attempted actions, proposed fix, and the exact decision needed to the live master.",
             "Do not wait passively and do not stop on ACK/read/summary; after handling a notification, resume your current task."

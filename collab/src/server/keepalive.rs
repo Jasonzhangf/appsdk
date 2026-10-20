@@ -324,7 +324,7 @@ fn flush_idle_batches_if_ready(server: &Server, now: i64) {
         "master-wake-batch".to_string()
     };
     let body = format!(
-        "newly_idle={} live_idle={} blocked={} pending_merges={} goal_due={}. Scheduling continues: saturate live present peers first, then schedule managed subagents within the configured cap. Never stay idle while eligible capacity remains. Inspect the task graph, every live peer and managed subagent, liveness, saturation, blockers, and pending merges; dispatch the next ready non-overlapping P0/P1 task to each idle eligible worker, resolve and reassign blockers, and merge accepted candidates that are pending. Cancel only iff no actionable task, dependency, resolvable blocker, or authorized open bug remains, using collab notify unsubscribe {} and record the receipt. If the goal is complete, report the evidence to the user.",
+        "newly_idle={} live_idle={} blocked={} pending_merges={} goal_due={}. Scheduling continues: assign long-horizon work to eligible peers first; each peer orchestrates concurrent independent `codex exec --profile gcm` workers. Start a master-owned GCM worker only when every eligible peer is busy. Inspect the task graph, every live peer, liveness, saturation, blockers, and pending merges; assign the next ready non-overlapping P0/P1 task to each idle eligible peer, resolve and reassign blockers, and merge accepted candidates that are pending. On every patrol, remove only unneeded owned worktrees after recoverable extraction; reclaim stale owned resources; close each open P0/P1 with applicable evidence or explicitly park it with owner, cause, and unblock condition; route each new production issue through the project's canonical intake before repair; preserve protected dirty/active/shared/unknown resources. Rearm a consumed one-shot goal/deadline wake before ending when scheduling continues. Read, ACK, status, or dispatch receipt is never completion. Cancel only iff no actionable task, dependency, resolvable blocker, or authorized open bug remains, using collab notify unsubscribe {} and record the receipt. If the goal is complete, report the evidence to the user.",
         newly_idle.join(","),
         live_idle.join(","),
         blocked.join(","),
@@ -779,6 +779,22 @@ mod tests {
             .expect("master idle batch");
         assert!(
             batch.body.contains("pending_merges=task-merge"),
+            "{}",
+            batch.body
+        );
+        assert!(
+            batch.body.contains("codex exec --profile gcm"),
+            "{}",
+            batch.body
+        );
+        assert!(
+            batch.body.contains("protected dirty/active/shared/unknown"),
+            "{}",
+            batch.body
+        );
+        assert!(batch.body.contains("canonical intake"), "{}", batch.body);
+        assert!(
+            batch.body.contains("one-shot goal/deadline"),
             "{}",
             batch.body
         );

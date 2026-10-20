@@ -1304,7 +1304,7 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
     if next_actions.is_empty() {
         if master["worker_id"].as_str() == Some(worker_id.as_str()) {
             next_actions.push(
-                "run `appsdk longhorizon show`, saturate live peers first, then schedule managed subagents within the configured cap; do not end the scheduling turn while eligible capacity remains idle"
+                "run `appsdk longhorizon show`, assign long-horizon work to eligible peers first, inspect and saturate eligible capacity, execute generic patrol obligations, and rearm consumed one-shot wakes before ending the patrol"
                     .into(),
             );
         } else {

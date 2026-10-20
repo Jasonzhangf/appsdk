@@ -1051,6 +1051,29 @@ fn verified_public_create_can_be_bound_and_read_back_as_managed() {
         String::from_utf8_lossy(&child_context.stdout),
         String::from_utf8_lossy(&child_context.stderr)
     );
+    let child_context: Value =
+        serde_json::from_slice(&child_context.stdout).expect("managed child context emits JSON");
+    let child_snapshot = &child_context["result"]["snapshot"];
+    assert_eq!(
+        child_snapshot["role_brief"]["role"], "legacy-managed-compatibility",
+        "{child_context}"
+    );
+    assert_eq!(
+        child_snapshot["authority"]["managed_subagent"], true,
+        "{child_context}"
+    );
+    assert_eq!(
+        child_snapshot["authority"]["may_start_new_work"], false,
+        "{child_context}"
+    );
+    assert_eq!(
+        child_snapshot["authority"]["may_dispatch"], false,
+        "{child_context}"
+    );
+    assert_eq!(
+        child_snapshot["role_brief"]["derivation"]["kind"], "legacy-managed-compatibility",
+        "{child_context}"
+    );
     let mut ready =
         fixture.configured_command(&["subagent", "ready", "managed-created-peer"], None);
     configure_child_runtime(&mut ready);

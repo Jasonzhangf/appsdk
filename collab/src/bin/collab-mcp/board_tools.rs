@@ -4,9 +4,9 @@ use serde_json::{json, Value};
 pub fn tools() -> Vec<Value> {
     let revision = json!({"type":"integer","minimum":1});
     vec![
-        tool("collab_board_show", "Read public tasks and the caller's own or managed-child private queue. Private child work is visible only to the child and its parent. Does not register peers, start the daemon, or consume messages.", json!({}), &[]),
-        tool("collab_board_publish", "Any registered master, peer, or managed child publishes a pending task with delivery/test conditions. Ordinary actors publish publicly; managed children publish private queue work. This does not start execution or transfer ownership.", json!({"id":{"type":"string"},"title":{"type":"string"},"description":{"type":"string"},"delivery_condition":{"type":"string"},"test_condition":{"type":"string"},"priority":{"type":"string","enum":["p0","p1","p2","p3","p4"]}}), &["id","title","description","delivery_condition","test_condition"]),
-        tool("collab_board_claim", "Any registered actor atomically claims one pending task at the observed revision. Public tasks are claimable by registered actors; a private queue task is claimable only by its publisher. Success transfers TaskRec.owner and enters working without changing publisher.", json!({"id":{"type":"string"},"expected_revision":revision}), &["id","expected_revision"]),
+        tool("collab_board_show", "Read public tasks. Private managed-child queues are exposed only for legacy compatibility diagnosis to the child and its parent. Does not register peers, start the daemon, or consume messages.", json!({}), &[]),
+        tool("collab_board_publish", "A registered peer publishes a pending public task with delivery/test conditions. This does not start execution or transfer ownership. Legacy managed children may retain private queue publications only for compatibility diagnosis.", json!({"id":{"type":"string"},"title":{"type":"string"},"description":{"type":"string"},"delivery_condition":{"type":"string"},"test_condition":{"type":"string"},"priority":{"type":"string","enum":["p0","p1","p2","p3","p4"]}}), &["id","title","description","delivery_condition","test_condition"]),
+        tool("collab_board_claim", "A registered peer atomically claims one pending public task at the observed revision. Success transfers TaskRec.owner and enters working without changing publisher. A legacy private queue task remains claimable only by its publisher.", json!({"id":{"type":"string"},"expected_revision":revision}), &["id","expected_revision"]),
         tool("collab_board_invite", "Live master invites one idle ordinary peer. Invitation reserves public dispatch capacity, not task ownership. A peer may decline or independently register its own work.", json!({"id":{"type":"string"},"to":{"type":"string"},"expected_revision":revision}), &["id","to","expected_revision"]),
         tool("collab_board_respond", "Only the invited peer accepts or declines an observed invitation. Accept rechecks other responsibilities and binding before transferring owner; decline requires reason and preserves publisher ownership.", json!({"id":{"type":"string"},"accept":{"type":"boolean"},"decline":{"type":"boolean"},"expected_revision":revision,"reason":{"type":"string"}}), &["id","expected_revision"]),
         tool("collab_board_withdraw", "Live master withdraws an unaccepted invitation with its observed revision and reason. Does not reclaim peer-owned execution.", json!({"id":{"type":"string"},"expected_revision":revision,"reason":{"type":"string"}}), &["id","expected_revision","reason"]),
@@ -133,6 +133,24 @@ mod tests {
                 1
             );
         }
+    }
+
+    #[test]
+    fn managed_board_work_is_labeled_legacy_not_active_assignment() {
+        let descriptions: std::collections::HashMap<_, _> = tools()
+            .into_iter()
+            .map(|tool| {
+                let name = tool["name"].as_str().unwrap().to_owned();
+                let description = tool["description"].as_str().unwrap().to_owned();
+                (name, description)
+            })
+            .collect();
+        assert!(descriptions["collab_board_publish"].starts_with("A registered peer publishes"));
+        assert!(descriptions["collab_board_publish"].contains("Legacy managed children"));
+        assert!(descriptions["collab_board_publish"].contains("compatibility diagnosis"));
+        assert!(descriptions["collab_board_show"].contains("legacy compatibility"));
+        assert!(!descriptions["collab_board_publish"]
+            .starts_with("Any registered master, peer, or managed child"));
     }
 
     #[test]

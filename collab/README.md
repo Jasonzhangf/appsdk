@@ -20,10 +20,16 @@ wake is a bounded preview; the durable mailbox remains authoritative.
   brief from server role truth; promotion and delegation return the new brief.
   The brief defines role, authority, derivation, blocked boundary, completion
   action, and next action without a second prompt contract.
-- Registered masters and peers publish pending work on the board. Peers and
-  registered managed children claim eligible work under their own identity;
-  peers may publish and claim their own work. Master may also invite an
-  ordinary peer. Private managed dispatch retains its existing protocol.
+- Registered masters and peers publish pending work on the board. Peers claim
+  eligible work under their own identity; peers may publish and claim their
+  own work, and master may invite an ordinary peer.
+- Ordinary execution and observation children use an independent
+  `codex exec --profile gcm`. Long-horizon work goes to a peer first. That peer
+  orchestrates concurrent GCM workers inside its task. Master starts its own
+  GCM worker only when every eligible peer is busy.
+- Managed-child commands remain compatibility records for diagnosis or
+  migration. They are not the production concurrency path and do not form a
+  second scheduler.
 - Each peer owns its task lifecycle after acceptance: latest-main sync, private
   worktree, implementation, tests, exact commit, candidate verification, short
   integration lease, main merge/verification/push, and cleanup.
@@ -60,13 +66,9 @@ keeps its owner and resources. Resuming it rechecks execution capacity.
 Before idle and on the next activation, recheck blockers and unfinished duties.
 These are agent actions; the board adds no periodic worker wake or automatic
 execution. The [Collab Skill](skills/collab/SKILL.md#continue-the-queue-and-recheck-blockers)
-defines each role's steps. Managed private queues are visible only to the child
-and its parent; the public board shows parent responsibility for public work.
-
-Subworkers normally receive assignments directly from their peer parent or
-master through the owning executor. A bound child's parent or current master
-can use `collab subagent send`. Board claim remains optional for a subworker;
-an existing assignment does not require a second publish/claim sequence.
+defines each role's steps and the standing patrol obligations. Legacy managed
+records may remain visible to their recorded child and parent; the public board
+does not expose their private assignment state.
 
 ## Display names
 
@@ -131,14 +133,15 @@ The context bootstrap also merges the shared `collab-mcp` server into project
 so `collab` can reach the App Server socket without a sandbox prompt. The
 `collab` CLI is a complete fallback when MCP tools are not listed.
 
-Use `collab subagent dispatch` from the live master for a real
-assignment, then `collab task accept <task-id>` from the assigned peer.
+For an ordinary assignment, publish a task, then invite an eligible registered
+peer. The peer accepts or declines in its own identity. A send or invitation
+receipt is not execution or completion.
 Collab master is not Codex root.
 Protocol: `collab master status`, `collab master promote --approval` when no
 live master exists, and `collab master delegate` by the current live master.
 Init and register never create a master; a recorded identity without a live
 App Server thread is not a live master. Independent peers may decline a master
-collaboration invite. A delegated subagent follows its task contract and this
+collaboration invite. A delegated GCM worker follows its task contract and this
 Collab protocol only when it is itself a registered peer; master-only rules
 also require an explicitly authorized master grant.
 
@@ -160,12 +163,13 @@ read latest main
 → close performs mandatory cleanup and persists a cleanup receipt
 ```
 
-The master assignment prefix is durable and idempotent by request ID:
+The ordinary board assignment flow is:
 
 ```text
-collab subagent dispatch --request-id <id> --subject <topic> <body>
-→ peer reads task-<message-id>
-→ collab task accept task-<message-id>
+collab board publish <task-id> ...
+→ collab board show
+→ collab board invite <task-id> --to <peer> --expected-revision <observed>
+→ peer responds with accept or decline
 → task update/deliver/review/integrated/close
 ```
 

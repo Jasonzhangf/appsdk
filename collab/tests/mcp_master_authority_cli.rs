@@ -195,7 +195,7 @@ impl Fixture {
             !self.root.join("h/server.sock").exists(),
             "daemon socket not released"
         );
-        self.tmux(&["kill-server"]);
+        self.tmux(&["kill-session", "-t", "mcp-authority"]);
         std::fs::remove_dir_all(&self.root).expect("remove only owned successful fixture");
         assert!(!self.root.exists());
         self.finished = true;
@@ -216,7 +216,7 @@ impl Drop for Fixture {
         match Command::new("tmux")
             .arg("-S")
             .arg(self.root.join("t.sock"))
-            .arg("kill-server")
+            .args(["kill-session", "-t", "mcp-authority"])
             .output()
         {
             Ok(output) if output.status.success() => {}

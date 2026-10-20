@@ -67,8 +67,8 @@ The upgrade is a replacement, not a compatibility layer:
 The global daemon can be shared by multiple projects. A binary upgrade alone
 does not authorize stopping or restarting it. Keep the existing daemon running
 unless an operator explicitly opens a maintenance window; then use only the
-official lifecycle and record the old/new binary version and digest, PID,
-socket, identity binding, and a live replay result. Never use `pkill`,
+official lifecycle and record the old/new binary version, PID, socket,
+identity binding, and a live replay result. Never use `pkill`,
 `killall`, broad process matching, a second socket, or an older binary as a
 fallback.
 
@@ -208,10 +208,11 @@ switch that binding to tmux on failure. See
 
 Never use implicit first-register master, master recovery, transfer-master,
 legacy central dispatch (`collab task dispatch`), task claim queue,
-remove-worker, or heartbeat recovery. The current master may use the
-explicit scheduler assignment (`collab subagent dispatch`) to create one
-durable task/message reservation for an eligible peer. Collab master is a
-separate explicit user-approved authority
+remove-worker, or heartbeat recovery. Ordinary peer assignment uses public
+board publish/invite. `collab subagent dispatch` is a legacy managed
+compatibility path only for old state diagnosis or migration; it is not the
+active peer execution surface. Collab master is a separate explicit
+user-approved authority
 decision, not Codex root, migration, or daemon recovery. The authority owner is
 the current typed grant in the exact project and app scope, with only empty or
 assigned states; the current holder controls independent of its liveness. An
@@ -222,9 +223,9 @@ Journal `RootAssigned` events become `MasterAssigned` on daemon replay.
 Hidden `collab root ...` commands run the same master protocol. AppSDK init and
 fresh governance init never clear master authority and are not an implicit
 authority reset. Independent peers may decline a master collaboration invite.
-A delegated subagent follows its task contract and this Skill's Collab protocol
-only when it is itself a registered peer; master-only rules also require an
-explicitly authorized master grant:
+A delegated GCM worker follows its task contract. It follows this Skill's
+Collab protocol only when it is itself a registered peer; master-only rules
+also require an explicitly authorized master grant:
 
 ```text
 collab master status

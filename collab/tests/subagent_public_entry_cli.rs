@@ -161,6 +161,7 @@ fn start_is_rejected_before_identity_coordination() {
         root: root.clone(),
         host_state: root.join("h"),
         tmux_socket: root.join("t.sock"),
+        tmux_session: String::new(),
         initialized: false,
     };
 
@@ -279,6 +280,7 @@ fn mcp_rejects_empty_or_invalid_success_output_for_subagent_only() {
         root: root.clone(),
         host_state: root.join("h"),
         tmux_socket: root.join("t.sock"),
+        tmux_session: String::new(),
         initialized: false,
     };
     std::fs::create_dir_all(&fixture.root).expect("create MCP test root");

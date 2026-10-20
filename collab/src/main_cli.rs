@@ -352,7 +352,7 @@ pub(crate) enum Cmd {
         #[arg(long, default_value_t = 0)]
         port: u16,
     },
-    /// Task board for registered masters, peers, and managed subworkers
+    /// Task board for registered masters and peers
     Board {
         #[command(subcommand)]
         cmd: BoardCommand,

@@ -143,7 +143,7 @@ fn context_gives_an_idle_master_one_canonical_scheduling_action() {
     assert!(context.data["recorded_unusable"].is_null());
     assert_eq!(
         context.data["next_actions"],
-        serde_json::json!(["run `appsdk longhorizon show`, saturate live peers first, then schedule managed subagents within the configured cap; do not end the scheduling turn while eligible capacity remains idle"])
+        serde_json::json!(["run `appsdk longhorizon show`, assign long-horizon work to eligible peers first, inspect and saturate eligible capacity, execute generic patrol obligations, and rearm consumed one-shot wakes before ending the patrol"])
     );
     let operations = context.data["operations"].as_array().expect("operations");
     assert!(
@@ -155,7 +155,7 @@ fn context_gives_an_idle_master_one_canonical_scheduling_action() {
             .iter()
             .any(|operation| operation["kind"] == "next_action"
                 && operation["action"]
-                    == "Run `appsdk longhorizon show`, saturate live peers first, then schedule managed subagents within the configured cap; do not end the scheduling turn while eligible capacity remains idle. Delivery or review triggers review/integration/cleanup/dispatch, not an endpoint.")
+                    == "Run `appsdk longhorizon show`; assign long-horizon work to eligible peers first, keep eligible capacity saturated, verify and integrate delivered work, execute every patrol obligation, and rearm consumed one-shot wakes before ending the patrol. Delivery or review is not an endpoint.")
     );
     assert!(context.data["role_brief"]["responsibilities"]
         .as_array()
@@ -164,10 +164,10 @@ fn context_gives_an_idle_master_one_canonical_scheduling_action() {
     assert!(context.data["role_brief"]["responsibilities"]
         .as_array()
         .unwrap()
-        .contains(&serde_json::json!("Before ending each scheduling turn, saturate every live present peer first, then schedule managed subagents within the configured cap; never stay idle while eligible capacity remains.")));
+        .contains(&serde_json::json!("Assign long-horizon work to an eligible peer first; that peer orchestrates concurrent independent `codex exec --profile gcm` workers. Start a master-owned GCM worker only when every eligible peer is busy.")));
     assert_eq!(
         context.data["role_brief"]["next_action"],
-        "Run `appsdk longhorizon show`, saturate live peers first, then schedule managed subagents within the configured cap; do not end the scheduling turn while eligible capacity remains idle. Delivery or review triggers review/integration/cleanup/dispatch, not an endpoint."
+        "Run `appsdk longhorizon show`; assign long-horizon work to eligible peers first, keep eligible capacity saturated, verify and integrate delivered work, execute every patrol obligation, and rearm consumed one-shot wakes before ending the patrol. Delivery or review is not an endpoint."
     );
     std::fs::remove_dir_all(root).ok();
 }

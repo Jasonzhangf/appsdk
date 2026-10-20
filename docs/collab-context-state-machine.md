@@ -19,7 +19,7 @@ daemon 拥有身份选择、创建、恢复、更新、credential/binding/lease 
 
 | 角色 | 允许 | 禁止 |
 | --- | --- | --- |
-| Agent（普通 peer / master / managed-subagent） | 调用 `collab context`；读取 `state_snapshot`；只按 `requires_identity_update.required_fields` 用一次 `collab context --provide` 补充真实事实 | 手改 routes/journal/mailbox/token；选择或猜测 worker；运行身份选择/恢复或 status/route/init 探测命令；设置身份覆盖环境或 approval supplement |
+| Agent（普通 peer / master） | 调用 `collab context`；读取 `state_snapshot`；只按 `requires_identity_update.required_fields` 用一次 `collab context --provide` 补充真实事实 | 手改 routes/journal/mailbox/token；选择或猜测 worker；运行身份选择/恢复或 status/route/init 探测命令；设置身份覆盖环境或 approval supplement |
 | CLI `context` 包装 | 解析 canonical project root；检查/创建 baseline；检查/启动 daemon；自动观察 runtime facts；提交 typed `IdentityContext` 请求并显示快照 | 选择 worker；创建或加载 identity；mint credential；跑 CLI 侧 recovery 序列 |
 | Daemon identity gate | 核验自动观察和 supplement 事实；选择、创建、恢复、更新身份；持久化 credential/binding/default lease；返回完整 snapshot 或精确缺失字段 | 把缺失事实变成 pending workflow；用 worker guess 或 approval 字段补足；把显式错误伪装成成功 |
 | Server Register owner | 在既有 host 事务内校验并提交 route/binding | 接受未验证身份；创建双主；把业务 payload 当控制真源 |

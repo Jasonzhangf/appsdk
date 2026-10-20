@@ -23,6 +23,7 @@ struct Fixture {
     root: PathBuf,
     host_state: PathBuf,
     tmux_socket: PathBuf,
+    tmux_session: String,
     initialized: bool,
 }
 
@@ -168,9 +169,17 @@ impl Drop for Fixture {
                 thread::sleep(Duration::from_millis(50));
             }
         }
-        let _ = Command::new("tmux")
-            .args(["-S", self.tmux_socket.to_str().unwrap(), "kill-server"])
-            .output();
+        if self.initialized {
+            let _ = Command::new("tmux")
+                .args([
+                    "-S",
+                    self.tmux_socket.to_str().unwrap(),
+                    "kill-session",
+                    "-t",
+                    &self.tmux_session,
+                ])
+                .output();
+        }
         if std::thread::panicking() {
             eprintln!(
                 "preserving failed e2e fixture for diagnosis: root={} host_state={}",
@@ -238,6 +247,7 @@ fn single_pane_fixture(label: &str) -> (Fixture, Pane) {
         root: root.clone(),
         host_state,
         tmux_socket: tmux_socket.clone(),
+        tmux_session: label.to_owned(),
         initialized: false,
     };
     tmux(

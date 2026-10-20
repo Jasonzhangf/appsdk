@@ -891,20 +891,13 @@ server snapshot plus `operations`. The default agent flow does not start with
 `collab master status`, `appsdk init .`, `collab down`/`up`, or
 `collab route resolve`; those remain explicit human diagnostics only.
 
-Live master dispatch uses `collab subagent dispatch --request-id <id>
---subject <topic> "<body>"` with optional
-`--feature-id/--worktree-path/--branch/--base-commit/--priority/--next-step`.
-`--request-id` is ASCII `[A-Za-z0-9_-]`, max 80 bytes, and idempotent.
-`--worktree-path` must match the configured `[worktree].base` layout when set
-(for example `<base>/<project-key>/<short-slug>`); legacy
-`<project-main>/playground/<short-slug>` records stay valid during the
-transition. Leaf max 32 ASCII bytes, no `..`. Only the live registered master
-can dispatch; the selected peer must be registered, present, non-managed, and
-inactive. Success returns `request_id`, `message_id`, `task_id`, `target`,
-`status: assigned`, `admission.*`, and `notification` (`sent` |
-`subscribed-not-sent` | `mailbox-only-no-subscription`). `sent` is not
-consumption; verify with `collab msg <id>` (`consumed_by_recv`) and
-`collab task status <task-id>`.
+The ordinary peer assignment path is the public board publish/invite workflow.
+The live master publishes a task with an observed revision and the target peer
+accepts or declines it in its own identity. `collab subagent dispatch` remains
+a legacy private compatibility path; it is not the active peer execution
+surface. A successful board invitation or legacy send receipt is not message
+consumption, execution, or completion. Verify the durable board/task state and
+the delivered evidence separately.
 
 Peers never share worktrees. Each task owner starts from latest main in one
 declared clean configured worktree path (`<base>/<project-key>/<short-slug>`

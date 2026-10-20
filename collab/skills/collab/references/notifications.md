@@ -79,6 +79,10 @@ collab notify unsubscribe <subscription-id>
   This outcome is not a sender-selected `mailbox-only` mode.
 - A failed/lost/delayed/duplicate wake never rolls back mailbox truth or counts
   as lifecycle evidence.
+- A one-shot resource or deadline subscription is consumed by its attempt.
+  When the selected event requires continued scheduling, rearm the one-shot
+  goal/deadline before the patrol ends. A read, ACK, status summary, or
+  dispatch receipt is not completion.
 - The daemon never infers continuation from task state, thread title, heartbeat,
   progress, ACK, or elapsed time, and must not create a `CONTINUE_TASK` message.
   The task-liveness rule is an Agent/skill obligation: when a supported

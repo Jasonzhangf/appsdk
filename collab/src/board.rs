@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, Subcommand)]
 #[serde(tag = "action", rename_all = "kebab-case")]
 pub enum BoardCommand {
-    /// Read public work plus the caller's own or managed-child private queue.
+    /// Read public work plus a legacy managed child's private compatibility queue.
     Show,
     /// Publish pending work; managed-child publications remain private.
     Publish {

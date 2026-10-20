@@ -49,6 +49,278 @@ fn remove_host_binding_route(path: &std::path::Path, binding_id: &str) {
     std::fs::write(path, lines).expect("write host journal without target route");
 }
 
+fn pane_after_opening_windows(
+    fixture: &Fixture,
+    label: &str,
+    first: &Pane,
+    target_pane_id: &str,
+) -> Pane {
+    let target_number = target_pane_id
+        .strip_prefix('%')
+        .and_then(|value| value.parse::<u32>().ok())
+        .expect("target pane id uses tmux %N form");
+    let first_number = first
+        .pane_id
+        .strip_prefix('%')
+        .and_then(|value| value.parse::<u32>().ok())
+        .expect("first pane id uses tmux %N form");
+    assert!(
+        first_number < target_number,
+        "fixture must open panes after the initial pane"
+    );
+
+    let mut pane_id = first.pane_id.clone();
+    for number in (first_number + 1)..=target_number {
+        let session = format!("{label}-{number}");
+        let output = tmux(
+            &fixture.tmux_socket,
+            &[
+                "new-session",
+                "-d",
+                "-P",
+                "-F",
+                "#{pane_id}",
+                "-s",
+                &session,
+                "sleep 600",
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "open isolated pane {number}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        fixture.track_tmux_session(session);
+        pane_id = String::from_utf8(output.stdout)
+            .expect("created pane id is utf8")
+            .trim()
+            .to_owned();
+        assert_eq!(pane_id, format!("%{number}"));
+    }
+
+    Pane {
+        server_pid: first.server_pid,
+        pane_id,
+        session_anchor: format!("session-{target_pane_id}"),
+        thread_anchor: format!("thread-{target_pane_id}"),
+    }
+}
+
+fn seed_exact_binding_with_one_unrelated_current_thread_route(
+    path: &std::path::Path,
+    source_binding: &Value,
+) -> Value {
+    let source_agent_id = source_binding["agent_id"]
+        .as_str()
+        .expect("source binding has an agent id");
+    let source_binding_id = source_binding["binding_id"]
+        .as_str()
+        .expect("source binding has a binding id");
+
+    let mut target_binding = source_binding.clone();
+    target_binding["agent_id"] = Value::String("codex-%11".into());
+    target_binding["runtime_id"] = Value::String("runtime-tmux-codex-%11".into());
+    target_binding["binding_id"] = Value::String("binding-codex-%11".into());
+
+    let mut records = Vec::new();
+    let mut registered = 0;
+    let mut bound = 0;
+    let mut target_routes = 0;
+    for line in std::fs::read_to_string(path)
+        .expect("read isolated project journal")
+        .lines()
+    {
+        let mut record: Value =
+            serde_json::from_str(line).expect("parse isolated project journal record");
+        match record["ev"].as_str() {
+            Some("GlobalCurrentThreadRouteSet")
+                if record["binding"]["binding_id"] == source_binding_id =>
+            {
+                target_routes += 1;
+                continue;
+            }
+            Some("GlobalRuntimeBound") if record["binding"]["binding_id"] == source_binding_id => {
+                record["binding"] = target_binding.clone();
+                bound += 1;
+            }
+            Some("Registered") if record["worker"]["id"] == source_agent_id => {
+                record["worker"]["id"] = Value::String("codex-%11".into());
+                registered += 1;
+            }
+            Some("NotificationSubscribed")
+                if record["subscription"]["worker_id"] == source_agent_id =>
+            {
+                record["subscription"]["worker_id"] = Value::String("codex-%11".into());
+                let id = record["subscription"]["id"]
+                    .as_str()
+                    .expect("subscription has an id");
+                record["subscription"]["id"] =
+                    Value::String(id.replace(source_agent_id, "codex-%11"));
+            }
+            _ => {}
+        }
+        records.push(record);
+    }
+    assert_eq!(registered, 1, "source journal must have one target worker");
+    assert_eq!(bound, 1, "source journal must have one target binding");
+    assert!(
+        target_routes <= 1,
+        "source journal cannot contain duplicate target route events"
+    );
+
+    let mut unrelated = target_binding.clone();
+    unrelated["binding_id"] = Value::String("binding-unrelated-route".into());
+    unrelated["agent_id"] = Value::String("unrelated-route-peer".into());
+    unrelated["runtime_id"] = Value::String("runtime-unrelated-route".into());
+    unrelated["endpoint_generation"] = Value::from(1);
+    unrelated["session_id"] = Value::String("unrelated-route-session".into());
+    unrelated["native_thread_id"] = Value::String("unrelated-route-thread".into());
+    unrelated["tmux_endpoint"] = Value::Null;
+    let unrelated = json!({
+        "ev": "GlobalCurrentThreadRouteSet",
+        "binding": unrelated,
+    });
+    records.push(unrelated);
+
+    let body = records
+        .iter()
+        .map(|record| serde_json::to_string(record).expect("serialize isolated journal record"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(path, format!("{body}\n")).expect("write isolated project journal");
+
+    let route_events = std::fs::read_to_string(path)
+        .expect("read seeded isolated project journal")
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|record| record["ev"] == "GlobalCurrentThreadRouteSet")
+        .collect::<Vec<_>>();
+    assert_eq!(route_events.len(), 1, "{route_events:?}");
+    assert_eq!(
+        route_events[0]["binding"]["binding_id"], "binding-unrelated-route",
+        "{route_events:?}"
+    );
+    target_binding
+}
+
+fn project_journal_for_root(fixture: &Fixture, root: &std::path::Path) -> std::path::PathBuf {
+    let project_scope = std::fs::canonicalize(root).expect("canonical project root");
+    let routes = std::fs::read_to_string(fixture.host_routes()).expect("read host route index");
+    if let Some(route) = routes
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|record| {
+            record["op"] == "register"
+                && record["app_scope_id"] == "appserver-cli"
+                && record["project_scope"] == project_scope.to_string_lossy().as_ref()
+        })
+    {
+        return std::path::PathBuf::from(
+            route["storage_root"]
+                .as_str()
+                .expect("project route has a storage root"),
+        )
+        .join(PROJECT_JOURNAL);
+    }
+
+    let mut journals = Vec::new();
+    fn visit(path: &std::path::Path, journals: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(path).expect("read isolated runtime root") {
+            let path = entry.expect("read isolated runtime entry").path();
+            if path.is_dir() {
+                visit(&path, journals);
+            } else if path.ends_with(PROJECT_JOURNAL) {
+                journals.push(path);
+            }
+        }
+    }
+    visit(&fixture.host_state.join("projects"), &mut journals);
+    journals.retain(|path| {
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .any(|record| {
+                record["ev"] == "GlobalProjectRegistered"
+                    && record["registration"]["project_scope"]
+                        == project_scope.to_string_lossy().as_ref()
+            })
+    });
+    assert_eq!(
+        journals.len(),
+        1,
+        "fixture needs one project journal for {}: {journals:?}",
+        project_scope.display()
+    );
+    journals.pop().expect("one project journal")
+}
+
+fn project_journal_excluding(fixture: &Fixture, excluded: &std::path::Path) -> std::path::PathBuf {
+    fn visit(
+        path: &std::path::Path,
+        excluded: &std::path::Path,
+        journals: &mut Vec<std::path::PathBuf>,
+    ) {
+        for entry in std::fs::read_dir(path).expect("read isolated runtime root") {
+            let path = entry.expect("read isolated runtime entry").path();
+            if path.is_dir() {
+                visit(&path, excluded, journals);
+            } else if path.ends_with(PROJECT_JOURNAL)
+                && std::fs::canonicalize(&path).ok().as_deref() != Some(excluded)
+            {
+                journals.push(path);
+            }
+        }
+    }
+
+    let mut journals = Vec::new();
+    visit(
+        &fixture.host_state.join("projects"),
+        excluded,
+        &mut journals,
+    );
+    assert_eq!(
+        journals.len(),
+        1,
+        "fixture needs exactly one remaining project journal: {journals:?}"
+    );
+    journals.pop().expect("one remaining project journal")
+}
+
+fn retain_exact_host_route(
+    path: &std::path::Path,
+    source_binding_id: &str,
+    target_binding: &Value,
+) -> Value {
+    let mut retained = 0;
+    let records = std::fs::read_to_string(path)
+        .expect("read isolated host journal")
+        .lines()
+        .map(|line| {
+            let mut record: Value =
+                serde_json::from_str(line).expect("parse isolated host journal record");
+            if record["ev"] == "GlobalCurrentThreadRouteSet"
+                && record["binding"]["binding_id"] == source_binding_id
+            {
+                record["binding"] = target_binding.clone();
+                retained += 1;
+            }
+            record
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        retained, 1,
+        "host journal must retain one exact target route"
+    );
+    let body = records
+        .iter()
+        .map(|record| serde_json::to_string(record).expect("serialize host journal record"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(path, format!("{body}\n")).expect("write isolated host journal");
+    target_binding.clone()
+}
+
 fn registered_context_at(
     fixture: &Fixture,
     project_root: &std::path::Path,
@@ -1661,6 +1933,175 @@ fn verified_public_create_can_be_bound_and_read_back_as_managed() {
         .find(|record| record["id"] == "managed-failure-peer")
         .expect("failed managed Send state remains visible through public List");
     assert_eq!(failed_record["status"], "assigned", "{failed_record}");
+}
+
+#[test]
+fn context_replays_exact_binding_when_an_unrelated_route_event_exists() {
+    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (mut fixture, first_pane) = Fixture::isolated("peer-exact-route-replay");
+    let pane = pane_after_opening_windows(&fixture, "peer-exact-route-replay", &first_pane, "%11");
+    let project = fixture.root.join("exact-route-project");
+    std::fs::create_dir_all(project.join(".agent-collab")).expect("create isolated target project");
+    let seeded = registered_context_at(&fixture, &project, "peer-exact-route-seed", &pane);
+    assert_eq!(seeded["result"]["outcome"], "completed", "{seeded}");
+    let source_binding = seeded["result"]["snapshot"]["binding"].clone();
+    let source_binding_id = source_binding["binding_id"]
+        .as_str()
+        .expect("seed has a binding id")
+        .to_owned();
+    assert!(
+        source_binding["endpoint_generation"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0
+    );
+    assert!(source_binding["session_id"].is_string(), "{source_binding}");
+    assert!(
+        source_binding["native_thread_id"].is_string(),
+        "{source_binding}"
+    );
+    assert_eq!(
+        source_binding["tmux_endpoint"]["pane_id"], "%11",
+        "{source_binding}"
+    );
+
+    let host_routes_before = std::fs::read(fixture.host_routes()).expect("read host route index");
+    let project_journal = project_journal_for_root(&fixture, &project);
+    let host_journal = project_journal_excluding(&fixture, &project_journal);
+    fixture.stop_daemon();
+    let binding = seed_exact_binding_with_one_unrelated_current_thread_route(
+        &project_journal,
+        &source_binding,
+    );
+    retain_exact_host_route(&host_journal, &source_binding_id, &binding);
+    let binding_id = binding["binding_id"]
+        .as_str()
+        .expect("seeded target binding id")
+        .to_owned();
+    assert_eq!(binding["agent_id"], "codex-%11", "{binding}");
+    assert_eq!(binding["tmux_endpoint"]["pane_id"], "%11", "{binding}");
+    assert_eq!(
+        std::fs::read(fixture.host_routes()).expect("read retained host route index"),
+        host_routes_before,
+        "the exact target host route must remain unchanged"
+    );
+    let journal = std::fs::read_to_string(&project_journal).unwrap();
+    assert!(
+        journal.lines().any(|line| {
+            serde_json::from_str::<Value>(line).is_ok_and(|record| {
+                record["ev"] == "GlobalRuntimeBound"
+                    && record["binding"]["binding_id"] == binding_id
+            })
+        }),
+        "the exact generation-bound target binding must remain durable"
+    );
+    assert!(
+        !journal.lines().any(|line| {
+            serde_json::from_str::<Value>(line).is_ok_and(|record| {
+                record["ev"] == "GlobalCurrentThreadRouteSet"
+                    && record["binding"]["binding_id"] == binding_id
+            })
+        }),
+        "the target project route event must be omitted"
+    );
+    assert_eq!(
+        journal
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|record| {
+                record["ev"] == "GlobalCurrentThreadRouteSet"
+                    && record["binding"]["binding_id"] == "binding-unrelated-route"
+            })
+            .count(),
+        1,
+        "the isolated journal must contain exactly one unrelated route event"
+    );
+    assert!(
+        !journal.lines().any(|line| {
+            serde_json::from_str::<Value>(line).is_ok_and(|record| {
+                record["ev"] == "GlobalCurrentThreadRouteSet"
+                    && record["binding"]["binding_id"] == binding_id
+            })
+        }),
+        "the project route event for codex-%11 must be absent"
+    );
+    assert!(
+        !journal.lines().any(|line| {
+            serde_json::from_str::<Value>(line).is_ok_and(|record| {
+                record["ev"] == "GlobalCurrentThreadRouteSet"
+                    && record["binding"]["binding_id"] == source_binding_id
+            })
+        }),
+        "the original generated route must not remain after reseeding"
+    );
+    let host_journal = std::fs::read_to_string(&host_journal).unwrap();
+    assert_eq!(
+        host_journal
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|record| {
+                record["ev"] == "GlobalCurrentThreadRouteSet"
+                    && record["binding"]["binding_id"] == binding_id
+            })
+            .count(),
+        1,
+        "the host journal must retain exactly one matching target route"
+    );
+    fixture.restart_after_external_stop();
+
+    let context_output = command_at(
+        &fixture,
+        &project,
+        &["context", "--op", "peer-exact-route-recover"],
+        &pane,
+    );
+    let context: Value = serde_json::from_slice(&context_output.stdout).unwrap_or(Value::Null);
+    assert!(
+        context_output.status.success(),
+        "context failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&context_output.stdout),
+        String::from_utf8_lossy(&context_output.stderr)
+    );
+    let status_output = command_at(
+        &fixture,
+        &project,
+        &["worker", "status", "codex-%11"],
+        &pane,
+    );
+    let status: Value = serde_json::from_slice(&status_output.stdout).unwrap_or(Value::Null);
+    assert!(
+        status_output.status.success(),
+        "worker status failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&status_output.stdout),
+        String::from_utf8_lossy(&status_output.stderr)
+    );
+    let status_row = status["workers"]
+        .as_array()
+        .expect("worker status list")
+        .iter()
+        .find(|worker| worker["id"] == "codex-%11")
+        .cloned();
+    let read_output = command_at(&fixture, &project, &["worker", "read", "codex-%11"], &pane);
+    let read = serde_json::from_slice::<Value>(&read_output.stdout).unwrap_or_else(|_| Value::Null);
+
+    assert_eq!(context["result"]["outcome"], "completed", "{context}");
+    assert!(
+        status_row
+            .as_ref()
+            .is_some_and(|row| row["presence"] == "present"),
+        "worker status={status}; worker read={read}; read stderr={}",
+        String::from_utf8_lossy(&read_output.stderr)
+    );
+    let status_row = status_row.expect("present worker status row");
+    assert_eq!(status_row["identity_valid"], true, "{status}");
+    assert!(
+        read_output.status.success(),
+        "worker read failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&read_output.stdout),
+        String::from_utf8_lossy(&read_output.stderr)
+    );
+    assert_eq!(read["result"]["outcome"], "ok", "{read}");
+    assert!(read["error"].is_null(), "{read}");
 }
 
 #[cfg(feature = "context-cancel-test-hooks")]

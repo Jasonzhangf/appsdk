@@ -68,11 +68,10 @@ impl State {
     /// compatibility index.
     ///
     /// This runs on every replay, independently of
-    /// `restore_unique_current_thread_routes_from_bindings`.  That helper only
-    /// backfills strict routes when a journal has no route event at all; a
-    /// journal whose route events are themselves thread-only (the live host
-    /// journal) would otherwise never index them, leaving every pre-dual-key
-    /// route unresolvable after a restart.
+    /// `restore_unique_current_thread_routes_from_bindings`.  That helper
+    /// backfills strict routes from durable bindings; this index covers the
+    /// thread-only binding shape, including journals whose route events are
+    /// themselves thread-only (the live host journal).
     pub(crate) fn index_legacy_thread_routes_from_bindings(&mut self) -> Result<(), String> {
         let mut bindings = self
             .global

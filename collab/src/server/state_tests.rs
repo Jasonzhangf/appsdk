@@ -1075,10 +1075,9 @@ fn runtime_binding_replay_keeps_a_legacy_thread_only_binding_resolvable() {
 #[test]
 fn legacy_bindings_are_indexed_even_when_a_strict_route_is_present() {
     // The live routecodex journal shape: durable thread-only bindings and a
-    // single strict route event.  The strict route makes
-    // `restore_unique_current_thread_routes_from_bindings` skip, so the
-    // legacy index must be built independently or every pre-dual-key route
-    // becomes unresolvable after a restart.
+    // single strict route event.  The strict restoration path owns only dual-key
+    // routes, so the legacy index must be built independently or every
+    // pre-dual-key route becomes unresolvable after a restart.
     let scope = ProjectScopeId::new("/legacy-mixed").unwrap();
     let legacy = RuntimeBinding {
         project_scope: scope.clone(),
@@ -1120,8 +1119,8 @@ fn legacy_bindings_are_indexed_even_when_a_strict_route_is_present() {
         binding: strict.clone(),
     });
 
-    // Precondition: a strict route exists, so the bindings-based restore
-    // path is skipped in replay.
+    // Precondition: a strict route exists, but the legacy compatibility index
+    // has not yet been projected from durable bindings.
     assert!(st
         .global
         .lookup_current_thread_route(
@@ -1148,9 +1147,8 @@ fn legacy_bindings_are_indexed_even_when_a_strict_route_is_present() {
 #[test]
 fn snapshot_events_keep_legacy_routes_alongside_a_strict_route() {
     // A compacted journal may hold one strict dual-key route plus a
-    // pre-dual-key thread-only route.  Replay skips the bindings-based
-    // restoration as soon as it sees any strict route, so the snapshot
-    // itself must carry the legacy route or restart drops it.
+    // pre-dual-key thread-only route.  The snapshot itself must carry the
+    // legacy route or restart drops it.
     let legacy = RuntimeBinding {
         project_scope: ProjectScopeId::new("/snapshot-legacy").unwrap(),
         app_scope_id: AppServerId::new("appserver-cli").unwrap(),

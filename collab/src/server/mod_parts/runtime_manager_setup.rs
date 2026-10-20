@@ -88,17 +88,18 @@ impl ProjectRuntimeManager {
                         (app_scope, project_scope),
                         RuntimeRoute {
                             root: root.clone(),
-                            storage_root: root,
+                            storage_root: host.storage_root.clone(),
                             runtime: Some(host.clone()),
                         },
                     );
                 }
                 HostRouteOwner::RegisteredNotReady { root } => {
+                    let storage_root = host_paths.app_storage_root(&project_scope, &app_scope);
                     routes
                         .entry((app_scope, project_scope))
                         .or_insert(RuntimeRoute {
                             root: root.clone(),
-                            storage_root: root,
+                            storage_root,
                             runtime: None,
                         });
                 }
@@ -170,7 +171,7 @@ impl ProjectRuntimeManager {
         }
 
         for record in route_records {
-            let (key, root, storage_root) = validate_host_route_record(&record)?;
+            let (key, root, storage_root) = validate_host_route_record(&record, host_paths)?;
             let resident_self_route = is_resident_self_route(
                 &key.0,
                 &key.1,
@@ -366,9 +367,10 @@ impl ProjectRuntimeManager {
             .values()
             .flat_map(|project| project.runtime_bindings.values())
         {
-            let (Some(session_id), Some(native_thread_id)) =
-                (binding.session_id.as_ref(), binding.native_thread_id.as_ref())
-            else {
+            let (Some(session_id), Some(native_thread_id)) = (
+                binding.session_id.as_ref(),
+                binding.native_thread_id.as_ref(),
+            ) else {
                 continue;
             };
             if host
@@ -483,10 +485,11 @@ impl ProjectRuntimeManager {
                 // refresh of this address, never an eviction.
                 if let Some(old) = host_route.as_ref() {
                     if old.endpoint_generation >= binding.endpoint_generation {
-                        return Err(format!(
-                            "RECOVERY_RECONCILE_REQUIRED: host route for {} is at generation {} and project route is at generation {}; re-register the worker to advance the route",
+                        append_log(&self.host.log_path(), &format!(
+                            "RECOVERY_RECONCILE_SKIPPED_SUPERSEDED: host route for {} is at generation {} and project route is at generation {}",
                             binding.binding_id, old.endpoint_generation, binding.endpoint_generation
                         ));
+                        continue;
                     }
                 }
                 self.host
@@ -518,8 +521,7 @@ impl ProjectRuntimeManager {
                     && current.runtime_id == binding.runtime_id
                     && current.project_scope == binding.project_scope
                     && current.app_scope_id == binding.app_scope_id;
-                if !same_durable_route
-                    || current.endpoint_generation >= binding.endpoint_generation
+                if !same_durable_route || current.endpoint_generation >= binding.endpoint_generation
                 {
                     return Err(format!(
                         "RECOVERY_RECONCILE_REQUIRED: host pane route for {} is at generation {}",
@@ -528,12 +530,13 @@ impl ProjectRuntimeManager {
                 }
             }
         }
-        if let (Some(session_id), Some(native_thread_id)) =
-            (binding.session_id.as_ref(), binding.native_thread_id.as_ref())
-        {
-            if let Some(current) =
-                host.global
-                    .lookup_current_thread_route(session_id, native_thread_id)
+        if let (Some(session_id), Some(native_thread_id)) = (
+            binding.session_id.as_ref(),
+            binding.native_thread_id.as_ref(),
+        ) {
+            if let Some(current) = host
+                .global
+                .lookup_current_thread_route(session_id, native_thread_id)
             {
                 if current == binding {
                     return Ok(());
@@ -545,8 +548,7 @@ impl ProjectRuntimeManager {
                     && current.app_scope_id == binding.app_scope_id
                     && current.session_id == binding.session_id
                     && current.native_thread_id == binding.native_thread_id;
-                if !same_durable_route
-                    || current.endpoint_generation >= binding.endpoint_generation
+                if !same_durable_route || current.endpoint_generation >= binding.endpoint_generation
                 {
                     return Err(format!(
                         "RECOVERY_RECONCILE_REQUIRED: current thread route for {} belongs to {}",
@@ -632,16 +634,18 @@ impl ProjectRuntimeManager {
                 && old.session_id == binding.session_id
                 && old.native_thread_id == binding.native_thread_id;
             if !same_durable_route {
-                return Err(format!(
-                    "RECOVERY_RECONCILE_REQUIRED: current thread route for {} belongs to {}",
-                    native_thread_id, old.binding_id
+                append_log(&self.host.log_path(), &format!(
+                    "RECOVERY_RECONCILE_SKIPPED_SUPERSEDED: current thread route for {} belongs to {}; historical binding {} remains unpublished",
+                    native_thread_id, old.binding_id, binding.binding_id
                 ));
+                continue;
             }
             if old.endpoint_generation >= binding.endpoint_generation {
-                return Err(format!(
-                    "RECOVERY_RECONCILE_REQUIRED: host route for {} is at generation {} and project route is at generation {}",
+                append_log(&self.host.log_path(), &format!(
+                    "RECOVERY_RECONCILE_SKIPPED_SUPERSEDED: host route for {} is at generation {} and project route is at generation {}",
                     binding.binding_id, old.endpoint_generation, binding.endpoint_generation
                 ));
+                continue;
             }
             self.host
                 .commit_checked(&[Event::GlobalCurrentThreadRouteSet {

@@ -558,6 +558,16 @@
             .unwrap()
             .clone();
         assert_eq!(published, binding);
+        let mut superseding = binding.clone();
+        superseding.binding_id = BindingId::new("binding-startup-current-owner").unwrap();
+        superseding.tmux_endpoint = None;
+        host.commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+            binding: superseding.clone(),
+        }]).unwrap();
+        manager.reconcile_started_thread_routes().unwrap();
+        assert_eq!(host.state.lock().unwrap().global
+            .lookup_current_thread_route(binding.session_id.as_ref().unwrap(), binding.native_thread_id.as_ref().unwrap()),
+            Some(&superseding), "historical project bindings cannot stop startup or evict the current route");
         std::fs::remove_dir_all(host_root).unwrap();
         std::fs::remove_dir_all(project_root).unwrap();
     }

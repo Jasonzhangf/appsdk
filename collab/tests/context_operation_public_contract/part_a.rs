@@ -759,26 +759,13 @@ fn canonical_root(fixture: &Fixture) -> String {
 }
 
 fn tmux_identity_facts(fixture: &Fixture, pane: &Pane) -> Value {
-    let output = tmux(
-        &fixture.tmux_socket,
-        &[
-            "display-message",
-            "-p",
-            "-t",
-            &pane.pane_id,
-            "#{session_id}|#{pane_id}|#{pane_pid}",
-        ],
-    );
-    let line = String::from_utf8(output.stdout).expect("tmux pane facts are UTF-8");
-    let mut fields = line.trim_end().split('|');
-    let tmux_session_id = fields.next().expect("tmux session id").to_owned();
-    let observed_pane_id = fields.next().expect("tmux pane id");
-    assert_eq!(observed_pane_id, pane.pane_id);
-    let pane_pid = fields
-        .next()
-        .expect("tmux pane pid")
-        .parse::<u64>()
-        .expect("tmux pane pid is numeric");
+    let output = tmux(&fixture.tmux_socket, &[
+        "display-message", "-p", "-t", &pane.pane_id,
+        "#{session_id}|#{pane_pid}",
+    ]);
+    assert!(output.status.success());
+    let line = String::from_utf8(output.stdout).unwrap();
+    let (session, pid) = line.trim_end().split_once('|').unwrap();
     json!({
         "session_id": pane.session_anchor,
         "thread_id": pane.thread_anchor,
@@ -786,19 +773,13 @@ fn tmux_identity_facts(fixture: &Fixture, pane: &Pane) -> Value {
         // so the CLI identity fact collector always adds this namespace. The
         // approval digest binds every observed fact, including this one.
         "namespace": "codex_tui",
-        "tmux_anchor": {
-            "socket_path": fixture.tmux_socket.to_string_lossy(),
-            "pane_id": pane.pane_id
-        },
         "tmux": {
             "endpoint": {
                 "socket_path": fixture.tmux_socket.to_string_lossy(),
                 "server_pid": pane.server_pid,
-                "tmux_session_id": tmux_session_id,
+                "tmux_session_id": session,
                 "pane_id": pane.pane_id,
-                "pane_pid": pane_pid,
-                "codex_session_id": pane.session_anchor,
-                "codex_thread_id": pane.thread_anchor
+                "pane_pid": pid.parse::<u64>().unwrap()
             },
             "cwd": canonical_root(fixture)
         }
@@ -812,6 +793,10 @@ fn approval_digest(approval: &Value, facts: &Value) -> String {
         object.remove("decided_by");
         object.remove("approved_at_ms");
     }
+    // The CLI sends native facts and an invocation PID. Placement is observed
+    // by the daemon after admission; it is not part of the submitted approval.
+    let mut facts = facts.clone();
+    facts.as_object_mut().unwrap().remove("tmux");
     let normalized = json!({"approval": approval, "facts": facts});
     format!(
         "sha256:{:x}",

@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 
 #[path = "board/cli.rs"]
 mod board_cli;
+#[path = "board/central_storage.rs"]
+mod central_storage;
 #[path = "board/patrol_subscriptions.rs"]
 mod patrol_subscriptions;
 

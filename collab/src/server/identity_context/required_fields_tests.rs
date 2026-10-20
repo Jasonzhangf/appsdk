@@ -91,6 +91,169 @@ fn persisted_context_fixture() -> (
 }
 
 #[test]
+fn session_move_retargets_owned_deadline_without_resetting_its_schedule() {
+    let (host, runtime, manager, host_root, root, mut facts, saved) = persisted_context_fixture();
+    let registered =
+        ProjectContext::for_registered_route(&root, saved.runtime.as_ref().unwrap()).unwrap();
+    let (_, subscribed) = manager.dispatch_sync(
+        Some(registered),
+        Req::NotificationSubscribe {
+            worker_id: saved.worker_id.clone(),
+            token: saved.token.clone(),
+            event: "deadline".into(),
+            subject: Some("placement-patrol".into()),
+            trigger_ms: Some(now_ms() + 60_000),
+            trigger_times_ms: Vec::new(),
+            interval_ms: None,
+            repeat_count: 1,
+            ttl_seconds: 120,
+        },
+    );
+    assert!(subscribed.ok, "{subscribed:?}");
+    let before = runtime
+        .state
+        .lock()
+        .unwrap()
+        .notification_subscriptions
+        .values()
+        .find(|subscription| subscription.subject.as_deref() == Some("placement-patrol"))
+        .unwrap()
+        .clone();
+    let mut cancelled = before.clone();
+    cancelled.id.push_str("-cancelled");
+    cancelled.status = "cancelled".into();
+    runtime
+        .try_commit(&[Event::NotificationSubscribed {
+            subscription: cancelled.clone(),
+        }])
+        .unwrap();
+    facts.tmux.as_mut().unwrap().endpoint.pane_id = "%77".into();
+    facts.tmux.as_mut().unwrap().endpoint.pane_pid += 1;
+    let (_, restored) = manager.dispatch_sync(
+        Some(recovery_context(&root)),
+        Req::IdentityContext {
+            facts,
+            identity_context: None,
+        },
+    );
+    assert!(restored.ok, "{restored:?}");
+    let after = runtime.state.lock().unwrap().notification_subscriptions[&before.id].clone();
+    assert_eq!(after.target, "%77");
+    assert_eq!(after.status, "armed");
+    assert_eq!(after.created_ms, before.created_ms);
+    assert_eq!(after.expires_ms, before.expires_ms);
+    assert_eq!(after.trigger_ms, before.trigger_ms);
+    assert_eq!(after.repeat_count, before.repeat_count);
+    assert_eq!(after.fired_count, before.fired_count);
+    let retained = runtime.state.lock().unwrap().notification_subscriptions[&cancelled.id].clone();
+    assert_eq!(
+        serde_json::to_value(retained).unwrap(),
+        serde_json::to_value(cancelled).unwrap()
+    );
+    drop(manager);
+    drop(runtime);
+    drop(host);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(host_root).unwrap();
+}
+
+#[test]
+fn new_tmux_runtime_id_does_not_encode_physical_placement() {
+    let (host, runtime, manager, host_root, root, _, saved) = persisted_context_fixture();
+    let (other, other_root) = test_server();
+    let mut transport = saved.transport.clone().unwrap();
+    let endpoint = transport.tmux_endpoint.as_mut().unwrap();
+    endpoint.socket_path = other_root
+        .join("different.sock")
+        .to_string_lossy()
+        .into_owned();
+    endpoint.server_pid += 1;
+    endpoint.pane_id = "%99".into();
+    endpoint.pane_pid += 1;
+    transport.endpoint = Some(endpoint.socket_path.clone());
+    let receipt = crate::server::peer_tests::seed_committed_owner(
+        &other,
+        &saved.worker_id,
+        &saved.token,
+        &transport,
+        &other_root.to_string_lossy(),
+        Some(AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap()),
+    );
+    assert!(receipt.ok, "{receipt:?}");
+    let (binding, _) =
+        identity::registration_from_receipt(&receipt.data, &saved.worker_id, &other_root).unwrap();
+    assert_eq!(
+        binding.runtime_id,
+        saved.runtime.as_ref().unwrap().runtime_id
+    );
+    drop(manager);
+    drop(runtime);
+    drop(host);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(host_root).unwrap();
+    std::fs::remove_dir_all(other_root).unwrap();
+}
+
+#[test]
+fn pane_movement_preserves_selected_native_transport() {
+    let (host, runtime, manager, host_root, root, facts, mut saved) = persisted_context_fixture();
+    let context = recovery_context(&root);
+    let mut binding = manager
+        .current_anchor_binding(&context, &facts)
+        .unwrap()
+        .unwrap();
+    binding.endpoint_generation += 1;
+    binding.session_id = Some(identity::SessionId::new("native-session").unwrap());
+    binding.native_thread_id = Some(NativeThreadId::new("native-thread").unwrap());
+    let mut worker = runtime.state.lock().unwrap().workers[&saved.worker_id].clone();
+    let transport = worker.transport.as_mut().unwrap();
+    transport.kind = TransportKind::AppServer;
+    transport.endpoint = Some("unix:///tmp/selected-native.sock".into());
+    transport.namespace = Some("codex_tui".into());
+    transport.session_id = Some("native-session".into());
+    transport.thread_id = Some("native-thread".into());
+    transport.capabilities = vec!["send_message_to_thread".into()];
+    let selected = transport.clone();
+    runtime
+        .try_commit(&[
+            Event::GlobalRuntimeBound {
+                binding: binding.clone(),
+            },
+            Event::Registered { worker },
+        ])
+        .unwrap();
+    saved.runtime.as_mut().unwrap().endpoint_generation = binding.endpoint_generation;
+    saved.runtime.as_mut().unwrap().session_id = binding.session_id.clone();
+    saved.runtime.as_mut().unwrap().native_thread_id = binding.native_thread_id.clone();
+    saved.transport = Some(selected.clone());
+    let mut moved = facts.tmux.unwrap();
+    moved.endpoint.pane_id = "%77".into();
+    moved.endpoint.pane_pid += 1;
+    let refreshed = manager
+        .refresh_session_endpoint(
+            &runtime,
+            &binding,
+            &moved,
+            &mut saved,
+            &Scope { root: root.clone() },
+        )
+        .unwrap();
+    let actual = saved.transport.as_ref().unwrap();
+    assert_eq!(actual.kind, TransportKind::AppServer);
+    assert_eq!(actual.endpoint, selected.endpoint);
+    assert_eq!(actual.session_id, selected.session_id);
+    assert_eq!(actual.thread_id, selected.thread_id);
+    assert_eq!(refreshed.session_id, binding.session_id);
+    assert_eq!(refreshed.native_thread_id, binding.native_thread_id);
+    assert_eq!(actual.tmux_endpoint.as_ref(), Some(&moved.endpoint));
+    drop(manager);
+    drop(runtime);
+    drop(host);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(host_root).unwrap();
+}
+
+#[test]
 fn ordinary_persisted_context_has_no_registration_effects() {
     let (host, runtime, manager, host_root, root, mut facts, saved) = persisted_context_fixture();
     let context = recovery_context(&root);
@@ -114,7 +277,21 @@ fn ordinary_persisted_context_has_no_registration_effects() {
         before,
         "ordinary restore must not Register or select/admit an adaptor"
     );
-    let stable = facts_from_saved_pane(&saved);
+    // The caller supplies its observed session even while delivery is offline.
+    // A historical socket + pane alone is no longer an identity selector.
+    let stable = IdentityFacts {
+        tmux: Some(crate::proto::TmuxCandidate {
+            endpoint: saved
+                .transport
+                .as_ref()
+                .unwrap()
+                .tmux_endpoint
+                .clone()
+                .unwrap(),
+            cwd: root.to_string_lossy().into_owned(),
+        }),
+        ..IdentityFacts::default()
+    };
     let (_, offline) = manager.dispatch_sync(
         Some(recovery_context(&root)),
         Req::IdentityContext {
@@ -1073,8 +1250,8 @@ fn s23_b03_inner_receipt_readback_requires_exact_nested_ids() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-/// A revision change between prepare and consume is rejected by the
-/// existing CAS: no worker is registered, no receipt is created, and the
+/// An explicitly requested revision check rejects a change between prepare
+/// and consume: no worker is registered, no receipt is created, and the
 /// prepared nested IDs are not rewritten or retried.
 #[test]
 fn s23_b03_stale_prepared_revision_is_rejected_without_effect_or_reprepare() {
@@ -1102,7 +1279,7 @@ fn s23_b03_stale_prepared_revision_is_rejected_without_effect_or_reprepare() {
         })
         .unwrap();
     let binding = RegisterOuterBinding::new(journal, "ctxop-b03-stale".into());
-    let prepared = server
+    let mut prepared = server
         .prepare_register_envelope_for_scope(
             worker_id,
             token,
@@ -1113,6 +1290,7 @@ fn s23_b03_stale_prepared_revision_is_rejected_without_effect_or_reprepare() {
             false,
         )
         .unwrap();
+    prepared.typed.envelope.expected_revision = Some(server.state.lock().unwrap().revision);
     let prepared_command = prepared.nested_command_id.clone();
     let prepared_operation = prepared.nested_operation_id.clone();
     binding.bind_validating(&prepared).unwrap();

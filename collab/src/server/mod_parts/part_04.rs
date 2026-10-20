@@ -711,12 +711,10 @@ impl ProjectRuntimeManager {
             .any(|(_, project)| project == project_scope)
     }
 
-    fn storage_root_for_new(&self, root: &Path, project_scope: &str, app_scope: &str) -> PathBuf {
-        if self.has_project_route(project_scope) {
-            app_scope_storage_path(root, app_scope)
-        } else {
-            root.to_path_buf()
-        }
+    fn storage_root_for_new(&self, _root: &Path, project_scope: &str, app_scope: &str) -> PathBuf {
+        self.host
+            .host_paths
+            .app_storage_root(project_scope, app_scope)
     }
 
     fn runtime_init_gate(&self, key: &RouteKey) -> Arc<Mutex<()>> {
@@ -750,8 +748,8 @@ impl ProjectRuntimeManager {
     fn ensure_runtime(
         &self,
         key: &RouteKey,
-        root: &Path,
-        storage_root: &Path,
+        requested_root: &Path,
+        requested_storage_root: &Path,
     ) -> Result<Arc<Server>, String> {
         if self
             .host
@@ -765,7 +763,7 @@ impl ProjectRuntimeManager {
                 "RESET_INCOMPLETE: project cleanup must complete before materialization".into(),
             );
         }
-        self.prune_before_materialization(key, root)?;
+        self.prune_before_materialization(key, requested_root)?;
         let gate = self.runtime_init_gate(key);
         let _guard = gate.lock().unwrap();
         if let Some(runtime) = self
@@ -777,6 +775,61 @@ impl ProjectRuntimeManager {
         {
             return Ok(runtime);
         }
+        let (root, storage_root) = self
+            .routes
+            .lock()
+            .unwrap()
+            .get(key)
+            .map(|route| (route.root.clone(), route.storage_root.clone()))
+            .unwrap_or_else(|| {
+                (
+                    requested_root.to_path_buf(),
+                    requested_storage_root.to_path_buf(),
+                )
+            });
+        let source_root = legacy_runtime_storage_source(
+            &self.host.host_paths,
+            &self.route_journal,
+            key,
+            &storage_root,
+        )?;
+        let storage_root = if let Some(source_root) = source_root {
+            let project_lock_held = self.project_locks.lock().unwrap().contains_key(&root);
+            if !project_lock_held {
+                let lock = acquire_legacy_writer_lock(
+                    &source_root.join(".agent-collab/server/daemon.lock"),
+                    "project daemon",
+                )
+                .map_err(|error| {
+                    format!(
+                        "CENTRAL_STORAGE_MIGRATION_FAILED: project {}: {error}",
+                        key.1
+                    )
+                })?;
+                self.project_locks
+                    .lock()
+                    .unwrap()
+                    .insert(root.clone(), lock);
+            }
+            let destination = central_runtime_storage_root(&self.host.host_paths, &key.1, &key.0);
+            migrate_legacy_runtime_storage_with_publication(
+                &self.host.host_paths,
+                &self.route_journal,
+                &root,
+                key,
+                &source_root,
+                &destination,
+                Some(&self.register_gate),
+            )?;
+            self.routes
+                .lock()
+                .unwrap()
+                .entry(key.clone())
+                .and_modify(|route| route.storage_root = destination.clone());
+            destination
+        } else {
+            storage_root
+        };
         // The per-route gate above deduplicates one key. Admission of the
         // external-runtime budget must also be one decision across different
         // keys: two concurrent materializations must not both observe the
@@ -802,7 +855,7 @@ impl ProjectRuntimeManager {
                 std::thread::sleep(std::time::Duration::from_millis(delay));
             }
         }
-        let (runtime, project_lock) = self.build_runtime(root, storage_root)?;
+        let (runtime, project_lock) = self.build_runtime(&root, &storage_root)?;
         self.install_runtime(key, runtime.clone(), project_lock);
         Ok(runtime)
     }

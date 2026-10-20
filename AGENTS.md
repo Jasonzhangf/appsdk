@@ -73,6 +73,9 @@ Playground/Active/Protected/generated 是消费者治理分区。不能据此把
 
 - AppSDK 全局项目/runtime/communication 真源：`~/.appsdk/` 的声明注册资源。
 - Collab 全局身份、route、mailbox 与 daemon 真源：`~/.collab/`，由 Collab 控制入口管理。
+- Collab 的 `cwd` 选择项目，当前 tmux session 选择该项目的 peer；pane 是当前投递位置。
+  socket 路径与 server PID 只用于通信观测，不参与身份选择或恢复准入。
+  CLI 不从 `TMUX` 环境变量注入 socket 路径。历史 pane/native 绑定不否决当前恢复。
 - `.agent-collab/` 为项目局部状态；存在目录不证明当前 peer 已注册。
 - AppSDK/Collab 不拥有 tmux server 的生命周期。tmux adaptor 只使用已存在的
   通信端点；安装、升级、daemon 维护、注册、恢复、巡检或数据迁移不关闭、

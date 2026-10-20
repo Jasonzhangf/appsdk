@@ -375,15 +375,15 @@ impl Server {
             app_scope_id: app_scope.clone(),
             project_scope_id: project_scope.clone(),
         };
-        // All state-dependent ID inputs and the actual binding are derived
-        // from one snapshot. The CAS is still rechecked by the reducer at
-        // consume time, so revision changes after prepare are rejected.
+        // Derive IDs and the binding from one snapshot. Registration is
+        // fenced by its principal and endpoint generation, not by unrelated
+        // ledger or timer revisions. Explicit caller CAS remains supported.
         let (
             runtime_text,
             generation,
             registration,
             registered_ms,
-            expected_revision,
+            snapshot_revision,
             base_command,
             prior_attempt,
         ) = {
@@ -414,21 +414,7 @@ impl Server {
                                 transport.thread_id.as_deref(),
                             ) {
                                 _ if transport.kind == TransportKind::Tmux => {
-                                    let endpoint = transport.tmux_endpoint.as_ref().ok_or_else(|| {
-                                "RUNTIME_BINDING_REJECTED: tmux transport has no endpoint"
-                                    .to_string()
-                            })?;
-                                    let bytes = serde_json::to_vec(endpoint).map_err(|error| {
-                                format!("RUNTIME_BINDING_REJECTED: encode tmux endpoint: {error}")
-                            })?;
-                                    let fingerprint = bytes.into_iter().fold(
-                                        0xcbf29ce484222325_u64,
-                                        |mut hash, byte| {
-                                            hash ^= u64::from(byte);
-                                            hash.wrapping_mul(0x100000001b3)
-                                        },
-                                    );
-                                    format!("runtime-tmux-{fingerprint:016x}")
+                                    format!("runtime-tmux-{}", sanitize_identifier(worker_id))
                                 }
                                 (Some(session_id), Some(thread_id)) => format!(
                                     "runtime-{}-{}-{}",
@@ -472,7 +458,7 @@ impl Server {
             let base_command =
                 scoped_register_command_prefix(&route_scope, &binding_id, generation);
             // `prior_attempt` selects the retry suffix, so it must be read in
-            // the same snapshot as `generation` and `expected_revision`.
+            // the same snapshot as `generation` and the retry revision.
             let prior_attempt = !reuse_existing
                 && st
                     .global
@@ -521,7 +507,7 @@ impl Server {
         binding.tmux_endpoint = transport.tmux_endpoint.clone();
         binding.validate().map_err(|error| error.to_string())?;
         let attempt_suffix = prior_attempt
-            .then(|| format!("-retry-{expected_revision}"))
+            .then(|| format!("-retry-{snapshot_revision}"))
             .unwrap_or_default();
         let command_id = CommandId::new(format!("{base_command}{attempt_suffix}"))
             .map_err(|error| error.to_string())?;
@@ -538,7 +524,7 @@ impl Server {
             binding_id,
             generation,
             route_scope,
-            Some(expected_revision),
+            None,
             None,
             None,
             None,
@@ -916,6 +902,22 @@ mod scoped_register_tests {
                 false,
             )
             .unwrap()
+    }
+
+    #[test]
+    fn prepared_registration_survives_an_unrelated_ledger_scan() {
+        let (server, root) = peer_tests::test_server();
+        let registration = prepared(&server, &root, "scan-independent-peer");
+        server.commit_checked(&[Event::GlobalLedgerScanReceiptRecorded {
+            receipt: global_state::LedgerScanReceipt {
+                scan_id: "unrelated-register-scan".into(), scanned_ms: now_ms(),
+                classified: 0, transitioned: 0, unchanged: 0, blocked: 0,
+                mailbox_messages_unchanged: true,
+            },
+        }]).unwrap();
+        server.typed_dispatch(registration.typed).expect("a scan cannot invalidate authorized registration");
+        assert!(server.state.lock().unwrap().workers.contains_key("scan-independent-peer"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

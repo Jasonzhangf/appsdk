@@ -63,6 +63,8 @@ fn facts(
         thread_id: thread.map(str::to_owned),
         endpoint: None,
         namespace: None,
+        caller_pid: None,
+        pane_hint: None,
         tmux,
         tmux_anchor: None,
         dsh_session_id: None,
@@ -417,12 +419,10 @@ fn resolver_prefers_current_scope_for_a_shared_pane_anchor() {
         thread_id: None,
         endpoint: None,
         namespace: None,
-        tmux: None,
-        tmux_anchor: Some(crate::proto::TmuxPaneAnchor {
-            socket_path: candidate.endpoint.socket_path,
-            pane_id: candidate.endpoint.pane_id,
-        }),
+        tmux: Some(candidate),
+        tmux_anchor: None,
         dsh_session_id: None,
+        ..Default::default()
     };
     let found = resolve_for_daemon_at(&host_paths, &scope, &facts).unwrap();
     assert_eq!(found.worker_id, "codex-%3");
@@ -442,7 +442,7 @@ fn resolver_prefers_current_scope_for_a_shared_pane_anchor() {
 }
 
 #[test]
-fn resolver_keeps_duplicate_current_scope_pane_anchors_ambiguous() {
+fn resolver_restores_current_scope_session_despite_duplicate_historical_peers() {
     let root = test_root("ci-resolver-shared-pane-current-scope-ambiguous");
     std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
     let scope = test_scope(root.clone());
@@ -470,15 +470,17 @@ fn resolver_keeps_duplicate_current_scope_pane_anchors_ambiguous() {
         thread_id: None,
         endpoint: None,
         namespace: None,
-        tmux: None,
-        tmux_anchor: Some(crate::proto::TmuxPaneAnchor {
-            socket_path: candidate.endpoint.socket_path,
-            pane_id: candidate.endpoint.pane_id,
-        }),
+        tmux: Some(candidate),
+        tmux_anchor: None,
         dsh_session_id: None,
+        ..Default::default()
     };
-    let error = resolve_for_daemon_at(&host_paths, &scope, &facts).unwrap_err();
-    assert!(error.to_string().starts_with("IDENTITY_RESTORE_AMBIGUOUS:"));
+    let restored = resolve_for_daemon_at(&host_paths, &scope, &facts).unwrap();
+    let persisted = read_persisted(&host_paths, &restored.worker_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored.project_scope, persisted.project_scope);
+    assert_eq!(restored.token, persisted.token);
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -601,6 +603,8 @@ fn archived_route_recovery_reads_without_calling_back() {
         thread_id: Some("thread-new".into()),
         endpoint: None,
         namespace: None,
+        caller_pid: None,
+        pane_hint: None,
         tmux: Some(candidate.clone()),
         tmux_anchor: None,
         dsh_session_id: None,
@@ -910,6 +914,33 @@ fn a_second_pane_of_the_same_tmux_session_reuses_the_identity_and_token() {
     let reused = resolve_for_daemon_at(&host_paths, &scope, &facts(None, None, Some(second)))
         .expect("a second pane in the same tmux session reuses the peer");
     assert_eq!(reused.worker_id, "pane-peer");
+    assert_eq!(reused.token, stored.token);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn tmux_session_identity_survives_socket_server_and_pane_movement() {
+    let root = test_root("ci-resolver-tmux-moved-session");
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    let scope = test_scope(root.clone());
+    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
+    let first = tmux_candidate(None, None, "%1");
+    saved_identity(
+        &host_paths,
+        &scope,
+        "moved-peer",
+        None,
+        None,
+        Some(first.endpoint.clone()),
+    );
+    let stored = read_persisted(&host_paths, "moved-peer").unwrap().unwrap();
+    let mut moved = tmux_candidate(None, None, "%9");
+    moved.endpoint.socket_path = "/tmp/tmux-other.sock".into();
+    moved.endpoint.server_pid += 100;
+    moved.endpoint.pane_pid += 100;
+    let reused = resolve_for_daemon_at(&host_paths, &scope, &facts(None, None, Some(moved)))
+        .expect("the project/session peer survives transport placement changes");
+    assert_eq!(reused.worker_id, "moved-peer");
     assert_eq!(reused.token, stored.token);
     std::fs::remove_dir_all(root).ok();
 }

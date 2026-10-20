@@ -822,10 +822,7 @@ fn stale_peer_recovers_missing_host_route_and_self_unregisters() {
     .stdout;
 
     fixture.stop_daemon();
-    remove_host_binding_route(
-        &fixture.root.join(".agent-collab/server/journal.jsonl"),
-        &binding_id,
-    );
+    remove_host_binding_route(&fixture.project_journal(), &binding_id);
     fixture.restart_after_external_stop();
 
     let recovered = command_at(

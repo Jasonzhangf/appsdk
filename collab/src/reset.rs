@@ -1206,6 +1206,9 @@ fn is_current_empty_baseline(agent_collab: &Path) -> bool {
         roots.push(name.to_owned());
     }
     roots.sort();
+    if roots.is_empty() {
+        return true;
+    }
     if roots != expected_roots {
         return false;
     }

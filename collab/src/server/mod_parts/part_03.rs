@@ -20,18 +20,22 @@ fn validate_transport_candidates(
     if let Some(candidate) = candidates.tmux.as_ref() {
         validate_tmux_candidate(candidate, &candidate_root)?;
         match crate::client::adapters::tmux::probe(&candidate.endpoint)? {
-            crate::client::adapters::tmux::PanePresence::Present => return Ok(SelectedTransport {
-                kind: TransportKind::Tmux,
-                endpoint: Some(candidate.endpoint.socket_path.clone()),
-                namespace: Some(candidate.endpoint.tmux_session_id.clone()),
-                session_id: candidate.endpoint.codex_session_id.clone(),
-                thread_id: candidate.endpoint.codex_thread_id.clone(),
-                tmux_endpoint: Some(candidate.endpoint.clone()),
-                capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
-                self_check: "daemon verified current pane".into(),
-            }),
-            crate::client::adapters::tmux::PanePresence::Missing => {},
-            crate::client::adapters::tmux::PanePresence::Unknown => return Err("TMUX_PANE_UNKNOWN".into()),
+            crate::client::adapters::tmux::PanePresence::Present => {
+                return Ok(SelectedTransport {
+                    kind: TransportKind::Tmux,
+                    endpoint: Some(candidate.endpoint.socket_path.clone()),
+                    namespace: Some(candidate.endpoint.tmux_session_id.clone()),
+                    session_id: candidate.endpoint.codex_session_id.clone(),
+                    thread_id: candidate.endpoint.codex_thread_id.clone(),
+                    tmux_endpoint: Some(candidate.endpoint.clone()),
+                    capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
+                    self_check: "daemon verified current pane".into(),
+                })
+            }
+            crate::client::adapters::tmux::PanePresence::Missing => {}
+            crate::client::adapters::tmux::PanePresence::Unknown => {
+                return Err("TMUX_PANE_UNKNOWN".into())
+            }
         }
     }
     // dsh is a mutually exclusive channel: it has no pane to act as an App
@@ -63,7 +67,11 @@ fn validate_transport_candidates(
         if let Some(tmux) = candidates.tmux.as_ref() {
             validate_tmux_candidate(tmux, &candidate_root)?;
             selected.tmux_endpoint = Some(tmux.endpoint.clone());
-            if !selected.capabilities.iter().any(|cap| cap == "pane_recovery_anchor") {
+            if !selected
+                .capabilities
+                .iter()
+                .any(|cap| cap == "pane_recovery_anchor")
+            {
                 selected.capabilities.push("pane_recovery_anchor".into());
             }
         }
@@ -72,12 +80,17 @@ fn validate_transport_candidates(
     Err("TRANSPORT_NONE: no reachable App Server, tmux or dsh candidate was supplied".into())
 }
 
-fn validate_tmux_candidate(candidate: &crate::proto::TmuxCandidate, root: &Path) -> Result<(), String> {
+fn validate_tmux_candidate(
+    candidate: &crate::proto::TmuxCandidate,
+    root: &Path,
+) -> Result<(), String> {
     crate::client::adapters::tmux::validate_endpoint(&candidate.endpoint)?;
     let cwd = std::fs::canonicalize(&candidate.cwd)
         .map_err(|error| format!("RUNTIME_BINDING_REJECTED: tmux candidate cwd: {error}"))?;
     if !Path::new(&candidate.cwd).is_absolute() || cwd != root {
-        return Err("RUNTIME_BINDING_REJECTED: tmux candidate cwd does not match project root".into());
+        return Err(
+            "RUNTIME_BINDING_REJECTED: tmux candidate cwd does not match project root".into(),
+        );
     }
     Ok(())
 }
@@ -340,6 +353,7 @@ include!("append_host_route_record.rs");
 fn validate_runtime_storage_root(
     root: &Path,
     storage_root: &Path,
+    host_root: &Path,
     error_prefix: &str,
 ) -> Result<PathBuf, String> {
     if !storage_root.is_absolute() {
@@ -353,6 +367,12 @@ fn validate_runtime_storage_root(
         .map_err(|error| format!("{error_prefix}: resolve runtime storage owner: {error}"))?;
     if storage_owner == root_owner {
         return Ok(root_owner);
+    }
+    let host_owner = storage_owner_path(host_root)
+        .map_err(|error| format!("{error_prefix}: resolve host storage owner: {error}"))?;
+    let host_projects = host_owner.join("projects");
+    if storage_owner.starts_with(&host_projects) {
+        return Ok(storage_owner);
     }
     let expected_parent = root_owner
         .join(".agent-collab")
@@ -406,3 +426,4 @@ fn validate_route_owner_table(
     }
     Ok(())
 }
+include!("central_storage.rs");

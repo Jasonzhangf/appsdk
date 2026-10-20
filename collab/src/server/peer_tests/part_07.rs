@@ -1209,19 +1209,21 @@ async fn duplicate_daemon_rejection_preserves_authoritative_pid() {
         std::process::id(),
         now_ms()
     ));
-    let scope = Scope { root: root.clone() };
-    let first = tokio::spawn(run(Scope { root: root.clone() }));
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    let paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+    let socket = paths.socket_path();
+    let pid_path = paths.pid_path();
+    let first = tokio::spawn(run_with_host_paths(Scope { root: root.clone() }, paths.clone()));
     for _ in 0..100 {
-        if scope.sock_path().exists() && scope.server_dir().join("server.pid").exists() {
+        if socket.exists() && pid_path.exists() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert!(scope.sock_path().exists());
-    let pid_path = scope.server_dir().join("server.pid");
+    assert!(socket.exists());
     let authoritative_pid = std::fs::read_to_string(&pid_path).unwrap();
 
-    let error = run(Scope { root: root.clone() })
+    let error = run_with_host_paths(Scope { root: root.clone() }, paths)
         .await
         .err()
         .expect("second daemon must be rejected");

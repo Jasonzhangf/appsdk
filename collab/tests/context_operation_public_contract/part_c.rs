@@ -1,3 +1,12 @@
+// Periodic ledger observations are independent of the query under test.
+fn without_ledger_scans(bytes: &[u8]) -> Vec<Value> {
+    std::str::from_utf8(bytes).unwrap().lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|event| !matches!(event["ev"].as_str(),
+            Some("GlobalRuntimeBindingLedgerClassified" | "GlobalLedgerScanReceiptRecorded")))
+        .collect()
+}
+
 /// Stale the identity produced by an already-completed seed so an approved
 /// recovery can be staged against the exact committed incumbent fence.
 fn stale_seeded_identity(fixture: &Fixture, seed: &Value) -> IdentityFence {
@@ -672,7 +681,7 @@ fn c13_cancellation_after_owner_begins_never_claims_cancelled() {
             "{query}"
         );
         assert_eq!(fs::read(fixture.host_journal()).unwrap(), host_before);
-        assert_eq!(fs::read(fixture.project_journal()).unwrap(), project_before);
+        assert_eq!(without_ledger_scans(&fs::read(fixture.project_journal()).unwrap()), without_ledger_scans(&project_before));
         let retry = run_context_cli(
             &fixture, Some(&pane), Some(operation_id), None, None,
             Some(&identity_approval), Some(&grant_approval), None, false,
@@ -682,7 +691,7 @@ fn c13_cancellation_after_owner_begins_never_claims_cancelled() {
         assert_eq!(replay["result"]["outcome"], "partial", "{replay}");
         assert_eq!(replay["result"]["committed_phases"], proven_receipts, "{replay}");
         assert_eq!(fs::read(fixture.host_journal()).unwrap(), host_before);
-        assert_eq!(fs::read(fixture.project_journal()).unwrap(), project_before);
+        assert_eq!(without_ledger_scans(&fs::read(fixture.project_journal()).unwrap()), without_ledger_scans(&project_before));
         let fresh = fixture.context(None, Some(&pane));
         assert_eq!(fresh["result"]["outcome"], "completed", "{fresh}");
         assert!(fresh["result"]["requires"]["approval"].is_null(), "{fresh}");
@@ -802,7 +811,7 @@ fn c13_cancellation_after_owner_begins_never_claims_cancelled() {
             "{query}"
         );
         assert_eq!(fs::read(fixture.host_journal()).unwrap(), host_before);
-        assert_eq!(fs::read(fixture.project_journal()).unwrap(), project_before);
+        assert_eq!(without_ledger_scans(&fs::read(fixture.project_journal()).unwrap()), without_ledger_scans(&project_before));
         fixture.stop_degraded_daemon();
         fixture.restart_daemon();
         let host_after_restart =

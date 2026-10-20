@@ -1,4 +1,3 @@
-use crate::proto::SelectedTransport;
 use crate::server::global_state::{
     LedgerScanReceipt, RuntimeBindingLedgerRecord, RuntimeBindingLedgerState,
 };
@@ -46,41 +45,26 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
     if server.state.lock().unwrap().admission_frozen() {
         return;
     }
-    let checks: Vec<(String, String, Option<SelectedTransport>)> = {
-        let state = server.state.lock().unwrap();
-        state
-            .notification_subscriptions
-            .values()
-            .filter(|s| s.status == "armed" && s.expires_ms > now)
-            .map(|s| {
-                (
-                    s.id.clone(),
-                    s.worker_id.clone(),
-                    state
-                        .workers
-                        .get(&s.worker_id)
-                        .and_then(super::selected_transport_for_worker),
-                )
-            })
-            .collect()
-    };
-    let mut lost_sub_ids = Vec::new();
-    for (id, worker_id, transport) in checks {
-        let Some(transport) = transport else {
-            lost_sub_ids.push(id);
-            continue;
-        };
-        // Tmux endpoint identity is persisted at registration. A notification
-        // attempt performs its own bounded pane check; timers do not infer
-        // agent state from terminal output.
-        if !super::subscription_matches_transport_by_worker(server, &id, &worker_id, &transport) {
-            lost_sub_ids.push(id);
-        }
-    }
-
     let mut lifecycle_events = Vec::new();
     {
-        let state = server.state.lock().unwrap();
+        let mut state = server.state.lock().unwrap();
+        // Derive and commit loss from the same current state. A placement
+        // rebind between two snapshots must not disable its new subscription.
+        let lost_sub_ids: HashSet<_> = state
+            .notification_subscriptions
+            .values()
+            .filter(|subscription| subscription.status == "armed" && subscription.expires_ms > now)
+            .filter(|subscription| {
+                state
+                    .workers
+                    .get(&subscription.worker_id)
+                    .and_then(super::selected_transport_for_worker)
+                    .is_none_or(|transport| {
+                        !super::subscription_matches_transport(subscription, &transport)
+                    })
+            })
+            .map(|subscription| subscription.id.clone())
+            .collect();
         for subscription in state.notification_subscriptions.values() {
             if subscription.status == "armed" {
                 if subscription.expires_ms <= now {
@@ -197,9 +181,9 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                 }
             }
         }
-    }
-    if !lifecycle_events.is_empty() {
-        server.commit(&lifecycle_events);
+        if !lifecycle_events.is_empty() {
+            server.commit_locked_reporting(&mut state, &lifecycle_events);
+        }
     }
 
     let mut due_events = Vec::new();

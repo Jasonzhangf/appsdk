@@ -7,10 +7,6 @@ use serde::{Deserialize, Serialize};
 
 pub const COLLAB_STATE_DIR_ENV: &str = "COLLAB_STATE_DIR";
 pub const HOME_ENV: &str = "HOME";
-pub const COLLAB_SOCKET_PATH_ENV: &str = "COLLAB_SOCKET_PATH";
-pub const COLLAB_HOST_SOCKET_ENV: &str = "COLLAB_HOST_SOCKET";
-pub const COLLAB_LOCK_PATH_ENV: &str = "COLLAB_LOCK_PATH";
-pub const COLLAB_HOST_LOCK_ENV: &str = "COLLAB_HOST_LOCK";
 
 #[cfg(test)]
 pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -47,13 +43,7 @@ impl HostPaths {
             std::env::var_os(COLLAB_STATE_DIR_ENV),
             std::env::var_os(HOME_ENV),
         )?;
-        let mut paths = Self::from_state_root(state_root)?;
-        apply_endpoint_overrides(
-            &mut paths,
-            first_env_path([COLLAB_SOCKET_PATH_ENV, COLLAB_HOST_SOCKET_ENV])?,
-            first_env_path([COLLAB_LOCK_PATH_ENV, COLLAB_HOST_LOCK_ENV])?,
-        )?;
-        Ok(paths)
+        Self::from_state_root(state_root)
     }
 
     pub fn from_env() -> anyhow::Result<Self> {
@@ -108,9 +98,42 @@ impl HostPaths {
         self.state_root.join("log.txt")
     }
 
+    /// Return the single host-owned runtime root for one project/app pair.
+    ///
+    /// Both path components use the existing injective chunked-hex encoding.
+    /// The project marker is only a discovery signal and never contributes
+    /// persistent runtime data.
+    pub fn app_storage_root(&self, project_scope: &str, app_scope: &str) -> PathBuf {
+        let project = encoded_storage_path(&self.state_root.join("projects"), project_scope);
+        let apps = project.join("apps");
+        encoded_storage_path(&apps, app_scope)
+    }
+
     pub fn ensure_root(&self) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.state_root)
     }
+}
+
+pub(crate) fn encoded_storage_path(base: &Path, value: &str) -> PathBuf {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    const CHUNK_BYTES: usize = 96;
+    let bytes = value.as_bytes();
+    let mut path = base.to_path_buf();
+    for (index, chunk) in bytes.chunks(CHUNK_BYTES).enumerate() {
+        let prefix = if index == 0 {
+            format!("v1-{}-", bytes.len())
+        } else {
+            String::new()
+        };
+        let mut component = String::with_capacity(prefix.len() + chunk.len() * 2);
+        component.push_str(&prefix);
+        for byte in chunk {
+            component.push(HEX[(byte >> 4) as usize] as char);
+            component.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+        path.push(component);
+    }
+    path
 }
 
 /// Load the durable project routes used by exact-root recovery commands.
@@ -134,7 +157,8 @@ fn load_route_records(host_paths: &HostPaths) -> anyhow::Result<Vec<CanonicalPro
         if is_linked_worktree_root(&canonical_root)? {
             continue;
         }
-        let (_, root, _) = validate_host_route_record(&record).map_err(anyhow::Error::msg)?;
+        let (_, root, _) =
+            validate_host_route_record(&record, host_paths).map_err(anyhow::Error::msg)?;
         records.push(CanonicalProjectRoute {
             root,
             app_scope_id: AppServerId::new(record.app_scope_id)?,
@@ -229,16 +253,6 @@ pub fn canonical_route_for_identity(
             )
         }
     }
-}
-
-pub fn route_for_tmux_pane(host_paths: &HostPaths) -> anyhow::Result<CanonicalProjectRoute> {
-    let candidate =
-        crate::client::adapters::tmux::candidate_from_env().map_err(anyhow::Error::msg)?;
-    let route = crate::client::resolve_route(&host_paths.socket_path(), &candidate.endpoint)?;
-    Ok(CanonicalProjectRoute {
-        root: PathBuf::from(route.canonical_root),
-        app_scope_id: route.app_scope_id,
-    })
 }
 
 /// Resolve the canonical registered project route for a read-only command.
@@ -378,54 +392,6 @@ fn git_worktree_roots_if_any(cwd: &Path) -> anyhow::Result<Option<GitWorktreeRoo
         main_root,
         worktree_root,
     }))
-}
-
-fn apply_endpoint_overrides(
-    paths: &mut HostPaths,
-    socket_override: Option<PathBuf>,
-    lock_override: Option<PathBuf>,
-) -> anyhow::Result<()> {
-    if let Some(value) = socket_override {
-        let parent = value.parent().ok_or_else(|| {
-            anyhow::anyhow!("host socket path has no parent: {}", value.display())
-        })?;
-        if parent != paths.state_root() {
-            anyhow::bail!(
-                "host socket path must be inside host state root {}: {}",
-                paths.state_root().display(),
-                value.display()
-            );
-        }
-        paths.socket_path = value;
-    }
-    if let Some(value) = lock_override {
-        let expected = paths.state_root().join("daemon.lock");
-        if value != expected {
-            anyhow::bail!(
-                "host lock path must be {} so client and daemon share one lock owner: {}",
-                expected.display(),
-                value.display()
-            );
-        }
-        paths.lock_path = value;
-    }
-    Ok(())
-}
-
-fn first_env_path<const N: usize>(names: [&str; N]) -> anyhow::Result<Option<PathBuf>> {
-    for name in names {
-        if let Some(value) = nonempty_env(name) {
-            return Ok(Some(validate_host_path(
-                PathBuf::from(value),
-                "host endpoint",
-            )?));
-        }
-    }
-    Ok(None)
-}
-
-fn nonempty_env(name: &str) -> Option<std::ffi::OsString> {
-    std::env::var_os(name).filter(|value| !value.is_empty())
 }
 
 fn resolve_state_root(
@@ -587,17 +553,7 @@ fn init_project_root(cwd: PathBuf) -> anyhow::Result<PathBuf> {
 /// configuration as an unrecorded side effect.
 pub fn init_collab_baseline(root: &Path) -> std::io::Result<PathBuf> {
     let base = root.join(".agent-collab");
-    for sub in [
-        "runs",
-        "handoff",
-        "merge-queue",
-        "mailbox",
-        "messages",
-        "mailboxes",
-        "server",
-    ] {
-        std::fs::create_dir_all(base.join(sub))?;
-    }
+    std::fs::create_dir_all(&base)?;
     Ok(base)
 }
 
@@ -1038,8 +994,8 @@ impl Scope {
         }
     }
     pub fn server_dir(&self) -> PathBuf {
-        // This remains the project-local reducer/journal directory.  The
-        // daemon socket and lease are exposed separately through host_paths.
+        // Legacy source discovery and compatibility fixtures only. Active
+        // runtime storage is selected by HostPaths::app_storage_root.
         self.root.join(".agent-collab").join("server")
     }
 

@@ -40,8 +40,8 @@ pub(crate) fn load_host_route_records(path: &Path) -> Result<Vec<HostRouteRecord
         let key = (record.app_scope_id.clone(), record.project_scope.clone());
         if record.version == 1 && record.op == "delete" {
             records.retain(|old: &HostRouteRecord| {
-                (old.app_scope_id.as_str(), old.project_scope.as_str()) !=
-                    (record.app_scope_id.as_str(), record.project_scope.as_str())
+                (old.app_scope_id.as_str(), old.project_scope.as_str())
+                    != (record.app_scope_id.as_str(), record.project_scope.as_str())
             });
             seen_keys.remove(&key);
             seen_storage_roots.retain(|_, (owner, _)| owner != &key);
@@ -77,6 +77,7 @@ pub(crate) fn load_host_route_records(path: &Path) -> Result<Vec<HostRouteRecord
 
 pub(crate) fn validate_host_route_record(
     record: &HostRouteRecord,
+    host_paths: &HostPaths,
 ) -> Result<(RouteKey, PathBuf, PathBuf), String> {
     if record.version != 1 || record.op != "register" {
         return Err(format!(
@@ -106,8 +107,36 @@ pub(crate) fn validate_host_route_record(
         );
     }
     let storage_root = PathBuf::from(&record.storage_root);
-    let storage_root =
-        validate_runtime_storage_root(&root, &storage_root, "HOST_ROUTE_REPLAY_FAILED")?;
+    let storage_root = validate_runtime_storage_root(
+        &root,
+        &storage_root,
+        host_paths.state_root(),
+        "HOST_ROUTE_REPLAY_FAILED",
+    )?;
+    let central = host_paths.app_storage_root(project_scope.as_str(), app_scope.as_str());
+    let central = storage_owner_path(&central)
+        .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: central storage owner: {error}"))?;
+    if storage_root == central {
+        return Ok((
+            (
+                app_scope.as_str().to_owned(),
+                project_scope.as_str().to_owned(),
+            ),
+            root,
+            storage_root,
+        ));
+    }
+    let legacy_first = storage_root == root;
+    let legacy_secondary = storage_root
+        == storage_owner_path(&app_scope_storage_path(&root, app_scope.as_str()))
+            .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: legacy app storage: {error}"))?;
+    if !legacy_first && !legacy_secondary {
+        return Err(format!(
+            "HOST_ROUTE_REPLAY_FAILED: runtime storage root {} is outside both central project storage {} and legacy project storage",
+            storage_root.display(),
+            central.display()
+        ));
+    }
     Ok((
         (
             app_scope.as_str().to_owned(),
@@ -344,6 +373,30 @@ fn iso(ms: i64) -> String {
         .unwrap_or_default()
 }
 
+fn retarget_owned_notification_events(
+    state: &State,
+    worker_id: &str,
+    transport: &SelectedTransport,
+    now: i64,
+) -> Vec<Event> {
+    let Some(target) = notification_target(transport) else { return Vec::new(); };
+    let default_id = default_direct_message_id(worker_id);
+    state.notification_subscriptions.values().filter(|subscription| {
+        subscription.worker_id == worker_id && subscription.id != default_id
+            && subscription.expires_ms > now
+            && matches!(subscription.status.as_str(), "armed" | "transport-lost")
+            && (subscription.method != transport.kind.as_str() || subscription.target != target)
+    }).map(|subscription| {
+        let mut subscription = subscription.clone();
+        subscription.method = transport.kind.as_str().to_owned();
+        subscription.target = target.to_owned();
+        subscription.status = "armed".into();
+        subscription.status_reason = None;
+        subscription.updated_ms = now;
+        Event::NotificationSubscribed { subscription }
+    }).collect()
+}
+
 fn default_direct_message_events(
     state: &State,
     worker_id: &str,
@@ -543,7 +596,10 @@ fn selected_transport_for_worker(worker: &WorkerRec) -> Option<SelectedTransport
 fn notification_target(transport: &SelectedTransport) -> Option<&str> {
     match transport.kind {
         TransportKind::Tmux => transport.thread_id.as_deref().or_else(|| {
-            transport.tmux_endpoint.as_ref().map(|endpoint| endpoint.pane_id.as_str())
+            transport
+                .tmux_endpoint
+                .as_ref()
+                .map(|endpoint| endpoint.pane_id.as_str())
         }),
         _ => transport.thread_id.as_deref(),
     }
@@ -554,8 +610,7 @@ fn subscription_matches_transport(
     transport: &SelectedTransport,
 ) -> bool {
     subscription.method == transport.kind.as_str()
-        && notification_target(transport)
-            .is_some_and(|thread_id| subscription.target == thread_id)
+        && notification_target(transport).is_some_and(|thread_id| subscription.target == thread_id)
 }
 
 pub(crate) fn subscription_matches_transport_by_worker(
@@ -815,7 +870,11 @@ fn attempt_tmux_notification_with_retry(
         &text,
         &first.1,
         explicit,
-        if queued_tmux { DAEMON_LIVE_CLOSURE_MODE } else { &delivery_mode },
+        if queued_tmux {
+            DAEMON_LIVE_CLOSURE_MODE
+        } else {
+            &delivery_mode
+        },
     ) {
         Ok(receipt) => {
             append_log(
@@ -1054,8 +1113,13 @@ fn notification_delivery_delay_ms(
     event: &str,
     config: &crate::config::Notifications,
 ) -> i64 {
-    if state.delivery_modes.get(message_id).is_some_and(|mode| mode == "queued")
-        && state.msgs.get(message_id)
+    if state
+        .delivery_modes
+        .get(message_id)
+        .is_some_and(|mode| mode == "queued")
+        && state
+            .msgs
+            .get(message_id)
             .and_then(|message| state.workers.get(&message.to))
             .and_then(selected_transport_for_worker)
             .is_some_and(|transport| transport.kind == TransportKind::Tmux)
@@ -1435,4 +1499,3 @@ pub(crate) fn attempt_notification_with_default(
     )
     .accepted()
 }
-

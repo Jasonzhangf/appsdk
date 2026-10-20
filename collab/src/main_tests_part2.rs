@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn context_collector_keeps_stable_pane_when_live_display_fails() {
+fn context_collector_never_derives_a_socket_from_the_tmux_environment() {
     let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
     let keys = ["TMUX", "TMUX_PANE", "CODEX_SESSION_ID", "CODEX_THREAD_ID"];
     let previous: Vec<_> = keys.iter().map(|key| std::env::var_os(key)).collect();
@@ -21,16 +21,14 @@ fn context_collector_keeps_stable_pane_when_live_display_fails() {
     }
     let facts = result.expect("stable pane facts must reach daemon despite a live display failure");
     assert!(
-        read_only.is_ok(),
-        "read-only anchor collection must not require live display: {read_only:?}"
+        read_only.as_ref().is_err_and(|error| error
+            .to_string()
+            .contains("TMUX_OBSERVATION_CAPABILITY_MISSING")),
+        "a caller-supplied TMUX value must not become a socket capability: {read_only:?}"
     );
-    assert_eq!(
-        facts.tmux_anchor,
-        Some(proto::TmuxPaneAnchor {
-            socket_path: "/tmp/collab-no-live-collector.sock".into(),
-            pane_id: "%3".into()
-        })
-    );
+    assert!(facts.tmux_anchor.is_none());
+    assert_eq!(facts.caller_pid, Some(std::process::id()));
+    assert_eq!(facts.pane_hint.as_deref(), Some("%3"));
     assert!(
         facts.tmux.is_none(),
         "failed discovery must not invent live endpoint fields"

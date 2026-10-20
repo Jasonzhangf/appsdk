@@ -1075,10 +1075,12 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
     // mailbox-only after the lease expired or was lost. Explicit owner
     // unsubscribe stays authoritative; only the legacy/expired shapes re-arm.
     if let Some(transport) = selected_transport_for_worker(&worker) {
-        let events = default_direct_message_events(&st, &worker_id, &transport, now_ms());
+        let now = now_ms();
+        let mut events = retarget_owned_notification_events(&st, &worker_id, &transport, now);
+        events.extend(default_direct_message_events(&st, &worker_id, &transport, now));
         if !events.is_empty() {
             if let Err(error) = server.try_commit_locked(&mut st, &events) {
-                return Resp::err(format!("default lease rearm failed: {error}"));
+                return Resp::err(format!("notification rearm failed: {error}"));
             }
         }
     }

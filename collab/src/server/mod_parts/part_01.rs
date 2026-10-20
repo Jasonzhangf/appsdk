@@ -1,4 +1,3 @@
-
 /// The resident v1 daemon owns one project reducer/journal.  Keep that
 /// ownership explicit at the host boundary instead of treating the process
 /// root as an implicit fallback for every valid project context.
@@ -23,7 +22,7 @@ impl HostRouteRegistry {
             .map_err(|error| format!("PROJECT_SCOPE_UNKNOWN: {error}"))?;
         let resident_root = PathBuf::from(resident_scope.as_str());
         let resident_journal = server
-            .root
+            .storage_root
             .join(".agent-collab")
             .join("server")
             .join("journal.jsonl");
@@ -372,25 +371,10 @@ fn sanitize_identifier(value: &str) -> String {
 /// collide). Hex encodes the original bytes and fixed-size chunks keep every
 /// component below common filesystem name limits even at the 256-byte ID cap.
 fn app_scope_storage_path(root: &Path, app_scope: &str) -> PathBuf {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    const CHUNK_BYTES: usize = 96;
-    let bytes = app_scope.as_bytes();
-    let mut path = root.join(".agent-collab").join("server").join("runtimes");
-    for (index, chunk) in bytes.chunks(CHUNK_BYTES).enumerate() {
-        let prefix = if index == 0 {
-            format!("v1-{}-", bytes.len())
-        } else {
-            String::new()
-        };
-        let mut component = String::with_capacity(prefix.len() + chunk.len() * 2);
-        component.push_str(&prefix);
-        for byte in chunk {
-            component.push(HEX[(byte >> 4) as usize] as char);
-            component.push(HEX[(byte & 0x0f) as usize] as char);
-        }
-        path.push(component);
-    }
-    path
+    crate::scope::encoded_storage_path(
+        &root.join(".agent-collab").join("server").join("runtimes"),
+        app_scope,
+    )
 }
 
 #[cfg(test)]
@@ -522,7 +506,9 @@ fn canonicalize_with_existing_suffix(candidate: &Path) -> Result<PathBuf, String
     let suffix = candidate
         .strip_prefix(existing)
         .map_err(|_| "worktree path cannot be resolved under project root".to_string())?;
-    Ok(normalize_trailing_separator(canonical_existing.join(suffix)))
+    Ok(normalize_trailing_separator(
+        canonical_existing.join(suffix),
+    ))
 }
 
 fn normalize_trailing_separator(path: PathBuf) -> PathBuf {
@@ -579,8 +565,9 @@ fn resolve_worktree_path(
     if stored_cleanup
         && canonical_candidate.starts_with(&canonical_playground)
         && canonical_candidate != canonical_playground
-        && canonical_candidate.strip_prefix(&canonical_playground).is_ok_and(|relative|
-            relative.components().count() == 1)
+        && canonical_candidate
+            .strip_prefix(&canonical_playground)
+            .is_ok_and(|relative| relative.components().count() == 1)
     {
         return Ok(canonical_candidate);
     }
@@ -590,9 +577,10 @@ fn resolve_worktree_path(
             return Err("configured worktree base must be outside the project root".into());
         }
         let project_key = configured_project_key(&canonical_root)?;
-        let task_slug = path.file_name().and_then(|v| v.to_str()).ok_or_else(|| {
-            "worktree path must end in a valid UTF-8 task slug".to_string()
-        })?;
+        let task_slug = path
+            .file_name()
+            .and_then(|v| v.to_str())
+            .ok_or_else(|| "worktree path must end in a valid UTF-8 task slug".to_string())?;
         let relative = config.worktree.render_relative(&project_key, task_slug)?;
         let expected = base.join(&relative);
         if !expected.starts_with(&base) {

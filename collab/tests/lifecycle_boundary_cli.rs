@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -107,7 +108,7 @@ impl IsolatedDaemon {
         let output = Command::new("tmux")
             .arg("-S")
             .arg(&socket)
-            .args(["new-session", "-d", "-s", &session, "sleep 600"])
+            .args(["new-session", "-d", "-s", &session, "sh -i"])
             .output()
             .expect("start owned tmux session");
         assert!(
@@ -116,6 +117,11 @@ impl IsolatedDaemon {
             String::from_utf8_lossy(&output.stderr)
         );
         self.tmux = Some((socket.clone(), session.clone()));
+        std::fs::write(
+            self.host.join("tmux-endpoints.json"),
+            serde_json::to_vec(&json!({"endpoints": [socket]})).unwrap(),
+        )
+        .unwrap();
         let server_pid =
             String::from_utf8(tmux(&socket, &["display-message", "-p", "#{pid}"]).stdout)
                 .unwrap()
@@ -145,19 +151,72 @@ impl IsolatedDaemon {
     }
 
     fn command_at(&self, root: &Path, pane: &TmuxPane, args: &[&str]) -> Output {
-        let mut command = self.base_command(args[0]);
-        command
-            .current_dir(root)
-            .args(&args[1..])
-            .env(
-                "TMUX",
-                format!("{},{},0", pane.socket.display(), pane.server_pid),
-            )
-            .env("TMUX_PANE", &pane.pane_id)
-            .env("CODEX_SESSION_ID", &pane.session_anchor)
-            .env("CODEX_THREAD_ID", &pane.thread_anchor)
-            .output()
-            .expect("run collab context")
+        static COMMAND: AtomicU64 = AtomicU64::new(0);
+        let sequence = COMMAND.fetch_add(1, Ordering::Relaxed);
+        let prefix = self.root.join(format!("pane-command-{sequence}"));
+        let script = prefix.with_extension("sh");
+        let stdout = prefix.with_extension("stdout");
+        let stderr = prefix.with_extension("stderr");
+        let status = prefix.with_extension("status");
+        let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+        let command = args
+            .iter()
+            .map(|value| quote(value))
+            .collect::<Vec<_>>()
+            .join(" ");
+        std::fs::write(&script, format!(
+            "cd {root}\nunset COLLAB_SOCKET_PATH COLLAB_HOST_SOCKET COLLAB_LOCK_PATH COLLAB_HOST_LOCK COLLAB_APPSERVER_SOCKET CODEX_APP_SERVER_SOCKET COLLAB_APPSERVER_NAMESPACE\nexport HOME={home} CODEX_HOME={home} COLLAB_STATE_DIR={host} TMUX_PANE={pane} CODEX_SESSION_ID={session} CODEX_THREAD_ID={thread}\n{binary} {command} >{stdout} 2>{stderr}\nprintf '%s' \"$?\" >{status}\n",
+            root=quote(&root.to_string_lossy()), home=quote(&self.home.to_string_lossy()),
+            host=quote(&self.host.to_string_lossy()), pane=quote(&pane.pane_id),
+            session=quote(&pane.session_anchor), thread=quote(&pane.thread_anchor),
+            binary=quote(&self.binary.to_string_lossy()), stdout=quote(&stdout.to_string_lossy()),
+            stderr=quote(&stderr.to_string_lossy()), status=quote(&status.to_string_lossy()),
+        )).unwrap();
+        let start = format!("sh {}", quote(&script.to_string_lossy()));
+        assert!(tmux(
+            &pane.socket,
+            &["send-keys", "-t", &pane.pane_id, "-l", &start]
+        )
+        .status
+        .success());
+        assert!(
+            tmux(&pane.socket, &["send-keys", "-t", &pane.pane_id, "Enter"])
+                .status
+                .success()
+        );
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while std::fs::read_to_string(&status)
+            .ok()
+            .and_then(|value| value.parse::<i32>().ok())
+            .is_none()
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            status.exists(),
+            "owned pane command did not finish: {args:?}"
+        );
+        let code: i32 = std::fs::read_to_string(status).unwrap().parse().unwrap();
+        Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: std::fs::read(stdout).unwrap(),
+            stderr: std::fs::read(stderr).unwrap(),
+        }
+    }
+
+    fn runtime_journal(&self, project: &Path) -> PathBuf {
+        let canonical = std::fs::canonicalize(project).unwrap();
+        std::fs::read_to_string(self.host.join("routes.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .find(|record| record["project_scope"] == canonical.to_string_lossy().as_ref())
+            .map(|record| {
+                PathBuf::from(record["storage_root"].as_str().unwrap())
+                    .join(".agent-collab/server/journal.jsonl")
+            })
+            .expect("registered project has a centralized runtime journal")
     }
 
     fn wait_until_alive(&mut self) {
@@ -704,7 +763,7 @@ fn available_context_restores_identity_without_register_or_pid_change() {
         .unwrap()
         .to_owned();
     let binding = first["result"]["snapshot"]["binding"].clone();
-    let journal = fixture.root.join(".agent-collab/server/journal.jsonl");
+    let journal = fixture.runtime_journal(&fixture.root);
     let before_journal = std::fs::read(&journal).unwrap_or_default();
     let before_pid = std::fs::read_to_string(fixture.host.join("server.pid")).unwrap();
 
@@ -757,7 +816,7 @@ fn self_request_cannot_unbind_another_projects_pane() {
     std::fs::create_dir_all(other.join(".agent-collab")).unwrap();
     let window = tmux(
         &pane.socket,
-        &["new-window", "-d", "-P", "-F", "#{pane_id}", "sleep 600"],
+        &["new-window", "-d", "-P", "-F", "#{pane_id}", "sh -i"],
     );
     let other_pane = TmuxPane {
         socket: pane.socket.clone(),
@@ -782,7 +841,7 @@ fn self_request_cannot_unbind_another_projects_pane() {
         )
         .status
         .success());
-    let journal = other.join(".agent-collab/server/journal.jsonl");
+    let journal = fixture.runtime_journal(&other);
     let before = std::fs::read(&journal).unwrap();
     let request = json!({"op":"UnregisterSelf", "worker_id":own_id,
         "token":credential["token"], "facts":{"tmux":{
@@ -840,7 +899,7 @@ fn current_pane_can_remove_own_binding_with_unfinished_work_and_keep_its_host() 
         ],
     );
     assert!(claimed.status.success(), "{}", output_text(&claimed));
-    let journal = fixture.root.join(".agent-collab/server/journal.jsonl");
+    let journal = fixture.runtime_journal(&fixture.root);
     let before = std::fs::read_to_string(&journal).unwrap();
     let worker = first["result"]["snapshot"]["identity"]["worker_id"]
         .as_str()
@@ -937,7 +996,7 @@ fn project_master_resets_online_and_erases_its_history_without_touching_another_
             "#{pane_id}",
             "-n",
             "other-project",
-            "sleep 600",
+            "sh -i",
         ],
     );
     let other_pane = TmuxPane {
@@ -971,7 +1030,7 @@ fn project_master_resets_online_and_erases_its_history_without_touching_another_
         ],
     );
     assert!(other_task.status.success(), "{}", output_text(&other_task));
-    let other_journal = other.join(".agent-collab/server/journal.jsonl");
+    let other_journal = fixture.runtime_journal(&other);
     let other_before = std::fs::read(&other_journal).unwrap();
     let denied = fixture.command_at(&other, &other_pane, &["reset", "--project"]);
     assert!(
@@ -981,6 +1040,7 @@ fn project_master_resets_online_and_erases_its_history_without_touching_another_
     assert_eq!(std::fs::read(&other_journal).unwrap(), other_before);
     let pid_before = std::fs::read(fixture.host.join("server.pid")).unwrap();
 
+    let resident = fixture.runtime_journal(&fixture.root);
     let reset = fixture.command_with_pane(&pane, &["reset", "--project"]);
     assert!(reset.status.success(), "{}", output_text(&reset));
     let reset: Value = serde_json::from_slice(&reset.stdout).unwrap();
@@ -1015,7 +1075,6 @@ fn project_master_resets_online_and_erases_its_history_without_touching_another_
         output_text(&other_board)
     );
     assert!(String::from_utf8_lossy(&other_board.stdout).contains("retain-other-history"));
-    let resident = fixture.root.join(".agent-collab/server/journal.jsonl");
     assert!(
         !std::fs::read_to_string(&resident)
             .unwrap_or_default()

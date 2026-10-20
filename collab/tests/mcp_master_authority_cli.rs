@@ -70,6 +70,14 @@ impl Fixture {
             fixture.server_pid,
             fixture.pane
         );
+        std::fs::write(
+            fixture.root.join("h/tmux-endpoints.json"),
+            serde_json::to_vec(&json!({
+                "endpoints": [fixture.root.join("t.sock")]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         fixture.start_daemon();
         fixture
     }
@@ -176,7 +184,7 @@ impl Fixture {
     }
 
     fn cli(&self, args: &[&str]) -> Value {
-        let mut command = Command::new(&self.cli);
+        let mut command = self.pane_command(&self.cli);
         self.environment(&mut command);
         let output = command.args(args).output().expect("run actual CLI");
         assert!(output.status.success(), "CLI {args:?}: {output:?}");
@@ -186,6 +194,58 @@ impl Fixture {
             .and_then(|result| result.get("snapshot"))
             .cloned()
             .unwrap_or(value)
+    }
+
+    fn pane_command(&self, binary: &std::path::Path) -> Command {
+        let ready = self.root.join(format!(
+            "pane-runner-{}.ready",
+            self.pane.trim_start_matches('%')
+        ));
+        let pid = String::from_utf8(
+            self.tmux(&["display-message", "-p", "-t", &self.pane, "#{pane_pid}"])
+                .stdout,
+        )
+        .unwrap();
+        let helper =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/pane_cli.py");
+        let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+        if !std::fs::read_to_string(&ready).is_ok_and(|stored| stored.trim() == pid.trim()) {
+            std::fs::remove_file(&ready).ok();
+            let start = format!(
+                "exec python3 {} runner --socket {} --pane-id {} --root {}",
+                quote(&helper.to_string_lossy()),
+                quote(&self.root.join("t.sock").to_string_lossy()),
+                quote(&self.pane),
+                quote(&self.root.to_string_lossy())
+            );
+            self.tmux(&["respawn-pane", "-k", "-t", &self.pane, &start]);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !ready.exists() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(20));
+            }
+            assert!(ready.exists(), "private MCP pane runner did not start");
+        }
+        let mut command = Command::new("python3");
+        command
+            .arg(helper)
+            .arg("client")
+            .arg("--socket")
+            .arg(self.root.join("t.sock"))
+            .arg("--pane-id")
+            .arg(&self.pane)
+            .arg("--root")
+            .arg(&self.root)
+            .arg("--binary")
+            .arg(binary)
+            .env(
+                "PANE_CONTROL_PATH",
+                std::env::var_os("PATH").unwrap_or_default(),
+            );
+        if binary == self.mcp.as_path() {
+            command.arg("--pipe-stdin");
+        }
+        command.arg("--");
+        command
     }
 
     fn registered_context(&self) -> Value {
@@ -229,7 +289,7 @@ impl Fixture {
     }
 
     fn start_mcp(&self) -> Mcp {
-        let mut command = Command::new(&self.mcp);
+        let mut command = self.pane_command(&self.mcp);
         self.environment(&mut command);
         let mut child = command
             .env("COLLAB_BIN", &self.cli)

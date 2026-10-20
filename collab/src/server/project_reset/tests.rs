@@ -311,8 +311,61 @@ fn online_reset_nonmaster_cannot_delete() {
 }
 
 #[test]
-fn online_reset_real_storage_error_is_incomplete_and_startup_finishes() {
+fn interrupted_reset_retains_central_cleanup_targets_until_startup_retry() {
     let (server, root, manager, context) = fixture();
+    let central = server.host_paths.app_storage_root(
+        context.project_scope.as_str(),
+        context.app_scope_id.as_str(),
+    );
+    for path in [
+        central.join(".agent-collab/server/journal.jsonl"),
+        central.join(".agent-collab/mailbox/reset-owned-mailbox"),
+        central.join(".agent-collab/assets/reset-owned-asset"),
+    ] {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "reset-owned").unwrap();
+    }
+    let unrelated_root = root.join("unrelated-project");
+    std::fs::create_dir_all(unrelated_root.join(".agent-collab")).unwrap();
+    let unrelated_root = std::fs::canonicalize(unrelated_root).unwrap();
+    let unrelated_scope = unrelated_root.display().to_string();
+    let unrelated_central = server
+        .host_paths
+        .app_storage_root(&unrelated_scope, "unrelated-app");
+    let unrelated_asset = unrelated_central.join(".agent-collab/assets/retained");
+    std::fs::create_dir_all(unrelated_asset.parent().unwrap()).unwrap();
+    std::fs::write(&unrelated_asset, "retained").unwrap();
+    for (app_scope, project_scope, canonical_root, storage_root) in [
+        (
+            context.app_scope_id.as_str(),
+            context.project_scope.as_str(),
+            context.canonical_root.as_str(),
+            central.as_path(),
+        ),
+        (
+            "unrelated-app",
+            unrelated_scope.as_str(),
+            unrelated_scope.as_str(),
+            unrelated_central.as_path(),
+        ),
+    ] {
+        append_host_route_record(
+            &manager.route_journal,
+            &HostRouteRecord {
+                version: 1,
+                op: "register".into(),
+                app_scope_id: app_scope.into(),
+                project_scope: project_scope.into(),
+                canonical_root: canonical_root.into(),
+                storage_root: std::fs::canonicalize(storage_root)
+                    .unwrap()
+                    .display()
+                    .to_string(),
+                registered_ms: now_ms(),
+            },
+        )
+        .unwrap();
+    }
     // A regular file where the identities owner needs a directory produces
     // a real filesystem error, independent of uid or chmod semantics.
     let identity_root = server.host_paths.state_root().join("identities");
@@ -340,6 +393,22 @@ fn online_reset_real_storage_error_is_incomplete_and_startup_finishes() {
         .pending_project_resets
         .is_empty());
     assert!(!recovered.has_project_route(context.project_scope.as_str()));
+    assert!(
+        !central.exists(),
+        "startup retry completed with residual central app data"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&unrelated_asset).unwrap(),
+        "retained",
+        "reset must preserve another project's central app namespace"
+    );
+    let records = load_host_route_records(&manager.route_journal).unwrap();
+    assert!(!records
+        .iter()
+        .any(|record| record.project_scope == context.project_scope.as_str()));
+    assert!(records
+        .iter()
+        .any(|record| record.project_scope == unrelated_scope));
     assert!(server.state.lock().unwrap().workers.is_empty());
     std::fs::remove_dir_all(root).unwrap();
 }

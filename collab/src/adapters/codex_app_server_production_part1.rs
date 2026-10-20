@@ -342,6 +342,8 @@ pub fn candidate_from_env() -> Result<Option<AppServerCandidate>, AdapterError> 
 /// which facts it needs and whether the caller may establish a new identity.
 pub(crate) fn identity_facts_from_env() -> Result<IdentityFacts, AdapterError> {
     let mut facts = IdentityFacts::default();
+    facts.caller_pid = Some(std::process::id());
+    facts.pane_hint = crate::client::adapters::tmux::pane_hint_from_env();
     facts.session_id = std::env::var("CODEX_SESSION_ID")
         .ok()
         .filter(|value| !value.trim().is_empty());
@@ -364,16 +366,9 @@ pub(crate) fn identity_facts_from_env() -> Result<IdentityFacts, AdapterError> {
         Err(_) => {}
     }
 
-    if std::env::var_os("TMUX_PANE").is_some() {
-        facts.tmux_anchor = Some(
-            crate::client::adapters::tmux::anchor_from_env()
-                .map_err(|error| AdapterError::InvalidBinding { detail: error })?,
-        );
-        match crate::client::adapters::tmux::candidate_from_env() {
-            Ok(candidate) => facts.tmux = Some(candidate),
-            Err(error) => eprintln!("collab: tmux live enrichment unavailable: {error}"),
-        }
-    }
+    // Placement is observed by the daemon (or by the read-only compatibility
+    // wrapper) from live endpoints and caller ancestry. The CLI never parses
+    // the `TMUX` socket/server value into identity facts.
     // The dsh adapter designs `DSH_SESSION_ID` as the agent's primary anchor.
     // Only the anchor is observable here: the gateway control socket address
     // and its runtime/agent ids belong to the gateway, which registers its own

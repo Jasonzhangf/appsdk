@@ -362,6 +362,8 @@ fn parse_identity_supplement(raw: &str) -> anyhow::Result<IdentityFacts> {
         thread_id: supplement.thread_id,
         endpoint: supplement.endpoint,
         namespace: supplement.namespace,
+        caller_pid: None,
+        pane_hint: None,
         tmux: None,
         tmux_anchor: None,
         dsh_session_id: None,
@@ -516,7 +518,10 @@ pub(crate) fn return_registration_challenge(raw: &str) -> anyhow::Result<Value> 
     }
     let challenge: Challenge = serde_json::from_str(raw)?;
     let facts = crate::client::adapters::codex_app_server::identity_facts_from_env()?;
-    let anchor = facts.tmux_anchor;
+    let anchor = facts.tmux_anchor.or_else(|| {
+        crate::client::adapters::tmux::pane_hint_from_env()
+            .and_then(|_| crate::client::adapters::tmux::anchor_from_env().ok())
+    });
     let native = if anchor.is_none() {
         Some(proto::RegisterNativeReply::AppServer {
             candidate: proto::AppServerCandidate {

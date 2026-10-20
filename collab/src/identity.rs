@@ -777,30 +777,20 @@ fn identity_by_current_anchors_at(
                 identities.insert(identity.worker_id.clone(), identity);
             }
         }
-        let identities = identities.into_values().collect::<Vec<_>>();
-        return match identities.as_slice() {
-            [] => Ok(None),
-            [identity] => Ok(Some(AnchorResolution::CurrentScope(identity.clone()))),
-            _ => anyhow::bail!(
-                "IDENTITY_RESTORE_AMBIGUOUS: tmux_session matches multiple persisted identities; the daemon cannot prove a unique owner"
-            ),
-        };
+        return Ok(identities
+            .into_values()
+            .next()
+            .map(AnchorResolution::CurrentScope));
     }
     let mut anchors = Vec::new();
-    if let Some(anchor) = observed.tmux_anchor.as_ref() {
-        // Pane ownership is the only identity selector when tmux is observed.
-        // Codex session/thread ids are route observations and must not compete.
-        anchors.push(("tmux_pane", anchor.pane_id.clone()));
-    } else {
-        for value in observed.session_anchors() {
-            anchors.push(("codex_session_id", value));
-        }
-        for value in observed.thread_anchors() {
-            anchors.push(("codex_thread_id", value));
-        }
-        if let Some(value) = observed.dsh_session_id.as_ref() {
-            anchors.push(("dsh_session_id", value.clone()));
-        }
+    for value in observed.session_anchors() {
+        anchors.push(("codex_session_id", value));
+    }
+    for value in observed.thread_anchors() {
+        anchors.push(("codex_thread_id", value));
+    }
+    if let Some(value) = observed.dsh_session_id.as_ref() {
+        anchors.push(("dsh_session_id", value.clone()));
     }
     let mut matches = BTreeMap::<String, BTreeMap<String, Identity>>::new();
     for entry in std::fs::read_dir(identities_root)? {
@@ -815,19 +805,6 @@ fn identity_by_current_anchors_at(
             .transport
             .as_ref()
             .and_then(|transport| transport.tmux_endpoint.as_ref());
-        // A tmux identity is anchored by pane; a native AppServer identity that
-        // only recorded a pane address (no Codex runtime ids) may still be
-        // claimed by that pane. Both shapes are valid owners of a tmux anchor.
-        let tmux_owner_matches =
-            |anchor: &crate::proto::TmuxPaneAnchor, persisted: &crate::proto::TmuxEndpoint| {
-                identity.transport.as_ref().is_some_and(|transport| {
-                    matches!(
-                        transport.kind,
-                        TransportKind::Tmux | TransportKind::AppServer
-                    )
-                }) && persisted.socket_path == anchor.socket_path
-                    && persisted.pane_id == anchor.pane_id
-            };
         for (name, value) in &anchors {
             let matched =
                 match *name {
@@ -855,12 +832,6 @@ fn identity_by_current_anchors_at(
                                 .and_then(|runtime| runtime.native_thread_id.as_ref())
                                 .is_some_and(|persisted| persisted.as_str() == value))
                     }
-                    "tmux_pane" => persisted_endpoint.is_some_and(|persisted| {
-                        observed
-                            .tmux_anchor
-                            .as_ref()
-                            .is_some_and(|anchor| tmux_owner_matches(anchor, persisted))
-                    }),
                     // The dsh anchor lives on the runtime binding, not on a tmux
                     // endpoint: `RuntimeIdentity.session_id` carries the gateway
                     // session id the adapter returned in its agent-facts reply.
@@ -934,9 +905,7 @@ pub(crate) fn same_tmux_session(
     left: &crate::proto::TmuxEndpoint,
     right: &crate::proto::TmuxEndpoint,
 ) -> bool {
-    left.socket_path == right.socket_path
-        && left.server_pid == right.server_pid
-        && left.tmux_session_id == right.tmux_session_id
+    left.tmux_session_id == right.tmux_session_id
 }
 
 /// Test-only adapter for the subagent launch harness, which names its child
@@ -965,7 +934,7 @@ pub(crate) fn load_existing_at(
     // resolves the caller's own anchors (env-derived) to a persisted peer, or
     // reads one exact named worker. The daemon bootstrap uses
     // `resolve_for_daemon_at` instead.
-    let observed = AnchorObservation::from_env()?;
+    let observed = AnchorObservation::from_env_at(host_paths)?;
     let explicit_worker = worker_id.filter(|value| !value.trim().is_empty());
     // A named worker is decided before anchor resolution: an anchor ambiguity
     // is exactly the case an explicit name resolves.
@@ -976,12 +945,7 @@ pub(crate) fn load_existing_at(
             return Ok(Some(identity));
         }
     }
-    let Some(worker_id) = explicit_worker.or_else(|| {
-        observed
-            .tmux_anchor
-            .as_ref()
-            .map(|anchor| format!("codex-{}", anchor.pane_id))
-    }) else {
+    let Some(worker_id) = explicit_worker else {
         return Ok(None);
     };
     read_identity(&identity_path_at(host_paths, &worker_id)?)

@@ -1,5 +1,7 @@
-use crate::proto::{TmuxCandidate, TmuxEndpoint};
+use crate::proto::{TmuxCandidate, TmuxEndpoint, TmuxPaneAnchor};
+use std::collections::{BTreeSet, HashMap};
 use std::io::Write;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 
@@ -12,91 +14,330 @@ pub enum PanePresence {
 
 static LAST_PANE_OUTPUT: OnceLock<Mutex<std::collections::HashMap<String, u64>>> = OnceLock::new();
 const MAX_PANE_OBSERVATIONS: usize = 256;
+pub const ENDPOINT_CAPABILITY_FILE: &str = "tmux-endpoints.json";
 
-pub fn anchor_from_env() -> Result<crate::proto::TmuxPaneAnchor, String> {
-    let tmux =
-        std::env::var("TMUX").map_err(|_| "TMUX_ENDPOINT_MISSING: TMUX unavailable".to_owned())?;
-    let pane_id = std::env::var("TMUX_PANE")
-        .map_err(|_| "TMUX_ENDPOINT_MISSING: TMUX_PANE unavailable".to_owned())?;
-    validate_pane_id(&pane_id)?;
-    let socket_path = tmux
-        .rsplitn(3, ',')
-        .nth(2)
-        .filter(|path| path.starts_with('/') && !path.chars().any(char::is_control))
-        .ok_or_else(|| "TMUX_ENDPOINT_INVALID: malformed tmux socket path".to_owned())?
-        .to_owned();
-    Ok(crate::proto::TmuxPaneAnchor {
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EndpointCapabilities {
+    endpoints: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ObservedPane {
+    server_pid: u32,
+    tmux_session_id: String,
+    pane_id: String,
+    pane_pid: u32,
+}
+
+pub fn configured_endpoints(state_root: &Path) -> Result<Vec<String>, String> {
+    let path = state_root.join(ENDPOINT_CAPABILITY_FILE);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(format!(
+                "TMUX_OBSERVATION_CAPABILITY_INVALID: read {}: {error}",
+                path.display()
+            ));
+        }
+    };
+    let capabilities: EndpointCapabilities = serde_json::from_slice(&bytes).map_err(|error| {
+        format!(
+            "TMUX_OBSERVATION_CAPABILITY_INVALID: parse {}: {error}",
+            path.display()
+        )
+    })?;
+    for endpoint in &capabilities.endpoints {
+        validate_socket_path(endpoint)?;
+    }
+    Ok(capabilities.endpoints)
+}
+
+pub fn observe_caller(
+    endpoints: impl IntoIterator<Item = String>,
+    caller_pid: u32,
+    pane_hint: Option<&str>,
+) -> Result<Option<TmuxEndpoint>, String> {
+    if caller_pid == 0 {
+        return Err("TMUX_OBSERVATION_INVALID: caller pid must be non-zero".into());
+    }
+    let endpoints = endpoints
+        .into_iter()
+        .map(|path| {
+            validate_socket_path(&path)?;
+            Ok(path)
+        })
+        .collect::<Result<BTreeSet<_>, String>>()?;
+    if endpoints.is_empty() {
+        if pane_hint.is_some() {
+            return Err(
+                "TMUX_OBSERVATION_CAPABILITY_MISSING: no configured or recorded tmux endpoint is available"
+                    .into(),
+            );
+        }
+        return Ok(None);
+    }
+    let parents = process_parents()?;
+    let ancestors = caller_ancestors(caller_pid, &parents);
+    let mut matches = Vec::new();
+    let mut observation_errors = Vec::new();
+    for socket_path in endpoints {
+        match list_panes(&socket_path) {
+            Ok(panes) => {
+                for pane in panes {
+                    if ancestors.contains(&pane.pane_pid) {
+                        matches.push((socket_path.clone(), pane));
+                    }
+                }
+            }
+            Err(error) if endpoint_is_absent(&error) => {}
+            Err(error) => observation_errors.push(format!("{socket_path}: {error}")),
+        }
+    }
+    if matches.len() > 1 {
+        if let Some(hint) = pane_hint.filter(|hint| validate_pane_id(hint).is_ok()) {
+            matches.retain(|(_, pane)| pane.pane_id == hint);
+        }
+    }
+    let (socket_path, pane) = match matches.len() {
+        0 => {
+            return if observation_errors.is_empty() {
+                Ok(None)
+            } else {
+                Err(format!(
+                    "TMUX_OBSERVATION_UNAVAILABLE: {}",
+                    observation_errors.join("; ")
+                ))
+            };
+        }
+        1 => matches.pop().unwrap(),
+        _ => {
+            let targets = matches
+                .iter()
+                .map(|(_, pane)| format!("{}:{}", pane.tmux_session_id, pane.pane_id))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "TMUX_OBSERVATION_AMBIGUOUS: caller ancestry matches multiple panes: {targets}"
+            ));
+        }
+    };
+    let endpoint = TmuxEndpoint {
         socket_path,
-        pane_id,
+        server_pid: pane.server_pid,
+        tmux_session_id: pane.tmux_session_id,
+        pane_id: pane.pane_id,
+        pane_pid: pane.pane_pid,
+        codex_session_id: None,
+        codex_thread_id: None,
+    };
+    validate_endpoint(&endpoint)?;
+    Ok(Some(endpoint))
+}
+
+/// Pane hint exported by tmux. The `TMUX` value (socket path/server pid/client
+/// session) is deliberately never parsed: it is caller-controlled placement
+/// data and cannot select a Collab identity.
+pub fn pane_hint_from_env() -> Option<String> {
+    std::env::var("TMUX_PANE")
+        .ok()
+        .filter(|value| validate_pane_id(value).is_ok())
+}
+
+/// Read-only endpoints persisted in identity receipts. This keeps legacy
+/// callers free of socket environment injection while still using only
+/// host-owned capability records.
+pub fn persisted_identity_endpoints(state_root: &Path) -> Result<Vec<String>, String> {
+    let root = state_root.join("identities");
+    let entries = match std::fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(format!(
+                "TMUX_OBSERVATION_CAPABILITY_INVALID: read {}: {error}",
+                root.display()
+            ));
+        }
+    };
+    let mut endpoints = BTreeSet::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            format!(
+                "TMUX_OBSERVATION_CAPABILITY_INVALID: read {}: {error}",
+                root.display()
+            )
+        })?;
+        if !entry
+            .file_type()
+            .map_err(|error| format!("TMUX_OBSERVATION_CAPABILITY_INVALID: {error}"))?
+            .is_dir()
+        {
+            continue;
+        }
+        let bytes = match std::fs::read(entry.path().join("identity.json")) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "TMUX_OBSERVATION_CAPABILITY_INVALID: read identity receipt: {error}"
+                ));
+            }
+        };
+        let receipt: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+            format!("TMUX_OBSERVATION_CAPABILITY_INVALID: parse identity receipt: {error}")
+        })?;
+        if receipt["transport"]["kind"].as_str() != Some("tmux") {
+            continue;
+        }
+        if let Some(socket) = receipt["transport"]["tmux_endpoint"]["socket_path"].as_str() {
+            validate_socket_path(socket)?;
+            endpoints.insert(socket.to_owned());
+        }
+    }
+    Ok(endpoints.into_iter().collect())
+}
+
+pub fn known_endpoints_at(state_root: &Path) -> Result<Vec<String>, String> {
+    let mut endpoints = configured_endpoints(state_root)?;
+    endpoints.extend(persisted_identity_endpoints(state_root)?);
+    endpoints.sort();
+    endpoints.dedup();
+    Ok(endpoints)
+}
+
+pub fn observe_caller_at(
+    state_root: &Path,
+    caller_pid: u32,
+    pane_hint: Option<&str>,
+) -> Result<Option<TmuxEndpoint>, String> {
+    observe_caller(known_endpoints_at(state_root)?, caller_pid, pane_hint)
+}
+
+/// Compatibility wrapper for callers that still request the current tmux
+/// candidate. It observes live ancestry against host-owned endpoint records;
+/// it does not parse `TMUX`.
+pub fn candidate_from_env() -> Result<TmuxCandidate, String> {
+    let host_paths = crate::scope::HostPaths::resolve().map_err(|error| {
+        format!("TMUX_OBSERVATION_CAPABILITY_INVALID: resolve host state root: {error}")
+    })?;
+    let hint = pane_hint_from_env();
+    let endpoint = observe_caller_at(host_paths.state_root(), std::process::id(), hint.as_deref())?
+        .ok_or_else(|| {
+            "TMUX_OBSERVATION_UNAVAILABLE: caller ancestry does not identify a live tmux pane"
+                .to_owned()
+        })?;
+    let cwd = std::env::current_dir()
+        .and_then(|path| path.canonicalize())
+        .map_err(|error| format!("TMUX_OBSERVATION_INVALID: resolve cwd: {error}"))?
+        .to_str()
+        .ok_or_else(|| "TMUX_OBSERVATION_INVALID: cwd is not UTF-8".to_owned())?
+        .to_owned();
+    Ok(TmuxCandidate { endpoint, cwd })
+}
+
+/// Compatibility wrapper for the remaining pane-anchor consumers. The socket
+/// path comes from the live observed endpoint, never from the `TMUX` value.
+pub fn anchor_from_env() -> Result<TmuxPaneAnchor, String> {
+    let candidate = candidate_from_env()?;
+    Ok(TmuxPaneAnchor {
+        socket_path: candidate.endpoint.socket_path,
+        pane_id: candidate.endpoint.pane_id,
     })
 }
 
-pub fn candidate_from_env() -> Result<TmuxCandidate, String> {
-    let tmux = std::env::var("TMUX").map_err(|_| {
-        "TMUX_ENDPOINT_MISSING: run this command from the registered tmux pane, then retry"
-            .to_owned()
-    })?;
-    let pane_id = std::env::var("TMUX_PANE")
-        .map_err(|_| "TMUX_ENDPOINT_MISSING: TMUX_PANE is unavailable; run this command from the registered tmux pane, then retry".to_owned())?;
-    validate_pane_id(&pane_id)?;
-    let mut parts = tmux.rsplitn(3, ',');
-    let _client_session = parts.next();
-    let server_pid = parts
-        .next()
-        .and_then(|part| part.parse::<u32>().ok())
-        .ok_or_else(|| "TMUX_ENDPOINT_INVALID: malformed tmux server pid".to_owned())?;
-    let socket_path = parts
-        .next()
-        .filter(|path| path.starts_with('/'))
-        .ok_or_else(|| "TMUX_ENDPOINT_INVALID: malformed tmux socket path".to_owned())?;
+fn validate_socket_path(path: &str) -> Result<(), String> {
+    if !Path::new(path).is_absolute() || path.chars().any(char::is_control) {
+        return Err(
+            "TMUX_OBSERVATION_CAPABILITY_INVALID: endpoint must be an absolute socket path".into(),
+        );
+    }
+    Ok(())
+}
+
+fn process_parents() -> Result<HashMap<u32, u32>, String> {
+    let output = Command::new("ps")
+        .args(["-axo", "pid=,ppid="])
+        .output()
+        .map_err(|error| format!("TMUX_OBSERVATION_UNAVAILABLE: start ps: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "TMUX_OBSERVATION_UNAVAILABLE: ps failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let text = String::from_utf8(output.stdout)
+        .map_err(|_| "TMUX_OBSERVATION_UNAVAILABLE: ps returned non-UTF-8".to_owned())?;
+    let mut parents = HashMap::new();
+    for line in text.lines() {
+        let mut fields = line.split_whitespace();
+        let (Some(pid), Some(parent), None) = (fields.next(), fields.next(), fields.next()) else {
+            return Err("TMUX_OBSERVATION_UNAVAILABLE: malformed ps process table".into());
+        };
+        let pid = pid
+            .parse::<u32>()
+            .map_err(|_| "TMUX_OBSERVATION_UNAVAILABLE: malformed ps pid".to_owned())?;
+        let parent = parent
+            .parse::<u32>()
+            .map_err(|_| "TMUX_OBSERVATION_UNAVAILABLE: malformed ps parent pid".to_owned())?;
+        parents.insert(pid, parent);
+    }
+    Ok(parents)
+}
+
+fn caller_ancestors(caller_pid: u32, parents: &HashMap<u32, u32>) -> BTreeSet<u32> {
+    let mut ancestors = BTreeSet::new();
+    let mut current = caller_pid;
+    while current != 0 && ancestors.insert(current) {
+        let Some(parent) = parents.get(&current) else {
+            break;
+        };
+        current = *parent;
+    }
+    ancestors
+}
+
+fn list_panes(socket_path: &str) -> Result<Vec<ObservedPane>, String> {
     let output = tmux_command(
         socket_path,
         &[
-            "display-message",
-            "-p",
-            "-t",
-            &pane_id,
-            "#{session_id}\t#{pane_id}\t#{pane_pid}",
+            "list-panes",
+            "-a",
+            "-F",
+            "#{pid}\t#{session_id}\t#{pane_id}\t#{pane_pid}",
         ],
     )?;
-    let line = String::from_utf8(output.stdout)
-        .map_err(|_| "TMUX_ENDPOINT_INVALID: non-UTF-8 tmux endpoint".to_owned())?;
-    let mut fields = line.trim_end().split('\t');
-    let tmux_session_id = fields.next().unwrap_or_default().to_owned();
-    let observed_pane_id = fields.next().unwrap_or_default();
-    let pane_pid = fields
-        .next()
-        .and_then(|value| value.parse::<u32>().ok())
-        .ok_or_else(|| "TMUX_ENDPOINT_INVALID: malformed pane pid".to_owned())?;
-    if !tmux_session_id.starts_with('$') || observed_pane_id != pane_id {
-        return Err("TMUX_ENDPOINT_INVALID: pane identity changed during discovery".into());
-    }
-    let cwd = std::env::current_dir()
-        .and_then(std::fs::canonicalize)
-        .map_err(|error| format!("TMUX_ENDPOINT_INVALID: resolve cwd: {error}"))?
-        .to_str()
-        .ok_or_else(|| "TMUX_ENDPOINT_INVALID: cwd is not UTF-8".to_owned())?
-        .to_owned();
-    let candidate = TmuxCandidate {
-        endpoint: TmuxEndpoint {
-            socket_path: socket_path.to_owned(),
-            server_pid,
-            tmux_session_id,
-            pane_id,
-            pane_pid,
-            codex_session_id: nonempty_env("CODEX_SESSION_ID"),
-            codex_thread_id: nonempty_env("CODEX_THREAD_ID"),
-        },
-        cwd,
-    };
-    validate_endpoint(&candidate.endpoint)?;
-    Ok(candidate)
+    let text = String::from_utf8(output.stdout)
+        .map_err(|_| "TMUX_OBSERVATION_INVALID: non-UTF-8 tmux metadata".to_owned())?;
+    text.lines()
+        .map(|line| {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            if fields.len() != 4 {
+                return Err("TMUX_OBSERVATION_INVALID: malformed tmux pane metadata".into());
+            }
+            let server_pid = fields[0]
+                .parse::<u32>()
+                .map_err(|_| "TMUX_OBSERVATION_INVALID: malformed tmux server pid".to_owned())?;
+            let pane_pid = fields[3]
+                .parse::<u32>()
+                .map_err(|_| "TMUX_OBSERVATION_INVALID: malformed tmux pane pid".to_owned())?;
+            validate_pane_id(fields[2])?;
+            if !fields[1].starts_with('$') {
+                return Err("TMUX_OBSERVATION_INVALID: malformed tmux session id".into());
+            }
+            Ok(ObservedPane {
+                server_pid,
+                tmux_session_id: fields[1].to_owned(),
+                pane_id: fields[2].to_owned(),
+                pane_pid,
+            })
+        })
+        .collect()
 }
 
-fn nonempty_env(key: &str) -> Option<String> {
-    std::env::var(key)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
+fn endpoint_is_absent(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("no server running") || error.contains("error connecting to")
 }
 
 pub fn probe(endpoint: &TmuxEndpoint) -> Result<PanePresence, String> {
@@ -554,53 +795,53 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn candidate_from_env_resolves_the_current_isolated_tmux_pane() {
-        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
-        let tmux = IsolatedTmux::start();
-        let endpoint = tmux.endpoint();
-        let previous_tmux = std::env::var_os("TMUX");
-        let previous_pane = std::env::var_os("TMUX_PANE");
-        let previous_session = std::env::var_os("CODEX_SESSION_ID");
-        let previous_thread = std::env::var_os("CODEX_THREAD_ID");
-        std::env::set_var(
-            "TMUX",
-            format!("{},{},0", endpoint.socket_path, endpoint.server_pid),
-        );
-        std::env::set_var("TMUX_PANE", &endpoint.pane_id);
-        std::env::set_var("CODEX_SESSION_ID", "codex-session-test");
-        std::env::set_var("CODEX_THREAD_ID", "codex-thread-test");
-        let candidate = candidate_from_env();
-        match previous_tmux {
-            Some(value) => std::env::set_var("TMUX", value),
-            None => std::env::remove_var("TMUX"),
-        }
-        match previous_pane {
-            Some(value) => std::env::set_var("TMUX_PANE", value),
-            None => std::env::remove_var("TMUX_PANE"),
-        }
-        match previous_session {
-            Some(value) => std::env::set_var("CODEX_SESSION_ID", value),
-            None => std::env::remove_var("CODEX_SESSION_ID"),
-        }
-        match previous_thread {
-            Some(value) => std::env::set_var("CODEX_THREAD_ID", value),
-            None => std::env::remove_var("CODEX_THREAD_ID"),
-        }
-        let candidate = candidate.unwrap();
-        assert_eq!(candidate.endpoint.socket_path, endpoint.socket_path);
-        assert_eq!(candidate.endpoint.server_pid, endpoint.server_pid);
-        assert_eq!(candidate.endpoint.tmux_session_id, endpoint.tmux_session_id);
-        assert_eq!(candidate.endpoint.pane_id, endpoint.pane_id);
-        assert_eq!(candidate.endpoint.pane_pid, endpoint.pane_pid);
+    fn caller_ancestry_disambiguates_overlapping_pane_ids() {
+        let first = IsolatedTmux::start();
+        let second = IsolatedTmux::start();
+        let first_endpoint = first.endpoint();
+        let second_endpoint = second.endpoint();
         assert_eq!(
-            candidate.endpoint.codex_session_id.as_deref(),
-            Some("codex-session-test")
+            first_endpoint.pane_id, second_endpoint.pane_id,
+            "fresh isolated servers should expose the overlapping pane id case"
         );
+        let observed = observe_caller(
+            vec![
+                first.socket.to_string_lossy().into_owned(),
+                second.socket.to_string_lossy().into_owned(),
+            ],
+            first_endpoint.pane_pid,
+            Some(&first_endpoint.pane_id),
+        )
+        .unwrap()
+        .expect("the caller's pane is observable");
+        assert_eq!(observed.socket_path, first_endpoint.socket_path);
+        assert_eq!(observed.server_pid, first_endpoint.server_pid);
+        assert_eq!(observed.tmux_session_id, first_endpoint.tmux_session_id);
+        assert_eq!(observed.pane_id, first_endpoint.pane_id);
+        assert_eq!(observed.pane_pid, first_endpoint.pane_pid);
+    }
+
+    #[test]
+    fn configured_endpoints_are_typed_host_capabilities() {
+        let root = std::env::temp_dir().join(format!(
+            "collab-tmux-capability-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join(ENDPOINT_CAPABILITY_FILE),
+            r#"{"endpoints":["/tmp/tmux-one.sock","/tmp/tmux-two.sock"]}"#,
+        )
+        .unwrap();
         assert_eq!(
-            candidate.endpoint.codex_thread_id.as_deref(),
-            Some("codex-thread-test")
+            configured_endpoints(&root).unwrap(),
+            vec!["/tmp/tmux-one.sock", "/tmp/tmux-two.sock"]
         );
-        assert!(!candidate.cwd.is_empty());
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

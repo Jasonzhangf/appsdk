@@ -120,6 +120,15 @@ pub struct IdentityFacts {
     pub endpoint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
+    /// Ephemeral process id of the caller. The daemon uses it only to observe
+    /// the caller's live tmux ancestry; it never selects an identity and is
+    /// excluded from operation and approval intent digests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_pid: Option<u32>,
+    /// Optional pane id hint used only to break an ancestry tie. The `TMUX`
+    /// socket value is never accepted as an identity or delivery address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_hint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tmux: Option<TmuxCandidate>,
     /// Stable address available without display/capture or native runtime IDs.
@@ -991,13 +1000,24 @@ pub struct RequestEnvelope {
     pub project_context: Option<ProjectContext>,
     #[serde(flatten)]
     pub request: Req,
+    /// Wire compatibility for user shutdown during upgrades from the legacy
+    /// operator schema. Never deserialized or used as daemon authority.
+    #[serde(
+        rename = "operator",
+        skip_deserializing,
+        skip_serializing_if = "Option::is_none"
+    )]
+    legacy_operator: Option<bool>,
 }
 
 impl RequestEnvelope {
     pub fn new(request: Req, project_context: Option<ProjectContext>) -> Self {
+        let legacy_operator =
+            matches!(&request, Req::Shutdown { password: Some(_) }).then_some(true);
         Self {
             project_context,
             request,
+            legacy_operator,
         }
     }
 
@@ -1363,6 +1383,34 @@ mod tests {
             .validate_for(&registered_identity(), &scope)
             .unwrap();
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn shutdown_wire_compatibility_is_not_identity_or_authority() {
+        let password = MaintenancePassword::new("fixture-only-password");
+        let encoded = serde_json::to_value(RequestEnvelope::new(
+            Req::Shutdown {
+                password: Some(password.clone()),
+            },
+            None,
+        ))
+        .unwrap();
+        assert_eq!(encoded["operator"], true);
+        let decoded: RequestEnvelope = serde_json::from_value(encoded).unwrap();
+        assert!(
+            matches!(decoded.request, Req::Shutdown { password: Some(value) } if value == password)
+        );
+        let legacy: RequestEnvelope = serde_json::from_value(serde_json::json!({
+            "op": "Shutdown", "operator": true,
+        }))
+        .unwrap();
+        assert!(matches!(legacy.request, Req::Shutdown { password: None }));
+        let ping = serde_json::to_value(RequestEnvelope::new(Req::Ping, None)).unwrap();
+        assert!(ping.get("operator").is_none());
+        let unauthenticated =
+            serde_json::to_value(RequestEnvelope::new(Req::Shutdown { password: None }, None))
+                .unwrap();
+        assert!(unauthenticated.get("operator").is_none());
     }
 
     #[test]

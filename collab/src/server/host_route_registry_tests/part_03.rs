@@ -52,18 +52,37 @@
         assert_ne!(app_a_runtime.storage_root, app_b_runtime.storage_root);
         assert_ne!(app_a_runtime.storage_root, project_b_runtime.storage_root);
         assert_ne!(app_b_runtime.storage_root, project_b_runtime.storage_root);
-        assert!(
-            app_a_runtime.storage_root.starts_with(&canonical_project_a),
-            "app-a storage {} is outside project {}",
-            app_a_runtime.storage_root.display(),
-            canonical_project_a.display()
+        assert_eq!(
+            app_a_runtime.storage_root,
+            host_paths
+                .app_storage_root(
+                    app_a_context.project_scope.as_str(),
+                    app_a_context.app_scope_id.as_str(),
+                )
+                .canonicalize()
+                .unwrap()
         );
-        assert!(app_b_runtime
-            .storage_root
-            .starts_with(canonical_project_a.join(".agent-collab/server/runtimes")));
-        assert!(project_b_runtime
-            .storage_root
-            .starts_with(&canonical_project_b));
+        assert_eq!(
+            app_b_runtime.storage_root,
+            host_paths
+                .app_storage_root(
+                    app_b_context.project_scope.as_str(),
+                    app_b_context.app_scope_id.as_str(),
+                )
+                .canonicalize()
+                .unwrap()
+        );
+        assert_eq!(
+            project_b_runtime.storage_root,
+            host_paths
+                .app_storage_root(
+                    project_b_context.project_scope.as_str(),
+                    project_b_context.app_scope_id.as_str(),
+                )
+                .canonicalize()
+                .unwrap()
+        );
+        assert_ne!(canonical_project_a, canonical_project_b);
 
         let app_a_identity =
             runtime_for_registered(&app_a_runtime, &project_a, "app-a-worker", "app/a");
@@ -844,8 +863,15 @@
             "encoded-colon-worker",
             "token-encoded-colon",
         );
-        let slash_storage = app_scope_storage_path(&canonical_project_root, "app/a");
-        let colon_storage = app_scope_storage_path(&canonical_project_root, "app:a");
+        let project_scope = GlobalState::canonical_project_scope(&canonical_project_root).unwrap();
+        let slash_storage = host_paths
+            .app_storage_root(project_scope.as_str(), "app/a")
+            .canonicalize()
+            .unwrap();
+        let colon_storage = host_paths
+            .app_storage_root(project_scope.as_str(), "app:a")
+            .canonicalize()
+            .unwrap();
         assert_ne!(slash_storage, colon_storage);
         assert_eq!(slash_runtime.storage_root, slash_storage);
         assert_eq!(colon_runtime.storage_root, colon_storage);
@@ -950,8 +976,11 @@
         std::fs::remove_dir_all(project_root).unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn prospective_storage_collision_rejects_register_before_route_publish() {
+        use std::os::unix::fs::symlink;
+
         let (server, host_root, _) = test_server();
         let project_root = host_root.with_file_name(format!(
             "{}-prospective-collision",
@@ -962,32 +991,31 @@
         let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
         let route_journal = host_paths.state_root().join("routes.jsonl");
         std::fs::create_dir_all(host_paths.state_root()).unwrap();
-        let legacy_app_scope = "v1-3-616263";
+        let existing_app_scope = "central-storage-owner";
         let candidate_app_scope = "abc";
-        let legacy_storage_root = canonical_project_root
-            .join(".agent-collab/server/runtimes")
-            .join(legacy_app_scope);
-        assert_eq!(
-            legacy_storage_root,
-            app_scope_storage_path(&canonical_project_root, candidate_app_scope)
-        );
         let project_scope = GlobalState::canonical_project_scope(&canonical_project_root).unwrap();
+        let existing_storage_root =
+            host_paths.app_storage_root(project_scope.as_str(), existing_app_scope);
+        let candidate_storage_root =
+            host_paths.app_storage_root(project_scope.as_str(), candidate_app_scope);
+        std::fs::create_dir_all(existing_storage_root.parent().unwrap()).unwrap();
+        symlink(&existing_storage_root, &candidate_storage_root).unwrap();
         let legacy_record = HostRouteRecord {
             version: 1,
             op: "register".into(),
-            app_scope_id: legacy_app_scope.into(),
+            app_scope_id: existing_app_scope.into(),
             project_scope: project_scope.as_str().into(),
             canonical_root: project_scope.as_str().into(),
-            storage_root: legacy_storage_root.to_string_lossy().into_owned(),
+            storage_root: existing_storage_root.to_string_lossy().into_owned(),
             registered_ms: 1,
         };
         let legacy_line = serde_json::to_string(&legacy_record).unwrap();
         std::fs::write(&route_journal, format!("{legacy_line}\n")).unwrap();
         let before_collision = std::fs::read(&route_journal).unwrap();
 
-        // The existing record uses the old lossy path convention. Startup
-        // must replay it, while a new encoded route must be rejected before
-        // the host route journal is replaced.
+        // The candidate app's actual central target aliases the existing
+        // route owner. Startup must replay the valid owner, while the new
+        // route must not share that storage target.
         let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
         let (_runtime, collision_response) = register_host_fixture(&manager,
             Some(context_with_app(&project_root, candidate_app_scope)),
@@ -1008,7 +1036,7 @@
 
         // The rejected prospective route must not poison the old route that
         // was successfully replayed from the durable journal.
-        let legacy_context = context_with_app(&project_root, legacy_app_scope);
+        let legacy_context = context_with_app(&project_root, existing_app_scope);
         let (_runtime, registration_response) = register_host_fixture(&manager,
             Some(legacy_context.clone()),
             Req::register("legacy-replayed-worker".into(),
@@ -1034,10 +1062,17 @@
     #[tokio::test]
     async fn resident_storage_collision_rejects_register_before_route_publish() {
         let (mut server, host_root, _) = test_server();
-        let resident_storage_root = host_root.with_file_name(format!(
-            "{}-resident-storage",
+        let collision_project = host_root.with_file_name(format!(
+            "{}-resident-collision-project",
             host_root.file_name().unwrap().to_string_lossy()
         ));
+        std::fs::create_dir_all(collision_project.join(".agent-collab/server")).unwrap();
+        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+        let collision_context = context_with_app(&collision_project, "collision-app");
+        let resident_storage_root = host_paths.app_storage_root(
+            collision_context.project_scope.as_str(),
+            collision_context.app_scope_id.as_str(),
+        );
         let resident_server_dir = resident_storage_root.join(".agent-collab/server");
         std::fs::create_dir_all(&resident_server_dir).unwrap();
         let resident_storage_root = resident_storage_root.canonicalize().unwrap();
@@ -1053,7 +1088,6 @@
             host.journal_path = resident_journal_path;
             host.journal = Mutex::new(resident_journal);
         }
-        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
         let route_journal = host_paths.state_root().join("routes.jsonl");
         std::fs::create_dir_all(host_paths.state_root()).unwrap();
         std::fs::write(&route_journal, b"").unwrap();
@@ -1081,13 +1115,12 @@
 
         // A second project whose storage root equals the resident reducer's
         // root must fail before a route record or second reducer is created.
-        let collision_context = context_with_app(&resident_storage_root, "collision-app");
         let (_runtime, collision_response) = register_host_fixture(&manager,
             Some(collision_context.clone()),
             Req::register("resident-collision-worker".into(),
                  "token-resident-collision".into(),
-                 resident_storage_root.display().to_string(),
-                 test_candidates_at("thread-resident-collision-worker", &resident_storage_root)),
+                 collision_project.display().to_string(),
+                 test_candidates_at("thread-resident-collision-worker", &collision_project)),
         );
         assert!(!collision_response.ok, "{collision_response:?}");
         assert!(
@@ -1113,7 +1146,7 @@
 
         drop(manager);
         std::fs::remove_dir_all(host_root).unwrap();
-        std::fs::remove_dir_all(resident_storage_root).unwrap();
+        std::fs::remove_dir_all(collision_project).unwrap();
     }
 
     #[tokio::test]
@@ -1146,7 +1179,15 @@
         assert!(app_response.ok, "{app_response:?}");
         assert!(!Arc::ptr_eq(&seed_runtime, &app_runtime));
 
-        let nested_root = app_scope_storage_path(&canonical_project_root, "app/a");
+        let nested_root = host_paths
+            .app_storage_root(
+                GlobalState::canonical_project_scope(&canonical_project_root)
+                    .unwrap()
+                    .as_str(),
+                "app/a",
+            )
+            .canonicalize()
+            .unwrap();
         assert_eq!(app_runtime.root, canonical_project_root);
         assert_eq!(app_runtime.storage_root, nested_root);
         std::fs::create_dir_all(nested_root.join(".agent-collab/server")).unwrap();
@@ -1196,7 +1237,9 @@
         let context = context_with_app(&root, "pending-concurrent");
         let key = ProjectRuntimeManager::route_key(&context);
         let canonical_root = root.canonicalize().unwrap();
-        manager.install_pending_route(&key, &canonical_root, &canonical_root);
+        let storage_root =
+            host_paths.app_storage_root(context.project_scope.as_str(), context.app_scope_id.as_str());
+        manager.install_pending_route(&key, &canonical_root, &storage_root);
 
         let first_manager = manager.clone();
         let first_context = context.clone();
@@ -1220,7 +1263,10 @@
         assert_eq!(manager.runtimes().len(), 2);
         assert_eq!(
             first.journal_path,
-            canonical_root.join(".agent-collab/server/journal.jsonl")
+            storage_root
+                .canonicalize()
+                .unwrap()
+                .join(".agent-collab/server/journal.jsonl")
         );
 
         drop(first);
@@ -1241,6 +1287,8 @@
         std::fs::create_dir_all(project_root.join(".agent-collab/server")).unwrap();
         let context = context_with_app(&project_root, "startup-pending-app");
         let route_journal = host_paths.state_root().join("routes.jsonl");
+        let storage_root =
+            host_paths.app_storage_root(context.project_scope.as_str(), context.app_scope_id.as_str());
         append_host_route_record(
             &route_journal,
             &HostRouteRecord {
@@ -1249,7 +1297,7 @@
                 app_scope_id: context.app_scope_id.as_str().into(),
                 project_scope: context.project_scope.as_str().into(),
                 canonical_root: context.canonical_root.clone(),
-                storage_root: context.canonical_root.clone(),
+                storage_root: storage_root.to_string_lossy().into_owned(),
                 registered_ms: 1,
             },
         )
@@ -1281,7 +1329,7 @@
         );
         assert_eq!(
             selected.journal_path,
-            project_root
+            storage_root
                 .canonicalize()
                 .unwrap()
                 .join(".agent-collab/server/journal.jsonl")
@@ -1539,19 +1587,21 @@
 
     #[test]
     fn startup_recovers_committed_project_binding_missing_from_host_index() {
-        let (seed_host, seed_host_root, _) = test_server();
-        let seed_paths = HostPaths::for_state_root(seed_host_root.join("host-state")).unwrap();
-        let seed_manager = ProjectRuntimeManager::new(seed_host, &seed_paths).unwrap();
+        let (host, host_root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+        let seed_manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
 
-        let project_root = seed_host_root.with_file_name(format!(
+        let project_root = host_root.with_file_name(format!(
             "{}-split-journal",
-            seed_host_root.file_name().unwrap().to_string_lossy()
+            host_root.file_name().unwrap().to_string_lossy()
         ));
         std::fs::create_dir_all(project_root.join(".agent-collab/server")).unwrap();
         let canonical_root = project_root.canonicalize().unwrap();
         let context = context_with_app(&project_root, "split-journal-app");
         let key = ProjectRuntimeManager::route_key(&context);
-        seed_manager.install_pending_route(&key, &canonical_root, &canonical_root);
+        let storage_root =
+            host_paths.app_storage_root(context.project_scope.as_str(), context.app_scope_id.as_str());
+        seed_manager.install_pending_route(&key, &canonical_root, &storage_root);
         let runtime = seed_manager.select_runtime(&context).unwrap();
         let binding = commit_tmux_typed_fixture(
             &runtime,
@@ -1563,10 +1613,8 @@
         drop(runtime);
         drop(seed_manager);
 
-        // The project commit is durable, but this host journal never received
-        // the matching current-thread publication.
-        let (host, host_root, _) = test_server();
-        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+        // The central project commit is durable, but this host journal never
+        // received the matching current-thread publication.
         std::fs::create_dir_all(host_paths.state_root()).unwrap();
         let route_journal = host_paths.state_root().join("routes.jsonl");
         append_host_route_record(
@@ -1577,7 +1625,7 @@
                 app_scope_id: context.app_scope_id.as_str().into(),
                 project_scope: context.project_scope.as_str().into(),
                 canonical_root: context.canonical_root.clone(),
-                storage_root: canonical_root.display().to_string(),
+                storage_root: storage_root.display().to_string(),
                 registered_ms: 1,
             },
         )
@@ -1737,7 +1785,7 @@
             record.app_scope_id == "routecodex-app"
                 && record.project_scope == project_scope.as_str()
         }));
-        let replayed_external = replay(&external_root).unwrap();
+        let replayed_external = replay(&runtime.storage_root).unwrap();
         let replayed_project = replayed_external
             .global
             .lookup_project(&project_scope)

@@ -33,25 +33,34 @@ impl AnchorObservation {
         }
     }
 
-    /// Legacy adapter for the read-only CLI callers (`load_existing_at`). The
-    /// daemon path never uses this: it consumes only `IdentityFacts`.
+    /// Legacy adapter for read-only CLI callers. It observes the caller's live
+    /// ancestry through host-owned endpoint records and never parses `TMUX`.
     fn from_env() -> anyhow::Result<Self> {
-        let tmux_anchor = if std::env::var_os("TMUX_PANE").is_some() {
-            Some(crate::client::adapters::tmux::anchor_from_env().map_err(anyhow::Error::msg)?)
-        } else {
-            None
-        };
+        let host_paths = crate::scope::HostPaths::resolve()?;
+        Self::from_env_at(&host_paths)
+    }
+
+    fn from_env_at(host_paths: &HostPaths) -> anyhow::Result<Self> {
+        let pane_hint = crate::client::adapters::tmux::pane_hint_from_env();
+        let tmux = crate::client::adapters::tmux::observe_caller_at(
+            host_paths.state_root(),
+            std::process::id(),
+            pane_hint.as_deref(),
+        )
+        .map_err(anyhow::Error::msg)?
+        .map(|endpoint| crate::proto::TmuxCandidate {
+            endpoint,
+            cwd: std::env::current_dir()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        });
         let session_env = std::env::var("CODEX_SESSION_ID").ok();
         let thread_env = std::env::var("CODEX_THREAD_ID").ok();
         Ok(Self {
             session_id: non_empty(session_env.as_deref()),
             thread_id: non_empty(thread_env.as_deref()),
-            tmux: if tmux_anchor.is_some() {
-                crate::client::adapters::tmux::candidate_from_env().ok()
-            } else {
-                None
-            },
-            tmux_anchor,
+            tmux,
+            tmux_anchor: None,
             dsh_session_id: non_empty(std::env::var("DSH_SESSION_ID").ok().as_deref()),
         })
     }
@@ -186,11 +195,6 @@ pub(crate) fn resolve_for_daemon_with_route_at(
 /// `codex-<pane>` and `codex-thread-<hex>` naming so a fresh verified anchor
 /// keeps its stable, filesystem-safe identity.
 fn draft_worker_id_at(observed: &AnchorObservation) -> anyhow::Result<String> {
-    if let Some(tmux) = observed.tmux_anchor.as_ref() {
-        let worker_id = format!("codex-{}", tmux.pane_id);
-        validate_id(&worker_id)?;
-        return Ok(worker_id);
-    }
     if let Some(dsh_session) = observed.dsh_session_id.as_deref() {
         let worker_id = format!("dsh-thread-{}", hex_encode(dsh_session));
         // Hex output is non-empty and control-character free, so length is the

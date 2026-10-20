@@ -59,7 +59,7 @@ fn parse_json(bytes: &[u8]) -> Value {
     serde_json::from_slice(bytes).expect("collab CLI emits JSON")
 }
 
-fn create_session_on_socket(label: &str, socket: &Path) -> Pane {
+fn create_session_on_socket(fixture: &Fixture, label: &str, socket: &Path) -> Pane {
     let output = Command::new("tmux")
         .args([
             "-S",
@@ -77,6 +77,7 @@ fn create_session_on_socket(label: &str, socket: &Path) -> Pane {
         "create owned tmux session failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    fixture.declare_tmux_endpoint(socket);
     let pane_id = String::from_utf8(
         Command::new("tmux")
             .args([
@@ -112,12 +113,14 @@ fn create_session_on_socket(label: &str, socket: &Path) -> Pane {
     .trim()
     .parse::<u32>()
     .expect("tmux server pid is numeric");
-    Pane {
+    let pane = Pane {
         server_pid,
         pane_id: pane_id.clone(),
         session_anchor: format!("session-{pane_id}"),
         thread_anchor: format!("thread-{pane_id}"),
-    }
+    };
+    fixture.start_pane_runner_on_socket(socket, &pane.pane_id, "sleep 600");
+    pane
 }
 
 fn run_script_in_pane_on_socket(
@@ -127,23 +130,7 @@ fn run_script_in_pane_on_socket(
     label: &str,
     script: &str,
 ) {
-    let script_path = fixture.root.join(format!("{label}.sh"));
-    std::fs::write(&script_path, script).expect("write selected-pane consumer");
-    let command = format!(
-        "cd {} && unset COLLAB_SOCKET_PATH COLLAB_HOST_SOCKET COLLAB_LOCK_PATH COLLAB_HOST_LOCK COLLAB_APPSERVER_SOCKET CODEX_APP_SERVER_SOCKET COLLAB_APPSERVER_NAMESPACE COLLAB_WORKER DSH_SESSION_ID; COLLAB_BINARY={} PROJECT_ROOT={} COLLAB_STATE_DIR={} CODEX_HOME={} CODEX_SESSION_ID={} CODEX_THREAD_ID={} CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex TUI' sh {}",
-        shell_quote(&fixture.root.to_string_lossy()),
-        shell_quote(&fixture.binary.to_string_lossy()),
-        shell_quote(&fixture.root.to_string_lossy()),
-        shell_quote(&fixture.host_state.to_string_lossy()),
-        shell_quote(&fixture.root.join("home").to_string_lossy()),
-        shell_quote(&pane.session_anchor),
-        shell_quote(&pane.thread_anchor),
-        shell_quote(&script_path.to_string_lossy())
-    );
-    tmux(
-        socket,
-        &["respawn-pane", "-k", "-t", &pane.pane_id, &command],
-    );
+    fixture.run_script_in_pane_on_socket(socket, pane, label, script);
 }
 
 fn register_context_in_project(
@@ -264,8 +251,16 @@ fn identity(context: &Value) -> (String, String, String) {
     )
 }
 
+fn central_runtime_journal(fixture: &Fixture, project_root: &Path) -> PathBuf {
+    assert_eq!(
+        std::fs::canonicalize(project_root).expect("canonicalize project root"),
+        fixture.root.canonicalize().expect("canonical fixture root")
+    );
+    fixture.project_journal()
+}
+
 fn retire_binding_route(fixture: &mut Fixture, project_root: &Path, binding_id: &str) {
-    let journal_path = project_root.join(PROJECT_JOURNAL);
+    let journal_path = central_runtime_journal(fixture, project_root);
     let binding = std::fs::read_to_string(&journal_path)
         .expect("read project journal")
         .lines()
@@ -402,7 +397,7 @@ fn setup_master_and_route_less_target(label: &str) -> (Fixture, Pane, Pane, Valu
     fixture.run_ok(&["context"], Some(&master));
     promote_master(&fixture, &fixture.root, &master);
 
-    let target = create_session_on_socket("route-less-target", &fixture.tmux_socket);
+    let target = create_session_on_socket(&fixture, "route-less-target", &fixture.tmux_socket);
     fixture.track_tmux_session("route-less-target");
     let target_context = register_context_in_project(
         &fixture,
@@ -430,9 +425,10 @@ fn close_retires_a_route_less_tmux_peer_after_its_exact_pane_is_missing() {
     assert_eq!(row["endpoint_live"], true, "{row}");
 
     let route = fixture
-        .configured_command(
+        .command_on_socket(
+            &fixture.tmux_socket,
             &["route", "resolve", "--pane-id", &target.pane_id],
-            Some(&target),
+            &target,
         )
         .env_remove("CODEX_SESSION_ID")
         .env_remove("CODEX_THREAD_ID")
@@ -573,12 +569,12 @@ fn close_route_less_unknown_target_stays_unknown_without_retirement() {
     promote_master(&fixture, &fixture.root, &master);
 
     let unknown_socket = fixture.root.join("unknown.sock");
-    create_session_on_socket("route-less-unknown-keeper", &unknown_socket);
+    create_session_on_socket(&fixture, "route-less-unknown-keeper", &unknown_socket);
     let mut keeper_session = OwnedTmuxSession {
         socket: unknown_socket.clone(),
         session: "route-less-unknown-keeper".to_owned(),
     };
-    let target = create_session_on_socket("route-less-unknown-target", &unknown_socket);
+    let target = create_session_on_socket(&fixture, "route-less-unknown-target", &unknown_socket);
     let mut target_session = OwnedTmuxSession {
         socket: unknown_socket.clone(),
         session: "route-less-unknown-target".to_owned(),

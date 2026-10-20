@@ -702,6 +702,211 @@ fn worker_close_allows_definitively_missing_worker_without_snapshot() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+fn owned_missing_tmux_endpoint(label: &str) -> (PathBuf, crate::proto::TmuxEndpoint, String) {
+    let socket = std::env::temp_dir().join(format!(
+        "collab-route-less-close-{}-{label}.sock",
+        std::process::id()
+    ));
+    let run = |args: &[&str]| {
+        let output = Command::new("tmux")
+            .arg("-S")
+            .arg(&socket)
+            .args(args)
+            .output()
+            .expect("run owned tmux command");
+        assert!(
+            output.status.success(),
+            "owned tmux {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    };
+    run(&["new-session", "-d", "-s", "route-less-keep", "sleep 60"]);
+    run(&["new-session", "-d", "-s", "route-less-gone", "sleep 60"]);
+    let server_pid = String::from_utf8(
+        run(&["display-message", "-p", "#{pid}"]).stdout,
+    )
+    .unwrap()
+    .trim()
+    .parse::<u32>()
+    .unwrap();
+    let fields = String::from_utf8(
+        run(&[
+            "display-message",
+            "-p",
+            "-t",
+            "route-less-gone",
+            "#{session_id}\t#{pane_id}\t#{pane_pid}",
+        ])
+        .stdout,
+    )
+    .unwrap();
+    let mut fields = fields.trim_end().split('\t');
+    let tmux_session_id = fields.next().unwrap().to_owned();
+    let pane_id = fields.next().unwrap().to_owned();
+    let pane_pid = fields.next().unwrap().parse::<u32>().unwrap();
+    run(&["kill-session", "-t", "route-less-gone"]);
+    let endpoint = crate::proto::TmuxEndpoint {
+        socket_path: socket.display().to_string(),
+        server_pid,
+        tmux_session_id,
+        pane_id,
+        pane_pid,
+        codex_session_id: None,
+        codex_thread_id: None,
+    };
+    (socket, endpoint, "route-less-keep".into())
+}
+
+#[test]
+fn lifecycle_close_retires_a_route_less_missing_tmux_target() {
+    use crate::proto::{PeerLifecycleRequest, PeerLifecycleTarget};
+
+    let (server, root) = test_server();
+    let app = AppServerId::new("tui-default").unwrap();
+    let cwd = root.display().to_string();
+    let master_transport = test_appserver_transport("thread-master");
+    let registered = seed_committed_owner(
+        &server,
+        "master",
+        "token-master",
+        &master_transport,
+        &cwd,
+        Some(app.clone()),
+    );
+    assert!(registered.ok, "{}", registered.error.unwrap_or_default());
+    commit_current_thread_route_for_runtime(&server, &server, "master", &cwd, Some(&app)).unwrap();
+    promote_master(&server, "master", "user approved lifecycle close");
+
+    let (tmux_socket, endpoint, keep_session) = owned_missing_tmux_endpoint("target");
+    let stale_transport = SelectedTransport {
+        kind: TransportKind::Tmux,
+        endpoint: Some(endpoint.socket_path.clone()),
+        namespace: Some(endpoint.tmux_session_id.clone()),
+        session_id: None,
+        thread_id: None,
+        tmux_endpoint: Some(endpoint),
+        capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
+        self_check: "route-less missing tmux target".into(),
+    };
+    let registered = seed_committed_owner(
+        &server,
+        "stale-peer",
+        "token-stale-peer",
+        &stale_transport,
+        &cwd,
+        Some(app.clone()),
+    );
+    assert!(registered.ok, "{}", registered.error.unwrap_or_default());
+    assert!(
+        server
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .current_thread_routes
+            .values()
+            .all(|route| route.agent_id.as_str() != "stale-peer"),
+        "fixture must leave the target route-less"
+    );
+    let now = now_ms();
+    server.commit(&[Event::NotificationSubscribed {
+        subscription: crate::server::state::NotificationSubscription {
+            id: "sub-stale-peer".into(),
+            worker_id: "stale-peer".into(),
+            target: "missing-pane".into(),
+            event: "direct-message".into(),
+            subject: None,
+            method: "tmux".into(),
+            status: "armed".into(),
+            status_reason: None,
+            created_ms: now,
+            updated_ms: now,
+            fired_count: 0,
+            trigger_ms: None,
+            trigger_times_ms: vec![],
+            repeat_count: 1,
+            interval_ms: None,
+            expires_ms: now + 60_000,
+        },
+    }]);
+
+    let context = ProjectContext::for_registered_root_with_app(&root, app).unwrap();
+    let read = super::peer_lifecycle::handle(
+        &server,
+        Some(&context),
+        PeerLifecycleRequest::Read {
+            worker_id: "master".into(),
+            token: "token-master".into(),
+            target_id: Some("stale-peer".into()),
+        },
+    );
+    assert!(read.ok, "{}", read.error.unwrap_or_default());
+    assert_eq!(
+        read.data["result"]["target"]["worker_id"],
+        "stale-peer",
+        "{}",
+        read.data
+    );
+    assert_eq!(
+        read.data["result"]["projection"]["transport_view"]["error"],
+        "TMUX_PANE_MISSING: target pane is gone",
+        "{}",
+        read.data
+    );
+    let target: PeerLifecycleTarget =
+        serde_json::from_value(read.data["result"]["target"].clone()).unwrap();
+
+    let closed = super::peer_lifecycle::handle(
+        &server,
+        Some(&context),
+        PeerLifecycleRequest::Close {
+            worker_id: "master".into(),
+            token: "token-master".into(),
+            operation_id: "route-less-close-op".into(),
+            query_capability: "route-less-close-capability".into(),
+            target,
+            reason: "remove stale no-session binding causing tombstone poison".into(),
+        },
+    );
+    assert!(closed.ok, "{:?}", closed.error);
+    assert_eq!(closed.data["result"]["outcome"], "complete", "{}", closed.data);
+    assert_eq!(closed.data["result"]["phase"], "complete", "{}", closed.data);
+    assert_eq!(
+        closed.data["result"]["close"]["runtime_archive"]["state"],
+        "missing",
+        "{}",
+        closed.data
+    );
+    assert_eq!(
+        closed.data["result"]["close"]["worker_retirement"]["state"],
+        "verified",
+        "{}",
+        closed.data
+    );
+    assert_eq!(
+        closed.data["result"]["close"]["binding_retirement"]["state"],
+        "verified",
+        "{}",
+        closed.data
+    );
+    assert_eq!(
+        closed.data["result"]["close"]["subscription_retirement"]["state"],
+        "verified",
+        "{}",
+        closed.data
+    );
+    assert!(!server.state.lock().unwrap().workers.contains_key("stale-peer"));
+
+    let _ = Command::new("tmux")
+        .arg("-S")
+        .arg(&tmux_socket)
+        .args(["kill-session", "-t", &keep_session])
+        .output();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn worker_close_is_master_only_audited_and_refuses_to_strand_tasks() {
     let (server, root) = test_server();

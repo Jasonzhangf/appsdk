@@ -73,18 +73,35 @@ fn exact_target(
     {
         return Err(PeerLifecycleOutcome::Refused);
     }
+    let transport = worker
+        .transport
+        .as_ref()
+        .ok_or(PeerLifecycleOutcome::Unknown)?;
     let mut routes = state
         .global
         .current_thread_routes
         .values()
         .filter(|route| route.agent_id.as_str() == worker.id);
-    if routes.next() != Some(binding) || routes.next().is_some() {
-        return Err(PeerLifecycleOutcome::Unknown);
+    match routes.next() {
+        Some(route) if route == binding => {
+            if routes.next().is_some() {
+                return Err(PeerLifecycleOutcome::Unknown);
+            }
+        }
+        Some(_) => return Err(PeerLifecycleOutcome::Unknown),
+        None => {
+            // A persisted no-session tmux binding can lose its route while its
+            // exact pane endpoint remains. Admit that shape only; a live
+            // AppServer route is still required for every other binding.
+            if binding.session_id.is_some()
+                || binding.native_thread_id.is_some()
+                || binding.tmux_endpoint.is_none()
+                || transport.kind != TransportKind::Tmux
+            {
+                return Err(PeerLifecycleOutcome::Unknown);
+            }
+        }
     }
-    let transport = worker
-        .transport
-        .as_ref()
-        .ok_or(PeerLifecycleOutcome::Unknown)?;
     if binding.session_id.as_ref().map(|id| id.as_str()) != transport.session_id.as_deref()
         || binding.native_thread_id.as_ref().map(|id| id.as_str()) != transport.thread_id.as_deref()
         || binding.tmux_endpoint != transport.tmux_endpoint

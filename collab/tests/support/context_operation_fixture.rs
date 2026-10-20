@@ -608,6 +608,15 @@ impl Drop for DaemonPause {
     }
 }
 
+impl Fixture {
+    pub fn track_tmux_session(&self, session: impl Into<String>) {
+        self.owned_sessions
+            .lock()
+            .unwrap()
+            .push(session.into());
+    }
+}
+
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.restore_project_journal();

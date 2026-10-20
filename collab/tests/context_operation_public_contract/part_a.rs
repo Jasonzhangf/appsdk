@@ -586,6 +586,23 @@ fn second_pane(fixture: &Fixture, label: &str, server_pid: u32) -> Pane {
         .expect("second pane id is UTF-8")
         .trim()
         .to_owned();
+    let session_name = String::from_utf8(
+        tmux(
+            &fixture.tmux_socket,
+            &[
+                "display-message",
+                "-p",
+                "-t",
+                pane_id.as_str(),
+                "#{session_name}",
+            ],
+        )
+        .stdout,
+    )
+    .expect("second pane session name is UTF-8")
+    .trim()
+    .to_owned();
+    fixture.track_tmux_session(session_name);
     Pane {
         server_pid,
         pane_id: pane_id.clone(),

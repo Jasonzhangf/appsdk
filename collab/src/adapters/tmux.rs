@@ -240,6 +240,22 @@ pub fn view(endpoint: &TmuxEndpoint) -> Result<serde_json::Value, String> {
     }))
 }
 
+pub fn snapshot(endpoint: &TmuxEndpoint, lines: usize) -> Result<serde_json::Value, String> {
+    match probe(endpoint)? {
+        PanePresence::Present => {}
+        PanePresence::Missing => return Err("TMUX_PANE_MISSING: target pane is gone".into()),
+        PanePresence::Unknown => return Err("TMUX_PANE_UNKNOWN: target pane is uncertain".into()),
+    }
+    let output = capture_lines(endpoint, lines)?;
+    Ok(serde_json::json!({
+        "transport": "tmux",
+        "pane_id": endpoint.pane_id,
+        "lines": lines,
+        "output": output,
+        "durable": false
+    }))
+}
+
 fn record_observation(key: String, digest: u64) -> Result<(bool, &'static str), String> {
     let observations =
         LAST_PANE_OUTPUT.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
@@ -272,6 +288,27 @@ fn capture(endpoint: &TmuxEndpoint) -> Result<String, String> {
     )
     .map_err(|error| format!("TMUX_CAPTURE_FAILED: {error}"))?;
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn capture_lines(endpoint: &TmuxEndpoint, lines: usize) -> Result<String, String> {
+    // `capture-pane -S -N` includes the visible pane rows in addition to the
+    // requested scrollback. Capture a generous bounded history once, then take
+    // only the newest lines so `--lines` is an exact public maximum.
+    let output = tmux_command(
+        &endpoint.socket_path,
+        &["capture-pane", "-p", "-t", &endpoint.pane_id, "-S", "-4096"],
+    )
+    .map_err(|error| format!("TMUX_CAPTURE_FAILED: {error}"))?;
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .rev()
+        .skip_while(|line| line.trim().is_empty())
+        .take(lines)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 fn buffer_name(message_id: &str) -> String {
@@ -641,6 +678,7 @@ pub(crate) mod tests {
 
     #[test]
     fn pane_probe_distinguishes_present_missing_and_unknown() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
         let tmux = IsolatedTmux::start();
         let endpoint = tmux.endpoint();
         assert_eq!(probe(&endpoint).unwrap(), PanePresence::Present);
@@ -749,6 +787,7 @@ pub(crate) mod tests {
 
     #[test]
     fn stable_pane_output_remains_observation_and_does_not_claim_agent_idle() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
         let tmux = IsolatedTmux::start();
         let endpoint = tmux.endpoint();
         let initial = view(&endpoint).unwrap();
@@ -763,6 +802,47 @@ pub(crate) mod tests {
             stable["pane_output_observation"].as_str(),
             Some("initial" | "changed" | "stable")
         ));
+    }
+
+    #[test]
+    fn snapshot_returns_only_the_latest_requested_lines() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let tmux = IsolatedTmux::start_with_command(Some(
+            "i=1; while [ $i -le 30 ]; do printf 'SNAP-%03d\\n' \"$i\"; i=$((i+1)); done; sleep 60",
+        ));
+        let endpoint = tmux.endpoint();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if capture(&endpoint).unwrap().contains("SNAP-030") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "snapshot fixture did not publish its terminal line"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let five = snapshot(&endpoint, 5).unwrap();
+        let five_lines = five["output"].as_str().unwrap().lines().collect::<Vec<_>>();
+        assert_eq!(five_lines.len(), 5, "{five:?}");
+        assert_eq!(five_lines.last().copied(), Some("SNAP-030"));
+        assert!(!five["output"].as_str().unwrap().contains("SNAP-025"));
+        assert_eq!(five["durable"], false);
+
+        let one = snapshot(&endpoint, 1).unwrap();
+        assert_eq!(one["output"], "SNAP-030");
+        let all = snapshot(&endpoint, 200).unwrap();
+        assert_eq!(all["output"].as_str().unwrap().lines().count(), 30);
+    }
+
+    #[test]
+    fn snapshot_capture_failure_is_explicit_and_does_not_return_text() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let tmux = IsolatedTmux::start();
+        let endpoint = tmux.endpoint();
+        let _wrapper = TmuxFailureWrapper::fail_command("capture-pane");
+        let error = snapshot(&endpoint, 40).unwrap_err();
+        assert!(error.starts_with("TMUX_CAPTURE_FAILED: forced capture-pane failure"));
     }
 
     #[test]

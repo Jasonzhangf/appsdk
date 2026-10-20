@@ -842,6 +842,25 @@ fn detail_reports_missing(detail: &str) -> bool {
 }
 
 fn archive_terminal(target: &PeerLifecycleTarget) -> HostTerminal {
+    if target.transport.kind == TransportKind::Tmux {
+        let Some(endpoint) = target.transport.tmux_endpoint.as_ref() else {
+            return HostTerminal::Unsupported(
+                "TRANSPORT_UNSUPPORTED: close target has no registered tmux endpoint".into(),
+            );
+        };
+        return match crate::client::adapters::tmux::probe(endpoint) {
+            Ok(crate::client::adapters::tmux::PanePresence::Missing) => HostTerminal::Missing,
+            Ok(crate::client::adapters::tmux::PanePresence::Present) => HostTerminal::Unsupported(
+                "TRANSPORT_UNSUPPORTED: close cannot archive a live tmux pane".into(),
+            ),
+            Ok(crate::client::adapters::tmux::PanePresence::Unknown) => HostTerminal::Unknown(
+                "TMUX_PANE_UNKNOWN: close cannot prove the target pane terminal".into(),
+            ),
+            Err(detail) => {
+                HostTerminal::Unknown(format!("PEER_LIFECYCLE_TMUX_PROBE_UNKNOWN: {detail}"))
+            }
+        };
+    }
     if target.transport.kind != TransportKind::AppServer {
         return HostTerminal::Unsupported(
             "TRANSPORT_UNSUPPORTED: close requires an App Server thread archive".into(),

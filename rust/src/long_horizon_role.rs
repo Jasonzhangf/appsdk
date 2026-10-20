@@ -5,6 +5,20 @@ use serde_json::Value;
 use crate::long_horizon_policy::ExecutionRole;
 use crate::{collab_master_status, run_goal_collab_command, GOAL_COLLAB_READ_TIMEOUT};
 
+/// `collab context` returns its runtime binding under `result.snapshot`. The
+/// long-horizon role and owner gates share one normalized view so they never
+/// read a second, independently drifted envelope.
+pub(crate) fn normalized_collab_context(context: &Value) -> Value {
+    if let Some(snapshot) = context
+        .get("result")
+        .and_then(|result| result.get("snapshot"))
+        .filter(|snapshot| snapshot.is_object())
+    {
+        return snapshot.clone();
+    }
+    context.clone()
+}
+
 /// Resolve the execution role only from a verified Collab context and live
 /// worker/master records. Any unavailable probe is surfaced and becomes
 /// `Unknown`; there is no master fallback.
@@ -16,6 +30,7 @@ pub(crate) fn execution_role(root: &Path, status: &Option<Value>) -> ExecutionRo
             return ExecutionRole::Unknown;
         }
     };
+    let context = normalized_collab_context(&context);
     let Some(peer) = context["identity"]["worker_id"].as_str().map(str::to_owned) else {
         return ExecutionRole::Unknown;
     };

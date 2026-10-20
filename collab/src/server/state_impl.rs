@@ -1,5 +1,12 @@
 use super::*;
+use crate::server::global_state::CurrentThreadRouteReplayStatus;
+
 impl State {
+    /// Backfill strict routes that replay did not establish.
+    ///
+    /// Route events are authoritative for existing ownership. Durable
+    /// bindings only fill an address with no live claimant or tombstone, and a
+    /// pane with several historical bindings is not uniquely restorable.
     pub(crate) fn restore_unique_current_thread_routes_from_bindings(
         &mut self,
     ) -> Result<(), String> {
@@ -22,10 +29,19 @@ impl State {
                         .map(|thread| thread.as_str()),
                 )
         });
+        let mut pane_binding_counts = std::collections::BTreeMap::new();
+        for binding in &bindings {
+            if binding.tmux_endpoint.is_some() {
+                let key =
+                    crate::server::global_state::installed_route_address_key(binding)
+                        .expect("validated pane binding has a route address");
+                *pane_binding_counts.entry(key).or_insert(0usize) += 1;
+            }
+        }
         let mut recovered = self.global.clone();
         for binding in bindings {
             let thread = binding.native_thread_id.clone().unwrap();
-            let Some(session) = binding.session_id.clone() else {
+            if binding.session_id.is_none() {
                 // A durable thread-only binding is a legacy record.  Keep it
                 // resolvable through the read-only compatibility index instead
                 // of aborting the whole host journal; the next explicit
@@ -36,22 +52,33 @@ impl State {
                         format!("journal replay rejected legacy thread route: {error}")
                     })?;
                 continue;
-            };
-            let existing = match binding.tmux_endpoint.as_ref() {
-                // A pane is resolved by the reducer below. Installing this
-                // route evicts whatever held the pane, so the fallback makes no
-                // decision for a pane address: one pane owns one binding.
-                Some(_) => None,
-                None => recovered.lookup_current_thread_route(&session, &thread),
-            };
-            if existing == Some(&binding) {
-                continue;
             }
-            if let Some(existing) = existing {
-                return Err(format!(
-                    "journal replay rejected ambiguous current thread route {thread}: {} is already live at this address",
-                    existing.binding_id
-                ));
+            match recovered.current_thread_route_replay_status(&binding) {
+                CurrentThreadRouteReplayStatus::Installed
+                | CurrentThreadRouteReplayStatus::Tombstoned
+                | CurrentThreadRouteReplayStatus::Contested => continue,
+                CurrentThreadRouteReplayStatus::Ambiguous(_)
+                    if binding.tmux_endpoint.is_some() =>
+                {
+                    // The replay projection already owns this pane. Restoring
+                    // historical candidates in thread order must not evict it.
+                    continue;
+                }
+                CurrentThreadRouteReplayStatus::Ambiguous(existing) => {
+                    return Err(format!(
+                        "journal replay rejected ambiguous current thread route {thread}: {} is already live at this address",
+                        existing.binding_id
+                    ));
+                }
+                CurrentThreadRouteReplayStatus::Missing => {}
+            }
+            if binding.tmux_endpoint.is_some() {
+                let key =
+                    crate::server::global_state::installed_route_address_key(&binding)
+                        .expect("validated pane binding has a route address");
+                if pane_binding_counts.get(&key).copied() != Some(1) {
+                    continue;
+                }
             }
             recovered
                 .set_current_thread_route(binding)

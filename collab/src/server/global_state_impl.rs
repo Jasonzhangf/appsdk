@@ -558,6 +558,47 @@ impl GlobalState {
             .collect()
     }
 
+    pub(crate) fn current_thread_route_replay_status(
+        &self,
+        binding: &RuntimeBinding,
+    ) -> CurrentThreadRouteReplayStatus {
+        let Some(address) = installed_route_address_key(binding) else {
+            return CurrentThreadRouteReplayStatus::Missing;
+        };
+        if self.current_thread_route_tombstones.contains_key(&address) {
+            return CurrentThreadRouteReplayStatus::Tombstoned;
+        }
+        let Some(endpoint) = binding.tmux_endpoint.as_ref() else {
+            let Some((session, thread)) = binding
+                .session_id
+                .as_ref()
+                .zip(binding.native_thread_id.as_ref())
+            else {
+                return CurrentThreadRouteReplayStatus::Missing;
+            };
+            return match self.lookup_current_thread_route(session, thread) {
+                None => CurrentThreadRouteReplayStatus::Missing,
+                Some(existing) if existing == binding => CurrentThreadRouteReplayStatus::Installed,
+                Some(existing) => CurrentThreadRouteReplayStatus::Ambiguous(existing.clone()),
+            };
+        };
+
+        let mut claimants = self.tmux_pane_route_claimants(endpoint);
+        claimants.retain(|existing| *existing != binding);
+        match claimants.as_slice() {
+            [] => CurrentThreadRouteReplayStatus::Missing,
+            [existing]
+                if existing.binding_id == binding.binding_id
+                    && existing.same_principal(binding)
+                    && existing.endpoint_generation <= binding.endpoint_generation =>
+            {
+                CurrentThreadRouteReplayStatus::Installed
+            }
+            [existing] => CurrentThreadRouteReplayStatus::Ambiguous((*existing).clone()),
+            _ => CurrentThreadRouteReplayStatus::Contested,
+        }
+    }
+
     /// The live route that claims this binding's pane as a *different* claim.
     ///
     /// One pane owns exactly one binding host-wide. Two claimants on the same

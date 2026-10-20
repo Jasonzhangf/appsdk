@@ -789,11 +789,10 @@ fn replay_from_journal_mode(
             "journal replay failed: incomplete command {command_id}; completion marker missing"
         );
     }
-    // Route events are an incomplete index.  A journal can contain an
+    // Route events are an incomplete index. A journal can contain an
     // unrelated route event while an exact durable binding has no project
-    // route event yet.  Restore every binding through the reducer; it rejects
-    // duplicate addresses and applies the same scope, tombstone, and
-    // generation rules as live route installation.
+    // route event yet. Backfill only addresses with no replay-established
+    // owner; the reducer preserves ambiguity, tombstone, and generation rules.
     st.restore_unique_current_thread_routes_from_bindings()
         .map_err(|error| anyhow::anyhow!("journal replay failed: {error}"))?;
     // Always index durable thread-only bindings, whether or not this journal

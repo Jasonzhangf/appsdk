@@ -23,10 +23,50 @@ struct Fixture {
     root: PathBuf,
     host_state: PathBuf,
     tmux_socket: PathBuf,
-    initialized: bool,
+    owned_sessions: Vec<String>,
+    daemon: Option<std::process::Child>,
 }
 
 impl Fixture {
+    fn start_daemon(&mut self) {
+        let daemon_log = std::fs::File::create(self.root.join("test-daemon.log")).unwrap();
+        self.daemon = Some(
+            self.configured_command(&["serve"], None, "Codex TUI")
+                .stdin(std::process::Stdio::null())
+                .stdout(daemon_log.try_clone().unwrap())
+                .stderr(daemon_log)
+                .spawn()
+                .expect("spawn owned serve child"),
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !self.host_state.join("server.sock").exists() && Instant::now() < deadline {
+            if let Some(status) = self.daemon.as_mut().unwrap().try_wait().unwrap() {
+                panic!(
+                    "test-owned serve exited before readiness: {status}: {}",
+                    std::fs::read_to_string(self.root.join("test-daemon.log")).unwrap_or_default()
+                );
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            self.host_state.join("server.sock").exists(),
+            "owned serve did not create socket"
+        );
+    }
+
+    fn stop_daemon(&mut self) {
+        if let Some(mut daemon) = self.daemon.take() {
+            let _ = daemon.kill();
+            let _ = daemon.wait();
+        }
+        let _ = std::fs::remove_file(self.host_state.join("server.sock"));
+    }
+
+    fn restart_daemon(&mut self) {
+        self.stop_daemon();
+        self.start_daemon();
+    }
+
     fn command(&self, args: &[&str], pane: Option<&Pane>) -> Output {
         self.command_with_originator(args, pane, "Codex TUI")
     }
@@ -52,6 +92,10 @@ impl Fixture {
             .current_dir(&self.root)
             .env("COLLAB_STATE_DIR", &self.host_state)
             .env("CODEX_HOME", self.root.join("home"))
+            .env_remove("COLLAB_SOCKET_PATH")
+            .env_remove("COLLAB_HOST_SOCKET")
+            .env_remove("COLLAB_LOCK_PATH")
+            .env_remove("COLLAB_HOST_LOCK")
             .env_remove("COLLAB_APPSERVER_SOCKET")
             .env_remove("CODEX_APP_SERVER_SOCKET")
             .env_remove("COLLAB_APPSERVER_NAMESPACE")
@@ -161,16 +205,18 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        if self.initialized {
-            let _ = self.command(&["down"], None);
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while Instant::now() < deadline && self.host_state.join("server.sock").exists() {
-                thread::sleep(Duration::from_millis(50));
-            }
+        self.stop_daemon();
+        for session in self.owned_sessions.drain(..) {
+            let _ = Command::new("tmux")
+                .args([
+                    "-S",
+                    self.tmux_socket.to_str().unwrap(),
+                    "kill-session",
+                    "-t",
+                    &session,
+                ])
+                .output();
         }
-        let _ = Command::new("tmux")
-            .args(["-S", self.tmux_socket.to_str().unwrap(), "kill-server"])
-            .output();
         if std::thread::panicking() {
             eprintln!(
                 "preserving failed e2e fixture for diagnosis: root={} host_state={}",
@@ -238,12 +284,15 @@ fn single_pane_fixture(label: &str) -> (Fixture, Pane) {
         root: root.clone(),
         host_state,
         tmux_socket: tmux_socket.clone(),
-        initialized: false,
+        owned_sessions: Vec::new(),
+        daemon: None,
     };
+    fixture.start_daemon();
     tmux(
         &tmux_socket,
         &["new-session", "-d", "-s", label, "sleep 600"],
     );
+    fixture.owned_sessions.push(label.to_owned());
     let server_pid =
         String::from_utf8(tmux(&tmux_socket, &["display-message", "-p", "#{pid}"]).stdout)
             .expect("tmux server pid is utf8")
@@ -255,7 +304,6 @@ fn single_pane_fixture(label: &str) -> (Fixture, Pane) {
             .expect("pane id is utf8")
             .trim()
             .to_owned();
-    fixture.initialized = true;
     let pane = Pane {
         server_pid,
         pane_id: pane_id.clone(),

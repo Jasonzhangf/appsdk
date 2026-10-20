@@ -203,6 +203,18 @@ impl State {
 
     pub fn apply_checked(&mut self, ev: &Event) -> Result<(), String> {
         match ev {
+            Event::ProjectResetStarted {
+                project_scope,
+                clear_local,
+                worker_ids,
+            } => {
+                crate::server::project_reset::clear_project(self, project_scope, *clear_local, worker_ids);
+                self.pending_project_resets
+                    .insert(project_scope.clone(), *clear_local);
+            }
+            Event::ProjectResetCompleted { project_scope } => {
+                self.pending_project_resets.remove(project_scope);
+            }
             Event::MasterWakeSignal { signal, at_ms } => {
                 crate::server::notification_state::accumulate_master_wake(
                     &mut self.master_wake,
@@ -1033,6 +1045,13 @@ impl State {
     /// The caller stores the counters in the replay-only envelope.
     pub fn snapshot_contents(&self) -> (u64, u64, Vec<Event>) {
         let mut events = Vec::new();
+        for (project_scope, clear_local) in &self.pending_project_resets {
+            events.push(Event::ProjectResetStarted {
+                project_scope: project_scope.clone(),
+                clear_local: *clear_local,
+                worker_ids: Vec::new(),
+            });
+        }
         if master_wake_snapshot_required(&self.master_wake) {
             events.push(Event::MasterWakeUpdated {
                 accumulator: self.master_wake.clone(),
@@ -1334,6 +1353,7 @@ impl State {
 
     pub fn admission_frozen(&self) -> bool {
         self.journal_poison.is_some()
+            || self.pending_project_resets.values().any(|clear_local| *clear_local)
             || self
                 .migration
                 .as_ref()

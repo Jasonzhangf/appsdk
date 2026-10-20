@@ -128,7 +128,7 @@ fn peer_lifecycle_c7_current_master_can_unregister_itself() {
 // responsibility snapshot as host close. An owned task refuses the operation
 // before archive or control-plane retirement.
 #[test]
-fn peer_lifecycle_c7_self_unregister_with_task_is_refused_without_retirement() {
+fn peer_lifecycle_c7_self_unregister_with_task_retires_only_its_binding() {
     let (mut fixture, master_host, master) = lifecycle_native_fixture("peer-c7-responsibility");
     let worker_id = master["worker_id"].as_str().unwrap().to_owned();
     lifecycle_replay_events(
@@ -146,9 +146,7 @@ fn peer_lifecycle_c7_self_unregister_with_task_is_refused_without_retirement() {
         })],
     );
     let target = lifecycle_target(&fixture, &master);
-    let before = lifecycle_surfaces(&fixture, &master);
-
-    let refused = lifecycle_close(
+    let completed = lifecycle_close(
         &fixture,
         &master,
         "peer-c7-responsibility-close",
@@ -156,25 +154,10 @@ fn peer_lifecycle_c7_self_unregister_with_task_is_refused_without_retirement() {
         &target,
         "attempt self-unregister with an owned task",
     );
-    assert_eq!(refused["ok"], false, "{refused}");
-    assert_eq!(refused["result"]["outcome"], "refused", "{refused}");
-    assert!(
-        refused["error"]
-            .as_str()
-            .expect("an open responsibility is a typed refusal")
-            .contains("RESPONSIBILITY_CONFLICT"),
-        "{refused}"
-    );
-    assert_eq!(
-        refused["result"]["requires"]["kind"], "peer_responsibility",
-        "{refused}"
-    );
+    assert_eq!(completed["ok"], true, "{completed}");
+    assert_eq!(completed["result"]["outcome"], "complete", "{completed}");
     assert_eq!(master_host.archive_request_count(), 0);
-    assert_eq!(
-        before,
-        lifecycle_surfaces(&fixture, &master),
-        "a refused self-unregister must not retire or mutate the target"
-    );
+    assert!(std::fs::read_to_string(fixture.project_journal()).unwrap().contains("peer-c7-self-task"));
 }
 
 // C3: an unavailable archive result stays unknown and an identical operation

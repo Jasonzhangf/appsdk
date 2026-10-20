@@ -126,10 +126,6 @@ fn manual_restore_case(returns: bool) {
         ],
         Some(&pane),
     );
-    let before = fixture.context(Some("manual-before"), Some(&pane));
-    let binding = before["result"]["snapshot"]["binding"].clone();
-    let identity = before["result"]["snapshot"]["identity"].clone();
-    let master = before["result"]["snapshot"]["master"].clone();
     let identity_path = fixture
         .host_state
         .join("identities")
@@ -139,12 +135,13 @@ fn manual_restore_case(returns: bool) {
                 .unwrap(),
         )
         .join("identity.json");
-    let saved_identity = std::fs::read(&identity_path).unwrap();
-    let effects = registration_effects(&fixture);
     let challenge_file = fixture.root.join("challenge.json");
     let returned_file = fixture.root.join("returned.json");
+    let endpoint_file = fixture.root.join("current-endpoint.json");
+    let endpoint_output = shell_quote(&endpoint_file.to_string_lossy());
     let script = format!(
         r#"set -e
+"$COLLAB_BINARY" context --op 'manual-current-endpoint' >{endpoint_output}
 "$COLLAB_BINARY" context --op '{label}' --recover-communication >"$PANE_STDOUT" 2>"$PANE_STDERR" || true
 IFS= read -r challenge
 case "$challenge" in COLLAB_REGISTER_CHALLENGE\ {{*) ;; *) exit 3 ;; esac
@@ -166,6 +163,12 @@ sleep 600
     );
     let challenge: Value =
         serde_json::from_slice(&std::fs::read(&challenge_file).unwrap()).unwrap();
+    let before: Value = serde_json::from_slice(&std::fs::read(endpoint_file).unwrap()).unwrap();
+    let binding = before["result"]["snapshot"]["binding"].clone();
+    let identity = before["result"]["snapshot"]["identity"].clone();
+    let master = before["result"]["snapshot"]["master"].clone();
+    let saved_identity = std::fs::read(&identity_path).unwrap();
+    let effects = registration_effects(&fixture);
     assert_eq!(challenge["purpose"], "manual_communication_restore");
     if returns {
         assert!(

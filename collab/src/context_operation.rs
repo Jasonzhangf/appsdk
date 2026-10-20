@@ -34,6 +34,32 @@ fn proof_path(host_paths: &HostPaths, operation_id: &str) -> PathBuf {
     proof_dir(host_paths).join(format!("{operation_id}.json"))
 }
 
+pub(crate) fn remove_project_proofs(
+    host_paths: &HostPaths,
+    project_scope: &str,
+) -> anyhow::Result<()> {
+    let directory = proof_dir(host_paths);
+    let entries = match std::fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let path = entry?.path();
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "json")
+        {
+            let proof: ContextOperationProof = serde_json::from_slice(&std::fs::read(&path)?)?;
+            if proof.project_scope == project_scope {
+                std::fs::remove_file(path)?;
+            }
+        }
+    }
+    std::fs::File::open(directory)?.sync_all()?;
+    Ok(())
+}
+
 fn validate_operation_id(operation_id: &str) -> anyhow::Result<()> {
     OperationId::new(operation_id.to_owned())
         .map(|_| ())

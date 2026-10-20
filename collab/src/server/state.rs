@@ -1217,6 +1217,15 @@ pub fn wait_cycle(tasks: &HashMap<String, TaskRec>, task_id: &str, waiting_for: 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "ev")]
 pub enum Event {
+    ProjectResetStarted {
+        project_scope: String,
+        clear_local: bool,
+        #[serde(default)]
+        worker_ids: Vec<String>,
+    },
+    ProjectResetCompleted {
+        project_scope: String,
+    },
     MasterWakeSignal {
         signal: MasterWakeSignal,
         at_ms: i64,

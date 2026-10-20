@@ -213,8 +213,8 @@ fn c05_minimal_approval_reads_current_incumbent_without_second_approval() {
         );
     }
     assert!(
-        replay["result"]["snapshot"].is_null(),
-        "replay must not reconcile: {replay}"
+        replay["result"]["snapshot"]["identity"].is_object(),
+        "completed replay must read the current usable identity: {replay}"
     );
     assert_eq!(
         (

@@ -372,34 +372,8 @@ impl RuntimeBinding {
         }
         if let Some(endpoint) = &self.tmux_endpoint {
             validate_tmux_route_endpoint(endpoint)?;
-            let tmux_route_matches = self.session_id.as_ref().map(SessionId::as_str)
-                == Some(endpoint.tmux_session_id.as_str())
-                && self.native_thread_id.as_ref().map(NativeThreadId::as_str)
-                    == Some(endpoint.pane_id.as_str());
-            let codex_identity_matches = self.session_id.as_ref().map(SessionId::as_str)
-                == Some(
-                    endpoint
-                        .codex_session_id
-                        .as_deref()
-                        .unwrap_or(&endpoint.tmux_session_id),
-                )
-                && self.native_thread_id.as_ref().map(NativeThreadId::as_str)
-                    == Some(
-                        endpoint
-                            .codex_thread_id
-                            .as_deref()
-                            .unwrap_or(&endpoint.pane_id),
-                    );
-            let native_facts_match = self.session_id.as_ref().map(SessionId::as_str)
-                == endpoint.codex_session_id.as_deref()
-                && self.native_thread_id.as_ref().map(NativeThreadId::as_str)
-                    == endpoint.codex_thread_id.as_deref();
-            if !native_facts_match && !tmux_route_matches && !codex_identity_matches {
-                return Err(StateError::invalid(
-                    "runtime binding tmux endpoint",
-                    "runtime identity must match Codex anchors or the tmux session/pane address",
-                ));
-            }
+            // The binding identity survives pane movement. The current tmux
+            // endpoint is its delivery address, not a second identity proof.
         }
         Ok(())
     }

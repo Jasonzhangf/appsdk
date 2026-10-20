@@ -3,6 +3,7 @@ pub(crate) struct IsolatedTmux {
     socket: PathBuf,
     owner_root: PathBuf,
     pane_command: String,
+    sessions: RefCell<Vec<String>>,
 }
 
 impl IsolatedTmux {
@@ -65,6 +66,7 @@ impl IsolatedTmux {
             socket,
             owner_root: root.to_path_buf(),
             pane_command: pane_command.into(),
+            sessions: RefCell::new(vec!["worker-snapshot-test".into()]),
         }
     }
 
@@ -144,6 +146,7 @@ impl IsolatedTmux {
             "add isolated tmux session: {}",
             String::from_utf8_lossy(&created.stderr)
         );
+        self.sessions.borrow_mut().push(session.clone());
         let output = Command::new("tmux")
             .args([
                 "-S",
@@ -197,10 +200,19 @@ impl IsolatedTmux {
         );
     }
 
-    fn kill_server(&self) {
-        let _ = Command::new("tmux")
-            .args(["-S", self.socket.to_str().unwrap(), "kill-server"])
-            .output();
+    fn close_owned_sessions(&self) {
+        let sessions = self.sessions.borrow_mut().drain(..).collect::<Vec<_>>();
+        for session in sessions {
+            let _ = Command::new("tmux")
+                .args([
+                    "-S",
+                    self.socket.to_str().unwrap(),
+                    "kill-session",
+                    "-t",
+                    &session,
+                ])
+                .output();
+        }
     }
 }
 
@@ -210,9 +222,7 @@ thread_local! {
 
 impl Drop for IsolatedTmux {
     fn drop(&mut self) {
-        let _ = Command::new("tmux")
-            .args(["-S", self.socket.to_str().unwrap(), "kill-server"])
-            .output();
+        self.close_owned_sessions();
         let _ = std::fs::remove_file(&self.socket);
     }
 }
@@ -308,7 +318,7 @@ fn stop_registered_test_tmux_server() {
             .as_ref()
             .expect("test tmux fixture exists")
             .0
-            .kill_server();
+            .close_owned_sessions();
         *fixture = None;
     });
 }
@@ -721,6 +731,26 @@ fn fixture_peer_endpoint(server: &Server, thread_id: &str) -> crate::proto::Tmux
 /// registration effects use register_public and its real participant return.
 pub(crate) fn register(server: &Server, id: &str, thread_id: &str) -> Resp {
     register_tmux(server, id, fixture_peer_endpoint(server, thread_id))
+}
+
+/// Seed a committed peer without starting a tmux server. Role projection and
+/// scheduling contracts do not need a live pane.
+pub(crate) fn register_synthetic_peer(server: &Server, id: &str, thread_id: &str) -> Resp {
+    static PANE_SEQ: AtomicU64 = AtomicU64::new(0);
+    let pane = PANE_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+    register_tmux(
+        server,
+        id,
+        crate::proto::TmuxEndpoint {
+            socket_path: format!("/tmp/collab-synthetic-{}-{pane}.sock", std::process::id()),
+            server_pid: 1,
+            tmux_session_id: format!("${pane}"),
+            pane_id: format!("%{pane}"),
+            pane_pid: 2,
+            codex_session_id: Some(format!("session-{thread_id}")),
+            codex_thread_id: Some(thread_id.into()),
+        },
+    )
 }
 
 fn register_public(server: &Arc<Server>, id: &str, thread_id: &str) -> Resp {

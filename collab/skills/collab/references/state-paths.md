@@ -16,41 +16,33 @@ $COLLAB_STATE_DIR for isolated tests, else $HOME/.collab
 
 Usage:
 
-- `server.sock` is the live daemon socket. It is created by `collab up` and
-  removed by `collab down`. Never write to it by hand.
+- `server.sock` belongs to the global user-managed daemon. Agent commands do not
+  create or remove it. Never write to it by hand.
 - `daemon.lock` prevents a second daemon. Do not delete or edit it.
-- `server.pid` is the current daemon PID. Verify it with `collab status --all`
-  after a controlled `collab down` / `collab up`.
+- `server.pid` is the current daemon PID. Read it through `collab context` or
+  `collab status --all`; do not use it to control the user-managed service.
 - `events.jsonl` is the append-only durable daemon event stream. Do not edit or
   delete it.
 - `log.txt` is diagnostic output. Read it for exact errors; never use it as a
   source of truth for task or identity state.
-- `routes.jsonl` is the append-only host-wide admission/storage index for app
+- `routes.jsonl` is the host-wide admission/storage index for app
   scopes and project roots. It is not a route selector. Never hand-edit it.
-  Stale or missing-root routes are retired only through the Collab
-  migration/reset owner.
+  The daemon automatically retires missing or deinitialized project routes
+  and routes whose loaded reducer binding is absent or superseded.
+  Project reset removes target route history through the same writer owner.
 
-For an explicitly authorized reset, name the level. Exactly one level is
-required, and `--storage-root` is required for `--host`
-(`RESET_STORAGE_ROOT_REQUIRED`):
+The current project master may reset the current project online:
 
 ```sh
-collab down
-# project control plane; run from the project root
-collab reset --project --discard-legacy --approval "<explicit user authorization>"
-# host control plane
-collab reset --host --storage-root <project root> --discard-legacy \
-  --approval "<explicit user authorization>"
-collab up
-collab status --all
+collab reset --project
 ```
 
-The routes level was removed: one pane owns one route binding host-wide
-(`docs/design/collab-pane-route-ownership-20261006.md`).
-
-`--host` keeps `reset.jsonl` and `archives/`, which are the audit trail, and it
-keeps the project business payload under `.agent-collab/`. Retire that payload
-with `--project`.
+Run it from the current project. The daemon deletes that project's historical
+messages, routes, tasks, assets and load. It preserves other projects and the
+global daemon. There is no offline prerequisite or archive prerequisite, and
+historical pane owners or open work do not block the reset. Real persistence,
+I/O or input-safety errors remain explicit. No legacy discard mode or separate
+approval argument exists for this project reset.
 
 Do not `cp`, `grep`, `mv`, truncate, or edit `routes.jsonl`; that bypasses the
 owner and destroys route provenance. If existing `.agent-collab/` state must be
@@ -58,9 +50,8 @@ preserved, use migration instead of reset.
 
 An ordinary version upgrade is not a reset. Install the current reviewed
 binary and refresh the embedded Skill; leave `~/.collab/` and the running
-daemon untouched. If the running daemon must load the new binary, use a
-separately authorized maintenance window and follow the controlled lifecycle
-in [migration-daemon.md](migration-daemon.md).
+daemon untouched. The global daemon is user-managed. Host reset and maintenance
+are outside the agent interface.
 
 ## Project-local registration input
 

@@ -1,209 +1,44 @@
 {
   "id": "appsdk-collab-control-plane-reset",
   "version": "0.3.0",
-  "description": "SESE control-plane reset graph. It authorizes one explicit reset level, proves exclusivity, inventories the exact retire set, retires the selected state transactionally, rebuilds that level's baseline, and emits one audit receipt. Two levels exist: --project rebuilds one project's runtime baseline and --host rebuilds the host control plane. They share one topology; the level selects the inventory and the retire set, not the shape of the transaction. Duplicate route claimants are not a level here. One tmux pane owns exactly one route binding host-wide, and the route reducer enforces that on every write and on every replay, so no ambiguous pane is left for an operator to resolve. Failure terminals are bound to the node that produces them, because dagpipe requires an audited SESE graph to declare exactly one output arc, so a terminal cannot also be a sink node. authorize_reset produces RESET_LEVEL_REQUIRED, RESET_LEVEL_FLAG_MISMATCH, RESET_AUTHORIZATION_REQUIRED, RESET_STORAGE_ROOT_REQUIRED, and RESET_STORAGE_ROOT_INVALID. prove_exclusivity produces RESET_DAEMON_LIVE. inventory_control_plane produces RESET_INDEX_ROOT_UNRESOLVED, RESET_PROJECT_HOLDS_HOST_INDEX, RESET_CONTROL_ROOT_INSPECTION_FAILED, RESET_CONTROL_ROOT_INVALID, RESET_CONTROL_ROOT_SYMLINK_REJECTED, RESET_CONTROL_TREE_SYMLINK_REJECTED, and RESET_DOC_SYMLINK_REJECTED. archive_inventory produces RESET_ARCHIVE_MISMATCH and RESET_SOURCE_SOCKET_CHANGED. rebuild_baseline produces RESET_BASELINE_INVALID, and any step can end in RESET_INCOMPLETE when the journal and reset-record rollback also fails. Every terminal leaves the source untouched.",
-  "inputs": [
-    {
-      "id": "reset_request",
-      "schema": "Object"
-    }
-  ],
+  "description": "当前项目 master 在线 reset 的 SESE 图。认证当前项目 master 后，在现有 daemon 内串行化项目变更，先持久记录 scoped reset intent，再删除本项目历史消息、任务、route、身份、订阅、操作、资产与负载。共享 journal 由其 writer owner 持锁压缩，物理删除目标历史并保留其他项目。未完成 intent 在启动路由恢复前继续删除。全局 daemon、socket、PID、lock 和其他项目不变；不经过离线、归档、历史身份批准或维护入口。真实写入或删除失败返回 RESET_INCOMPLETE，不能宣称成功。用户主机维护不属于本图。",
+  "inputs": [{"id": "reset_request", "schema": "Object"}],
   "nodes": [
     {
       "id": "authorize_reset",
       "operator": "appsdk.collab_control_plane.authorize_reset",
       "operator_version": "1",
-      "inputs": [
-        "reset_request"
-      ],
-      "output": {
-        "id": "authorized_reset_request",
-        "schema": "Object"
-      },
-      "input_selector": {
-        "include": [],
-        "exclude": [],
-        "predicate": null
-      },
-      "output_selector": {
-        "include": [],
-        "exclude": [],
-        "predicate": null
-      },
+      "inputs": ["reset_request"],
+      "output": {"id": "authorized_reset_request", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
       "iterator": "Whole"
     },
     {
-      "id": "prove_exclusivity",
-      "operator": "appsdk.collab_control_plane.prove_exclusivity",
+      "id": "online_project_reset",
+      "description": "当前 master 认证后沿现有全局锁顺序 identity → materialization → route publication → project wire 串行化删除；resident route 恢复同样先 materialization 再 publication，避免跨项目锁反转。",
+      "operator": "appsdk.collab_control_plane.online_project_reset",
       "operator_version": "1",
-      "inputs": [
-        "authorized_reset_request"
-      ],
-      "output": {
-        "id": "exclusive_reset_context",
-        "schema": "Object"
-      },
-      "input_selector": {
-        "include": [],
-        "exclude": [],
-        "predicate": null
-      },
-      "output_selector": {
-        "include": [],
-        "exclude": [],
-        "predicate": null
-      },
-      "iterator": "Whole"
-    },
-    {
-      "id": "inventory_control_plane",
-      "operator": "appsdk.collab_control_plane.inventory_control_plane",
-      "operator_version": "1",
-      "inputs": [
-        "exclusive_reset_context"
-      ],
-      "output": {
-        "id": "control_plane_inventory",
-        "schema": "Object"
-      },
-      "input_selector": {
-        "include": [],
-        "exclude": [],
-        "predicate": null
-      },
-      "output_selector": {
-        "include": [],
-        "exclude": [],
-        "predicate": null
-      },
-      "iterator": "Whole"
-    },
-    {
-      "id": "archive_inventory",
-      "operator": "appsdk.collab_control_plane.archive_inventory",
-      "operator_version": "1",
-      "inputs": [
-        "control_plane_inventory"
-      ],
-      "output": {
-        "id": "verified_archive",
-        "schema": "Object"
-      },
-      "input_selector": {
-        "include": [],
-        "exclude": [],
-        "predicate": null
-      },
-      "output_selector": {
-        "include": [],
-        "exclude": [],
-        "predicate": null
-      },
-      "iterator": "Whole"
-    },
-    {
-      "id": "retire_selected_state",
-      "operator": "appsdk.collab_control_plane.retire_selected_state",
-      "operator_version": "1",
-      "inputs": [
-        "verified_archive"
-      ],
-      "output": {
-        "id": "retired_state",
-        "schema": "Object"
-      },
-      "input_selector": {
-        "include": [],
-        "exclude": [],
-        "predicate": null
-      },
-      "output_selector": {
-        "include": [],
-        "exclude": [],
-        "predicate": null
-      },
-      "iterator": "Whole"
-    },
-    {
-      "id": "rebuild_baseline",
-      "operator": "appsdk.collab_control_plane.rebuild_baseline",
-      "operator_version": "1",
-      "inputs": [
-        "retired_state"
-      ],
-      "output": {
-        "id": "rebuilt_baseline",
-        "schema": "Object"
-      },
-      "input_selector": {
-        "include": [],
-        "exclude": [],
-        "predicate": null
-      },
-      "output_selector": {
-        "include": [],
-        "exclude": [],
-        "predicate": null
-      },
+      "inputs": ["authorized_reset_request"],
+      "output": {"id": "online_project_result", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
       "iterator": "Whole"
     },
     {
       "id": "record_reset_receipt",
       "operator": "appsdk.collab_control_plane.record_reset_receipt",
       "operator_version": "1",
-      "inputs": [
-        "rebuilt_baseline"
-      ],
-      "output": {
-        "id": "reset_receipt",
-        "schema": "Object"
-      },
-      "input_selector": {
-        "include": [],
-        "exclude": [],
-        "predicate": null
-      },
-      "output_selector": {
-        "include": [],
-        "exclude": [],
-        "predicate": null
-      },
+      "inputs": ["online_project_result"],
+      "output": {"id": "reset_receipt", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
       "iterator": "Whole"
     }
   ],
   "edges": [
-    {
-      "from": "authorize_reset",
-      "to": "prove_exclusivity",
-      "arc_id": "authorized_reset_request"
-    },
-    {
-      "from": "prove_exclusivity",
-      "to": "inventory_control_plane",
-      "arc_id": "exclusive_reset_context"
-    },
-    {
-      "from": "inventory_control_plane",
-      "to": "archive_inventory",
-      "arc_id": "control_plane_inventory"
-    },
-    {
-      "from": "archive_inventory",
-      "to": "retire_selected_state",
-      "arc_id": "verified_archive"
-    },
-    {
-      "from": "retire_selected_state",
-      "to": "rebuild_baseline",
-      "arc_id": "retired_state"
-    },
-    {
-      "from": "rebuild_baseline",
-      "to": "record_reset_receipt",
-      "arc_id": "rebuilt_baseline"
-    }
+    {"from": "authorize_reset", "to": "online_project_reset", "arc_id": "authorized_reset_request"},
+    {"from": "online_project_reset", "to": "record_reset_receipt", "arc_id": "online_project_result"}
   ],
-  "outputs": [
-    "reset_receipt"
-  ]
+  "outputs": ["reset_receipt"]
 }

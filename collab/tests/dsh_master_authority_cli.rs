@@ -2,7 +2,7 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -111,7 +111,7 @@ struct Fixture {
     state: PathBuf,
     binary: PathBuf,
     gateway: Gateway,
-    daemon_owned: bool,
+    daemon: Option<Child>,
     finished: bool,
 }
 
@@ -134,13 +134,20 @@ impl Fixture {
             root,
             binary: collab_binary(),
             gateway,
-            daemon_owned: false,
+            daemon: None,
             finished: false,
         }
     }
 
     fn command(&self, args: &[&str]) -> Output {
-        Command::new(&self.binary)
+        self.configured_command(args)
+            .output()
+            .expect("run collab CLI")
+    }
+
+    fn configured_command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(&self.binary);
+        command
             .args(args)
             .current_dir(&self.root)
             .env("COLLAB_STATE_DIR", &self.state)
@@ -153,20 +160,8 @@ impl Fixture {
             .env_remove("CODEX_SESSION_ID")
             .env_remove("CODEX_THREAD_ID")
             .env_remove("COLLAB_WORKER")
-            .env_remove("DSH_SESSION_ID")
-            .output()
-            .expect("run collab CLI")
-    }
-
-    fn daemon(&mut self, args: &[&str]) -> Output {
-        let output = self.command(args);
-        if args == ["up"] && output.status.success() {
-            self.daemon_owned = true;
-        }
-        if args == ["down"] && output.status.success() {
-            self.daemon_owned = false;
-        }
-        output
+            .env_remove("DSH_SESSION_ID");
+        command
     }
 
     fn request(&self, value: Value) -> Value {
@@ -201,10 +196,36 @@ impl Fixture {
         );
     }
 
-    fn finish(mut self) {
-        let down = self.daemon(&["down"]);
-        assert!(down.status.success(), "final daemon down: {down:?}");
+    fn stop_daemon(&mut self) {
+        if let Some(mut daemon) = self.daemon.take() {
+            let _ = daemon.kill();
+            let _ = daemon.wait();
+        }
+        let _ = std::fs::remove_file(self.state.join("server.sock"));
         self.wait_socket(false);
+    }
+
+    fn start_daemon(&mut self) {
+        let daemon_log = std::fs::File::create(self.root.join("test-daemon.log"))
+            .expect("create owned serve log");
+        self.daemon = Some(
+            self.configured_command(&["serve"])
+                .stdin(std::process::Stdio::null())
+                .stdout(daemon_log.try_clone().expect("clone owned serve log"))
+                .stderr(daemon_log)
+                .spawn()
+                .expect("spawn owned serve child"),
+        );
+        self.wait_socket(true);
+    }
+
+    fn restart_daemon(&mut self) {
+        self.stop_daemon();
+        self.start_daemon();
+    }
+
+    fn finish(mut self) {
+        self.stop_daemon();
         self.gateway
             .shutdown()
             .expect("join gateway before removing its socket directory");
@@ -219,15 +240,8 @@ impl Drop for Fixture {
         if self.finished {
             return;
         }
-        if self.daemon_owned {
-            let down = self.daemon(&["down"]);
-            if !down.status.success() {
-                eprintln!("owned failed fixture daemon cleanup: {down:?}");
-            }
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while Instant::now() < deadline && self.state.join("server.sock").exists() {
-                thread::sleep(Duration::from_millis(30));
-            }
+        if self.daemon.is_some() {
+            self.stop_daemon();
         }
         if self.gateway.shutdown().is_err() {
             eprintln!("owned failed fixture gateway thread panicked");
@@ -325,14 +339,7 @@ fn must_refuse(reply: &Value) {
 #[test]
 fn dsh_master_authority_public_wire_and_restart_preserve_peer_state() {
     let mut fixture = Fixture::new();
-    let up = fixture.daemon(&["up"]);
-    assert!(
-        up.status.success(),
-        "up stdout={} stderr={}",
-        String::from_utf8_lossy(&up.stdout),
-        String::from_utf8_lossy(&up.stderr)
-    );
-    fixture.wait_socket(true);
+    fixture.start_daemon();
 
     let reg_a = register(&fixture, "workerA", "tokenA", "agentA");
     assert_ok(&reg_a);
@@ -509,22 +516,7 @@ fn dsh_master_authority_public_wire_and_restart_preserve_peer_state() {
     );
     assert_ok(&clear_a);
     assert_eq!(clear_a["previous_worker_id"], "workerB", "{clear_a}");
-    let down = fixture.daemon(&["down"]);
-    assert!(
-        down.status.success(),
-        "down stdout={} stderr={}",
-        String::from_utf8_lossy(&down.stdout),
-        String::from_utf8_lossy(&down.stderr)
-    );
-    fixture.wait_socket(false);
-    let restart = fixture.daemon(&["up"]);
-    assert!(
-        restart.status.success(),
-        "restart up stdout={} stderr={}",
-        String::from_utf8_lossy(&restart.stdout),
-        String::from_utf8_lossy(&restart.stderr)
-    );
-    fixture.wait_socket(true);
+    fixture.restart_daemon();
 
     let after_restart = status(&fixture, &fixture.root);
     assert_ok(&after_restart);

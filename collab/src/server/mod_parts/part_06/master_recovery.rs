@@ -221,11 +221,14 @@ fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Va
     if current_master_worker_id(state, route_scope.as_ref()).as_deref() == Some(worker_id) {
         return json!({
             "role": "master",
-            "role_task": "Orchestrate the project; implementation is not your primary job.",
+            "role_task": "Orchestrate the project by task kind: route long-horizon goals to autonomous peers and bounded one-shot execution or observation to GCM subworkers; implementation is not your primary job.",
             "responsibilities": [
                 "Run `appsdk longhorizon show` to reconstruct goal, tasks, workers, blockers, and bugs.",
-                "Split work into independent scopes; assign tasks and resources; keep useful worker capacity loaded.",
-                "Before ending each scheduling turn, saturate every live present peer first, then schedule managed subagents within the configured cap; never stay idle while eligible capacity remains.",
+                "Route long-horizon goals to autonomous peers and bounded one-shot execution or observation to `codex exec --profile gcm` subworkers.",
+                "Keep useful capacity loaded by task kind: peers for long-horizon goals, GCM subworkers for bounded execution and observation; never require filling peers first.",
+                "For every dispatch, state the goal, scope, authorized actions, resource owner, delivery and test evidence, report channel, and stop conditions.",
+                "Verify returned evidence yourself; a subworker or peer BLOCKED report is not a goal result.",
+                "Retain project coordination, cross-peer dependencies, and final integration; delegated peers get no inherited master authority.",
                 "Delivery, merge, or a review verdict is not a lifecycle endpoint; drive review/integration/cleanup/close and assign the next ready P0/P1 task.",
                 "Own worker blockers: investigate, unblock, reassign, or close. Do not wait for someone else.",
                 "Drive test, verification, commit, merge, worktree cleanup, and task closure.",
@@ -243,7 +246,7 @@ fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Va
             },
             "blocked_boundary": "Investigate and unblock first; only pause for a true external approval or dependency gate.",
             "completion_action": "Drive the project to verified merge, cleanup, task closure, and final acceptance.",
-            "next_action": "Run `appsdk longhorizon show`, saturate live peers first, then schedule managed subagents within the configured cap; do not end the scheduling turn while eligible capacity remains idle. Delivery or review triggers review/integration/cleanup/dispatch, not an endpoint.",
+            "next_action": "Run `appsdk longhorizon show`; route long-horizon goals to autonomous peers and bounded one-shot execution or observation to `codex exec --profile gcm` subworkers; state goal, scope, authorized actions, resource owner, delivery/test evidence, report and stop conditions; verify peer evidence and blockers; peers independently plan, dispatch, integrate assigned work, and clean owned resources without inheriting master authority; retain project, cross-peer, and final integration.",
             "notification_rule": "A notification is an interrupt, not completion. Do its P0/P1/P2 action, then resume scheduling; never stop on ACK/read/summary."
         });
     }
@@ -255,12 +258,12 @@ fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Va
             .map(|record| record.parent.clone());
         return json!({
             "role": "managed-subagent",
-            "role_task": "Execute the assigned independent task and return evidence to parent/master.",
+            "role_task": "Complete one bounded one-shot execution or observation and return evidence to parent/master; you are not the goal orchestrator.",
             "responsibilities": [
-                "Stay inside the assigned task, worktree, file scope, delivery conditions, and tests.",
-                "Accept and execute master/parent instructions for this assignment; do not create a global schedule.",
+                "Stay inside the assigned goal slice, worktree, file scope, authorized actions, delivery/test conditions, report path, and stop conditions.",
+                "Do not create a project or global schedule, recursively dispatch another agent, register Collab, expand permissions, or claim the long-horizon goal.",
                 "On trouble, investigate first. Send root cause, attempted actions, proposed fix, and any required decision to the live master; copy parent when different.",
-                "Complete implementation, tests, commit, delivery evidence, and resource cleanup; do not stop at code-written or ACK."
+                "Perform only the assigned execution or observation, tests, delivery evidence, and owned-resource cleanup; report DONE or BLOCKED and stop."
             ],
             "communication_recovery": communication_recovery_brief(),
             "authority": {
@@ -273,19 +276,21 @@ fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Va
                 "parent": parent
             },
             "blocked_boundary": "Stay within the assigned task and report a concrete root cause, proposed fix, and required decision to parent/master.",
-            "completion_action": "Return the completed scoped task with implementation, tests, commit, delivery evidence, and resource cleanup.",
-            "next_action": "Continue the assigned task; report ready when idle.",
+            "completion_action": "Return the completed bounded contract with evidence, owned-resource cleanup, and any remaining risk.",
+            "next_action": "Complete only the assigned bounded contract, report evidence or BLOCKED, and stop without taking follow-on goals.",
             "notification_rule": "Handle the named priority action, then resume your assigned task. Reading or ACK is never task progress."
         });
     }
     json!({
         "role": "worker",
-        "role_task": "Own and complete your independent task; collaborate with the master without abandoning existing ownership.",
+        "role_task": "Own the accepted long-horizon goal as its independent orchestrator; collaborate with the master without inheriting master authority.",
         "responsibilities": [
-            "Execute your registered task end to end within its worktree and file scope: implement, test, commit, deliver evidence, and close resources.",
-            "Evaluate master collaboration requests against current ownership and capacity. Accept ready non-conflicting work; decline or negotiate conflicts explicitly instead of silently ignoring them.",
+            "Split and plan the goal, then dispatch bounded one-shot execution or observation to `codex exec --profile gcm` subworkers; use autonomous peers only for subordinate long-horizon goals within the authorized scope.",
+            "Verify subworker evidence, resolve blockers, integrate assigned work, manage resources, and deliver the goal to the sender.",
+            "Keep the sender contract explicit: goal, scope, authorized actions, resource owner, delivery/test evidence, report channel, and stop conditions.",
+            "Evaluate master collaboration requests against current ownership and capacity. Accept, decline, or negotiate conflicts explicitly; do not claim master grants, peer administration, or another peer's resources.",
             "On trouble, investigate first. Report root cause, attempted actions, proposed fix, and the exact decision needed to the live master.",
-            "Do not wait passively and do not stop on ACK/read/summary; after handling a notification, resume your current task."
+            "Do not wait passively and do not stop on ACK/read/summary; continue the accepted goal and report verified progress at contract points."
         ],
         "communication_recovery": communication_recovery_brief(),
         "authority": {
@@ -298,8 +303,8 @@ fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Va
             "parent": null
         },
         "blocked_boundary": "Protect current ownership and capacity; negotiate conflicts explicitly instead of silently accepting or ignoring them.",
-        "completion_action": "Own the task through implementation, verification, delivery evidence, and resource closure.",
-        "next_action": "Resume the registered task or remain available for an explicit dispatch.",
+        "completion_action": "Own the accepted goal through planning, dispatch, verification, integration, delivery evidence, and owned-resource closure.",
+        "next_action": "Continue the accepted goal: plan, dispatch bounded `codex exec --profile gcm` subworkers, verify evidence, resolve blockers, integrate, and report to the sender.",
         "notification_rule": "P0 preempts P1, P1 preempts P2. Higher priority interrupts but does not cancel your owned task."
     })
 }

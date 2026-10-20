@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -89,7 +89,7 @@ struct AppFixture {
     app_socket: PathBuf,
     state: Arc<Mutex<HashMap<String, ThreadState>>>,
     appserver_connections: Arc<AtomicU64>,
-    initialized: bool,
+    daemon: Option<Child>,
     _server_thread: thread::JoinHandle<()>,
 }
 
@@ -139,16 +139,18 @@ impl AppFixture {
                 }
             }
         });
-        Self {
+        let mut fixture = Self {
             root,
             project,
             host_state,
             app_socket,
             state: shared,
             appserver_connections: connections,
-            initialized: false,
+            daemon: None,
             _server_thread: server_thread,
-        }
+        };
+        fixture.start_daemon();
+        fixture
     }
 
     fn command_public(&self, args: &[&str], thread: &str) -> Output {
@@ -312,31 +314,60 @@ impl AppFixture {
             .to_owned()
     }
 
-    fn restart_daemon(&self, thread: &str) {
-        let down = self.command_public(&["down"], thread);
-        assert!(down.status.success(), "daemon down failed: {down:?}");
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline && self.host_state.join("server.sock").exists() {
-            thread::sleep(Duration::from_millis(50));
+    fn stop_daemon(&mut self) {
+        if let Some(mut daemon) = self.daemon.take() {
+            let _ = daemon.kill();
+            let _ = daemon.wait();
         }
-        let up = self.command_public(&["up"], thread);
-        assert!(up.status.success(), "daemon up failed: {up:?}");
+        let _ = std::fs::remove_file(self.host_state.join("server.sock"));
+    }
+
+    fn start_daemon(&mut self) {
+        let daemon_log =
+            std::fs::File::create(self.root.join("test-daemon.log")).expect("create serve log");
+        let mut command = Command::new(binary());
+        command
+            .arg("serve")
+            .current_dir(&self.project)
+            .env("COLLAB_STATE_DIR", &self.host_state)
+            .env("CODEX_HOME", self.root.join("home"))
+            .env_remove("COLLAB_APPSERVER_SOCKET")
+            .env_remove("CODEX_APP_SERVER_SOCKET")
+            .env_remove("COLLAB_APPSERVER_NAMESPACE")
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .env_remove("CODEX_SESSION_ID")
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("COLLAB_WORKER")
+            .stdin(std::process::Stdio::null())
+            .stdout(daemon_log.try_clone().expect("clone serve log"))
+            .stderr(daemon_log);
+        self.daemon = Some(command.spawn().expect("spawn owned serve child"));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !self.host_state.join("server.sock").exists() && Instant::now() < deadline {
+            if let Some(status) = self.daemon.as_mut().unwrap().try_wait().unwrap() {
+                panic!(
+                    "test-owned serve exited before readiness: {status}: {}",
+                    std::fs::read_to_string(self.root.join("test-daemon.log")).unwrap_or_default()
+                );
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            self.host_state.join("server.sock").exists(),
+            "owned serve did not create socket"
+        );
+    }
+
+    fn restart_daemon(&mut self) {
+        self.stop_daemon();
+        self.start_daemon();
     }
 }
 
 impl Drop for AppFixture {
     fn drop(&mut self) {
-        if self.initialized {
-            let _ = Command::new(binary())
-                .arg("down")
-                .current_dir(&self.project)
-                .env("COLLAB_STATE_DIR", &self.host_state)
-                .output();
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while Instant::now() < deadline && self.host_state.join("server.sock").exists() {
-                thread::sleep(Duration::from_millis(50));
-            }
-        }
+        self.stop_daemon();
         if std::thread::panicking() {
             eprintln!(
                 "preserving failed app e2e fixture for diagnosis: root={}",
@@ -602,7 +633,6 @@ fn two_tui_appserver_receipt_flow() {
         .expect("daemon receipt names TUI worker B")
         .to_owned();
     let mut app_fixture = fixture;
-    app_fixture.initialized = true;
 
     let context_a = app_fixture.run_public(&["context"], THREAD_A);
     assert_eq!(context_a["identity"]["transport"]["kind"], "appserver");
@@ -683,12 +713,7 @@ fn two_tui_appserver_receipt_flow() {
     let msg_state = app_fixture.run_public(&["msg", &immediate_id], THREAD_A);
     assert_eq!(msg_state["state"], "read");
 
-    let _down = app_fixture.command_public(&["down"], THREAD_B);
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline && app_fixture.host_state.join("server.sock").exists() {
-        thread::sleep(Duration::from_millis(50));
-    }
-    let _up = app_fixture.command_public(&["up"], THREAD_B);
+    app_fixture.restart_daemon();
     let replay_context = app_fixture.run_public(&["context"], THREAD_B);
     assert_eq!(replay_context["inbox"]["unread"], 0);
     assert_eq!(replay_context["identity"]["transport"]["kind"], "appserver");
@@ -715,7 +740,6 @@ fn desktop_registration_uses_explicit_endpoint_and_codex_app_namespace() {
         .expect("daemon receipt names Desktop worker B")
         .to_owned();
     assert_eq!(context_b["identity"]["transport"]["namespace"], "codex_app");
-    fixture.initialized = true;
 
     let context_b = fixture.run_ok_desktop(&["context"], THREAD_B);
     assert_eq!(context_b["identity"]["transport"]["namespace"], "codex_app");
@@ -757,14 +781,7 @@ fn desktop_registration_uses_explicit_endpoint_and_codex_app_namespace() {
     );
     assert_eq!(received["count"], 1);
 
-    let down = fixture.command_desktop(&["down"], THREAD_B);
-    assert!(down.status.success());
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline && fixture.host_state.join("server.sock").exists() {
-        thread::sleep(Duration::from_millis(50));
-    }
-    let up = fixture.command_desktop(&["up"], THREAD_B);
-    assert!(up.status.success());
+    fixture.restart_daemon();
     let replay_context = fixture.run_ok_desktop(&["context"], THREAD_B);
     assert_eq!(
         replay_context["identity"]["transport"]["namespace"],
@@ -796,7 +813,6 @@ fn desktop_managed_socket_is_not_inferred_without_explicit_endpoint() {
 #[test]
 fn tui_does_not_borrow_the_desktop_managed_socket() {
     let mut fixture = AppFixture::new_desktop_managed();
-    fixture.initialized = true;
 
     let output = fixture.command_tui_without_explicit_endpoint(&["init"], THREAD_A);
     assert!(
@@ -814,9 +830,10 @@ fn tui_does_not_borrow_the_desktop_managed_socket() {
 
 #[test]
 fn wrong_appserver_endpoint_fails_closed() {
-    let root = unique_root();
-    let project = root.join("project");
-    let host_state = root.join("h");
+    let fixture = AppFixture::new();
+    let root = fixture.root.clone();
+    let project = fixture.project.clone();
+    let host_state = fixture.host_state.clone();
     let missing = root.join("missing.sock");
     std::fs::create_dir_all(&project).unwrap();
     std::fs::create_dir_all(&host_state).unwrap();
@@ -843,7 +860,6 @@ fn wrong_appserver_endpoint_fails_closed() {
         combined.contains("APPSERVER_ENDPOINT_REJECTED") || combined.contains("endpoint"),
         "{combined}"
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// B02/B11: an explicit approved promotion replaces the recorded holder even
@@ -870,7 +886,6 @@ fn master_authority_appserver_explicit_replacement_keeps_holder_control() {
         .as_str()
         .expect("context receipt names the app scope")
         .to_owned();
-    fixture.initialized = true;
 
     let promoted_a = fixture.run_public(
         &[
@@ -1046,7 +1061,6 @@ fn repeated_appserver_context_reuses_the_same_identity_and_binding() {
         context_a["identity"]["worker_id"].as_str().is_some(),
         "daemon receipt must name the AppServer worker"
     );
-    fixture.initialized = true;
     let repeated = fixture.run_public(&["context"], THREAD_A);
     assert_eq!(
         repeated["identity"]["worker_id"],
@@ -1115,7 +1129,6 @@ fn context_partial_native_facts_require_the_missing_endpoint_fields() {
         !created,
         "a conflicting supplement must not create an identity: {identities:?}"
     );
-    fixture.initialized = true;
     drop(fixture);
 }
 
@@ -1188,7 +1201,6 @@ fn one_full_supplement_establishes_and_then_replays_the_same_identity() {
     assert_eq!(replay["binding"]["endpoint_generation"], generation);
     assert_eq!(replay["binding"], binding);
 
-    fixture.initialized = true;
     drop(fixture);
 }
 
@@ -1239,7 +1251,6 @@ fn one_thread_supplement_survives_continuously_missing_environment() {
         anonymous["result"]["requires"]["fields"],
         json!(["session_id", "thread_id", "endpoint", "namespace"])
     );
-    fixture.initialized = true;
     drop(fixture);
 }
 
@@ -1269,7 +1280,6 @@ fn external_linked_worktree_reuses_the_canonical_identity_without_recovery_calls
             .success());
     }
     let context = fixture.run_public(&["context"], THREAD_A);
-    fixture.initialized = true;
     let linked = fixture.root.join("external-linked");
     assert!(Command::new("git")
         .args([
@@ -1319,9 +1329,10 @@ fn external_linked_worktree_reuses_the_canonical_identity_without_recovery_calls
 
 #[test]
 fn forged_appserver_endpoint_and_missing_project_context_fail_closed() {
-    let root = unique_root();
-    let project = root.join("project");
-    let host_state = root.join("h");
+    let fixture = AppFixture::new();
+    let root = fixture.root.clone();
+    let project = fixture.project.clone();
+    let host_state = fixture.host_state.clone();
     let forged = root.join("forged.sock");
     std::fs::create_dir_all(&project).unwrap();
     std::fs::create_dir_all(&host_state).unwrap();
@@ -1384,6 +1395,4 @@ fn forged_appserver_endpoint_and_missing_project_context_fail_closed() {
             "missing ProjectContext must fail explicitly: {line}"
         );
     }
-
-    let _ = std::fs::remove_dir_all(&root);
 }

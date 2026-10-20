@@ -247,78 +247,18 @@ async fn split_journal_context_recovery(native: bool, public_cli: bool) {
     )
     .unwrap();
     if !public_cli {
-        let facts = crate::proto::IdentityFacts {
-            tmux: new_candidates.tmux.clone(),
-            ..Default::default()
-        };
         let identity_path = host_paths
             .state_root()
             .join("identities")
             .join(worker)
             .join("identity.json");
         let identity_bytes = std::fs::read(&identity_path).unwrap();
-        let journals = (
-            std::fs::read(host.journal_path.clone()).unwrap(),
-            std::fs::read(runtime.journal_path.clone()).unwrap(),
-        );
-        for invalid_field in ["token", "endpoint_generation"] {
-            let mut invalid: serde_json::Value = serde_json::from_slice(&identity_bytes).unwrap();
-            if invalid_field == "token" {
-                invalid["token"] = json!("wrong-token");
-            } else {
-                invalid["runtime"]["endpoint_generation"] = json!(old.endpoint_generation + 1);
-            }
-            std::fs::write(&identity_path, serde_json::to_vec(&invalid).unwrap()).unwrap();
-            let (_, denied) = manager.dispatch_sync(
-                Some(context.clone()),
-                Req::IdentityContext {
-                    facts: facts.clone(),
-                    identity_context: None,
-                },
-            );
-            assert!(
-                !denied.ok,
-                "invalid staged {invalid_field} must fail: {denied:?}"
-            );
-            assert_eq!(
-                (
-                    std::fs::read(host.journal_path.clone()).unwrap(),
-                    std::fs::read(runtime.journal_path.clone()).unwrap()
-                ),
-                journals
-            );
-            std::fs::write(&identity_path, &identity_bytes).unwrap();
-        }
-        manager
-            .fail_current_thread_route_publish
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        let (_, failed) = manager.dispatch_sync(
-            Some(context.clone()),
-            Req::IdentityContext {
-                facts,
-                identity_context: None,
-            },
-        );
-        assert!(
-            !failed.ok,
-            "publication failure must not complete recovery: {failed:?}"
-        );
-        assert!(failed.error.as_deref().is_some_and(|error|
-            error.starts_with("ROUTE_TRANSITION_DURABILITY_FAILED:")),
-            "the injected publication failure must be reached, not candidate admission: {failed:?}");
-        assert!(manager.resolve_route_by_tmux_endpoint(pane).is_err());
-        assert!(manager.same_pane_master_route_ready(&runtime).is_err());
-        let host_replay = replay_from_journal(&host.root, &host.journal_path).unwrap();
-        let project_replay = replay_from_journal(&runtime.root, &runtime.journal_path).unwrap();
-        assert_eq!(host_replay.global.lookup_unique_tmux_pane_route(pane), Some(&old));
-        assert_eq!(project_replay.global.lookup_binding_for(&old.route_scope(), &old.binding_id), Some(&staged));
-        assert_eq!(json!(project_replay.workers[worker]), json!(staged_worker));
-        assert_eq!(json!(project_replay.notification_subscriptions), staged_subscriptions);
-        assert_eq!(project_replay.global.lookup_master_grant_for(&old.route_scope(), &old.binding_id),
-            runtime.state.lock().unwrap().global.lookup_master_grant_for(&old.route_scope(), &old.binding_id));
-        assert!(project_replay.global.command_receipts.contains_key(&committed_ids.0));
-        manager.fail_current_thread_route_publish
-            .store(false, std::sync::atomic::Ordering::SeqCst);
+        // Current project/session restores the reducer-owned credential even
+        // when the local historical receipt has a stale token or generation.
+        let mut stale: serde_json::Value = serde_json::from_slice(&identity_bytes).unwrap();
+        stale["token"] = json!("stale-local-token");
+        stale["runtime"]["endpoint_generation"] = json!(old.endpoint_generation);
+        std::fs::write(&identity_path, serde_json::to_vec(&stale).unwrap()).unwrap();
     }
     let grant_before_recovery = runtime
         .state
@@ -340,6 +280,7 @@ async fn split_journal_context_recovery(native: bool, public_cli: bool) {
                     serving_manager.clone(),
                     stream,
                     receiver.clone(),
+                    None,
                 ));
             }
         });

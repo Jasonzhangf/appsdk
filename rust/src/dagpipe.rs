@@ -403,11 +403,11 @@ fn design_graph_ids() -> [&'static str; 17] {
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 89] {
+fn design_graph_operator_names() -> [&'static str; 90] {
     [
         "appsdk.collab_context.resolve_root",
+        "appsdk.collab_context.require_daemon",
         "appsdk.collab_context.ensure_baseline",
-        "appsdk.collab_context.ensure_daemon",
         "appsdk.collab_context.identity_gate",
         "appsdk.collab_context.env_view",
         "appsdk.collab_context.emit_snapshot",
@@ -453,6 +453,7 @@ fn design_graph_operator_names() -> [&'static str; 89] {
         "appsdk.collab.board.apply",
         "appsdk.collab.board.project_result",
         "appsdk.collab_control_plane.authorize_reset",
+        "appsdk.collab_control_plane.online_project_reset",
         "appsdk.collab_control_plane.prove_exclusivity",
         "appsdk.collab_control_plane.inventory_control_plane",
         "appsdk.collab_control_plane.archive_inventory",

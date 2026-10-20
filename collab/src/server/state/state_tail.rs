@@ -1,5 +1,6 @@
 #[derive(Debug, Default)]
 pub struct State {
+    pub pending_project_resets: std::collections::BTreeMap<String, bool>,
     /// Monotonic in-memory reducer revision and journal sequence.  These are
     /// not business payload and are advanced only by the resident writer.
     pub revision: u64,

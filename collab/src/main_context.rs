@@ -192,8 +192,13 @@ pub(crate) fn resolve_context_root(
     host_paths: &scope::HostPaths,
     cwd: &Path,
 ) -> anyhow::Result<(Scope, &'static str)> {
-    if let Ok(scope) = Scope::resolve() {
-        return Ok((scope, "route"));
+    if Scope::local_baseline_is_authoritative(cwd)? {
+        return Ok((
+            Scope {
+                root: std::fs::canonicalize(cwd)?,
+            },
+            "cwd",
+        ));
     }
     if let Ok(route) = scope::canonical_route_for_cwd(host_paths, cwd) {
         return Ok((Scope { root: route.root }, "canonical-route"));
@@ -235,6 +240,9 @@ pub(crate) fn context_bootstrap(
     cwd: &Path,
 ) -> anyhow::Result<ContextBootstrap> {
     let (scope, project_root_resolution) = resolve_context_root(host_paths, cwd)?;
+    // Observe the user-managed daemon before any baseline, identity, route, or
+    // journal write. Ordinary context never launches or restarts it.
+    client::require_server(&scope.sock_path())?;
     let baseline_created = if scope.root.join(".agent-collab").is_dir() {
         false
     } else {
@@ -250,13 +258,11 @@ pub(crate) fn context_bootstrap(
         scope::init(&scope.root)?;
         true
     };
-    let daemon_started = !client::alive(&scope.sock_path());
-    client::ensure_server(&scope.sock_path())?;
     Ok(ContextBootstrap {
         scope,
         project_root_resolution,
         baseline_created,
-        daemon_started,
+        daemon_started: false,
     })
 }
 

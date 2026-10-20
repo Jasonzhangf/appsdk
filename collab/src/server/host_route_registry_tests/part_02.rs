@@ -21,6 +21,10 @@
         dispatch: impl FnOnce(ProjectContext, Req) -> (Arc<Server>, Resp),
     ) -> (Arc<Server>, Resp) {
         let context = context.expect("participant project context");
+        if matches!(&request, Req::Register { candidates: Some(candidates), .. }
+            if candidates.appserver.is_some() && candidates.tmux.is_none()) {
+            return dispatch(context, request);
+        }
         let candidate = match &mut request {
             Req::Register { candidates: Some(candidates), .. } =>
                 candidates.tmux.as_mut().expect("selected tmux participant"),
@@ -434,7 +438,7 @@
     }
 
     #[tokio::test]
-    async fn native_thread_route_resolution_rejects_cross_project_thread_reuse() {
+    async fn tmux_projects_with_repeated_native_facts_keep_scoped_routes() {
         let (server, root, host_journal) = test_server();
         let project_a = root.with_file_name(format!(
             "{}-current-a",
@@ -454,13 +458,15 @@
         let shared_thread = "thread-cross-project-current";
         let context_a = context_with_app(&project_a, "current-app-a");
         let context_b = context_with_app(&project_b, "current-app-b");
+        let first_candidates = test_candidates_at(shared_thread, &project_a).unwrap();
+        let first_endpoint = first_candidates.tmux.as_ref().unwrap().endpoint.clone();
 
         let (_, first) = register_host_fixture(&manager,
             Some(context_a.clone()),
             Req::register("current-worker-a".into(),
                  "token-current-a".into(),
                  project_a.display().to_string(),
-                 test_candidates_at(shared_thread, &project_a)),
+                 Some(first_candidates)),
         );
         assert!(first.ok, "{first:?}");
         let (_, second) = register_host_fixture(&manager,
@@ -470,17 +476,11 @@
                  project_b.display().to_string(),
                  test_candidates_at(shared_thread, &project_b)),
         );
-        assert!(!second.ok, "{second:?}");
-        assert!(
-            second
-                .error
-                .as_deref()
-                .is_some_and(|error| error.starts_with("RUNTIME_BINDING_REJECTED:")),
-            "{second:?}"
-        );
+        assert!(second.ok, "{second:?}");
+        assert_eq!(second.data["command"]["binding"]["project_scope"], context_b.project_scope.as_str());
 
         let current = manager
-            .resolve_route_by_native_thread(&format!("session-{shared_thread}"), shared_thread)
+            .resolve_route_by_tmux_endpoint(&first_endpoint)
             .unwrap();
         assert_eq!(
             current.project_scope.as_str(),
@@ -500,7 +500,7 @@
         assert!(!rejected.ok, "{rejected:?}");
         assert_eq!(
             manager
-                .resolve_route_by_native_thread(&format!("session-{shared_thread}"), shared_thread)
+                .resolve_route_by_tmux_endpoint(&first_endpoint)
                 .unwrap(),
             current
         );
@@ -547,7 +547,7 @@
         let replayed_manager = ProjectRuntimeManager::new(replayed_host, &host_paths).unwrap();
         assert_eq!(
             replayed_manager
-                .resolve_route_by_native_thread(&format!("session-{shared_thread}"), shared_thread)
+                .resolve_route_by_tmux_endpoint(&first_endpoint)
                 .unwrap(),
             current
         );
@@ -761,11 +761,10 @@
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// A Codex thread is not an anchor, so it cannot transfer a pane. Two peers
-    /// claiming one thread on different panes stay a conflict, and the refused
-    /// registration must leave the ledger untouched.
+    /// Native facts do not claim tmux identity. Independent tmux sessions keep
+    /// separate routes even if they carry the same native observations.
     #[tokio::test]
-    async fn a_codex_thread_on_another_pane_stays_a_conflict() {
+    async fn codex_facts_on_another_tmux_session_do_not_block_registration() {
         let (server, root, journal_path) = test_server();
         let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
         let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
@@ -792,21 +791,15 @@
                  root.display().to_string(),
                  test_candidates_at(shared_thread, &root)),
         );
-        assert!(!second_registration.ok, "{second_registration:?}");
-        assert!(
-            second_registration
-                .error
-                .as_deref()
-                .is_some_and(|error| error.starts_with("RUNTIME_BINDING_REJECTED:")
-                    && error.contains("another pane")),
-            "{second_registration:?}"
-        );
-        assert_eq!(std::fs::read(&journal_path).unwrap(), before);
-
-        let owner = manager
-            .resolve_route_by_native_thread(&format!("session-{shared_thread}"), shared_thread)
-            .unwrap();
+        assert!(second_registration.ok, "{second_registration:?}");
+        assert!(std::fs::read(&journal_path).unwrap().starts_with(&before));
+        let first_endpoint = &initial_candidates.tmux.as_ref().unwrap().endpoint;
+        let owner = manager.resolve_route_by_tmux_endpoint(first_endpoint).unwrap();
         assert_eq!(owner.agent_id.as_str(), "thread-owner-a");
+        let second_endpoint: crate::proto::TmuxEndpoint = serde_json::from_value(
+            second_registration.data["command"]["binding"]["tmux_endpoint"].clone()).unwrap();
+        let owner = manager.resolve_route_by_tmux_endpoint(&second_endpoint).unwrap();
+        assert_eq!(owner.agent_id.as_str(), "thread-owner-b");
 
         std::fs::remove_dir_all(root).unwrap();
     }

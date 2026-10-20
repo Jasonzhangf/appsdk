@@ -95,7 +95,7 @@ fn context_is_read_only_and_does_not_consume_notifications() {
         .iter()
         .any(|operation| operation["kind"] == "next_action"
             && operation["action"]
-                == "Resume the registered task or remain available for an explicit dispatch."));
+                .as_str().is_some_and(|action| action.contains("Continue the accepted goal"))));
     assert_eq!(
         context.data["identity"]["transport"]["tmux_endpoint"],
         serde_json::to_value(expected_tmux_endpoint).unwrap()
@@ -143,7 +143,7 @@ fn context_gives_an_idle_master_one_canonical_scheduling_action() {
     assert!(context.data["recorded_unusable"].is_null());
     assert_eq!(
         context.data["next_actions"],
-        serde_json::json!(["run `appsdk longhorizon show`, saturate live peers first, then schedule managed subagents within the configured cap; do not end the scheduling turn while eligible capacity remains idle"])
+        serde_json::json!(["run `appsdk longhorizon show`; route long-horizon goals to autonomous peers and bounded one-shot execution or observation to `codex exec --profile gcm` subworkers; state goal, scope, authorized actions, resource owner, delivery/test evidence, report and stop conditions; peers plan, dispatch, verify, resolve blockers, integrate assigned work, and clean owned resources without inheriting master authority; master retains project, cross-peer, and final integration"])
     );
     let operations = context.data["operations"].as_array().expect("operations");
     assert!(
@@ -155,7 +155,7 @@ fn context_gives_an_idle_master_one_canonical_scheduling_action() {
             .iter()
             .any(|operation| operation["kind"] == "next_action"
                 && operation["action"]
-                    == "Run `appsdk longhorizon show`, saturate live peers first, then schedule managed subagents within the configured cap; do not end the scheduling turn while eligible capacity remains idle. Delivery or review triggers review/integration/cleanup/dispatch, not an endpoint.")
+                    == "Run `appsdk longhorizon show`; route long-horizon goals to autonomous peers and bounded one-shot execution or observation to `codex exec --profile gcm` subworkers; state goal, scope, authorized actions, resource owner, delivery/test evidence, report and stop conditions; verify peer evidence and blockers; peers independently plan, dispatch, integrate assigned work, and clean owned resources without inheriting master authority; retain project, cross-peer, and final integration.")
     );
     assert!(context.data["role_brief"]["responsibilities"]
         .as_array()
@@ -164,11 +164,48 @@ fn context_gives_an_idle_master_one_canonical_scheduling_action() {
     assert!(context.data["role_brief"]["responsibilities"]
         .as_array()
         .unwrap()
-        .contains(&serde_json::json!("Before ending each scheduling turn, saturate every live present peer first, then schedule managed subagents within the configured cap; never stay idle while eligible capacity remains.")));
+        .contains(&serde_json::json!("Keep useful capacity loaded by task kind: peers for long-horizon goals, GCM subworkers for bounded execution and observation; never require filling peers first.")));
     assert_eq!(
         context.data["role_brief"]["next_action"],
-        "Run `appsdk longhorizon show`, saturate live peers first, then schedule managed subagents within the configured cap; do not end the scheduling turn while eligible capacity remains idle. Delivery or review triggers review/integration/cleanup/dispatch, not an endpoint."
+        "Run `appsdk longhorizon show`; route long-horizon goals to autonomous peers and bounded one-shot execution or observation to `codex exec --profile gcm` subworkers; state goal, scope, authorized actions, resource owner, delivery/test evidence, report and stop conditions; verify peer evidence and blockers; peers independently plan, dispatch, integrate assigned work, and clean owned resources without inheriting master authority; retain project, cross-peer, and final integration."
     );
+    assert!(!context
+        .data
+        .to_string()
+        .contains("saturate live present peers first"));
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn master_context_routes_work_by_task_kind() {
+    let (server, root) = test_server();
+    register_synthetic_peer(&server, "master", "%master");
+    promote_master(&server, "master", "user-approved");
+
+    let context = handle_context(&server, "master".into(), "token-master".into());
+
+    assert!(context.ok, "{}", context.error.unwrap_or_default());
+    assert_eq!(context.data["identity"]["role"], "master");
+    assert_eq!(
+        context.data["next_actions"],
+        serde_json::json!(["run `appsdk longhorizon show`; route long-horizon goals to autonomous peers and bounded one-shot execution or observation to `codex exec --profile gcm` subworkers; state goal, scope, authorized actions, resource owner, delivery/test evidence, report and stop conditions; peers plan, dispatch, verify, resolve blockers, integrate assigned work, and clean owned resources without inheriting master authority; master retains project, cross-peer, and final integration"])
+    );
+    let responsibilities = context.data["role_brief"]["responsibilities"]
+        .as_array()
+        .expect("master responsibilities")
+        .iter()
+        .filter_map(|line| line.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    assert!(responsibilities.contains("long-horizon goals"));
+    assert!(responsibilities.contains("bounded one-shot"));
+    assert!(responsibilities.contains("codex exec --profile gcm"));
+    assert!(!responsibilities.contains("saturate every live present peer first"));
+    assert!(!context
+        .data
+        .to_string()
+        .contains("saturate live present peers first"));
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -978,8 +1015,8 @@ fn external_or_operator_sender_can_send_without_registration() {
 #[test]
 fn worker_freed_transitions_notify_live_master() {
     let (server, root) = test_server();
-    register(&server, "master-worker", "thread-master");
-    register(&server, "task-worker", "thread-worker");
+    register_synthetic_peer(&server, "master-worker", "thread-master");
+    register_synthetic_peer(&server, "task-worker", "thread-worker");
     let server_arc = std::sync::Arc::new(server);
     let promote_resp = dispatch(
         &server_arc,
@@ -1060,6 +1097,15 @@ fn worker_freed_transitions_notify_live_master() {
     let alert = idle_alert.unwrap();
     assert!(alert.body.contains("newly_idle=subagent:managed-worker"));
     assert!(alert.body.contains("live_idle=subagent:managed-worker"));
+    assert!(alert.body.contains("send long-horizon goals to autonomous peers"));
+    assert!(
+        alert
+            .body
+            .contains("bounded one-shot execution or observation")
+    );
+    assert!(alert.body.contains("codex exec --profile gcm"));
+    assert!(alert.body.contains("without inheriting master authority"));
+    assert!(!alert.body.contains("saturate live present peers first"));
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }

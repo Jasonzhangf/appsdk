@@ -386,6 +386,7 @@ fn worker_status_summary_with_maps(
 
 fn mutation_blocked_during_migration(req: &Req) -> bool {
     match req {
+        Req::UnregisterSelf { .. } | Req::ProjectReset { .. } => false,
         Req::PeerLifecycle { request } => matches!(request, crate::proto::PeerLifecycleRequest::Update { .. } | crate::proto::PeerLifecycleRequest::Close { .. }),
         Req::BoardShow => false,
         Req::Board { command, .. } => !matches!(command, crate::board::BoardCommand::Show),

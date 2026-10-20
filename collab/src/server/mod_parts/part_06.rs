@@ -600,7 +600,7 @@ fn handle_migration_apply(server: &Server, worker_id: String, token: String) -> 
     Resp::data(json!({
         "migration": migration,
         "admission_frozen": true,
-        "next": "upgrade/restart the single daemon, re-register existing peers from their current tmux panes, then run collab migrate verify",
+        "next": "verify the applied migration against the current service; identity restoration uses collab context and does not repeat registration",
     }))
 }
 

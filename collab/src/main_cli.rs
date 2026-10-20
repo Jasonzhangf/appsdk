@@ -294,12 +294,23 @@ pub(crate) enum WorkerCmd {
     /// Retire one exact peer through the lifecycle owner
     Close {
         /// Exact worker ID to close
-        target_id: String,
+        #[arg(
+            required_unless_present = "self_current",
+            conflicts_with = "self_current"
+        )]
+        target_id: Option<String>,
+        /// Remove this pane's own binding and route; keep its host running
+        #[arg(long = "self")]
+        self_current: bool,
         /// Why this worker is being closed; recorded for audit
-        #[arg(long)]
-        reason: String,
+        #[arg(
+            long,
+            required_unless_present = "self_current",
+            conflicts_with = "self_current"
+        )]
+        reason: Option<String>,
         /// Retained operation ID from an earlier attempt
-        #[arg(long = "op")]
+        #[arg(long = "op", conflicts_with = "self_current")]
         operation_id: Option<String>,
     },
     /// Read one retained lifecycle operation without producing a host effect
@@ -334,12 +345,14 @@ pub(crate) enum Cmd {
     /// Hidden: create .agent-collab skeleton for internal AppSDK initialization
     #[command(hide = true)]
     Init,
-    /// Hidden: daemon entrypoint (spawned by `up`)
+    /// User service runtime entrypoint
     #[command(hide = true)]
     Serve,
-    /// Start the coordination daemon (idempotent)
+    /// User maintenance entrypoint
+    #[command(hide = true)]
     Up,
-    /// Explicitly stop the daemon and disable automatic restart
+    /// User maintenance entrypoint
+    #[command(hide = true)]
     Down,
     /// Show server summary (pass --all to aggregate all workers, tasks, subagents)
     Status {
@@ -399,27 +412,25 @@ pub(crate) enum Cmd {
         #[arg(long, default_value_t = 40)]
         lines: usize,
     },
-    /// Retire accumulated control-plane burden and rebuild the baseline.
-    /// Offline, explicit authorization, transactional. Exactly one level is
-    /// required.
+    /// Current project master clears this project's Collab history and load
     Reset {
-        /// Explicit operator authorization text; required.
-        #[arg(long)]
+        /// Legacy offline-maintenance authorization
+        #[arg(long, hide = true)]
         approval: Option<String>,
         /// Confirm that the named control plane may be discarded.
-        #[arg(long)]
+        #[arg(long, hide = true)]
         discard_legacy: bool,
-        /// L2: rebuild this project's runtime baseline.
+        /// Reset this project's history, routes, assets and runtime load online
         #[arg(long)]
         project: bool,
         /// L3: rebuild the host control plane.
-        #[arg(long)]
+        #[arg(long, hide = true)]
         host: bool,
         /// The live host index root. Required for --host.
-        #[arg(long)]
+        #[arg(long, hide = true)]
         storage_root: Option<std::path::PathBuf>,
         /// L3: also remove ~/.collab/runs/.
-        #[arg(long)]
+        #[arg(long, hide = true)]
         include_runs: bool,
     },
     /// Send a message to another worker
@@ -454,8 +465,8 @@ pub(crate) enum Cmd {
     },
     /// List unread inbox
     Inbox,
-    /// Single agent bootstrap: resolve root, start daemon, restore identity and
-    /// registration, re-arm default notify, then return the authoritative snapshot
+    /// Restore current project identity and communication through the existing
+    /// user-managed service, then return the authoritative snapshot
     Context {
         #[arg(long = "op")]
         operation_id: Option<String>,

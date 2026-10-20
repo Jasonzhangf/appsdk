@@ -727,6 +727,7 @@ impl Server {
         &self,
         st: &State,
     ) -> Result<(), notification_contract::JournalError> {
+        use std::io::Write;
         let path = self.journal_path.clone();
         let tmp = path.with_file_name("journal.jsonl.tmp");
         let mut body = String::new();
@@ -741,7 +742,11 @@ impl Server {
         })?;
         body.push_str(&line);
         body.push('\n');
-        std::fs::write(&tmp, body).map_err(|error| {
+        let mut replacement = std::fs::OpenOptions::new().write(true).create(true).truncate(true)
+            .open(&tmp).map_err(|error| {
+                notification_contract::JournalError::Append(format!("compact create: {error}"))
+            })?;
+        replacement.write_all(body.as_bytes()).and_then(|_| replacement.sync_all()).map_err(|error| {
             notification_contract::JournalError::Append(format!("compact write: {error}"))
         })?;
         std::fs::rename(&tmp, &path).map_err(|error| {
@@ -755,6 +760,9 @@ impl Server {
                 notification_contract::JournalError::Append(format!("compact reopen: {error}"))
             })?;
         *self.journal.lock().unwrap() = file;
+        sync_parent_dir(&path).map_err(|error| {
+            notification_contract::JournalError::Append(format!("compact directory sync: {error}"))
+        })?;
         Ok(())
     }
 

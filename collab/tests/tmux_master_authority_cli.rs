@@ -1,5 +1,189 @@
 include!("support/tmux_cli_fixture.rs");
 
+#[test]
+fn context_session_reuse_and_minimal_master_approval() {
+    let (mut fixture, first) = single_pane_fixture("identity-session-main");
+    let daemon_pid = fixture.daemon.as_ref().unwrap().id();
+    let initial = fixture.registered_context(&first, true);
+    let worker = initial["identity"]["worker_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let split = tmux(
+        &fixture.tmux_socket,
+        &[
+            "split-window",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            &first.pane_id,
+            "sleep 600",
+        ],
+    );
+    let pane_id = String::from_utf8(split.stdout).unwrap().trim().to_owned();
+    let second = Pane {
+        pane_id,
+        server_pid: first.server_pid,
+        session_anchor: "new-native-session".into(),
+        thread_anchor: "new-native-thread".into(),
+    };
+    let moved = fixture.run_context(&["context", "--op", "identity-session-move"], Some(&second));
+    assert_eq!(moved["identity"]["worker_id"], worker, "{moved}");
+    assert_eq!(
+        moved["binding"]["tmux_endpoint"]["pane_id"], second.pane_id,
+        "{moved}"
+    );
+    let other_session = "identity-session-incumbent";
+    let created = tmux(
+        &fixture.tmux_socket,
+        &[
+            "new-session",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-s",
+            other_session,
+            "sleep 600",
+        ],
+    );
+    fixture.owned_sessions.push(other_session.into());
+    let pane_id = String::from_utf8(created.stdout).unwrap().trim().to_owned();
+    let incumbent = Pane {
+        pane_id,
+        server_pid: first.server_pid,
+        session_anchor: "incumbent-native-session".into(),
+        thread_anchor: "incumbent-native-thread".into(),
+    };
+    let registered = fixture.registered_context(&incumbent, true);
+    let incumbent_worker = registered["identity"]["worker_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    fixture.run_ok(
+        &["master", "promote", "--approval", "user assigned incumbent"],
+        Some(&incumbent),
+    );
+    let peer = fixture.run_context(&["context", "--op", "identity-peer-usable"], Some(&second));
+    assert_eq!(peer["identity"]["worker_id"], worker, "{peer}");
+    assert_eq!(peer["identity"]["role"], "worker", "{peer}");
+    assert_eq!(peer["master"]["worker_id"], incumbent_worker, "{peer}");
+    assert!(
+        peer["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action
+                .as_str()
+                .is_some_and(|text| text.contains("--approve-grant"))),
+        "{peer}"
+    );
+    let peer_message = fixture.run_ok(
+        &[
+            "sendmessage",
+            "--to",
+            &incumbent_worker,
+            "--subject",
+            "peer remains usable",
+            "ordinary peer message",
+        ],
+        Some(&second),
+    );
+    let received = fixture.run_ok(&["recv", "--timeout", "0"], Some(&incumbent));
+    assert!(
+        received["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["id"] == peer_message["msg_id"]),
+        "{received}"
+    );
+    let reply = fixture.run_ok(
+        &[
+            "sendmessage",
+            "--to",
+            &worker,
+            "--subject",
+            "reply",
+            "peer recovery reply",
+        ],
+        Some(&incumbent),
+    );
+    let received = fixture.run_ok(&["recv", "--timeout", "0"], Some(&second));
+    assert!(
+        received["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["id"] == reply["msg_id"]),
+        "{received}"
+    );
+    let args = ["context", "--op", "identity-minimal-master", "--approve-grant", "{\"action\":\"restore_master\",\"authorization\":\"user approved current session master\"}"];
+    let master = fixture.run_context(&args, Some(&second));
+    assert_eq!(master["identity"]["role"], "master", "{master}");
+    assert_eq!(
+        fixture.run_ok(&["master", "status"], Some(&second))["master"]["worker_id"],
+        worker
+    );
+    let replay = fixture.run_context(&args, Some(&second));
+    assert_eq!(replay["master"]["worker_id"], worker, "{replay}");
+    let current = fixture.run_context(&["context"], Some(&second));
+    assert_eq!(current["identity"]["role"], "master", "{current}");
+    assert!(!current["next_actions"]
+        .to_string()
+        .contains("--approve-grant"));
+    let sent = fixture.run_ok(
+        &[
+            "sendmessage",
+            "--to",
+            &incumbent_worker,
+            "--subject",
+            "master",
+            "master recovery message",
+        ],
+        Some(&second),
+    );
+    let received = fixture.run_ok(&["recv", "--timeout", "0"], Some(&incumbent));
+    assert!(
+        received["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["id"] == sent["msg_id"]),
+        "{received}"
+    );
+    let reply = fixture.run_ok(
+        &[
+            "sendmessage",
+            "--to",
+            &worker,
+            "--subject",
+            "reply",
+            "master recovery reply",
+        ],
+        Some(&incumbent),
+    );
+    let received = fixture.run_ok(&["recv", "--timeout", "0"], Some(&second));
+    assert!(
+        received["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["id"] == reply["msg_id"]),
+        "{received}"
+    );
+    assert_eq!(fixture.daemon.as_ref().unwrap().id(), daemon_pid);
+    assert!(fixture
+        .daemon
+        .as_mut()
+        .unwrap()
+        .try_wait()
+        .unwrap()
+        .is_none());
+}
+
 /// B01: a tmux registration records a Codex session/thread anchor, but a tmux
 /// pane address cannot answer whether the agent is resident. The recorded grant
 /// holder must still be able to act, and every public projection must agree on
@@ -20,6 +204,33 @@ fn master_authority_tmux_unknown_holder_keeps_control_and_projection() {
         .as_str()
         .expect("context receipt names the app scope")
         .to_owned();
+    assert_eq!(registered["identity"]["role"], "worker", "{registered}");
+    assert_eq!(
+        registered["role_brief"]["derivation"]["kind"], "peer",
+        "{registered}"
+    );
+    assert!(registered["master"].is_null(), "{registered}");
+    let ordinary_authority = &registered["role_brief"]["authority"];
+    assert_eq!(ordinary_authority["managed_subagent"], false);
+    assert_eq!(ordinary_authority["must_obey_master"], false);
+    assert_eq!(ordinary_authority["may_decline_master_invite"], true);
+    let ordinary_role_task = registered["role_brief"]["role_task"]
+        .as_str()
+        .expect("ordinary peer role task");
+    let ordinary_responsibilities = registered["role_brief"]["responsibilities"]
+        .as_array()
+        .expect("ordinary peer responsibilities")
+        .iter()
+        .filter_map(|line| line.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    assert!(ordinary_role_task.contains("long-horizon"));
+    assert!(ordinary_role_task.contains("orchestrator"));
+    assert!(ordinary_responsibilities.contains("codex exec --profile gcm"));
+    assert!(ordinary_responsibilities.contains("verify subworker evidence"));
+    assert!(ordinary_role_task.contains("without inheriting master authority"));
+    assert!(!ordinary_responsibilities.contains("saturate every live present peer first"));
 
     let promoted = fixture.run_ok(
         &[
@@ -52,6 +263,23 @@ fn master_authority_tmux_unknown_holder_keeps_control_and_projection() {
     assert_eq!(context["identity"]["role"], "master");
     assert_scope("assigned context", &context, &project_scope, &app_scope_id);
     assert!(context["recorded_unusable"].is_null(), "{context}");
+    let master_responsibilities = context["role_brief"]["responsibilities"]
+        .as_array()
+        .expect("master responsibilities")
+        .iter()
+        .filter_map(|line| line.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    assert!(master_responsibilities.contains("long-horizon goals"));
+    assert!(master_responsibilities.contains("bounded one-shot"));
+    assert!(master_responsibilities.contains("codex exec --profile gcm"));
+    assert!(master_responsibilities.contains("no inherited master authority"));
+    assert!(!master_responsibilities.contains("saturate every live present peer first"));
+    assert_eq!(
+        context["next_actions"],
+        serde_json::json!(["run `appsdk longhorizon show`; route long-horizon goals to autonomous peers and bounded one-shot execution or observation to `codex exec --profile gcm` subworkers; state goal, scope, authorized actions, resource owner, delivery/test evidence, report and stop conditions; peers plan, dispatch, verify, resolve blockers, integrate assigned work, and clean owned resources without inheriting master authority; master retains project, cross-peer, and final integration"])
+    );
     // Durable identity stays Present for the registered pane; endpoint
     // reachability and agent activity are separate observations.
     assert_eq!(context["liveness"]["presence"], "present");
@@ -102,7 +330,7 @@ fn master_authority_tmux_unknown_holder_keeps_control_and_projection() {
 /// task, peer, message or consumption state is deleted.
 #[test]
 fn master_authority_clear_removes_grant_and_preserves_business_state() {
-    let (fixture, pane) = single_pane_fixture("collab-master-authority-b03");
+    let (mut fixture, pane) = single_pane_fixture("collab-master-authority-b03");
     let registered = fixture.registered_context(&pane, true);
     let worker_id = registered["identity"]["worker_id"]
         .as_str()
@@ -215,20 +443,7 @@ fn master_authority_clear_removes_grant_and_preserves_business_state() {
 
     // A real isolated daemon restart must not resurrect any typed or legacy
     // holder, and the public task/message facts must still be present.
-    let down = fixture.command_without_pane(&["down"]);
-    assert!(
-        down.status.success(),
-        "isolated clear fixture down must succeed"
-    );
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline && fixture.host_state.join("server.sock").exists() {
-        thread::sleep(Duration::from_millis(50));
-    }
-    let up = fixture.command_without_pane(&["up"]);
-    assert!(
-        up.status.success(),
-        "isolated clear fixture up must succeed"
-    );
+    fixture.restart_daemon();
 
     let restarted_status = fixture.run_ok(&["master", "status"], Some(&pane));
     assert!(

@@ -130,7 +130,7 @@ fn peer_lifecycle_create_cli_exposes_frozen_arguments() {
 #[test]
 fn worker_snapshot_public_cli_returns_bounded_tmux_buffer_without_a_write() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
-    let (fixture, master) = Fixture::isolated("worker-snapshot-public");
+    let (mut fixture, master) = Fixture::isolated("worker-snapshot-public");
     let seeded = fixture.registered_context("worker-snapshot-master", &master);
     assert_eq!(seeded["result"]["outcome"], "completed", "{seeded}");
     let promoted = fixture.run_ok(
@@ -147,13 +147,13 @@ fn worker_snapshot_public_cli_returns_bounded_tmux_buffer_without_a_write() {
     let split = tmux(
         &fixture.tmux_socket,
         &[
-            "split-window",
+            "new-session",
             "-d",
             "-P",
             "-F",
             "#{pane_id}",
-            "-t",
-            &master.pane_id,
+            "-s",
+            "snapshot-peer",
             "sleep 600",
         ],
     );
@@ -166,6 +166,11 @@ fn worker_snapshot_public_cli_returns_bounded_tmux_buffer_without_a_write() {
         .expect("peer pane id is utf8")
         .trim()
         .to_owned();
+    fixture
+        .owned_sessions
+        .lock()
+        .unwrap()
+        .push("snapshot-peer".into());
     let peer = Pane {
         server_pid: master.server_pid,
         pane_id: peer_pane_id.clone(),
@@ -241,7 +246,7 @@ fn worker_snapshot_public_cli_returns_bounded_tmux_buffer_without_a_write() {
 #[test]
 fn top_level_snapshot_reads_a_peer_buffer_for_a_non_master_caller() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
-    let (fixture, master) = Fixture::isolated("snapshot-top-level");
+    let (mut fixture, master) = Fixture::isolated("snapshot-top-level");
     let help = Command::new(env!("CARGO_BIN_EXE_collab"))
         .args(["snapshot", "--help"])
         .output()
@@ -271,13 +276,13 @@ fn top_level_snapshot_reads_a_peer_buffer_for_a_non_master_caller() {
     let split = tmux(
         &fixture.tmux_socket,
         &[
-            "split-window",
+            "new-session",
             "-d",
             "-P",
             "-F",
             "#{pane_id}",
-            "-t",
-            &master.pane_id,
+            "-s",
+            "snapshot-peer",
             "sleep 600",
         ],
     );
@@ -290,6 +295,11 @@ fn top_level_snapshot_reads_a_peer_buffer_for_a_non_master_caller() {
         .expect("peer pane id is utf8")
         .trim()
         .to_owned();
+    fixture
+        .owned_sessions
+        .lock()
+        .unwrap()
+        .push("snapshot-peer".into());
     let peer = Pane {
         server_pid: master.server_pid,
         pane_id: peer_pane_id.clone(),

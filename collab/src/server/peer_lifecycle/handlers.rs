@@ -691,11 +691,13 @@ fn handle_close(
             return unavailable(request, "PEER_LIFECYCLE_SCOPE_MISMATCH", true);
         }
         let snapshot = state::responsibility_snapshot(&state, &target.worker_id);
-        if let Some(requires) = close_responsibility_requires(&snapshot) {
-            let mut refused = result(PeerLifecycleAction::Close, PeerLifecycleOutcome::Refused);
-            refused.operation_id = Some(operation_id.clone());
-            refused.requires = requires;
-            return response(refused, Some("PEER_LIFECYCLE_RESPONSIBILITY_CONFLICT"));
+        if !self_unregister {
+            if let Some(requires) = close_responsibility_requires(&snapshot) {
+                let mut refused = result(PeerLifecycleAction::Close, PeerLifecycleOutcome::Refused);
+                refused.operation_id = Some(operation_id.clone());
+                refused.requires = requires;
+                return response(refused, Some("PEER_LIFECYCLE_RESPONSIBILITY_CONFLICT"));
+            }
         }
         let snapshot_captured_ms = target.transport.thread_id.as_deref().and_then(|thread_id| {
             state

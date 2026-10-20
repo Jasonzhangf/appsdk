@@ -71,7 +71,8 @@ pub struct Fixture {
     pub root: PathBuf,
     pub host_state: PathBuf,
     pub tmux_socket: PathBuf,
-    active_daemon: bool,
+    daemon: Option<Child>,
+    owned_sessions: std::sync::Mutex<Vec<String>>,
     hidden_project_journal: Option<PathBuf>,
     hook_socket: Option<PathBuf>,
 }
@@ -112,7 +113,8 @@ impl Fixture {
             root,
             host_state,
             tmux_socket: tmux_socket.clone(),
-            active_daemon: false,
+            daemon: None,
+            owned_sessions: std::sync::Mutex::new(vec![label.to_owned()]),
             hidden_project_journal: None,
             hook_socket: None,
         };
@@ -131,7 +133,7 @@ impl Fixture {
                 .expect("pane id is utf8")
                 .trim()
                 .to_owned();
-        fixture.active_daemon = true;
+        fixture.start_daemon();
         let pane = Pane {
             server_pid,
             pane_id: pane_id.clone(),
@@ -175,17 +177,18 @@ impl Fixture {
         let host_state = root.join("h");
         std::fs::create_dir_all(&host_state).expect("create isolated host state");
         seed_baseline(&root);
-        Self {
+        let mut fixture = Self {
             binary: collab_test_binary(),
             root: root.clone(),
             host_state,
             tmux_socket: root.join("unused.sock"),
-            // A plain `context` invocation may auto-start the daemon even
-            // without a tmux identity anchor, so Drop owns that lifecycle.
-            active_daemon: true,
+            daemon: None,
+            owned_sessions: std::sync::Mutex::new(Vec::new()),
             hidden_project_journal: None,
             hook_socket: None,
-        }
+        };
+        fixture.start_daemon();
+        fixture
     }
 
     pub fn configured_command(&self, args: &[&str], pane: Option<&Pane>) -> Command {
@@ -228,6 +231,48 @@ impl Fixture {
             }
         }
         command
+    }
+
+    fn start_daemon(&mut self) {
+        let command = self.configured_command(&["serve"], None);
+        self.start_daemon_with(command);
+    }
+
+    fn start_daemon_with(&mut self, mut command: Command) {
+        assert!(self.daemon.is_none(), "fixture daemon already owned");
+        let log_path = self.root.join("test-daemon.log");
+        let log = std::fs::File::create(&log_path).expect("create fixture daemon log");
+        self.daemon = Some(
+            command
+                .stdin(Stdio::null())
+                .stdout(log.try_clone().expect("clone fixture daemon log"))
+                .stderr(log)
+                .spawn()
+                .expect("spawn isolated collab serve"),
+        );
+        let socket = self.host_state.join("server.sock");
+        assert!(
+            wait_until(Duration::from_secs(10), || {
+                if let Some(status) = self.daemon.as_mut().unwrap().try_wait().unwrap() {
+                    panic!(
+                        "fixture daemon exited before readiness: {status}: {}",
+                        std::fs::read_to_string(&log_path).unwrap_or_default()
+                    );
+                }
+                socket.exists()
+            }),
+            "fixture daemon did not create its socket: {}",
+            std::fs::read_to_string(log_path).unwrap_or_default()
+        );
+    }
+
+    fn reap_daemon(&mut self) {
+        if let Some(mut child) = self.daemon.take() {
+            if child.try_wait().ok().flatten().is_none() {
+                let _ = unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+            }
+            let _ = child.wait();
+        }
     }
 
     pub fn command(&self, args: &[&str], pane: Option<&Pane>) -> Output {
@@ -394,7 +439,17 @@ impl Fixture {
             }),
             "degraded fixture daemon still owns its socket"
         );
-        self.active_daemon = false;
+        if self
+            .daemon
+            .as_mut()
+            .is_some_and(|child| child.id() as i32 == pid)
+        {
+            self.daemon
+                .take()
+                .unwrap()
+                .wait()
+                .expect("reap owned fixture daemon");
+        }
     }
 
     pub fn restore_project_journal(&mut self) {
@@ -412,33 +467,28 @@ impl Fixture {
     }
 
     pub fn stop_daemon(&mut self) {
-        if self.active_daemon {
-            let output = self.command(&["down"], None);
-            let host_log_tail = std::fs::read_to_string(self.host_log())
-                .unwrap_or_default()
-                .lines()
-                .rev()
-                .take(12)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect::<Vec<_>>()
-                .join("\n");
-            assert!(
-                output.status.success(),
-                "fixture daemon down failed: stdout={} stderr={} host_log_tail={}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr),
-                host_log_tail
-            );
-            assert!(
-                wait_until(Duration::from_secs(15), || {
-                    !self.host_state.join("server.sock").exists()
-                }),
-                "fixture daemon still owns its socket after down"
-            );
-            self.active_daemon = false;
+        let socket = self.host_state.join("server.sock");
+        let Some(mut child) = self.daemon.take() else {
+            if socket.exists() {
+                panic!("fixture socket exists without an owned daemon child");
+            }
+            return;
+        };
+        let child_pid = child.id() as i32;
+        assert!(child_pid > 1, "fixture daemon pid is valid");
+        if child
+            .try_wait()
+            .expect("poll owned fixture daemon")
+            .is_none()
+        {
+            let result = unsafe { libc::kill(child_pid, libc::SIGTERM) };
+            assert_eq!(result, 0, "terminate only fixture daemon pid {child_pid}");
         }
+        child.wait().expect("reap owned fixture daemon");
+        assert!(
+            wait_until(Duration::from_secs(15), || !socket.exists()),
+            "fixture daemon still owns its socket after stop"
+        );
     }
 
     pub fn daemon_pid(&self) -> i32 {
@@ -463,13 +513,7 @@ impl Fixture {
     pub fn restart_daemon(&mut self) {
         self.stop_daemon();
         std::fs::remove_file(self.host_state.join("DOWN")).ok();
-        client_ensure_server(
-            &self.binary,
-            &self.root,
-            &self.host_state,
-            self.hook_socket.as_deref(),
-        );
-        self.active_daemon = true;
+        self.start_daemon();
     }
 
     /// Restart only this fixture daemon with one compile-time gated fault
@@ -477,16 +521,9 @@ impl Fixture {
     pub fn restart_daemon_with_env(&mut self, key: &str, value: &str) {
         self.stop_daemon();
         std::fs::remove_file(self.host_state.join("DOWN")).ok();
-        let mut command = self.configured_command(&["up"], None);
+        let mut command = self.configured_command(&["serve"], None);
         command.env(key, value);
-        let output = command.output().expect("restart daemon with test fault");
-        assert!(
-            output.status.success(),
-            "fault-injected daemon up failed: stdout={} stderr={}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        self.active_daemon = true;
+        self.start_daemon_with(command);
     }
 
     /// Stop this fixture's daemon by exact PID so a request handler can be
@@ -505,15 +542,9 @@ impl Fixture {
     }
 
     pub fn restart_after_external_stop(&mut self) {
-        self.active_daemon = false;
+        self.reap_daemon();
         std::fs::remove_file(self.host_state.join("DOWN")).ok();
-        client_ensure_server(
-            &self.binary,
-            &self.root,
-            &self.host_state,
-            self.hook_socket.as_deref(),
-        );
-        self.active_daemon = true;
+        self.start_daemon();
     }
 
     /// Point this fixture's CLI, MCP and daemon processes at the private
@@ -521,12 +552,13 @@ impl Fixture {
     /// operation; the isolated daemon reads the same variable at startup.
     pub fn enable_cancellation_hooks(&mut self, socket: &Path) {
         self.hook_socket = Some(socket.to_path_buf());
+        self.restart_daemon();
     }
 
     pub fn restart_daemon_with_file_limit(&mut self, bytes: u64) {
         self.stop_daemon();
         std::fs::remove_file(self.host_state.join("DOWN")).ok();
-        let mut command = self.configured_command(&["up"], None);
+        let mut command = self.configured_command(&["serve"], None);
         unsafe {
             command.pre_exec(move || {
                 if libc::signal(libc::SIGXFSZ, libc::SIG_IGN) == libc::SIG_ERR {
@@ -542,14 +574,7 @@ impl Fixture {
                 Ok(())
             });
         }
-        let output = command.output().expect("restart daemon with file-size cap");
-        assert!(
-            output.status.success(),
-            "capped daemon up failed: stdout={} stderr={}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        self.active_daemon = true;
+        self.start_daemon_with(command);
     }
 
     pub fn snapshot_surfaces(&self) -> Vec<(String, Vec<u8>)> {
@@ -586,14 +611,18 @@ impl Drop for DaemonPause {
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.restore_project_journal();
-        self.stop_daemon();
-        let _ = Command::new("tmux")
-            .args([
-                "-S",
-                self.tmux_socket.to_str().unwrap_or_default(),
-                "kill-server",
-            ])
-            .output();
+        self.reap_daemon();
+        for session in self.owned_sessions.get_mut().unwrap().drain(..) {
+            let _ = Command::new("tmux")
+                .args([
+                    "-S",
+                    self.tmux_socket.to_str().unwrap_or_default(),
+                    "kill-session",
+                    "-t",
+                    &session,
+                ])
+                .output();
+        }
         if std::thread::panicking() {
             eprintln!(
                 "preserving failed public fixture: root={} host_state={}",
@@ -1041,29 +1070,6 @@ impl Mcp {
             reader.join().expect("join MCP stdout reader");
         }
     }
-}
-
-fn client_ensure_server(binary: &Path, root: &Path, host_state: &Path, hook_socket: Option<&Path>) {
-    let mut command = Command::new(binary);
-    command
-        .args(["up"])
-        .current_dir(root)
-        .env("COLLAB_STATE_DIR", host_state)
-        .env("CODEX_HOME", root.join("home"))
-        .env_remove("TMUX")
-        .env_remove("TMUX_PANE")
-        .env_remove("CODEX_SESSION_ID")
-        .env_remove("CODEX_THREAD_ID");
-    if let Some(hook_socket) = hook_socket {
-        command.env("COLLAB_CONTEXT_CANCEL_HOOK_SOCKET", hook_socket);
-    }
-    let output = command.output().expect("start isolated daemon");
-    assert!(
-        output.status.success(),
-        "isolated daemon up failed: stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
 }
 
 pub fn tmux(socket: &Path, args: &[&str]) -> Output {

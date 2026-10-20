@@ -131,12 +131,209 @@ fn ordinary_persisted_context_has_no_registration_effects() {
 }
 
 #[test]
+fn minimal_restore_master_grant_derives_current_identity_and_scope() {
+    let (host, _runtime, manager, host_root, root, facts, saved) = persisted_context_fixture();
+    let context = recovery_context(&root);
+    let request = IdentityContextRequest {
+        operation_id: "ctxop-minimal-restore-master".into(),
+        invocation: "approved_recovery".into(),
+        action: "context".into(),
+        facts,
+        approval: None,
+        grant_approval: Some(json!({
+            "action": "restore_master",
+            "authorization": "user explicitly approved current identity as master"
+        })),
+        query: false,
+        query_capability: "minimal-master-capability".into(),
+        invocation_ticket: String::new(),
+    };
+    let approved = match manager.approved_recovery_admission(&context, &request) {
+        Ok(Some(approved)) => approved,
+        Ok(None) => panic!("restore_master must be admitted as an approved operation"),
+        Err(_) => panic!("minimal restore_master approval must be admitted"),
+    };
+    assert_eq!(approved.identity.worker_id, saved.worker_id);
+    assert_eq!(approved.identity.token, saved.token);
+    assert_eq!(approved.identity_approval.action, "restore_master");
+    assert_eq!(
+        approved.identity_approval.project_scope,
+        context.project_scope.as_str()
+    );
+    assert_eq!(
+        approved.identity_approval.app_scope_id,
+        context.app_scope_id.as_str()
+    );
+    drop(host);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(host_root).unwrap();
+}
+
+#[test]
+fn same_session_endpoint_move_reuses_identity_without_register() {
+    let (host, runtime, manager, host_root, root, mut facts, saved) = persisted_context_fixture();
+    assert!(
+        handle_master_promote(
+            &runtime,
+            saved.worker_id.clone(),
+            saved.token.clone(),
+            "user assigned current session master".into()
+        )
+        .ok
+    );
+    let before = std::fs::read_to_string(&runtime.journal_path).unwrap();
+    facts.tmux.as_mut().unwrap().endpoint.pane_id = "%77".into();
+    facts.tmux.as_mut().unwrap().endpoint.pane_pid += 1;
+    let (_, response) = manager.dispatch_sync(
+        Some(recovery_context(&root)),
+        Req::IdentityContext {
+            facts: facts.clone(),
+            identity_context: None,
+        },
+    );
+    assert!(response.ok, "{response:?}");
+    assert_eq!(
+        response.data["snapshot"]["identity"]["role"], "master",
+        "{response:?}"
+    );
+    let restored: identity::Identity =
+        serde_json::from_value(response.data["identity_receipt"].clone()).unwrap();
+    assert_eq!(restored.worker_id, saved.worker_id);
+    assert_eq!(restored.token, saved.token);
+    assert_eq!(
+        restored.transport.unwrap().tmux_endpoint,
+        Some(facts.tmux.unwrap().endpoint)
+    );
+    let after = std::fs::read_to_string(&runtime.journal_path).unwrap();
+    assert_eq!(
+        after.matches("CommandStarted").count(),
+        before.matches("CommandStarted").count(),
+        "endpoint move must not dispatch Register"
+    );
+    drop(manager);
+    drop(runtime);
+    drop(host);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(host_root).unwrap();
+}
+
+#[test]
+fn current_project_session_retires_foreign_pane_authority_without_register() {
+    let (host, old_runtime, manager, host_root, old_root, facts, old_identity) =
+        persisted_context_fixture();
+    assert!(
+        handle_master_promote(
+            &old_runtime,
+            old_identity.worker_id.clone(),
+            old_identity.token.clone(),
+            "user assigned former project master".into()
+        )
+        .ok
+    );
+    let (new_runtime, root) = test_server();
+    let new_runtime = Arc::new(new_runtime);
+    let context = recovery_context(&root);
+    let mut transport = old_identity.transport.clone().unwrap();
+    transport.tmux_endpoint.as_mut().unwrap().pane_id = "%78".into();
+    let registered = crate::server::peer_tests::seed_committed_owner(
+        &new_runtime,
+        "current-project-peer",
+        "current-project-token",
+        &transport,
+        &root.display().to_string(),
+        Some(context.app_scope_id.clone()),
+    );
+    assert!(registered.ok, "{registered:?}");
+    commit_current_thread_route_for_runtime(
+        &host,
+        &new_runtime,
+        "current-project-peer",
+        &root.display().to_string(),
+        Some(&context.app_scope_id),
+    )
+    .unwrap();
+    let (binding, transport) =
+        identity::registration_from_receipt(&registered.data, "current-project-peer", &root)
+            .unwrap();
+    let mut current = identity::Identity {
+        worker_id: "current-project-peer".into(),
+        token: "current-project-token".into(),
+        project_scope: Some(context.project_scope.clone()),
+        runtime: None,
+        transport: None,
+    };
+    identity::persist_registration_at(
+        &host.host_paths,
+        &Scope { root: root.clone() },
+        &mut current,
+        binding,
+        transport,
+    )
+    .unwrap();
+    manager.install_runtime(
+        &(
+            context.app_scope_id.as_str().into(),
+            context.project_scope.as_str().into(),
+        ),
+        new_runtime.clone(),
+        None,
+    );
+    let before = std::fs::read_to_string(&new_runtime.journal_path).unwrap();
+    let (_, restored) = manager.dispatch_sync(
+        Some(context.clone()),
+        Req::IdentityContext {
+            facts,
+            identity_context: None,
+        },
+    );
+    assert!(restored.ok, "{restored:?}");
+    assert_eq!(
+        restored.data["identity_receipt"]["worker_id"],
+        current.worker_id
+    );
+    assert_eq!(restored.data["snapshot"]["identity"]["role"], "worker");
+    let state = old_runtime.state.lock().unwrap();
+    assert!(!state.workers.contains_key(&old_identity.worker_id));
+    let route_scope = RouteScope {
+        app_scope_id: context.app_scope_id.clone(),
+        project_scope_id: old_identity.project_scope.clone().unwrap(),
+    };
+    assert!(current_master_grant(&state, Some(&route_scope)).is_none());
+    let old_binding = state
+        .global
+        .lookup_binding_for(&route_scope, &old_identity.runtime.unwrap().binding_id)
+        .unwrap();
+    assert!(old_binding.tmux_endpoint.is_none());
+    drop(state);
+    let after = std::fs::read_to_string(&new_runtime.journal_path).unwrap();
+    assert_eq!(
+        after.matches("CommandStarted").count(),
+        before.matches("CommandStarted").count()
+    );
+    let host_state = host.state.lock().unwrap();
+    assert!(!host_state
+        .global
+        .current_thread_routes
+        .values()
+        .any(|route| route.agent_id.as_str() == old_identity.worker_id));
+    drop(host_state);
+    drop(manager);
+    drop(new_runtime);
+    drop(old_runtime);
+    drop(host);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(old_root).unwrap();
+    std::fs::remove_dir_all(host_root).unwrap();
+}
+
+#[test]
 fn minimal_role_intent_is_an_explicit_authority_approval() {
     let (host, runtime, manager, host_root, root, facts, saved) = persisted_context_fixture();
     let context = recovery_context(&root);
     let app = context.app_scope_id.clone();
     let mut other = facts.tmux.clone().unwrap();
     other.endpoint.pane_id = "%4".into();
+    other.endpoint.tmux_session_id = "$4".into();
     // The unrelated master is durable prior state, so seed a committed owner
     // instead of driving an initial Register: a tmux candidate can only finish
     // registration through a live participant return, which this fixture does
@@ -191,6 +388,26 @@ fn minimal_role_intent_is_an_explicit_authority_approval() {
     };
     let unrelated =
         current_master_grant(&runtime.state.lock().unwrap(), Some(&role_scope)).unwrap();
+    let (_, peer) = manager.dispatch_sync(
+        Some(context.clone()),
+        Req::IdentityContext {
+            facts: facts.clone(),
+            identity_context: None,
+        },
+    );
+    assert!(peer.ok, "{peer:?}");
+    assert_eq!(peer.data["snapshot"]["identity"]["role"], "worker");
+    assert_eq!(
+        peer.data["snapshot"]["master"]["worker_id"],
+        "unrelated-master"
+    );
+    assert!(peer.data["snapshot"]["next_actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|action| action
+            .as_str()
+            .is_some_and(|text| text.contains("--approve-grant"))));
     for (step, role) in ["peer", "master", "peer"].into_iter().enumerate() {
         let mut stale = saved.clone();
         stale.token = "stale-token".into();

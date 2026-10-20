@@ -9,6 +9,10 @@ use std::{
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    /// User-only daemon maintenance credential. Serialization omits it so
+    /// `collab config` never renders the secret.
+    #[serde(default, skip_serializing)]
+    pub maintenance: Maintenance,
     pub keepalive: Keepalive,
     pub notifications: Notifications,
     pub timers: Timers,
@@ -19,6 +23,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            maintenance: Maintenance::default(),
             keepalive: Keepalive::default(),
             notifications: Notifications::default(),
             timers: Timers::default(),
@@ -26,6 +31,28 @@ impl Default for Config {
             retention: Retention::default(),
             worktree: Worktree::default(),
         }
+    }
+}
+
+pub const DEFAULT_MAINTENANCE_PASSWORD: &str = "admin";
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Maintenance {
+    pub password: String,
+}
+impl Default for Maintenance {
+    fn default() -> Self {
+        Self {
+            password: DEFAULT_MAINTENANCE_PASSWORD.into(),
+        }
+    }
+}
+impl std::fmt::Debug for Maintenance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Maintenance")
+            .field("password", &"<redacted>")
+            .finish()
     }
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -474,6 +501,9 @@ pub fn parse(text: &str, root: &Path) -> Result<Config> {
             let table = project
                 .as_table_mut()
                 .context("project override must be a table")?;
+            if table.contains_key("maintenance") {
+                bail!("maintenance is global-only; project overrides are not supported");
+            }
             let path = table
                 .remove("root")
                 .and_then(|v| v.as_str().map(PathBuf::from))
@@ -502,6 +532,9 @@ pub fn parse(text: &str, root: &Path) -> Result<Config> {
 }
 impl Config {
     fn validate(&self) -> Result<()> {
+        if self.maintenance.password.is_empty() {
+            bail!("maintenance.password must not be empty");
+        }
         if !(900..=86400).contains(&self.keepalive.interval_seconds)
             || !(1..=3).contains(&self.keepalive.max_unacked)
         {
@@ -576,6 +609,38 @@ impl Config {
         Ok(())
     }
 }
+
+/// Read the user-only maintenance password from the global AppSDK config.
+///
+/// This is a pure read: it never migrates, writes, or merges project
+/// overrides. Project tables are ignored even if they declare `maintenance`,
+/// and the daemon rejects such config at startup through `parse`.
+pub fn maintenance_password() -> Result<String> {
+    let path = path()?;
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(DEFAULT_MAINTENANCE_PASSWORD.into());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let parsed: toml::Value =
+        toml::from_str(&text).map_err(|_| anyhow::anyhow!("invalid ~/.appsdk/config.toml"))?;
+    let Some(maintenance) = parsed.get("maintenance") else {
+        return Ok(DEFAULT_MAINTENANCE_PASSWORD.into());
+    };
+    let Some(value) = maintenance.get("password") else {
+        return Ok(DEFAULT_MAINTENANCE_PASSWORD.into());
+    };
+    let password = value
+        .as_str()
+        .context("maintenance.password must be a string")?;
+    if password.is_empty() {
+        bail!("maintenance.password must not be empty");
+    }
+    Ok(password.to_owned())
+}
+
 pub fn load(root: &Path) -> Result<Config> {
     let path = path()?;
     let mut text = match std::fs::read_to_string(&path) {

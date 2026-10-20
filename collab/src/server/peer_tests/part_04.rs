@@ -1435,14 +1435,26 @@ fn ordinary_worker_snapshots_master_and_master_closes_idempotently() {
 fn master_promotion_requires_user_approval_and_existing_master_delegates() {
     let (server, root) = test_server();
     let server = Arc::new(server);
-    let worker_registration = register(&server, "peer-a", "%a");
-    let target_registration = register(&server, "peer-b", "%b");
+    let worker_registration = register_synthetic_peer(&server, "peer-a", "%a");
+    let target_registration = register_synthetic_peer(&server, "peer-b", "%b");
     assert_eq!(worker_registration.data["role_brief"]["role"], "worker");
     assert_eq!(target_registration.data["role_brief"]["role"], "worker");
-    assert!(worker_registration.data["role_brief"]["role_task"]
+    let ordinary_role_task = worker_registration.data["role_brief"]["role_task"]
         .as_str()
+        .unwrap();
+    let ordinary_responsibilities = worker_registration.data["role_brief"]["responsibilities"]
+        .as_array()
         .unwrap()
-        .contains("independent task"));
+        .iter()
+        .filter_map(|line| line.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    assert!(ordinary_role_task.contains("long-horizon"));
+    assert!(ordinary_role_task.contains("orchestrator"));
+    assert!(ordinary_responsibilities.contains("codex exec --profile gcm"));
+    assert!(ordinary_responsibilities.contains("verify subworker evidence"));
+    assert!(ordinary_responsibilities.contains("do not claim master grants"));
     assert_eq!(
         worker_registration.data["role_brief"]["communication_recovery"]["close_only_when"]
             .as_array()
@@ -1465,11 +1477,18 @@ fn master_promotion_requires_user_approval_and_existing_master_delegates() {
     assert!(promoted.ok, "{}", promoted.error.unwrap_or_default());
     assert_eq!(promoted.data["mode"], "user_approved_self_promotion");
     assert_eq!(promoted.data["role_brief"]["role"], "master");
-    assert!(promoted.data["role_brief"]["responsibilities"]
+    let master_responsibilities = promoted.data["role_brief"]["responsibilities"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|line| line.as_str().unwrap().contains("assign tasks")));
+        .filter_map(|line| line.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    assert!(master_responsibilities.contains("long-horizon goals"));
+    assert!(master_responsibilities.contains("bounded one-shot"));
+    assert!(master_responsibilities.contains("codex exec --profile gcm"));
+    assert!(!master_responsibilities.contains("saturate every live present peer first"));
     let context = handle_context(&server, "peer-a".into(), "token-peer-a".into());
     assert_eq!(context.data["master"]["worker_id"], "peer-a");
     assert_eq!(context.data["role_brief"]["role"], "master");

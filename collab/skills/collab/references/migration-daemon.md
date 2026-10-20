@@ -1,4 +1,4 @@
-# Migration and Daemon Maintenance
+# Migration and User-Managed Daemon Boundary
 
 ## Global truth and project-local state
 
@@ -51,9 +51,9 @@ The upgrade is a replacement, not a compatibility layer:
   `$CARGO_HOME/bin/collab` and `$CARGO_HOME/bin/collab-mcp` for subsequent
   checks.
 - Do not migrate, interpret, or read old local Collab control history merely
-  to keep an old project alive. For an explicitly authorized clean epoch, use
-  the current `collab reset --discard-legacy` owner; for replayable state, use
-  `collab migrate`.
+  to keep an old project alive. For an explicitly authorized clean epoch, the
+  current project master may use `collab reset --project`; for replayable
+  state, use `collab migrate`.
 - If a verified legacy user-local Collab binary pair exists, remove only that
   exact pair after the canonical pair is installed. Do not remove project
   `.agent-collab/`, `~/.collab/`, AppSDK state, or business source.
@@ -64,20 +64,18 @@ The upgrade is a replacement, not a compatibility layer:
   `collab context`, and one live tmux send/recv receipt replay. Binary
   installation alone does not prove the running daemon or route is current.
 
-The global daemon can be shared by multiple projects. A binary upgrade alone
-does not authorize stopping or restarting it. Keep the existing daemon running
-unless an operator explicitly opens a maintenance window; then use only the
-official lifecycle and record the old/new binary version and digest, PID,
-socket, identity binding, and a live replay result. Never use `pkill`,
-`killall`, broad process matching, a second socket, or an older binary as a
-fallback.
+Collab has one global user-managed daemon. Agents never start, stop or restart
+it, including for identity recovery or installation. User maintenance commands
+and credentials are outside the agent interface. Preserve identity and journals
+when the service is unavailable. Never use broad process kills, a second socket
+or an older binary as a fallback.
 
 ## Formal v1 migration
 
 ```text
 inspect -> plan -> admission freeze -> snapshot
         -> install reviewed binaries with scripts/install-global-collab.sh
-        -> controlled daemon restart
+        -> user-managed runtime activation, if required
         -> identity rebind -> verify -> resume
 ```
 
@@ -85,7 +83,7 @@ inspect -> plan -> admission freeze -> snapshot
 collab migrate inspect
 collab migrate plan
 collab migrate apply
-# install and restart the exact reviewed build
+# installation does not change the user-managed running service
 collab migrate verify
 ```
 
@@ -109,8 +107,6 @@ collab migrate inspect
 collab migrate plan
 collab migrate apply
 # install the reviewed Collab binary
-collab down
-collab up
 collab context
 collab migrate verify
 ```
@@ -131,34 +127,30 @@ journal, a count mismatch, or an unresolved owner:
 3. Resolve the named owner or blocker through the Collab server protocol.
 4. Create a new plan only after the source can be proved safe.
 
-When the operator explicitly decides to abandon the old epoch instead of
-preserving it, and the project-local journal cannot be replayed under the
-current contract, use the single offline reset owner:
+When the current project master explicitly decides to abandon the old epoch
+instead of preserving it, and the project-local journal cannot be replayed
+under the current contract, run the online project reset from the current
+project:
 
 ```sh
-collab down
-collab reset --discard-legacy --approval "explicit user authorization text"
-collab up
-collab status --all
+collab reset --project
 ```
 
 `collab reset` is not `collab migrate`. It never imports history, never
 pretends to preserve counts, and never claims delivery, review, or install
-evidence. It requires the daemon to be down, takes the same host writer lock,
-archives the exact retired `.agent-collab/` and `.agent-collab-v2/` bytes under
-`~/.collab/archives/`, verifies archive equality, removes only those
-Collab-owned control roots plus the retired project stale host route, prunes
-host routes whose canonical root is gone or no longer initialized, and
-rebuilds the current empty baseline. It accepts an uninitialized project root
-and therefore also repairs a missing baseline. It is idempotent; a second run
-reports `already_reset: true`, including after the daemon has created an empty
-current journal.
+evidence. It deletes the current project's historical messages, routes, tasks,
+assets and load while preserving other projects and the user-managed global
+daemon. There is no offline prerequisite or archive prerequisite. Historical
+pane owners and open work do not block the reset. Real persistence, I/O or input
+safety errors remain explicit. No legacy discard mode or separate approval
+argument exists for this project reset.
 
-`.appsdk-control/` is AppSDK-owned and is never removed by this command. The
-current project-local `.agent-collab/` is a project scope input, while the
-host-wide runtime truth remains `~/.collab/` (`server.sock`, `events.jsonl`,
-`log.txt`, and route state). It never removes business source, runtime data,
-`active/`, or `protected/`, and it writes `delivery_verified: false`.
+`.appsdk/` and `.appsdk-control/` are AppSDK-owned and are never removed by
+this command. The project-local `.agent-collab/` is a project scope input,
+while the host-wide runtime truth remains `~/.collab/` (`server.sock`,
+`events.jsonl`, `log.txt`, and route state). Do not manually remove
+`.agent-collab/server/journal.jsonl`, mailbox files, binding records or route
+state to imitate reset.
 
 Never manually delete `.agent-collab/`, edit journal or mailbox JSON, clear
 the mailbox, or copy identity tokens. Do not convert a failed migration into a
@@ -167,30 +159,17 @@ governance reset remains a separate owner and transaction; it never removes
 `.agent-collab/`.
 
 After `verify`, record the migration record ID, source and target versions,
-snapshot digest, preserved counts, old/new daemon PID and socket, identity
-rebinds, and one real post-restart subscribed message. Migration verification
-does not prove AppSDK delivery, review, install, or freeze.
+preserved counts and identity rebind. A restored peer and a restored master
+must each send, receive and reply through the current route for live acceptance.
+Migration verification does not prove AppSDK delivery, review, install, or
+freeze.
 
-## Controlled daemon lifecycle
+## User-managed daemon boundary
 
-```sh
-collab down
-collab up
-```
-
-- These are explicit daemon-operator actions. Peer messages do not authorize
-  maintenance.
-- Use official lifecycle; never broad process-name kills.
-- Resolve exact project socket/cwd/PID/tasks/migration/journal/mailbox first.
-- Installing a binary does not replace a live daemon and does not close a
-  runtime delivery.
-- Do not restart the global daemon for peer identity recovery. Schedule the
-  explicit runtime delivery maintenance window when daemon/server behavior was
-  installed.
-- Keep an explicitly stopped daemon down through implementation and review.
-- Restart only after reviewed source reaches verified latest main.
-- After restart prove one PID/socket, preserved durable state, identity rebind,
-  migration verify, and one real subscribed notice.
+Agents do not perform daemon lifecycle actions or request credentials for them.
+Installation does not activate a new runtime. Report installed and live states
+separately. Restore peer identity with `collab context` against the existing
+service. Host reset and maintenance are outside the agent interface.
 
 ### Native endpoint diagnostics
 

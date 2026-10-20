@@ -396,6 +396,7 @@ pub(crate) mod tests {
     struct IsolatedTmux {
         socket: PathBuf,
         root: PathBuf,
+        session: String,
     }
 
     impl IsolatedTmux {
@@ -414,11 +415,12 @@ pub(crate) mod tests {
             ));
             std::fs::create_dir_all(&root).unwrap();
             let socket = root.join("tmux.sock");
+            let session = "collab-test".to_owned();
             let mut command = Command::new("tmux");
             command
                 .arg("-S")
                 .arg(&socket)
-                .args(["new-session", "-d", "-s", "collab-test"]);
+                .args(["new-session", "-d", "-s", &session]);
             if let Some(pane_command) = pane_command {
                 command.arg(pane_command);
             }
@@ -439,7 +441,11 @@ pub(crate) mod tests {
                 "split isolated tmux: {}",
                 String::from_utf8_lossy(&split.stderr)
             );
-            Self { socket, root }
+            Self {
+                socket,
+                root,
+                session,
+            }
         }
 
         fn endpoint(&self) -> TmuxEndpoint {
@@ -479,7 +485,7 @@ pub(crate) mod tests {
             let _ = Command::new("tmux")
                 .arg("-S")
                 .arg(&self.socket)
-                .args(["kill-server"])
+                .args(["kill-session", "-t", &self.session])
                 .output();
             let _ = std::fs::remove_dir_all(&self.root);
         }

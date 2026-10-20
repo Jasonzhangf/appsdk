@@ -324,7 +324,7 @@ fn flush_idle_batches_if_ready(server: &Server, now: i64) {
         "master-wake-batch".to_string()
     };
     let body = format!(
-        "newly_idle={} live_idle={} blocked={} pending_merges={} goal_due={}. Scheduling continues: saturate live present peers first, then schedule managed subagents within the configured cap. Never stay idle while eligible capacity remains. Inspect the task graph, every live peer and managed subagent, liveness, saturation, blockers, and pending merges; dispatch the next ready non-overlapping P0/P1 task to each idle eligible worker, resolve and reassign blockers, and merge accepted candidates that are pending. Cancel only iff no actionable task, dependency, resolvable blocker, or authorized open bug remains, using collab notify unsubscribe {} and record the receipt. If the goal is complete, report the evidence to the user.",
+        "newly_idle={} live_idle={} blocked={} pending_merges={} goal_due={}. Task-kind routing: send long-horizon goals to autonomous peers; send bounded one-shot execution or observation to `codex exec --profile gcm` subworkers. Sender supplies goal, scope, authorized actions, resource owner, delivery/test evidence, report and stop conditions. Peers independently orchestrate, split, dispatch, verify, resolve blockers, integrate assigned work, and clean owned resources without inheriting master authority. Master retains project/cross-peer/final integration. Inspect the task graph, liveness, capacity, blockers, and pending merges; dispatch the next ready non-overlapping P0/P1 work by task kind, resolve and reassign blockers, and merge accepted pending candidates. Cancel only iff no actionable task, dependency, resolvable blocker, or authorized open bug remains, using collab notify unsubscribe {} and record the receipt. If the goal is complete, report the evidence to the user.",
         newly_idle.join(","),
         live_idle.join(","),
         blocked.join(","),
@@ -775,7 +775,7 @@ mod tests {
         let batch = state
             .msgs
             .values()
-            .find(|message| message.to == "master" && message.body.contains("Scheduling continues"))
+            .find(|message| message.to == "master" && message.body.contains("Task-kind routing"))
             .expect("master idle batch");
         assert!(
             batch.body.contains("pending_merges=task-merge"),

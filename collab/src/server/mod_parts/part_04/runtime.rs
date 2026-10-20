@@ -466,6 +466,27 @@ impl ProjectRuntimeManager {
                 Resp::err(format!("PROJECT_CONTEXT_INVALID: {error}")),
             );
         }
+        if let Req::UnregisterSelf { worker_id, token } = &req {
+            let runtime = self.routes.lock().unwrap().get(&Self::route_key(&context))
+                .and_then(|route| route.runtime.clone());
+            let Some(runtime) = runtime else {
+                return (self.host.clone(), Resp::err("SELF_ROUTE_UNAVAILABLE"));
+            };
+            let owned_routes: Vec<_> = self.host.state.lock().unwrap().global
+                .current_thread_routes.values().filter(|binding|
+                    binding.project_scope == context.project_scope && binding.app_scope_id == context.app_scope_id
+                        && binding.agent_id.as_str() == worker_id).cloned().collect();
+            let mut response = peer_lifecycle::unregister_self(&runtime, Some(&context), worker_id, token);
+            if response.ok && !Arc::ptr_eq(&runtime, &self.host) {
+                for binding in owned_routes {
+                    if let Err(error) = self.host.commit_checked(&[Event::GlobalCurrentThreadRouteRetired { binding }]) {
+                        response.ok = false;
+                        response.error = Some(format!("SELF_ROUTE_CLEANUP_FAILED: {error}"));
+                    }
+                }
+            }
+            return (runtime, response);
+        }
         if let Req::PeerLifecycle { ref request } = req {
             // Pure lifecycle requests never initialize a project runtime or
             // reconcile same-pane routes, leases, or registration state.

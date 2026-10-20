@@ -1304,7 +1304,7 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
     if next_actions.is_empty() {
         if master["worker_id"].as_str() == Some(worker_id.as_str()) {
             next_actions.push(
-                "run `appsdk longhorizon show`, saturate live peers first, then schedule managed subagents within the configured cap; do not end the scheduling turn while eligible capacity remains idle"
+                "run `appsdk longhorizon show`; route long-horizon goals to autonomous peers and bounded one-shot execution or observation to `codex exec --profile gcm` subworkers; state goal, scope, authorized actions, resource owner, delivery/test evidence, report and stop conditions; peers plan, dispatch, verify, resolve blockers, integrate assigned work, and clean owned resources without inheriting master authority; master retains project, cross-peer, and final integration"
                     .into(),
             );
         } else {

@@ -1097,7 +1097,7 @@ async fn runtime_less_draft_keeps_its_token_without_a_committed_record() {
 /// is a REAL conflict, not a stale index. It must stay fatal so the identity
 /// gate keeps failing closed instead of overwriting the committed state.
 #[tokio::test]
-async fn conflicting_pane_route_index_stays_fatal_for_the_identity_gate() {
+async fn historical_conflicting_pane_route_index_is_repaired_by_context() {
     let (host, host_root, _) = test_server();
     let (runtime, project_root, _) = test_server();
     let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
@@ -1162,9 +1162,10 @@ async fn conflicting_pane_route_index_stays_fatal_for_the_identity_gate() {
             identity_context: None,
         },
     );
-    assert!(!response.ok, "{response:?}");
-    let message = response.error.clone().unwrap_or_default();
-    assert!(message.starts_with("ROUTE_RESOLVE_INVALID"), "{message}");
+    assert!(response.ok, "{response:?}");
+    let repaired = manager.resolve_route_by_tmux_endpoint(&endpoint).unwrap();
+    assert_eq!(repaired.binding_id, committed.binding_id);
+    assert_eq!(repaired.endpoint_generation, committed.endpoint_generation);
 
     std::fs::remove_dir_all(host_root).unwrap();
     std::fs::remove_dir_all(project_root).unwrap();
@@ -1274,7 +1275,7 @@ async fn an_orphan_stale_index_claim_does_not_block_the_identity_gate_takeover()
         .lookup_unique_tmux_pane_route(&endpoint)
         .cloned()
         .expect("the pane is owned after the takeover");
-    assert_eq!(current.binding_id, binding_id);
+    assert_ne!(current.binding_id, binding_id, "orphan identity has no current-session ownership");
     assert!(
         current.endpoint_generation < orphan.endpoint_generation,
         "the takeover legitimately regressed the orphan's generation"

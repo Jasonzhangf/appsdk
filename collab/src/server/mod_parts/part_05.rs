@@ -38,6 +38,15 @@ pub(crate) fn load_host_route_records(path: &Path) -> Result<Vec<HostRouteRecord
             )
         })?;
         let key = (record.app_scope_id.clone(), record.project_scope.clone());
+        if record.version == 1 && record.op == "delete" {
+            records.retain(|old: &HostRouteRecord| {
+                (old.app_scope_id.as_str(), old.project_scope.as_str()) !=
+                    (record.app_scope_id.as_str(), record.project_scope.as_str())
+            });
+            seen_keys.remove(&key);
+            seen_storage_roots.retain(|_, (owner, _)| owner != &key);
+            continue;
+        }
         if let Some(previous_line) = seen_keys.insert(key.clone(), index + 1) {
             return Err(format!(
                 "HOST_ROUTE_REPLAY_FAILED: duplicate route key ({}, {}) at lines {} and {}",

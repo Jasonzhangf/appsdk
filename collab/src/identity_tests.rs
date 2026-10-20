@@ -235,7 +235,7 @@ fn resolver_mints_a_deterministic_draft_without_writing() {
 }
 
 #[test]
-fn resolver_uses_the_pane_naming_for_a_new_pane() {
+fn resolver_does_not_name_a_new_session_by_historical_pane() {
     let root = test_root("ci-resolver-pane-draft");
     std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
     let scope = test_scope(root.clone());
@@ -243,8 +243,10 @@ fn resolver_uses_the_pane_naming_for_a_new_pane() {
     let candidate = tmux_candidate(None, None, "%9");
     let draft =
         resolve_for_daemon_at(&host_paths, &scope, &facts(None, None, Some(candidate))).unwrap();
-    assert_eq!(draft.worker_id, "codex-%9");
-    assert!(read_persisted(&host_paths, "codex-%9").unwrap().is_none());
+    assert!(draft.worker_id.starts_with("codex-session-"));
+    assert!(read_persisted(&host_paths, &draft.worker_id)
+        .unwrap()
+        .is_none());
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -316,7 +318,7 @@ fn resolver_rejects_an_ambiguous_anchor_without_guessing_from_recency() {
 }
 
 #[test]
-fn resolver_rejects_a_cross_project_anchor() {
+fn resolver_ignores_a_cross_project_historical_anchor() {
     let root = test_root("ci-resolver-cross-project");
     let other = root.join("other-project");
     std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
@@ -324,25 +326,28 @@ fn resolver_rejects_a_cross_project_anchor() {
     let scope = test_scope(root.clone());
     let other_scope = test_scope(other.clone());
     let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
+    let pane = tmux_candidate(None, None, "%1");
     saved_identity(
         &host_paths,
         &other_scope,
         "foreign-peer",
-        Some("session-foreign"),
         None,
         None,
+        Some(pane.endpoint.clone()),
     );
-    let error = resolve_for_daemon_at(
-        &host_paths,
-        &scope,
-        &facts(Some("session-foreign"), None, None),
-    )
-    .unwrap_err()
-    .to_string();
-    assert!(
-        error.starts_with("IDENTITY_RESTORE_CROSS_PROJECT:"),
-        "{error}"
+    let resolved = resolve_for_daemon_at(&host_paths, &scope, &facts(None, None, Some(pane)))
+        .expect("a foreign historical anchor must not block the current project");
+    assert_ne!(resolved.worker_id, "foreign-peer");
+    assert_eq!(
+        resolved.project_scope,
+        Some(
+            scope
+                .route_scope(AppServerId::new(CLI_APP_SERVER_ID).unwrap())
+                .unwrap()
+                .project_scope_id
+        )
     );
+    assert!(resolved.runtime.is_none());
     assert!(read_persisted(&host_paths, "foreign-peer")
         .unwrap()
         .is_some());
@@ -350,7 +355,7 @@ fn resolver_rejects_a_cross_project_anchor() {
 }
 
 #[test]
-fn preserved_draft_token_is_not_reminted() {
+fn historical_pane_draft_does_not_claim_current_session() {
     let root = test_root("ci-resolver-preserve-draft");
     std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
     let scope = test_scope(root.clone());
@@ -375,7 +380,8 @@ fn preserved_draft_token_is_not_reminted() {
     let candidate = tmux_candidate(None, None, "%5");
     let resolved =
         resolve_for_daemon_at(&host_paths, &scope, &facts(None, None, Some(candidate))).unwrap();
-    assert_eq!(resolved.token, "stored-draft-token");
+    assert_ne!(resolved.token, "stored-draft-token");
+    assert!(resolved.worker_id.starts_with("codex-session-"));
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -473,7 +479,10 @@ fn archived_route_recovery_reads_without_calling_back() {
     };
     let selected =
         resolve_for_daemon_with_route_at(&host_paths, &scope, &facts, Some(&route)).unwrap();
-    assert_eq!(selected.token, original.token);
+    assert_ne!(
+        selected.token, original.token,
+        "ordinary restore must not inherit archived pane identity"
+    );
     let mut committed = route.clone();
     committed.endpoint_generation += 1;
     committed.session_id = Some(SessionId::new("session-new").unwrap());
@@ -753,10 +762,8 @@ fn resolver_still_refuses_a_caller_with_no_anchor() {
     std::fs::remove_dir_all(root).ok();
 }
 
-/// The tmux anchor is the owned pane, so two panes of one tmux session must
-/// never resolve to one identity.
 #[test]
-fn a_second_pane_of_the_same_tmux_session_is_not_that_identity() {
+fn a_second_pane_of_the_same_tmux_session_reuses_the_identity_and_token() {
     let root = test_root("ci-resolver-tmux-session");
     std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
     let scope = test_scope(root.clone());
@@ -770,10 +777,12 @@ fn a_second_pane_of_the_same_tmux_session_is_not_that_identity() {
         None,
         Some(first.endpoint.clone()),
     );
+    let stored = read_persisted(&host_paths, "pane-peer").unwrap().unwrap();
     let second = tmux_candidate(None, None, "%2");
-    let draft = resolve_for_daemon_at(&host_paths, &scope, &facts(None, None, Some(second)))
-        .expect("a different pane is a new identity, not an ambiguity error");
-    assert_eq!(draft.worker_id, "codex-%2");
+    let reused = resolve_for_daemon_at(&host_paths, &scope, &facts(None, None, Some(second)))
+        .expect("a second pane in the same tmux session reuses the peer");
+    assert_eq!(reused.worker_id, "pane-peer");
+    assert_eq!(reused.token, stored.token);
     std::fs::remove_dir_all(root).ok();
 }
 

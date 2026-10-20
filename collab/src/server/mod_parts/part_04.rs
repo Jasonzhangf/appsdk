@@ -614,7 +614,7 @@ impl ProjectRuntimeManager {
         }
         if let Err(RoutePublishError::Ambiguous(error)) = publish_result {
             return Err(format!(
-                "ROUTE_TRANSITION_DURABILITY_FAILED: host journal publication outcome is unknown: {error}; registration route may already be durable; preserve both journals and restart the affected daemon from the reviewed AppSDK main binary before retrying; do not edit routes or bindings manually"
+                "ROUTE_TRANSITION_DURABILITY_FAILED: host journal publication outcome is unknown: {error}; preserve both journals and the current identity; daemon reconciliation owns route recovery; do not edit routes or bindings manually"
             ));
         }
         Ok(())
@@ -647,7 +647,7 @@ impl ProjectRuntimeManager {
             Err(error) => (
                 runtime,
                 Resp::err(format!(
-                    "{error}; recovery: preserve the project and host journals, then restart the affected daemon from the reviewed AppSDK main binary so durable state can be replayed; do not edit routes or bindings manually"
+                    "{error}; preserve the project and host journals and current identity; route recovery belongs to daemon reconciliation; do not edit routes or bindings manually"
                 )),
             ),
         }
@@ -753,6 +753,19 @@ impl ProjectRuntimeManager {
         root: &Path,
         storage_root: &Path,
     ) -> Result<Arc<Server>, String> {
+        if self
+            .host
+            .state
+            .lock()
+            .unwrap()
+            .pending_project_resets
+            .contains_key(&key.1)
+        {
+            return Err(
+                "RESET_INCOMPLETE: project cleanup must complete before materialization".into(),
+            );
+        }
+        self.prune_before_materialization(key, root)?;
         let gate = self.runtime_init_gate(key);
         let _guard = gate.lock().unwrap();
         if let Some(runtime) = self

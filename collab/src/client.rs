@@ -357,6 +357,49 @@ pub fn ensure_server(sock: &Path) -> anyhow::Result<()> {
     ensure_server_with_launcher(sock, spawn_server)
 }
 
+/// Require an already user-managed daemon. Ordinary commands call this so they
+/// never launch, replace, or restart the shared daemon. A daemon that is
+/// already starting is observed until it becomes reachable; nothing is spawned.
+pub fn require_server(sock: &Path) -> anyhow::Result<()> {
+    let Some(server_dir) = sock.parent() else {
+        anyhow::bail!("invalid collab server socket path");
+    };
+    if server_dir.join("DOWN").exists() {
+        anyhow::bail!(
+            "DAEMON_UNAVAILABLE: collab daemon is stopped at {}; only the user manages daemon lifecycle",
+            sock.display()
+        );
+    }
+    let deadline = Instant::now() + STARTING_WAIT;
+    loop {
+        let status = daemon_status(sock);
+        match status {
+            DaemonAvailability::Alive => return Ok(()),
+            DaemonAvailability::Starting if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            DaemonAvailability::Starting => {
+                anyhow::bail!(
+                    "DAEMON_STARTING: collab daemon is still starting at {}; ordinary commands do not manage daemon lifecycle",
+                    sock.display()
+                );
+            }
+            DaemonAvailability::Unavailable => {
+                anyhow::bail!(
+                    "DAEMON_UNAVAILABLE: collab daemon is not running at {}; only the user manages daemon lifecycle",
+                    sock.display()
+                );
+            }
+            DaemonAvailability::Unknown => {
+                anyhow::bail!(
+                    "DAEMON_UNKNOWN: collab daemon state is ambiguous at {}; refusing to launch or replace it",
+                    sock.display()
+                );
+            }
+        }
+    }
+}
+
 fn ensure_server_with_launcher<F>(sock: &Path, mut launch: F) -> anyhow::Result<()>
 where
     F: FnMut(&Path) -> anyhow::Result<()>,
@@ -366,9 +409,7 @@ where
         .ok_or_else(|| anyhow::anyhow!("invalid collab server socket path"))?;
     let down = server_dir.join("DOWN");
     if down.exists() {
-        anyhow::bail!(
-            "DAEMON_UNAVAILABLE: collab daemon is explicitly down; run `collab up` first"
-        );
+        anyhow::bail!("DAEMON_UNAVAILABLE: the global daemon is user-managed and unavailable");
     }
     match daemon_status(sock) {
         DaemonAvailability::Alive => Ok(()),

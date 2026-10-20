@@ -1322,7 +1322,7 @@ fn worker_snapshot_returns_bounded_tmux_buffer_without_side_effects() {
 }
 
 #[test]
-fn ordinary_worker_requires_its_own_snapshot_and_closes_idempotently() {
+fn ordinary_worker_snapshots_master_and_master_closes_idempotently() {
     let (server, root) = test_server();
     let tmux = IsolatedTmux::start(&root);
     let endpoints = tmux.endpoints();
@@ -1357,20 +1357,26 @@ fn ordinary_worker_requires_its_own_snapshot_and_closes_idempotently() {
         .unwrap()
         .contains("requires a successful worker snapshot"));
 
-    let outsider_snapshot = super::handle_worker_snapshot(
+    let revision_before_snapshot = server.state.lock().unwrap().revision;
+    let ordinary_snapshot = super::handle_worker_snapshot(
         &server,
         "ordinary".into(),
         "token-ordinary".into(),
         "master".into(),
         40,
     );
-    assert!(!outsider_snapshot.ok);
-    assert!(outsider_snapshot
-        .error
-        .unwrap()
-        .contains("master authority required"));
+    assert!(
+        ordinary_snapshot.ok,
+        "{}",
+        ordinary_snapshot.error.unwrap_or_default()
+    );
+    assert_eq!(ordinary_snapshot.data["durable"], false);
+    assert_eq!(ordinary_snapshot.data["worker_id"], "master");
+    assert_eq!(
+        server.state.lock().unwrap().revision,
+        revision_before_snapshot
+    );
 
-    let revision_before_snapshot = server.state.lock().unwrap().revision;
     let transient_snapshot = super::handle_worker_snapshot(
         &server,
         "master".into(),

@@ -183,6 +183,21 @@ struct RuntimeRoute {
     runtime: Option<Arc<Server>>,
 }
 
+/// Hard cap on concurrently materialized external project reducers. Every
+/// materialized reducer owns one writer lock and one append journal file, so
+/// an unbounded route projection would otherwise consume two descriptors per
+/// route before serving any request. The cap leaves room below the common
+/// 256-descriptor soft limit for listener, socket, identity, and timer files.
+pub(crate) const MAX_MATERIALIZED_EXTERNAL_RUNTIMES: usize = 64;
+
+fn materialized_runtime_budget_error(materialized_external: usize, cap: usize) -> Option<String> {
+    (materialized_external >= cap).then(|| {
+        format!(
+            "PROJECT_ROUTE_RESOURCE_BUDGET_EXCEEDED: {materialized_external} external project runtimes are already materialized; the cap is {cap}. Unused routes stay pending; close or retire an idle project route before opening another."
+        )
+    })
+}
+
 /// Owns the single host listener's route table and the independent project
 /// reducers behind it.  The existing handler surface remains unchanged: a
 /// request is first routed here, then dispatched to the selected `Server`.
@@ -196,8 +211,17 @@ struct ProjectRuntimeManager {
     register_gate: Mutex<()>,
     identity_gate: Mutex<()>,
     runtime_init_gates: Mutex<std::collections::BTreeMap<RouteKey, Arc<Mutex<()>>>>,
+    /// Manager-wide admission lock. The per-route gates deduplicate one key;
+    /// this lock makes the external-runtime count and the following install
+    /// one atomic admission decision across different keys.
+    materialization_gate: Mutex<()>,
+    /// Same as `MAX_MATERIALIZED_EXTERNAL_RUNTIMES` in production. Tests lower
+    /// it so the boundary can be exercised without 64 real reducers.
+    materialization_cap: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     fail_current_thread_route_publish: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    materialization_build_delay_ms: std::sync::atomic::AtomicU64,
 }
 
 fn storage_owner_path(path: &Path) -> Result<PathBuf, String> {

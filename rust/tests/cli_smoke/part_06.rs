@@ -917,6 +917,7 @@ fi
   printf 'cwd=%s\n' "$PWD"
   printf 'probe=%s\n' "$APPSDK_COLLAB_ENV_PROBE"
   printf 'args=%s\n' "$*"
+  printf 'state=%s\n' "$COLLAB_STATE_DIR"
 } >> "$APPSDK_COLLAB_PROBE"
 exit 73
 "#,
@@ -974,6 +975,10 @@ exit 73
     let invocation = fs::read_to_string(&probe).unwrap();
     assert_eq!(invocation.matches("args=init\n").count(), 2);
     assert!(invocation.contains("probe=same-environment\n"));
+    assert!(
+        invocation.contains(&format!("state={}\n", collab_state_dir().display())),
+        "init must pass the isolated Collab state root: {invocation}"
+    );
     let child_cwd = invocation
         .lines()
         .find_map(|line| line.strip_prefix("cwd="))

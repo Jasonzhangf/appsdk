@@ -391,6 +391,14 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         cmd: WorkerCmd,
     },
+    /// Read the latest live buffer from an exact registered tmux peer
+    Snapshot {
+        /// Exact worker ID whose pane buffer is captured
+        target_id: String,
+        /// Maximum number of recent tmux buffer lines to return (1..=200)
+        #[arg(long, default_value_t = 40)]
+        lines: usize,
+    },
     /// Retire accumulated control-plane burden and rebuild the baseline.
     /// Offline, explicit authorization, transactional. Exactly one level is
     /// required.

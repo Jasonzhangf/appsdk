@@ -28,6 +28,65 @@ fn journal_excluding_background_maintenance(path: &std::path::Path) -> Vec<Strin
         .collect()
 }
 
+fn remove_host_binding_route(path: &std::path::Path, binding_id: &str) {
+    let mut removed = 0;
+    let lines = std::fs::read_to_string(path)
+        .expect("read host journal")
+        .lines()
+        .filter(|line| {
+            let value: Value = serde_json::from_str(line).expect("parse host journal record");
+            let matches = value["ev"] == "GlobalCurrentThreadRouteSet"
+                && value["binding"]["binding_id"] == binding_id;
+            removed += usize::from(matches);
+            !matches
+        })
+        .map(|line| format!("{line}\n"))
+        .collect::<String>();
+    assert_eq!(
+        removed, 1,
+        "fixture must remove exactly one host publication for {binding_id}"
+    );
+    std::fs::write(path, lines).expect("write host journal without target route");
+}
+
+fn registered_context_at(
+    fixture: &Fixture,
+    project_root: &std::path::Path,
+    label: &str,
+    pane: &Pane,
+) -> Value {
+    let done = fixture.root.join(format!("{label}.participant-done"));
+    let result_path = fixture.root.join(format!("{label}.participant-result"));
+    let script = format!(
+        "cd {}\n\"$COLLAB_BINARY\" context --op {} >{} 2>\"$PANE_STDERR\"\nprintf done >{}\nsleep 600\n",
+        shell_quote(&project_root.to_string_lossy()),
+        shell_quote(label),
+        shell_quote(&result_path.to_string_lossy()),
+        shell_quote(&done.to_string_lossy())
+    );
+    let consumer = fixture.run_in_pane(pane, label, &script);
+    assert!(
+        wait_until(Duration::from_secs(15), || done.exists()),
+        "external project participant did not complete: {} {}",
+        consumer.output(),
+        std::fs::read_to_string(&result_path).unwrap_or_default()
+    );
+    serde_json::from_slice(&std::fs::read(result_path).unwrap()).unwrap()
+}
+
+fn command_at(
+    fixture: &Fixture,
+    project_root: &std::path::Path,
+    args: &[&str],
+    pane: &Pane,
+) -> Output {
+    fixture
+        .configured_command(args, Some(pane))
+        .current_dir(project_root)
+        .output()
+        .expect("run public collab CLI in external project")
+}
+
 #[test]
 fn peer_lifecycle_create_cli_exposes_frozen_arguments() {
     let create = worker_help("create");
@@ -176,6 +235,159 @@ fn worker_snapshot_public_cli_returns_bounded_tmux_buffer_without_a_write() {
         journal_excluding_background_maintenance(&fixture.project_journal()),
         journal_before,
         "snapshot must not write a durable receipt or journal event"
+    );
+}
+
+#[test]
+fn top_level_snapshot_reads_a_peer_buffer_for_a_non_master_caller() {
+    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (fixture, master) = Fixture::isolated("snapshot-top-level");
+    let help = Command::new(env!("CARGO_BIN_EXE_collab"))
+        .args(["snapshot", "--help"])
+        .output()
+        .expect("run top-level snapshot help");
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).expect("snapshot help is UTF-8");
+    assert!(help.contains("TARGET_ID"), "{help}");
+    assert!(help.contains("--lines"), "{help}");
+
+    let seeded = fixture.registered_context("snapshot-top-level-master", &master);
+    assert_eq!(seeded["result"]["outcome"], "completed", "{seeded}");
+    let promoted = fixture.run_ok(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "isolated top-level snapshot acceptance",
+        ],
+        Some(&master),
+    );
+    let master_id = promoted["role_brief"]["worker_id"]
+        .as_str()
+        .or_else(|| seeded["result"]["snapshot"]["identity"]["worker_id"].as_str())
+        .expect("master has a worker id")
+        .to_owned();
+
+    let split = tmux(
+        &fixture.tmux_socket,
+        &[
+            "split-window",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            &master.pane_id,
+            "sleep 600",
+        ],
+    );
+    assert!(
+        split.status.success(),
+        "split fixture pane: {}",
+        String::from_utf8_lossy(&split.stderr)
+    );
+    let peer_pane_id = String::from_utf8(split.stdout)
+        .expect("peer pane id is utf8")
+        .trim()
+        .to_owned();
+    let peer = Pane {
+        server_pid: master.server_pid,
+        pane_id: peer_pane_id.clone(),
+        session_anchor: format!("session-{peer_pane_id}"),
+        thread_anchor: format!("thread-{peer_pane_id}"),
+    };
+    let peer_seeded = fixture.registered_context("snapshot-top-level-peer", &peer);
+    assert_eq!(
+        peer_seeded["result"]["snapshot"]["identity"]["role"], "worker",
+        "snapshot caller must remain an ordinary peer: {peer_seeded}"
+    );
+    let prepared = tmux(
+        &fixture.tmux_socket,
+        &[
+            "respawn-pane",
+            "-k",
+            "-t",
+            &master.pane_id,
+            "printf 'MASTER-BUFFER\\n'; sleep 600",
+        ],
+    );
+    assert!(
+        prepared.status.success(),
+        "prepare master buffer: {}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let capture = tmux(
+            &fixture.tmux_socket,
+            &["capture-pane", "-p", "-t", &master.pane_id, "-S", "-4096"],
+        );
+        if String::from_utf8_lossy(&capture.stdout).contains("MASTER-BUFFER") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "master pane fixture did not publish its buffer"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let capture = || {
+        String::from_utf8(
+            tmux(
+                &fixture.tmux_socket,
+                &["capture-pane", "-p", "-t", &master.pane_id, "-S", "-4096"],
+            )
+            .stdout,
+        )
+        .expect("master capture is utf8")
+    };
+    let buffer_before = capture();
+    let queued = fixture.run_ok(
+        &[
+            "sendmessage",
+            "--to",
+            &master_id,
+            "--subject",
+            "snapshot must not consume mail",
+            "--delivery",
+            "queued",
+            "durable body for the target",
+        ],
+        Some(&peer),
+    );
+    let message_id = queued["msg_id"]
+        .as_str()
+        .expect("queued message has an id")
+        .to_owned();
+    let journal_before = journal_excluding_background_maintenance(&fixture.project_journal());
+
+    let snapshot = fixture.run_ok(&["snapshot", &master_id, "--lines", "20"], Some(&peer));
+    assert_eq!(snapshot["transport"], "tmux", "{snapshot}");
+    assert_eq!(snapshot["worker_id"], master_id, "{snapshot}");
+    assert_eq!(snapshot["pane_id"], master.pane_id, "{snapshot}");
+    assert_eq!(snapshot["durable"], false, "{snapshot}");
+    assert!(
+        snapshot["output"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("MASTER-BUFFER"),
+        "{snapshot}"
+    );
+    assert_eq!(
+        capture(),
+        buffer_before,
+        "snapshot must not submit input or change the target pane"
+    );
+    assert_eq!(
+        journal_excluding_background_maintenance(&fixture.project_journal()),
+        journal_before,
+        "snapshot must not write a journal record or durable receipt"
+    );
+    let receipt = fixture.run_ok(&["msg", &message_id], Some(&master));
+    assert_eq!(
+        receipt["consumed_by_recv"], false,
+        "snapshot must not consume the target mailbox: {receipt}"
     );
 }
 
@@ -534,6 +746,140 @@ fn peer_lifecycle_self_unregister_public_cli_rebuilds_and_keeps_pane() {
     assert_eq!(received["messages"][0]["id"], msg_id, "{received}");
     let receipt = fixture.run_ok(&["msg", msg_id], Some(&pane));
     assert_eq!(receipt["consumed_by_recv"], true, "{receipt}");
+}
+
+#[test]
+fn stale_peer_recovers_missing_host_route_and_self_unregisters() {
+    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (mut fixture, pane) = Fixture::isolated("peer-stale-route-self-close");
+    let seeded = fixture.registered_context("peer-stale-route-host-seed", &pane);
+    assert_eq!(seeded["result"]["outcome"], "completed", "{seeded}");
+
+    let external_project = fixture.root.join("external-project");
+    std::fs::create_dir_all(external_project.join(".agent-collab")).unwrap();
+    let split = tmux(
+        &fixture.tmux_socket,
+        &[
+            "split-window",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            &pane.pane_id,
+            "sleep 600",
+        ],
+    );
+    assert!(
+        split.status.success(),
+        "split external project pane: {}",
+        String::from_utf8_lossy(&split.stderr)
+    );
+    let external_pane = Pane {
+        server_pid: pane.server_pid,
+        pane_id: String::from_utf8(split.stdout)
+            .expect("external pane id is utf8")
+            .trim()
+            .to_owned(),
+        session_anchor: "external-session".into(),
+        thread_anchor: "external-thread".into(),
+    };
+    let external = registered_context_at(
+        &fixture,
+        &external_project,
+        "peer-stale-route-external-seed",
+        &external_pane,
+    );
+    assert_eq!(external["result"]["outcome"], "completed", "{external}");
+    let worker_id = external["result"]["snapshot"]["identity"]["worker_id"]
+        .as_str()
+        .expect("registered peer has a worker id")
+        .to_owned();
+    let binding_id = external["result"]["snapshot"]["binding"]["binding_id"]
+        .as_str()
+        .expect("registered peer has a binding id")
+        .to_owned();
+    let pane_pid_before = tmux(
+        &fixture.tmux_socket,
+        &[
+            "display-message",
+            "-p",
+            "-t",
+            &external_pane.pane_id,
+            "#{pane_pid}",
+        ],
+    )
+    .stdout;
+
+    fixture.stop_daemon();
+    remove_host_binding_route(
+        &fixture.root.join(".agent-collab/server/journal.jsonl"),
+        &binding_id,
+    );
+    fixture.restart_after_external_stop();
+
+    let recovered = command_at(
+        &fixture,
+        &external_project,
+        &["context", "--op", "peer-stale-route-external-recover"],
+        &external_pane,
+    );
+    assert!(
+        recovered.status.success(),
+        "stale peer context recovery failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&recovered.stdout),
+        String::from_utf8_lossy(&recovered.stderr)
+    );
+    let recovered: Value = serde_json::from_slice(&recovered.stdout).unwrap();
+    assert_eq!(recovered["result"]["outcome"], "completed", "{recovered}");
+    assert_eq!(
+        recovered["result"]["snapshot"]["identity"]["worker_id"], worker_id,
+        "{recovered}"
+    );
+
+    let closed = command_at(
+        &fixture,
+        &external_project,
+        &[
+            "worker",
+            "close",
+            &worker_id,
+            "--reason",
+            "self-unregister after missing host route recovery",
+        ],
+        &external_pane,
+    );
+    assert!(
+        closed.status.success(),
+        "self-unregister failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&closed.stdout),
+        String::from_utf8_lossy(&closed.stderr)
+    );
+    let closed: Value = serde_json::from_slice(&closed.stdout).unwrap();
+    assert_eq!(closed["result"]["outcome"], "complete", "{closed}");
+    assert_eq!(
+        closed["result"]["close"]["binding_retirement"]["state"], "verified",
+        "{closed}"
+    );
+    assert_eq!(
+        closed["result"]["close"]["route_retirement"]["state"], "verified",
+        "{closed}"
+    );
+    let pane_pid_after = tmux(
+        &fixture.tmux_socket,
+        &[
+            "display-message",
+            "-p",
+            "-t",
+            &external_pane.pane_id,
+            "#{pane_pid}",
+        ],
+    )
+    .stdout;
+    assert_eq!(
+        pane_pid_after, pane_pid_before,
+        "self-unregister must not replace the peer pane"
+    );
 }
 
 #[test]

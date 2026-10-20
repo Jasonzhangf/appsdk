@@ -723,7 +723,7 @@ impl ProjectRuntimeManager {
                         })
                         .cloned()
                 };
-                let published = current.as_ref().is_some_and(|saved| {
+                let host_has_publication = |saved: &RuntimeBinding| {
                     let state = self.host.state.lock().unwrap();
                     match saved.tmux_endpoint.as_ref() {
                         Some(endpoint) => {
@@ -738,7 +738,10 @@ impl ProjectRuntimeManager {
                                     == Some(saved)
                             }),
                     }
-                });
+                };
+                let mut published = current
+                    .as_ref()
+                    .is_some_and(|saved| host_has_publication(saved));
                 let anchor_agrees = current.as_ref().is_some_and(|saved| {
                     match (facts.tmux.as_ref(), saved.tmux_endpoint.as_ref()) {
                         (Some(candidate), Some(endpoint)) => {
@@ -751,6 +754,28 @@ impl ProjectRuntimeManager {
                         _ => true,
                     }
                 });
+                if !published && anchor_agrees {
+                    // The project journal still owns this durable binding but
+                    // the host index lost its publication. Recover the host
+                    // route from this exact durable owner. A conflict on an
+                    // unrelated project must not block this peer's recovery,
+                    // while another claimant on this pane or native address
+                    // still fails closed.
+                    if let Some(saved) = current.as_ref() {
+                        if let Err(error) = self.reconcile_binding_publication(saved) {
+                            append_log(
+                                &self.host.log_path(),
+                                &format!(
+                                    "IDENTITY_RECOVERY_RECONCILE_FAILED: route publication for {}: {error}",
+                                    ident.worker_id
+                                ),
+                            );
+                        }
+                    }
+                    published = current
+                        .as_ref()
+                        .is_some_and(|saved| host_has_publication(saved));
+                }
                 if published && anchor_agrees {
                     let (runtime, snapshot) = self.dispatch_sync(
                         Some(registered_context),

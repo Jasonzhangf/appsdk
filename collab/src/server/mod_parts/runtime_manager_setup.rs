@@ -1,3 +1,35 @@
+fn pending_same_pane_master_bindings_in(state: &State) -> Vec<RuntimeBinding> {
+    state
+        .global
+        .projects
+        .values()
+        .flat_map(|project| project.runtime_bindings.values())
+        .filter(|binding| {
+            if binding.tmux_endpoint.is_none() {
+                return false;
+            }
+            let recorded_operation = state
+                .global
+                .command_receipts
+                .values()
+                .any(|receipt| register_receipt_names_binding(receipt, binding));
+            recorded_operation
+                && state
+                    .global
+                    .lookup_master_grant_for(&binding.route_scope(), &binding.binding_id)
+                    .is_some_and(|grant| grant.endpoint_generation == binding.endpoint_generation)
+                && state
+                    .workers
+                    .get(binding.agent_id.as_str())
+                    .is_some_and(|worker| {
+                        selected_transport_for_worker(worker)
+                            .is_some_and(|transport| transport.kind == TransportKind::Tmux)
+                    })
+        })
+        .cloned()
+        .collect()
+}
+
 impl ProjectRuntimeManager {
     fn new(host: Arc<Server>, host_paths: &crate::scope::HostPaths) -> Result<Arc<Self>, String> {
         let operation_journal = Arc::new(
@@ -183,13 +215,25 @@ impl ProjectRuntimeManager {
             register_gate: Mutex::new(()),
             identity_gate: Mutex::new(()),
             runtime_init_gates: Mutex::new(std::collections::BTreeMap::new()),
+            materialization_gate: Mutex::new(()),
+            materialization_cap: std::sync::atomic::AtomicUsize::new(
+                MAX_MATERIALIZED_EXTERNAL_RUNTIMES,
+            ),
             #[cfg(test)]
             fail_current_thread_route_publish: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            materialization_build_delay_ms: std::sync::atomic::AtomicU64::new(0),
         });
 
-        // Replay every durable route at startup.  A broken external runtime
-        // remains in the route table and is reported as NOT_READY on use;
-        // it must never silently fall back to the resident reducer.
+        // A durable route record is not itself an active runtime. A route
+        // needs a reducer at startup when the host index already addresses it,
+        // or when its project journal owns a committed binding that the host
+        // index never received (the crash window between the two journals).
+        // The second case is discovered with one read-only journal read at a
+        // time; the route keeps a reducer only when it is materialized, so a
+        // stale route cannot hold a journal or writer-lock descriptor merely
+        // because it remains in the durable index.
+        let active_routes = manager.active_host_route_keys();
         let pending = manager
             .routes
             .lock()
@@ -199,6 +243,53 @@ impl ProjectRuntimeManager {
             .map(|(key, route)| (key.clone(), route.root.clone(), route.storage_root.clone()))
             .collect::<Vec<_>>();
         for (key, root, storage_root) in pending {
+            if !root.join(".agent-collab").is_dir() {
+                append_log(
+                    &host_paths.log_path(),
+                    &format!(
+                        "RUNTIME_ENSURE_SKIPPED_UNINITIALIZED: route {key:?} at {} (storage {}) is not materialized",
+                        root.display(),
+                        storage_root.display()
+                    ),
+                );
+                continue;
+            }
+            if !active_routes.contains(&key) {
+                match manager.route_has_unpublished_binding(&root, &storage_root) {
+                    Ok(true) => {
+                        append_log(
+                            &host_paths.log_path(),
+                            &format!(
+                                "RUNTIME_RECOVERY_PUBLICATION: route {key:?} at {} (storage {}) has a committed project binding missing from the host index",
+                                root.display(),
+                                storage_root.display()
+                            ),
+                        );
+                    }
+                    Ok(false) => {
+                        append_log(
+                            &host_paths.log_path(),
+                            &format!(
+                                "RUNTIME_MATERIALIZATION_DEFERRED: route {key:?} at {} (storage {}) has no active host binding",
+                                root.display(),
+                                storage_root.display()
+                            ),
+                        );
+                        continue;
+                    }
+                    Err(error) => {
+                        append_log(
+                            &host_paths.log_path(),
+                            &format!(
+                                "RUNTIME_RECOVERY_DISCOVERY_FAILED: route {key:?} at {} (storage {}): {error}",
+                                root.display(),
+                                storage_root.display()
+                            ),
+                        );
+                        continue;
+                    }
+                }
+            }
             // A route whose runtime cannot be opened must stay visibly not
             // ready.  Dropping this error would hide the only trace of the
             // failure until a client happens to ask for that project.
@@ -218,39 +309,61 @@ impl ProjectRuntimeManager {
         Ok(manager)
     }
 
-    fn pending_same_pane_master_bindings(&self, runtime: &Server) -> Vec<RuntimeBinding> {
-        let state = runtime.state.lock().unwrap();
-        state
+    /// Detect the crash window between the project binding commit and the
+    /// host index publication. The replay is read-only: it does not rewrite a
+    /// legacy journal, open an append descriptor, or take the writer lock.
+    fn route_has_unpublished_binding(
+        &self,
+        root: &Path,
+        storage_root: &Path,
+    ) -> Result<bool, String> {
+        let journal_path = storage_root
+            .join(".agent-collab")
+            .join("server")
+            .join("journal.jsonl");
+        if !journal_path.is_file() {
+            return Ok(false);
+        }
+        let state = replay_from_journal_read_only(root, &journal_path).map_err(|error| {
+            format!(
+                "replay committed project journal {}: {error}",
+                journal_path.display()
+            )
+        })?;
+        let host = self.host.state.lock().unwrap();
+        for binding in state
             .global
             .projects
             .values()
             .flat_map(|project| project.runtime_bindings.values())
-            .filter(|binding| {
-                if binding.tmux_endpoint.is_none() {
-                    return false;
-                }
-                let recorded_operation = state
-                    .global
-                    .command_receipts
-                    .values()
-                    .any(|receipt| register_receipt_names_binding(receipt, binding));
-                recorded_operation
-                    && state
-                        .global
-                        .lookup_master_grant_for(&binding.route_scope(), &binding.binding_id)
-                        .is_some_and(|grant| {
-                            grant.endpoint_generation == binding.endpoint_generation
-                        })
-                    && state
-                        .workers
-                        .get(binding.agent_id.as_str())
-                        .is_some_and(|worker| {
-                            selected_transport_for_worker(worker)
-                                .is_some_and(|transport| transport.kind == TransportKind::Tmux)
-                        })
-            })
-            .cloned()
-            .collect()
+        {
+            let (Some(session_id), Some(native_thread_id)) =
+                (binding.session_id.as_ref(), binding.native_thread_id.as_ref())
+            else {
+                continue;
+            };
+            if host
+                .global
+                .lookup_current_thread_route(session_id, native_thread_id)
+                != Some(binding)
+            {
+                return Ok(true);
+            }
+        }
+        for binding in pending_same_pane_master_bindings_in(&state) {
+            let Some(endpoint) = binding.tmux_endpoint.as_ref() else {
+                continue;
+            };
+            if host.global.lookup_unique_tmux_pane_route(endpoint) != Some(&binding) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn pending_same_pane_master_bindings(&self, runtime: &Server) -> Vec<RuntimeBinding> {
+        let state = runtime.state.lock().unwrap();
+        pending_same_pane_master_bindings_in(&state)
     }
 
     fn same_pane_master_route_ready(&self, runtime: &Arc<Server>) -> Result<(), String> {
@@ -352,6 +465,72 @@ impl ProjectRuntimeManager {
                     .map_err(|error| format!("RECOVERY_RECONCILE_REQUIRED: {error}"))?;
             }
         }
+        Ok(())
+    }
+
+    /// Republish one binding owned by the current recovery request.
+    ///
+    /// Recovery must not fail because another project has an unrelated stale
+    /// route. The same pane and native-address conflicts still fail closed.
+    fn reconcile_binding_publication(&self, binding: &RuntimeBinding) -> Result<(), String> {
+        if let Some(owner) = self.pane_owner_other_than(binding) {
+            return Err(format!(
+                "RECOVERY_RECONCILE_REQUIRED: pane for {} belongs to {} binding {}",
+                binding.binding_id, owner.agent_id, owner.binding_id
+            ));
+        }
+
+        let host = self.host.state.lock().unwrap();
+        if let Some(endpoint) = binding.tmux_endpoint.as_ref() {
+            if let Some(current) = host.global.lookup_unique_tmux_pane_route(endpoint) {
+                let same_durable_route = current.same_principal(binding)
+                    && current.binding_id == binding.binding_id
+                    && current.runtime_id == binding.runtime_id
+                    && current.project_scope == binding.project_scope
+                    && current.app_scope_id == binding.app_scope_id;
+                if !same_durable_route
+                    || current.endpoint_generation >= binding.endpoint_generation
+                {
+                    return Err(format!(
+                        "RECOVERY_RECONCILE_REQUIRED: host pane route for {} is at generation {}",
+                        binding.binding_id, current.endpoint_generation
+                    ));
+                }
+            }
+        }
+        if let (Some(session_id), Some(native_thread_id)) =
+            (binding.session_id.as_ref(), binding.native_thread_id.as_ref())
+        {
+            if let Some(current) =
+                host.global
+                    .lookup_current_thread_route(session_id, native_thread_id)
+            {
+                if current == binding {
+                    return Ok(());
+                }
+                let same_durable_route = current.same_principal(binding)
+                    && current.binding_id == binding.binding_id
+                    && current.runtime_id == binding.runtime_id
+                    && current.project_scope == binding.project_scope
+                    && current.app_scope_id == binding.app_scope_id
+                    && current.session_id == binding.session_id
+                    && current.native_thread_id == binding.native_thread_id;
+                if !same_durable_route
+                    || current.endpoint_generation >= binding.endpoint_generation
+                {
+                    return Err(format!(
+                        "RECOVERY_RECONCILE_REQUIRED: current thread route for {} belongs to {}",
+                        native_thread_id, current.binding_id
+                    ));
+                }
+            }
+        }
+        drop(host);
+        self.host
+            .commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+                binding: binding.clone(),
+            }])
+            .map_err(|error| format!("RECOVERY_RECONCILE_REQUIRED: {error}"))?;
         Ok(())
     }
 

@@ -300,7 +300,7 @@ fn ensure_graph_nodes_use_registered_operators(
 mod notification;
 use notification::{register_notification_operator, validate_notification_objects};
 
-fn embedded_graph_paths() -> [(&'static str, &'static str); 18] {
+fn embedded_graph_paths() -> [(&'static str, &'static str); 19] {
     [
         (
             "contracts/dagpipe/fix-lifecycle.graph.json",
@@ -355,6 +355,10 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 18] {
             include_str!("../../docs/dagpipe/collab-pane-route-reconcile.graph.json"),
         ),
         (
+            "docs/dagpipe/collab-host-resource-recovery.graph.json",
+            include_str!("../../docs/dagpipe/collab-host-resource-recovery.graph.json"),
+        ),
+        (
             "docs/dagpipe/collab-master-authority.graph.json",
             include_str!("../../docs/dagpipe/collab-master-authority.graph.json"),
         ),
@@ -377,7 +381,7 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 18] {
     ]
 }
 
-fn design_graph_ids() -> [&'static str; 16] {
+fn design_graph_ids() -> [&'static str; 17] {
     [
         "appsdk-collab-context",
         "appsdk-collab-subagent-command",
@@ -390,6 +394,7 @@ fn design_graph_ids() -> [&'static str; 16] {
         "appsdk-collab-dashboard-operation",
         "appsdk-collab-control-plane-reset",
         "appsdk-collab-pane-route-reconcile",
+        "appsdk-collab-host-resource-recovery",
         "appsdk-collab-master-authority",
         "appsdk-collab-peer-lifecycle",
         "appsdk-user-requirement-change",
@@ -398,7 +403,7 @@ fn design_graph_ids() -> [&'static str; 16] {
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 83] {
+fn design_graph_operator_names() -> [&'static str; 89] {
     [
         "appsdk.collab_context.resolve_root",
         "appsdk.collab_context.ensure_baseline",
@@ -459,6 +464,12 @@ fn design_graph_operator_names() -> [&'static str; 83] {
         "appsdk.collab_pane_route.publish_owner_route",
         "appsdk.collab_pane_route.verify_pane_uniqueness",
         "appsdk.collab_pane_route.return_named_outcome",
+        "appsdk.collab_host_resource.scan_route_inventory",
+        "appsdk.collab_host_resource.classify_route_ownership",
+        "appsdk.collab_host_resource.archive_retire_candidates",
+        "appsdk.collab_host_resource.rewrite_route_index",
+        "appsdk.collab_host_resource.enforce_resource_budget",
+        "appsdk.collab_host_resource.publish_recovery_receipt",
         "appsdk.collab_authority.resolve_scope",
         "appsdk.collab_authority.transfer_master",
         "appsdk.collab_authority.emit_receipt",

@@ -57,6 +57,13 @@ collab task integrated <task-id> --commit <main-sha> --evidence "main gates=pass
 collab task close <task-id>
 ```
 
+While a task waits on another peer, inspect that peer with
+`collab snapshot <peer-id> --lines <1..200>` before and during the wait. The
+bounded buffer shows the current pane text without sending input. Decide from
+it whether to keep waiting, escalate, or steer through the normal input path.
+The buffer does not prove busy/idle, Codex turn state, message consumption, or
+task completion, and it writes no durable receipt.
+
 Last owned close cancels this peer's direct-message auto-notify. A leftover
 keepalive after the task is done is stopped by task close; a specific
 owner-scoped lease can be cancelled with

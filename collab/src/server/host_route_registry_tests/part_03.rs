@@ -238,6 +238,25 @@
             .as_deref()
             .is_some_and(|error| error.contains("recipient app-b-worker not registered")));
 
+        // Snapshot is scoped to one project reducer. A target owned by a
+        // neighboring route is absent from this state and must fail closed
+        // before any transport probe.
+        let cross_route_snapshot = manager.dispatch_sync(
+            Some(app_a_runtime_context.clone()),
+            Req::WorkerSnapshot {
+                worker_id: "app-a-worker".into(),
+                token: "token-app-a".into(),
+                target_id: "project-b-worker".into(),
+                lines: 40,
+            },
+        );
+        assert!(!cross_route_snapshot.1.ok, "{:?}", cross_route_snapshot.1);
+        assert!(cross_route_snapshot
+            .1
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("target worker project-b-worker not registered")));
+
         for (context, worker_id, token, message_id, suffix) in [
             (
                 app_a_runtime_context.clone(),
@@ -1208,6 +1227,222 @@
         drop(second);
         drop(manager);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn startup_materializes_a_durable_route_only_after_its_first_selection() {
+        let (host, host_root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+        std::fs::create_dir_all(host_paths.state_root()).unwrap();
+        let project_root = host_root.with_file_name(format!(
+            "{}-pending",
+            host_root.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(project_root.join(".agent-collab/server")).unwrap();
+        let context = context_with_app(&project_root, "startup-pending-app");
+        let route_journal = host_paths.state_root().join("routes.jsonl");
+        append_host_route_record(
+            &route_journal,
+            &HostRouteRecord {
+                version: 1,
+                op: "register".into(),
+                app_scope_id: context.app_scope_id.as_str().into(),
+                project_scope: context.project_scope.as_str().into(),
+                canonical_root: context.canonical_root.clone(),
+                storage_root: context.canonical_root.clone(),
+                registered_ms: 1,
+            },
+        )
+        .unwrap();
+
+        let manager = ProjectRuntimeManager::new(host, &host_paths).unwrap();
+        let key = ProjectRuntimeManager::route_key(&context);
+        assert!(
+            manager.routes.lock().unwrap()[&key].runtime.is_none(),
+            "an unused durable route must stay pending at startup"
+        );
+        assert!(
+            manager.project_locks.lock().unwrap().is_empty(),
+            "an unused route must not hold a writer-lock descriptor"
+        );
+
+        let selected = manager.select_runtime(&context).unwrap();
+        assert!(Arc::ptr_eq(
+            &selected,
+            &manager.routes.lock().unwrap()[&key]
+                .runtime
+                .clone()
+                .expect("selection materializes the route")
+        ));
+        assert_eq!(
+            manager.project_locks.lock().unwrap().len(),
+            1,
+            "the first selection must acquire exactly one writer lock"
+        );
+        assert_eq!(
+            selected.journal_path,
+            project_root
+                .canonicalize()
+                .unwrap()
+                .join(".agent-collab/server/journal.jsonl")
+        );
+
+        drop(selected);
+        drop(manager);
+        std::fs::remove_dir_all(project_root).unwrap();
+        std::fs::remove_dir_all(host_root).unwrap();
+    }
+
+    #[test]
+    fn materialized_runtime_budget_rejects_the_route_above_the_cap() {
+        assert!(
+            materialized_runtime_budget_error(
+                MAX_MATERIALIZED_EXTERNAL_RUNTIMES - 1,
+                MAX_MATERIALIZED_EXTERNAL_RUNTIMES,
+            )
+            .is_none()
+        );
+        let error = materialized_runtime_budget_error(
+            MAX_MATERIALIZED_EXTERNAL_RUNTIMES,
+            MAX_MATERIALIZED_EXTERNAL_RUNTIMES,
+        )
+        .expect("the budget gate rejects the route at the cap");
+        assert!(error.starts_with("PROJECT_ROUTE_RESOURCE_BUDGET_EXCEEDED:"), "{error}");
+        assert!(error.contains(&MAX_MATERIALIZED_EXTERNAL_RUNTIMES.to_string()));
+    }
+
+    #[tokio::test]
+    async fn concurrent_distinct_route_admission_respects_one_cap() {
+        let (server, root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(server, &host_paths).unwrap();
+        manager
+            .materialization_cap
+            .store(1, std::sync::atomic::Ordering::Relaxed);
+        manager
+            .materialization_build_delay_ms
+            .store(250, std::sync::atomic::Ordering::Relaxed);
+
+        let mut projects = Vec::new();
+        let mut contexts = Vec::new();
+        for suffix in ["a", "b"] {
+            let project_root = root.with_file_name(format!(
+                "{}-budget-{suffix}",
+                root.file_name().unwrap().to_string_lossy()
+            ));
+            std::fs::create_dir_all(project_root.join(".agent-collab/server")).unwrap();
+            let canonical_root = project_root.canonicalize().unwrap();
+            let context = context_with_app(&project_root, "budget-app");
+            manager.install_pending_route(
+                &ProjectRuntimeManager::route_key(&context),
+                &canonical_root,
+                &canonical_root,
+            );
+            projects.push(project_root);
+            contexts.push(context);
+        }
+
+        let start = Arc::new(std::sync::Barrier::new(3));
+        let mut tasks = Vec::new();
+        for context in contexts {
+            let manager = manager.clone();
+            let start = start.clone();
+            tasks.push(tokio::task::spawn_blocking(move || {
+                start.wait();
+                manager.select_runtime(&context)
+            }));
+        }
+        start.wait();
+        let mut admitted = 0;
+        for task in tasks {
+            if task.await.unwrap().is_ok() {
+                admitted += 1;
+            }
+        }
+        assert_eq!(admitted, 1, "only one route may pass admission at the cap");
+        assert_eq!(
+            manager.runtimes().len(),
+            2,
+            "the host plus exactly one external reducer"
+        );
+
+        drop(manager);
+        for project_root in projects {
+            std::fs::remove_dir_all(project_root).unwrap();
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn startup_recovers_committed_project_binding_missing_from_host_index() {
+        let (seed_host, seed_host_root, _) = test_server();
+        let seed_paths = HostPaths::for_state_root(seed_host_root.join("host-state")).unwrap();
+        let seed_manager = ProjectRuntimeManager::new(seed_host, &seed_paths).unwrap();
+
+        let project_root = seed_host_root.with_file_name(format!(
+            "{}-split-journal",
+            seed_host_root.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(project_root.join(".agent-collab/server")).unwrap();
+        let canonical_root = project_root.canonicalize().unwrap();
+        let context = context_with_app(&project_root, "split-journal-app");
+        let key = ProjectRuntimeManager::route_key(&context);
+        seed_manager.install_pending_route(&key, &canonical_root, &canonical_root);
+        let runtime = seed_manager.select_runtime(&context).unwrap();
+        let binding = commit_tmux_typed_fixture(
+            &runtime,
+            "split-journal-worker",
+            "token-split-journal",
+            context.app_scope_id.clone(),
+            committed_tmux_endpoint(&project_root, "split-journal-thread"),
+        );
+        drop(runtime);
+        drop(seed_manager);
+
+        // The project commit is durable, but this host journal never received
+        // the matching current-thread publication.
+        let (host, host_root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+        std::fs::create_dir_all(host_paths.state_root()).unwrap();
+        let route_journal = host_paths.state_root().join("routes.jsonl");
+        append_host_route_record(
+            &route_journal,
+            &HostRouteRecord {
+                version: 1,
+                op: "register".into(),
+                app_scope_id: context.app_scope_id.as_str().into(),
+                project_scope: context.project_scope.as_str().into(),
+                canonical_root: context.canonical_root.clone(),
+                storage_root: canonical_root.display().to_string(),
+                registered_ms: 1,
+            },
+        )
+        .unwrap();
+
+        let manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
+        assert!(
+            manager.routes.lock().unwrap()[&key].runtime.is_some(),
+            "a committed project binding missing from the host index must materialize"
+        );
+        let published = {
+            let session_id = binding.session_id.clone().unwrap();
+            let native_thread_id = binding.native_thread_id.clone().unwrap();
+            host.state
+                .lock()
+                .unwrap()
+                .global
+                .lookup_current_thread_route(&session_id, &native_thread_id)
+                .cloned()
+        };
+        assert_eq!(
+            published,
+            Some(binding),
+            "startup must republish the committed project binding"
+        );
+
+        drop(manager);
+        std::fs::remove_dir_all(host_root).unwrap();
+        std::fs::remove_dir_all(project_root).unwrap();
     }
 
     #[tokio::test]

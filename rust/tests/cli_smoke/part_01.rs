@@ -10,7 +10,24 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+fn collab_state_dir() -> PathBuf {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!(
+            "appsdk-rust-collab-state-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        // AppSDK init auto-runs `collab init`. Point every child at one test
+        // state root so route records never enter the real ~/.collab index.
+        std::env::set_var("COLLAB_STATE_DIR", &dir);
+        dir
+    })
+    .clone()
+}
+
 fn binary() -> PathBuf {
+    let _ = collab_state_dir();
     env::var_os("APPSDK_TEST_BINARY")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_appsdk")))

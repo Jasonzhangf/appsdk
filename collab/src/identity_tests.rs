@@ -386,6 +386,93 @@ fn historical_pane_draft_does_not_claim_current_session() {
 }
 
 #[test]
+fn resolver_prefers_current_scope_for_a_shared_pane_anchor() {
+    let root = test_root("ci-resolver-shared-pane-current-scope");
+    let other = root.join("other-project");
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    std::fs::create_dir_all(other.join(".agent-collab")).unwrap();
+    let scope = test_scope(root.clone());
+    let other_scope = test_scope(other.clone());
+    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
+    let candidate = tmux_candidate(None, None, "%3");
+    saved_identity(
+        &host_paths,
+        &scope,
+        "codex-%3",
+        None,
+        None,
+        Some(candidate.endpoint.clone()),
+    );
+    saved_identity(
+        &host_paths,
+        &other_scope,
+        "foreign-pane-peer",
+        None,
+        None,
+        Some(candidate.endpoint.clone()),
+    );
+
+    let facts = crate::proto::IdentityFacts {
+        session_id: None,
+        thread_id: None,
+        endpoint: None,
+        namespace: None,
+        tmux: None,
+        tmux_anchor: Some(crate::proto::TmuxPaneAnchor {
+            socket_path: candidate.endpoint.socket_path,
+            pane_id: candidate.endpoint.pane_id,
+        }),
+        dsh_session_id: None,
+    };
+    let found = resolve_for_daemon_at(&host_paths, &scope, &facts).unwrap();
+    assert_eq!(found.worker_id, "codex-%3");
+    assert_eq!(
+        found.project_scope,
+        Some(
+            scope
+                .route_scope(AppServerId::new(CLI_APP_SERVER_ID).unwrap())
+                .unwrap()
+                .project_scope_id
+        )
+    );
+    assert!(read_persisted(&host_paths, "foreign-pane-peer")
+        .unwrap()
+        .is_some());
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn preserved_draft_token_is_not_reminted() {
+    let root = test_root("ci-resolver-preserve-draft");
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    let scope = test_scope(root.clone());
+    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
+    let draft_identity = Identity {
+        worker_id: "codex-%5".into(),
+        token: "stored-draft-token".into(),
+        project_scope: Some(
+            scope
+                .route_scope(AppServerId::new(CLI_APP_SERVER_ID).unwrap())
+                .unwrap()
+                .project_scope_id,
+        ),
+        runtime: None,
+        transport: None,
+    };
+    write_identity(
+        &identity_path_at(&host_paths, "codex-%5").unwrap(),
+        &draft_identity,
+    )
+    .unwrap();
+    let candidate = tmux_candidate(None, None, "%5");
+    let resolved =
+        resolve_for_daemon_at(&host_paths, &scope, &facts(None, None, Some(candidate))).unwrap();
+    assert_ne!(resolved.token, "stored-draft-token");
+    assert!(resolved.worker_id.starts_with("codex-session-"));
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn deterministic_name_does_not_adopt_a_registered_identity_with_different_anchors() {
     let root = test_root("ci-name-collision");
     std::fs::create_dir_all(root.join(".agent-collab")).unwrap();

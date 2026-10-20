@@ -890,7 +890,17 @@ fn identity_by_current_anchors_at(
         .route_scope(AppServerId::new(CLI_APP_SERVER_ID)?)?
         .project_scope_id;
     for (anchor, identities) in matches {
-        let group = identities.into_values().collect::<Vec<_>>();
+        let mut group = identities.into_values().collect::<Vec<_>>();
+        if group.len() > 1 {
+            let current_scope = group
+                .iter()
+                .filter(|identity| identity.project_scope.as_ref() == Some(&expected_scope))
+                .cloned()
+                .collect::<Vec<_>>();
+            if current_scope.len() == 1 {
+                group = current_scope;
+            }
+        }
         if group.len() > 1 {
             anyhow::bail!("IDENTITY_RESTORE_AMBIGUOUS: {anchor} matches multiple persisted identities; the daemon cannot prove a unique owner");
         }

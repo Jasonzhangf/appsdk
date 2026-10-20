@@ -93,6 +93,7 @@ include!("mod_parts/part_11.rs");
 include!("mod_parts/part_12.rs");
 include!("mod_parts/part_13.rs");
 include!("board_handlers.rs");
+include!("names.rs");
 include!("board_invites.rs");
 include!("board_execution.rs");
 #[cfg(test)]

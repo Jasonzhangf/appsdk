@@ -439,7 +439,7 @@ pub(crate) fn registered_available_peer_for_admission(
             .values()
             .filter(|worker| worker.id != requester)
             .filter(|worker| !is_managed_subagent(&state, &worker.id))
-            .filter(|worker| !board_peer_has_responsibility(&state, &worker.id, None))
+            .filter(|worker| !board_peer_has_execution_reservation(&state, &worker.id, None))
             .cloned()
             .collect();
         workers.sort_by(|a, b| a.id.cmp(&b.id));
@@ -462,7 +462,7 @@ pub(crate) fn registered_available_peer_for_admission(
             && current.registered_ms == worker.registered_ms;
         if unchanged
             && !is_managed_subagent(&state, &worker.id)
-            && !board_peer_has_responsibility(&state, &worker.id, None)
+            && !board_peer_has_execution_reservation(&state, &worker.id, None)
         {
             return Some((worker.id, "identity-valid registered peer has no active task".into()));
         }
@@ -488,10 +488,7 @@ pub(crate) fn idle_managed_subagent_for_admission(
                     .map(|worker| (record.clone(), worker))
             })
             .filter(|(_, worker)| {
-                !state
-                    .tasks
-                    .values()
-                    .any(|task| task.owner == worker.id && task_resource_active(&task.status))
+                !board_peer_has_execution_reservation(&state, &worker.id, None)
             })
             .collect::<Vec<_>>();
         candidates.sort_by(|left, right| left.0.id.cmp(&right.0.id));
@@ -518,10 +515,7 @@ pub(crate) fn idle_managed_subagent_for_admission(
             && current_worker.token == worker.token
             && current_worker.cwd == worker.cwd
             && current_worker.registered_ms == worker.registered_ms
-            && !state
-                .tasks
-                .values()
-                .any(|task| task.owner == worker.id && task_resource_active(&task.status))
+            && !board_peer_has_execution_reservation(&state, &worker.id, None)
         {
             return Some((
                 record.id,
@@ -1097,11 +1091,7 @@ pub(crate) fn handle_scheduler_dispatch(
         if !state.workers.contains_key(&peer_id) {
             continue;
         }
-        if state
-            .tasks
-            .values()
-            .any(|task| task.owner == peer_id && task_resource_active(&task.status))
-        {
+        if board_peer_has_execution_reservation(&state, &peer_id, None) {
             continue;
         }
         let mut managed_child = None;

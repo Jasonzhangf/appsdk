@@ -6,7 +6,7 @@
   "return_path": "Resp",
   "lifecycle_rules": {
     "loop": "Every master goal, bug report/fix, master-to-subagent assignment, and peer task follows Trigger -> Work -> Gate -> State -> Stop.",
-    "sequence": "Discover -> durable dispatch intent -> Hand off -> Verify -> Persist -> Schedule.",
+    "sequence": "Declare board work and queue pending tasks -> claim or accept -> Verify -> Persist -> close applicable duties or record blocker -> inspect remaining work and blocker release -> continue eligible work or idle. Recheck on the next authorized activation; no new periodic worker wake.",
     "role_default": "Default identity is peer; master authority is user-authorized through explicit promotion or delegation by the current live master.",
     "wake": "Only master has long-horizon wake; workers are not long-horizon wake targets and are not automatically woken from idle.",
     "worker_idle_fact": "On each worker working -> idle transition, emit one idempotent worker-idle fact to the live master; this fact does not count or control the master idle reminder episode.",

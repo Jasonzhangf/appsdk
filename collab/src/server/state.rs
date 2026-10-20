@@ -1244,6 +1244,10 @@ pub enum Event {
     Registered {
         worker: WorkerRec,
     },
+    WorkerNamed {
+        worker_id: String,
+        name: Option<String>,
+    },
     #[serde(rename = "WorkerRemoved")]
     LegacyWorkerRemoved {
         worker_id: String,

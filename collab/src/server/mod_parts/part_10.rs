@@ -342,8 +342,14 @@ fn worker_status_summary_with_maps(
     } else {
         None
     };
+    let display_name = {
+        let state = server.state.lock().unwrap();
+        let master = current_master_holder(server, &state).ok().flatten();
+        worker_display_name(&state, &w.id, master.as_deref() == Some(w.id.as_str()))
+    };
     json!({
         "id": w.id,
+        "display_name": display_name,
         "role": role_brief["role"].clone(),
         "role_brief": role_brief,
         "transport": w.transport.as_ref().map(|transport| json!({
@@ -416,6 +422,7 @@ fn mutation_blocked_during_migration(req: &Req) -> bool {
         | Req::RemoveWorker { .. }
         | Req::WorkerSnapshot { .. }
         | Req::WorkerClose { .. }
+        | Req::WorkerName { .. }
         | Req::ResetBindings { .. } => true,
         Req::Register { .. }
         | Req::IdentityContext { .. }
@@ -466,6 +473,7 @@ fn wire_mutation_principal(req: &Req) -> Option<(&str, &str)> {
             ..
         } if subagent_action_mutates(command) => Some((worker_id, token)),
         Req::Board { worker_id, token, .. }
+        | Req::WorkerName { worker_id, token, .. }
         | Req::Register {
             worker_id, token, ..
         }

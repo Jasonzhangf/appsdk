@@ -131,6 +131,7 @@ fn create_daemon_for_subagent_cli(name: &str) -> (Fixture, Pane, String) {
     fixture.registered_context(&pane, true);
     let context = fixture.run_ok(&["context"], Some(&pane));
     let snapshot = &context["result"]["snapshot"];
+    assert_eq!(snapshot["identity"]["display_name"], pane.pane_id);
     assert_eq!(
         snapshot["registered"], true,
         "context must contain a registered daemon snapshot: {context}"

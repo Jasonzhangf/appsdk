@@ -16,6 +16,7 @@ pub struct State {
     pub responsibility_fences: HashMap<String, ResponsibilityFence>,
     pub peer_lifecycle_operations: HashMap<String, PeerLifecycleOperationRecord>,
     pub workers: HashMap<String, WorkerRec>,
+    pub worker_names: HashMap<String, String>,
     pub msgs: HashMap<String, Message>,
     pub notification_delivery_failures: HashMap<String, NotificationDeliveryFailure>,
     /// Last native attempt accepted for a durable message, if any.

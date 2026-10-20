@@ -311,6 +311,17 @@ impl AppFixture {
             .expect("context receipt names the daemon-owned worker")
             .to_owned()
     }
+
+    fn restart_daemon(&self, thread: &str) {
+        let down = self.command_public(&["down"], thread);
+        assert!(down.status.success(), "daemon down failed: {down:?}");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && self.host_state.join("server.sock").exists() {
+            thread::sleep(Duration::from_millis(50));
+        }
+        let up = self.command_public(&["up"], thread);
+        assert!(up.status.success(), "daemon up failed: {up:?}");
+    }
 }
 
 impl Drop for AppFixture {
@@ -892,8 +903,8 @@ fn master_authority_appserver_explicit_replacement_keeps_holder_control() {
     assert_eq!(status["scope"]["project_scope"], project_scope);
     assert_eq!(status["scope"]["app_scope_id"], app_scope_id);
 
-    // The replaced holder no longer controls the board; the current holder does.
-    let rejected = fixture.command_public(
+    // The replaced holder remains a peer and may publish its own work.
+    let published_by_peer = fixture.run_public(
         &[
             "board",
             "publish",
@@ -911,12 +922,7 @@ fn master_authority_appserver_explicit_replacement_keeps_holder_control() {
         ],
         THREAD_A,
     );
-    assert!(
-        !rejected.status.success(),
-        "the replaced holder must not keep board control: stdout={} stderr={}",
-        String::from_utf8_lossy(&rejected.stdout),
-        String::from_utf8_lossy(&rejected.stderr)
-    );
+    assert_eq!(published_by_peer["task"]["publisher"], worker_a);
     let published = fixture.run_public(
         &[
             "board",
@@ -936,6 +942,33 @@ fn master_authority_appserver_explicit_replacement_keeps_holder_control() {
         THREAD_B,
     );
     assert_eq!(published["task"]["id"], "b-after-replacement");
+    let rejected = fixture.command_public(
+        &[
+            "board",
+            "invite",
+            "b-after-replacement",
+            "--to",
+            &worker_a,
+            "--expected-revision",
+            "1",
+        ],
+        THREAD_A,
+    );
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("BOARD_MASTER_REQUIRED"));
+    let invited = fixture.run_public(
+        &[
+            "board",
+            "invite",
+            "b-after-replacement",
+            "--to",
+            &worker_a,
+            "--expected-revision",
+            "1",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(invited["task"]["status"], "invited");
 
     // The replaced holder keeps its own peer row, task and mailbox while it
     // loses only control authority.

@@ -24,6 +24,33 @@ observed tmux socket + pane may also be stored as the durable identity anchor,
 independently of native runtime IDs.
 Production projects use the globally installed Collab v1.
 
+## Display names
+
+Names are human labels. Stable worker IDs, pane anchors, message recipients,
+task ownership, and grants do not change when a label changes. Initialize only
+when the user requests it, through the existing `collab context` entry. An
+ordinary tmux peer defaults to its bound pane identifier. The current master
+defaults to `Jenny`, even if its communication endpoint is unavailable. A
+non-tmux identity without a pane keeps its worker ID as the default display.
+
+Only change a name on explicit user request. Use the same self-service command
+for a peer or master; it requires the caller's already registered identity:
+
+```sh
+collab worker name "Alice"
+collab worker name --reset
+```
+
+The override survives identity restoration and daemon restart. It stays with
+that identity across role changes and does not transfer to another master.
+Reset removes the override: a master becomes `Jenny`, and an ordinary peer
+returns to its pane default. Registration/recovery must not reset a user's
+chosen name. A retired identity's name is not inherited by its replacement.
+Do not invent a human name or persist `Jenny` merely to apply the default.
+Duplicate names are allowed; commands still address stable IDs. Read names in
+`context`, `who`, `worker status`, `master status`, and board/dashboard views.
+MCP uses `collab_worker_name` with either `name` or `reset: true`.
+
 ## Current-version baseline
 
 Use only the current globally installed `collab` and `collab-mcp`. The
@@ -461,7 +488,13 @@ selection and sends only through the selected adapter.
 
 ## Public task board and read-only dashboard
 
-The public task board is the shared master/peer surface. It carries only public
+The task board is the shared work surface for registered masters, peers, and
+subworkers. Each role declares its current work and may queue later work here.
+An unregistered subworker does not inherit its parent's identity or token;
+its registered parent declares and tracks that assignment. Subworkers normally
+receive a scoped assignment directly from their peer parent or master. They
+do not need to claim board work in daily use; claim remains available when
+explicitly needed. The public view carries
 task identity, lifecycle status, owner, and the typed delivery/test conditions.
 It never exposes worker tokens, runtime endpoints, role briefs, managed-child
 identity, private assignments, or raw journal events. A published task does not
@@ -473,12 +506,28 @@ Read the board without consuming messages or changing lifecycle:
 collab board show
 ```
 
-The current master grant holder publishes a pending task with its contract,
-then invites one live idle ordinary peer:
+Any registered execution role publishes a pending task with its contract.
+Publishing queues work; it does not start it. Publish several task IDs to queue
+later work without consuming execution capacity:
 
 ```sh
 collab board publish <task-id> --title <t> --description <d> \
   --delivery-condition <d> --test-condition <t> [--priority p0|p1|p2|p3|p4]
+collab board claim <task-id> --expected-revision <observed>
+```
+
+Claim starts one pending task in the caller's own identity. A peer may claim
+its own publication or another authorized task. A registered managed subworker
+may also claim. Read the current revision from `board show`. Claim atomically
+checks that the task is still pending and that the caller can start execution;
+it records the actual executor as owner. A stale or competing claim fails
+without taking the task. Do not update a pending task to `working` to bypass
+claim. Never claim outside the user's authorized goal or take another owner's
+working or blocked task.
+
+Master may instead offer a public task to one ordinary peer:
+
+```sh
 collab board invite <task-id> --to <peer> --expected-revision <observed>
 ```
 
@@ -511,7 +560,7 @@ collab board withdraw <task-id> --expected-revision <observed> --reason "<text>"
 ```
 
 Ordinary peers do not receive scheduler dispatch. `collab subagent dispatch`
-targets the private managed path only; a public assignment uses the board
+targets the private managed path only; public work uses claim or the board
 invitation above. If a peer or its peer node refuses an invitation, that refusal
 is explicit and there is no silent fallback to a private child.
 
@@ -546,10 +595,13 @@ The observer rejects a request whose `Host` is not its own bound authority with
 board endpoint answers 503 with the exact daemon error instead of an empty
 board. Static assets carry no state and no token.
 
-The public board is for the master and ordinary peers only. A managed subagent
-actor is refused with `BOARD_PRIVATE_ACTOR`, managed children never appear in
-the board projection, and `collab subagent dispatch` stays on the private
-managed path.
+Managed subworkers participate through their own registered identity. Their
+internal assignments and queued publications remain private to the child and
+its parent. Public tasks claimed by a child remain visible; the public view
+shows the parent's responsibility, while the durable task keeps the actual
+child executor. Managed member identities and internal task references stay
+out of the public dashboard. `collab subagent dispatch` retains its private
+assignment protocol; board claim does not create or bind a child.
 
 An owner edits the descriptive part of its own independent task without
 changing lifecycle. Every flag is required and the revision is checked:
@@ -560,7 +612,7 @@ collab board describe <task-id> --expected-revision <observed> --title <t> \
 ```
 
 `collab-mcp` exposes the same operations as `collab_board_show`,
-`collab_board_publish`, `collab_board_invite`, `collab_board_respond`,
+`collab_board_publish`, `collab_board_claim`, `collab_board_invite`, `collab_board_respond`,
 `collab_board_withdraw`, `collab_board_update`, `collab_board_describe`, and
 `collab_task_decline`. Each takes `expected_revision` as an integer of at least
 1; `collab_task_decline` takes `legacy_assignment: true` only for an unstarted
@@ -569,6 +621,55 @@ legacy assignment.
 When any board command fails, the CLI preserves the server's full typed
 response, including durable IDs and `repair_required`. Read the `collab
 response:` line before retrying: a durable outcome is not a retryable failure.
+
+### Continue the queue and recheck blockers
+
+Use this sequence for master, peer, and registered subworker work. Master also
+checks the public queue and its coordination tasks. A parent checks its child's
+remaining tasks and helps resolve child blockers.
+
+1. Before peer/master board work starts, publish its goal, delivery condition,
+   and test condition, then claim it or accept its invitation. For a subworker,
+   the peer parent or master declares the assignment and its conditions, then
+   dispatches it through the owning executor. A bound managed child's parent
+   or current master can use `collab subagent send <id> --subject <topic>
+   "<scope; delivery; tests>"`; its existing task assignment stays authoritative.
+   Do not add a board claim to every child assignment. Reuse an existing
+   assigned or registered task; describe it if
+   conditions are missing. Do not register a duplicate task for the same work.
+   Bind a claimed task's execution worktree through `collab task relocate
+   <task-id> --worktree <owned-worktree> [--branch <branch>]`; queue entries
+   do not reserve another task's resources.
+2. On completion, finish the applicable delivery, review, integration, cleanup,
+   and close steps. A delivery report alone does not end a cleanup obligation.
+   Read `collab board show` and check for unfinished work before stopping.
+3. On a blocker, keep ownership and record the cause, release condition, and
+   next action with `board update --status blocked --next "<facts>"`. Report it
+   to master and, for a child, its parent. For an actual resource conflict use
+   `collab task wait <task-id> --for <holder-task-id>`; it is not a
+   general dependency queue.
+4. Check owned blocked/waiting tasks against current evidence. If a blocker
+   has cleared, recheck resources and execution capacity, then resume through
+   `board update --status working` using the current revision. A release notice
+   requires a recheck; it does not prove the task can resume. Keep it blocked
+   while another task occupies the execution slot.
+5. If current work cannot proceed, select another authorized, nonconflicting
+   pending task and claim it. Prefer priority p0 through p4, then task ID for
+   equal priority. Pending queue entries do not occupy execution capacity.
+   A subworker normally takes the next assignment from its peer parent or
+   master; it picks and claims board work only when that mode is authorized.
+   Blocked/waiting tasks keep their resources and unfinished responsibility;
+   starting another task does not release or cancel them.
+6. Before entering idle, check remaining work, pending close/cleanup duties,
+   and each blocker again. If any action is possible, continue it. Otherwise
+   record what is blocked and the event or responsible actor needed to resume.
+   Repeat this check on the next message, dispatch, supported notification, or
+   other authorized activation. Consume applicable messages with `collab recv`.
+
+These are agent actions within an activation. The board does not automatically
+claim, execute, or resume work. Idle peers and children have no new periodic
+wake guarantee. Do not invent a polling interval, cron job, or retry loop.
+Existing subscriptions, master wake, and one worker-idle fact remain unchanged.
 
 ## Common command card
 
@@ -747,8 +848,10 @@ acts on an explicit dispatch, a bounded direct-message lease, or its own open
 task state;
 it does not need periodic activation to make progress. Unknown/absent produces
 no transport input. On each `working` -> `idle` transition, a worker sends one
-idempotent worker-idle fact to the current master and then stops; it does not keep
-knocking. Idle, progress, delivery, bug, and worker-idle notices are
+idempotent worker-idle fact to the current master. Before stopping, it follows
+the board queue and blocker checks above; it continues any eligible work.
+If nothing can proceed, it stops and does not keep knocking. Idle, progress,
+delivery, bug, and worker-idle notices are
 auto-merged; explicit `collab sendmessage` remains immediate. Master idle
 reminders are level-triggered: within the same master idle episode, each
 reminder attempt consumes the shared episode-local budget, up to three
@@ -760,8 +863,10 @@ scheduling-turn counter or automatic rearm.
 Managed subagents do not get child-targeted periodic liveness ACK loops. Their
 state is persisted by the daemon; a `working` -> `idle` transition contributes
 one durable `subagent-status` fact to the current master. The master, not the
-child, owns the outcome and decides whether to re-dispatch, force-close, or
-leave the child idle. A subagent with an unfinished task is not repeatedly
+child, owns the outcome and checks the child's remaining board tasks and
+blocker release conditions before re-dispatching, closing, or leaving it idle.
+An activated child also follows the board queue and blocker checks. A subagent
+with an unfinished task is not repeatedly
 woken just because its task is not closed. `subagent status` reports durable
 task state and native thread state. Managed subagent creation remains
 unsupported; commands fail explicitly. Codex thread history is read only from
@@ -794,7 +899,9 @@ then report it to the current master in the same activation. Do not leave a task
 at `assigned`, `working`, `blocked`, `waiting`, `delivered`, or
 `cleanup_pending` merely because the last direct message was acknowledged.
 After delivery or merge, perform the real cleanup and close the task; a
-reminder does not create a second task or a duplicate dispatch.
+reminder does not create a second task or a duplicate dispatch. After closing
+or recording a blocker, inspect the board and continue the next eligible task.
+Enter idle only after the remaining-work and blocker checks above.
 
 Escalation routing is explicit:
 

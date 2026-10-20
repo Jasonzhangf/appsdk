@@ -30,7 +30,7 @@ function renderDetail(task) {
   const content = byId("detail-content");
   content.replaceChildren();
   const fields = [
-    ["任务", task.id], ["Owner / 状态", `${task.owner} · ${labels[task.status] || task.status} · revision ${task.revision}`],
+    ["任务", task.id], ["负责人 / 状态", `${task.owner_display_name} · ${labels[task.status] || task.status} · revision ${task.revision}`],
     ["任务说明", task.description], ["下一步", task.next_step],
     ["交付条件", task.delivery_condition], ["测试条件", task.test_condition],
     ["邀请对象", task.invited_peer], ["接单记录", task.last_response],
@@ -64,7 +64,9 @@ function render() {
   const scopeText = scope.project_scope ? `${scope.project_scope} · ${scope.app_scope_id}` : "作用域未知";
   if (authority && authority.worker_id) {
     const summary = element("div", undefined, "member");
-    summary.append(element("strong", authority.worker_id), element("span", "Master 授权", "role"));
+    const name = element("strong", authority.display_name);
+    name.title = authority.worker_id;
+    summary.append(name, element("span", "Master 授权", "role"));
     summary.append(element("small", `授权持有人 · ${scopeText}`));
     members.append(summary);
   } else {
@@ -73,25 +75,28 @@ function render() {
   for (const member of snapshot.workers) {
     const item = element("div", undefined, "member");
     const status = { online: "在线", cold: "未驻留", offline: "离线", unknown: "未知" }[member.status] || member.status;
-    item.append(element("strong", member.id), element("span", member.role === "master" ? "Master" : "Peer", "role"));
+    const name = element("strong", member.display_name);
+    name.title = member.id;
+    item.append(name, element("span", member.role === "master" ? "Master" : "Peer", "role"));
     item.append(element("small", `${status} · ${member.task_ids.length ? `负责 ${member.task_ids.length} 个任务` : "无执行任务"}${member.invitation_ids.length ? ` · ${member.invitation_ids.length} 个邀请` : ""}`));
     members.append(item);
   }
   if (!snapshot.workers.length) members.append(element("p", "暂无在线注册的公共成员；历史任务仍保留。", "muted"));
   const owners = [...new Set(snapshot.tasks.map(task => task.owner))].sort();
-  const key = JSON.stringify(owners);
+  const ownerNames = new Map(snapshot.tasks.map(task => [task.owner, task.owner_display_name]));
+  const key = JSON.stringify(owners.map(owner => [owner, ownerNames.get(owner)]));
   if (key !== ownersKey) {
     ownersKey = key;
     const selected = byId("owner").value;
     const options = [element("option", "全部成员")];
     options[0].value = "";
-    for (const owner of owners) { const option = element("option", owner); option.value = owner; options.push(option); }
+    for (const owner of owners) { const option = element("option", ownerNames.get(owner)); option.value = owner; options.push(option); }
     byId("owner").replaceChildren(...options);
     if (owners.includes(selected)) byId("owner").value = selected;
   }
   const owner = byId("owner").value;
   const query = byId("search").value.trim().toLocaleLowerCase();
-  const tasks = snapshot.tasks.filter(task => (!owner || task.owner === owner) && (!query || [task.id, task.title, task.next_step || ""].join(" ").toLocaleLowerCase().includes(query)));
+  const tasks = snapshot.tasks.filter(task => (!owner || task.owner === owner) && (!query || [task.id, task.title, task.owner_display_name, task.publisher_display_name, task.next_step || ""].join(" ").toLocaleLowerCase().includes(query)));
   byId("task-count").textContent = `${tasks.length} / ${snapshot.tasks.length}`;
   byId("empty").hidden = snapshot.tasks.length !== 0;
   const board = byId("board");
@@ -110,7 +115,9 @@ function render() {
       head.append(element("span", task.priority.toUpperCase()), element("span", labels[task.status] || task.status, `status ${task.status}`));
       card.append(head, element("strong", task.title, "task-title"), element("small", task.id, "muted"));
       card.append(element("p", task.next_step || "尚未填写下一步", "next-step"));
-      card.append(element("div", task.owner, "owner"));
+      const owner = element("div", task.owner_display_name, "owner");
+      owner.title = task.owner;
+      card.append(owner);
       if (task.invited_peer) card.append(element("small", `邀请 → ${task.invited_peer}`, "invited-peer"));
       card.addEventListener("click", () => openDetail(task));
       column.append(card);

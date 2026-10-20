@@ -1,6 +1,30 @@
 use super::*;
 
 #[test]
+fn worker_name_adapter_requires_exactly_one_user_action() {
+    assert_eq!(
+        build_argv("collab_worker_name", &json!({"name":"Alice"})).unwrap(),
+        ["worker", "name", "--", "Alice"]
+    );
+    assert_eq!(
+        build_argv("collab_worker_name", &json!({"name":"--reset"})).unwrap(),
+        ["worker", "name", "--", "--reset"]
+    );
+    assert_eq!(
+        build_argv("collab_worker_name", &json!({"reset":true})).unwrap(),
+        ["worker", "name", "--reset"]
+    );
+    for args in [
+        json!({}),
+        json!({"reset":false}),
+        json!({"name":"Alice","reset":true}),
+        json!({"reset":"true"}),
+    ] {
+        assert!(build_argv("collab_worker_name", &args).is_err());
+    }
+}
+
+#[test]
 fn content_length_and_newline_frames_round_trip() {
     let body = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}});
     let encoded = serde_json::to_string(&body).unwrap();

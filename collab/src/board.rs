@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, Subcommand)]
 #[serde(tag = "action", rename_all = "kebab-case")]
 pub enum BoardCommand {
-    /// Read the project's public task board without consuming messages.
+    /// Read public work plus the caller's own or managed-child private queue.
     Show,
-    /// Publish a pending project task (live master only).
+    /// Publish pending work; managed-child publications remain private.
     Publish {
         id: String,
         #[arg(long)]
@@ -21,6 +21,12 @@ pub enum BoardCommand {
         test_condition: String,
         #[arg(long, default_value = "p2")]
         priority: String,
+    },
+    /// Atomically claim one pending task at the observed board revision.
+    Claim {
+        id: String,
+        #[arg(long)]
+        expected_revision: u64,
     },
     /// Invite one live idle ordinary peer; ownership transfers only on accept.
     Invite {
@@ -128,7 +134,9 @@ pub struct BoardTaskView {
     pub test_condition: String,
     pub revision: u64,
     pub owner: String,
+    pub owner_display_name: String,
     pub publisher: String,
+    pub publisher_display_name: String,
     pub priority: String,
     pub status: String,
     pub next_step: Option<String>,
@@ -145,6 +153,7 @@ pub struct BoardTaskView {
 #[derive(Debug, Serialize)]
 pub struct BoardMemberView {
     pub id: String,
+    pub display_name: String,
     pub role: String,
     pub status: String,
     pub task_ids: Vec<String>,

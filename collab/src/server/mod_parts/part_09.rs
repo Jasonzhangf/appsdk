@@ -1186,7 +1186,8 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("worker")
                 .to_owned();
-            (peer.clone(), peer_role)
+            let display_name = worker_display_name(&st, &peer.id, peer_role == "master");
+            (peer.clone(), peer_role, display_name)
         })
         .collect();
     peer_snapshots.sort_by(|left, right| left.0.id.cmp(&right.0.id));
@@ -1199,6 +1200,7 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
     let task_count = st.tasks.len();
     let mut subagents: Vec<crate::subagent::Record> = st.subagents.values().cloned().collect();
     subagents.sort_by(|left, right| left.id.cmp(&right.id));
+    let display_name = worker_display_name(&st, &worker.id, role == "master");
     drop(st);
 
     // Normal Context records presence before this pure projection. A completed
@@ -1240,12 +1242,13 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
     endpoint_live_by_worker.insert(worker.id.clone(), caller_endpoint_live);
     let peers: Vec<_> = peer_snapshots
         .into_iter()
-        .map(|(peer, peer_role)| {
+        .map(|(peer, peer_role, display_name)| {
             let peer_presence = worker_presence(server, &peer);
             let (_, peer_endpoint_live) = worker_identity_and_endpoint(server, &peer);
             endpoint_live_by_worker.insert(peer.id.clone(), peer_endpoint_live);
             json!({
                 "worker_id": peer.id,
+                "display_name": display_name,
                 "id": peer.id,
                 "role": peer_role,
                 "presence": match peer_presence {
@@ -1399,6 +1402,7 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
         "project_root": server.root,
         "identity": {
             "worker_id": worker.id,
+            "display_name": display_name,
             "kind": "peer",
             "role": role,
             "transport": transport,

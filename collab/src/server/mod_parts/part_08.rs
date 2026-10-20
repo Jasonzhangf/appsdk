@@ -30,6 +30,7 @@ pub(crate) fn master_authority_view_with_endpoint(
     };
     json!({
         "worker_id": grant.agent_id.as_str(),
+        "display_name": worker_display_name(state, grant.agent_id.as_str(), true),
         "scope": scope_view(route_scope),
         "endpoint_live": endpoint_live,
         "grant_id": grant.resource_id(),
@@ -347,17 +348,17 @@ pub(crate) fn handle_send_with_task(
         let Some(child) = st.subagents.get(id).cloned() else {
             return Resp::err(format!("unknown managed subagent {}", id));
         };
-        if child.parent != from || child.peer != to {
+        let master = match current_master_holder(server, &st) {
+            Ok(master) => master,
+            Err(error) => return Resp::err(error),
+        };
+        if (child.parent != from && master.as_deref() != Some(from.as_str())) || child.peer != to {
             return Resp::err("managed subagent owner mismatch");
         }
         if child.status != "idle" {
             return Resp::err("subagent is not idle; query status instead of resending");
         }
-        if st
-            .tasks
-            .values()
-            .any(|task| task.owner == child.peer && task_resource_active(&task.status))
-        {
+        if board_peer_has_execution_reservation(&st, &child.peer, None) {
             return Resp::err("managed subagent already has an active task");
         }
         Some(child)
@@ -1170,6 +1171,9 @@ fn task_update_locked(
                 "invalid task transition {} -> {}",
                 task.status, new_status
             ));
+        }
+        if task.status == "blocked" && new_status == "working" {
+            if let Err(error) = board_resume_gate(&st, &worker_id, &task.id) { return error; }
         }
         task.status = new_status.clone();
         if new_status != "waiting" {

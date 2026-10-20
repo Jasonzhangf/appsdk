@@ -245,6 +245,13 @@ pub(crate) enum LiveClosureCmd {
 
 #[derive(Subcommand)]
 pub(crate) enum WorkerCmd {
+    /// Set your display name, or restore the current role/pane default
+    Name {
+        #[arg(required_unless_present = "reset", conflicts_with = "reset")]
+        name: Option<String>,
+        #[arg(long)]
+        reset: bool,
+    },
     /// Master creates an ordinary peer with durable native-thread receipts
     Create {
         target_id: String,
@@ -345,7 +352,7 @@ pub(crate) enum Cmd {
         #[arg(long, default_value_t = 0)]
         port: u16,
     },
-    /// Shared public task board for the project master and independent peers
+    /// Task board for registered masters, peers, and managed subworkers
     Board {
         #[command(subcommand)]
         cmd: BoardCommand,

@@ -183,3 +183,44 @@
   work. No reset, identity impersonation, real-peer message or memory write is
   part of this repair. Exact remote, installed and cleanup receipts are kept
   in the evidence root after their respective actions.
+
+## 2026-10-19 — Collab board queue, claim and display names
+
+- User scope: master/peer publication, self claim, optional child claim,
+  queued pending work, completion/blocker continuation and idle recheck.
+  Children normally receive peer-parent/master assignments without an extra
+  publish/claim sequence. Existing parent/master send authority is retained.
+- Added atomic `board claim`, shared execution-slot/resume checks and typed
+  MCP adapter. Blocked/waiting retain resource and close responsibilities.
+  Managed public work stays visible under parent responsibility; private
+  tasks, child names and identity facts stay out of public board projections.
+- Added self `worker name <name>|--reset`. Defaults derive from the typed
+  current role and bound pane: master Jenny, ordinary tmux peer pane ID.
+  Explicit labels persist through reload/compaction and role changes; reset
+  and retirement remove them. Task/message/grant IDs and routing are unchanged.
+- Author verification: 998 Collab core tests passed, one pre-existing ignore;
+  25 MCP, 22 AppServer/board, 5 peer lifecycle and 4 subworker CLI tests passed.
+  Original and additional privacy red results were preserved. Formatting,
+  JavaScript syntax and Skill validation passed. Updated graphs remain SESE.
+- Installed canonical Collab/Collab-MCP and Skill: 0.2.0275. Isolated real tmux
+  and browser checked pane/Jenny defaults, explicit labels, filter/search,
+  safe text rendering, MCP naming, reset and formal daemon reload persistence.
+  Shared daemon was formally reloaded from an existing declared operator
+  route after this unregistered source-root route was refused; no identity
+  was initialized. Review and remote integration are pending.
+- Owner evidence: `/Volumes/Intel/playground/appsdk-board-run-20261019/`.
+  `verification.md` distinguishes static Skill walkthroughs from live command
+  behavior; this change adds no periodic worker wake or automatic execution.
+  Main's pre-existing dirty changes and foreign worktrees remain protected.
+- Follow-up: corrected default Jenny in narrowed lifecycle Read using typed
+  scoped master authority. Corrected managed Send's inner authorization to
+  accept the original parent or current master. Direct dispatch reuses the
+  shared execution-capacity predicate; blocked tasks retain their resources.
+  Both regressions have failing red evidence. All 246 peer protocol tests
+  passed, and the public Create/Bind/MCP Send/Recv test passed with ordinary
+  parent dispatch and blocked-next continuation. Refreshed official installed
+  binaries/Skill to 0.2.0276 and formally reloaded the shared and isolated
+  daemons. Installed worker Read shows Jenny. Independent whole-milestone
+  review and follow-up closure review passed with no P0/P1 findings. Local
+  guidance audit identified historical digest/candidate-binding instructions;
+  removed those retired requirements. Remote integration is pending.

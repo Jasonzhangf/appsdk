@@ -16,6 +16,30 @@ fn register_worker(state: &mut State, id: &str) {
     );
 }
 
+fn register_managed_child(state: &mut State, id: &str, parent: &str, peer: &str) {
+    state
+        .apply_checked(&Event::SubagentUpdated {
+            subagent: crate::subagent::Record {
+                id: id.into(),
+                parent: parent.into(),
+                peer: peer.into(),
+                status: "idle".into(),
+                thread_id: Some(format!("thread-{peer}")),
+                profile: None,
+                created_ms: now_ms(),
+                ready_deadline_ms: now_ms() + 60_000,
+                last_message: None,
+                error: None,
+                probe_failures: Vec::new(),
+                runtime: Some("codex".into()),
+                create_operation_id: None,
+                binding_id: None,
+                endpoint_generation: None,
+            },
+        })
+        .unwrap();
+}
+
 fn task(id: &str, owner: &str) -> TaskRec {
     TaskRec {
         id: id.into(),
@@ -115,7 +139,7 @@ fn compact_snapshot_preserves_invitation_and_its_capacity_reservation() {
             },
         })
         .unwrap();
-    assert!(board_peer_has_responsibility(&state, "peer", None));
+    assert!(board_peer_has_execution_reservation(&state, "peer", None));
     assert!(!keepalive::actionable("invited"));
     assert!(!task_resource_active("invited"));
     let mut restored = State::default();
@@ -132,8 +156,197 @@ fn compact_snapshot_preserves_invitation_and_its_capacity_reservation() {
         8
     );
     assert_eq!(restored.tasks["offer"].owner, "publisher");
-    assert!(board_peer_has_responsibility(&restored, "peer", None));
+    assert!(board_peer_has_execution_reservation(
+        &restored, "peer", None
+    ));
     assert!(board_check_revision(&restored, "offer", 16).is_err());
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn blocked_and_waiting_keep_responsibility_without_consuming_the_next_execution_slot() {
+    let mut state = State::default();
+    register_worker(&mut state, "peer");
+    let mut blocked = task("blocked", "peer");
+    blocked.status = "blocked".into();
+    let mut waiting = task("waiting", "peer");
+    waiting.status = "waiting".into();
+    state
+        .apply_checked(&Event::TaskCreated { task: blocked })
+        .unwrap();
+    state
+        .apply_checked(&Event::TaskCreated { task: waiting })
+        .unwrap();
+    assert!(keepalive::unfinished("blocked"));
+    assert!(keepalive::unfinished("waiting"));
+    assert!(!board_peer_has_execution_reservation(&state, "peer", None));
+}
+
+#[test]
+fn managed_binding_does_not_hide_a_task_published_for_public_work() {
+    let mut state = State::default();
+    register_worker(&mut state, "parent");
+    register_worker(&mut state, "child-peer");
+    register_managed_child(&mut state, "child", "parent", "child-peer");
+    let mut public = task("public-claimed-by-child", "child-peer");
+    public.created_by = "parent".into();
+    state
+        .apply_checked(&Event::TaskCreated { task: public })
+        .unwrap();
+    state
+        .apply_checked(&Event::BoardDetailsChanged {
+            task_id: "public-claimed-by-child".into(),
+            details: crate::board::BoardTaskDetails {
+                title: "公开任务".into(),
+                revision: 2,
+                public_visibility: true,
+                ..crate::board::BoardTaskDetails::default()
+            },
+        })
+        .unwrap();
+    let record = state.subagents["child"].clone();
+    state
+        .apply_checked(&Event::SubagentUpdated { subagent: record })
+        .unwrap();
+    assert!(state.board_details["public-claimed-by-child"].public_visibility);
+}
+
+#[test]
+fn authenticated_managed_queue_is_parent_visible_while_public_output_hides_child_identity() {
+    let mut state = State::default();
+    register_worker(&mut state, "parent");
+    register_worker(&mut state, "child-peer");
+    register_worker(&mut state, "other-peer");
+    register_managed_child(&mut state, "child", "parent", "child-peer");
+    state
+        .apply_checked(&Event::WorkerNamed {
+            worker_id: "child-peer".into(),
+            name: Some("Private child name".into()),
+        })
+        .unwrap();
+    state
+        .apply_checked(&Event::WorkerNamed {
+            worker_id: "parent".into(),
+            name: Some("Parent name".into()),
+        })
+        .unwrap();
+
+    let mut public = task("public-claimed-by-child", "parent");
+    public.created_by = "parent".into();
+    state
+        .apply_checked(&Event::TaskCreated {
+            task: public.clone(),
+        })
+        .unwrap();
+    state
+        .apply_checked(&Event::BoardDetailsChanged {
+            task_id: public.id.clone(),
+            details: crate::board::BoardTaskDetails {
+                title: "公开任务".into(),
+                revision: 1,
+                public_visibility: true,
+                ..crate::board::BoardTaskDetails::default()
+            },
+        })
+        .unwrap();
+    public.owner = "child-peer".into();
+    public.status = "working".into();
+    state
+        .apply_checked(&Event::TaskUpdated { task: public })
+        .unwrap();
+
+    let private = task("child-private", "child-peer");
+    state
+        .apply_checked(&Event::TaskCreated {
+            task: private.clone(),
+        })
+        .unwrap();
+    assert!(board_task_view(&state, &state.tasks[&private.id]).is_none());
+    assert!(board_task_view_for(&state, &state.tasks[&private.id], Some("parent")).is_some());
+    assert!(board_task_view_for(&state, &state.tasks[&private.id], Some("child-peer")).is_some());
+    assert!(board_task_view_for(&state, &state.tasks[&private.id], Some("other-peer")).is_none());
+
+    let public_view = board_task_view(&state, &state.tasks["public-claimed-by-child"]).unwrap();
+    assert_eq!(public_view.owner, "parent");
+    assert_eq!(public_view.publisher, "parent");
+    assert!(!serde_json::to_string(&public_view)
+        .unwrap()
+        .contains("child-peer"));
+    assert_eq!(public_view.owner_display_name, "Parent name");
+    assert!(!serde_json::to_string(&public_view)
+        .unwrap()
+        .contains("Private child name"));
+    let private_parent =
+        board_task_view_for(&state, &state.tasks["child-private"], Some("parent")).unwrap();
+    assert_eq!(private_parent.owner, "child-peer");
+    assert_eq!(private_parent.publisher, "child-peer");
+
+    let mut restored = State::default();
+    for event in state.snapshot_events() {
+        restored.apply_checked(&event).unwrap();
+    }
+    assert_eq!(
+        restored.tasks["public-claimed-by-child"].owner,
+        "child-peer"
+    );
+    assert!(restored.board_details["public-claimed-by-child"].public_visibility);
+    assert_eq!(
+        board_task_view(&restored, &restored.tasks["public-claimed-by-child"])
+            .unwrap()
+            .owner,
+        "parent"
+    );
+    assert!(!restored.board_details["child-private"].public_visibility);
+    assert!(
+        board_task_view_for(&restored, &restored.tasks["child-private"], Some("parent")).is_some()
+    );
+    assert!(board_task_view(&restored, &restored.tasks["child-private"]).is_none());
+}
+
+#[test]
+fn name_overrides_survive_compaction_but_reset_and_retirement_remove_them() {
+    let mut state = State::default();
+    register_worker(&mut state, "peer");
+    state
+        .apply_checked(&Event::WorkerNamed {
+            worker_id: "peer".into(),
+            name: Some("Alice".into()),
+        })
+        .unwrap();
+    let restore = |state: &State| {
+        let mut restored = State::default();
+        for event in state.snapshot_events() {
+            restored.apply_checked(&event).unwrap();
+        }
+        restored
+    };
+    let mut state = restore(&state);
+    assert_eq!(worker_display_name(&state, "peer", true), "Alice");
+    state
+        .apply_checked(&Event::WorkerNamed {
+            worker_id: "peer".into(),
+            name: None,
+        })
+        .unwrap();
+    let mut state = restore(&state);
+    assert_eq!(worker_display_name(&state, "peer", true), "Jenny");
+    state
+        .apply_checked(&Event::WorkerNamed {
+            worker_id: "peer".into(),
+            name: Some("Alice".into()),
+        })
+        .unwrap();
+    state
+        .apply_checked(&Event::WorkerClosed {
+            worker_id: "peer".into(),
+            closed_by: "peer".into(),
+            reason: "user unregister".into(),
+            snapshot_captured_ms: None,
+            at_ms: now_ms(),
+        })
+        .unwrap();
+    let mut state = restore(&state);
+    register_worker(&mut state, "peer");
+    assert_eq!(worker_display_name(&state, "peer", false), "peer");
 }

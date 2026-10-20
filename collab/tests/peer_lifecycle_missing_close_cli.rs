@@ -1,16 +1,69 @@
 include!("support/context_operation_fixture.rs");
 
-use std::thread;
+struct OwnedTmuxSession {
+    socket: PathBuf,
+    session: String,
+}
+
+impl OwnedTmuxSession {
+    fn kill(&mut self) {
+        if self.socket.exists() {
+            let output = Command::new("tmux")
+                .args([
+                    "-S",
+                    self.socket.to_str().unwrap(),
+                    "kill-session",
+                    "-t",
+                    &self.session,
+                ])
+                .output()
+                .expect("close owned tmux session");
+            assert!(
+                output.status.success(),
+                "close owned tmux session failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    fn wait_for_server_exit(&self) {
+        assert!(
+            wait_until(Duration::from_secs(5), || {
+                !Command::new("tmux")
+                    .args(["-S", self.socket.to_str().unwrap(), "list-sessions"])
+                    .output()
+                    .is_ok_and(|output| output.status.success())
+            }),
+            "owned tmux server did not exit after its final session closed"
+        );
+    }
+}
+
+impl Drop for OwnedTmuxSession {
+    fn drop(&mut self) {
+        if self.socket.exists() {
+            let _ = Command::new("tmux")
+                .args([
+                    "-S",
+                    self.socket.to_str().unwrap(),
+                    "kill-session",
+                    "-t",
+                    &self.session,
+                ])
+                .output();
+        }
+    }
+}
 
 fn parse_json(bytes: &[u8]) -> Value {
     serde_json::from_slice(bytes).expect("collab CLI emits JSON")
 }
 
-fn create_session(fixture: &Fixture, label: &str) -> Pane {
+fn create_session_on_socket(label: &str, socket: &Path) -> Pane {
     let output = Command::new("tmux")
         .args([
             "-S",
-            fixture.tmux_socket.to_str().unwrap(),
+            socket.to_str().unwrap(),
             "new-session",
             "-d",
             "-s",
@@ -28,7 +81,7 @@ fn create_session(fixture: &Fixture, label: &str) -> Pane {
         Command::new("tmux")
             .args([
                 "-S",
-                fixture.tmux_socket.to_str().unwrap(),
+                socket.to_str().unwrap(),
                 "display-message",
                 "-p",
                 "-t",
@@ -46,7 +99,7 @@ fn create_session(fixture: &Fixture, label: &str) -> Pane {
         Command::new("tmux")
             .args([
                 "-S",
-                fixture.tmux_socket.to_str().unwrap(),
+                socket.to_str().unwrap(),
                 "display-message",
                 "-p",
                 "#{pid}",
@@ -67,65 +120,331 @@ fn create_session(fixture: &Fixture, label: &str) -> Pane {
     }
 }
 
-#[test]
-fn close_retires_a_no_session_tmux_peer_after_its_exact_pane_is_missing() {
-    let (mut fixture, master) =
-        Fixture::isolated_with_pane_command("stale-peer-close", "sleep 600");
-
-    let master_context = fixture.run_ok(&["context"], Some(&master));
-    let master_id = master_context["result"]["snapshot"]["identity"]["worker_id"]
-        .as_str()
-        .expect("master worker id")
-        .to_owned();
-    let promoted = fixture.run_ok(
-        &[
-            "master",
-            "promote",
-            "--approval",
-            "isolated stale peer close acceptance",
-        ],
-        Some(&master),
-    );
-    assert_eq!(promoted["master"], master_id, "{promoted}");
-
-    let stale = create_session(&fixture, "stale-peer");
-    fixture.track_tmux_session("stale-peer");
-    let stale_result = fixture.root.join("stale-context.json");
-    let stale_error = fixture.root.join("stale-context.err");
-    let stale_done = fixture.root.join("stale-context.done");
-    let script = format!(
-        "set -e\nunset CODEX_SESSION_ID CODEX_THREAD_ID CODEX_THREAD\n{} context --op stale-peer-bootstrap >{} 2>{}\nprintf done >{}\nsleep 600\n",
+fn run_script_in_pane_on_socket(
+    fixture: &Fixture,
+    socket: &Path,
+    pane: &Pane,
+    label: &str,
+    script: &str,
+) {
+    let script_path = fixture.root.join(format!("{label}.sh"));
+    std::fs::write(&script_path, script).expect("write selected-pane consumer");
+    let command = format!(
+        "cd {} && unset COLLAB_SOCKET_PATH COLLAB_HOST_SOCKET COLLAB_LOCK_PATH COLLAB_HOST_LOCK COLLAB_APPSERVER_SOCKET CODEX_APP_SERVER_SOCKET COLLAB_APPSERVER_NAMESPACE COLLAB_WORKER DSH_SESSION_ID; COLLAB_BINARY={} PROJECT_ROOT={} COLLAB_STATE_DIR={} CODEX_HOME={} CODEX_SESSION_ID={} CODEX_THREAD_ID={} CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex TUI' sh {}",
+        shell_quote(&fixture.root.to_string_lossy()),
         shell_quote(&fixture.binary.to_string_lossy()),
-        shell_quote(&stale_result.to_string_lossy()),
-        shell_quote(&stale_error.to_string_lossy()),
-        shell_quote(&stale_done.to_string_lossy())
+        shell_quote(&fixture.root.to_string_lossy()),
+        shell_quote(&fixture.host_state.to_string_lossy()),
+        shell_quote(&fixture.root.join("home").to_string_lossy()),
+        shell_quote(&pane.session_anchor),
+        shell_quote(&pane.thread_anchor),
+        shell_quote(&script_path.to_string_lossy())
     );
-    fixture.run_in_pane(&stale, "stale-peer-register", &script);
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while !stale_done.exists() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(25));
-    }
+    tmux(
+        socket,
+        &["respawn-pane", "-k", "-t", &pane.pane_id, &command],
+    );
+}
+
+fn register_context_in_project(
+    fixture: &Fixture,
+    project_root: &Path,
+    pane: &Pane,
+    operation_id: &str,
+    no_native_identity: bool,
+) -> Value {
+    let result = fixture
+        .root
+        .join(format!("{operation_id}.participant-result"));
+    let error = fixture
+        .root
+        .join(format!("{operation_id}.participant-error"));
+    let done = fixture
+        .root
+        .join(format!("{operation_id}.participant-done"));
+    let unset = if no_native_identity {
+        "unset CODEX_SESSION_ID CODEX_THREAD_ID CODEX_THREAD\n"
+    } else {
+        ""
+    };
+    let script = format!(
+        "set -e\ncd {}\n{}\"$COLLAB_BINARY\" context --op {} >{} 2>{}\nprintf done >{}\nsleep 600\n",
+        shell_quote(&project_root.to_string_lossy()),
+        unset,
+        shell_quote(operation_id),
+        shell_quote(&result.to_string_lossy()),
+        shell_quote(&error.to_string_lossy()),
+        shell_quote(&done.to_string_lossy())
+    );
+    let consumer = fixture.run_in_pane(pane, operation_id, &script);
     assert!(
-        stale_done.exists(),
-        "stale peer registration failed: {}",
-        std::fs::read_to_string(&stale_error).unwrap_or_default()
+        wait_until(Duration::from_secs(15), || done.exists()),
+        "participant registration failed: {} {}",
+        consumer.output(),
+        std::fs::read_to_string(error).unwrap_or_default()
     );
-    let stale_context = parse_json(&std::fs::read(&stale_result).expect("stale context result"));
-    assert_eq!(
-        stale_context["result"]["outcome"], "completed",
-        "{stale_context}"
+    let context = parse_json(&std::fs::read(result).expect("participant context result"));
+    assert_eq!(context["result"]["outcome"], "completed", "{context}");
+    context
+}
+
+fn register_context_on_socket(
+    fixture: &Fixture,
+    socket: &Path,
+    project_root: &Path,
+    pane: &Pane,
+    operation_id: &str,
+) -> Value {
+    let result = fixture
+        .root
+        .join(format!("{operation_id}.participant-result"));
+    let error = fixture
+        .root
+        .join(format!("{operation_id}.participant-error"));
+    let done = fixture
+        .root
+        .join(format!("{operation_id}.participant-done"));
+    let script = format!(
+        "set -e\ncd {}\nunset CODEX_SESSION_ID CODEX_THREAD_ID CODEX_THREAD\n\"$COLLAB_BINARY\" context --op {} >{} 2>{}\nprintf done >{}\nsleep 600\n",
+        shell_quote(&project_root.to_string_lossy()),
+        shell_quote(operation_id),
+        shell_quote(&result.to_string_lossy()),
+        shell_quote(&error.to_string_lossy()),
+        shell_quote(&done.to_string_lossy())
     );
-    let stale_id = stale_context["result"]["snapshot"]["identity"]["worker_id"]
-        .as_str()
-        .expect("stale worker id")
-        .to_owned();
-    assert_eq!(
-        stale_context["result"]["snapshot"]["identity"]["transport"]["session_id"],
-        Value::Null
+    run_script_in_pane_on_socket(fixture, socket, pane, operation_id, &script);
+    assert!(
+        wait_until(Duration::from_secs(15), || done.exists()),
+        "participant registration failed: {}",
+        std::fs::read_to_string(error).unwrap_or_default()
     );
+    let context = parse_json(&std::fs::read(result).expect("participant context result"));
+    assert_eq!(context["result"]["outcome"], "completed", "{context}");
+    context
+}
+
+fn promote_master(fixture: &Fixture, project_root: &Path, pane: &Pane) -> Value {
+    let output = fixture
+        .configured_command(
+            &[
+                "master",
+                "promote",
+                "--approval",
+                "isolated route-less peer close acceptance",
+            ],
+            Some(pane),
+        )
+        .current_dir(project_root)
+        .output()
+        .expect("promote fixture master");
+    assert!(
+        output.status.success(),
+        "master promote failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_json(&output.stdout)
+}
+
+fn identity(context: &Value) -> (String, String, String) {
+    let snapshot = &context["result"]["snapshot"];
+    (
+        snapshot["identity"]["worker_id"]
+            .as_str()
+            .expect("worker id")
+            .to_owned(),
+        snapshot["binding"]["binding_id"]
+            .as_str()
+            .expect("binding id")
+            .to_owned(),
+        snapshot["binding"]["app_scope_id"]
+            .as_str()
+            .expect("app scope id")
+            .to_owned(),
+    )
+}
+
+fn retire_binding_route(fixture: &mut Fixture, project_root: &Path, binding_id: &str) {
+    let journal_path = project_root.join(PROJECT_JOURNAL);
+    let binding = std::fs::read_to_string(&journal_path)
+        .expect("read project journal")
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|record| {
+            record["ev"] == "GlobalCurrentThreadRouteSet"
+                && record["binding"]["binding_id"] == binding_id
+        })
+        .last()
+        .and_then(|record| record.get("binding").cloned())
+        .expect("target route publication");
+    fixture.stop_daemon();
+    let mut journal = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&journal_path)
+        .expect("open project journal for typed replay");
+    serde_json::to_writer(
+        &mut journal,
+        &json!({"ev": "GlobalCurrentThreadRouteRetired", "binding": binding}),
+    )
+    .expect("serialize route retirement");
+    journal.write_all(b"\n").expect("append route retirement");
+    drop(journal);
+    fixture.restart_daemon();
+}
+
+fn wire_request(socket: &Path, request: &Value) -> Value {
+    let mut stream =
+        std::os::unix::net::UnixStream::connect(socket).expect("connect isolated daemon socket");
+    stream
+        .write_all(serde_json::to_string(request).unwrap().as_bytes())
+        .expect("write daemon request");
+    stream.write_all(b"\n").expect("terminate daemon request");
+    stream.flush().expect("flush daemon request");
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("read daemon response");
+    serde_json::from_str(&line).expect("daemon emits one JSON response")
+}
+
+fn workers_for_route(fixture: &Fixture, project_root: &Path, app_scope_id: &str) -> Value {
+    let canonical_root = std::fs::canonicalize(project_root).expect("canonicalize project root");
+    wire_request(
+        &fixture.host_state.join("server.sock"),
+        &json!({
+            "op": "Workers",
+            "project_context": {
+                "app_scope_id": app_scope_id,
+                "canonical_root": canonical_root.to_string_lossy(),
+                "project_scope": canonical_root.to_string_lossy()
+            }
+        }),
+    )
+}
+
+fn worker_row(workers: &Value, worker_id: &str) -> Value {
+    workers["workers"]
+        .as_array()
+        .expect("workers array")
+        .iter()
+        .find(|worker| worker["id"] == worker_id)
+        .cloned()
+        .unwrap_or_else(|| panic!("worker {worker_id} missing from {workers}"))
+}
+
+fn read_exact(fixture: &Fixture, master: &Pane, target_id: &str) -> Value {
+    fixture.run_ok(&["worker", "read", target_id], Some(master))
+}
+
+fn assert_not_retired(
+    fixture: &Fixture,
+    master: &Pane,
+    project_root: &Path,
+    app_scope_id: &str,
+    target_id: &str,
+    binding_id: &str,
+    close: &Value,
+    expected_runtime_archive: &str,
+) {
+    let result = &close["result"];
     assert_eq!(
-        stale_context["result"]["snapshot"]["identity"]["transport"]["thread_id"],
-        Value::Null
+        result["close"]["runtime_archive"]["state"], expected_runtime_archive,
+        "{close}"
+    );
+    for stage in [
+        "worker_retirement",
+        "binding_retirement",
+        "route_retirement",
+        "subscription_retirement",
+    ] {
+        assert_eq!(
+            result["close"][stage]["state"], "not-attempted",
+            "{stage} must not run after a non-terminal host probe: {close}"
+        );
+    }
+    let workers = workers_for_route(fixture, project_root, app_scope_id);
+    let row = worker_row(&workers, target_id);
+    assert_eq!(row["transport"]["kind"], "tmux", "{row}");
+    let read = read_exact(fixture, master, target_id);
+    assert_eq!(read["result"]["target"]["binding_id"], binding_id, "{read}");
+}
+
+fn close_target(fixture: &Fixture, master: &Pane, target_id: &str, reason: &str) -> Value {
+    let output = fixture
+        .configured_command(
+            &["worker", "close", target_id, "--reason", reason],
+            Some(master),
+        )
+        .output()
+        .expect("run public worker close");
+    assert!(
+        !output.stdout.is_empty(),
+        "worker close returned no typed receipt: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_json(&output.stdout)
+}
+
+fn query_operation(fixture: &Fixture, master: &Pane, operation_id: &str) -> Value {
+    let output = fixture
+        .configured_command(&["worker", "query", "--op", operation_id], Some(master))
+        .output()
+        .expect("run public worker query");
+    assert!(
+        !output.stdout.is_empty(),
+        "worker query returned no typed receipt: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_json(&output.stdout)
+}
+
+fn setup_master_and_route_less_target(label: &str) -> (Fixture, Pane, Pane, Value) {
+    let (mut fixture, master) = Fixture::isolated_with_pane_command(label, "sleep 600");
+    fixture.run_ok(&["context"], Some(&master));
+    promote_master(&fixture, &fixture.root, &master);
+
+    let target = create_session_on_socket("route-less-target", &fixture.tmux_socket);
+    fixture.track_tmux_session("route-less-target");
+    let target_context = register_context_in_project(
+        &fixture,
+        &fixture.root,
+        &target,
+        &format!("{label}-target"),
+        true,
+    );
+    let (_, binding_id, _) = identity(&target_context);
+    let project_root = fixture.root.clone();
+    retire_binding_route(&mut fixture, &project_root, &binding_id);
+    (fixture, master, target, target_context)
+}
+
+#[test]
+fn close_retires_a_route_less_tmux_peer_after_its_exact_pane_is_missing() {
+    let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (mut fixture, master, target, target_context) =
+        setup_master_and_route_less_target("stale-peer-close");
+    let (target_id, binding_id, app_scope_id) = identity(&target_context);
+
+    let workers = workers_for_route(&fixture, &fixture.root, &app_scope_id);
+    let row = worker_row(&workers, &target_id);
+    assert_eq!(row["presence"], "missing", "{row}");
+    assert_eq!(row["endpoint_live"], true, "{row}");
+
+    let route = fixture
+        .configured_command(
+            &["route", "resolve", "--pane-id", &target.pane_id],
+            Some(&target),
+        )
+        .env_remove("CODEX_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("CODEX_THREAD")
+        .output()
+        .expect("run route resolve");
+    assert!(
+        !route.status.success()
+            && String::from_utf8_lossy(&route.stderr).contains("ROUTE_RESOLVE_NOT_FOUND"),
+        "route must be absent before the missing-pane close: stdout={} stderr={}",
+        String::from_utf8_lossy(&route.stdout),
+        String::from_utf8_lossy(&route.stderr)
     );
 
     let killed = Command::new("tmux")
@@ -134,79 +453,183 @@ fn close_retires_a_no_session_tmux_peer_after_its_exact_pane_is_missing() {
             fixture.tmux_socket.to_str().unwrap(),
             "kill-session",
             "-t",
-            "stale-peer",
+            "route-less-target",
         ])
         .output()
-        .expect("close owned stale session");
+        .expect("close owned route-less target session");
     assert!(
         killed.status.success(),
-        "close owned stale session failed: {}",
+        "close owned route-less target session failed: {}",
         String::from_utf8_lossy(&killed.stderr)
     );
 
-    let read = fixture
-        .configured_command(&["worker", "read", &stale_id], Some(&master))
-        .output()
-        .expect("run exact worker read");
-    let read_json = parse_json(&read.stdout);
+    let close = close_target(
+        &fixture,
+        &master,
+        &target_id,
+        "remove route-less no-session binding causing tombstone poison",
+    );
+    assert_eq!(close["ok"], true, "{close}");
+    assert_eq!(close["result"]["outcome"], "complete", "{close}");
+    assert_eq!(close["result"]["phase"], "complete", "{close}");
     assert_eq!(
-        read_json["result"]["target"]["worker_id"], stale_id,
-        "read must expose the exact target: {read_json}"
+        close["result"]["target"]["binding_id"], binding_id,
+        "{close}"
+    );
+    assert_eq!(
+        close["result"]["close"]["runtime_archive"]["state"], "missing",
+        "{close}"
+    );
+    assert_eq!(
+        close["result"]["close"]["worker_retirement"]["state"], "verified",
+        "{close}"
+    );
+    assert_eq!(
+        close["result"]["close"]["binding_retirement"]["state"], "verified",
+        "{close}"
+    );
+    assert_eq!(
+        close["result"]["close"]["route_retirement"]["state"], "not-applicable",
+        "{close}"
+    );
+    assert_eq!(
+        close["result"]["close"]["subscription_retirement"]["state"], "verified",
+        "{close}"
     );
 
-    let close = fixture
-        .configured_command(
-            &[
-                "worker",
-                "close",
-                &stale_id,
-                "--reason",
-                "remove stale no-session binding causing tombstone poison",
-            ],
-            Some(&master),
-        )
-        .output()
-        .expect("run exact worker close");
-    let close_json = parse_json(&close.stdout);
-    assert!(
-        close.status.success() && close_json["ok"] == Value::Bool(true),
-        "close failed: {close_json}"
-    );
-    assert_eq!(close_json["result"]["action"], "close", "{close_json}");
-    assert_eq!(close_json["result"]["outcome"], "complete", "{close_json}");
-    assert_eq!(close_json["result"]["phase"], "complete", "{close_json}");
-    assert_eq!(
-        close_json["result"]["target"]["binding_id"],
-        stale_context["result"]["snapshot"]["binding"]["binding_id"],
-        "{close_json}"
-    );
-    assert_eq!(
-        close_json["result"]["close"]["runtime_archive"]["state"], "missing",
-        "{close_json}"
-    );
-    assert_eq!(
-        close_json["result"]["close"]["worker_retirement"]["state"], "verified",
-        "{close_json}"
-    );
-    assert_eq!(
-        close_json["result"]["close"]["binding_retirement"]["state"], "verified",
-        "{close_json}"
-    );
-    assert_eq!(
-        close_json["result"]["close"]["route_retirement"]["state"], "not-applicable",
-        "{close_json}"
-    );
-    assert_eq!(
-        close_json["result"]["close"]["subscription_retirement"]["state"], "verified",
-        "{close_json}"
-    );
+    let operation_id = close["result"]["operation_id"]
+        .as_str()
+        .expect("close operation id")
+        .to_owned();
+    let queried = query_operation(&fixture, &master, &operation_id);
+    assert_eq!(queried["result"], close["result"], "{queried}");
 
-    let after = fixture.run_ok(&["worker", "status"], Some(&master));
-    let remaining = after["workers"].as_array().expect("workers array");
+    fixture.stop_daemon();
+    fixture.restart_daemon();
+    let replayed = query_operation(&fixture, &master, &operation_id);
+    assert_eq!(replayed["result"], close["result"], "{replayed}");
+
+    let workers = workers_for_route(&fixture, &fixture.root, &app_scope_id);
     assert!(
-        remaining
+        workers["workers"]
+            .as_array()
+            .expect("workers array")
             .iter()
-            .all(|worker| worker["id"].as_str() != Some(stale_id.as_str())),
-        "retired worker still listed: {after}"
+            .all(|worker| worker["id"] != target_id),
+        "retired worker still listed after replay: {workers}"
     );
+}
+
+#[test]
+fn close_route_less_present_target_stays_cleanup_open_without_retirement() {
+    let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (fixture, master, _target, target_context) =
+        setup_master_and_route_less_target("route-less-present-close");
+    let (target_id, binding_id, app_scope_id) = identity(&target_context);
+
+    let workers = workers_for_route(&fixture, &fixture.root, &app_scope_id);
+    let row = worker_row(&workers, &target_id);
+    assert_eq!(row["presence"], "missing", "{row}");
+    assert_eq!(row["endpoint_live"], true, "{row}");
+
+    let close = close_target(
+        &fixture,
+        &master,
+        &target_id,
+        "must not archive a live route-less pane",
+    );
+    assert_eq!(close["result"]["outcome"], "cleanup-open", "{close}");
+    assert_eq!(close["result"]["phase"], "cleanup-open", "{close}");
+    assert!(
+        close["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("TRANSPORT_UNSUPPORTED"),
+        "{close}"
+    );
+    assert_not_retired(
+        &fixture,
+        &master,
+        &fixture.root,
+        &app_scope_id,
+        &target_id,
+        &binding_id,
+        &close,
+        "refused",
+    );
+    let operation_id = close["result"]["operation_id"]
+        .as_str()
+        .expect("close operation id");
+    let queried = query_operation(&fixture, &master, operation_id);
+    assert_eq!(queried["result"], close["result"], "{queried}");
+}
+
+#[test]
+fn close_route_less_unknown_target_stays_unknown_without_retirement() {
+    let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (mut fixture, master) =
+        Fixture::isolated_with_pane_command("route-less-unknown-close", "sleep 600");
+    fixture.run_ok(&["context"], Some(&master));
+    promote_master(&fixture, &fixture.root, &master);
+
+    let unknown_socket = fixture.root.join("unknown.sock");
+    create_session_on_socket("route-less-unknown-keeper", &unknown_socket);
+    let mut keeper_session = OwnedTmuxSession {
+        socket: unknown_socket.clone(),
+        session: "route-less-unknown-keeper".to_owned(),
+    };
+    let target = create_session_on_socket("route-less-unknown-target", &unknown_socket);
+    let mut target_session = OwnedTmuxSession {
+        socket: unknown_socket.clone(),
+        session: "route-less-unknown-target".to_owned(),
+    };
+    let target_context = register_context_on_socket(
+        &fixture,
+        &unknown_socket,
+        &fixture.root,
+        &target,
+        "route-less-unknown-context",
+    );
+    let (target_id, binding_id, app_scope_id) = identity(&target_context);
+    let project_root = fixture.root.clone();
+    retire_binding_route(&mut fixture, &project_root, &binding_id);
+
+    target_session.kill();
+    keeper_session.kill();
+    target_session.wait_for_server_exit();
+    let workers = workers_for_route(&fixture, &fixture.root, &app_scope_id);
+    let row = worker_row(&workers, &target_id);
+    assert_eq!(row["identity_valid"], false, "{row}");
+    assert_eq!(row["endpoint_live"], Value::Null, "{row}");
+
+    let close = close_target(
+        &fixture,
+        &master,
+        &target_id,
+        "must not retire a target with an unknown tmux terminal",
+    );
+    assert_eq!(close["result"]["outcome"], "unknown", "{close}");
+    assert_eq!(close["result"]["phase"], "unknown", "{close}");
+    assert!(
+        close["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("PEER_LIFECYCLE_TMUX_PROBE_UNKNOWN"),
+        "{close}"
+    );
+    assert_not_retired(
+        &fixture,
+        &master,
+        &fixture.root,
+        &app_scope_id,
+        &target_id,
+        &binding_id,
+        &close,
+        "unknown",
+    );
+    let operation_id = close["result"]["operation_id"]
+        .as_str()
+        .expect("close operation id");
+    let queried = query_operation(&fixture, &master, operation_id);
+    assert_eq!(queried["result"], close["result"], "{queried}");
 }

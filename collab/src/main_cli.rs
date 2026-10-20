@@ -262,8 +262,8 @@ pub(crate) enum WorkerCmd {
     },
     /// Read the latest live buffer from an exact registered tmux peer
     Snapshot {
-        /// Worker ID to inspect
-        id: String,
+        /// Exact worker ID whose pane buffer is captured
+        target_id: String,
         /// Maximum number of recent tmux buffer lines to return (1..=200)
         #[arg(long, default_value_t = 40)]
         lines: usize,

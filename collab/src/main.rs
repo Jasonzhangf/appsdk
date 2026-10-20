@@ -765,7 +765,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     out(&v);
                     Ok(())
                 }
-                WorkerCmd::Snapshot { id, lines } => {
+                WorkerCmd::Snapshot { target_id, lines } => {
                     let ident = me(&scope)?;
                     let v: serde_json::Value = call_project(
                         &scope,
@@ -773,7 +773,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                         &Req::WorkerSnapshot {
                             worker_id: ident.worker_id.clone(),
                             token: ident.token.clone(),
-                            target_id: id,
+                            target_id,
                             lines,
                         },
                     )?;

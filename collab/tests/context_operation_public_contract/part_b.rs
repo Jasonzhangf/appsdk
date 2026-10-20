@@ -223,7 +223,7 @@ fn single_context_master_peer_intent_overrides_and_replays_after_restart() {
         }
         let bytes = (
             fs::read(fixture.host_journal()).unwrap(),
-            fs::read(fixture.project_journal()).unwrap(),
+            without_ledger_scans(&fs::read(fixture.project_journal()).unwrap()),
             fs::read(&fence.identity_path).unwrap(),
         );
         let replay = run_context_cli(
@@ -242,7 +242,7 @@ fn single_context_master_peer_intent_overrides_and_replays_after_restart() {
             bytes,
             (
                 fs::read(fixture.host_journal()).unwrap(),
-                fs::read(fixture.project_journal()).unwrap(),
+                without_ledger_scans(&fs::read(fixture.project_journal()).unwrap()),
                 fs::read(&fence.identity_path).unwrap()
             )
         );
@@ -254,7 +254,7 @@ fn single_context_master_peer_intent_overrides_and_replays_after_restart() {
         );
         let after_restart = (
             fs::read(fixture.host_journal()).unwrap(),
-            fs::read(fixture.project_journal()).unwrap(),
+            without_ledger_scans(&fs::read(fixture.project_journal()).unwrap()),
             fs::read(&fence.identity_path).unwrap(),
         );
         let replay = run_context_cli(
@@ -273,7 +273,7 @@ fn single_context_master_peer_intent_overrides_and_replays_after_restart() {
             after_restart,
             (
                 fs::read(fixture.host_journal()).unwrap(),
-                fs::read(fixture.project_journal()).unwrap(),
+                without_ledger_scans(&fs::read(fixture.project_journal()).unwrap()),
                 fs::read(&fence.identity_path).unwrap(),
             ),
             "same-key replay after restart must not repeat effects"

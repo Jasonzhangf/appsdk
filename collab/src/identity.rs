@@ -777,10 +777,14 @@ fn identity_by_current_anchors_at(
                 identities.insert(identity.worker_id.clone(), identity);
             }
         }
-        return Ok(identities
-            .into_values()
-            .next()
-            .map(AnchorResolution::CurrentScope));
+        let identities = identities.into_values().collect::<Vec<_>>();
+        return match identities.as_slice() {
+            [] => Ok(None),
+            [identity] => Ok(Some(AnchorResolution::CurrentScope(identity.clone()))),
+            _ => anyhow::bail!(
+                "IDENTITY_RESTORE_AMBIGUOUS: tmux_session matches multiple persisted identities; the daemon cannot prove a unique owner"
+            ),
+        };
     }
     let mut anchors = Vec::new();
     if let Some(anchor) = observed.tmux_anchor.as_ref() {

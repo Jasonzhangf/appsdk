@@ -224,3 +224,10 @@
   review and follow-up closure review passed with no P0/P1 findings. Local
   guidance audit identified historical digest/candidate-binding instructions;
   removed those retired requirements. Remote integration is pending.
+- CI caught two integration omissions: the tmux authority-clear fixture still
+  expected master-only publication, and the board graph referenced unregistered
+  operator version 2. Updated the fixture to require peer publish success and
+  master-only invite rejection; restored the registered version 1 bindings.
+  All 7 tmux authority CLI cases and the embedded graph registry consumer test
+  passed. These corrections change tests/design bindings only; installed
+  runtime code is unchanged.

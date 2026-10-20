@@ -220,7 +220,7 @@ impl State {
                 for task in self
                     .tasks
                     .values()
-                    .filter(|task| task.owner == subagent.peer || task.created_by == subagent.peer)
+                    .filter(|task| task.created_by == subagent.peer)
                 {
                     if let Some(details) = self.board_details.get_mut(&task.id) {
                         details.public_visibility = false;
@@ -268,8 +268,15 @@ impl State {
                 self.worker_snapshots.remove(&worker.id);
                 self.workers.insert(worker.id.clone(), worker.clone());
             }
+            Event::WorkerNamed { worker_id, name } => {
+                match name {
+                    Some(name) => { self.worker_names.insert(worker_id.clone(), name.clone()); },
+                    None => { self.worker_names.remove(worker_id); },
+                }
+            }
             Event::LegacyWorkerRemoved { worker_id } => {
                 self.workers.remove(worker_id);
+                self.worker_names.remove(worker_id);
                 self.master_wake.idle_workers.retain(|id| id != worker_id);
                 self.master_wake
                     .newly_idle_workers
@@ -293,6 +300,7 @@ impl State {
                     },
                 );
                 self.workers.remove(worker_id);
+                self.worker_names.remove(worker_id);
                 self.keepalives.remove(worker_id);
                 self.master_wake.idle_workers.retain(|id| id != worker_id);
                 self.master_wake
@@ -1060,6 +1068,11 @@ impl State {
                 .into_iter()
                 .map(|worker| Event::Registered { worker }),
         );
+        let mut names: Vec<_> = self.worker_names.iter().collect();
+        names.sort_by(|left, right| left.0.cmp(right.0));
+        events.extend(names.into_iter().map(|(id, name)| Event::WorkerNamed {
+            worker_id: id.clone(), name: Some(name.clone()),
+        }));
         let mut keepalives: Vec<_> = self.keepalives.iter().collect();
         keepalives.sort_by(|a, b| a.0.cmp(b.0));
         events.extend(

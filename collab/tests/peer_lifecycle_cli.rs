@@ -724,6 +724,173 @@ fn verified_public_create_can_be_bound_and_read_back_as_managed() {
         "{ready}"
     );
 
+    // Exercise the board through the actual CLI after public Create + Bind.
+    let board_call = |args: &[&str], child: bool| -> Value {
+        let mut command = fixture.configured_command(args, None);
+        if child {
+            configure_child_runtime(&mut command);
+        } else {
+            configure_runtime(&mut command);
+        }
+        let output = command.output().expect("managed board command");
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+    let publish = |id: &str, child: bool| {
+        board_call(
+            &[
+                "board",
+                "publish",
+                id,
+                "--title",
+                "Board work",
+                "--description",
+                "Own scoped work",
+                "--delivery-condition",
+                "Verified result",
+                "--test-condition",
+                "Public CLI assertions",
+            ],
+            child,
+        )
+    };
+    publish("managed-board-public", false);
+    let claimed = board_call(
+        &[
+            "board",
+            "claim",
+            "managed-board-public",
+            "--expected-revision",
+            "1",
+        ],
+        true,
+    );
+    assert_eq!(claimed["task"]["status"], "working");
+    let actual = board_call(&["task", "status", "managed-board-public"], true);
+    assert_eq!(actual["owner"], "bind-created-peer");
+    publish("managed-board-private", true);
+    let private_board = board_call(&["board", "show"], true);
+    assert!(private_board["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|task| task["id"] == "managed-board-private"));
+
+    let revision = claimed["task"]["revision"].as_u64().unwrap().to_string();
+    let described = board_call(
+        &[
+            "board",
+            "describe",
+            "managed-board-public",
+            "--expected-revision",
+            &revision,
+            "--title",
+            "Updated public work",
+            "--description",
+            "Public work stays public",
+            "--delivery-condition",
+            "Verified result",
+            "--test-condition",
+            "Public CLI assertions",
+        ],
+        true,
+    );
+    let parent_board = board_call(&["board", "show"], false);
+    let public = parent_board["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "managed-board-public")
+        .unwrap();
+    assert_ne!(
+        public["owner"], "bind-created-peer",
+        "public responsibility is the parent"
+    );
+    // A failed claim uses the same public projection instead of exposing child identity.
+    let public_revision = described["task"]["revision"].as_u64().unwrap().to_string();
+    let mut competing = fixture.configured_command(
+        &[
+            "board",
+            "claim",
+            "managed-board-public",
+            "--expected-revision",
+            &public_revision,
+        ],
+        None,
+    );
+    configure_runtime(&mut competing);
+    let rejected = competing.output().unwrap();
+    assert!(!rejected.status.success());
+    assert!(!String::from_utf8_lossy(&rejected.stderr).contains("bind-created-peer"));
+
+    board_call(
+        &[
+            "board",
+            "update",
+            "managed-board-public",
+            "--expected-revision",
+            &public_revision,
+            "--status",
+            "blocked",
+            "--next",
+            "Await authorized input; continue private queue",
+        ],
+        true,
+    );
+    let private_claim = board_call(
+        &[
+            "board",
+            "claim",
+            "managed-board-private",
+            "--expected-revision",
+            "1",
+        ],
+        true,
+    );
+    assert_eq!(private_claim["task"]["status"], "working");
+    let private_revision = private_claim["task"]["revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    board_call(
+        &[
+            "board",
+            "update",
+            "managed-board-private",
+            "--expected-revision",
+            &private_revision,
+            "--status",
+            "cancelled",
+        ],
+        true,
+    );
+    board_call(
+        &[
+            "task",
+            "update",
+            "managed-board-public",
+            "--status",
+            "cancelled",
+        ],
+        true,
+    );
+
+    // A parent remains authorized to dispatch after returning to ordinary peer.
+    let mut clear = fixture.configured_command(
+        &[
+            "master",
+            "clear",
+            "--approval",
+            "isolated parent dispatch acceptance",
+        ],
+        None,
+    );
+    configure_runtime(&mut clear);
+    assert!(clear.output().unwrap().status.success());
     let send_reply = subagent_mcp_call(json!({
         "action":"send",
         "id":"managed-created-peer",
@@ -790,6 +957,29 @@ fn verified_public_create_can_be_bound_and_read_back_as_managed() {
         consumed_status["consumed_by_recv"], true,
         "{consumed_status}"
     );
+
+    board_call(&["subagent", "working", "managed-created-peer"], true);
+    let assigned_task = format!("task-{success_msg_id}");
+    board_call(
+        &["task", "update", &assigned_task, "--status", "blocked"],
+        true,
+    );
+    let next_reply = subagent_mcp_call(json!({
+        "action":"send", "id":"managed-created-peer",
+        "subject":"next task after blocker", "body":"Continue independent work while the first task stays blocked."
+    }));
+    assert_eq!(next_reply["isError"], false, "{next_reply}");
+    let mut promote_again = fixture.configured_command(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "isolated remaining Create acceptance",
+        ],
+        None,
+    );
+    configure_runtime(&mut promote_again);
+    assert!(promote_again.output().unwrap().status.success());
 
     // Exercise the public partial-commit path with a second managed child.
     // Its ready transition and durable message commit must remain visible when

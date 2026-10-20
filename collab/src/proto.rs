@@ -871,6 +871,11 @@ pub enum Req {
     WorkerStatus {
         worker_id: Option<String>,
     },
+    WorkerName {
+        worker_id: String,
+        token: String,
+        name: Option<String>,
+    },
     WorkerSnapshot {
         worker_id: String,
         token: String,

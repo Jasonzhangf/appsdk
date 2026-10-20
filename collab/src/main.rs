@@ -758,6 +758,20 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
         Cmd::Worker { cmd } => {
             let scope = Scope::resolve()?;
             match cmd {
+                WorkerCmd::Name { name, reset: _ } => {
+                    let ident = registered_board_identity(&scope)?;
+                    let value: Value = call_project(
+                        &scope,
+                        &ident,
+                        &Req::WorkerName {
+                            worker_id: ident.worker_id.clone(),
+                            token: ident.token.clone(),
+                            name,
+                        },
+                    )?;
+                    out(&value);
+                    Ok(())
+                }
                 WorkerCmd::Status { id } => {
                     let ident = me(&scope)?;
                     let v: serde_json::Value =
@@ -1058,7 +1072,6 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             let scope = Scope::resolve()?;
             let ident = registered_board_identity(&scope)?;
             let request = match cmd {
-                board::BoardCommand::Show => Req::BoardShow,
                 command => Req::Board {
                     worker_id: ident.worker_id.clone(),
                     token: ident.token.clone(),

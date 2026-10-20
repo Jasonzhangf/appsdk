@@ -36,7 +36,7 @@
       "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"
     },
     {
-      "id": "emit_snapshot", "operator": "appsdk.collab_context.emit_snapshot", "operator_version": "2",
+      "id": "输出含显示名的权威快照", "operator": "appsdk.collab_context.emit_snapshot", "operator_version": "2",
       "inputs": ["env_projection"], "output": {"id": "state_snapshot", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
       "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"
@@ -47,7 +47,7 @@
     {"from": "ensure_baseline", "to": "ensure_daemon", "arc_id": "baseline_ready"},
     {"from": "ensure_daemon", "to": "identity_gate", "arc_id": "daemon_ready"},
     {"from": "identity_gate", "to": "env_view", "arc_id": "identity_operation_result"},
-    {"from": "env_view", "to": "emit_snapshot", "arc_id": "env_projection"}
+    {"from": "env_view", "to": "输出含显示名的权威快照", "arc_id": "env_projection"}
   ],
   "outputs": ["state_snapshot"]
 }

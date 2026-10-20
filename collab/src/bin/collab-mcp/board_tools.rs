@@ -4,8 +4,9 @@ use serde_json::{json, Value};
 pub fn tools() -> Vec<Value> {
     let revision = json!({"type":"integer","minimum":1});
     vec![
-        tool("collab_board_show", "Read public master/peer tasks and observed members. Does not register peers, start the daemon, consume messages, or expose private subworkers.", json!({}), &[]),
-        tool("collab_board_publish", "Live project master publishes a pending task with delivery/test conditions. This does not start execution or transfer ownership.", json!({"id":{"type":"string"},"title":{"type":"string"},"description":{"type":"string"},"delivery_condition":{"type":"string"},"test_condition":{"type":"string"},"priority":{"type":"string","enum":["p0","p1","p2","p3","p4"]}}), &["id","title","description","delivery_condition","test_condition"]),
+        tool("collab_board_show", "Read public tasks and the caller's own or managed-child private queue. Private child work is visible only to the child and its parent. Does not register peers, start the daemon, or consume messages.", json!({}), &[]),
+        tool("collab_board_publish", "Any registered master, peer, or managed child publishes a pending task with delivery/test conditions. Ordinary actors publish publicly; managed children publish private queue work. This does not start execution or transfer ownership.", json!({"id":{"type":"string"},"title":{"type":"string"},"description":{"type":"string"},"delivery_condition":{"type":"string"},"test_condition":{"type":"string"},"priority":{"type":"string","enum":["p0","p1","p2","p3","p4"]}}), &["id","title","description","delivery_condition","test_condition"]),
+        tool("collab_board_claim", "Any registered actor atomically claims one pending task at the observed revision. Public tasks are claimable by registered actors; a private queue task is claimable only by its publisher. Success transfers TaskRec.owner and enters working without changing publisher.", json!({"id":{"type":"string"},"expected_revision":revision}), &["id","expected_revision"]),
         tool("collab_board_invite", "Live master invites one idle ordinary peer. Invitation reserves public dispatch capacity, not task ownership. A peer may decline or independently register its own work.", json!({"id":{"type":"string"},"to":{"type":"string"},"expected_revision":revision}), &["id","to","expected_revision"]),
         tool("collab_board_respond", "Only the invited peer accepts or declines an observed invitation. Accept rechecks other responsibilities and binding before transferring owner; decline requires reason and preserves publisher ownership.", json!({"id":{"type":"string"},"accept":{"type":"boolean"},"decline":{"type":"boolean"},"expected_revision":revision,"reason":{"type":"string"}}), &["id","expected_revision"]),
         tool("collab_board_withdraw", "Live master withdraws an unaccepted invitation with its observed revision and reason. Does not reclaim peer-owned execution.", json!({"id":{"type":"string"},"expected_revision":revision,"reason":{"type":"string"}}), &["id","expected_revision","reason"]),
@@ -38,6 +39,7 @@ pub fn argv(name: &str, args: &Value) -> Result<Option<Vec<String>>, String> {
     let action = match name {
         "collab_board_show" => "show",
         "collab_board_publish" => "publish",
+        "collab_board_claim" => "claim",
         "collab_board_invite" => "invite",
         "collab_board_respond" => "respond",
         "collab_board_withdraw" => "withdraw",
@@ -76,6 +78,7 @@ pub fn argv(name: &str, args: &Value) -> Result<Option<Vec<String>>, String> {
                 optional_flag(&mut argv, args, "priority", "--priority")?;
             }
         }
+        "claim" => {}
         "invite" => argv.extend(["--to".into(), required(args, "to")?]),
         "respond" => {
             let accept = boolean(args, "accept")?;
@@ -114,7 +117,7 @@ mod tests {
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names.len(), 8);
+        assert_eq!(names.len(), 9);
         for tool in tools.iter().filter(|tool| {
             !matches!(
                 tool["name"].as_str(),
@@ -130,6 +133,24 @@ mod tests {
                 1
             );
         }
+    }
+
+    #[test]
+    fn claim_maps_to_one_atomic_board_command_with_a_positive_revision() {
+        assert_eq!(
+            argv(
+                "collab_board_claim",
+                &json!({"id":"next-task","expected_revision":7})
+            )
+            .unwrap()
+            .unwrap(),
+            ["board", "claim", "next-task", "--expected-revision", "7"]
+        );
+        assert!(argv(
+            "collab_board_claim",
+            &json!({"id":"next-task","expected_revision":0})
+        )
+        .is_err());
     }
 
     #[test]

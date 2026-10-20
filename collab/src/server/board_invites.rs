@@ -34,6 +34,7 @@ fn board_invite(server: &Server, actor: String, token: String, id: String, to: S
     if let Err(error) = board_check_actor(&state, &actor, &token)
         .and_then(|()| board_check_master_locked(server, &state, &actor)) { return error; }
     let mut details = match board_check_revision(&state, &id, expected_revision) { Ok(details) => details, Err(error) => return error };
+    if !details.public_visibility { return Resp::err("BOARD_TASK_NOT_PUBLIC: only public work may be invited"); }
     let Some(mut task) = state.tasks.get(&id).cloned() else { return Resp::err("task not found"); };
     if task.status != "pending" { return Resp::err("only a pending task may be invited"); }
     if task.owner != task.created_by { return Resp::err("pending task owner must be its publisher"); }
@@ -47,7 +48,7 @@ fn board_invite(server: &Server, actor: String, token: String, id: String, to: S
     if binding.binding_id != expected_binding.binding_id || binding.endpoint_generation != expected_binding.endpoint_generation {
         return Resp::err("BOARD_STALE_PEER: recipient runtime binding changed during admission");
     }
-    if board_peer_has_responsibility(&state, &to, None) { return Resp::err("BOARD_PEER_BUSY: peer owns an unfinished task or another invitation"); }
+    if board_peer_has_execution_reservation(&state, &to, None) { return Resp::err("BOARD_PEER_BUSY: peer owns an active task or another invitation"); }
     let now = now_ms();
     let message_id = format!("board-invite-{}-{}", id, details.revision + 1);
     details.invitation = Some(crate::board::BoardInvitation {
@@ -58,7 +59,7 @@ fn board_invite(server: &Server, actor: String, token: String, id: String, to: S
     details.revision += 1;
     task.status = "invited".into(); task.updated_ms = now;
     let message = Message {
-        id: message_id.clone(), from: actor, to: to.clone(), mtype: "request".into(),
+        id: message_id.clone(), from: actor.clone(), to: to.clone(), mtype: "request".into(),
         subject: Some(format!("task-invitation:{id}")),
         body: format!("{}\n{}\nDelivery condition: {}\nTest condition: {}\nRead the durable message with collab recv, then observe your invitation with collab board show. Respond using collab board respond <task-id> --accept|--decline --expected-revision <observed-revision>, taking the task ID and revision from the typed task view, not this message. You may decline; an invitation alone does not transfer ownership.", details.title, details.description, details.delivery_condition, details.test_condition),
         in_reply_to: None, created_ms: now, state: "pending".into(),
@@ -74,7 +75,8 @@ fn board_invite(server: &Server, actor: String, token: String, id: String, to: S
     ];
     if let Some(subscription) = &subscription { events.push(Event::WakeBound { message_id: message_id.clone(), subscription_id: subscription.id.clone() }); }
     if let Err(error) = server.commit_locked_checked(&mut state, &events) { return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}")); }
-    let data = json!({ "task": state.tasks.get(&id).and_then(|task| board_task_view(&state, task)), "msg_id": message_id, "consumed": false });
+    let master = current_master_worker_id(&state, Some(&route));
+    let data = json!({ "task": state.tasks.get(&id).and_then(|task| board_task_view_with_master(&state, task, Some(&actor), master.as_deref())), "msg_id": message_id, "consumed": false });
     drop(state);
     let attempt = match &subscription {
         Some(subscription) => attempt_notification_detailed_with_at(server, &message_id, &subscription.id, now_ms()),
@@ -115,7 +117,7 @@ fn board_respond(server: &Server, actor: String, token: String, id: String, expe
     let mut events = vec![Event::TaskUpdated { task }, Event::BoardDetailsChanged { task_id: id.clone(), details }];
     if !accept { events.push(Event::Superseded { ids: vec![invite.message_id] }); }
     if let Err(error) = server.commit_locked_checked(&mut state, &events) { return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}")); }
-    board_task_response(&state, &id)
+    board_task_response(server, &state, &id, &actor)
 }
 
 fn board_withdraw(server: &Server, actor: String, token: String, id: String, expected_revision: u64, reason: String) -> Resp {
@@ -133,5 +135,5 @@ fn board_withdraw(server: &Server, actor: String, token: String, id: String, exp
         Event::TaskUpdated { task }, Event::BoardDetailsChanged { task_id: id.clone(), details },
         Event::Superseded { ids: vec![invite.message_id] },
     ]) { return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}")); }
-    board_task_response(&state, &id)
+    board_task_response(server, &state, &id, &actor)
 }

@@ -20,10 +20,10 @@ wake is a bounded preview; the durable mailbox remains authoritative.
   brief from server role truth; promotion and delegation return the new brief.
   The brief defines role, authority, derivation, blocked boundary, completion
   action, and next action without a second prompt contract.
-- The live master scheduler is the sole task assignment admission owner. It
-  dispatches an authorized task to a live idle registered peer, then to an
-  idle managed child when no ordinary peer is eligible. The assigned peer
-  accepts the durable task before execution and owns the rest of its lifecycle.
+- Registered masters and peers publish pending work on the board. Peers and
+  registered managed children claim eligible work under their own identity;
+  peers may publish and claim their own work. Master may also invite an
+  ordinary peer. Private managed dispatch retains its existing protocol.
 - Each peer owns its task lifecycle after acceptance: latest-main sync, private
   worktree, implementation, tests, exact commit, candidate verification, short
   integration lease, main merge/verification/push, and cleanup.
@@ -41,6 +41,49 @@ wake is a bounded preview; the durable mailbox remains authoritative.
 Scoped capabilities replace roles: task owner for one task, resource holder
 for one resource, integration lease for one main merge, and daemon operator for
 one maintenance action.
+
+## Board work and queued tasks
+
+```sh
+collab board show
+collab board publish <id> --title <title> --description <scope> \
+  --delivery-condition <result> --test-condition <check>
+collab board claim <id> --expected-revision <observed-revision>
+collab board update <id> --expected-revision <observed-revision> \
+  --status blocked --next "<cause; release condition; next action>"
+```
+
+Publish additional IDs to queue subsequent work. Pending entries do not start
+execution or occupy its slot. On completion or a blocker, inspect remaining
+work and continue an authorized, nonconflicting task. Blocked and waiting work
+keeps its owner and resources. Resuming it rechecks execution capacity.
+Before idle and on the next activation, recheck blockers and unfinished duties.
+These are agent actions; the board adds no periodic worker wake or automatic
+execution. The [Collab Skill](skills/collab/SKILL.md#continue-the-queue-and-recheck-blockers)
+defines each role's steps. Managed private queues are visible only to the child
+and its parent; the public board shows parent responsibility for public work.
+
+Subworkers normally receive assignments directly from their peer parent or
+master through the owning executor. A bound child's parent or current master
+can use `collab subagent send`. Board claim remains optional for a subworker;
+an existing assignment does not require a second publish/claim sequence.
+
+## Display names
+
+An ordinary tmux peer defaults to its bound pane identifier. The current master
+defaults to `Jenny`, unless the user explicitly chooses another name:
+
+```sh
+collab worker name "Alice"
+collab worker name --reset
+```
+
+Run the existing `collab context` initialization only when requested by the
+user. Naming operates on that registered caller, without a new registration.
+Overrides survive restart and stay with the identity across role changes.
+Reset restores its current default. Names are labels; routing, tasks and
+messages keep stable IDs. The board, dashboard, context and status views use
+the same display-name projection. MCP exposes `collab_worker_name`.
 
 ## Install
 

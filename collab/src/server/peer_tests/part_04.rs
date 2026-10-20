@@ -1,4 +1,58 @@
 #[test]
+fn managed_direct_dispatch_accepts_master_and_continues_after_blocked() {
+    use crate::subagent::{Action, Record};
+    let (server, root) = test_server();
+    for id in ["parent", "child", "master", "other"] {
+        register(&server, id, &format!("%{id}"));
+    }
+    promote_master(&server, "master", "user approval");
+    let now = now_ms();
+    let record = bind_test_subagent_record(&server, Record {
+        id: "managed".into(), parent: "parent".into(), peer: "child".into(),
+        status: "idle".into(), thread_id: Some("thread-child".into()),
+        profile: None, created_ms: now, ready_deadline_ms: now + 90_000,
+        last_message: None, error: None, probe_failures: Vec::new(), runtime: None,
+        create_operation_id: None, binding_id: None, endpoint_generation: None,
+    });
+    server.commit(&[Event::SubagentUpdated { subagent: record }]);
+    let send = |actor: &str, subject: &str| crate::subagent::handle(
+        &server, actor, &format!("token-{actor}"), Action::Send {
+            id: "managed".into(), subject: subject.into(), body: subject.into(),
+        });
+    assert!(!send("other", "unauthorized").ok);
+    let first = send("master", "first");
+    assert!(first.ok, "{:?}", first.error);
+    let working = crate::subagent::handle(&server, "child", "token-child", Action::Working { id: "managed".into() });
+    assert!(working.ok, "{:?}", working.error);
+    assert!(!send("parent", "busy").ok);
+    let mut task = server.state.lock().unwrap().tasks.values().find(|task| task.owner == "child").unwrap().clone();
+    task.status = "blocked".into();
+    task.worktree_path = Some(root.join("held-worktree").display().to_string());
+    server.commit(&[Event::TaskUpdated { task: task.clone() }]);
+    let next = send("parent", "next");
+    assert!(next.ok, "{:?}", next.error);
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.tasks[&task.id].owner, task.owner);
+    assert_eq!(state.tasks[&task.id].status, "blocked");
+    assert_eq!(state.tasks[&task.id].worktree_path, task.worktree_path);
+    assert_eq!(state.tasks.values().filter(|task| task.owner == "child" && task.status == "assigned").count(), 1);
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn master_name_uses_authority_when_read_projection_is_peer() {
+    let (server, root) = test_server();
+    register(&server, "master", "%master");
+    promote_master(&server, "master", "user approval");
+    let worker = server.state.lock().unwrap().workers["master"].clone();
+    let summary = worker_status_summary_with_maps(&server, &Default::default(), &Default::default(), &Default::default(), json!({"role":"peer"}), &worker);
+    assert_eq!(summary["display_name"], "Jenny");
+    assert_eq!(summary["role"], "peer");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn managed_subagent_send_binds_the_selected_child_when_multiple_children_are_assigned() {
     use crate::subagent::{Action, Record};
     let (server, root) = test_server();

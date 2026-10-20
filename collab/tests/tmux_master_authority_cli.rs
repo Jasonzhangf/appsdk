@@ -260,7 +260,7 @@ fn master_authority_clear_removes_grant_and_preserves_business_state() {
         "restart must preserve the mailbox: {restarted_context}"
     );
 
-    let rejected = fixture.command(
+    let published = fixture.run_ok(
         &[
             "board",
             "publish",
@@ -278,12 +278,24 @@ fn master_authority_clear_removes_grant_and_preserves_business_state() {
         ],
         Some(&pane),
     );
+    assert_eq!(published["task"]["status"], "pending");
+    let rejected = fixture.command(
+        &[
+            "board",
+            "invite",
+            "after-clear",
+            "--to",
+            "other-peer",
+            "--expected-revision",
+            "1",
+        ],
+        Some(&pane),
+    );
     assert!(
         !rejected.status.success(),
-        "a cleared holder must not keep board control: stdout={} stderr={}",
-        String::from_utf8_lossy(&rejected.stdout),
-        String::from_utf8_lossy(&rejected.stderr)
+        "a cleared holder must lose master-only invitation authority"
     );
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("BOARD_MASTER_REQUIRED"));
 }
 
 /// B04: a blank approval is not authorization. Both promote and clear must

@@ -197,6 +197,11 @@ fn tools() -> Value {
         .as_array_mut()
         .expect("tool list")
         .extend(board_tools::tools());
+    tools.as_array_mut().unwrap().push(tool(
+        "collab_worker_name",
+        "Set the authenticated caller's display name on explicit user request, or reset to its current role/pane default. Master defaults to Jenny. Stable routing and ownership IDs do not change.",
+        json!({"name":{"type":"string"},"reset":{"type":"boolean"}}), &[],
+    ));
     tools
 }
 
@@ -391,6 +396,22 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
     }
     let mut argv = Vec::<String>::new();
     match name {
+        "collab_worker_name" => {
+            let reset = match args.get("reset") {
+                None => false,
+                Some(value) => value.as_bool().ok_or("reset must be a boolean")?,
+            };
+            let name = args.get("name");
+            if reset == name.is_some() {
+                return Err("provide exactly one of name or reset=true".into());
+            }
+            argv.extend(["worker".into(), "name".into()]);
+            if reset {
+                argv.push("--reset".into());
+            } else {
+                argv.extend(["--".into(), required(args, "name")?]);
+            }
+        }
         "collab_msg" => argv.extend(["msg".into(), required(args, "id")?]),
         "collab_recv" => {
             argv.push("recv".into());

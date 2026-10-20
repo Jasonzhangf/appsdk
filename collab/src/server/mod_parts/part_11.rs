@@ -47,7 +47,8 @@ fn dispatch_with_route_context_bound(
         Req::RegisterReply { .. } => Resp::err("REGISTER_REPLY_HOST_REQUIRED"),
         Req::PeerLifecycle { request } => peer_lifecycle::handle(server, project_context.as_ref(), request),
         Req::IdentityContext { .. } => Resp::err("IDENTITY_CONTEXT_HOST_REQUIRED: identity reconciliation belongs to the host daemon"),
-        Req::BoardShow => handle_board_show(server),
+        Req::BoardShow => handle_board_show(server, None),
+        Req::WorkerName { worker_id, token, name } => handle_worker_name(server, worker_id, token, name),
         Req::Board { worker_id, token, command } => handle_board_command(server, worker_id, token, command),
         Req::SubagentObserve { id, snapshot_lines } => {
             match crate::subagent::observe(server, id.as_deref(), snapshot_lines) {
@@ -809,6 +810,7 @@ fn wire_route_principals(req: &Req) -> Result<Vec<WireRoutePrincipal<'_>>, Strin
     match req {
         Req::PeerLifecycle { request: crate::proto::PeerLifecycleRequest::Read { worker_id, .. } | crate::proto::PeerLifecycleRequest::Update { worker_id, .. } | crate::proto::PeerLifecycleRequest::Close { worker_id, .. } } => Ok(vec![WireRoutePrincipal::Authenticated { worker_id }]),
         Req::Board { worker_id, .. }
+        | Req::WorkerName { worker_id, .. }
         | Req::Subagent { worker_id, .. }
         | Req::Register { worker_id, .. }
         | Req::LiveClosureDaemonSend { worker_id, .. }

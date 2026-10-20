@@ -73,6 +73,33 @@ fn collab_peer_lifecycle_design_graph_is_single_source_single_sink_and_registere
 }
 
 #[test]
+fn collab_host_resource_recovery_design_graph_is_single_source_single_sink_and_registered() {
+    let (_, source) = embedded_graph_paths()
+        .into_iter()
+        .find(|(path, _)| *path == "docs/dagpipe/collab-host-resource-recovery.graph.json")
+        .expect("the host resource recovery graph is embedded");
+    let graph = parse_graph_json(source).unwrap();
+    ensure_single_source_single_sink(&graph).unwrap();
+    validate_graph_registry(&graph).unwrap();
+    assert_eq!(graph.id, "appsdk-collab-host-resource-recovery");
+    assert_eq!(
+        graph
+            .nodes
+            .iter()
+            .map(|node| node.operator.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "appsdk.collab_host_resource.scan_route_inventory",
+            "appsdk.collab_host_resource.classify_route_ownership",
+            "appsdk.collab_host_resource.archive_retire_candidates",
+            "appsdk.collab_host_resource.rewrite_route_index",
+            "appsdk.collab_host_resource.enforce_resource_budget",
+            "appsdk.collab_host_resource.publish_recovery_receipt",
+        ]
+    );
+}
+
+#[test]
 fn graph_manifest_covers_every_embedded_graph_and_validate_reports_contracted_designs() {
     let result = validate_graph_contracts().unwrap();
     let graph_ids = result["graphs"]

@@ -183,6 +183,21 @@ struct RuntimeRoute {
     runtime: Option<Arc<Server>>,
 }
 
+/// Hard cap on concurrently materialized external project reducers. Every
+/// materialized reducer owns one writer lock and one append journal file, so
+/// an unbounded route projection would otherwise consume two descriptors per
+/// route before serving any request. The cap leaves room below the common
+/// 256-descriptor soft limit for listener, socket, identity, and timer files.
+pub(crate) const MAX_MATERIALIZED_EXTERNAL_RUNTIMES: usize = 64;
+
+fn materialized_runtime_budget_error(materialized_external: usize) -> Option<String> {
+    (materialized_external >= MAX_MATERIALIZED_EXTERNAL_RUNTIMES).then(|| {
+        format!(
+            "PROJECT_ROUTE_RESOURCE_BUDGET_EXCEEDED: {materialized_external} external project runtimes are already materialized; the cap is {MAX_MATERIALIZED_EXTERNAL_RUNTIMES}. Unused routes stay pending; close or retire an idle project route before opening another."
+        )
+    })
+}
+
 /// Owns the single host listener's route table and the independent project
 /// reducers behind it.  The existing handler surface remains unchanged: a
 /// request is first routed here, then dispatched to the selected `Server`.

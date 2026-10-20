@@ -1242,7 +1242,6 @@ does not establish project identity.
 |---|---|---|
 | Create a peer | `collab worker create <peer-id> --cwd <existing-project-dir-or-linked-worktree> --op <stable-operation-id> [--model <model>]` | `outcome=complete`; response identifies the real thread, route, registration, and verified ready turn. Reuse the same operation ID to recover a retry; never create a replacement ID after an unknown result. |
 | Inspect a peer | `collab worker read <peer-id>` | `outcome=ok` with the exact peer lifecycle projection. `collab worker read` with no ID reads the caller. |
-| Inspect a tmux peer buffer | `collab worker snapshot <peer-id> --lines <1..200>` | Returns the latest bounded, transient pane buffer only for a registered tmux peer. It sends no input and writes no durable receipt. AppServer and DSH peers remain unsupported. |
 | Move a peer's AppServer cwd | `collab worker update <peer-id> --cwd <existing-project-dir-or-linked-worktree>` | First call omits `--op`. `outcome=complete` requires settings update and cwd readback. Supply `--op <returned-operation-id>` only to retry/query that retained update after an uncertain result. |
 | Unregister yourself | `collab worker close <your-peer-id> --reason "<auditable reason>"` | An authenticated peer or master can retire its own identity without closing or archiving its pane/thread. Open responsibilities are refused. `outcome=complete` requires exact control-plane retirement; `runtime_archive=not-applicable`. Only this identity's exact master grant is revoked. |
 | Close another peer | `collab worker close <peer-id> --reason "<auditable reason>"` | First call omits `--op`. `outcome=complete` requires verified runtime archive and peer, binding, route, lease, and subscription retirement. Open responsibilities are refused. Use `--op <returned-operation-id>` only for its retained retry/query. |
@@ -1255,6 +1254,20 @@ before retrying. Unread messages remain durable; unregister does not consume
 them. A later `collab context` at the same live anchor rebuilds a default peer
 with one active binding and a new generation. It does not restore the retired
 master grant. This is identity rebuild, not manual communication recovery.
+
+### Peer observation
+
+Any authenticated peer of the same registered project may read the latest live
+buffer of an exact registered tmux peer. Master authority is not required
+because the read changes no durable state.
+
+| When | Command | Required result |
+|---|---|---|
+| Decide whether to keep waiting, escalate, or steer | `collab snapshot <peer-id> --lines <1..200>` | Returns the latest bounded, transient tmux pane buffer through one presence check and one `capture-pane`. It sends no input, consumes no mailbox message, bumps no revision, and writes no durable snapshot receipt. AppServer and DSH peers remain unsupported. |
+
+`collab worker snapshot <peer-id> --lines <1..200>` remains a compatibility
+alias. The buffer is only the latest visible pane text. It does not prove
+busy/idle, Codex turn state, message consumption, or task completion.
 
 For `refused`, `partial`, or `unknown`, keep the typed response and its
 operation ID. A responsibility or project-scope refusal has no lifecycle

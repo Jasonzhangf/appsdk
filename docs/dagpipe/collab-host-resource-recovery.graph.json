@@ -1,0 +1,87 @@
+{
+  "id": "appsdk-collab-host-resource-recovery",
+  "version": "0.1.0",
+  "description": "主机路由资源回收对象流。它扫描路由投影与各项目运行态，按真实项目、测试残留、缺失目录和未知项分类，退役前归档候选字节，事务重写保留路由并在重放中核对所有权；恢复后只按活跃 host binding 物化路由，未使用路由保持 pending，首次选择才取得 journal 与 writer lock，并以预算门限制物化数量，最后输出恢复回执。它只处理主机路由资源，不改写项目业务 journal；失败终态归各自节点：scan_route_inventory 产生 HOST_ROUTE_INVENTORY_UNREADABLE，classify_route_ownership 产生 HOST_ROUTE_OWNERSHIP_UNKNOWN，archive_retire_candidates 产生 HOST_ROUTE_ARCHIVE_MISMATCH，rewrite_route_index 产生 HOST_ROUTE_REWRITE_FAILED 与保留集回滚，enforce_resource_budget 产生 HOST_ROUTE_RESOURCE_BUDGET_EXCEEDED。任一失败都保持原路由投影。",
+  "inputs": [
+    {
+      "id": "host_route_inventory",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "scan_route_inventory",
+      "semantic_label": "扫描主机路由投影与项目初始化状态",
+      "operator": "appsdk.collab_host_resource.scan_route_inventory",
+      "operator_version": "1",
+      "inputs": ["host_route_inventory"],
+      "output": {"id": "route_inventory", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "classify_route_ownership",
+      "semantic_label": "分类真实项目、测试残留、缺失目录与未知项",
+      "operator": "appsdk.collab_host_resource.classify_route_ownership",
+      "operator_version": "1",
+      "inputs": ["route_inventory"],
+      "output": {"id": "route_classification", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "archive_retire_candidates",
+      "semantic_label": "退役前归档待移除路由字节",
+      "operator": "appsdk.collab_host_resource.archive_retire_candidates",
+      "operator_version": "1",
+      "inputs": ["route_classification"],
+      "output": {"id": "verified_route_archive", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "rewrite_route_index",
+      "semantic_label": "事务重写保留路由并核对重放所有权",
+      "operator": "appsdk.collab_host_resource.rewrite_route_index",
+      "operator_version": "1",
+      "inputs": ["verified_route_archive"],
+      "output": {"id": "rewritten_route_index", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "enforce_resource_budget",
+      "semantic_label": "按活跃 host binding 物化路由，未使用路由保持 pending，首次选择才取得 journal/lock 并限制预算",
+      "operator": "appsdk.collab_host_resource.enforce_resource_budget",
+      "operator_version": "1",
+      "inputs": ["rewritten_route_index"],
+      "output": {"id": "resource_budget_postcondition", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "publish_recovery_receipt",
+      "semantic_label": "发布保留、退役、未知项、延迟物化与资源预算回执",
+      "operator": "appsdk.collab_host_resource.publish_recovery_receipt",
+      "operator_version": "1",
+      "inputs": ["resource_budget_postcondition"],
+      "output": {"id": "resource_recovery_receipt", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {"from": "scan_route_inventory", "to": "classify_route_ownership", "arc_id": "route_inventory"},
+    {"from": "classify_route_ownership", "to": "archive_retire_candidates", "arc_id": "route_classification"},
+    {"from": "archive_retire_candidates", "to": "rewrite_route_index", "arc_id": "verified_route_archive"},
+    {"from": "rewrite_route_index", "to": "enforce_resource_budget", "arc_id": "rewritten_route_index"},
+    {"from": "enforce_resource_budget", "to": "publish_recovery_receipt", "arc_id": "resource_budget_postcondition"}
+  ],
+  "outputs": ["resource_recovery_receipt"]
+}

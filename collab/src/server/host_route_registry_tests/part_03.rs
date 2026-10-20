@@ -238,6 +238,25 @@
             .as_deref()
             .is_some_and(|error| error.contains("recipient app-b-worker not registered")));
 
+        // Snapshot is scoped to one project reducer. A target owned by a
+        // neighboring route is absent from this state and must fail closed
+        // before any transport probe.
+        let cross_route_snapshot = manager.dispatch_sync(
+            Some(app_a_runtime_context.clone()),
+            Req::WorkerSnapshot {
+                worker_id: "app-a-worker".into(),
+                token: "token-app-a".into(),
+                target_id: "project-b-worker".into(),
+                lines: 40,
+            },
+        );
+        assert!(!cross_route_snapshot.1.ok, "{:?}", cross_route_snapshot.1);
+        assert!(cross_route_snapshot
+            .1
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("target worker project-b-worker not registered")));
+
         for (context, worker_id, token, message_id, suffix) in [
             (
                 app_a_runtime_context.clone(),
@@ -1208,6 +1227,81 @@
         drop(second);
         drop(manager);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn startup_materializes_a_durable_route_only_after_its_first_selection() {
+        let (host, host_root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+        std::fs::create_dir_all(host_paths.state_root()).unwrap();
+        let project_root = host_root.with_file_name(format!(
+            "{}-pending",
+            host_root.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(project_root.join(".agent-collab/server")).unwrap();
+        let context = context_with_app(&project_root, "startup-pending-app");
+        let route_journal = host_paths.state_root().join("routes.jsonl");
+        append_host_route_record(
+            &route_journal,
+            &HostRouteRecord {
+                version: 1,
+                op: "register".into(),
+                app_scope_id: context.app_scope_id.as_str().into(),
+                project_scope: context.project_scope.as_str().into(),
+                canonical_root: context.canonical_root.clone(),
+                storage_root: context.canonical_root.clone(),
+                registered_ms: 1,
+            },
+        )
+        .unwrap();
+
+        let manager = ProjectRuntimeManager::new(host, &host_paths).unwrap();
+        let key = ProjectRuntimeManager::route_key(&context);
+        assert!(
+            manager.routes.lock().unwrap()[&key].runtime.is_none(),
+            "an unused durable route must stay pending at startup"
+        );
+        assert!(
+            manager.project_locks.lock().unwrap().is_empty(),
+            "an unused route must not hold a writer-lock descriptor"
+        );
+
+        let selected = manager.select_runtime(&context).unwrap();
+        assert!(Arc::ptr_eq(
+            &selected,
+            &manager.routes.lock().unwrap()[&key]
+                .runtime
+                .clone()
+                .expect("selection materializes the route")
+        ));
+        assert_eq!(
+            manager.project_locks.lock().unwrap().len(),
+            1,
+            "the first selection must acquire exactly one writer lock"
+        );
+        assert_eq!(
+            selected.journal_path,
+            project_root
+                .canonicalize()
+                .unwrap()
+                .join(".agent-collab/server/journal.jsonl")
+        );
+
+        drop(selected);
+        drop(manager);
+        std::fs::remove_dir_all(project_root).unwrap();
+        std::fs::remove_dir_all(host_root).unwrap();
+    }
+
+    #[test]
+    fn materialized_runtime_budget_rejects_the_route_above_the_cap() {
+        assert!(
+            materialized_runtime_budget_error(MAX_MATERIALIZED_EXTERNAL_RUNTIMES - 1).is_none()
+        );
+        let error = materialized_runtime_budget_error(MAX_MATERIALIZED_EXTERNAL_RUNTIMES)
+            .expect("the budget gate rejects the route at the cap");
+        assert!(error.starts_with("PROJECT_ROUTE_RESOURCE_BUDGET_EXCEEDED:"), "{error}");
+        assert!(error.contains(&MAX_MATERIALIZED_EXTERNAL_RUNTIMES.to_string()));
     }
 
     #[tokio::test]

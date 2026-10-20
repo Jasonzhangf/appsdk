@@ -1463,7 +1463,11 @@ fn handle_worker_snapshot(
     lines: usize,
 ) -> Resp {
     let state = server.state.lock().unwrap();
-    if let Err(error) = verify_master_actor(server, &state, &worker_id, &token) {
+    // A waiting peer observes the peer it waits for without disturbing it, so
+    // this read is admitted for any authenticated peer of this exact project
+    // route. Master authority is not the subject of a transient pane read and
+    // must not gate it.
+    if let Err(error) = verify(&state, &worker_id, &token) {
         return error;
     }
     let Some(target) = state.workers.get(&target_id) else {

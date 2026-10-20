@@ -187,9 +187,12 @@ impl ProjectRuntimeManager {
             fail_current_thread_route_publish: std::sync::atomic::AtomicBool::new(false),
         });
 
-        // Replay every durable route at startup.  A broken external runtime
-        // remains in the route table and is reported as NOT_READY on use;
-        // it must never silently fall back to the resident reducer.
+        // A durable route record is not itself an active runtime. Only the
+        // host's current addressable bindings need a reducer at startup. All
+        // other routes stay pending and materialize on their first selection,
+        // so a stale route cannot consume a journal or writer-lock descriptor
+        // merely because it remains in the durable index.
+        let active_routes = manager.active_host_route_keys();
         let pending = manager
             .routes
             .lock()
@@ -199,6 +202,28 @@ impl ProjectRuntimeManager {
             .map(|(key, route)| (key.clone(), route.root.clone(), route.storage_root.clone()))
             .collect::<Vec<_>>();
         for (key, root, storage_root) in pending {
+            if !active_routes.contains(&key) {
+                append_log(
+                    &host_paths.log_path(),
+                    &format!(
+                        "RUNTIME_MATERIALIZATION_DEFERRED: route {key:?} at {} (storage {}) has no active host binding",
+                        root.display(),
+                        storage_root.display()
+                    ),
+                );
+                continue;
+            }
+            if !root.join(".agent-collab").is_dir() {
+                append_log(
+                    &host_paths.log_path(),
+                    &format!(
+                        "RUNTIME_ENSURE_SKIPPED_UNINITIALIZED: route {key:?} at {} (storage {}) is not materialized",
+                        root.display(),
+                        storage_root.display()
+                    ),
+                );
+                continue;
+            }
             // A route whose runtime cannot be opened must stay visibly not
             // ready.  Dropping this error would hide the only trace of the
             // failure until a client happens to ask for that project.

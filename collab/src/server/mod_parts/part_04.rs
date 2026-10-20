@@ -728,6 +728,22 @@ impl ProjectRuntimeManager {
             .clone()
     }
 
+    fn active_host_route_keys(&self) -> std::collections::BTreeSet<RouteKey> {
+        let state = self.host.state.lock().unwrap();
+        state
+            .global
+            .current_thread_routes
+            .values()
+            .chain(state.global.legacy_thread_routes.values())
+            .map(|binding| {
+                (
+                    binding.app_scope_id.as_str().to_owned(),
+                    binding.project_scope.as_str().to_owned(),
+                )
+            })
+            .collect()
+    }
+
     /// Open and install a pending route exactly once. The double-check after
     /// acquiring the per-route gate is required because Poll and blocking
     /// requests can select the same durable pending route concurrently.
@@ -747,6 +763,14 @@ impl ProjectRuntimeManager {
             .and_then(|route| route.runtime.clone())
         {
             return Ok(runtime);
+        }
+        let materialized_external = self
+            .runtimes()
+            .into_iter()
+            .filter(|runtime| !Arc::ptr_eq(runtime, &self.host))
+            .count();
+        if let Some(error) = materialized_runtime_budget_error(materialized_external) {
+            return Err(error);
         }
         let (runtime, project_lock) = self.build_runtime(root, storage_root)?;
         self.install_runtime(key, runtime.clone(), project_lock);

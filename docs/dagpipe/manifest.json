@@ -58,6 +58,10 @@
       "path": "docs/dagpipe/collab-pane-route-reconcile.graph.json"
     },
     {
+      "id": "appsdk-collab-host-resource-recovery",
+      "path": "docs/dagpipe/collab-host-resource-recovery.graph.json"
+    },
+    {
       "id": "appsdk-collab-master-authority",
       "path": "docs/dagpipe/collab-master-authority.graph.json"
     },

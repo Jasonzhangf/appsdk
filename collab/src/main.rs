@@ -755,6 +755,22 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             out(&v);
             Ok(())
         }
+        Cmd::Snapshot { target_id, lines } => {
+            let scope = Scope::resolve()?;
+            let ident = me(&scope)?;
+            let v: serde_json::Value = call_project(
+                &scope,
+                &ident,
+                &Req::WorkerSnapshot {
+                    worker_id: ident.worker_id.clone(),
+                    token: ident.token.clone(),
+                    target_id,
+                    lines,
+                },
+            )?;
+            out(&v);
+            Ok(())
+        }
         Cmd::Worker { cmd } => {
             let scope = Scope::resolve()?;
             match cmd {

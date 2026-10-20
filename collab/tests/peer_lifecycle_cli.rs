@@ -180,6 +180,159 @@ fn worker_snapshot_public_cli_returns_bounded_tmux_buffer_without_a_write() {
 }
 
 #[test]
+fn top_level_snapshot_reads_a_peer_buffer_for_a_non_master_caller() {
+    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (fixture, master) = Fixture::isolated("snapshot-top-level");
+    let help = Command::new(env!("CARGO_BIN_EXE_collab"))
+        .args(["snapshot", "--help"])
+        .output()
+        .expect("run top-level snapshot help");
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).expect("snapshot help is UTF-8");
+    assert!(help.contains("TARGET_ID"), "{help}");
+    assert!(help.contains("--lines"), "{help}");
+
+    let seeded = fixture.registered_context("snapshot-top-level-master", &master);
+    assert_eq!(seeded["result"]["outcome"], "completed", "{seeded}");
+    let promoted = fixture.run_ok(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "isolated top-level snapshot acceptance",
+        ],
+        Some(&master),
+    );
+    let master_id = promoted["role_brief"]["worker_id"]
+        .as_str()
+        .or_else(|| seeded["result"]["snapshot"]["identity"]["worker_id"].as_str())
+        .expect("master has a worker id")
+        .to_owned();
+
+    let split = tmux(
+        &fixture.tmux_socket,
+        &[
+            "split-window",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            &master.pane_id,
+            "sleep 600",
+        ],
+    );
+    assert!(
+        split.status.success(),
+        "split fixture pane: {}",
+        String::from_utf8_lossy(&split.stderr)
+    );
+    let peer_pane_id = String::from_utf8(split.stdout)
+        .expect("peer pane id is utf8")
+        .trim()
+        .to_owned();
+    let peer = Pane {
+        server_pid: master.server_pid,
+        pane_id: peer_pane_id.clone(),
+        session_anchor: format!("session-{peer_pane_id}"),
+        thread_anchor: format!("thread-{peer_pane_id}"),
+    };
+    let peer_seeded = fixture.registered_context("snapshot-top-level-peer", &peer);
+    assert_eq!(
+        peer_seeded["result"]["snapshot"]["identity"]["role"], "worker",
+        "snapshot caller must remain an ordinary peer: {peer_seeded}"
+    );
+    let prepared = tmux(
+        &fixture.tmux_socket,
+        &[
+            "respawn-pane",
+            "-k",
+            "-t",
+            &master.pane_id,
+            "printf 'MASTER-BUFFER\\n'; sleep 600",
+        ],
+    );
+    assert!(
+        prepared.status.success(),
+        "prepare master buffer: {}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let capture = tmux(
+            &fixture.tmux_socket,
+            &["capture-pane", "-p", "-t", &master.pane_id, "-S", "-4096"],
+        );
+        if String::from_utf8_lossy(&capture.stdout).contains("MASTER-BUFFER") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "master pane fixture did not publish its buffer"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let capture = || {
+        String::from_utf8(
+            tmux(
+                &fixture.tmux_socket,
+                &["capture-pane", "-p", "-t", &master.pane_id, "-S", "-4096"],
+            )
+            .stdout,
+        )
+        .expect("master capture is utf8")
+    };
+    let buffer_before = capture();
+    let queued = fixture.run_ok(
+        &[
+            "sendmessage",
+            "--to",
+            &master_id,
+            "--subject",
+            "snapshot must not consume mail",
+            "--delivery",
+            "queued",
+            "durable body for the target",
+        ],
+        Some(&peer),
+    );
+    let message_id = queued["msg_id"]
+        .as_str()
+        .expect("queued message has an id")
+        .to_owned();
+    let journal_before = journal_excluding_background_maintenance(&fixture.project_journal());
+
+    let snapshot = fixture.run_ok(&["snapshot", &master_id, "--lines", "20"], Some(&peer));
+    assert_eq!(snapshot["transport"], "tmux", "{snapshot}");
+    assert_eq!(snapshot["worker_id"], master_id, "{snapshot}");
+    assert_eq!(snapshot["pane_id"], master.pane_id, "{snapshot}");
+    assert_eq!(snapshot["durable"], false, "{snapshot}");
+    assert!(
+        snapshot["output"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("MASTER-BUFFER"),
+        "{snapshot}"
+    );
+    assert_eq!(
+        capture(),
+        buffer_before,
+        "snapshot must not submit input or change the target pane"
+    );
+    assert_eq!(
+        journal_excluding_background_maintenance(&fixture.project_journal()),
+        journal_before,
+        "snapshot must not write a journal record or durable receipt"
+    );
+    let receipt = fixture.run_ok(&["msg", &message_id], Some(&master));
+    assert_eq!(
+        receipt["consumed_by_recv"], false,
+        "snapshot must not consume the target mailbox: {receipt}"
+    );
+}
+
+#[test]
 fn peer_lifecycle_create_cli_and_mcp_round_trip_through_isolated_daemon() {
     let fixture = Fixture::without_tmux("peer-lifecycle-adapter");
     let appserver = TestAppServer::start_with_effect(

@@ -197,6 +197,122 @@ fn approved_promotion_supersedes_a_live_tmux_master() {
 }
 
 #[test]
+fn cross_project_send_queues_to_a_live_tmux_master_without_runtime_identity() {
+    let (server, root) = test_server();
+    register(&server, "target-master", "%target-master");
+    promote_master(&server, "target-master", "user approved target-master");
+    let binding = server
+        .state
+        .lock()
+        .unwrap()
+        .global
+        .projects
+        .values()
+        .flat_map(|project| project.runtime_bindings.values())
+        .find(|binding| binding.agent_id.as_str() == "target-master")
+        .cloned()
+        .expect("target master binding");
+    let worker = server.state.lock().unwrap().workers["target-master"].clone();
+    assert_eq!(
+        worker_presence(&server, &worker),
+        IdentityPresence::Present,
+        "a fresh registration has a verified identity and route"
+    );
+    // Model the observed production drift: the pane address stays live and the
+    // typed master grant stays valid, but the runtime route projection no
+    // longer claims the pane. Identity then reads Missing even though the
+    // durable mailbox address remains reachable.
+    {
+        let mut st = server.state.lock().unwrap();
+        st.global
+            .current_thread_routes
+            .retain(|_, route| route.binding_id != binding.binding_id);
+        assert_eq!(
+            current_master_holder(&server, &st).unwrap().as_deref(),
+            Some("target-master"),
+            "the typed grant survives the route projection loss"
+        );
+    }
+    assert_eq!(
+        worker_presence(&server, &worker),
+        IdentityPresence::Missing,
+        "the missing route projection makes runtime identity Missing"
+    );
+    assert_eq!(
+        worker_identity_and_endpoint(&server, &worker).1,
+        Some(true),
+        "the exact target pane must still be reachable"
+    );
+
+    let delivered = super::handle_cross_project_send(
+        &server,
+        "appsdk-master".into(),
+        "/tmp/appsdk".into(),
+        "thread-appsdk-master".into(),
+        "appsdk-master".into(),
+        Some("user approved appsdk-master".into()),
+        1,
+        "target-master".into(),
+        "feature".into(),
+        "durable tmux master message".into(),
+        None,
+    );
+    assert!(delivered.ok, "{}", delivered.error.unwrap_or_default());
+    let msg_id = delivered.data["msg_id"].as_str().unwrap();
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.msgs[msg_id].to, "target-master");
+    assert_eq!(state.msgs[msg_id].from, "appsdk-master@/tmp/appsdk");
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn cross_project_send_rejects_a_definitively_missing_tmux_endpoint() {
+    let (server, root) = test_server();
+    register(&server, "target-master", "%target-master");
+    promote_master(&server, "target-master", "user approved target-master");
+    let binding = registered_binding(&server, "target-master");
+    retire_registered_test_pane(&binding);
+    let worker = server.state.lock().unwrap().workers["target-master"].clone();
+    assert_eq!(
+        worker_identity_and_endpoint(&server, &worker).1,
+        Some(false),
+        "the pane probe must prove the address is gone"
+    );
+    {
+        let state = server.state.lock().unwrap();
+        assert_eq!(
+            current_master_holder(&server, &state).unwrap().as_deref(),
+            Some("target-master"),
+            "the typed grant is independent of the dead address"
+        );
+    }
+
+    let denied = super::handle_cross_project_send(
+        &server,
+        "appsdk-master".into(),
+        "/tmp/appsdk".into(),
+        "thread-appsdk-master".into(),
+        "appsdk-master".into(),
+        Some("user approved appsdk-master".into()),
+        1,
+        "target-master".into(),
+        "feature".into(),
+        "must reject a dead address".into(),
+        None,
+    );
+    assert!(!denied.ok);
+    assert!(
+        denied
+            .error
+            .unwrap_or_default()
+            .contains("reachable target binding"),
+        "the reject must name the dead address, not master authority"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn cross_project_send_requires_master_endpoints_on_both_sides() {
     let (server, root) = test_server();
     // The target master is a native App Server peer, so its presence is a real

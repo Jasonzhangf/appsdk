@@ -704,9 +704,11 @@ fn handle_cross_project_send(
     drop(st);
     // Cross-project messages are durable mailbox entries. Identity admission
     // must not turn endpoint uncertainty or activity into an enqueue failure.
-    if worker_presence(server, &recipient) != IdentityPresence::Present {
+    // A tmux peer has a valid address even when its runtime identity remains
+    // Unknown; only a definitively dead endpoint blocks enqueue.
+    if worker_identity_and_endpoint(server, &recipient).1 == Some(false) {
         return Resp::err(
-            "cross-project communication requires a valid target identity on its server-selected transport",
+            "cross-project communication requires a reachable target binding on its server-selected transport",
         );
     }
     let mut st = server.state.lock().unwrap();

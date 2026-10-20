@@ -1479,11 +1479,35 @@ fn handle_worker_snapshot(
     let Some(target) = state.workers.get(&target_id) else {
         return Resp::err(format!("target worker {} not registered", target_id));
     };
-    if target.transport.is_none() {
-        return Resp::err(format!("worker {} has no registered transport", target_id));
-    }
+    let Some(transport) = target.transport.clone() else {
+        return Resp::err(format!("worker {target_id} has no registered transport"));
+    };
     if !(1..=200).contains(&lines) {
         return Resp::err("snapshot lines must be 1..200");
     }
-    Resp::err("WORKER_SNAPSHOT_UNSUPPORTED: tmux panes do not expose durable Codex thread history; inspect the worker's durable mailbox and task state")
+    let endpoint = match transport.kind {
+        crate::proto::TransportKind::Tmux => match transport.tmux_endpoint.clone() {
+            Some(endpoint) => endpoint,
+            None => {
+                return Resp::err(format!(
+                    "worker {target_id} has no registered tmux endpoint"
+                ))
+            }
+        },
+        crate::proto::TransportKind::AppServer | crate::proto::TransportKind::Dsh => {
+            return Resp::err(
+                "WORKER_SNAPSHOT_UNSUPPORTED: only registered tmux peers expose transient pane buffers",
+            )
+        }
+    };
+    // Transport execution never runs under the reducer lock. The cloned
+    // endpoint is the admitted route; the response describes that one capture,
+    // not a later claim about the peer's state.
+    drop(state);
+    let mut snapshot = match crate::client::adapters::tmux::snapshot(&endpoint, lines) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return Resp::err(error),
+    };
+    snapshot["worker_id"] = target_id.into();
+    Resp::data(snapshot)
 }

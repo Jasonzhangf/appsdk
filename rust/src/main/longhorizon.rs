@@ -343,6 +343,7 @@ pub(super) fn run_goal_collab_command(
 }
 
 pub(super) fn context_has_live_tmux_transport(context: &Value) -> bool {
+    let context = crate::long_horizon_role::normalized_collab_context(context);
     let transport = &context["identity"]["transport"];
     let endpoint = &transport["tmux_endpoint"];
     transport["kind"].as_str() == Some("tmux")
@@ -378,6 +379,7 @@ pub(super) fn verified_goal_master(root: &Path) -> Result<String, String> {
     }
     let context: Value = serde_json::from_slice(&context_output.stdout)
         .map_err(|error| format!("GOAL_OWNER_CONTEXT_JSON_INVALID:{}", error))?;
+    let context = crate::long_horizon_role::normalized_collab_context(&context);
     let owner = context["identity"]["worker_id"]
         .as_str()
         .filter(|owner| !owner.trim().is_empty())

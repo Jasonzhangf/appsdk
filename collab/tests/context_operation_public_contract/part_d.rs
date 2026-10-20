@@ -313,6 +313,184 @@ fn peer_lifecycle_c8_unsupported_transport_stays_cleanup_open() {
     assert_eq!(query["result"]["outcome"], "cleanup-open", "{query}");
 }
 
+#[test]
+fn peer_lifecycle_closes_a_tmux_peer_only_after_its_pane_is_proven_missing() {
+    let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (fixture, master_pane) = Fixture::isolated("peer-tmux-missing-close");
+    let master_seed = fixture.registered_context("peer-tmux-missing-master", &master_pane);
+    let master = lifecycle_identity(&fixture, &master_seed);
+    fixture.run_ok(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "isolated missing tmux retirement fixture",
+        ],
+        Some(&master_pane),
+    );
+    let child_pane = second_pane(
+        &fixture,
+        "peer-tmux-missing-child",
+        master_pane.server_pid,
+    );
+    let child_seed = fixture.registered_context("peer-tmux-missing-child", &child_pane);
+    let child = lifecycle_identity(&fixture, &child_seed);
+    let target = lifecycle_read(
+        &fixture,
+        &master,
+        Some(child["worker_id"].as_str().unwrap()),
+    )["result"]["target"]
+        .clone();
+
+    let killed = tmux(
+        &fixture.tmux_socket,
+        &["kill-pane", "-t", &child_pane.pane_id],
+    );
+    assert!(
+        killed.status.success(),
+        "kill lifecycle target pane: {}",
+        String::from_utf8_lossy(&killed.stderr)
+    );
+
+    let closed = lifecycle_close(
+        &fixture,
+        &master,
+        "peer-tmux-missing-close",
+        "peer-tmux-missing-capability",
+        &target,
+        "retire a tmux peer whose exact pane is gone",
+    );
+    assert_eq!(closed["result"]["outcome"], "complete", "{closed}");
+    assert_eq!(
+        closed["result"]["close"]["runtime_archive"]["state"], "missing",
+        "{closed}"
+    );
+    assert_eq!(
+        closed["result"]["close"]["worker_retirement"]["state"], "verified",
+        "{closed}"
+    );
+    let read = lifecycle_read(
+        &fixture,
+        &master,
+        Some(child["worker_id"].as_str().unwrap()),
+    );
+    assert_eq!(read["result"]["outcome"], "closed", "{read}");
+}
+
+fn tmux_probe_wrapper(label: &str, script: &str) -> (std::path::PathBuf, std::ffi::OsString) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = std::env::temp_dir().join(format!(
+        "collab-lifecycle-tmux-{label}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let wrapper = root.join("tmux");
+    std::fs::write(&wrapper, script).unwrap();
+    let mut permissions = std::fs::metadata(&wrapper).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&wrapper, permissions).unwrap();
+    let original = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![root.clone()];
+    paths.extend(std::env::split_paths(&original));
+    (root, std::env::join_paths(paths).unwrap())
+}
+
+fn close_with_tmux_probe(label: &str, script: &str, expected_error: &str) -> Value {
+    let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (mut fixture, master_pane) = Fixture::isolated(label);
+    let master_seed = fixture.registered_context(&format!("{label}-master"), &master_pane);
+    let master = lifecycle_identity(&fixture, &master_seed);
+    fixture.run_ok(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "isolated uncertain tmux retirement fixture",
+        ],
+        Some(&master_pane),
+    );
+    let child_pane = second_pane(&fixture, &format!("{label}-child"), master_pane.server_pid);
+    let child_seed = fixture.registered_context(&format!("{label}-child"), &child_pane);
+    let child = lifecycle_identity(&fixture, &child_seed);
+    let target = lifecycle_read(
+        &fixture,
+        &master,
+        Some(child["worker_id"].as_str().unwrap()),
+    )["result"]["target"]
+        .clone();
+    let endpoint = &target["transport"]["tmux_endpoint"];
+    let script = script
+        .replace("{server_pid}", &endpoint["server_pid"].to_string())
+        .replace("{session}", endpoint["tmux_session_id"].as_str().unwrap())
+        .replace("{pane}", endpoint["pane_id"].as_str().unwrap())
+        .replace("{pane_pid}", &endpoint["pane_pid"].to_string());
+    let (wrapper_root, path) = tmux_probe_wrapper(label, &script);
+    fixture.restart_daemon_with_env("PATH", path.to_str().unwrap());
+
+    let closed = lifecycle_close(
+        &fixture,
+        &master,
+        &format!("{label}-close"),
+        &format!("{label}-capability"),
+        &target,
+        "close a tmux peer whose exact pane state is uncertain",
+    );
+    assert_eq!(closed["result"]["outcome"], "unknown", "{closed}");
+    assert_eq!(
+        closed["result"]["close"]["runtime_archive"]["state"], "unknown",
+        "{closed}"
+    );
+    assert!(
+        closed["error"].as_str().unwrap_or_default().contains(expected_error),
+        "{closed}"
+    );
+    let read = lifecycle_read(
+        &fixture,
+        &master,
+        Some(child["worker_id"].as_str().unwrap()),
+    );
+    assert_ne!(read["result"]["outcome"], "closed", "{read}");
+    assert_eq!(
+        read["result"]["target"]["worker_id"],
+        child["worker_id"],
+        "an uncertain probe must keep the exact worker record: {read}"
+    );
+    assert_eq!(
+        read["result"]["close"]["runtime_archive"]["state"], "unknown",
+        "{read}"
+    );
+    let _ = std::fs::remove_dir_all(wrapper_root);
+    fixture.restart_daemon();
+    closed
+}
+
+// A probe that cannot observe the exact pane stays unknown. It must not be
+// treated as a missing terminal, and no control-plane record may retire.
+#[test]
+fn peer_lifecycle_tmux_probe_error_stays_unknown_and_does_not_retire() {
+    close_with_tmux_probe(
+        "peer-tmux-probe-error",
+        "#!/bin/sh\necho 'forced tmux probe failure' >&2\nexit 1\n",
+        "PEER_LIFECYCLE_TMUX_PROBE_UNKNOWN",
+    );
+}
+
+// A reachable tmux server that reports an unparseable pane-dead state is
+// uncertain, not absent. The close must keep the target and its control plane.
+#[test]
+fn peer_lifecycle_tmux_unknown_presence_does_not_retire() {
+    close_with_tmux_probe(
+        "peer-tmux-unknown",
+        "#!/bin/sh\nprintf '%s\\n' '{server_pid}\t{session}\t{pane}\t{pane_pid}\t?'\n",
+        "TMUX_PANE_UNKNOWN",
+    );
+}
+
 // C9: restart restores both the unknown Close receipt and its active fence.
 // Query is read-only and a new Update cannot get past that retained fence.
 #[test]

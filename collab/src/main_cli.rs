@@ -260,11 +260,11 @@ pub(crate) enum WorkerCmd {
         /// Optional worker ID to inspect (defaults to all registered workers)
         id: Option<String>,
     },
-    /// Capture durable App Server thread evidence before closing a worker
+    /// Read the latest live buffer from an exact registered tmux peer
     Snapshot {
         /// Worker ID to inspect
         id: String,
-        /// Maximum number of recent thread items to read
+        /// Maximum number of recent tmux buffer lines to return (1..=200)
         #[arg(long, default_value_t = 40)]
         lines: usize,
     },

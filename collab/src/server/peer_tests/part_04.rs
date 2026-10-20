@@ -1038,18 +1038,73 @@ fn last_task_close_keeps_default_lease_armed_and_preserves_pending_unread_payloa
 }
 
 #[test]
-fn worker_snapshot_rejects_tmux_without_writing_a_receipt() {
+fn worker_snapshot_returns_bounded_tmux_buffer_without_side_effects() {
     let (server, root) = test_server();
     let tmux = IsolatedTmux::start(&root);
-    let endpoints = tmux.endpoints();
+    let mut endpoints = tmux.endpoints();
     assert_eq!(endpoints.len(), 2);
+    let peer_pane_id = endpoints[1].pane_id.clone();
+    let output = Command::new("tmux")
+        .args([
+            "-S",
+            &endpoints[1].socket_path,
+            "respawn-pane",
+            "-k",
+            "-t",
+            &peer_pane_id,
+            "sh",
+            "-c",
+            "i=1; while [ $i -le 30 ]; do printf 'SNAP-%03d\\n' \"$i\"; i=$((i+1)); done; sleep 60",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "prepare pane buffer: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let capture = Command::new("tmux")
+            .args([
+                "-S",
+                &endpoints[1].socket_path,
+                "capture-pane",
+                "-p",
+                "-t",
+                &peer_pane_id,
+                "-S",
+                "-4096",
+            ])
+            .output()
+            .unwrap();
+        if String::from_utf8_lossy(&capture.stdout).contains("SNAP-030") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "snapshot fixture did not publish its terminal line"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    endpoints = tmux.endpoints();
+    let peer_endpoint = endpoints
+        .iter()
+        .find(|endpoint| endpoint.pane_id == peer_pane_id)
+        .cloned()
+        .unwrap();
     // The master must carry an explicit AppServer session and thread: a
     // tmux-only binding is Unknown and therefore holds no live master authority.
-    let mut master_endpoint = endpoints[0].clone();
+    let mut master_endpoint = endpoints
+        .iter()
+        .find(|endpoint| endpoint.pane_id != peer_pane_id)
+        .cloned()
+        .unwrap();
     master_endpoint.codex_session_id = Some("session-snapshot-master".into());
     master_endpoint.codex_thread_id = Some("thread-snapshot-master".into());
-    assert!(register_tmux(&server, "snapshot-master", master_endpoint).ok);
-    assert!(register_tmux(&server, "snapshot-peer", endpoints[1].clone()).ok);
+    assert!(register_tmux(&server, "snapshot-master", master_endpoint.clone()).ok);
+    assert!(register_tmux(&server, "snapshot-peer", peer_endpoint.clone()).ok);
+    register_appserver_worker(&server, &root, "snapshot-appserver", "thread-snapshot-appserver");
     let promoted = super::handle_master_promote(
         &server,
         "snapshot-master".into(),
@@ -1065,18 +1120,148 @@ fn worker_snapshot_rejects_tmux_without_writing_a_receipt() {
         "snapshot-master".into(),
         "token-snapshot-master".into(),
         "snapshot-peer".into(),
+        5,
+    );
+    assert!(response.ok, "{}", response.error.unwrap_or_default());
+    assert_eq!(response.data["transport"], "tmux");
+    assert_eq!(response.data["pane_id"], peer_pane_id);
+    assert_eq!(response.data["lines"], 5);
+    assert_eq!(response.data["durable"], false);
+    let output = response.data["output"].as_str().unwrap();
+    let lines = output.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 5, "{output:?}");
+    assert_eq!(lines.last().copied(), Some("SNAP-030"));
+    assert!(!output.contains("SNAP-025"));
+
+    let one = super::handle_worker_snapshot(
+        &server,
+        "snapshot-master".into(),
+        "token-snapshot-master".into(),
+        "snapshot-peer".into(),
+        1,
+    );
+    assert!(one.ok, "{}", one.error.unwrap_or_default());
+    assert_eq!(one.data["output"], "SNAP-030");
+
+    let all = super::handle_worker_snapshot(
+        &server,
+        "snapshot-master".into(),
+        "token-snapshot-master".into(),
+        "snapshot-peer".into(),
+        200,
+    );
+    assert!(all.ok, "{}", all.error.unwrap_or_default());
+    assert_eq!(all.data["output"].as_str().unwrap().lines().count(), 30);
+
+    for invalid in [0, 201] {
+        let response = super::handle_worker_snapshot(
+            &server,
+            "snapshot-master".into(),
+            "token-snapshot-master".into(),
+            "snapshot-peer".into(),
+            invalid,
+        );
+        assert!(!response.ok);
+        assert!(response
+            .error
+            .unwrap()
+            .contains("snapshot lines must be 1..200"));
+    }
+
+    for (target, token, expected) in [
+        ("snapshot-peer", "wrong-token", "token mismatch"),
+        ("missing-peer", "token-snapshot-master", "not registered"),
+        (
+            "snapshot-appserver",
+            "token-snapshot-master",
+            "WORKER_SNAPSHOT_UNSUPPORTED",
+        ),
+    ] {
+        let response = super::handle_worker_snapshot(
+            &server,
+            "snapshot-master".into(),
+            token.into(),
+            target.into(),
+            40,
+        );
+        assert!(!response.ok);
+        assert!(
+            response.error.as_deref().unwrap_or_default().contains(expected),
+            "{target}: {:?}",
+            response.error
+        );
+    }
+    server
+        .state
+        .lock()
+        .unwrap()
+        .workers
+        .get_mut("snapshot-appserver")
+        .unwrap()
+        .transport
+        .as_mut()
+        .unwrap()
+        .tmux_endpoint = Some(master_endpoint);
+    let incidental_tmux = super::handle_worker_snapshot(
+        &server,
+        "snapshot-master".into(),
+        "token-snapshot-master".into(),
+        "snapshot-appserver".into(),
         40,
     );
-    assert!(!response.ok);
-    assert!(response
+    assert!(!incidental_tmux.ok);
+    assert!(incidental_tmux
         .error
         .unwrap()
         .starts_with("WORKER_SNAPSHOT_UNSUPPORTED:"));
+    server
+        .state
+        .lock()
+        .unwrap()
+        .workers
+        .get_mut("snapshot-appserver")
+        .unwrap()
+        .transport = None;
+    let no_transport = super::handle_worker_snapshot(
+        &server,
+        "snapshot-master".into(),
+        "token-snapshot-master".into(),
+        "snapshot-appserver".into(),
+        40,
+    );
+    assert!(!no_transport.ok);
+    assert!(no_transport.error.unwrap().contains("no registered transport"));
+
     let state = server.state.lock().unwrap();
     assert!(!state.worker_snapshots.contains_key("snapshot-peer"));
     assert_eq!(state.revision, revision_before);
     drop(state);
     assert_eq!(std::fs::read(&server.journal_path).unwrap(), journal_before);
+
+    let killed = Command::new("tmux")
+        .args([
+            "-S",
+            &peer_endpoint.socket_path,
+            "kill-pane",
+            "-t",
+            &peer_pane_id,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        killed.status.success(),
+        "kill target pane: {}",
+        String::from_utf8_lossy(&killed.stderr)
+    );
+    let missing = super::handle_worker_snapshot(
+        &server,
+        "snapshot-master".into(),
+        "token-snapshot-master".into(),
+        "snapshot-peer".into(),
+        40,
+    );
+    assert!(!missing.ok);
+    assert!(missing.error.unwrap().starts_with("TMUX_PANE_MISSING:"));
 
     drop(tmux);
     std::fs::remove_dir_all(root).unwrap();
@@ -1132,18 +1317,15 @@ fn ordinary_worker_requires_its_own_snapshot_and_closes_idempotently() {
         .contains("master authority required"));
 
     let revision_before_snapshot = server.state.lock().unwrap().revision;
-    let unsupported_snapshot = super::handle_worker_snapshot(
+    let transient_snapshot = super::handle_worker_snapshot(
         &server,
         "master".into(),
         "token-master".into(),
         "ordinary".into(),
         40,
     );
-    assert!(!unsupported_snapshot.ok);
-    assert!(unsupported_snapshot
-        .error
-        .unwrap()
-        .starts_with("WORKER_SNAPSHOT_UNSUPPORTED:"));
+    assert!(transient_snapshot.ok, "{}", transient_snapshot.error.unwrap_or_default());
+    assert_eq!(transient_snapshot.data["durable"], false);
     let state = server.state.lock().unwrap();
     assert!(!state.worker_snapshots.contains_key("ordinary"));
     assert_eq!(state.revision, revision_before_snapshot);

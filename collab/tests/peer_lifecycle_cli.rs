@@ -13,6 +13,21 @@ fn worker_help(action: &str) -> String {
     String::from_utf8(output.stdout).expect("CLI help is UTF-8")
 }
 
+// The background scheduler independently appends ledger-maintenance events on
+// its own tick. Exclude only those known timer-owned records so the snapshot
+// assertion still fails on any command, registration, or snapshot receipt.
+fn journal_excluding_background_maintenance(path: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| {
+            !line.contains("\"GlobalRuntimeBindingLedgerClassified\"")
+                && !line.contains("\"GlobalLedgerScanReceiptRecorded\"")
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
 #[test]
 fn peer_lifecycle_create_cli_exposes_frozen_arguments() {
     let create = worker_help("create");
@@ -21,6 +36,11 @@ fn peer_lifecycle_create_cli_exposes_frozen_arguments() {
     }
     let read = worker_help("read");
     assert!(read.contains("TARGET_ID"), "{read}");
+
+    let snapshot = worker_help("snapshot");
+    assert!(snapshot.contains("TARGET_ID"), "{snapshot}");
+    assert!(snapshot.contains("--lines"), "{snapshot}");
+    assert!(snapshot.contains("1..=200"), "{snapshot}");
 
     let update = worker_help("update");
     assert!(update.contains("--cwd"), "{update}");
@@ -46,6 +66,117 @@ fn peer_lifecycle_create_cli_exposes_frozen_arguments() {
             "worker help unexpectedly exposes {unsupported}: {root_help}"
         );
     }
+}
+
+#[test]
+fn worker_snapshot_public_cli_returns_bounded_tmux_buffer_without_a_write() {
+    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (fixture, master) = Fixture::isolated("worker-snapshot-public");
+    let seeded = fixture.registered_context("worker-snapshot-master", &master);
+    assert_eq!(seeded["result"]["outcome"], "completed", "{seeded}");
+    let promoted = fixture.run_ok(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "isolated worker snapshot acceptance",
+        ],
+        Some(&master),
+    );
+    assert_eq!(promoted["role_brief"]["role"], "master", "{promoted}");
+
+    let split = tmux(
+        &fixture.tmux_socket,
+        &[
+            "split-window",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            &master.pane_id,
+            "sleep 600",
+        ],
+    );
+    assert!(
+        split.status.success(),
+        "split fixture pane: {}",
+        String::from_utf8_lossy(&split.stderr)
+    );
+    let peer_pane_id = String::from_utf8(split.stdout)
+        .expect("peer pane id is utf8")
+        .trim()
+        .to_owned();
+    let peer = Pane {
+        server_pid: master.server_pid,
+        pane_id: peer_pane_id.clone(),
+        session_anchor: format!("session-{peer_pane_id}"),
+        thread_anchor: format!("thread-{peer_pane_id}"),
+    };
+    let peer_seeded = fixture.registered_context("worker-snapshot-peer", &peer);
+    assert_eq!(
+        peer_seeded["result"]["outcome"], "completed",
+        "{peer_seeded}"
+    );
+    let peer_id = peer_seeded["result"]["snapshot"]["identity"]["worker_id"]
+        .as_str()
+        .expect("snapshot peer has a worker id")
+        .to_owned();
+
+    let prepared = tmux(
+        &fixture.tmux_socket,
+        &[
+            "respawn-pane",
+            "-k",
+            "-t",
+            &peer.pane_id,
+            "i=1; while [ $i -le 200 ]; do printf 'PUB-%03d\\n' \"$i\"; i=$((i+1)); done; sleep 600",
+        ],
+    );
+    assert!(
+        prepared.status.success(),
+        "prepare peer buffer: {}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let capture = tmux(
+            &fixture.tmux_socket,
+            &["capture-pane", "-p", "-t", &peer.pane_id, "-S", "-4096"],
+        );
+        if String::from_utf8_lossy(&capture.stdout).contains("PUB-200") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "public snapshot fixture did not publish its terminal line"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let journal_before = journal_excluding_background_maintenance(&fixture.project_journal());
+
+    let snapshot = fixture.run_ok(
+        &["worker", "snapshot", &peer_id, "--lines", "40"],
+        Some(&master),
+    );
+    assert_eq!(snapshot["transport"], "tmux", "{snapshot}");
+    assert_eq!(snapshot["worker_id"], peer_id, "{snapshot}");
+    assert_eq!(snapshot["pane_id"], peer.pane_id, "{snapshot}");
+    assert_eq!(snapshot["lines"], 40, "{snapshot}");
+    assert_eq!(snapshot["durable"], false, "{snapshot}");
+    let lines = snapshot["output"]
+        .as_str()
+        .expect("snapshot output is text")
+        .lines()
+        .collect::<Vec<_>>();
+    assert_eq!(lines.len(), 40);
+    assert_eq!(lines.first().copied(), Some("PUB-161"));
+    assert_eq!(lines.last().copied(), Some("PUB-200"));
+    assert_eq!(
+        journal_excluding_background_maintenance(&fixture.project_journal()),
+        journal_before,
+        "snapshot must not write a durable receipt or journal event"
+    );
 }
 
 #[test]

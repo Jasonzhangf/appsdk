@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-peer-lifecycle",
   "version": "0.1.0",
-  "description": "一次 Collab peer Create/Read/Update/Close 请求到一次生命周期结果。请求分类、责任准入、互斥分支调度、阶段读回和唯一结果出口构成 SESE。Create 复用已有创建和注册 owner。Close 在同一入口区分两种终态：既有他人宿主关闭按所选 host adapter 归档线程并分类真实宿主终态；已认证主体注销自身只走控制面退役，跳过宿主 archive，保留真实 pane/thread 运行，并撤销该精确身份自身的 master grant。自注销的责任冲突明确拒绝且不丢失。唯一结果区分成功、拒绝、缺事实、partial、unknown、cancelled（仅真实安全边界）或 cleanup-open。不引入自动重试、fallback 或第二状态 owner。",
+  "description": "一次 Collab peer Create/Read/Update/Close/Snapshot 请求到一次生命周期结果。请求分类、责任准入、互斥分支调度、阶段读回和唯一结果出口构成 SESE。Create 复用已有创建和注册 owner。Close 在同一入口区分两种终态：既有他人宿主关闭按所选 host adapter 归档线程并分类真实宿主终态，其中 tmux 只有精确 pane 明确缺失才可作为 host terminal；已认证主体注销自身只走控制面退役，跳过宿主 archive，保留真实 pane/thread 运行，并撤销该精确身份自身的 master grant。自注销的责任冲突明确拒绝且不丢失。Snapshot 只对已注册 tmux peer 读取一次当前缓存区，返回瞬时状态；不提交输入、不消费消息、不写 durable receipt，也不作为 busy/idle 或 AppServer 历史证据。唯一结果区分成功、拒绝、缺事实、partial、unknown、cancelled（仅真实安全边界）或 cleanup-open。不引入自动重试、fallback 或第二状态 owner。",
   "inputs": [
     {
       "id": "peer_lifecycle_request",

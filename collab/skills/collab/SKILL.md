@@ -31,6 +31,9 @@ selected, tmux is never a message, wake, presence, or status fallback. Its
 observed tmux socket + pane may also be stored as the durable identity anchor,
 independently of native runtime IDs.
 Production projects use the globally installed Collab v1.
+Production tmux launchers must place sockets in a stable private user directory.
+Configure the launcher, preserve existing live endpoints, and verify the actual
+new socket path; see [state paths](references/state-paths.md#production-tmux-sockets).
 
 ## Task routing and role responsibilities
 

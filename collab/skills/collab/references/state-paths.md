@@ -53,6 +53,45 @@ binary and refresh the embedded Skill; leave `~/.collab/` and the running
 daemon untouched. The global daemon is user-managed. Host reset and maintenance
 are outside the agent interface.
 
+## Production tmux sockets
+
+Production tmux sockets also belong in a stable, private user directory, not
+`/tmp`, `/private/tmp`, or the OS temporary directory. The tmux launcher owns
+this setting. Collab observes the current socket through `TMUX` and uses that
+exact address; it does not create or relocate the production tmux server.
+
+For shell-launched tmux, create the directory once:
+
+```sh
+install -d -m 700 "$HOME/.tmux/run"
+```
+
+Export this setting in the startup file used by the launcher (`~/.zshenv` for
+zsh, including noninteractive shells):
+
+```sh
+export TMUX_TMPDIR="$HOME/.tmux/run"
+```
+
+A new tmux server then uses `$HOME/.tmux/run/tmux-<uid>/default`. `-L <name>`
+changes the socket name within that directory. An explicit `-S <path>` bypasses
+this default and must itself use a stable user path. GUI and service launchers
+that bypass shell startup must configure their own launch environment. Do not
+claim that a shell edit changes those launchers.
+
+Verify a new, isolated server through `display-message -p '#{socket_path}'`.
+The socket is an IPC endpoint; a stable pathname does not preserve processes or
+sessions after a reboot.
+
+This setting affects future server creation. Existing servers keep their actual
+socket paths. Clients inside an existing tmux session may still select its
+socket through `TMUX`; outside clients can use its observed `-S` address until
+the user migrates that server. Do not move a live socket, substitute a symlink,
+rewrite Collab routes to an unobserved address, or reject current identity
+recovery because an existing server still uses a temporary path. Changing the
+default alone is not live migration. Use `collab context` to restore identity
+and communication from the real current endpoint.
+
 ## Project-local registration input
 
 Each registered project root has its own `.agent-collab/`:

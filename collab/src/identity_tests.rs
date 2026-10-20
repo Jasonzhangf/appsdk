@@ -442,6 +442,47 @@ fn resolver_prefers_current_scope_for_a_shared_pane_anchor() {
 }
 
 #[test]
+fn resolver_keeps_duplicate_current_scope_pane_anchors_ambiguous() {
+    let root = test_root("ci-resolver-shared-pane-current-scope-ambiguous");
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    let scope = test_scope(root.clone());
+    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
+    let candidate = tmux_candidate(None, None, "%4");
+    saved_identity(
+        &host_paths,
+        &scope,
+        "codex-%4",
+        None,
+        None,
+        Some(candidate.endpoint.clone()),
+    );
+    saved_identity(
+        &host_paths,
+        &scope,
+        "same-project-pane-peer",
+        None,
+        None,
+        Some(candidate.endpoint.clone()),
+    );
+
+    let facts = crate::proto::IdentityFacts {
+        session_id: None,
+        thread_id: None,
+        endpoint: None,
+        namespace: None,
+        tmux: None,
+        tmux_anchor: Some(crate::proto::TmuxPaneAnchor {
+            socket_path: candidate.endpoint.socket_path,
+            pane_id: candidate.endpoint.pane_id,
+        }),
+        dsh_session_id: None,
+    };
+    let error = resolve_for_daemon_at(&host_paths, &scope, &facts).unwrap_err();
+    assert!(error.to_string().starts_with("IDENTITY_RESTORE_AMBIGUOUS:"));
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn preserved_draft_token_is_not_reminted() {
     let root = test_root("ci-resolver-preserve-draft");
     std::fs::create_dir_all(root.join(".agent-collab")).unwrap();

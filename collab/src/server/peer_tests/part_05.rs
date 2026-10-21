@@ -66,6 +66,15 @@ fn role_contract_is_identical_across_context_workers_and_status() {
                 assert!(responsibilities.contains("peer-first"));
                 assert!(responsibilities.contains("every eligible peer"));
                 assert!(responsibilities.contains("protected_hold"));
+                assert!(responsibilities.contains("only its own project"));
+                assert!(responsibilities.contains("non-overlapping"));
+                assert!(responsibilities.contains("close-before-open/sese"));
+                assert!(responsibilities.contains("400/502/598"));
+                assert!(responsibilities.contains("client-wire status"));
+                assert!(responsibilities.contains("provider http status"));
+                assert!(responsibilities.contains("typed internal terminal"));
+                assert!(responsibilities.contains("business response"));
+                assert!(responsibilities.contains("daemon or tmux lifecycle"));
                 assert!(responsibilities.contains("re-arm"));
                 assert!(responsibilities.contains("no inherited master authority"));
                 assert!(!responsibilities.contains("saturate every live present peer first"));
@@ -74,7 +83,13 @@ fn role_contract_is_identical_across_context_workers_and_status() {
                 assert!(role_task.contains("long-horizon"));
                 assert!(role_task.contains("orchestrator"));
                 assert!(responsibilities.contains("codex exec --profile gcm"));
+                assert!(responsibilities.contains("non-overlapping bounded scopes"));
                 assert!(responsibilities.contains("verify subworker evidence"));
+                assert!(responsibilities.contains("resource closure"));
+                assert!(responsibilities.contains("close-before-open/sese"));
+                assert!(responsibilities.contains("400/502/598"));
+                assert!(responsibilities.contains("business response"));
+                assert!(responsibilities.contains("daemon or tmux lifecycle actions"));
                 assert!(responsibilities.contains("do not claim master grants"));
                 assert_eq!(
                     context.data["role_brief"]["authority"],

@@ -1157,6 +1157,44 @@ fn init_releases_collab_doc_only_once() {
 }
 
 #[test]
+fn collab_doc_projects_canonical_project_agnostic_patrol_contract() {
+    let normalized = COLLAB_DOC.split_whitespace().collect::<Vec<_>>().join(" ");
+    for marker in [
+        "patrols only its own project",
+        "open P0/P1 work",
+        "real peer evidence",
+        "canonical issue intake",
+        "currently supported monitored events",
+        "non-overlapping bounded scopes",
+        "Close-Before-Open/SESE",
+        "PROTECTED_HOLD",
+        "broad process kills",
+        "daemon or tmux lifecycle actions",
+        "400/502/598",
+        "client-wire status",
+        "provider HTTP status",
+        "typed internal terminal",
+        "business response",
+        "goal or deadline one-shot wakes",
+        "report channel",
+        "typed grant controls independently of transport liveness",
+    ] {
+        assert!(
+            normalized.contains(marker),
+            "project Collab projection is missing {marker:?}"
+        );
+    }
+    assert!(
+        !normalized.contains("RouteCodex"),
+        "canonical Collab contract must stay project-agnostic"
+    );
+    assert!(
+        !normalized.contains("live server-verified transport"),
+        "typed master grants must not depend on transport liveness"
+    );
+}
+
+#[test]
 fn init_rejects_malformed_existing_configuration_without_overwriting_it() {
     let json_root = test_root("init-invalid-json");
     std::fs::create_dir_all(&json_root).unwrap();

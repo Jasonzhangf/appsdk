@@ -173,9 +173,39 @@ mod tests {
             .unwrap_or_else(|e| panic!("read {rel}: {e}"));
             assert_eq!(on_disk, *embedded, "drift in {rel}");
             if *rel == "SKILL.md" {
-                assert!(embedded.contains("Peer-first"));
-                assert!(embedded.contains("PROTECTED_HOLD"));
-                assert!(embedded.contains("one-shot wake"));
+                let normalized = embedded.split_whitespace().collect::<Vec<_>>().join(" ");
+                assert!(normalized.contains("Peer-first"));
+                assert!(normalized.contains("PROTECTED_HOLD"));
+                assert!(normalized.contains("one-shot wake"));
+                for marker in [
+                    "patrols only its own project",
+                    "open P0/P1 work",
+                    "real peer evidence",
+                    "owned worktrees and stale resources",
+                    "canonical issue intake",
+                    "currently supported monitored events",
+                    "non-overlapping bounded scopes",
+                    "Close-Before-Open/SESE",
+                    "broad process kills",
+                    "daemon or tmux lifecycle actions",
+                    "400/502/598",
+                    "client-wire status",
+                    "provider HTTP status",
+                    "typed internal terminal",
+                    "business response",
+                    "goal or deadline one-shot wakes",
+                    "explicitly re-arm",
+                    "report channel",
+                ] {
+                    assert!(
+                        normalized.contains(marker),
+                        "compiled Skill projection is missing {marker:?}"
+                    );
+                }
+                assert!(
+                    !normalized.contains("RouteCodex"),
+                    "canonical Collab contract must stay project-agnostic"
+                );
             }
             if *rel == "references/task-worktree-lifecycle.md" {
                 assert!(embedded.contains("PROTECTED_HOLD"));

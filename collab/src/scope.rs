@@ -787,23 +787,56 @@ tokens, mixed runtime writes, and guessing thread identity are deprecated.
 - Every registered identity is an equal `peer`; there is no inferred master
   from first registration. Codex root is not Collab master.
 - Context bootstrap and peer registration never create a master. A master exists
-  only when a registered peer has a live server-verified transport and was assigned by
-  user-approved self-promotion or live-master delegation. A recorded identity
-  with a dead App Server thread is not a live master.
-- If a live master exists, other peers cannot promote; only that master may
-  `collab master delegate <peer>`. If no live master exists, a peer may
+  only through an explicit user-approved scoped grant. The typed grant controls
+  independently of transport liveness; endpoint and agent activity are separate
+  observations.
+- If a master grant exists, other peers cannot promote; only the current master
+  may `collab master delegate <peer>`. If no grant exists, a peer may
   `collab master promote --approval "<user text>"` itself after explicit user
   approval. Master authority is arbitration only; it does not take another
   peer's task. Independent peers may temporarily decline a master
   collaboration invite to protect their own task. A delegated subagent follows
   its task contract; it follows Collab protocol only if it is itself a
   registered peer.
-- Each peer self-registers one task and owns its full worktree, test,
-  integration, main verification, push, cleanup, and resource lifecycle.
+- A long-horizon goal is offered through the public board to a consenting peer.
+  The peer owns planning, execution, verification, unblocking, integration, and
+  resource closure for its accepted scope. Master verifies evidence, coordinates
+  cross-peer dependencies, integrates the delivery, and closes project
+  responsibilities.
+- Each peer self-registers one task and owns its worktree, tests, assigned
+  integration, cleanup, and resource lifecycle.
 - Task owner, resource holder, integration lease, and daemon operator are
   scoped capabilities, never durable identity roles.
 - Peers send no normal progress reports. P2P communication is limited to
   durable resource occupancy and release coordination.
+
+## Canonical patrol contract
+
+This contract is project-agnostic. Project-specific paths, commands, issue
+bindings, and implementation details do not replace it.
+
+1. A master patrols only its own project. Patrol covers open P0/P1 work, real
+   peer evidence, owned worktrees and stale resources, canonical issue intake,
+   and currently supported monitored events. Durable evidence is required;
+   inactivity, heartbeat, and ACK prove neither progress nor completion.
+2. Long-horizon goals go through the public board to consenting peers. Each
+   peer partitions its accepted goal into non-overlapping bounded scopes and
+   orchestrates independent `codex exec --profile gcm` workers. Master-owned
+   GCM is capacity fallback only when every eligible peer is busy.
+3. Peers own planning, execution, verification, unblocking, integration, and
+   resource closure. Master verifies evidence, coordinates dependencies,
+   integrates the delivery, and closes project responsibilities.
+4. Worktree lifecycle is Close-Before-Open/SESE. Dirty, active, shared, or
+   unknown resources are PROTECTED_HOLD. Do not run broad process kills or
+   perform daemon or tmux lifecycle actions, including host-pane termination.
+5. New 400/502/598 production issues use project-canonical intake and
+   deduplication. Evidence separately identifies client-wire status, provider
+   HTTP status, typed internal terminal, and business response.
+6. Continuous patrol uses existing goal or deadline one-shot wakes. Re-arm a
+   consumed one-shot before a turn ends when scheduling continues. A read, ACK,
+   status summary, or dispatch receipt is not completion.
+7. Every dispatch states goal, scope, authorized actions, resource owner,
+   delivery and test evidence, report channel, and stop conditions.
 
 ## Task lifecycle
 
@@ -866,17 +899,12 @@ work and are not a fallback when board admission fails. A durable send or
 dispatch receipt is not consumption or completion; verify with `collab msg
 <id>` and the owning task record.
 
-Every standing patrol checks owned worktrees and stale resources, open P0/P1
-work, and new production issues. Remove only unneeded owned worktrees after
-recoverable extraction. Preserve dirty, active, shared, or unknown resources as
-PROTECTED_HOLD. Run each production issue through the project's canonical
-intake before repair. Re-arm a consumed one-shot goal or deadline wake before
-the cycle ends when continued scheduling is required.
-
-Peers never share worktrees. Each task owner starts from latest main in one
-declared clean configured worktree path (`<base>/<project-key>/<short-slug>`
-when `[worktree].base` is set; legacy `<project-main>/playground/<short-slug>`
-during transition), implements and tests, commits the exact
+Peers never share worktrees. Worktree lifecycle is Close-Before-Open/SESE:
+close the old owned worktree before opening its replacement. Each task owner
+starts from latest main in one declared clean configured worktree path
+(`<base>/<project-key>/<short-slug>` when `[worktree].base` is set; legacy
+`<project-main>/playground/<short-slug>` during transition), implements and
+tests, commits the exact
 change set, syncs latest main again, verifies the candidate, acquires a short
 integration lease, merges the exact commit to main, verifies and pushes main,
 then closes the task to remove only its clean merged worktree/branch and persist

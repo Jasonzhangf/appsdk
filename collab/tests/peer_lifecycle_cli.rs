@@ -106,10 +106,10 @@ fn pane_after_opening_windows(
     }
 }
 
-fn seed_exact_binding_with_one_unrelated_current_thread_route(
+fn seed_tombstoned_and_missing_exact_bindings(
     path: &std::path::Path,
     source_binding: &Value,
-) -> Value {
+) -> (Value, Value) {
     let source_agent_id = source_binding["agent_id"]
         .as_str()
         .expect("source binding has an agent id");
@@ -117,10 +117,50 @@ fn seed_exact_binding_with_one_unrelated_current_thread_route(
         .as_str()
         .expect("source binding has a binding id");
 
-    let mut target_binding = source_binding.clone();
-    target_binding["agent_id"] = Value::String("codex-%11".into());
-    target_binding["runtime_id"] = Value::String("runtime-tmux-codex-%11".into());
-    target_binding["binding_id"] = Value::String("binding-codex-%11".into());
+    // Keep the persisted peer's exact binding. The public context owner checks
+    // the saved identity generation, so renaming only its journal records
+    // would create an artificial reconciliation failure.
+    let missing_binding = source_binding.clone();
+
+    let mut tombstoned_binding = source_binding.clone();
+    tombstoned_binding["agent_id"] = Value::String("codex-%10".into());
+    tombstoned_binding["runtime_id"] = Value::String("runtime-tmux-codex-%10".into());
+    tombstoned_binding["binding_id"] = Value::String("binding-codex-%10".into());
+    tombstoned_binding["session_id"] = Value::String("session-%10".into());
+    tombstoned_binding["native_thread_id"] = Value::String("thread-%10".into());
+    let endpoint = tombstoned_binding["tmux_endpoint"]
+        .as_object_mut()
+        .expect("source binding has a tmux endpoint");
+    endpoint.insert("pane_id".into(), Value::String("%10".into()));
+    endpoint.insert("tmux_session_id".into(), Value::String("$10".into()));
+    endpoint.insert(
+        "codex_session_id".into(),
+        Value::String("session-%10".into()),
+    );
+    endpoint.insert("codex_thread_id".into(), Value::String("thread-%10".into()));
+
+    let mut rebound = tombstoned_binding.clone();
+    rebound["endpoint_generation"] = Value::from(
+        tombstoned_binding["endpoint_generation"]
+            .as_u64()
+            .expect("source binding endpoint generation")
+            + 1,
+    );
+    rebound["session_id"] = Value::String("session-%10-rebound".into());
+    rebound["native_thread_id"] = Value::String("thread-%10-rebound".into());
+    rebound["tmux_endpoint"] = Value::Null;
+    let tombstone = json!({
+        "project_scope": tombstoned_binding["project_scope"].clone(),
+        "app_scope_id": tombstoned_binding["app_scope_id"].clone(),
+        "agent_id": tombstoned_binding["agent_id"].clone(),
+        "runtime_id": tombstoned_binding["runtime_id"].clone(),
+        "binding_id": tombstoned_binding["binding_id"].clone(),
+        "endpoint_generation": tombstoned_binding["endpoint_generation"].clone(),
+        "session_id": tombstoned_binding["session_id"].clone(),
+        "native_thread_id": tombstoned_binding["native_thread_id"].clone(),
+        "tmux_endpoint": tombstoned_binding["tmux_endpoint"].clone(),
+        "reboundTo": rebound,
+    });
 
     let mut records = Vec::new();
     let mut registered = 0;
@@ -140,27 +180,34 @@ fn seed_exact_binding_with_one_unrelated_current_thread_route(
                 continue;
             }
             Some("GlobalRuntimeBound") if record["binding"]["binding_id"] == source_binding_id => {
-                record["binding"] = target_binding.clone();
+                let mut tombstoned = record.clone();
+                tombstoned["binding"] = tombstoned_binding.clone();
+                records.push(tombstoned);
+                record["binding"] = missing_binding.clone();
                 bound += 1;
             }
             Some("Registered") if record["worker"]["id"] == source_agent_id => {
-                record["worker"]["id"] = Value::String("codex-%11".into());
+                let mut tombstoned = record.clone();
+                tombstoned["worker"]["id"] = Value::String("codex-%10".into());
+                tombstoned["worker"]["token"] = Value::String("0".repeat(64));
+                tombstoned["worker"]["transport"]["namespace"] = Value::String("$10".into());
+                tombstoned["worker"]["transport"]["session_id"] =
+                    tombstoned_binding["session_id"].clone();
+                tombstoned["worker"]["transport"]["thread_id"] =
+                    tombstoned_binding["native_thread_id"].clone();
+                tombstoned["worker"]["transport"]["tmux_endpoint"] =
+                    tombstoned_binding["tmux_endpoint"].clone();
+                records.push(tombstoned);
                 registered += 1;
-            }
-            Some("NotificationSubscribed")
-                if record["subscription"]["worker_id"] == source_agent_id =>
-            {
-                record["subscription"]["worker_id"] = Value::String("codex-%11".into());
-                let id = record["subscription"]["id"]
-                    .as_str()
-                    .expect("subscription has an id");
-                record["subscription"]["id"] =
-                    Value::String(id.replace(source_agent_id, "codex-%11"));
             }
             _ => {}
         }
         records.push(record);
     }
+    records.push(json!({
+        "ev": "GlobalCurrentThreadRouteTombstoneSet",
+        "tombstone": tombstone,
+    }));
     assert_eq!(registered, 1, "source journal must have one target worker");
     assert_eq!(bound, 1, "source journal must have one target binding");
     assert!(
@@ -168,7 +215,7 @@ fn seed_exact_binding_with_one_unrelated_current_thread_route(
         "source journal cannot contain duplicate target route events"
     );
 
-    let mut unrelated = target_binding.clone();
+    let mut unrelated = missing_binding.clone();
     unrelated["binding_id"] = Value::String("binding-unrelated-route".into());
     unrelated["agent_id"] = Value::String("unrelated-route-peer".into());
     unrelated["runtime_id"] = Value::String("runtime-unrelated-route".into());
@@ -200,7 +247,7 @@ fn seed_exact_binding_with_one_unrelated_current_thread_route(
         route_events[0]["binding"]["binding_id"], "binding-unrelated-route",
         "{route_events:?}"
     );
-    target_binding
+    (tombstoned_binding, missing_binding)
 }
 
 fn project_journal_for_root(fixture: &Fixture, root: &std::path::Path) -> std::path::PathBuf {
@@ -1936,10 +1983,16 @@ fn verified_public_create_can_be_bound_and_read_back_as_managed() {
 }
 
 #[test]
-fn context_replays_exact_binding_when_an_unrelated_route_event_exists() {
+fn context_replay_preserves_tombstone_and_backfills_unrelated_exact_route() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (mut fixture, first_pane) = Fixture::isolated("peer-exact-route-replay");
     let pane = pane_after_opening_windows(&fixture, "peer-exact-route-replay", &first_pane, "%11");
+    let tombstoned_pane = Pane {
+        server_pid: first_pane.server_pid,
+        pane_id: "%10".into(),
+        session_anchor: "session-%10".into(),
+        thread_anchor: "thread-%10".into(),
+    };
     let project = fixture.root.join("exact-route-project");
     std::fs::create_dir_all(project.join(".agent-collab")).expect("create isolated target project");
     let seeded = registered_context_at(&fixture, &project, "peer-exact-route-seed", &pane);
@@ -1948,6 +2001,10 @@ fn context_replays_exact_binding_when_an_unrelated_route_event_exists() {
     let source_binding_id = source_binding["binding_id"]
         .as_str()
         .expect("seed has a binding id")
+        .to_owned();
+    let source_agent_id = source_binding["agent_id"]
+        .as_str()
+        .expect("seed has an agent id")
         .to_owned();
     assert!(
         source_binding["endpoint_generation"]
@@ -1969,17 +2026,33 @@ fn context_replays_exact_binding_when_an_unrelated_route_event_exists() {
     let project_journal = project_journal_for_root(&fixture, &project);
     let host_journal = project_journal_excluding(&fixture, &project_journal);
     fixture.stop_daemon();
-    let binding = seed_exact_binding_with_one_unrelated_current_thread_route(
-        &project_journal,
-        &source_binding,
-    );
-    retain_exact_host_route(&host_journal, &source_binding_id, &binding);
-    let binding_id = binding["binding_id"]
+    let (tombstoned_binding, missing_binding) =
+        seed_tombstoned_and_missing_exact_bindings(&project_journal, &source_binding);
+    retain_exact_host_route(&host_journal, &source_binding_id, &missing_binding);
+    let tombstoned_binding_id = tombstoned_binding["binding_id"]
         .as_str()
-        .expect("seeded target binding id")
+        .expect("seeded tombstoned binding id")
         .to_owned();
-    assert_eq!(binding["agent_id"], "codex-%11", "{binding}");
-    assert_eq!(binding["tmux_endpoint"]["pane_id"], "%11", "{binding}");
+    let missing_binding_id = missing_binding["binding_id"]
+        .as_str()
+        .expect("seeded missing binding id")
+        .to_owned();
+    assert_eq!(
+        tombstoned_binding["agent_id"], "codex-%10",
+        "{tombstoned_binding}"
+    );
+    assert_eq!(
+        tombstoned_binding["tmux_endpoint"]["pane_id"], "%10",
+        "{tombstoned_binding}"
+    );
+    assert_eq!(
+        missing_binding["agent_id"], source_agent_id,
+        "{missing_binding}"
+    );
+    assert_eq!(
+        missing_binding["tmux_endpoint"]["pane_id"], "%11",
+        "{missing_binding}"
+    );
     assert_eq!(
         std::fs::read(fixture.host_routes()).expect("read retained host route index"),
         host_routes_before,
@@ -1990,19 +2063,38 @@ fn context_replays_exact_binding_when_an_unrelated_route_event_exists() {
         journal.lines().any(|line| {
             serde_json::from_str::<Value>(line).is_ok_and(|record| {
                 record["ev"] == "GlobalRuntimeBound"
-                    && record["binding"]["binding_id"] == binding_id
+                    && record["binding"]["binding_id"] == tombstoned_binding_id
             })
         }),
-        "the exact generation-bound target binding must remain durable"
+        "the tombstoned target binding must remain durable"
+    );
+    assert!(
+        journal.lines().any(|line| {
+            serde_json::from_str::<Value>(line).is_ok_and(|record| {
+                record["ev"] == "GlobalRuntimeBound"
+                    && record["binding"]["binding_id"] == missing_binding_id
+            })
+        }),
+        "the unrelated missing binding must remain durable"
+    );
+    assert!(
+        journal.lines().any(|line| {
+            serde_json::from_str::<Value>(line).is_ok_and(|record| {
+                record["ev"] == "GlobalCurrentThreadRouteTombstoneSet"
+                    && record["tombstone"]["binding_id"] == tombstoned_binding_id
+            })
+        }),
+        "the target binding address must be explicitly tombstoned"
     );
     assert!(
         !journal.lines().any(|line| {
             serde_json::from_str::<Value>(line).is_ok_and(|record| {
                 record["ev"] == "GlobalCurrentThreadRouteSet"
-                    && record["binding"]["binding_id"] == binding_id
+                    && (record["binding"]["binding_id"] == tombstoned_binding_id
+                        || record["binding"]["binding_id"] == missing_binding_id)
             })
         }),
-        "the target project route event must be omitted"
+        "neither target may carry a project route event"
     );
     assert_eq!(
         journal
@@ -2020,32 +2112,23 @@ fn context_replays_exact_binding_when_an_unrelated_route_event_exists() {
         !journal.lines().any(|line| {
             serde_json::from_str::<Value>(line).is_ok_and(|record| {
                 record["ev"] == "GlobalCurrentThreadRouteSet"
-                    && record["binding"]["binding_id"] == binding_id
-            })
-        }),
-        "the project route event for codex-%11 must be absent"
-    );
-    assert!(
-        !journal.lines().any(|line| {
-            serde_json::from_str::<Value>(line).is_ok_and(|record| {
-                record["ev"] == "GlobalCurrentThreadRouteSet"
                     && record["binding"]["binding_id"] == source_binding_id
             })
         }),
         "the original generated route must not remain after reseeding"
     );
-    let host_journal = std::fs::read_to_string(&host_journal).unwrap();
+    let host_journal_body = std::fs::read_to_string(&host_journal).unwrap();
     assert_eq!(
-        host_journal
+        host_journal_body
             .lines()
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
             .filter(|record| {
                 record["ev"] == "GlobalCurrentThreadRouteSet"
-                    && record["binding"]["binding_id"] == binding_id
+                    && record["binding"]["binding_id"] == missing_binding_id
             })
             .count(),
         1,
-        "the host journal must retain exactly one matching target route"
+        "the host journal must retain exactly one route for the unaffected target"
     );
     fixture.restart_after_external_stop();
 
@@ -2065,7 +2148,7 @@ fn context_replays_exact_binding_when_an_unrelated_route_event_exists() {
     let status_output = command_at(
         &fixture,
         &project,
-        &["worker", "status", "codex-%11"],
+        &["worker", "status", source_agent_id.as_str()],
         &pane,
     );
     let status: Value = serde_json::from_slice(&status_output.stdout).unwrap_or(Value::Null);
@@ -2079,12 +2162,33 @@ fn context_replays_exact_binding_when_an_unrelated_route_event_exists() {
         .as_array()
         .expect("worker status list")
         .iter()
-        .find(|worker| worker["id"] == "codex-%11")
+        .find(|worker| worker["id"] == source_agent_id.as_str())
         .cloned();
-    let read_output = command_at(&fixture, &project, &["worker", "read", "codex-%11"], &pane);
+    let read_output = command_at(
+        &fixture,
+        &project,
+        &["worker", "read", source_agent_id.as_str()],
+        &pane,
+    );
     let read = serde_json::from_slice::<Value>(&read_output.stdout).unwrap_or_else(|_| Value::Null);
 
     assert_eq!(context["result"]["outcome"], "completed", "{context}");
+    assert_eq!(
+        context["result"]["snapshot"]["identity"]["worker_id"], source_agent_id,
+        "{context}"
+    );
+    assert_eq!(
+        context["result"]["snapshot"]["binding"]["binding_id"], missing_binding_id,
+        "{context}"
+    );
+    assert_eq!(
+        context["result"]["snapshot"]["binding"]["agent_id"], source_agent_id,
+        "{context}"
+    );
+    assert_eq!(
+        context["result"]["snapshot"]["binding"]["tmux_endpoint"]["pane_id"], "%11",
+        "{context}"
+    );
     assert!(
         status_row
             .as_ref()
@@ -2102,6 +2206,148 @@ fn context_replays_exact_binding_when_an_unrelated_route_event_exists() {
     );
     assert_eq!(read["result"]["outcome"], "ok", "{read}");
     assert!(read["error"].is_null(), "{read}");
+
+    let tombstoned_status_output = command_at(
+        &fixture,
+        &project,
+        &["worker", "status", "codex-%10"],
+        &pane,
+    );
+    let tombstoned_status: Value =
+        serde_json::from_slice(&tombstoned_status_output.stdout).unwrap_or(Value::Null);
+    assert!(
+        tombstoned_status_output.status.success(),
+        "worker status for tombstoned target failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&tombstoned_status_output.stdout),
+        String::from_utf8_lossy(&tombstoned_status_output.stderr)
+    );
+    let tombstoned_status_row = tombstoned_status["workers"]
+        .as_array()
+        .expect("tombstoned worker status list")
+        .iter()
+        .find(|worker| worker["id"] == "codex-%10")
+        .cloned();
+    assert!(
+        tombstoned_status_row
+            .as_ref()
+            .is_none_or(|row| row["presence"] == "missing" && row["identity_valid"] == false),
+        "replay revived the tombstoned target: {tombstoned_status}"
+    );
+    let tombstoned_read_output =
+        command_at(&fixture, &project, &["worker", "read", "codex-%10"], &pane);
+    let tombstoned_read: Value =
+        serde_json::from_slice(&tombstoned_read_output.stdout).unwrap_or(Value::Null);
+    assert!(
+        !tombstoned_read_output.status.success(),
+        "tombstoned target became operable: stdout={} stderr={}",
+        String::from_utf8_lossy(&tombstoned_read_output.stdout),
+        String::from_utf8_lossy(&tombstoned_read_output.stderr)
+    );
+    assert_eq!(
+        tombstoned_read["error"],
+        "PEER_LIFECYCLE_UNAUTHORIZED",
+        "{}",
+        String::from_utf8_lossy(&tombstoned_read_output.stderr)
+    );
+
+    let tombstoned_context_output = command_at(
+        &fixture,
+        &project,
+        &["context", "--op", "peer-tombstoned-route-recover"],
+        &tombstoned_pane,
+    );
+    let tombstoned_context: Value =
+        serde_json::from_slice(&tombstoned_context_output.stdout).unwrap_or(Value::Null);
+    assert!(
+        tombstoned_context_output.status.success(),
+        "tombstoned pane did not reactivate its identity: stdout={} stderr={}",
+        String::from_utf8_lossy(&tombstoned_context_output.stdout),
+        String::from_utf8_lossy(&tombstoned_context_output.stderr)
+    );
+    assert_eq!(
+        tombstoned_context["result"]["outcome"], "completed",
+        "{tombstoned_context}"
+    );
+    let reactivated_agent_id = tombstoned_context["result"]["snapshot"]["identity"]["worker_id"]
+        .as_str()
+        .expect("reactivated pane has an agent id");
+    let reactivated_binding = &tombstoned_context["result"]["snapshot"]["binding"];
+    let reactivated_binding_id = reactivated_binding["binding_id"]
+        .as_str()
+        .expect("reactivated pane has a new binding id");
+    assert_eq!(
+        reactivated_agent_id,
+        tombstoned_binding["agent_id"]
+            .as_str()
+            .expect("tombstoned binding has an agent id"),
+        "{tombstoned_context}"
+    );
+    assert_eq!(
+        reactivated_binding_id,
+        tombstoned_binding_id.as_str(),
+        "tombstone rebind preserves the binding identity: {tombstoned_context}"
+    );
+    let tombstoned_generation = tombstoned_binding["endpoint_generation"]
+        .as_u64()
+        .expect("tombstoned binding has a generation");
+    let reactivated_generation = reactivated_binding["endpoint_generation"]
+        .as_u64()
+        .expect("reactivated binding has a generation");
+    assert!(
+        reactivated_generation > tombstoned_generation,
+        "tombstone rebind must advance the generation: {tombstoned_context}"
+    );
+    assert_eq!(
+        reactivated_binding["agent_id"], reactivated_agent_id,
+        "{tombstoned_context}"
+    );
+    assert_eq!(
+        reactivated_binding["tmux_endpoint"]["pane_id"], "%10",
+        "{tombstoned_context}"
+    );
+
+    let replayed_journal =
+        std::fs::read_to_string(&project_journal).expect("read replayed journal");
+    assert_eq!(
+        replayed_journal
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|record| {
+                record["ev"] == "GlobalCurrentThreadRouteTombstoneSet"
+                    && record["tombstone"]["binding_id"] == tombstoned_binding_id
+            })
+            .count(),
+        1,
+        "replay must retain the tombstoned binding record"
+    );
+    assert!(
+        replayed_journal.lines().any(|line| {
+            serde_json::from_str::<Value>(line).is_ok_and(|record| {
+                record["ev"] == "GlobalRuntimeBound"
+                    && record["binding"]["binding_id"] == tombstoned_binding_id
+            })
+        }),
+        "replay must retain the tombstoned runtime binding"
+    );
+    let replayed_host_journal =
+        std::fs::read_to_string(&host_journal).expect("read replayed host route journal");
+    let latest_tombstoned_pane_route = replayed_host_journal
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|record| {
+            record["ev"] == "GlobalCurrentThreadRouteSet"
+                && record["binding"]["tmux_endpoint"]["pane_id"] == "%10"
+        })
+        .next_back()
+        .expect("reactivated pane must publish a current route");
+    assert_eq!(
+        latest_tombstoned_pane_route["binding"]["binding_id"], reactivated_binding_id,
+        "{latest_tombstoned_pane_route}"
+    );
+    assert_eq!(
+        latest_tombstoned_pane_route["binding"]["binding_id"], tombstoned_binding_id,
+        "{latest_tombstoned_pane_route}"
+    );
 }
 
 #[cfg(feature = "context-cancel-test-hooks")]

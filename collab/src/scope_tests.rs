@@ -1178,6 +1178,7 @@ fn collab_doc_projects_canonical_project_agnostic_patrol_contract() {
         "goal or deadline one-shot wakes",
         "report channel",
         "typed grant controls independently of transport liveness",
+        "explicit user approval may promote itself and atomically replace the existing scoped holder regardless of transport liveness",
     ] {
         assert!(
             normalized.contains(marker),
@@ -1191,6 +1192,10 @@ fn collab_doc_projects_canonical_project_agnostic_patrol_contract() {
     assert!(
         !normalized.contains("live server-verified transport"),
         "typed master grants must not depend on transport liveness"
+    );
+    assert!(
+        !normalized.contains("If a master grant exists, other peers cannot promote"),
+        "explicit user approval must be able to replace an existing master grant"
     );
 }
 

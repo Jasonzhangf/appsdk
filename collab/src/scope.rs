@@ -790,14 +790,13 @@ tokens, mixed runtime writes, and guessing thread identity are deprecated.
   only through an explicit user-approved scoped grant. The typed grant controls
   independently of transport liveness; endpoint and agent activity are separate
   observations.
-- If a master grant exists, other peers cannot promote; only the current master
-  may `collab master delegate <peer>`. If no grant exists, a peer may
-  `collab master promote --approval "<user text>"` itself after explicit user
-  approval. Master authority is arbitration only; it does not take another
-  peer's task. Independent peers may temporarily decline a master
-  collaboration invite to protect their own task. A delegated subagent follows
-  its task contract; it follows Collab protocol only if it is itself a
-  registered peer.
+- An authenticated peer with explicit user approval may promote itself and
+  atomically replace the existing scoped holder regardless of transport
+  liveness. Only the current master may `collab master delegate <peer>`.
+  Master authority is arbitration only; it does not take another peer's task.
+  Independent peers may temporarily decline a master collaboration invite to
+  protect their own task. A delegated subagent follows its task contract; it
+  follows Collab protocol only if it is itself a registered peer.
 - A long-horizon goal is offered through the public board to a consenting peer.
   The peer owns planning, execution, verification, unblocking, integration, and
   resource closure for its accepted scope. Master verifies evidence, coordinates

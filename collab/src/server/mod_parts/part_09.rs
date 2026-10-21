@@ -625,6 +625,7 @@ fn handle_task_close(
             &server.config,
             task.worktree_path.as_deref(),
             task.branch.as_deref(),
+            lifecycle.integration_commit.as_deref(),
         ) {
             return Resp::err(e);
         }
@@ -838,7 +839,24 @@ fn handle_task_finalize_cleanup(
     worker_id: String,
     token: String,
     task_id: String,
+    integration_commit: Option<String>,
 ) -> Resp {
+    let provided_integration = match integration_commit.as_deref() {
+        Some(value) => {
+            let value = value.trim();
+            if value.is_empty() {
+                return Resp::err_data(
+                    "CLEANUP_FINALIZE_COMMIT_INVALID",
+                    json!({
+                        "provided": value,
+                        "expected": "a non-empty commit sha reachable from refs/heads/main",
+                    }),
+                );
+            }
+            Some(value.to_owned())
+        }
+        None => None,
+    };
     let mut st = server.state.lock().unwrap();
     let Some(worker) = st.workers.get(&worker_id).cloned() else {
         return Resp::err(format!("worker {} not registered", worker_id));
@@ -888,6 +906,36 @@ fn handle_task_finalize_cleanup(
             }),
         );
     }
+    if let Some(commit) = provided_integration.as_deref() {
+        // An explicit commit is operator-supplied proof for a task that was
+        // force-closed without recorded integration. Validate it exactly like
+        // `collab task integrated` so a stale or unrelated commit cannot
+        // authorize deletion.
+        let main_head = match resolve_authoritative_main_head(&server.root) {
+            Ok(head) => head,
+            Err(error) => return error,
+        };
+        match commit_is_integrated_in_main(&server.root, commit) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Resp::err_data(
+                    "CLEANUP_FINALIZE_COMMIT_NOT_IN_MAIN",
+                    json!({
+                        "provided": commit,
+                        "main_head": main_head,
+                        "expected": "a commit reachable from refs/heads/main",
+                    }),
+                )
+            }
+            Err(error) => return error,
+        }
+    }
+    let recorded_integration = st
+        .task_lifecycle
+        .get(&task.id)
+        .and_then(|record| record.integration_commit.clone())
+        .filter(|value| !value.trim().is_empty());
+    let integration_evidence = provided_integration.or(recorded_integration);
     let existing = st
         .cleanup_receipts
         .get(&task.id)
@@ -953,6 +1001,7 @@ fn handle_task_finalize_cleanup(
         &server.config,
         task.worktree_path.as_deref(),
         task.branch.as_deref(),
+        integration_evidence.as_deref(),
     ) {
         return Resp::err_data(
             format!("CLEANUP_FINALIZE_REFUSED: {error}"),

@@ -1052,6 +1052,7 @@ fn finalize_releases_a_waiter_exactly_once() {
         "master".into(),
         "token-master".into(),
         "held".into(),
+        None,
     );
     assert!(finalized.ok, "{}", finalized.error.unwrap_or_default());
     assert_eq!(finalized.data["cleanup"]["result"], "verified");
@@ -1088,6 +1089,7 @@ fn finalize_releases_a_waiter_exactly_once() {
         "master".into(),
         "token-master".into(),
         "held".into(),
+        None,
     );
     assert!(again.ok, "{}", again.error.unwrap_or_default());
     assert_eq!(again.data["idempotent"], true);
@@ -1120,6 +1122,7 @@ fn interrupted_finalize_is_resumed_by_a_retry_not_silently_completed() {
         "master".into(),
         "token-master".into(),
         "held".into(),
+        None,
     );
     assert!(first.ok, "{}", first.error.unwrap_or_default());
     assert_eq!(first.data["idempotent"], false);
@@ -1147,6 +1150,7 @@ fn interrupted_finalize_is_resumed_by_a_retry_not_silently_completed() {
         "master".into(),
         "token-master".into(),
         "held".into(),
+        None,
     );
     assert!(retried.ok, "{}", retried.error.unwrap_or_default());
     assert_eq!(
@@ -1190,6 +1194,7 @@ fn finalize_preserves_unread_direct_message_payloads() {
         "master".into(),
         "token-master".into(),
         "held".into(),
+        None,
     );
     assert!(finalized.ok, "{}", finalized.error.unwrap_or_default());
     let state = server.state.lock().unwrap();

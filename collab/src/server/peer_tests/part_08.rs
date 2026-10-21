@@ -572,6 +572,7 @@ fn configured_worktree_lifecycle_register_relocate_and_cleanup_use_configured_ba
         "owner".into(),
         "token-owner".into(),
         "configured-task".into(),
+        None,
     );
     assert!(finalized.ok, "{finalized:?}");
     assert!(!target.exists());

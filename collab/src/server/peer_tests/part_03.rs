@@ -624,7 +624,7 @@ fn missing_subagent_with_unresolved_responsibility_still_requires_a_snapshot() {
         "task-missing-busy".into(), true, Some("owner resolves the fixture task before unread-only responsibility check".into()));
     assert!(closed_task.ok, "{closed_task:?}");
     let finalized = handle_task_finalize_cleanup(&server, "child".into(), "token-child".into(),
-        "task-missing-busy".into());
+        "task-missing-busy".into(), None);
     assert!(finalized.ok, "{finalized:?}");
     assert_eq!(finalized.data["cleanup"]["result"], "verified");
     assert_eq!(server.state.lock().unwrap().tasks["task-missing-busy"].status, "closed");

@@ -188,7 +188,7 @@ fn context_gives_an_idle_master_one_canonical_scheduling_action() {
         .iter()
         .any(|line| {
             line.as_str().is_some_and(|line| {
-                line.contains("Converge owned worktrees") && line.contains("PROTECTED_HOLD")
+                line.contains("converges owned worktrees") && line.contains("PROTECTED_HOLD")
             })
         }));
     assert_eq!(

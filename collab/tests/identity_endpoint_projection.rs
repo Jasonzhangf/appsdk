@@ -105,6 +105,38 @@ fn live_pane_reports_endpoint_live_true_and_output_keeps_identity() {
     );
     assert_eq!(promoted["master"], worker_id, "{promoted}");
 
+    // These assertions cover the daemon's periodic agent observation as well
+    // as immediate endpoint reachability. Wait for the actual current-session
+    // facts; a fast context call may precede the first monitor tick.
+    let journal = PathBuf::from(registered["daemon"]["storage_root"].as_str().unwrap())
+        .join(".agent-collab/server/journal.jsonl");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let records = std::fs::read_to_string(&journal).unwrap();
+        let events: Vec<Value> = records
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        let observed = |event: &str, field: &str| {
+            events.iter().any(|record| {
+                record["ev"] == event
+                    && record[field]["worker_id"] == worker_id
+                    && record[field]["session_id"] == registered["session_id"]
+                    && record[field]["project_scope"] == registered["scope"]["project_scope"]
+            })
+        };
+        if observed("AgentPresenceObserved", "presence")
+            && observed("AgentActivityObserved", "activity")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "current agent probe facts not observed: {registered}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+
     let status = fixture.run_ok(&["master", "status"], Some(&pane));
     assert_eq!(status["master"]["worker_id"], worker_id, "{status}");
     assert_eq!(status["master"]["endpoint_live"], true, "{status}");

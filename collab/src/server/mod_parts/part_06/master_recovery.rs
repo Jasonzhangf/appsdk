@@ -298,6 +298,7 @@ fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Va
             "Verify subworker evidence, resolve blockers, integrate assigned work, manage resources, and deliver the goal to the sender.",
             "Keep the sender contract explicit: goal, scope, authorized actions, resource owner, delivery/test evidence, report channel, and stop conditions.",
             "Use a finite patrol for goal progress, blockers, subworker activity, worktree/runtime resources, and the need to re-arm consumed scheduling. Account for registration and context restoration in that scope, but do not repeat unrelated recovery checks.",
+            "For your own ongoing long-horizon goals, create and maintain finite patrol tasks and subscriptions. On each new master assignment, evaluate the goal, dependencies, blockers, priorities and resources, then update existing patrol tasks and subscriptions before proceeding; add only missing scope and retire obsolete owned scope without duplicating timers.",
             "Keep independent GCM workers busy for ready bounded work on this goal regardless of whether other peers are busy; do not treat master capacity or another peer's availability as a routing prerequisite.",
             "Each patrol closes or explicitly parks open P0/P1 work, routes new production issues through the project's canonical intake, and reports all PROTECTED_HOLD resources.",
             "Before a patrol cycle ends, re-arm a consumed one-shot goal or deadline wake when continued scheduling is required.",

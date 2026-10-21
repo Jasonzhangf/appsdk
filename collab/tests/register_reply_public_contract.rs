@@ -23,6 +23,15 @@ fn initial_tmux_registers_once_without_participant_return() {
     let response: Value = serde_json::from_slice(&output.stdout).expect("typed context result");
     assert!(output.status.success(), "{response}");
     assert_eq!(response["result"]["outcome"], "completed", "{response}");
+    let patrol_contract = "For your own ongoing long-horizon goals, create and maintain finite patrol tasks and subscriptions. On each new master assignment, evaluate the goal, dependencies, blockers, priorities and resources, then update existing patrol tasks and subscriptions before proceeding; add only missing scope and retire obsolete owned scope without duplicating timers.";
+    assert!(
+        response["result"]["snapshot"]["role_brief"]["responsibilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|rule| rule == patrol_contract),
+        "registration must explain peer-owned patrol and assignment reassessment: {response}"
+    );
     assert_eq!(registration_effects(&fixture), [1, 1], "{response}");
     assert!(!fixture
         .host_state
@@ -30,6 +39,14 @@ fn initial_tmux_registers_once_without_participant_return() {
         .exists());
     let replay = fixture.context(Some("gate-no-return"), Some(&pane));
     assert_eq!(replay["result"]["outcome"], "completed", "{replay}");
+    assert!(
+        replay["result"]["snapshot"]["role_brief"]["responsibilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|rule| rule == patrol_contract),
+        "recovery must retain the peer patrol contract: {replay}"
+    );
     assert_eq!(registration_effects(&fixture), [1, 1]);
     let before = std::fs::read(fixture.project_journal()).unwrap();
     let query = fixture.context_query("gate-no-return", Some(&pane));

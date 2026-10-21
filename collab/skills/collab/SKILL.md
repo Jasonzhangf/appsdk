@@ -125,6 +125,12 @@ board tasks, timers, or subscriptions.
   evidence or park it with owner, cause, and unblock condition. Dispatch ready
   P0/P1 work before ending the scheduling turn.
 - An ordinary peer is the autonomous goal orchestrator for its accepted scope.
+  For its own ongoing long-horizon goals, it creates and maintains finite patrol
+  tasks and subscriptions. On each master assignment, first evaluate the goal,
+  dependencies, blockers, priorities and resources; then update the existing
+  patrol tasks and subscriptions before proceeding. Add only missing scope,
+  retire obsolete owned scope, and do not duplicate timers. Report the resulting
+  patrol scope or the concrete reason no subscription change is needed.
   It owns scoped patrol of task progress, blockers, owned worktree/runtime
   resources, canonical issue intake, cleanup, and only the explicit event
   subscriptions needed for that scope. On a blocker, first report to the
@@ -1144,7 +1150,9 @@ daemon 生命周期由用户管理，agent 不执行维护动作、不索取凭�
 注册、恢复和巡检都不得重启或停止 tmux server，也不得关闭或终止宿主 pane。
 
 A peer orchestrates only its accepted scope, owns that goal's full lifecycle,
-and maintains its own scoped patrol subscriptions. A legacy managed-subagent
+and maintains its own scoped patrol subscriptions. Each master assignment
+requires a fresh scope assessment and an update to its existing patrol tasks
+and subscriptions when the monitored goal changes. A legacy managed-subagent
 record grants no new execution or patrol authority.
 On a peer blocker, first ask the current master for help with the task,
 evidence, attempted actions, proposed next step, and decision needed. Do not

@@ -305,3 +305,16 @@ and the full 64-case context target pass locally; only the test file changed.
 Installed/runtime product version remains 0.2.0300. User restarted the daemon;
 new PID57606 responds and the existing RouteCodex project's seven worker
 identities are valid. Linux CI confirmation and remote merge remain pending.
+
+User added peer patrol reassessment: peers own patrol tasks/subscriptions for
+their ongoing goals and evaluate/update existing patrol scope on every master
+assignment. The shared role brief carries this at registration, recovery and
+board invitation; source/global Skill and stable-name reference agree.
+Registration/recovery public red then 6-case green passed. Formal 0.2.0301
+installed and 8 installed registration/endpoint cases passed. Loaded daemon
+remains 0.2.0300 until the final user maintenance activation.
+
+Second Linux CI passed C13 and all 64 context cases. Its next first failure
+was the endpoint projection test asserting periodic agent facts before the
+first observation. Added an exact project/worker/session fact readiness wait;
+all endpoint and agent-state assertions remain. Both endpoint cases pass.

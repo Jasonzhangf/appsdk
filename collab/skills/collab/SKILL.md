@@ -110,6 +110,33 @@ closure is a long-horizon goal.
   historical facts for diagnosis or migration and grants no new production
   execution authority.
 
+### Register the long-horizon goal before dispatch
+
+Master and peer must explicitly register their own accepted long-horizon goal
+through the supported goal control entry. Master owns the project goal; peer
+owns the delegated subgoal. On registration/recovery and each new assignment,
+read the existing goal, resume or update it, and create one only when missing.
+Record the objective, scope, acceptance evidence, current owner/name and parent
+goal when delegated. Report the goal path/identifier and registration receipt.
+An ordinary worker task, board assignment, note, timer subscription or verbal
+promise does not register a long-horizon goal. Do not report registration as
+complete without the goal control receipt.
+
+The current AppSDK entry is `appsdk goal subscribe --goal <existing-goal.md>
+--interval <agreed-period>`; inspect it with `appsdk goal status --json` and
+`appsdk longhorizon show --json`. `appsdk longhorizon` is a read projection,
+not a register/subscribe command; `collab longhorizon` does not exist. The
+current AppSDK goal entry verifies master ownership and stores one project
+goal. A peer must not overwrite that goal, promote itself, or substitute a
+worker task or notification subscription. If its own goal cannot be registered,
+report the exact entry/permission limitation to master, keep the delegated goal
+and evidence in its existing task notes, and continue authorized independent
+work. Those notes are pending registration, not a successful goal registration.
+
+Close owned goal scheduling and patrol subscriptions after completion or when
+no new task and no actionable work remain. Retain direct-message reception;
+assess a new assignment before registering/rearming its goal schedule.
+
 ### Registered patrol duties
 
 Registration returns a patrol reminder, and every dispatch repeats it. On the

@@ -57,7 +57,7 @@
     },
     {
       "id": "按分支准入当前身份与责任边界",
-      "description": "self removal 先通过标准 context 自动恢复当前身份与当前通信，再用其现有认证能力只移除自身；不接收调用方指定的 pane、其他项目 target 或历史身份凭据作为授权。旧本地 token 由 context 自动修复，无用户补证、历史 fence 或未结任务门禁。关闭其他 peer 保留其原有权限与宿主边界。Tmux 目标的当前项目权威 binding 与一致 endpoint 足以证明身份，不要求 route 索引存在，也不要求 agent sessionID 为空；endpoint present、missing 与 unknown 由后续独立 probe 决定关闭结果。",
+      "description": "Create/Read/Update/Close/Query 的已注册调用者复用 registered_project_identity：daemon 当前 route 选择精确 credential 并核对 scope/binding/generation；历史同 session 档案不否决有效当前 route。无当前 route 明确失败，不扫描历史 fallback、不注册或恢复。调用者 route 与目标项目 binding 分开。self removal 先通过标准 context 自动恢复当前身份与当前通信，再用其现有认证能力只移除自身；不接收调用方指定的 pane、其他项目 target 或历史身份凭据作为授权。旧本地 token 由 context 自动修复，无用户补证、历史 fence 或未结任务门禁。关闭其他 peer 保留其原有权限与宿主边界。Tmux 目标的当前项目权威 binding 与一致 endpoint 足以证明身份，不要求 route 索引存在，也不要求 agent sessionID 为空；endpoint present、missing 与 unknown 由后续独立 probe 决定关闭结果。",
       "operator": "appsdk.collab_peer_lifecycle.admit_request",
       "operator_version": "1",
       "inputs": [

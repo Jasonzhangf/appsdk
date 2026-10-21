@@ -919,6 +919,62 @@ fn peer_lifecycle_create_cli_and_mcp_round_trip_through_isolated_daemon() {
         );
     }
     let cwd = fixture.root.to_str().unwrap();
+    // A historical receipt may share the current session without owning its
+    // current route. Lifecycle commands must select the live route's actor.
+    let historical_dir = fixture
+        .host_state
+        .join("identities/historical-lifecycle-peer");
+    std::fs::create_dir_all(&historical_dir).unwrap();
+    let historical = serde_json::json!({
+        "worker_id": "historical-lifecycle-peer",
+        "token": "isolated-historical-token",
+        "project_scope": context["result"]["snapshot"]["binding"]["project_scope"],
+        "runtime": {
+            "agent_id": "historical-lifecycle-peer",
+            "runtime_id": "historical-runtime",
+            "appserver_id": "appserver-cli",
+            "binding_id": "historical-binding",
+            "endpoint_generation": 1,
+            "session_id": "lifecycle-session",
+            "native_thread_id": "historical-thread"
+        }
+    });
+    let historical_bytes = serde_json::to_vec(&historical).unwrap();
+    let historical_path = historical_dir.join("identity.json");
+    std::fs::write(&historical_path, &historical_bytes).unwrap();
+    let mut current_read = fixture.configured_command(&["worker", "read"], None);
+    configure_runtime(&mut current_read);
+    let current_read = current_read.output().unwrap();
+    let mut unknown_close = fixture.configured_command(
+        &[
+            "worker",
+            "close",
+            "unregistered-target",
+            "--reason",
+            "isolated caller resolution probe",
+        ],
+        None,
+    );
+    configure_runtime(&mut unknown_close);
+    let unknown_close = unknown_close.output().unwrap();
+    assert!(
+        current_read.status.success(),
+        "current route read failed: {}; close caller result: {}",
+        String::from_utf8_lossy(&current_read.stderr),
+        String::from_utf8_lossy(&unknown_close.stderr)
+    );
+    assert!(!unknown_close.status.success());
+    assert!(!String::from_utf8_lossy(&unknown_close.stderr).contains("IDENTITY_RESTORE_AMBIGUOUS"));
+    let mut missing_route = fixture.configured_command(&["worker", "read"], None);
+    configure_runtime(&mut missing_route);
+    missing_route.env("CODEX_THREAD_ID", "historical-thread");
+    let missing_route = missing_route.output().unwrap();
+    assert!(
+        !missing_route.status.success(),
+        "history must not replace an absent current route"
+    );
+    assert!(!String::from_utf8_lossy(&missing_route.stderr).contains("IDENTITY_RESTORE_AMBIGUOUS"));
+    assert_eq!(std::fs::read(&historical_path).unwrap(), historical_bytes);
     for _ in 0..2 {
         let mut command = fixture.configured_command(
             &[
@@ -1064,6 +1120,58 @@ fn peer_lifecycle_create_cli_and_mcp_round_trip_through_isolated_daemon() {
         "{update}"
     );
 
+    let outsider = TestAppServer::start_with_effect_at(
+        &fixture.root,
+        "outsider-appserver.sock",
+        "outsider-session",
+        "outsider-thread",
+        "ready_and_update_ok",
+    );
+    let outsider_context = fixture.context_provide(
+        "outsider-register",
+        &serde_json::json!({
+            "session_id": "outsider-session", "thread_id": "outsider-thread",
+            "endpoint": outsider.endpoint(), "namespace": "codex_tui"
+        }),
+        None,
+    );
+    assert_eq!(
+        outsider_context["result"]["outcome"], "completed",
+        "{outsider_context}"
+    );
+    let mut denied = fixture.configured_command(
+        &[
+            "worker",
+            "close",
+            "mcp-created-peer",
+            "--reason",
+            "unauthorized fixture caller",
+        ],
+        None,
+    );
+    denied
+        .env("CODEX_SESSION_ID", "outsider-session")
+        .env("CODEX_THREAD_ID", "outsider-thread")
+        .env(
+            "CODEX_APP_SERVER_SOCKET",
+            outsider.endpoint().strip_prefix("unix://").unwrap(),
+        );
+    let denied = denied.output().unwrap();
+    assert!(
+        !denied.status.success(),
+        "an unrelated peer must not close another target"
+    );
+    let denial = format!(
+        "{}{}",
+        String::from_utf8_lossy(&denied.stdout),
+        String::from_utf8_lossy(&denied.stderr)
+    );
+    assert!(
+        denial.contains("PEER_LIFECYCLE_UNAUTHORIZED")
+            || denial.contains("PEER_LIFECYCLE_CLOSE_UNAUTHORIZED"),
+        "{denial}"
+    );
+
     let closed = mcp_call(serde_json::json!({
         "action": "close",
         "target_id": "mcp-created-peer",
@@ -1078,6 +1186,7 @@ fn peer_lifecycle_create_cli_and_mcp_round_trip_through_isolated_daemon() {
     assert_eq!(appserver.settings_request_count(), 1);
     assert_eq!(appserver.challenge_request_count(), 1);
     assert_eq!(appserver.start_request_count(), 2);
+    assert_eq!(std::fs::read(&historical_path).unwrap(), historical_bytes);
 }
 
 #[test]

@@ -217,6 +217,7 @@ fn communication_recovery_brief() -> serde_json::Value {
 }
 
 fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Value {
+    let idle_patrol_rule = "When a task completes, or there is no new task and no actionable work, actively close your owned patrol tasks and timed subscriptions. Do not renew or recreate idle patrol loops. Keep the direct-message receive subscription for new assignments; evaluate a new assignment before starting a new scoped patrol.";
     let route_scope = server_route_scope(server, state).ok().flatten();
     if current_master_worker_id(state, route_scope.as_ref()).as_deref() == Some(worker_id) {
         return json!({
@@ -233,6 +234,7 @@ fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Va
                 "When no authorized peer is available, retain the long-horizon goal and split ready implementation, execution, or observation into bounded subagent tasks.",
                 "Converge owned worktrees, stale resources, open P0/P1 work, and PROTECTED_HOLD reporting. Preserve dirty, active, shared, or unknown resources.",
                 "Before a patrol cycle ends, explicitly re-arm a consumed one-shot goal or deadline wake when continued scheduling is required; a read, ACK, summary, or dispatch receipt is not completion.",
+                idle_patrol_rule,
                 "For every dispatch, state the goal, scope, authorized actions, resource owner, delivery and test evidence, report channel, and stop conditions.",
                 "Verify returned evidence yourself; a subworker or peer BLOCKED report is not a goal result.",
                 "Retain project coordination, cross-peer dependencies, and final integration; delegated peers get no inherited master authority.",
@@ -302,6 +304,7 @@ fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Va
             "Keep independent GCM workers busy for ready bounded work on this goal regardless of whether other peers are busy; do not treat master capacity or another peer's availability as a routing prerequisite.",
             "Each patrol closes or explicitly parks open P0/P1 work, routes new production issues through the project's canonical intake, and reports all PROTECTED_HOLD resources.",
             "Before a patrol cycle ends, re-arm a consumed one-shot goal or deadline wake when continued scheduling is required.",
+            idle_patrol_rule,
             "Subscription presence does not gate identity; do not invent a polling interval. Use supported event subscriptions or explicit finite owner-scoped patrol deadlines with agreed timing, and do not claim project-wide master authority.",
             "Collab/AppSDK and tmux have independent lifecycles. Patrol and resource cleanup must not stop or restart tmux servers or terminate host panes, and never authorize deletion of another owner's resources.",
             "Evaluate master collaboration requests against current ownership and capacity. Accept, decline, or negotiate conflicts explicitly; do not claim master authority, peer administration, or another peer's resources.",

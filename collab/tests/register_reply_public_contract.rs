@@ -24,6 +24,21 @@ fn initial_tmux_registers_once_without_participant_return() {
     assert!(output.status.success(), "{response}");
     assert_eq!(response["result"]["outcome"], "completed", "{response}");
     let patrol_contract = "For your own ongoing long-horizon goals, create and maintain finite patrol tasks and subscriptions. On each new master assignment, evaluate the goal, dependencies, blockers, priorities and resources, then update existing patrol tasks and subscriptions before proceeding; add only missing scope and retire obsolete owned scope without duplicating timers.";
+    let closes_idle_patrol = |snapshot: &Value| {
+        snapshot["role_brief"]["responsibilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|rule| {
+                rule.contains("no new task and no actionable work")
+                    && rule.contains("close your owned patrol tasks and timed subscriptions")
+            })
+    };
+    assert!(
+        closes_idle_patrol(&response["result"]["snapshot"]),
+        "{response}"
+    );
     assert!(
         response["result"]["snapshot"]["role_brief"]["responsibilities"]
             .as_array()
@@ -39,6 +54,10 @@ fn initial_tmux_registers_once_without_participant_return() {
         .exists());
     let replay = fixture.context(Some("gate-no-return"), Some(&pane));
     assert_eq!(replay["result"]["outcome"], "completed", "{replay}");
+    assert!(
+        closes_idle_patrol(&replay["result"]["snapshot"]),
+        "{replay}"
+    );
     assert!(
         replay["result"]["snapshot"]["role_brief"]["responsibilities"]
             .as_array()

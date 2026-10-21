@@ -143,6 +143,12 @@ board tasks, timers, or subscriptions.
 - Before a patrol cycle ends, explicitly re-arm a consumed one-shot goal or
   deadline wake when continued scheduling is required. A read, ACK, status
   summary, or dispatch receipt is not completion and does not renew a wake.
+- When a task completes, the owning master or peer actively closes that task's
+  patrol tasks and timed subscriptions. If there is no new task and no actionable
+  work, close the patrol; do not renew, recreate or keep idle polling loops.
+  Keep the direct-message receive subscription for new assignments. On a new
+  assignment, assess the required scope before starting another patrol. Close
+  only owned patrol scope; do not cancel another goal's subscriptions.
 - A legacy managed-subagent record creates no new patrol task, subscription,
   dispatch, or execution authority. Its parent or master preserves it only for
   diagnosis or migration.

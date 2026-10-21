@@ -338,3 +338,12 @@ consumer now identifies its exact message among legitimate existing patrol
 mail and still checks its true consumption receipt. Release consumers exclude
 only the test-build fault-injection case; that case remains required/passing
 on the hook-enabled candidate. Final installed evidence is retained separately.
+
+Main feature candidate a6c7b603 passed all applicable remote CI. User then
+required active patrol shutdown: master/peer must close owned patrol tasks and
+timed subscriptions after completion or when no new task/actionable work
+remains, without recreating idle loops. Direct-message reception remains.
+One shared runtime rule and source/global Collab/recovery/migration Skills now
+state this. Public registration red reproduced the missing rule; registration6
+and authority8 pass after the text change. Official 0.2.0303 is installed;
+final user activation and this small addition's CI remain pending.

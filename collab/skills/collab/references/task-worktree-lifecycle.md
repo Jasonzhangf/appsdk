@@ -164,8 +164,9 @@ cannot. ACKing a wake is not progress and does not satisfy liveness.
 Route escalation by role:
 
 - An ordinary worker reports blockers to the current Collab master immediately.
-  First find a concrete solution (root cause, proposed change, authorization
-  needed); send that, not a symptom. Do not wait. Independent peers may
+  Send original failure evidence, attempted remedies and the decision needed;
+  do not delay help until root cause or a solution is proven. Apply the main
+  Skill's Registered patrol duties for master verification. Independent peers may
   temporarily decline a master collaboration invite to protect their own task.
   If no current master exists, report to the collaborator that initiated the
   task. Legacy managed records grant no new execution authority.
@@ -185,12 +186,15 @@ Route escalation by role:
   results, evidence location) are unambiguous. Do not equally split a large
   goal or share a write scope. Bounded execution or observation uses an
   independent `codex exec --profile gcm` worker. Workers execute only the
-  approved assignment and return evidence. On a blocker they find a solution
-  first, then report master immediately.
+  approved assignment and return evidence. Report suspected blockers promptly
+  with original failure evidence and attempted remedies; do not require a
+  proven solution before asking for help. Apply the main Skill's Registered
+  patrol duties for master verification and continued peer delivery ownership.
 
 For every escalation include `task_id`, current durable status, exact blocker or
-wait target, proposed solution, attempted resolution, and the decision/action
-needed. Keep the task blocked or waiting truth durable; do not create a
+wait target, failure evidence, attempted resolution/results, and the decision/action
+needed. Include a cause or proposed solution when known; otherwise mark it
+unknown and request help promptly. Keep the task blocked or waiting truth durable; do not create a
 duplicate task, silently release a claim, or wait without a next check and
 escalation path.
 

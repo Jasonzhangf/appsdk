@@ -146,6 +146,34 @@ assess a new assignment before registering/rearming its goal schedule.
 
 ### Registered patrol duties
 
+Patrol is a safety-net wake, never an execution dependency. After registering or
+rearming it, immediately continue all ready work under the standing goal. Do
+not end a turn with "wait for the next wake" while an authorized next action,
+investigation, dispatch, verification, integration or cleanup remains possible.
+A future deadline, missing wake or unavailable patrol service does not block
+that work. Wait only for a concrete external dependency or uncovered approval,
+and continue independent work while that dependency remains pending.
+
+The accepted peer is the sole delivery owner for its scope. Delegation and
+requests for help do not transfer that responsibility. Investigate failures,
+verify subworker limitations in the real entry, change the in-scope approach
+or executor where authorized, and pursue completion without waiting for master
+or another peer to solve it. Do not exceed authority or repeat unchanged failures.
+
+A suspected blocker is a request for investigation, not an approved stop. Ask
+master promptly with the task and affected acceptance condition, exact failing
+entry/input and original error or evidence path, attempted remedies and their
+results, why authorized alternatives cannot proceed, the external dependency,
+and the exact decision and resume condition. Separate facts from hypotheses;
+a proven root cause is not required to ask for help. Stop only unsafe or truly
+dependent actions and continue the rest. Master must independently inspect or
+reproduce the relevant evidence and check permissions, alternatives and scope
+before accepting the blocker. A peer report alone is insufficient. Record the
+decision, verified evidence, affected work and resume condition; return an
+unsupported claim for investigation. Approval does not relieve peer ownership
+unless master explicitly reassigns the scope. Never close unfinished work merely
+to silence a blocker or its reminders.
+
 Registration returns a patrol reminder, and every dispatch repeats it. On the
 next authorized activation after registration, promotion, delegation, or
 recovery, update the existing scope; context restoration does not fabricate
@@ -196,7 +224,8 @@ or implementation details.
 8. For its own ongoing long-horizon goals, an accepted peer creates and
    maintains finite patrol tasks and subscriptions. On each master assignment,
    first evaluate the goal, dependencies, blockers, priorities and resources;
-   then update the existing patrol tasks and subscriptions before proceeding.
+   then update the existing patrol tasks and subscriptions as part of that
+   assessment. This housekeeping does not gate ready authorized work.
    Add only missing scope, retire obsolete owned scope, and do not duplicate
    timers. Report the resulting patrol scope or the concrete reason no
    subscription change is needed.
@@ -463,9 +492,9 @@ decision or a recv receipt.
 An error, timeout, `subscribed-not-sent`, `thread-lost`, `identity-mismatch`,
 `unknown`, or absent Agent is not success. Preserve the exact error and
 durable IDs; do not retry automatically, ACK for another identity, or mark a
-task delivered/closed without its required evidence. A worker reports the
-root cause and proposed fix to the current master. The master takes ownership by
-fixing, re-dispatching, or force-closing with an auditable reason.
+task delivered/closed without its required evidence. Apply Registered patrol
+duties for a prompt evidence-based help request and independent master
+verification. The peer retains delivery ownership unless explicitly reassigned.
 
 Transport observations (`unknown`, `cold`, `missing`) are separate from
 authority. They never create, replace, or clear the current master grant. Do
@@ -560,8 +589,9 @@ and delegation is accepted only from the current master grant holder and
 records that handoff. Registration, a process, inferred `/goal`, or
 `role_brief` never silently creates master authority.
 
-On trouble, every non-master investigates first and reports the current
-master: root cause, attempted actions, proposed fix, and exact decision needed.
+On trouble, apply Registered patrol duties: investigate and promptly report
+available failure evidence, attempts and the decision needed to the current
+master. Mark an unknown cause as unknown; help does not require a proven fix.
 A role change via `master promote` or `master delegate` returns the new master brief;
 the old worker brief no longer governs that peer.
 Once task scope and the independent worktree are known, automatically follow
@@ -868,7 +898,8 @@ Flow:
   Create/verify the assigned worktree <--worktree-path> on branch
   <--branch> at <--base-commit>.
   Implement scoped change, run tests, commit.
-  Deliver evidence to master; report root cause + proposed fix if blocked.
+  Deliver evidence to master; use Registered patrol duties for suspected
+  blockers, timely help requests and master verification.
 ```
 
 Board assignment example:
@@ -953,15 +984,17 @@ Escalation routing is explicit:
 
 - An ordinary worker reports blockers to the current Collab master immediately.
   Do not wait for the next liveness cycle or for master to invent the fix.
-  First find a concrete solution (root cause, proposed change, authorization
-  needed); escalate that, not a symptom. Lazy thinking is forbidden: do not
+  Supply available failure evidence, attempted remedies and the decision
+  needed; distinguish unknown cause from verified facts. Do not delay an
+  assistance request until the root cause or solution is proven. Do not
   dump "I'm blocked" and idle. If the assignment's delivery or test conditions
   are ambiguous, do not guess; propose the missing conditions and send them to
   master. Independent peers may temporarily decline a master collaboration
   invite to protect their own current task. If no current
   master exists, report to the collaborator that initiated the task. Include
-  the task ID, exact blocker, proposed solution, attempted actions, and
-  requested decision.
+  the task ID, failure evidence, attempted actions/results, and requested
+  decision. Include a cause or proposed solution when known; otherwise state
+  unknown and request help immediately.
 - Master authority is the current typed grant in the exact project and app
   scope. Only two authority states exist: empty (no current grant) and
   assigned (one current holder). When the user explicitly approves this peer
@@ -980,8 +1013,8 @@ Escalation routing is explicit:
   `who.master` field never authorizes a mutation; promote, clear, and delegate
   still require an authenticated current binding. Codex root is not Collab
   master. Operators may use `collab master status` read-only for audit.
-- If a blocker or wait cannot be executed locally after a real solution is
-  found, report that solution to the current master immediately instead of
+- If an evidenced dependency cannot be resolved locally, report the evidence
+  and requested decision to the current master immediately instead of
   silently waiting. Keep the durable wait/task state, continue any
   independent work, and re-escalate on the next direct master communication or
   when the situation changes; do not wait for a periodic worker wake.
@@ -993,17 +1026,15 @@ in the project. Once master accepts a dispatch, the master -- not the
 worker -- is the escalation target, and the master cannot hide behind the
 worker's blocker. Concretely:
 
-- The current master must close any task that cannot otherwise be closed,
-  including stuck or merged-but-unclean tasks, with `collab task close
-  <id> --force --reason "<text>"`. The reason is recorded in the cleanup
-  receipt so the manual close is auditable; notification obligations for that
-  task owner are superseded.
-- When a worker reports a blocker the master must take over ownership of
-  the resolution: re-dispatch, close manually, or revise the assignment
-  conditions. Master is not allowed to send an "I'm waiting on you"
-  reply, mark the task blocked, and idle. If master cannot unblock the worker
-  promptly, master force-closes the task with a reason so the loop stops and
-  the worker's identity stays clean.
+- The current master may use `collab task close <id> --force --reason "<text>"`
+  for an authorized cancellation or verified lifecycle cleanup. Record the
+  actual outcome and remaining work in the cleanup receipt. A blocker alone
+  never requires force-close and cannot justify reporting unfinished work as
+  delivered.
+- When a peer reports a blocker, apply the evidence and approval contract in
+  Registered patrol duties. Master owns cross-peer decisions and assistance;
+  the peer retains delivery ownership unless explicitly reassigned. Do not
+  accept a report as proof or force-close unfinished work to stop reminders.
 - When no master is assigned, the task owner may force-close its own task with
   `collab task close <id> --force --reason "<text>"`. If the owner's registered
   transport identity is missing and no master is assigned, a registered peer
@@ -1012,10 +1043,9 @@ worker's blocker. Concretely:
   only allowed force-close exceptions;
   the reason and cleanup receipt are mandatory so the daemon can show who
   closed what and why.
-- Master may not delegate its accountability by passing the task back to
-  the worker and waiting. Master either solves, re-dispatches, or force-
-  closes. Doing nothing on a stuck task is a master failure, not a
-  worker failure.
+- Master retains project accountability: verify, coordinate, unblock or
+  explicitly reassign. Keep genuine external waits scoped and evidenced,
+  continue independent project work, and preserve unfinished-work truth.
 
 
 ## Master splits and assigns
@@ -1037,8 +1067,9 @@ Master operates under two prime directives:
    test commands, expected results, and evidence location. Every assignment must
    anticipate failure and define an exception resolution path: **fallbacks,
    silent downgrades, or masking errors are strictly prohibited**. A blocked
-   worker must produce root-cause evidence and proposed fixes for master
-   arbitration; master must actively close the lifecycle rather than patch
+   peer supplies failure evidence, attempted remedies and the decision needed
+   for master verification; an unknown root cause does not delay requesting
+   help. Master must actively close the lifecycle rather than patch
    output symptoms.
 2. **Peer-first Capacity**: Master must keep eligible capacity saturated
    without serial bottlenecks. Offer long-horizon goals through the public
@@ -1247,7 +1278,7 @@ is an observation, never task or control truth.
 | Clear the current master authority with explicit approval | `collab master clear --approval "<user text>"` |
 | Delegate master authority to another peer (current master only) | `collab master delegate <peer>` |
 | Split work to a registered peer | `collab sendmessage --to <peer> --subject <topic> "<assignment with delivery and test conditions>"` |
-| Report a blocker to the current master | `collab sendmessage --to <master> --subject blocker "<task_id; cause; proposed fix; decision needed>"` |
+| Request blocker verification from the current master | `collab sendmessage --to <master> --subject blocker "<task_id; failure evidence; attempts/results; alternatives; decision/resume condition; cause/fix if known, otherwise unknown>"` |
 | Cancel one of your own notification leases | `collab notify unsubscribe <subscription-id>` |
 
 After a transport preview, use its notification ID and abbreviated subject to weigh
@@ -1543,8 +1574,9 @@ claim an independent goal or infer master authority.
   unique write scope, offers long-horizon work to a consenting peer through the
   public board with unambiguous delivery and test conditions, and keeps
   architecture/integration/acceptance; it does not take another peer's task.
-  Workers find a solution first, then report blockers to master immediately;
-  they do not wait or dump symptoms. Legacy managed records grant no new task
+  Peers request help promptly with available failure evidence and attempts;
+  root cause and solution need not be proven first. Apply Registered patrol
+  duties for master verification and continued ownership. Legacy managed records grant no new task
   authority. Last owned
   task close keeps that owner's auto-notify armed; use
   `collab notify unsubscribe <subscription-id>` for a specific leftover

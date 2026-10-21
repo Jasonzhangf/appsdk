@@ -19,6 +19,14 @@ that responsibility. Report the real goal receipt; task/board/note/timer state
 alone does not prove registration. Use the [Collab contract](../../collab/SKILL.md#register-the-long-horizon-goal-before-dispatch)
 for ownership, finite wake and patrol rules.
 
+Patrol is a safety-net wake, never an execution dependency. Continue ready
+authorized work immediately after subscribing or rearming. The peer retains
+sole delivery ownership for its scope. A blocker request needs original failure
+evidence, attempted remedies, unavailable authorized alternatives, the exact
+decision and resume condition. Master independently checks that evidence before
+accepting a scoped blocker; help does not transfer ownership. Continue unaffected
+work while a decision is pending. Do not close unfinished tasks to stop reminders.
+
 For an authorized migration, reference the [migration Skill](../../appsdk-migration/SKILL.md)
 and existing evidence. A prompt grants no new role, destructive authority or
 daemon lifecycle permission. Keep source, installed and loaded-runtime evidence

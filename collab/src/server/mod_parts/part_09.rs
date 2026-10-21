@@ -32,15 +32,21 @@ fn handle_task_review(
     }
     let now = now_ms();
     let mut reviewed = task;
+    let mut lifecycle = st.task_lifecycle.get(&task_id).cloned().unwrap_or_default();
+    let read_only = lifecycle.delivery_kind == state::TaskDeliveryKind::ReadOnly;
     reviewed.status = if accept { "accepted" } else { "rework" }.into();
     reviewed.next_step = Some(if accept {
-        "integrate the accepted candidate on refs/heads/main, then record collab task integrated"
-            .into()
+        if read_only {
+            "reviewed read-only delivery requires no merge; clean owned resources and close"
+                .into()
+        } else {
+            "integrate the accepted candidate on refs/heads/main, then record collab task integrated"
+                .into()
+        }
     } else {
         format!("address review evidence: {evidence}")
     });
     reviewed.updated_ms = now;
-    let mut lifecycle = st.task_lifecycle.get(&task_id).cloned().unwrap_or_default();
     lifecycle.review_evidence = Some(evidence.to_owned());
     lifecycle.reviewer = Some(worker_id.clone());
     lifecycle.reviewed_ms = Some(now);
@@ -57,7 +63,7 @@ fn handle_task_review(
     let mut pending_notification = None;
     let mut notification_missing = false;
     let mut merge_pending_registered = false;
-    if accept {
+    if accept && !read_only {
         // A merge obligation exists only when a master owns the merge. In
         // a master-less project the owner keeps the plain self-integration
         // lifecycle; registering a pending merge there would deadlock close.
@@ -149,6 +155,11 @@ fn handle_task_review(
         "reviewer": worker_id,
         "evidence": evidence,
         "merge_pending": merge_pending_registered,
+        "disposition": if accept {
+            if read_only { "no_merge_required" } else { "integration_required" }
+        } else {
+            "rework_required"
+        },
         "next_action": reviewed.next_step,
     });
     if notification_missing {
@@ -195,6 +206,29 @@ fn handle_task_integrated(
     }
     if !task_integration_authorized(server, &st, &task, &worker_id) {
         return Resp::err("task integrated requires task owner or live master authority");
+    }
+    let lifecycle = st.task_lifecycle.get(&task_id).cloned().unwrap_or_default();
+    if lifecycle.delivery_kind == state::TaskDeliveryKind::ReadOnly {
+        return Resp::err_data(
+            "TASK_NO_MERGE_REQUIRED",
+            json!({
+                "task_id": task_id,
+                "status": task.status,
+                "delivery_kind": lifecycle.delivery_kind,
+                "rule": "this accepted delivery is explicitly read-only; clean owned resources and close without recording integration",
+            }),
+        );
+    }
+    if lifecycle.delivered_ms.is_some() && lifecycle.delivery_commit.is_none() {
+        return Resp::err_data(
+            "TASK_DELIVERY_CANDIDATE_UNRESOLVED",
+            json!({
+                "task_id": task_id,
+                "status": task.status,
+                "delivery_kind": lifecycle.delivery_kind,
+                "rule": "code delivery must resolve the exact delivered candidate before integration; rework and re-deliver rather than treating this as read-only",
+            }),
+        );
     }
     if st.pending_merges.contains_key(&task_id) {
         let request = st.pending_merges.get(&task_id).cloned().unwrap();
@@ -245,26 +279,29 @@ fn handle_task_integrated(
             }),
         );
     }
-    // When a pending merge carries the delivered candidate, the recorded
-    // integration must prove that candidate itself reached main; an unrelated
-    // pre-existing main commit must not satisfy the obligation. The
-    // unbound-candidate case already failed closed above, so the candidate is
-    // guaranteed to be present here.
-    if let Some(candidate) = st
-        .pending_merges
-        .get(&task_id)
-        .and_then(|request| request.candidate_commit.as_deref())
-    {
+    // The delivered lifecycle record owns the exact candidate. A pending merge
+    // can add master ownership, but it cannot weaken this candidate proof.
+    let candidate = lifecycle.delivery_commit.as_deref().or_else(|| {
+        st.pending_merges
+            .get(&task_id)
+            .and_then(|request| request.candidate_commit.as_deref())
+    });
+    if let Some(candidate) = candidate {
         match commit_is_integrated_in_main(&server.root, candidate) {
             Ok(true) => {}
             Ok(false) => {
+                let code = if st.pending_merges.contains_key(&task_id) {
+                    "TASK_MERGE_PENDING"
+                } else {
+                    "TASK_INTEGRATION_CANDIDATE_MISMATCH"
+                };
                 return Resp::err_data(
-                    "TASK_MERGE_PENDING",
+                    code,
                     json!({
                         "task_id": task_id,
                         "candidate_commit": candidate,
                         "provided": commit,
-                        "rule": "the delivered candidate must be merged onto refs/heads/main before the pending merge can be resolved",
+                        "rule": "the exact delivered candidate must be reachable from refs/heads/main before integration can be recorded",
                     }),
                 );
             }
@@ -276,7 +313,7 @@ fn handle_task_integrated(
     integrated.status = "merged".into();
     integrated.next_step = Some("owner cleans the worktree/branch and closes the task".into());
     integrated.updated_ms = now;
-    let mut lifecycle = st.task_lifecycle.get(&task_id).cloned().unwrap_or_default();
+    let mut lifecycle = lifecycle;
     lifecycle.integration_commit = Some(commit.to_owned());
     lifecycle.integration_evidence = Some(evidence.to_owned());
     lifecycle.integrated_ms = Some(now);
@@ -505,7 +542,23 @@ fn handle_task_close(
             return Resp::err("task close requires task owner or current master authority");
         }
     }
-    if task.status != "merged" {
+    let lifecycle = st.task_lifecycle.get(&task_id).cloned().unwrap_or_default();
+    let read_only_accepted = task.status == "accepted"
+        && lifecycle.delivery_kind == state::TaskDeliveryKind::ReadOnly
+        && lifecycle
+            .review_evidence
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        && lifecycle.reviewer.is_some()
+        && lifecycle.reviewed_ms.is_some();
+    if task.status != "merged" && !read_only_accepted {
+        if task.status == "accepted"
+            && lifecycle.delivery_kind == state::TaskDeliveryKind::Code
+            && lifecycle.delivered_ms.is_some()
+            && lifecycle.delivery_commit.is_none()
+        {
+            return Resp::err("TASK_DELIVERY_CANDIDATE_UNRESOLVED");
+        }
         if let Some(request) = st.pending_merges.get(&task_id) {
             return Resp::err_data(
                 "TASK_MERGE_PENDING",
@@ -537,15 +590,19 @@ fn handle_task_close(
                 .as_deref()
                 .is_some_and(|value| !value.trim().is_empty())
             && record.reviewed_ms.is_some()
-            && record
-                .integration_commit
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty())
-            && record
-                .integration_evidence
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty())
-            && record.integrated_ms.is_some()
+            && if record.delivery_kind == state::TaskDeliveryKind::ReadOnly {
+                true
+            } else {
+                record
+                    .integration_commit
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                    && record
+                        .integration_evidence
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty())
+                    && record.integrated_ms.is_some()
+            }
     });
     if !lifecycle_complete {
         return Resp::err(format!(
@@ -575,7 +632,11 @@ fn handle_task_close(
     let mut closed = task;
     closed.status = "closed".to_string();
     closed.wait = None;
-    closed.next_step = Some("closed after owner merge and cleanup".to_string());
+    closed.next_step = Some(if lifecycle.delivery_kind == state::TaskDeliveryKind::ReadOnly {
+        "closed after reviewed read-only delivery and owner cleanup".to_string()
+    } else {
+        "closed after owner merge and cleanup".to_string()
+    });
     closed.updated_ms = now_ms();
     let receipt = CleanupReceipt {
         id: format!("cleanup-{}-{}", closed.id, closed.updated_ms),
@@ -642,6 +703,11 @@ fn handle_task_close(
         "task": closed.id,
         "status": closed.status,
         "owner": closed.owner,
+        "disposition": if lifecycle.delivery_kind == state::TaskDeliveryKind::ReadOnly {
+            "no_merge_required"
+        } else {
+            "integrated"
+        },
         "cleanup": {
             "worktree": closed.worktree_path,
             "branch": closed.branch,
@@ -966,9 +1032,18 @@ fn task_view(state: &State, task: &TaskRec) -> serde_json::Value {
         "next_step": task.next_step,
         "wait": task.wait,
         "delivery": {
+            "kind": lifecycle.map(|record| record.delivery_kind).unwrap_or_default(),
             "evidence": lifecycle.and_then(|record| record.delivery_evidence.clone()),
             "at": lifecycle.and_then(|record| record.delivered_ms.map(iso)),
         },
+        "disposition": lifecycle.map(|record| match (task.status.as_str(), record.delivery_kind) {
+            ("accepted", state::TaskDeliveryKind::ReadOnly) => "no_merge_required",
+            ("accepted", state::TaskDeliveryKind::Code) => "integration_required",
+            ("merged", state::TaskDeliveryKind::Code) => "integrated",
+            ("closed", state::TaskDeliveryKind::ReadOnly) => "no_merge_required",
+            ("closed", state::TaskDeliveryKind::Code) => "integrated",
+            _ => "in_progress",
+        }),
         "review": {
             "evidence": lifecycle.and_then(|record| record.review_evidence.clone()),
             "reviewer": lifecycle.and_then(|record| record.reviewer.clone()),

@@ -103,8 +103,11 @@ pub(crate) enum TaskCmd {
         id: String,
         #[arg(long)]
         evidence: String,
+        /// Explicitly classify this as read-only work with no code candidate.
+        #[arg(long, conflicts_with = "worktree")]
+        no_candidate: bool,
         #[arg(long)]
-        worktree: String,
+        worktree: Option<String>,
     },
     /// Accept a delivered task or return it for rework
     Review {

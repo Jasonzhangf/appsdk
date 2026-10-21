@@ -826,6 +826,8 @@ pub enum Req {
         task_id: String,
         evidence: Option<String>,
         worktree: Option<String>,
+        #[serde(default)]
+        no_candidate: bool,
     },
     TaskReview {
         worker_id: String,

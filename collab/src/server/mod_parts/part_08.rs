@@ -1362,6 +1362,26 @@ fn handle_task_deliver(
     evidence: Option<String>,
     worktree: Option<String>,
 ) -> Resp {
+    handle_task_deliver_with_intent(
+        server,
+        worker_id,
+        token,
+        task_id,
+        evidence,
+        worktree,
+        false,
+    )
+}
+
+fn handle_task_deliver_with_intent(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    task_id: String,
+    evidence: Option<String>,
+    worktree: Option<String>,
+    no_candidate: bool,
+) -> Resp {
     let mut st = server.state.lock().unwrap();
     let Some(worker) = st.workers.get(&worker_id).cloned() else {
         return Resp::err(format!("worker {} not registered", worker_id));
@@ -1382,16 +1402,26 @@ fn handle_task_deliver(
     let Some(evidence) = evidence.filter(|value| !value.trim().is_empty()) else {
         return Resp::err("task deliver requires non-empty --evidence");
     };
-    let Some(worktree) = worktree.filter(|value| !value.trim().is_empty()) else {
-        return Resp::err("task deliver requires non-empty --worktree");
+    let worktree = if no_candidate {
+        if worktree.is_some() {
+            return Resp::err(
+                "task deliver --no-candidate cannot be combined with --worktree",
+            );
+        }
+        None
+    } else {
+        let Some(worktree) = worktree.filter(|value| !value.trim().is_empty()) else {
+            return Resp::err("task deliver requires non-empty --worktree");
+        };
+        if task
+            .worktree_path
+            .as_deref()
+            .is_some_and(|registered| registered != worktree)
+        {
+            return Resp::err("task deliver --worktree must match the registered task worktree");
+        }
+        Some(worktree)
     };
-    if task
-        .worktree_path
-        .as_deref()
-        .is_some_and(|registered| registered != worktree)
-    {
-        return Resp::err("task deliver --worktree must match the registered task worktree");
-    }
     let now = now_ms();
     task.status = "delivered".to_string();
     task.wait = None;
@@ -1401,11 +1431,25 @@ fn handle_task_deliver(
     );
     task.updated_ms = now;
     let mut lifecycle = st.task_lifecycle.get(&task.id).cloned().unwrap_or_default();
+    lifecycle.delivery_kind = if no_candidate {
+        state::TaskDeliveryKind::ReadOnly
+    } else {
+        state::TaskDeliveryKind::Code
+    };
     lifecycle.delivery_evidence = Some(evidence.clone());
     lifecycle.delivered_ms = Some(now);
+    lifecycle.review_evidence = None;
+    lifecycle.reviewer = None;
+    lifecycle.reviewed_ms = None;
+    lifecycle.integration_commit = None;
+    lifecycle.integration_evidence = None;
+    lifecycle.integrated_ms = None;
     // Capture the exact candidate commit so a later pending merge can prove
     // the delivered candidate itself reached main, not just some main ref.
-    lifecycle.delivery_commit = resolve_candidate_commit(&server.root, &task, &worktree);
+    lifecycle.delivery_commit = worktree
+        .as_deref()
+        .and_then(|worktree| resolve_candidate_commit(&server.root, &task, worktree));
+    let delivery_kind = lifecycle.delivery_kind;
     if let Err(error) = server.commit_locked(
         &mut st,
         &[
@@ -1425,6 +1469,7 @@ fn handle_task_deliver(
         "status": task.status,
         "evidence": evidence,
         "worktree": worktree,
+        "delivery_kind": delivery_kind,
         "notification": "none",
         "next_action": task.next_step,
         "identity": {"worker_id": worker.id, "kind": "peer"},

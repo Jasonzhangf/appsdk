@@ -121,13 +121,13 @@ fn tools() -> Value {
         ),
         tool(
             "collab_task_deliver",
-            "Deliver a claimed task through the Server.",
-            json!({"id":{"type":"string"},"evidence":{"type":"string"},"worktree":{"type":"string"}}),
-            &["id", "evidence", "worktree"]
+            "Deliver a claimed task through the Server. Code delivery requires a resolvable worktree. Set no_candidate=true only for explicit read-only work that has no code candidate.",
+            json!({"id":{"type":"string"},"evidence":{"type":"string"},"worktree":{"type":"string"},"no_candidate":{"type":"boolean"}}),
+            &["id", "evidence"]
         ),
         tool(
             "collab_task_review",
-            "Accept a delivered task or return it for rework with durable evidence. Accept registers a daemon-owned pending merge and notifies the live master; the master must merge on refs/heads/main and record collab_task_integrated before the task can close (TASK_MERGE_PENDING).",
+            "Accept a delivered task or return it for rework with durable evidence. Accepted code delivery creates the applicable main integration obligation. Accepted explicit read-only delivery reaches no_merge_required and can close after owned cleanup.",
             json!({"id":{"type":"string"},"accept":{"type":"boolean"},"rework":{"type":"boolean"},"evidence":{"type":"string"}}),
             &["id", "evidence"]
         ),
@@ -615,7 +615,14 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
         "collab_task_deliver" => {
             argv.extend(["task".into(), "deliver".into(), required(args, "id")?]);
             argv.extend(["--evidence".into(), required(args, "evidence")?]);
-            argv.extend(["--worktree".into(), required(args, "worktree")?]);
+            optional_flag(&mut argv, args, "worktree", "--worktree")?;
+            if args
+                .get("no_candidate")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                argv.push("--no-candidate".into());
+            }
         }
         "collab_task_review" => {
             argv.extend(["task".into(), "review".into(), required(args, "id")?]);

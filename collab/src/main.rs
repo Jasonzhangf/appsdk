@@ -1194,12 +1194,14 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     id,
                     evidence,
                     worktree,
+                    no_candidate,
                 } => Req::TaskDeliver {
                     worker_id: worker_id.clone(),
                     token: token.clone(),
                     task_id: id,
                     evidence: Some(evidence),
-                    worktree: Some(worktree),
+                    worktree,
+                    no_candidate,
                 },
                 TaskCmd::Review {
                     id,

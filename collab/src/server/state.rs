@@ -1088,6 +1088,8 @@ pub struct TaskRec {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TaskLifecycleRecord {
     #[serde(default)]
+    pub delivery_kind: TaskDeliveryKind,
+    #[serde(default)]
     pub delivery_evidence: Option<String>,
     #[serde(default)]
     pub delivered_ms: Option<i64>,
@@ -1108,6 +1110,23 @@ pub struct TaskLifecycleRecord {
     pub integration_evidence: Option<String>,
     #[serde(default)]
     pub integrated_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskDeliveryKind {
+    #[default]
+    Code,
+    ReadOnly,
+}
+
+impl TaskDeliveryKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Code => "code",
+            Self::ReadOnly => "read_only",
+        }
+    }
 }
 
 /// Daemon-owned registration that an accepted task is awaiting a merge on

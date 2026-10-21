@@ -1181,3 +1181,209 @@ fn accepted_task_can_return_to_rework_and_redeliver() {
     );
     std::fs::remove_dir_all(root).ok();
 }
+
+#[test]
+fn task_lifecycle_public_read_only_delivery_reaches_no_merge_and_owner_close() {
+    let (server, root) = test_server();
+    assert!(register_synthetic_peer(&server, "owner", "thread-read-only").ok);
+    assert!(create_task(&server, "owner", "read-only-task", "feature").ok);
+    let server = Arc::new(server);
+
+    let delivered = dispatch(
+        &server,
+        Req::TaskDeliver {
+            worker_id: "owner".into(),
+            token: "token-owner".into(),
+            task_id: "read-only-task".into(),
+            evidence: Some("documentation and source audit complete".into()),
+            worktree: None,
+            no_candidate: true,
+        },
+    );
+    assert!(delivered.ok, "{delivered:?}");
+    {
+        let state = server.state.lock().unwrap();
+        let lifecycle = &state.task_lifecycle["read-only-task"];
+        assert_eq!(
+            lifecycle.delivery_kind,
+            crate::server::state::TaskDeliveryKind::ReadOnly
+        );
+        assert_eq!(lifecycle.delivery_commit, None);
+    }
+
+    let reviewed = dispatch(
+        &server,
+        Req::TaskReview {
+            worker_id: "owner".into(),
+            token: "token-owner".into(),
+            task_id: "read-only-task".into(),
+            accept: true,
+            rework: false,
+            evidence: "review accepted".into(),
+        },
+    );
+    assert!(reviewed.ok, "{reviewed:?}");
+    assert_eq!(reviewed.data["status"], "accepted");
+    assert_eq!(reviewed.data["merge_pending"], false);
+    assert_eq!(reviewed.data["disposition"], "no_merge_required");
+    assert!(
+        server
+            .state
+            .lock()
+            .unwrap()
+            .pending_merges
+            .get("read-only-task")
+            .is_none()
+    );
+
+    let closed = dispatch(
+        &server,
+        Req::TaskClose {
+            worker_id: "owner".into(),
+            token: "token-owner".into(),
+            task_id: "read-only-task".into(),
+            force: false,
+            reason: None,
+        },
+    );
+    assert!(closed.ok, "{closed:?}");
+    assert_eq!(closed.data["disposition"], "no_merge_required");
+    drop(server);
+
+    let replayed = replay(&root).unwrap();
+    assert_eq!(replayed.tasks["read-only-task"].status, "closed");
+    assert_eq!(
+        replayed.task_lifecycle["read-only-task"].delivery_kind,
+        crate::server::state::TaskDeliveryKind::ReadOnly
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn task_lifecycle_public_masterless_code_integration_requires_exact_candidate() {
+    let (server, root) = test_server();
+    assert!(register_synthetic_peer(&server, "owner", "thread-code").ok);
+    assert!(create_task(&server, "owner", "code-task", "feature").ok);
+    let worktree = candidate_worktree(&root, "code-task");
+    git_ok(&worktree, &["commit", "--allow-empty", "-q", "-m", "code candidate"]);
+    let candidate = current_head(&worktree);
+    for status in ["verifying", "reviewed"] {
+        assert!(
+            handle_task_update(
+                &server,
+                "owner".into(),
+                "token-owner".into(),
+                "code-task".into(),
+                Some(status.into()),
+                None,
+            )
+            .ok
+        );
+    }
+    let delivered = handle_task_deliver(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "code-task".into(),
+        Some("code candidate delivered".into()),
+        Some(worktree.to_string_lossy().into_owned()),
+    );
+    assert!(delivered.ok, "{delivered:?}");
+    let reviewed = handle_task_review(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "code-task".into(),
+        true,
+        false,
+        "code review accepted".into(),
+    );
+    assert!(reviewed.ok, "{reviewed:?}");
+    git_ok(&root, &["worktree", "remove", worktree.to_str().unwrap()]);
+    git_ok(&root, &["commit", "--allow-empty", "-q", "-m", "unrelated main"]);
+    let unrelated_main = current_head(&root);
+    assert_ne!(candidate, unrelated_main);
+    let server = Arc::new(server);
+
+    let rejected = dispatch(
+        &server,
+        Req::TaskIntegrated {
+            worker_id: "owner".into(),
+            token: "token-owner".into(),
+            task_id: "code-task".into(),
+            commit: unrelated_main,
+            evidence: "main moved without the delivered candidate".into(),
+        },
+    );
+    assert!(!rejected.ok, "{rejected:?}");
+    assert_eq!(
+        rejected.error.as_deref(),
+        Some("TASK_INTEGRATION_CANDIDATE_MISMATCH")
+    );
+    assert_eq!(rejected.data["candidate_commit"], candidate);
+    assert_eq!(
+        server.state.lock().unwrap().tasks["code-task"].status,
+        "accepted"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn task_lifecycle_public_unresolved_code_delivery_is_not_read_only() {
+    let (server, root) = test_server();
+    assert!(register_synthetic_peer(&server, "owner", "thread-unresolved").ok);
+    assert!(create_task(&server, "owner", "unresolved-task", "feature").ok);
+    let server = Arc::new(server);
+
+    let delivered = dispatch(
+        &server,
+        Req::TaskDeliver {
+            worker_id: "owner".into(),
+            token: "token-owner".into(),
+            task_id: "unresolved-task".into(),
+            evidence: Some("code delivery without a resolvable candidate".into()),
+            worktree: Some("/definitely-not-a-worktree".into()),
+            no_candidate: false,
+        },
+    );
+    assert!(delivered.ok, "{delivered:?}");
+    {
+        let state = server.state.lock().unwrap();
+        let lifecycle = &state.task_lifecycle["unresolved-task"];
+        assert_eq!(
+            lifecycle.delivery_kind,
+            crate::server::state::TaskDeliveryKind::Code
+        );
+        assert_eq!(lifecycle.delivery_commit, None);
+    }
+
+    let reviewed = dispatch(
+        &server,
+        Req::TaskReview {
+            worker_id: "owner".into(),
+            token: "token-owner".into(),
+            task_id: "unresolved-task".into(),
+            accept: true,
+            rework: false,
+            evidence: "review accepted".into(),
+        },
+    );
+    assert!(reviewed.ok, "{reviewed:?}");
+    assert_eq!(reviewed.data["disposition"], "integration_required");
+    let closed = dispatch(
+        &server,
+        Req::TaskClose {
+            worker_id: "owner".into(),
+            token: "token-owner".into(),
+            task_id: "unresolved-task".into(),
+            force: false,
+            reason: None,
+        },
+    );
+    assert!(!closed.ok, "{closed:?}");
+    assert_eq!(
+        closed.error.as_deref(),
+        Some("TASK_DELIVERY_CANDIDATE_UNRESOLVED")
+    );
+    std::fs::remove_dir_all(root).ok();
+}

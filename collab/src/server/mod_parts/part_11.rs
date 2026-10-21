@@ -425,7 +425,16 @@ fn dispatch_with_route_context_bound(
             task_id,
             evidence,
             worktree,
-        } => handle_task_deliver(server, worker_id, token, task_id, evidence, worktree),
+            no_candidate,
+        } => handle_task_deliver_with_intent(
+            server,
+            worker_id,
+            token,
+            task_id,
+            evidence,
+            worktree,
+            no_candidate,
+        ),
         Req::TaskReview {
             worker_id,
             token,

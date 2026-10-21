@@ -496,10 +496,48 @@ fn resolver_rejects_duplicate_agent_session_owners_instead_of_using_current_pane
         ..Default::default()
     };
     let error = resolve_for_daemon_at(&host_paths, &scope, &facts).unwrap_err();
+    let message = error.to_string();
     assert!(
-        error.to_string().starts_with("IDENTITY_RESTORE_AMBIGUOUS:"),
-        "{error}"
+        message.starts_with("IDENTITY_RESTORE_AMBIGUOUS:"),
+        "{message}"
     );
+    assert!(message.contains("codex-%4"), "{message}");
+    assert!(message.contains("same-project-pane-peer"), "{message}");
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn resolver_disambiguates_a_shared_codex_anchor_by_the_live_binding() {
+    let root = test_root("ci-resolver-shared-anchor-live-binding");
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    let scope = test_scope(root.clone());
+    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
+    let live = tmux_candidate(Some("session-shared"), Some("thread-shared"), "%6");
+    let stale = tmux_candidate(Some("session-shared"), Some("thread-shared"), "%175");
+    saved_identity(
+        &host_paths,
+        &scope,
+        "codex-%12",
+        Some("session-shared"),
+        Some("thread-shared"),
+        Some(live.endpoint.clone()),
+    );
+    saved_identity(
+        &host_paths,
+        &scope,
+        "codex-%175",
+        Some("session-shared"),
+        Some("thread-shared"),
+        Some(stale.endpoint.clone()),
+    );
+
+    let found = resolve_for_daemon_at(
+        &host_paths,
+        &scope,
+        &facts(Some("session-shared"), Some("thread-shared"), Some(live)),
+    )
+    .unwrap();
+    assert_eq!(found.worker_id, "codex-%12");
     std::fs::remove_dir_all(root).ok();
 }
 

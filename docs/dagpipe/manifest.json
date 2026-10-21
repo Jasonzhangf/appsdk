@@ -18,6 +18,10 @@
       "path": "docs/dagpipe/collab-name-ownership.graph.json"
     },
     {
+      "id": "appsdk-collab-goal-ownership",
+      "path": "docs/dagpipe/collab-goal-ownership.graph.json"
+    },
+    {
       "id": "appsdk-collab-subagent-command",
       "path": "docs/dagpipe/collab-subagent-command.graph.json"
     },

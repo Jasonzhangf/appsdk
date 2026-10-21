@@ -1,69 +1,26 @@
-# Goal Prompt Generation
+# AppSDK additions to goal prompts
 
-Use only when the user asks for a goal prompt. An ordinary development/debug
-request does not require generating a prompt or writing a separate plan file.
-For a requested prompt, clarify material unknowns:
+Use the host's [goal-prompt Skill](../../goal-prompt/SKILL.md) for the reusable
+prompt structure, role routing, planning, verification and delivery contract.
+This reference owns only AppSDK-specific additions; do not maintain a second
+generic `/goal` template here. An ordinary development request does not require
+generating another prompt or a new implementation document.
 
-1. Restate the objective in one sentence.
-2. List acceptance criteria.
-3. List non-goals and assumptions.
-4. Identify ambiguity and ask only material questions.
-5. Wait for confirmation when scope, risk, permission, or irreversible behavior is unclear.
-6. Write `docs/goals/<feature-name>-plan.md` before emitting the prompt.
+Bind the existing project requirements, affected DAG, unique owner, allowed
+paths and acceptance evidence. Reuse an existing goal/plan document; create
+`docs/goals/<feature>-plan.md` only when the requested goal needs one. Do not
+add token, time, context, cost, round or concurrency budgets.
 
-Never put a token, time, context, or turn budget in the plan or `/goal` prompt.
-Do not emit fields such as `token_budget`, budget seconds, context limits, or
-round limits. Completion is determined only by the plan's acceptance criteria
-and evidence.
+Registered master and peer are both long-horizon orchestrators. Each restores
+or registers, updates, rearms and closes its own goal with the current AppSDK
+goal entry. A peer does not ask master to register its goal; master must not
+proxy-register or take ownership of it. Desktop/TUI placement is irrelevant to
+that responsibility. Report the real goal receipt; task/board/note/timer state
+alone does not prove registration. Use the [Collab contract](../../collab/SKILL.md#register-the-long-horizon-goal-before-dispatch)
+for ownership, finite wake and patrol rules.
 
-For an MVP→M1 migration or closeout, the plan is the single implementation
-source and must additionally bind:
-
-- the current MVP baseline and the intended M1 target;
-- the owning endpoint/project scope, allowed and forbidden paths, and the
-  authorized master/worker boundaries;
-- the legacy control-plane inventory, retained evidence, chosen preserve/reset
-  route, and exact destructive authorization (if any);
-- the five Loop parts (`Trigger`, `Work`, `Gate`, `State`, `Stop`) and the
-  per-round order `Discover → Hand off → Verify → Persist → Schedule`;
-- the AppSDK source-repository versus managed-project boundary, Codex TUI
-  identity and route evidence, two-way replay, and explicit failure/unknown
-  handling;
-- exact candidate, merge, install, daemon-restart, and deployed replay gates.
-
-Use the [AppSDK migration Skill](../../appsdk-migration/SKILL.md) for the complete
-inspect/snapshot/migrate-or-reset/context-reconcile/restart/verify procedure. Do not copy
-that state machine into the prompt or into this reference. A prompt cannot
-register a goal or grant a role: Desktop never runs `appsdk goal subscribe`;
-only the authorized live TUI/master endpoint may register the existing plan.
-If the plan is absent, unconfirmed, or not admitted, stop before emitting a
-usable execution prompt. A periodic interval is a scheduling choice, not a
-ten-second liveness probe or permission to retry a blocked command.
-
-Use this compact output:
-
-```text
-/goal
-目标：<one-sentence objective>
-
-说明：本任务不需要再写新的提示词，直接按实现文档执行。
-
-实现文档：
-docs/goals/<feature-name>-plan.md
-
-执行规范：
-- 先查项目合同、owner、scope 和真源。
-- 只在允许路径修改；禁止 fallback、silent strip、旁路和无关改动。
-- 目标未 confirmed/admitted 时停止实现。
-- 不声明 token、时间、上下文或轮次预算；按完成条件和证据收口。
-
-验证：
-- 运行定向测试、build/compile、verify 和要求的 review gate。
-- 无证据不宣称完成。
-
-完成标准：
-- 实现计划中的验收标准全部满足。
-- 记录、artifact、scope 和 review 结果一致。
-```
-
-The prompt is the final execution task. Do not create another prompt for the same task.
+For an authorized migration, reference the [migration Skill](../../appsdk-migration/SKILL.md)
+and existing evidence. A prompt grants no new role, destructive authority or
+daemon lifecycle permission. Keep source, installed and loaded-runtime evidence
+separate. Close owned schedules when complete or idle with no actionable work,
+and retain direct-message reception for the next assignment.

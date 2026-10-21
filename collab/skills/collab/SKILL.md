@@ -22,6 +22,12 @@ journal、清空 board、重建 pane 或重启 tmux。
 所持资源与需要巡检的事项。名字的当前工作者接续任务；旧执行者不另行处理。
 规则升级与已加载 runtime 分别验收，不能仅凭读到新版 Skill 宣称 daemon 已升级。
 
+master 与 peer 均自行管理本人的 longhorizon goal；旧的“goal 只归 master”
+“peer 找 master 代登记”“所有 peer 忙才可发 GCM”规则已废弃。详细入口与回执沿
+[本人目标合同](#register-the-long-horizon-goal-before-dispatch)。以当前正式安装 Skill
+和 daemon 当前 `role_brief` 为准；旧 worktree 的 `collab/skills/` 是分发源码副本，
+不能替代当前运行规则，也不能通过改写他人的 worktree 来做规则升级。
+
 ## 全局 daemon 与默认身份恢复
 
 Collab 只有一个全局、由用户管理的 daemon。agent 不启动、关闭或重启它，也不为身份恢复申请维护窗口。用户维护命令、参数和凭据不属于 agent 接口。
@@ -122,16 +128,17 @@ An ordinary worker task, board assignment, note, timer subscription or verbal
 promise does not register a long-horizon goal. Do not report registration as
 complete without the goal control receipt.
 
-The current AppSDK entry is `appsdk goal subscribe --goal <existing-goal.md>
---interval <agreed-period>`; inspect it with `appsdk goal status --json` and
+The AppSDK entry is `appsdk goal subscribe --goal <existing-goal.md> --interval <agreed-period>`;
+inspect your own goal with `appsdk goal status --json` and
 `appsdk longhorizon show --json`. `appsdk longhorizon` is a read projection,
 not a register/subscribe command; `collab longhorizon` does not exist. The
-current AppSDK goal entry verifies master ownership and stores one project
-goal. A peer must not overwrite that goal, promote itself, or substitute a
-worker task or notification subscription. If its own goal cannot be registered,
-report the exact entry/permission limitation to master, keep the delegated goal
-and evidence in its existing task notes, and continue authorized independent
-work. Those notes are pending registration, not a successful goal registration.
+goal entry selects the authenticated caller's project and stable name. Master
+and peer each register, read, update, rearm and cancel their own goal. SessionID
+is the execution carrier; a worktree or transport change does not transfer
+ownership. Master must not proxy-register, hold or cancel a peer's goal. Each
+owner's status reconciliation must leave other owners' records unchanged.
+A runtime that refuses an ordinary peer's own goal has an implementation defect;
+report its exact error, do not promote the peer or route registration through master.
 
 Close owned goal scheduling and patrol subscriptions after completion or when
 no new task and no actionable work remain. Retain direct-message reception;
@@ -155,7 +162,9 @@ or implementation details.
    neither progress nor completion. Close each P0/P1 with applicable evidence
    or park it with owner, cause, and unblock condition. Dispatch ready P0/P1
    work before ending the scheduling turn.
-2. Offer every long-horizon goal through the public board to a consenting peer.
+2. Offer delegated long-horizon work through the public board to a consenting
+   peer when one is available; keep ownership of your own goal. With no suitable
+   peer, retain it and split ready bounded work for subworkers.
    Each accepted peer partitions the goal into non-overlapping bounded scopes
    and orchestrates independent `codex exec --profile gcm` workers. Planner and
    Reviewer remain independent roles. Dispatch bounded one-shot execution or
@@ -1511,9 +1520,10 @@ The sender never inspects or configures the recipient's subscription.
 For subscription semantics or delivery diagnosis, read
 [references/notifications.md](references/notifications.md).
 
-Desktop does not register goal subscribe. Goal subscribe is master-only
-long-horizon scheduling; workers and Desktop clients must not infer or
-register it.
+Goal registration belongs to the current master or peer's own accepted scope,
+independent of Desktop/TUI placement. Host type does not grant or deny a role.
+Unregistered bounded subworkers and legacy managed-subagent records cannot
+claim an independent goal or infer master authority.
 
 ## Hard boundaries
 

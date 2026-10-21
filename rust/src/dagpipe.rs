@@ -300,7 +300,7 @@ fn ensure_graph_nodes_use_registered_operators(
 mod notification;
 use notification::{register_notification_operator, validate_notification_objects};
 
-fn embedded_graph_paths() -> [(&'static str, &'static str); 22] {
+fn embedded_graph_paths() -> [(&'static str, &'static str); 23] {
     [
         (
             "contracts/dagpipe/fix-lifecycle.graph.json",
@@ -317,6 +317,10 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 22] {
         (
             "docs/dagpipe/collab-name-ownership.graph.json",
             include_str!("../../docs/dagpipe/collab-name-ownership.graph.json"),
+        ),
+        (
+            "docs/dagpipe/collab-goal-ownership.graph.json",
+            include_str!("../../docs/dagpipe/collab-goal-ownership.graph.json"),
         ),
         (
             "docs/dagpipe/collab-subagent-command.graph.json",
@@ -393,10 +397,11 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 22] {
     ]
 }
 
-fn design_graph_ids() -> [&'static str; 20] {
+fn design_graph_ids() -> [&'static str; 21] {
     [
         "appsdk-collab-context",
         "appsdk-collab-name-ownership",
+        "appsdk-collab-goal-ownership",
         "appsdk-collab-subagent-command",
         "appsdk-collab-stewardship-patrol",
         "appsdk-collab-appserver-route-repair",
@@ -418,12 +423,16 @@ fn design_graph_ids() -> [&'static str; 20] {
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 99] {
+fn design_graph_operator_names() -> [&'static str; 103] {
     [
         "appsdk.collab.board.admit_request",
         "appsdk.collab.board.apply",
         "appsdk.collab.board.authorize",
         "appsdk.collab.board.project_result",
+        "appsdk.collab_goal.resolve_owner",
+        "appsdk.collab_goal.select_record",
+        "appsdk.collab_goal.apply_transition",
+        "appsdk.collab_goal.emit_result",
         "appsdk.collab_appserver_route.fail_explicitly",
         "appsdk.collab_assignment.authorize_target",
         "appsdk.collab_assignment.classify_source",

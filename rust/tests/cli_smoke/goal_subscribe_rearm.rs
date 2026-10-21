@@ -47,6 +47,7 @@ esac
     )
     .unwrap();
     fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+    install_goal_test_context(&fake_collab, &root);
 
     let failed_subscribe = Command::new(binary())
         .args([

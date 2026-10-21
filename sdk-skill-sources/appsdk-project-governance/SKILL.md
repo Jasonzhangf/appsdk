@@ -29,7 +29,7 @@ Use this Skill only when an AppSDK-managed project performs governance bootstrap
    - Trigger one independent architecture/milestone review at the milestone integration boundary after author verification passes. Ordinary internal nodes and commits do not trigger review.
 4. **Collaboration ownership**:
    - Long-horizon work belongs to a consenting peer assigned through the public Collab board. That peer orchestrates independent `codex exec --profile gcm` execution and observation workers.
-   - A master-owned GCM worker is a capacity fallback only when every eligible peer is busy. Managed-subagent commands and records are legacy compatibility for diagnosis or migration, not a production execution surface.
+   - Master and peer each own and orchestrate their goal. One-shot execution/observation goes directly to independent GCM workers regardless of peer availability. Managed-subagent commands and records are legacy compatibility for diagnosis or migration, not a production execution surface.
    - Fleet, patrol, worktree-hold, and one-shot rearm rules belong to the Collab Skill. This governance Skill owns AppSDK intake, DAG, gates, review, and goal commands.
 
 ## Reference router (load on demand)

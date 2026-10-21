@@ -39,7 +39,7 @@
       "nodes": [
         {"node_id": "inspect_legacy", "instruction": "Inventory old governance truth and disposable runtime state.", "owner": "project", "evidence": ["legacy-inventory"]},
         {"node_id": "choose_route", "instruction": "Choose preserve-and-migrate or the explicitly authorized clean-epoch reset for each named control-plane owner.", "owner": "project", "evidence": ["migration-route"]},
-        {"node_id": "apply_route", "instruction": "Execute the canonical AppSDK migration/reset and the separate Collab migration/reset through their respective owners; never substitute one transaction for the other.", "owner": "project", "evidence": ["migration-record"]},
+        {"node_id": "apply_route", "instruction": "Execute only the migration/reset transactions selected in the authorized plan through their own owners. AppSDK migration does not require a Collab reset or global daemon maintenance; never substitute one transaction for another.", "owner": "project", "evidence": ["migration-record"]},
         {"node_id": "migration_verify", "instruction": "Verify the resulting single governance truth.", "owner": "project", "evidence": ["verify-result"]}
       ],
       "edges": [{"from": "inspect_legacy", "to": "choose_route"}, {"from": "choose_route", "to": "apply_route"}, {"from": "apply_route", "to": "migration_verify"}]
@@ -61,11 +61,11 @@
       "objective": "Develop features through project context, proportionate design, proportionate validation, and verified cleanup.",
       "entry_node": "requirements",
       "nodes": [
-        {"node_id": "requirements", "instruction": "Define the user-visible contract, scope, non-goals, acceptance, and required evidence; reuse an existing confirmed decision when present.", "owner": "project", "evidence": ["requirements"]},
+        {"node_id": "requirements", "instruction": "First check the affected existing DAG for completeness, closure and SESE, then collect observations and use the independent Plan contract. Resolve scope and acceptance from existing user decisions; ask only material unresolved questions.", "owner": "project", "evidence": ["requirements"]},
         {"node_id": "map_check", "instruction": "Read the declared function and verification maps, bind the owner, allowed and forbidden paths, required gates, and prior records, and note any map entry that the change must add.", "owner": "project", "evidence": ["function-map-binding", "verification-map-binding"]},
         {"node_id": "architecture", "instruction": "For a new project or meaningful cross-module or semantic change, close top-down modules, resources, boundaries, and mainline flow; otherwise record why existing architecture is sufficient.", "owner": "project", "evidence": ["architecture-design"]},
         {"node_id": "detailed_design", "instruction": "When the change introduces non-trivial behavior, close calls, data, errors, and verification mapping before implementation.", "owner": "project", "evidence": ["detailed-design"]},
-        {"node_id": "implementation", "instruction": "Implement the smallest change through the mapped owner in a clean owner worktree.", "owner": "project", "evidence": ["source-diff", "worktree-record"]},
+        {"node_id": "implementation", "instruction": "After the accepted graph and affected gate are correct and the regression fails for the intended behavior, implement the smallest change through the unique owner in a clean external worktree. Later validation does not replace the red-test precondition.", "owner": "project", "evidence": ["source-diff", "worktree-record"]},
         {"node_id": "validation", "instruction": "Run focused tests and mapped gates, then add build, install, restart, and same-entry replay only when the change affects those surfaces.", "owner": "project", "evidence": ["validation-record"]},
         {"node_id": "map_update", "instruction": "Update declared function ownership, paths, call edges, and verification gates when the validated change altered them.", "owner": "project", "evidence": ["function-map-binding", "verification-map-binding"]},
         {"node_id": "review", "instruction": "Review the validated change against applicable quality, safety, evidence and owner contracts. Block concrete regressions; optional simplification and unrelated historical debt are advisory.", "owner": "project", "evidence": ["architecture-conformance", "review-record"], "reminders": [{"kind": "memory_review", "blocking": false, "command": "project-memory review --run <run-id>"}]},
@@ -87,9 +87,9 @@
       "objective": "Orient to project truth, record evidence while exploring, and resolve through the unique mapped owner.",
       "entry_node": "orient",
       "nodes": [
-        {"node_id": "orient", "instruction": "Read project AGENTS, declared function and verification maps, and existing run notes and records; bind the failing request to an owner and required gates.", "owner": "project", "evidence": ["orientation-record", "function-map-binding", "verification-map-binding"]},
+        {"node_id": "orient", "instruction": "First check the affected existing DAG for completeness, closure and SESE. Read applicable project rules, requirements, maps and run notes; bind the failure to the unique owner and gates, reusing valid evidence.", "owner": "project", "evidence": ["orientation-record", "function-map-binding", "verification-map-binding"]},
         {"node_id": "explore", "instruction": "Append observations, one active hypothesis, confirmation and falsification signals, and evidence to run notes; reproduce when feasible and locate the first semantic divergence.", "owner": "project", "evidence": ["exploration-record", "debug-notes"]},
-        {"node_id": "resolve", "instruction": "After causal evidence, fix the unique mapped owner, add proportionate regression coverage, and update maps or gates when their truth changed.", "owner": "project", "evidence": ["resolution-record", "red-green-test"]},
+        {"node_id": "resolve", "instruction": "Use causal observations and independent Plan to correct the graph, then the affected gate, then obtain a failing same-entry regression before fixing the unique owner. Preserve the original failure; never change the contract or assertion to fit broken code.", "owner": "project", "evidence": ["resolution-record", "red-green-test"]},
         {"node_id": "validation", "instruction": "Run focused tests and mapped gates, then choose build, install, restart, and original-input replay according to runtime impact.", "owner": "project", "evidence": ["validation-record"]},
         {"node_id": "review", "instruction": "Review the validated fix against applicable quality, safety, evidence and owner contracts. Block concrete regressions; optional simplification and unrelated historical debt are advisory.", "owner": "project", "evidence": ["architecture-conformance", "review-record"], "reminders": [{"kind": "memory_review", "blocking": false, "command": "project-memory review --run <run-id>"}]},
         {"node_id": "integration", "instruction": "Integrate on latest main.", "owner": "project", "evidence": ["mainline-receipt"]},
@@ -119,7 +119,7 @@
         {"node_id": "whitebox", "instruction": "Run project-owned internal validation.", "owner": "project", "evidence": ["whitebox-evidence"]},
         {"node_id": "build", "instruction": "Build the exact candidate artifact.", "owner": "project", "evidence": ["artifact"]},
         {"node_id": "install", "instruction": "Install the exact artifact into the declared environment.", "owner": "project", "evidence": ["install-receipt"]},
-        {"node_id": "restart", "instruction": "Restart the declared runtime when required.", "owner": "project", "evidence": ["restart-receipt"]},
+        {"node_id": "restart", "instruction": "When activation is required, use the declared lifecycle owner and supported entry. The user manages global Collab daemon activation; agents never start, stop or restart it. AppSDK/Collab maintenance never controls tmux lifecycle.", "owner": "project", "evidence": ["restart-receipt"]},
         {"node_id": "blackbox", "instruction": "Replay through the public deployed entrypoint.", "owner": "project", "evidence": ["blackbox-evidence"]},
         {"node_id": "bind_validation", "instruction": "Bind whitebox, artifact, deployment, and blackbox evidence.", "owner": "project", "evidence": ["pre-review-validation"]}
       ],

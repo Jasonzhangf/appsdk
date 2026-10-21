@@ -12,6 +12,8 @@
 - 当前任务事实与证据 → 独占任务笔记；项目摘要 → 单 owner 追加 `note.md`。
 - 对消费者分发的规则 → `templates/minimal/AGENTS.md`；SDK 分发 Skills →
   `sdk-skill-sources/`。它们与本项目开发 Skill 的作用域不同。
+- 分发目录是开发和发布源码。已注册参与者使用当前正式安装的 Skill 与 daemon
+  当前 `role_brief`；旧 worktree 内的分发副本不构成第二套运行规则。
 
 ## 产品与架构
 
@@ -90,6 +92,10 @@ Playground/Active/Protected/generated 是消费者治理分区。不能据此把
   peer 管理受托子目标；两者都负责拆解、派发、资源管理、验收与交付，优先交子 agent
   完成具体编码、执行和观察。peer 不是直接执行 worker。注册和恢复须说明此职责，并
   推荐对自身目标、阻塞和资源配置定时巡检；不以任务内容反推或限制协作身份。
+  master 与 peer 均自行登记、读取、更新、续订和关闭本人的 longhorizon goal。
+  master 不代登记或代持 peer goal；项目仲裁权不等于他人目标的所有权。
+  目标按规范项目和稳定名字隔离，sessionID 是执行载体；同名换会话或 worktree 继续
+  原目标。普通 task、board 分配、笔记和定时订阅不能代替 goal 的真实登记回执。
 - `.agent-collab/` 为项目局部状态；存在目录不证明当前 peer 已注册。
 - AppSDK/Collab 不拥有 tmux server 的生命周期。tmux adaptor 只使用已存在的
   通信端点；安装、升级、daemon 维护、注册、恢复、巡检或数据迁移不关闭、

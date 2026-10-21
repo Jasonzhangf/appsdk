@@ -24,8 +24,29 @@ pub(super) fn parse_duration_to_ms(s: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("GOAL_DURATION_OVERFLOW:{}", s))
 }
 
-pub(super) fn long_horizon_record(root: &Path) -> Result<Option<Value>, String> {
-    let file = root.join(".appsdk-control/long-task-goal.json");
+pub(super) struct GoalScope {
+    pub owner: String,
+    pub worker_id: String,
+    pub project: PathBuf,
+    pub invocation_root: PathBuf,
+    pub session_id: Option<String>,
+}
+
+impl GoalScope {
+    pub fn control_dir(&self) -> PathBuf {
+        // Reversible encoding keeps names (including slashes and Unicode) in
+        // one path component without adding another identity registry.
+        let encoded: String = self
+            .owner
+            .as_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        self.project.join(".appsdk-control/goals").join(encoded)
+    }
+}
+
+fn read_goal_file(file: &Path) -> Result<Option<Value>, String> {
     let content = match fs::read_to_string(&file) {
         Ok(content) => content,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
@@ -63,27 +84,6 @@ pub(super) fn collab_status_all(root: &Path) -> Result<Value, String> {
         .map_err(|error| format!("COLLAB_STATUS_JSON_INVALID:{}", error))
 }
 
-pub(super) fn collab_master_status(root: &Path) -> Result<Value, String> {
-    let mut command = Command::new("collab");
-    command.args(["master", "status"]).current_dir(root);
-    let out = run_goal_collab_command(command, GOAL_COLLAB_READ_TIMEOUT)
-        .map_err(|error| format!("GOAL_OWNER_MASTER_STATUS_UNAVAILABLE:{}", error))?;
-    if !out.status.success() {
-        let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        return Err(format!(
-            "GOAL_OWNER_MASTER_STATUS_FAILED:exit={}{}",
-            out.status.code().unwrap_or(1),
-            if detail.is_empty() {
-                String::new()
-            } else {
-                format!(":{}", detail)
-            }
-        ));
-    }
-    serde_json::from_slice(&out.stdout)
-        .map_err(|error| format!("GOAL_OWNER_MASTER_STATUS_JSON_INVALID:{}", error))
-}
-
 pub(super) fn goal_record_subscription_id(record: &Value) -> Option<String> {
     record
         .get("subscription_id")
@@ -98,16 +98,55 @@ pub(super) fn goal_record_subscription_id(record: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
-pub(super) fn goal_record_read(root: &Path) -> Result<Option<Value>, String> {
-    long_horizon_record(root)
+pub(super) fn goal_record_read(scope: &GoalScope) -> Result<Option<Value>, String> {
+    if let Some(record) = read_goal_file(&scope.control_dir().join("long-task-goal.json"))? {
+        if record["owner"].as_str() != Some(scope.owner.as_str()) {
+            return Err("GOAL_RECORD_OWNER_MISMATCH".into());
+        }
+        return Ok(Some(record));
+    }
+    // Legacy data is optional compatibility input, not the current owner's
+    // namespace. Preserve and report unusable legacy data without blocking a
+    // separately authenticated owner's explicitly requested goal.
+    for root in [&scope.invocation_root, &scope.project] {
+        let mut record = match read_goal_file(&root.join(".appsdk-control/long-task-goal.json")) {
+            Ok(Some(record)) => record,
+            Ok(None) => continue,
+            Err(error) => {
+                eprintln!("GOAL_LEGACY_RECORD_NOT_IMPORTED:{error}");
+                continue;
+            }
+        };
+        let Some(owner) = record["owner"]
+            .as_str()
+            .filter(|owner| !owner.trim().is_empty())
+        else {
+            eprintln!("GOAL_LEGACY_RECORD_NOT_IMPORTED: legacy record has no owner");
+            continue;
+        };
+        if owner != scope.owner && owner != scope.worker_id {
+            continue;
+        }
+        record["owner"] = Value::String(scope.owner.clone());
+        record["record_source"] = Value::String("legacy-read-only".into());
+        return Ok(Some(record));
+    }
+    Ok(None)
 }
 
-pub(super) fn goal_record_write(root: &Path, record: &Value) -> Result<(), String> {
-    let control_dir = root.join(".appsdk-control");
+pub(super) fn goal_record_write(scope: &GoalScope, record: &Value) -> Result<(), String> {
+    if record["owner"].as_str() != Some(scope.owner.as_str()) {
+        return Err("GOAL_RECORD_OWNER_MISMATCH".into());
+    }
+    let mut record = record.clone();
+    record["record_source"] = Value::String("owner-scoped".into());
+    record["project_scope"] = serde_json::json!(scope.project);
+    record["session_id"] = serde_json::json!(scope.session_id);
+    let control_dir = scope.control_dir();
     fs::create_dir_all(&control_dir)
         .map_err(|error| format!("GOAL_CONTROL_DIR_CREATE_FAILED:{}", error))?;
     let file = control_dir.join("long-task-goal.json");
-    let content = serde_json::to_string_pretty(record)
+    let content = serde_json::to_string_pretty(&record)
         .map_err(|error| format!("GOAL_RECORD_SERIALIZE_FAILED:{}", error))?
         + "\n";
     let staging = control_dir.join(format!(
@@ -342,31 +381,11 @@ pub(super) fn run_goal_collab_command(
     }
 }
 
-pub(super) fn context_has_live_tmux_transport(context: &Value) -> bool {
-    let context = crate::long_horizon_role::normalized_collab_context(context);
-    let transport = &context["identity"]["transport"];
-    let endpoint = &transport["tmux_endpoint"];
-    transport["kind"].as_str() == Some("tmux")
-        && endpoint["socket_path"]
-            .as_str()
-            .is_some_and(|value| !value.trim().is_empty())
-        && endpoint["server_pid"].as_u64().is_some_and(|pid| pid > 0)
-        && endpoint["tmux_session_id"]
-            .as_str()
-            .is_some_and(|value| !value.trim().is_empty())
-        && endpoint["pane_id"]
-            .as_str()
-            .is_some_and(|value| !value.trim().is_empty())
-        && endpoint["pane_pid"].as_u64().is_some_and(|pid| pid > 0)
-        && transport["endpoint"].as_str() == endpoint["socket_path"].as_str()
-        && context["liveness"]["live"].as_bool() == Some(true)
-        && context["liveness"]["presence"].as_str() == Some("present")
-        && context["liveness"]["transport_kind"].as_str() == Some("tmux")
-        && context["liveness"]["endpoint"].as_str() == endpoint["socket_path"].as_str()
+pub(super) fn resolve_goal_scope(root: &Path) -> Result<GoalScope, String> {
+    goal_scope_from_context(&goal_context(root)?, root)
 }
 
-pub(super) fn verified_goal_master(root: &Path) -> Result<String, String> {
-    let status = collab_status_all(root)?;
+pub(super) fn goal_context(root: &Path) -> Result<Value, String> {
     let mut context_command = Command::new("collab");
     context_command.args(["context"]).current_dir(root);
     let context_output = run_goal_collab_command(context_command, GOAL_COLLAB_READ_TIMEOUT)
@@ -379,58 +398,48 @@ pub(super) fn verified_goal_master(root: &Path) -> Result<String, String> {
     }
     let context: Value = serde_json::from_slice(&context_output.stdout)
         .map_err(|error| format!("GOAL_OWNER_CONTEXT_JSON_INVALID:{}", error))?;
-    let context = crate::long_horizon_role::normalized_collab_context(&context);
-    let owner = context["identity"]["worker_id"]
+    Ok(crate::long_horizon_role::normalized_collab_context(
+        &context,
+    ))
+}
+
+pub(super) fn goal_scope_from_context(context: &Value, root: &Path) -> Result<GoalScope, String> {
+    let worker_id = context["identity"]["worker_id"]
         .as_str()
         .filter(|owner| !owner.trim().is_empty())
         .ok_or_else(|| "GOAL_OWNER_IDENTITY_MISSING".to_string())?;
-
-    let worker = status["workers"]
-        .as_array()
-        .and_then(|workers| {
-            workers
-                .iter()
-                .find(|worker| worker["id"].as_str() == Some(owner))
-        })
-        .ok_or_else(|| "GOAL_OWNER_WORKER_MISSING".to_string())?;
-    if worker["endpoint_live"].as_bool() != Some(true) {
-        return Err("GOAL_OWNER_NOT_LIVE:verified Collab owner endpoint is not live".into());
-    }
-    if worker["identity_valid"].as_bool() != Some(true) {
-        return Err("GOAL_OWNER_IDENTITY_INVALID:verified Collab owner identity is invalid".into());
-    }
-
-    let master_status = collab_master_status(root)?;
-    let master = master_status
-        .get("master")
-        .filter(|value| value.is_object())
-        .ok_or_else(|| "GOAL_OWNER_MASTER_IDENTITY_MISSING".to_string())?;
-    let master_owner = master["worker_id"]
+    let owner = context["name"]
         .as_str()
-        .filter(|worker_id| !worker_id.trim().is_empty())
-        .ok_or_else(|| "GOAL_OWNER_MASTER_IDENTITY_MISSING".to_string())?;
-    if master["endpoint_live"].as_bool() != Some(true) {
-        return Err("GOAL_OWNER_MASTER_NOT_LIVE".into());
+        .filter(|name| !name.trim().is_empty())
+        .ok_or("GOAL_OWNER_NAME_MISSING")?;
+
+    if context["identity"]["role"].as_str() == Some("managed-subagent")
+        || context["identity"]["kind"].as_str() == Some("managed-subagent")
+        || context["role_brief"]["derivation"]["kind"].as_str() == Some("managed-subagent")
+    {
+        return Err(
+            "GOAL_OWNER_MANAGED_SUBAGENT: independent goals require an ordinary peer".into(),
+        );
     }
-    if master_owner != owner {
-        return Err(format!(
-            "GOAL_OWNER_IDENTITY_MISMATCH:context={} master={}",
-            owner, master_owner
-        ));
+    let project = context["binding"]["project_scope"]
+        .as_str()
+        .or_else(|| context["project_scope"].as_str())
+        .filter(|p| !p.is_empty())
+        .ok_or("GOAL_OWNER_PROJECT_SCOPE_MISSING")?;
+    let project = PathBuf::from(project);
+    if !project.is_absolute() {
+        return Err("GOAL_OWNER_PROJECT_SCOPE_INVALID".into());
     }
-    if !context_has_live_tmux_transport(&context) {
-        return Err("GOAL_OWNER_CONTEXT_TRANSPORT_NOT_LIVE".into());
-    }
-    match worker["suspected_offline"].as_bool() {
-        Some(false) => {}
-        Some(true) if master_owner == owner && master["endpoint_live"].as_bool() == Some(true) => {}
-        _ => {
-            return Err(
-                "GOAL_OWNER_SUSPECTED_OFFLINE:verified Collab owner is suspected offline".into(),
-            );
-        }
-    }
-    Ok(owner.to_string())
+    Ok(GoalScope {
+        owner: owner.to_owned(),
+        worker_id: worker_id.to_owned(),
+        project,
+        invocation_root: root.to_path_buf(),
+        session_id: context["session_id"]
+            .as_str()
+            .or_else(|| context["binding"]["session_id"].as_str())
+            .map(str::to_owned),
+    })
 }
 
 pub(super) fn parse_goal_subscription_response(stdout: &[u8]) -> Result<(Value, String), String> {
@@ -510,6 +519,7 @@ pub(super) fn goal_cancel_subscription(
 
 pub(super) fn goal_subscription_status(
     root: &Path,
+    scope: &GoalScope,
     subscription_id: &str,
 ) -> Result<(String, Value), String> {
     let mut command = Command::new("collab");
@@ -547,6 +557,7 @@ pub(super) fn goal_subscription_status(
             subscription_id
         ));
     };
+    goal_check_subscription_owner(scope, subscription)?;
     let remote_status = subscription
         .get("status")
         .and_then(Value::as_str)
@@ -557,6 +568,7 @@ pub(super) fn goal_subscription_status(
 
 pub(super) fn goal_subscription_by_subject(
     root: &Path,
+    scope: &GoalScope,
     subject: &str,
 ) -> Result<Option<(String, String, Value)>, String> {
     let mut command = Command::new("collab");
@@ -577,6 +589,7 @@ pub(super) fn goal_subscription_by_subject(
         .ok_or_else(|| "GOAL_RECONCILE_RESPONSE_MISSING_SUBSCRIPTIONS".to_string())?;
     let matches: Vec<(String, String, Value)> = subscriptions
         .iter()
+        .filter(|subscription| goal_check_subscription_owner(scope, subscription).is_ok())
         .filter_map(|subscription| {
             let id = subscription
                 .get("id")
@@ -633,12 +646,15 @@ pub(super) fn goal_subject_candidates(
 
 pub(super) fn goal_subscription_by_subject_candidates(
     root: &Path,
+    scope: &GoalScope,
     record: Option<&Value>,
     canonical_subject: &str,
 ) -> Result<Option<(String, String, Value, String)>, String> {
     let mut matches: Vec<(String, String, Value, String)> = Vec::new();
     for subject in goal_subject_candidates(record, canonical_subject) {
-        if let Some((id, status, remote_record)) = goal_subscription_by_subject(root, &subject)? {
+        if let Some((id, status, remote_record)) =
+            goal_subscription_by_subject(root, scope, &subject)?
+        {
             if !matches
                 .iter()
                 .any(|(matched_id, _, _, _)| matched_id == &id)
@@ -654,6 +670,22 @@ pub(super) fn goal_subscription_by_subject_candidates(
         ));
     }
     Ok(matches.into_iter().next())
+}
+
+pub(super) fn goal_check_subscription_owner(
+    scope: &GoalScope,
+    subscription: &Value,
+) -> Result<(), String> {
+    if subscription["worker_id"]
+        .as_str()
+        .is_some_and(|owner| owner != scope.worker_id)
+        || subscription["owner"]
+            .as_str()
+            .is_some_and(|owner| owner != scope.owner)
+    {
+        return Err("GOAL_SUBSCRIPTION_OWNER_MISMATCH".into());
+    }
+    Ok(())
 }
 
 pub(super) fn goal_subscription_is_terminal(status: &str) -> bool {

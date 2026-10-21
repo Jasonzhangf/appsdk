@@ -979,6 +979,7 @@ impl Drop for AppFixture {
 #[derive(Clone, Debug)]
 struct ThreadState {
     inputs: Vec<Value>,
+    reject_input: bool,
     session_id: Option<String>,
     status: String,
     active_turn: Option<String>,
@@ -992,6 +993,7 @@ impl ThreadState {
     fn new() -> Self {
         Self {
             inputs: Vec::new(),
+            reject_input: false,
             session_id: None,
             status: "idle".into(),
             active_turn: None,
@@ -1059,6 +1061,14 @@ fn dispatch(
         "thread/turns/list" => thread_turns(params, id, state),
         "turn/start" | "turn/steer" | "thread/queue/add" => {
             let thread = params["threadId"].as_str().unwrap_or_default().to_owned();
+            if state
+                .lock()
+                .unwrap()
+                .get(&thread)
+                .is_some_and(|s| s.reject_input)
+            {
+                return json!({"id":id,"error":{"code":-32000,"message":"fixture rejects native input"}});
+            }
             state
                 .lock()
                 .unwrap()

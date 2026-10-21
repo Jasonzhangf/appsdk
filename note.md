@@ -347,3 +347,45 @@ One shared runtime rule and source/global Collab/recovery/migration Skills now
 state this. Public registration red reproduced the missing rule; registration6
 and authority8 pass after the text change. Official 0.2.0303 is installed;
 final user activation and this small addition's CI remain pending.
+
+## 2026-10-21 — owner-scoped goals and active prompt ablation
+
+User correction: master and peer are orchestrators at different goal levels.
+Each manages its own goal; master proxy registration is invalid. The previous
+master-only goal documentation described the defect instead of fixing it.
+Runtime now scopes goal records/locks by canonical project and stable name,
+shares one current context for identity/role, permits ordinary peer finite goal
+deadlines, and keeps peer deadlines separate from master wake. Legacy singleton
+data is only imported for the authenticated owner; unusable optional legacy
+data is preserved/reported without blocking a new independent goal.
+
+Active source prompt owners, generated references, SDK Skills/templates and
+global goal-prompt were audited. Twelve conflict/duplication classes and their
+owners are recorded in docs/design/appsdk-prompt-audit-20261021.md. The formal
+Collab installer also retires two exact stale reference copies found in the
+installed global Skill; arbitrary user references are preserved. Current
+stable-name design text now matches the goal/master-idle boundary.
+
+Evidence: ~/.collab/runs/owner-scoped-goals-20261021/verification.md and raw logs.
+Latest AppSDK units59; public owner/prompt consumers39; Collab goal units12;
+registration6 and authority8; installer6. Canonical installed cross-product
+AppSDK -> private daemon -> native fixture passes1 in122.66s: peer owns goal,
+deadline consumed, peer cancel preserves master and direct-message reception.
+Official binaries and managed Skills installed; Collab0.2.0305. Global daemon
+activation remains user-managed. No production registration, message, timer,
+daemon lifecycle or tmux lifecycle action was performed. Independent overall
+review and main integration follow; shared dirty main/other worktrees protected.
+
+Independent milestone review found three P1 closure gaps: remote pending goal
+subscriptions did not follow name handoff; legacy singleton reads omitted the
+original invocation worktree; and native consumers asserted polling consumption
+without exact native submission. All three now have red/green evidence in
+review-fix-* logs. Candidate public consumers5 pass in123.97s, including real
+AppSDK same-name A->B status/rearm/cancel, old caller denial, schedule/history
+preservation, linked-worktree legacy upgrade and exact native wake/consumption.
+Native matcher recognizes start toolOutput and steer/queue input formats;
+rejecting-adapter negative case remains. A parent red also caught transport-lost
+goal subscriptions omitted from handoff; valid restored schedules now transfer
+and rearm without reviving terminal states. Name units60 and final AppSDK units59
+pass. Official Collab0.2.0307 installed; final installed consumers/finding recheck
+and integration continue in the same run. Global daemon remains user-managed.

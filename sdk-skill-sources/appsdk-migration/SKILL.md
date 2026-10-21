@@ -26,9 +26,10 @@ collab context --provide '{"session_id":"...","thread_id":"...","endpoint":"..."
 ```
 
 - Context restores current identity, binding, route, receive lease and existing valid owned subscriptions together. cwd selects project; the stable name owns work, and the reported agent sessionID is its current carrier. Same-name session changes automatically update all unclosed board assignments. Explicitly retire the old rule that a tmux session selects peer identity: tmux sessions, socket paths, server PIDs and pane history are placement only. The CLI does not parse the `TMUX` value. Migration never requires restarting tmux or rewriting historical task evidence.
-- An existing master does not block ordinary peer recovery. Restoring Jenny also restores master authority. A different online holder requires the one user takeover confirmation; unknown ownership goes to Jenny for snapshot adjudication. Self-restoration needs no repeated approval or historical journal inspection. Use the current Collab recovery contract rather than simulating takeover by changing a display label.
+- An existing master does not block ordinary peer recovery. Name/session takeover follows the [Collab name contract](../collab/references/stable-name-recovery.md). Explicitly confirmed user takeover of unavailable unknown Jenny takes precedence over Jenny adjudication; do not wait for the old executor. Do not simulate recovery by changing a display label.
 - Recovery acceptance includes real send, receive and reply. A role field alone is not communication recovery. Do not reset a project or operate daemon lifecycle for identity recovery.
 - After recovery, evaluate owned patrol tasks and timed subscriptions. Close them when their task is complete or no new task and no actionable work remains; do not recreate idle patrol loops. Keep direct-message reception for new assignments.
+- Master and peer each restore and manage their own goal under the current stable name. Recovery does not transfer a peer goal to master, require master proxy registration, or grant project-master authority to a peer.
 - Do not hand-edit `routes.jsonl`, `identities/`, or `.agent-collab/` files.
 
 ## 2. Collab version upgrade & daemon maintenance

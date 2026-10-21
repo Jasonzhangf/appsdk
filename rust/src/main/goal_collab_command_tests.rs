@@ -30,40 +30,6 @@ fn injected_timeout_bounds_output_pipe_drain_without_false_success() {
 }
 
 #[test]
-fn goal_owner_context_requires_a_live_tmux_endpoint() {
-    let tmux_context = serde_json::json!({
-        "identity": {"transport": {
-            "kind": "tmux",
-            "endpoint": "/tmp/collab.sock",
-            "tmux_endpoint": {
-                "socket_path": "/tmp/collab.sock",
-                "server_pid": 123,
-                "tmux_session_id": "$1",
-                "pane_id": "%1",
-                "pane_pid": 456
-            }
-        }},
-        "liveness": {
-            "live": true,
-            "presence": "present",
-            "transport_kind": "tmux",
-            "endpoint": "/tmp/collab.sock"
-        }
-    });
-    assert!(context_has_live_tmux_transport(&tmux_context));
-
-    let appserver_context = serde_json::json!({
-        "identity": {"transport": {"kind": "appserver", "thread_id": "thread-1"}},
-        "liveness": {"live": true, "transport_kind": "appserver"}
-    });
-    assert!(!context_has_live_tmux_transport(&appserver_context));
-
-    let mut unknown = tmux_context;
-    unknown["liveness"]["presence"] = Value::String("unknown".into());
-    assert!(!context_has_live_tmux_transport(&unknown));
-}
-
-#[test]
 fn goal_owner_context_reads_the_nested_collab_snapshot_envelope() {
     // `collab context` nests the live binding under `result.snapshot`. The
     // long-horizon role and owner gates must read that envelope, not a
@@ -97,7 +63,6 @@ fn goal_owner_context_reads_the_nested_collab_snapshot_envelope() {
         crate::long_horizon_role::normalized_collab_context(&nested)["identity"]["worker_id"],
         "codex-%1"
     );
-    assert!(context_has_live_tmux_transport(&nested));
     let mut conflicting = nested.clone();
     conflicting["identity"] = serde_json::json!({"worker_id": "top-level"});
     assert_eq!(

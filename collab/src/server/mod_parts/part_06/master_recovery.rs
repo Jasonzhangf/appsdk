@@ -217,6 +217,7 @@ fn communication_recovery_brief() -> serde_json::Value {
 }
 
 fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Value {
+    let own_goal_rule = "Master and peer are goal orchestrators at different levels, not execution workers. Restore or register your own accepted goal with `appsdk goal subscribe --goal <existing-goal.md> --interval <agreed-period>`; verify your own `appsdk goal status --json` receipt before dispatch. Read, update, rearm and cancel only your own goal. Never ask master to proxy-register a peer goal, and never register or hold another peer's goal as master. A task, board assignment, note or timer alone is not goal registration. Stable name owns the goal; sessionID is the current carrier, independent of Desktop/TUI or tmux placement. Use the current installed Collab Skill and this current role brief; an older worktree's skill-source copy is not another operating contract. Retire master-only goal, peer-as-executor and all-peers-busy-before-GCM instructions.";
     let idle_patrol_rule = "When a task completes, or there is no new task and no actionable work, actively close your owned patrol tasks and timed subscriptions. Do not renew or recreate idle patrol loops. Keep the direct-message receive subscription for new assignments; evaluate a new assignment before starting a new scoped patrol.";
     let route_scope = server_route_scope(server, state).ok().flatten();
     if current_master_worker_id(state, route_scope.as_ref()).as_deref() == Some(worker_id) {
@@ -226,6 +227,7 @@ fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Va
             "goal_level": "project",
             "role_task": "Act as the project's long-horizon orchestrator. Prefer assigning code implementation to subagents; orchestrate scheduling, acceptance, delivery, integration, and owned-resource closure instead of implementing the mainline yourself. Patrol only your own project and own its audit. Route suitable long-horizon goals to authorized peers when available; if none is available, retain the goal and split it into bounded subagent work. Dispatch one-shot execution or observation directly to independent `codex exec --profile gcm` workers regardless of whether other peers are busy; ordinary implementation remains with its delivery owner.",
             "responsibilities": [
+                own_goal_rule,
                 "Run `appsdk longhorizon show` to reconstruct goal, tasks, workers, blockers, and bugs.",
                 "A master patrols only its own project. After registration, promotion, or restoration, update this project's inspection tasks and your own patrol subscriptions; refresh them when scope or monitored events change. Inspect buglist P0/P1, actual peer work progress evidence, owned worktree and runtime resource cleanup of stale resources, canonical issue intake, and all currently supported monitored events.",
                 "Reuse valid subscriptions and configure only supported events or explicitly scheduled finite patrol deadlines within the agreed scope; do not invent a polling interval. Subscription presence does not gate identity. Inspect evidence, update task next actions, and retire only obsolete owned subscriptions or resources after verified completion.",
@@ -297,6 +299,7 @@ fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Va
         "goal_level": "delegated_goal",
         "role_task": "The wire role remains `worker` with derivation kind `peer` for compatibility; operationally you are the accepted goal's long-horizon orchestrator. Prefer assigning code implementation to subagents; orchestrate scheduling, acceptance, delivery, and owned-resource closure instead of implementing the mainline yourself. Dispatch one-shot execution or observation directly to independent `codex exec --profile gcm` workers regardless of whether other peers are busy.",
         "responsibilities": [
+            own_goal_rule,
             "Split the accepted goal into non-overlapping bounded scopes, then dispatch bounded one-shot execution or observation to independent `codex exec --profile gcm` subworkers; use autonomous peers only for subordinate long-horizon goals within the authorized scope.",
             "Own planning, execution, verification, unblocking, assigned integration, and resource closure for the accepted scope. Verify subworker evidence and deliver the goal to the sender.",
             "Keep the sender contract explicit: goal, scope, authorized actions, resource owner, delivery/test evidence, report channel, and stop conditions.",

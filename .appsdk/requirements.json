@@ -269,9 +269,36 @@
         "version": 1
       },
       "version": 10
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "我们 peer 可以做自己的 goal，你脑子瓦特了？peer 和 master 只是分工不同，职责都是一样的，peer 不是 worker！！！\n需要全局审计所有的本项目的提示词，是否冲突，是否逻辑自洽，是否重复，要消融错误",
+          "role": "user",
+          "source": "Current Codex conversation: explicit peer/master goal ownership correction and comprehensive project prompt audit request, 2026-10-21"
+        },
+        "base_version": 1,
+        "operation": "replace",
+        "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
+        "request_id": "appsdk-owner-goal-and-prompt-ablation-20261021",
+        "requirement_id": "req-collab-globalized-orchestration-patrol",
+        "text": "Collab orchestration and patrol use one project-generic contract. Master and ordinary peer are both autonomous long-horizon goal orchestrators at different goal levels; peer is not a bounded execution worker. Each registers, reads, updates, rearms and cancels its own goal. Master must not proxy-register or hold a peer goal. Stable name owns work; agent sessionID is its current execution carrier, independent of tmux and worktree placement. Goal status and lifecycle changes must not rewrite another owner's records. Ordinary tasks, board assignments, notes and timer subscriptions do not substitute for a real goal registration receipt. Route suitable long-horizon subgoals to consenting authorized peers; route bounded execution and observation directly to independent codex exec --profile gcm subworkers regardless of peer availability, using only the documented fallback when unavailable. Keep Plan/Review roles and host primitives separate; do not use built-in spawn/fork/session Agent slots or legacy managed subagents as production concurrency. Both orchestrators plan, dispatch, manage resources, verify evidence, unblock, integrate and deliver their own goal. On each assignment evaluate goal/dependencies/blockers/priority/resources and update finite owned patrols without duplicate timers. Patrol checks open P0/P1 work, actual subtask progress, owned worktree/runtime cleanup, canonical issue intake and relevant events; preserve protected dirty, active, shared or unknown resources. Peer requests master help for blockers without transferring goal ownership. Rearm a consumed one-shot wake only while actionable scheduling remains; ACK/read/summary are not completion. On goal completion or no new task and no actionable work, actively close owned goal scheduling and patrols while keeping direct-message reception. Audit all active AppSDK project prompts, runtime generators, templates, source and installed Skills for conflicting roles, logic gaps and duplicated rule owners; remove incorrect instructions, retain one authoritative owner and distinguish generated projections from independent sources. Preserve legitimate current-master project arbitration, reset, master-idle and cross-project boundaries; global daemon lifecycle remains user-managed and is not an identity or project reset prerequisite. Keep this contract project-generic; business-specific checks belong to their project Skill."
+      },
+      "result": {
+        "authorization": {
+          "original_text": "我们 peer 可以做自己的 goal，你脑子瓦特了？peer 和 master 只是分工不同，职责都是一样的，peer 不是 worker！！！\n需要全局审计所有的本项目的提示词，是否冲突，是否逻辑自洽，是否重复，要消融错误",
+          "role": "user",
+          "source": "Current Codex conversation: explicit peer/master goal ownership correction and comprehensive project prompt audit request, 2026-10-21"
+        },
+        "requirement_id": "req-collab-globalized-orchestration-patrol",
+        "status": "active",
+        "text": "Collab orchestration and patrol use one project-generic contract. Master and ordinary peer are both autonomous long-horizon goal orchestrators at different goal levels; peer is not a bounded execution worker. Each registers, reads, updates, rearms and cancels its own goal. Master must not proxy-register or hold a peer goal. Stable name owns work; agent sessionID is its current execution carrier, independent of tmux and worktree placement. Goal status and lifecycle changes must not rewrite another owner's records. Ordinary tasks, board assignments, notes and timer subscriptions do not substitute for a real goal registration receipt. Route suitable long-horizon subgoals to consenting authorized peers; route bounded execution and observation directly to independent codex exec --profile gcm subworkers regardless of peer availability, using only the documented fallback when unavailable. Keep Plan/Review roles and host primitives separate; do not use built-in spawn/fork/session Agent slots or legacy managed subagents as production concurrency. Both orchestrators plan, dispatch, manage resources, verify evidence, unblock, integrate and deliver their own goal. On each assignment evaluate goal/dependencies/blockers/priority/resources and update finite owned patrols without duplicate timers. Patrol checks open P0/P1 work, actual subtask progress, owned worktree/runtime cleanup, canonical issue intake and relevant events; preserve protected dirty, active, shared or unknown resources. Peer requests master help for blockers without transferring goal ownership. Rearm a consumed one-shot wake only while actionable scheduling remains; ACK/read/summary are not completion. On goal completion or no new task and no actionable work, actively close owned goal scheduling and patrols while keeping direct-message reception. Audit all active AppSDK project prompts, runtime generators, templates, source and installed Skills for conflicting roles, logic gaps and duplicated rule owners; remove incorrect instructions, retain one authoritative owner and distinguish generated projections from independent sources. Preserve legitimate current-master project arbitration, reset, master-idle and cross-project boundaries; global daemon lifecycle remains user-managed and is not an identity or project reset prerequisite. Keep this contract project-generic; business-specific checks belong to their project Skill.",
+        "version": 2
+      },
+      "version": 11
     }
   ],
   "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
   "schema_version": 1,
-  "version": 10
+  "version": 11
 }

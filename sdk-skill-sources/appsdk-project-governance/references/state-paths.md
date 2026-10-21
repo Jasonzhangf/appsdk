@@ -84,11 +84,7 @@ appsdk reset-governance <project> --discard-legacy
                                -> AppSDK control-plane reset
 appsdk init --fresh --discard-legacy
                                -> preferred single transaction for old AppSDK control plane
-collab down
-collab reset --project --discard-legacy --approval "<user text>"
-collab up
-collab context
-                               -> Collab-owned project control-plane reset
+collab reset --project         -> current-master online reset of this project
 ```
 
 For old `.appsdk/` state, do not delete it manually. Use the authorized reset
@@ -99,9 +95,9 @@ current baseline; it does not delete `.agent-collab/` or global truth.
 When the user explicitly asks to start fresh instead of migrating legacy
 state, keep the owners separate:
 
-1. Use `collab migrate` when the project journal is replayable; otherwise use
-   the explicitly authorized `collab reset --project --discard-legacy` sequence above
-   for Collab-owned state. Do not manually remove `.agent-collab/`.
+1. Only when the plan includes Collab state, use its current migration/reset
+   contract. Current-master `collab reset --project` is online and does not
+   control the global daemon. Do not manually remove `.agent-collab/`.
 2. From a clean non-`main` owner worktree, use `appsdk init --fresh
    --discard-legacy` for `.appsdk/` and `.appsdk-control/`. Do not manually
    remove either AppSDK-owned root.
@@ -135,10 +131,11 @@ route, or binding. The supplement invocation returns the resulting snapshot.
 `truth`. Registration returns the brief effective at registration; `collab
 context` projects the current brief, and promotion or delegation returns the
 replacement brief. Read master/authority state from the same snapshot. A live
-master exists iff the returned `master` is an object with
-`endpoint_live=true`. `master: null` means no live master is recorded; a
-`master` object with `endpoint_live=false` is a recorded-but-dead identity and
-is not a live master. Do not run a separate master, route, or worker query for
+master endpoint is reachable when returned `master.endpoint_live=true`.
+`master: null` means no authority holder is assigned; a master object with
+`endpoint_live=false` retains its recorded authority but has no reachable
+endpoint. Reachability never grants or removes master authority. Do not run a
+separate master, route, or worker query for
 bootstrap. Do not inspect journal, mailbox, `routes.jsonl`, or `~/.collab`
 paths to prove registration. Missing or failed identity prevents claiming
 registration.

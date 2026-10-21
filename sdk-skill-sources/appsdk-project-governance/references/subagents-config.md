@@ -11,10 +11,10 @@ independent `codex exec --profile gcm` workers. Use the documented fallback only
 when GCM is unavailable. Do not use Codex built-in spawn/fork/session Agent
 slots or managed subagents as the production concurrency path.
 
-A master-owned independent GCM worker is a capacity fallback only when every
-eligible peer is busy. The master retains audit, dispatch, verification,
-integration, and final acceptance. It does not replace the delivery owner for
-ordinary scoped implementation.
+One-shot execution and observation go directly to independent GCM workers,
+regardless of peer availability. Master and peer each retain their goal's
+planning, verification, integration, acceptance and resource closure. Each
+registers and manages its own goal; neither substitutes for another goal owner.
 
 Each bounded worker contract states:
 

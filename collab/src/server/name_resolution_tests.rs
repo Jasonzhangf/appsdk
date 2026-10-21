@@ -3,6 +3,113 @@ use super::name_state::*;
 use super::*;
 
 #[test]
+fn name_handoff_preserves_goal_schedule_and_terminal_history() {
+    let (server, root) = peer_tests::test_server();
+    for id in ["old", "new"] {
+        assert!(peer_tests::register_synthetic_peer(&server, id, id).ok);
+    }
+    let mut state = server.state.lock().unwrap();
+    let scope = server_route_scope(&server, &state)
+        .unwrap()
+        .unwrap()
+        .project_scope_id
+        .as_str()
+        .to_owned();
+    let old = NameOccupancy {
+        name: "Alice".into(),
+        worker_id: "old".into(),
+        session_id: "s1".into(),
+        occupancy_revision: 1,
+        updated_ms: 1,
+    };
+    state
+        .name_occupancies
+        .entry(scope.clone())
+        .or_default()
+        .insert("Alice".into(), old.clone());
+    let base = state.notification_subscriptions[&mailbox::default_direct_message_id("old")].clone();
+    let mut originals = Vec::new();
+    for (id, status, event, subject, expires) in [
+        ("armed", "armed", "deadline", "goal:owned", i64::MAX),
+        ("lost", "transport-lost", "deadline", "goal:owned", i64::MAX),
+        ("consumed", "consumed", "deadline", "goal:owned", i64::MAX),
+        ("cancelled", "cancelled", "deadline", "goal:owned", i64::MAX),
+        ("expired", "armed", "deadline", "goal:owned", 1),
+        ("patrol", "armed", "deadline", "patrol:owned", i64::MAX),
+        ("master", "armed", "master-idle", "goal:owned", i64::MAX),
+    ] {
+        let mut sub = base.clone();
+        sub.id = id.into();
+        sub.status = status.into();
+        sub.event = event.into();
+        sub.subject = Some(subject.into());
+        sub.expires_ms = expires;
+        sub.trigger_times_ms = vec![100, 200];
+        sub.interval_ms = Some(100);
+        sub.repeat_count = 2;
+        sub.fired_count = 1;
+        sub.created_ms = 7;
+        state
+            .notification_subscriptions
+            .insert(id.into(), sub.clone());
+        originals.push(sub);
+    }
+    state
+        .apply_checked(&Event::Sent {
+            msg: serde_json::from_value(json!({
+                "id":"pending-goal", "from":"collab-server", "to":"old", "type":"notification",
+                "subject":"deadline:goal:owned", "body":"original", "in_reply_to":null,
+                "created_ms":1, "state":"pending", "wake_attempt_count":0, "last_wake_attempt_ms":0
+            }))
+            .unwrap(),
+        })
+        .unwrap();
+    state
+        .apply_checked(&Event::WakeBound {
+            message_id: "pending-goal".into(),
+            subscription_id: "armed".into(),
+        })
+        .unwrap();
+    let next = NameOccupancy {
+        worker_id: "new".into(),
+        session_id: "s2".into(),
+        occupancy_revision: 2,
+        updated_ms: 2,
+        ..old
+    };
+    let events = build_name_resolution_events(&state, &scope, &next);
+    for event in &events {
+        state.apply_checked(event).unwrap();
+    }
+    assert_eq!(
+        state.wake_bindings["pending-goal"], "armed",
+        "pending goal consumption must close its transferred subscription"
+    );
+    for mut expected in originals {
+        if matches!(expected.id.as_str(), "armed" | "lost" | "consumed") {
+            expected.worker_id = "new".into();
+            let transport = selected_transport_for_worker(&state.workers["new"]).unwrap();
+            expected.method = transport.kind.as_str().into();
+            expected.target = notification_target(&transport).unwrap().into();
+            expected.updated_ms = 2;
+            if expected.id == "lost" {
+                expected.status = "armed".into();
+                expected.status_reason = None;
+            }
+        }
+        assert_eq!(
+            serde_json::to_value(&state.notification_subscriptions[&expected.id]).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+    }
+    assert!(!build_name_resolution_events(&state, &scope, &next)
+        .iter()
+        .any(|e| matches!(e, Event::NotificationSubscribed { .. })));
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn confirmed_user_jenny_takeover_overrides_unknown_without_ordinary_name_bypass() {
     let mut state = State::default();
     let mut old = input("old", "s1");
@@ -10,19 +117,27 @@ fn confirmed_user_jenny_takeover_overrides_unknown_without_ordinary_name_bypass(
     assert_eq!(committed(&mut state, &old).name, "Jenny");
     let mut next = input("new", "s2");
     next.intent = Some(NameIntent {
-        requested_name: "Jenny".into(), user_authorized: true, replace_confirmed: false,
+        requested_name: "Jenny".into(),
+        user_authorized: true,
+        replace_confirmed: false,
     });
-    assert!(matches!(plan_name_resolution(&state, &next).unwrap().decision,
-        NameResolutionDecision::Pending { .. }));
+    assert!(matches!(
+        plan_name_resolution(&state, &next).unwrap().decision,
+        NameResolutionDecision::Pending { .. }
+    ));
     next.intent.as_mut().unwrap().replace_confirmed = true;
     let plan = plan_name_resolution(&state, &next).unwrap();
     assert!(plan.requires_master_authorization);
-    assert!(matches!(plan.decision, NameResolutionDecision::Committed { occupancy, .. }
-        if occupancy.name == "Jenny" && occupancy.worker_id == "new" && occupancy.session_id == "s2"));
+    assert!(
+        matches!(plan.decision, NameResolutionDecision::Committed { occupancy, .. }
+        if occupancy.name == "Jenny" && occupancy.worker_id == "new" && occupancy.session_id == "s2")
+    );
     committed(&mut state, &input("ordinary", "s3"));
     next.intent.as_mut().unwrap().requested_name = "Alice".into();
-    assert!(matches!(plan_name_resolution(&state, &next).unwrap().decision,
-        NameResolutionDecision::Pending { .. }));
+    assert!(matches!(
+        plan_name_resolution(&state, &next).unwrap().decision,
+        NameResolutionDecision::Pending { .. }
+    ));
 }
 
 fn input(worker: &str, session: &str) -> NameResolutionInput {

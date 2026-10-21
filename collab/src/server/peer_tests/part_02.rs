@@ -628,12 +628,12 @@ fn cancelling_master_idle_subscription_supersedes_pending_wake() {
 }
 
 #[test]
-fn deadline_subscription_requires_live_master_authority() {
+fn goal_deadline_subscription_belongs_to_each_registered_orchestrator() {
     let (server, root) = test_server();
     register(&server, "worker", "%worker");
     register(&server, "master", "%master");
 
-    let denied = handle_notification_subscribe(
+    let peer_goal = handle_notification_subscribe(
         &server,
         "worker".into(),
         "token-worker".into(),
@@ -645,8 +645,8 @@ fn deadline_subscription_requires_live_master_authority() {
         1,
         60,
     );
-    assert!(!denied.ok);
-    assert!(denied.error.unwrap().contains("deadline subscriptions"));
+    assert!(peer_goal.ok, "peer owns its goal without promotion: {peer_goal:?}");
+    assert_eq!(peer_goal.data["subscription"]["worker_id"], "worker");
 
     promote_master(&server, "master", "user approved test master");
     let accepted = handle_notification_subscribe(
@@ -662,6 +662,7 @@ fn deadline_subscription_requires_live_master_authority() {
         60,
     );
     assert!(accepted.ok, "master should be allowed: {accepted:?}");
+    assert_ne!(peer_goal.data["subscription"]["id"], accepted.data["subscription"]["id"]);
     std::fs::remove_dir_all(root).ok();
 }
 

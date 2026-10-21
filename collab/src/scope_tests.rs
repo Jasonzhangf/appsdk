@@ -1157,31 +1157,23 @@ fn init_releases_collab_doc_only_once() {
 }
 
 #[test]
-fn collab_doc_projects_canonical_project_agnostic_patrol_contract() {
+fn collab_doc_routes_to_canonical_project_agnostic_patrol_owner() {
     let normalized = COLLAB_DOC.split_whitespace().collect::<Vec<_>>().join(" ");
     for marker in [
+        "Read the current installed `collab` Skill",
+        "Canonical patrol contract lives in that Skill",
         "patrols only its own project",
-        "open P0/P1 work",
-        "real peer evidence",
-        "canonical issue intake",
-        "currently supported monitored events",
-        "non-overlapping bounded scopes",
-        "Close-Before-Open/SESE",
-        "PROTECTED_HOLD",
-        "broad process kills",
-        "daemon or tmux lifecycle actions",
-        "project's canonical intake and deduplication",
-        "owning project contract",
-        "goal or deadline one-shot wakes",
-        "report channel",
-        "typed grant controls independently of transport liveness",
-        "explicit user approval may promote itself and atomically replace the existing scoped holder regardless of transport liveness",
+        "Master authority is explicit user-approved project arbitration",
+        "separate from transport reachability",
+        "master does not proxy-register",
     ] {
         assert!(
             normalized.contains(marker),
             "project Collab projection is missing {marker:?}"
         );
     }
+    assert!(!normalized.contains("every eligible peer is busy"));
+    assert!(!normalized.contains("## Common commands"));
     assert!(
         !normalized.contains("RouteCodex"),
         "canonical Collab contract must stay project-agnostic"

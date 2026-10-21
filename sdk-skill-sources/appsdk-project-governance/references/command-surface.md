@@ -23,7 +23,7 @@ appsdk guide compile                   compile declared guidance after contract 
 appsdk guide init --task <id> --mode <mode> --module <module-id>
                                        create a task-specific guide plan
 appsdk goal subscribe --goal <file.md> --interval <interval>
-                                       master-only long-horizon registration
+                                       register the caller master/peer's own goal
 appsdk goal status --json              verify goal subscription state
 appsdk longhorizon show --json         read long-horizon role/task state
 appsdk bug intake --input <json>       deduplicate/classify execution work and return issue_id
@@ -106,8 +106,9 @@ The global daemon is user-managed. Agent commands do not start, stop, or restart
 it, including during installation, identity recovery, Collab reset, or this
 governance flow. Long-horizon work belongs to a consenting peer assigned through
 the public board. That peer orchestrates independent
-`codex exec --profile gcm` workers. A master-owned GCM worker is a capacity
-fallback only when every eligible peer is busy.
+`codex exec --profile gcm` workers. One-shot execution and observation go
+directly to those workers regardless of peer availability. Each master/peer
+registers and manages its own goal; master does not proxy-register peer goals.
 
 ## Do not guess
 

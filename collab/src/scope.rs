@@ -755,8 +755,8 @@ the installed independent binaries are `~/.cargo/bin/collab` and
 Collab checkout.
 
 There is one global user-managed daemon. Agent commands never start, stop or
-restart it. `collab context` uses the current cwd project and current tmux
-session; historical pane ownership never blocks identity restoration. A project
+restart it. `collab context` resolves the canonical project and current agent
+sessionID; the stable name owns work. Tmux is only placement. A project
 without a master restores a peer automatically. If a master already exists,
 offer the user a choice to authorize replacing it with the current identity;
 without approval, peer restoration remains available. Work content, task
@@ -786,158 +786,37 @@ tokens, mixed runtime writes, and guessing thread identity are deprecated.
 
 - Every registered identity is an equal `peer`; there is no inferred master
   from first registration. Codex root is not Collab master.
-- Context bootstrap and peer registration never create a master. A master exists
-  only through an explicit user-approved scoped grant. The typed grant controls
-  independently of transport liveness; endpoint and agent activity are separate
-  observations.
-- An authenticated peer with explicit user approval may promote itself and
-  atomically replace the existing scoped holder regardless of transport
-  liveness. Only the current master may `collab master delegate <peer>`.
-  Master authority is arbitration only; it does not take another peer's task.
-  Independent peers may temporarily decline a master collaboration invite to
-  protect their own task. A delegated subagent follows its task contract; it
-  follows Collab protocol only if it is itself a registered peer.
-- A long-horizon goal is offered through the public board to a consenting peer.
-  The peer owns planning, execution, verification, unblocking, integration, and
-  resource closure for its accepted scope. Master verifies evidence, coordinates
-  cross-peer dependencies, integrates the delivery, and closes project
-  responsibilities.
-- Each peer self-registers one task and owns its worktree, tests, assigned
-  integration, cleanup, and resource lifecycle.
+- Master authority is explicit user-approved project arbitration, separate
+  from transport reachability. An explicitly approved takeover replaces the
+  recorded holder under the current name contract. Context never auto-promotes.
+- Master and peer both orchestrate goals at different levels. Each registers,
+  reads, updates, rearms and closes its own goal; master does not proxy-register
+  or take ownership of peer goals. Peer is not an execution worker.
 - Task owner, resource holder, integration lease, and daemon operator are
   scoped capabilities, never durable identity roles.
-- Peers send no normal progress reports. P2P communication is limited to
-  durable resource occupancy and release coordination.
+- Report goal evidence and blockers through the assignment's report contract.
+  The installed Collab Skill owns operating rules; this generated reference
+  does not define a second role, scheduling or command policy.
 
-## Canonical patrol contract
+## Operating contract
 
-This contract is project-agnostic. Project-specific paths, commands, issue
-bindings, and implementation details do not replace it.
+Read the current installed `collab` Skill and the current context `role_brief`.
+They own goal registration, public-board assignment, task lifecycle, messaging,
+finite subscriptions, worktrees, delivery and cleanup. Use the selected command's
+current help for its exact arguments. Do not keep a second command catalog or
+frozen workflow in this generated project reference.
 
-1. A master patrols only its own project. Patrol covers open P0/P1 work, real
-   peer evidence, owned worktrees and stale resources, canonical issue intake,
-   and currently supported monitored events. Durable evidence is required;
-   inactivity, heartbeat, and ACK prove neither progress nor completion.
-2. Long-horizon goals go through the public board to consenting peers. Each
-   peer partitions its accepted goal into non-overlapping bounded scopes and
-   orchestrates independent `codex exec --profile gcm` workers. Master-owned
-   GCM is capacity fallback only when every eligible peer is busy.
-3. Peers own planning, execution, verification, unblocking, integration, and
-   resource closure. Master verifies evidence, coordinates dependencies,
-   integrates the delivery, and closes project responsibilities.
-4. Worktree lifecycle is Close-Before-Open/SESE. Dirty, active, shared, or
-   unknown resources are PROTECTED_HOLD. Do not run broad process kills or
-   perform daemon or tmux lifecycle actions, including host-pane termination.
-5. New production issues use the project's canonical intake and deduplication
-   before repair or dispatch. Record evidence according to the owning project
-   contract; project-specific error codes, wire status, and response planes
-   stay in the owning project Skill.
-6. Continuous patrol uses existing goal or deadline one-shot wakes. Re-arm a
-   consumed one-shot before a turn ends when scheduling continues. A read, ACK,
-   status summary, or dispatch receipt is not completion.
-7. Every dispatch states goal, scope, authorized actions, resource owner,
-   delivery and test evidence, report channel, and stop conditions.
-
-## Task lifecycle
-
-```
-working -> verifying -> reviewed -> delivered
-        -> accepted -> integrated/merged -> cleanup_pending
-        -> cleanup_verified -> closed
-        -> rework -> working
-blocked -> bounded waiting -> resource release/timeout -> owner recheck
-```
-
-Task records use a fixed shape:
-`id / owner / feature_id / worktree_path / branch / base_commit / priority /
- status`. Normal statuses are `working`, `blocked`, `waiting`, `verifying`,
-`reviewed`, `delivered`, `accepted`, `rework`, `merged`, `closed`, and
-`cancelled`.
-
-## Common commands
-
-```sh
-collab who                        # registered peers + local state projection
-collab task status [task-id]      # durable task registry
-collab notify methods             # discover opt-in notification methods
-collab notify subscribe --event direct-message --ttl-seconds 600
-collab notify status
-collab context                    # restore current identity and communication route + role operations
-collab master status              # live master, or recorded-but-dead identity
-collab master promote --approval "<user text>"
-collab master delegate <peer>     # live master only
-collab task register <id> --feature <feature-id> --worktree <path> \
-  --branch <branch> --base-commit <sha> --priority p2
-collab task wait <id> --for <blocking-task>
-collab task deliver <id> --evidence "commit=<sha>; gates=pass" --worktree <path>
-collab task deliver <id> --evidence "read-only evidence" --no-candidate
-collab task block <id> --next "blocked: <evidence and next condition>"
-collab task review <id> --accept --evidence "review gates=pass"
-collab task integrated <id> --commit <main-sha> --evidence "main gates=pass"
-collab task close <id>            # owner; verifies applicable integration/read-only review and clean state
-collab task close <id> --force --reason "..."  # master/approved fallback close
-```
-
-`collab context` is the single automatic agent state entry. It resolves the
-canonical project root (live route, registered route, or local baseline),
-connects to the existing user-managed daemon, creates a missing `.agent-collab`
-baseline when applicable, restores/registers the peer identity, and returns the
-server snapshot plus `operations`. The default agent flow does not start with
-`collab master status`, `appsdk init .`, or `collab route resolve`.
-Daemon lifecycle is outside the agent interface and is never identity recovery.
-
-Ordinary peer assignment uses the public board:
-`collab board publish` with delivery/test conditions, then claim or invitation
-with the observed revision. The recipient is a registered, consenting peer.
-Long-horizon work belongs to that peer; bounded execution or observation uses
-an independent `codex exec --profile gcm` worker. The master starts its own
-GCM worker only when every eligible peer is busy.
-
-`collab subagent dispatch` and managed-subagent records are legacy
-compatibility for diagnosis or migration. They do not authorize new production
-work and are not a fallback when board admission fails. A durable send or
-dispatch receipt is not consumption or completion; verify with `collab msg
-<id>` and the owning task record.
-
-Peers never share worktrees. Worktree lifecycle is Close-Before-Open/SESE:
-close the old owned worktree before opening its replacement. Each task owner
-starts from latest main in one declared clean configured worktree path
-(`<base>/<project-key>/<short-slug>` when `[worktree].base` is set; legacy
-`<project-main>/playground/<short-slug>` during transition), implements and
-tests, commits the exact
-change set, syncs latest main again, verifies the candidate, acquires a short
-integration lease, merges the exact commit to main, verifies and pushes main,
-then closes the task to remove only its clean merged worktree/branch and persist
-a cleanup receipt. A bound worktree is a mandatory cleanup obligation;
-`delivered`/`merged` are not cleanup completion, and a task with a pending or
-unproven cleanup cannot become closed or pass audit. Delivery is an owner-local
-durable milestone and sends no peer notification. `/goal`
-delegation and interactive task recognition are intentionally deferred.
-
-## Message handling
-
-On a notification, use its id and abbreviated subject to weigh urgency against
-the current task. Query durable state before acting when the notice is relevant.
-`collab sendmessage` requires `--subject` and accepts only explicit coordination
-or asynchronous-result notices. Never type peer messages into a terminal. After the
-receiving Agent registers a finite subscription, the daemon may send one id,
-abbreviated subject, safe one-line original body preview, and final submit as
-one App Server immediate turn submission. The direct-message lease is reusable
-until expiry; resource and deadline subscriptions remain one-shot.
-
-`collab inbox` and `collab msg <id>` query the durable local mailbox after a
-registered App Server thread becomes unavailable; mailbox state remains
-authoritative.
+The project-agnostic Canonical patrol contract lives in that Skill. Each master
+patrols only its own project. Project-specific paths, commands and issue intake
+details belong to the owning project; they do not replace the shared contract.
 
 ## Notifications and waits
 
-There is no periodic continuation. Agent-owned subscriptions are exact-event,
-exact-subject, and finite. Direct-message delivery is serialized and reusable
-until expiry; other subscriptions are one-shot. No registration, absent,
-unknown, working, expired, cancelled, consumed, or exhausted message produces
-App Server input. Every wait stores waiter, blocking task owner, reason, deadline,
-resume events, and P2P escalation. Timeout changes state without unsolicited
-messages; resource release notifies only an exact active subscriber.
+Agent-owned subscriptions have explicit event, subject and finite lifetime.
+Goal deadlines are one-shot with explicit rearm; generic periodic deadlines
+have a finite occurrence count. On completion or no new task/actionable work,
+close owned goal scheduling and patrols while retaining direct-message reception.
+Actual enqueue, delivery and consumption remain distinct receipts.
 "#;
 
 /// Scope guard used by every command except init.

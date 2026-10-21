@@ -161,10 +161,14 @@ fn single_context_master_peer_intent_overrides_and_replays_after_restart() {
         Some(&other),
     );
     let unrelated = master_status(&fixture, &other);
+    let mut work_name = Value::Null;
+    let mut task_baseline = Value::Null;
+    let mut message_baseline = Value::Null;
     for (step, role) in ["peer", "master", "peer"].into_iter().enumerate() {
         let op = format!("ctxop-role-public-{step}");
         let approval = json!({"decision":"approved", "target_identity":fence.worker_id,
             "action":format!("restore_{role}"), "authorization":format!("user requires {role}"),
+            "replace_confirmed": role == "master",
             "expected_incumbent":{"binding_id":"old-caller-fence", "endpoint_generation":999}});
         let (identity_approval, grant_approval) = if role == "master" {
             (None, Some(&approval))
@@ -187,16 +191,25 @@ fn single_context_master_peer_intent_overrides_and_replays_after_restart() {
         assert!(result["result"]["committed_phases"]
             .as_array()
             .unwrap()
-            .contains(&json!("grant")));
+            .contains(&json!("grant")), "role step {step} must retain its authority receipt: {result}");
         assert_eq!(result["result"]["snapshot"]["identity"]["worker_id"], fence.worker_id);
         if step == 0 {
+            work_name = result["result"]["snapshot"]["identity"]["display_name"].clone();
+            assert_eq!(work_name, result["result"]["snapshot"]["name_resolution"]["name"]);
+            assert!(work_name.is_string());
             fixture.run_ok(&["task", "register", "role-preserved-task", "--next", "retain responsibility"], Some(&pane));
             fixture.run_ok(&["sendmessage", "--to", &fence.worker_id, "--subject", "role preserved mailbox", "--delivery", "queued", "retain unread message"], Some(&pane));
+            task_baseline = role_consumer_task_facts(&fixture, &pane);
+            message_baseline = read_lines(&fixture.project_journal()).into_iter()
+                .find(|event| event["ev"] == "Sent" && event["msg"]["subject"] == "role preserved mailbox")
+                .expect("queued compatibility message has a durable ID")["msg"].clone();
         } else {
-            let task = fixture.run_ok(&["task", "status", "role-preserved-task"], Some(&pane));
-            assert_eq!(task["owner"], fence.worker_id, "{task}");
-            assert!(result["result"]["snapshot"]["inbox"]["messages"].as_array().unwrap().iter()
-                .any(|message| message["subject"] == "role preserved mailbox"), "{result}");
+            assert_eq!(role_consumer_task_facts(&fixture, &pane), task_baseline);
+            let message = result["result"]["snapshot"]["inbox"]["messages"].as_array().unwrap().iter()
+                .find(|message| message["id"] == message_baseline["id"])
+                .expect("worker-addressed unread message remains with the explicit worker");
+            assert_eq!(message["body"], message_baseline["body"]);
+            assert_eq!(message["from"], message_baseline["from"]);
         }
         assert_eq!(
             result["result"]["snapshot"]["identity"]["role"],
@@ -215,17 +228,27 @@ fn single_context_master_peer_intent_overrides_and_replays_after_restart() {
                 fence.worker_id
             );
             assert_ne!(other_id, fence.worker_id);
+            assert_eq!(demoted["result"]["snapshot"]["identity"]["display_name"], work_name);
         } else {
             assert!(
                 grant.is_null(),
                 "target peer intent clears its own master grant"
             );
+            assert_ne!(result["result"]["snapshot"]["identity"]["display_name"], work_name);
         }
-        let bytes = (
-            fs::read(fixture.host_journal()).unwrap(),
-            without_ledger_scans(&fs::read(fixture.project_journal()).unwrap()),
-            fs::read(&fence.identity_path).unwrap(),
-        );
+        let task = fixture.run_ok(&["task", "status", "role-preserved-task"], Some(&pane));
+        let expected_owner = if step == 0 { json!(fence.worker_id) } else { other_id.clone() };
+        assert_eq!(task["owner"], expected_owner, "work stays with {work_name}: {task}");
+        let occupancy = read_lines(&fixture.project_journal()).into_iter().rev()
+            .find(|event| event["ev"] == "NameResolutionCommitted" && event["occupancy"]["name"] == work_name)
+            .expect("work name has typed occupancy");
+        assert_eq!(occupancy["occupancy"]["worker_id"], expected_owner);
+        assert_eq!(role_consumer_task_facts(&fixture, &pane), task_baseline);
+        let messages = read_lines(&fixture.project_journal());
+        assert_eq!(messages.iter().find(|event| event["ev"] == "Sent" && event["msg"]["id"] == message_baseline["id"]).unwrap()["msg"], message_baseline);
+        assert!(!messages.iter().any(|event| matches!(event["ev"].as_str(), Some("ReceiveCommitted" | "Delivered" | "Acked" | "Superseded"))
+            && event["ids"].as_array().is_some_and(|ids| ids.contains(&message_baseline["id"]))), "context must not consume the worker-addressed message");
+        let bytes = role_consumer_replay_facts(&fixture, &fence.identity_path);
         let replay = run_context_cli(
             &fixture,
             Some(&pane),
@@ -240,11 +263,7 @@ fn single_context_master_peer_intent_overrides_and_replays_after_restart() {
         assert_eq!(success_payload(&replay)["result"]["outcome"], "completed");
         assert_eq!(
             bytes,
-            (
-                fs::read(fixture.host_journal()).unwrap(),
-                without_ledger_scans(&fs::read(fixture.project_journal()).unwrap()),
-                fs::read(&fence.identity_path).unwrap()
-            )
+            role_consumer_replay_facts(&fixture, &fence.identity_path)
         );
         fixture.restart_daemon();
         assert_eq!(
@@ -252,11 +271,7 @@ fn single_context_master_peer_intent_overrides_and_replays_after_restart() {
             grant,
             "restart retains exact durable role"
         );
-        let after_restart = (
-            fs::read(fixture.host_journal()).unwrap(),
-            without_ledger_scans(&fs::read(fixture.project_journal()).unwrap()),
-            fs::read(&fence.identity_path).unwrap(),
-        );
+        let after_restart = role_consumer_replay_facts(&fixture, &fence.identity_path);
         let replay = run_context_cli(
             &fixture,
             Some(&pane),
@@ -271,11 +286,7 @@ fn single_context_master_peer_intent_overrides_and_replays_after_restart() {
         assert_eq!(success_payload(&replay)["result"]["outcome"], "completed");
         assert_eq!(
             after_restart,
-            (
-                fs::read(fixture.host_journal()).unwrap(),
-                without_ledger_scans(&fs::read(fixture.project_journal()).unwrap()),
-                fs::read(&fence.identity_path).unwrap(),
-            ),
+            role_consumer_replay_facts(&fixture, &fence.identity_path),
             "same-key replay after restart must not repeat effects"
         );
         let restored = fixture.context(Some(&format!("ctxop-role-readback-{step}")), Some(&pane));
@@ -283,7 +294,53 @@ fn single_context_master_peer_intent_overrides_and_replays_after_restart() {
             restored["result"]["snapshot"]["identity"]["worker_id"],
             fence.worker_id
         );
+        assert_eq!(role_consumer_task_facts(&fixture, &pane), task_baseline);
+        assert_eq!(fixture.run_ok(&["task", "status", "role-preserved-task"], Some(&pane))["owner"], expected_owner);
     }
+}
+
+// Ignore only volatile status projection fields; retain task ID, state, next step,
+// evidence and resource/merge/cleanup facts across name and role changes.
+fn role_consumer_task_facts(fixture: &Fixture, pane: &Pane) -> Value {
+    let mut task = fixture.run_ok(&["task", "status", "role-preserved-task"], Some(pane));
+    let fields = task.as_object_mut().unwrap();
+    fields.remove("owner"); // Checked separately against the current typed name occupancy.
+    fields.remove("updated_at");
+    fields.remove("keepalive");
+    task
+}
+
+fn role_consumer_replay_facts(fixture: &Fixture, identity_path: &Path) -> (Vec<u8>, Vec<Value>, Vec<u8>) {
+    let events = read_lines(&fixture.project_journal());
+    // Timer-owned presence adjudication and reflow notices are identified by
+    // typed control references, never by message body or metadata.
+    let timer_messages: Vec<String> = events.iter().filter_map(|event| {
+        if event["ev"] == "NameRecoveryUpdated"
+            && event["recovery"]["request"]["invocation"] == "presence_adjudication"
+        {
+            Some(format!("name-adjudication-{}", event["recovery"]["operation_id"].as_str().unwrap()))
+        } else if event["ev"] == "TaskAssignmentUpdated" {
+            event["assignment"]["reflow"]["message_id"].as_str().map(str::to_owned)
+        } else { None }
+    }).collect();
+    let is_timer_message = |id: &Value| id.as_str().is_some_and(|id| timer_messages.iter().any(|known| known == id));
+    let controls = events.into_iter().filter(|event| {
+        let timer_effect = match event["ev"].as_str().unwrap() {
+            "GlobalRuntimeBindingLedgerClassified" | "GlobalLedgerScanReceiptRecorded"
+            | "AgentPresenceObserved" | "AgentActivityObserved" => true,
+            "NameRecoveryUpdated" => event["recovery"]["request"]["invocation"] == "presence_adjudication"
+                && matches!(event["recovery"]["progress"].as_str(), Some("pending" | "adjudication_requested")),
+            "Sent" => is_timer_message(&event["msg"]["id"]) && event["msg"]["from"] == "daemon",
+            "DeliveryMode" => is_timer_message(&event["msg_id"]),
+            "WakeBound" | "NotificationDeliveryAccepted" | "NotificationDeliveryFailed" => is_timer_message(&event["message_id"]),
+            "WakeAttempted" => event["ids"].as_array().is_some_and(|ids| !ids.is_empty() && ids.iter().all(&is_timer_message)),
+            _ => false,
+        };
+        !timer_effect
+    }).collect();
+    // All other events remain exact, including NameResolutionCommitted,
+    // TaskAssignmentUpdated, TaskUpdated, BoardDetailsChanged and ReceiveCommitted.
+    (fs::read(fixture.host_journal()).unwrap(), controls, fs::read(identity_path).unwrap())
 }
 
 fn same_session_pane(fixture: &Fixture, label: &str, server_pid: u32, base: &Pane) -> Pane {
@@ -355,7 +412,7 @@ fn registered_context_in(
     result
 }
 
-fn context_without_native_ids(
+fn context_with_agent_session(
     fixture: &Fixture,
     project_root: &Path,
     operation_id: &str,
@@ -373,7 +430,7 @@ fn current_pane_command(
     if done.exists() { fs::remove_file(&done).unwrap(); }
     let command = args.iter().map(|arg| shell_quote(arg)).collect::<Vec<_>>().join(" ");
     let script = format!(
-        "cd {}\nunset CODEX_SESSION_ID CODEX_THREAD_ID\n\"$COLLAB_BINARY\" {} >{} 2>\"$PANE_STDERR\"\nprintf '%s' \"$?\" >{}\nsleep 600\n",
+        "cd {}\nunset CODEX_THREAD_ID\n\"$COLLAB_BINARY\" {} >{} 2>\"$PANE_STDERR\"\nprintf '%s' \"$?\" >{}\nsleep 600\n",
         shell_quote(&project_root.to_string_lossy()), command,
         shell_quote(&result.to_string_lossy()), shell_quote(&done.to_string_lossy()),
     );
@@ -483,7 +540,7 @@ fn public_context_prefers_current_project_for_a_shared_tmux_session() {
         String::from_utf8_lossy(&task.stderr)
     );
 
-    let recovered = context_without_native_ids(
+    let recovered = context_with_agent_session(
         &fixture,
         &fixture.root,
         "shared-tmux-current-restore",
@@ -496,7 +553,7 @@ fn public_context_prefers_current_project_for_a_shared_tmux_session() {
         "{recovered}"
     );
 
-    let foreign_restore = context_without_native_ids(&fixture, &foreign_root, "shared-tmux-foreign-readback", &foreign_pane);
+    let foreign_restore = context_with_agent_session(&fixture, &foreign_root, "shared-tmux-foreign-readback", &foreign_pane);
     let foreign_restore = success_payload(&foreign_restore);
     assert_eq!(
         foreign_restore["result"]["snapshot"]["identity"]["worker_id"],
@@ -518,10 +575,11 @@ fn public_context_prefers_current_project_for_a_shared_tmux_session() {
 fn public_context_restores_current_session_with_historical_identity_duplicates() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (fixture, pane) = Fixture::isolated("shared-tmux-ambiguous");
+    let current = fixture.registered_context("shared-agent-current-seed", &pane);
     seed_shared_session_identities(&fixture, &pane);
     let identities_before = identity_tree(&fixture.host_state);
 
-    let output = context_without_native_ids(
+    let output = context_with_agent_session(
         &fixture,
         &fixture.root,
         "shared-tmux-ambiguous-restore",
@@ -533,6 +591,11 @@ fn public_context_restores_current_session_with_historical_identity_duplicates()
     assert_eq!(snapshot["registered"], true);
     assert!(snapshot["master"].is_null(), "history must not grant master authority");
     let worker = snapshot["identity"]["worker_id"].as_str().unwrap();
+    assert_eq!(
+        worker,
+        current["result"]["snapshot"]["identity"]["worker_id"].as_str().unwrap(),
+        "current agent session must win over historical tmux identity duplicates"
+    );
     let selected_path = format!("{worker}/identity.json");
     let identities_after = identity_tree(&fixture.host_state);
     assert_eq!(identities_after.len(), identities_before.len());

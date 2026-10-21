@@ -306,6 +306,7 @@ fn worker_status_summary_with_maps(
         (None, _) => "unknown",
         (Some(true), Some("notLoaded")) => "cold",
         (Some(true), Some("idle")) => "idle",
+        (Some(true), Some("waiting_user")) => "waiting_user",
         (Some(true), Some("working")) => "working",
         (Some(true), Some("active")) => "working",
         _ => "unknown",

@@ -5,6 +5,23 @@ description: "仅约束已成功注册 Collab 的 peer；master 权限需另行�
 
 # Collab
 
+## 升级交接：明确弃用 tmux session 身份规则
+
+名字承载工作归属，agent sessionID 是当前执行载体。注册报告并绑定 agent sessionID；
+同名字续接时自动更新 sessionID，并同步该名字下全部未关闭 board 任务。旧 sessionID
+不是恢复门禁，不要求 Jenny 重新 assign；已关闭任务保留历史。具体合同见
+[名字、会话与工作继承](references/stable-name-recovery.md)。
+
+升级后必须摒弃旧规则“当前 tmux session 决定 peer”“按 pane/socket 恢复工作归属”。
+tmux session、pane、socket 和 server PID 仅供探测与投递定位，不是身份键、名字占用键
+或任务 owner。不要根据旧文档重新添加这些耦合，也不要把 tmux session ID 当作
+agent sessionID。历史数据由 daemon 在正常注册或恢复时兼容，不要求 agent 手改
+journal、清空 board、重建 pane 或重启 tmux。
+
+交接给恢复者时报告当前名字、master/peer 角色、agent sessionID、未完成目标、
+所持资源与需要巡检的事项。名字的当前工作者接续任务；旧执行者不另行处理。
+规则升级与已加载 runtime 分别验收，不能仅凭读到新版 Skill 宣称 daemon 已升级。
+
 ## 全局 daemon 与默认身份恢复
 
 Collab 只有一个全局、由用户管理的 daemon。agent 不启动、关闭或重启它，也不为身份恢复申请维护窗口。用户维护命令、参数和凭据不属于 agent 接口。
@@ -13,7 +30,7 @@ Collab/AppSDK 与 tmux 使用独立生命周期。Collab 安装、重启、注�
 巡检或 daemon 不可达，都不得触发 tmux server 的重启或停止，也不得关闭、
 终止宿主 pane。现有共享 Collab daemon 继续由用户管理。
 
-默认使用 `collab context`。当前 `cwd` 决定 project，当前 tmux session 决定本次身份上下文；历史 pane 绑定到谁都不阻断恢复。当前 project 没有 master 时自动恢复为 peer；已有 master 时询问用户是否授权当前身份恢复为 master，授权后直接替换现有 master，未授权则继续作为 peer。不按任务内容、worktree、旧角色或 master 派单增加身份准入校验，不要求重新注册或通信回环。daemon 不可达时保留身份和任务，返回服务不可用；不启动第二个服务或修改 journal、route、credential 文件。
+默认使用 `collab context`。当前 `cwd` 决定 project，名字承载工作归属，注册报告的 agent sessionID 绑定当前执行载体；历史 pane 绑定到谁都不阻断恢复。当前 project 没有 master 时自动恢复为 peer。用户指定恢复 Jenny 时同时恢复 master；另一个在线工作者占名时，默认不替换，用户要求接管需本次二次确认。确认离线后可正常分配；归属 unknown 时交 Jenny snapshot 裁决。未获 master 授权的普通恢复继续作为 peer。不按任务内容、worktree、旧角色或 master 派单增加身份准入校验，不要求重新注册或通信回环。daemon 不可达时保留身份和任务，返回服务不可用；不启动第二个服务或修改 journal、route、credential 文件。
 
 明确恢复授权覆盖当前 pane 的历史 peer/master；旧绑定和旧 route 自动失效，不再要求旧身份批准。agent 可以移除当前 pane 自身的 agent 绑定和 route，不关闭宿主。daemon 自动清理失效 route。当前项目 master 可以 reset 本项目的 Collab，移除历史消息、route、任务、资产和负载；只清当前项目，不操作其他项目或全局 daemon 生命周期。实际 I/O 错误保留原错，不用历史身份保护拒绝当前授权，也不伪造成功。
 
@@ -39,31 +56,49 @@ facts; initial registration prefers a verified current tmux pane. Persisted
 restoration reuses the durable selected binding. Once an AppServer binding is
 selected, tmux is never a message, wake, presence, or status fallback. Its
 observed tmux endpoint is delivery placement only. cwd selects the project,
-and the current tmux session selects that project's peer. Socket paths, server
-PIDs, pane history and old native addresses do not select or protect identity.
+and the stable name owns the work. The reported agent sessionID is the current
+execution carrier; tmux session, pane, socket and server PID locate transport
+only. Same-name session changes update all unclosed board assignments. Pane
+history and old native addresses do not select or protect identity.
 Production projects use the globally installed Collab v1.
+Candidate consumers may use the existing `COLLAB_TEST_BINARY` seam to select
+the exact tested binary. Candidate results do not prove the canonical installed
+binary or the global daemon has loaded that behavior; report those separately.
 Production tmux launchers must place sockets in a stable private user directory.
 Configure the launcher, preserve existing live endpoints, and verify the actual
 new socket path; see [state paths](references/state-paths.md#production-tmux-sockets).
 
 When the user explicitly asks the current peer to become master, that request
-is the approval. Run `collab master promote --approval "<user's approval text>"`
-from that peer's current project. Do not request approval again, pass an empty
+provides the role authorization. Replacing a different online holder still
+requires the single takeover confirmation in the stable-name contract; ordinary
+self-restoration does not. Use the current project's authorized recovery entry.
+Do not repeatedly request the same approval, pass an empty
 `--approve-grant`, inspect historical journals, or reset the project to obtain
 authority. If current context cannot recover, preserve the exact error and fix
 that recovery path; do not claim promotion or communication succeeded.
 
 ## Task routing and role responsibilities
 
+master 和 peer 的编排功能相同，区别是目标层级：master 管理项目大目标，peer
+管理受托子目标，两者都继续拆解、派发、资源管理、验收与交付。peer 不是直接执行
+worker；具体一次性编码、执行和观察由子 agent 承担。注册与恢复说明目标层级和
+职责，不用任务类型反推协作身份。
+
 Choose the receiver by task kind, not by idle capacity or expected duration. A
 fixed command that runs for hours is still bounded work. A goal that needs
 planning, delegation, evidence review, unblocking, integration, and resource
 closure is a long-horizon goal.
 
+- `master` and ordinary peers primarily own long-horizon goals and orchestrate
+  planning, task dispatch, resource management, project acceptance and delivery.
+  Prefer assigning code implementation to subagents rather than writing it
+  directly. Registration and recovery must explain these roles and recommend
+  scheduled patrols for each role's own goals, risks and resources.
 - `master` audits, dispatches, verifies, and integrates. It offers each
   long-horizon goal through the public board to a suitable, consenting peer.
-  Start a master-owned independent `codex exec --profile gcm` worker only when
-  every eligible peer is busy. Master retains project coordination, cross-peer
+  Bounded one-shot execution or observation always uses an independent
+  `codex exec --profile gcm` worker. With no eligible peer, retain the long-horizon
+  goal and split bounded work. Master retains project coordination, cross-peer
   dependencies, final integration, and the delivery owner's ordinary scope.
 - An ordinary peer keeps the code-compatible wire role `worker` and derivation
   `peer`. It is the long-horizon orchestrator for an accepted goal: split and
@@ -74,6 +109,33 @@ closure is a long-horizon goal.
 - A managed-subagent record is legacy compatibility state. It preserves
   historical facts for diagnosis or migration and grants no new production
   execution authority.
+
+### Register the long-horizon goal before dispatch
+
+Master and peer must explicitly register their own accepted long-horizon goal
+through the supported goal control entry. Master owns the project goal; peer
+owns the delegated subgoal. On registration/recovery and each new assignment,
+read the existing goal, resume or update it, and create one only when missing.
+Record the objective, scope, acceptance evidence, current owner/name and parent
+goal when delegated. Report the goal path/identifier and registration receipt.
+An ordinary worker task, board assignment, note, timer subscription or verbal
+promise does not register a long-horizon goal. Do not report registration as
+complete without the goal control receipt.
+
+The current AppSDK entry is `appsdk goal subscribe --goal <existing-goal.md>
+--interval <agreed-period>`; inspect it with `appsdk goal status --json` and
+`appsdk longhorizon show --json`. `appsdk longhorizon` is a read projection,
+not a register/subscribe command; `collab longhorizon` does not exist. The
+current AppSDK goal entry verifies master ownership and stores one project
+goal. A peer must not overwrite that goal, promote itself, or substitute a
+worker task or notification subscription. If its own goal cannot be registered,
+report the exact entry/permission limitation to master, keep the delegated goal
+and evidence in its existing task notes, and continue authorized independent
+work. Those notes are pending registration, not a successful goal registration.
+
+Close owned goal scheduling and patrol subscriptions after completion or when
+no new task and no actionable work remain. Retain direct-message reception;
+assess a new assignment before registering/rearming its goal schedule.
 
 ### Registered patrol duties
 
@@ -90,6 +152,12 @@ board tasks, timers, or subscriptions.
   evidence or park it with owner, cause, and unblock condition. Dispatch ready
   P0/P1 work before ending the scheduling turn.
 - An ordinary peer is the autonomous goal orchestrator for its accepted scope.
+  For its own ongoing long-horizon goals, it creates and maintains finite patrol
+  tasks and subscriptions. On each master assignment, first evaluate the goal,
+  dependencies, blockers, priorities and resources; then update the existing
+  patrol tasks and subscriptions before proceeding. Add only missing scope,
+  retire obsolete owned scope, and do not duplicate timers. Report the resulting
+  patrol scope or the concrete reason no subscription change is needed.
   It owns scoped patrol of task progress, blockers, owned worktree/runtime
   resources, canonical issue intake, cleanup, and only the explicit event
   subscriptions needed for that scope. On a blocker, first report to the
@@ -102,6 +170,12 @@ board tasks, timers, or subscriptions.
 - Before a patrol cycle ends, explicitly re-arm a consumed one-shot goal or
   deadline wake when continued scheduling is required. A read, ACK, status
   summary, or dispatch receipt is not completion and does not renew a wake.
+- When a task completes, the owning master or peer actively closes that task's
+  patrol tasks and timed subscriptions. If there is no new task and no actionable
+  work, close the patrol; do not renew, recreate or keep idle polling loops.
+  Keep the direct-message receive subscription for new assignments. On a new
+  assignment, assess the required scope before starting another patrol. Close
+  only owned patrol scope; do not cancel another goal's subscriptions.
 - A legacy managed-subagent record creates no new patrol task, subscription,
   dispatch, or execution authority. Its parent or master preserves it only for
   diagnosis or migration.
@@ -118,32 +192,16 @@ is compatibility only. Planner and Reviewer remain independent roles with
 their existing model routing; the bounded GCM rule does not turn them into
 execution workers.
 
-## Display names
+## 稳定名字与旧版 display-label 迁移
 
-Names are human labels. Stable worker IDs, pane anchors, message recipients,
-task ownership, and grants do not change when a label changes. Initialize only
-when the user requests it, through the existing `collab context` entry. An
-ordinary tmux peer defaults to its bound pane identifier. The current master
-defaults to `Jenny`, even if its communication endpoint is unavailable. A
-non-tmux identity without a pane keeps its worker ID as the default display.
+项目名字由 daemon 分配和恢复，承载工作归属，不再只是可以重复的显示标签。
+Jenny 对应项目 master；普通名字按固定池顺序分配，各项目独立。同名字恢复或换
+session 时继承工作并同步未关闭任务，不能恢复 pane ID 默认名或阻止名字工作继承。
+内部 worker ID 仍可作兼容索引，但不能代替名字归属。
 
-Only change a name on explicit user request. Use the same self-service command
-for a peer or master; it requires the caller's already registered identity:
-
-```sh
-collab worker name "Alice"
-collab worker name --reset
-```
-
-The override survives identity restoration and daemon restart. It stays with
-that identity across role changes and does not transfer to another master.
-Reset removes the override: a master becomes `Jenny`, and an ordinary peer
-returns to its pane default. Registration/recovery must not reset a user's
-chosen name. A retired identity's name is not inherited by its replacement.
-Do not invent a human name or persist `Jenny` merely to apply the default.
-Duplicate names are allowed; commands still address stable IDs. Read names in
-`context`, `who`, `worker status`, `master status`, and board/dashboard views.
-MCP uses `collab_worker_name` with either `name` or `reset: true`.
+旧版 `collab worker name` / MCP name 接口曾只修改 label，不能用旧接口的行为模拟
+新名字接管。升级以当前 `collab context` 与名字恢复合同为准，读取其权威回执；
+旧 runtime 未加载新实现时明确报告版本边界，不把改 label 当作恢复成功。
 
 ## Current-version baseline
 
@@ -280,13 +338,13 @@ factual transport-safety checks; they do not establish historical identity or
 authority. Query remains read-only. A failed diagnostic leaves the restored
 identity and current binding intact.
 
-For tmux, use the current cwd project and current tmux session. Reuse that
-identity regardless of historical pane ownership; a new pane changes the
-delivery address, not the identity. With no project master, context restores a
-peer automatically. With another master, the peer remains usable and the user
-may authorize replacing the incumbent. Reuse the current project/session
-master without repeated approval. Other native transports retain their own
-session/thread identity facts.
+For tmux, cwd selects the project; the stable name owns the work and the agent
+sessionID is its current carrier. A new pane or tmux session changes placement,
+not ownership. Same-name session changes automatically update unclosed tasks.
+With no project master, context restores a peer; an existing master does not
+block ordinary peer recovery. A different online name holder requires the
+one takeover confirmation; self-restoration does not. Native session/thread
+facts locate the selected adaptor and never replace the stable-name contract.
 
 Ordinary persisted restore reuses the identity and restores its current
 communication binding, route and default lease without another Register or
@@ -463,10 +521,10 @@ It is the registration-time projection; `collab context` returns the current
 brief, and promotion or delegation returns the replacement brief. Do not
 maintain a separate role prompt:
 
-- `master`: audit and dispatch through the public board, keep eligible capacity
-  loaded peer-first, own blockers, run a master-owned GCM worker only when every
-  eligible peer is busy, and drive verify/merge/cleanup/close. Ordinary scoped
-  implementation remains with its delivery owner.
+- `master`: orchestrate the project goal, offer delegated long-horizon goals
+  through the public board, own blockers and drive verify/merge/cleanup/close.
+  Send one-shot execution or observation directly to independent GCM workers.
+  Peer availability does not gate this routing.
 - `worker` with derivation `peer`: orchestrate the accepted long-horizon goal,
   run bounded work through independent `codex exec --profile gcm` workers,
   verify evidence, resolve blockers, integrate assigned work, and report to the
@@ -617,9 +675,11 @@ collab board withdraw <task-id> --expected-revision <observed> --reason "<text>"
 
 Public work uses claim or the board invitation above. `collab subagent
 dispatch` is a legacy private managed path and grants no new production work.
-If a peer declines an invitation, that refusal is explicit and there is no
-fallback to a private child. If every eligible peer is busy, master may start
-an independent master-owned `codex exec --profile gcm` worker.
+If a peer declines a long-horizon invitation, retain that goal and arrange
+another consenting peer or decompose it under the current orchestrator.
+Dispatch its bounded execution or observation directly to independent
+`codex exec --profile gcm` workers. A refusal does not authorize the legacy
+private managed path or transfer orchestration responsibility to a subworker.
 
 `collab dashboard` opens a read-only loopback Web observer for the same public
 board. It requires a registered identity, does not bootstrap or restart the
@@ -835,8 +895,8 @@ scheduling-turn counter or automatic rearm.
 Legacy managed records do not receive child-targeted liveness work or new
 assignments. Their historical `subagent-status` facts remain diagnostic input.
 Codex thread history is read only from the owning AppServer when supported and
-is never fabricated. A tmux pane is a last-resort identity anchor, not a status
-observation or snapshot receipt.
+is never fabricated. A tmux pane locates delivery and observation only; it is
+not an identity anchor, task owner, or snapshot receipt.
 
 ## Cross-project master communication
 
@@ -964,8 +1024,8 @@ Master operates under two prime directives:
    without serial bottlenecks. Offer long-horizon goals through the public
    board to suitable, consenting peers. Each peer orchestrates independent
    `codex exec --profile gcm` workers for bounded execution or observation.
-   Master starts its own independent GCM worker only when every eligible peer
-   is busy. Before ending each scheduling turn, inspect ready work, peer
+   Master and peer send one-shot execution or observation directly to GCM
+   workers, regardless of peer availability. Before ending each scheduling turn, inspect ready work, peer
    capacity, protected holds, P0/P1 work, and the active issue backlog.
    Delivery, merge, review, task close, and cleanup are lifecycle steps, never
    reasons to leave eligible work undispatched.
@@ -1001,8 +1061,8 @@ Do not stop after consuming a report or closing a task while authorized ready
 work has no correct receiver. Offer long-horizon goals to peers through the
 board. Use independent `codex exec --profile gcm` workers for bounded execution
 or observation. Dispatch the next ready non-overlapping P0/P1 work before the
-scheduling turn ends. A master-owned GCM worker is a capacity fallback only
-when every eligible peer is busy.
+scheduling turn ends. Master and peer retain their goal's orchestration and
+delivery responsibility when dispatching bounded GCM work.
 
 Master idle reminders are level-triggered. Within the same master idle episode,
 each reminder attempt consumes the shared episode-local budget, up to three
@@ -1043,6 +1103,9 @@ explicitly classifies read-only work with no code candidate. When review
 accepts it, the typed disposition is `no_merge_required`; no pending merge or
 merge wake is created, and the owner can close normally after owned cleanup.
 `task integrated` is not applicable to this delivery kind.
+Read-only work still needs the requested result, applicable acceptance evidence,
+real mailbox consumption, owned-resource cleanup, and normal task close.
+An ACK, summary, dispatch receipt, or `--no-candidate` flag alone is not completion.
 
 For code delivery, review acceptance creates the applicable daemon-owned
 pending merge and notifies the current master. The obligation is durable and
@@ -1060,8 +1123,8 @@ assignment. A reviewed read-only delivery proceeds directly through cleanup
 and normal close. Do not leave a peer idle merely because its last task
 returned `delivered`, `merged`, or a review verdict. Route the next
 non-overlapping P0/P1 work peer-first. Reuse an autonomous peer for another
-long-horizon goal. Start a master-owned independent GCM worker only when every
-eligible peer is busy. Closing or force-closing a stale task is a scheduling
+long-horizon goal. Dispatch one-shot execution or observation directly to
+independent GCM workers. Closing or force-closing a stale task is a scheduling
 decision that must preserve evidence, not a reason to stop dispatching.
 
 ### Verified merge and resource cleanup DAG（单源单汇）
@@ -1120,7 +1183,9 @@ daemon 生命周期由用户管理，agent 不执行维护动作、不索取凭�
 注册、恢复和巡检都不得重启或停止 tmux server，也不得关闭或终止宿主 pane。
 
 A peer orchestrates only its accepted scope, owns that goal's full lifecycle,
-and maintains its own scoped patrol subscriptions. A legacy managed-subagent
+and maintains its own scoped patrol subscriptions. Each master assignment
+requires a fresh scope assessment and an update to its existing patrol tasks
+and subscriptions when the monitored goal changes. A legacy managed-subagent
 record grants no new execution or patrol authority.
 On a peer blocker, first ask the current master for help with the task,
 evidence, attempted actions, proposed next step, and decision needed. Do not
@@ -1274,16 +1339,20 @@ through the existing authority owner.
 
 ### Context 状态与终点（DAGpipe：单源单汇）
 
-`context_request` 是唯一入口，`state_snapshot` 是唯一成功出口，中间节点按
-DAGpipe 顺序执行：解析当前 cwd 项目 → 连接已有 daemon → 检查/创建基线 → daemon 身份门
-→ binding convergence → 环境投影 → 输出快照。CLI 自动观察可用事实；daemon
-身份门负责选择、创建、恢复、更新身份，持久化 credential/binding/lease。
+`context_request` 是唯一入口，`state_snapshot` 是本次权威结果出口。现有七节点链为：
+解析项目与控制范围 → 读取现有服务 → 读取持久名字、agent sessionID 与占用 →
+判定续接、分配、确认或待决 → 提交名字绑定并同步未关闭任务或持久待决 →
+生成安全环境投影 → 输出含名字归属的权威快照。binding 收敛属于现有名字提交链，
+由既有 credential/binding/route owner 完成，不另建身份选择路径。
 Binding convergence makes context completion, worker status, and board admission
 read one authoritative project/app/agent binding and endpoint generation. Only
 context repairs; status and board admission are read-only consumers. Missing,
 ambiguous, stale, or principal-mismatched bindings return a typed
 `SESSION_THREAD_BINDING_MISMATCH` with known expected/observed generations and
 `collab context` as the only repair entry.
+The canonical project and app scope bound the lookup; another project's binding
+or a historical pane/native route cannot supply a missing current binding.
+Endpoint liveness remains separate from durable identity validity.
 
 Missing facts are the terminal of this invocation: `registered=false`,
 `identity=null`, and `requires_identity_update` gives exact `required_fields`,
@@ -1296,7 +1365,8 @@ snapshot:
 | 状态/终态 | 含义 | Agent 动作 |
 | --- | --- | --- |
 | `state_snapshot` 且 `registered=true` | 注册成功；含 role/operations/master/peers/peer_count/summary/master_wake/subagents/inbox/worktrees/tasks/env | 读快照执行已注册角色的 `operations`；无需再跑 who/status/master status |
-| 陈旧/他人的 pane claim 已被顶掉 | 默认路径的一部分，不产生额外终态 | 无；不需要第二条命令，也不参与裁决 |
+| 历史 pane claim 与当前投递位置不符 | daemon 对齐通信位置；不由 pane 决定名字归属 | 名字续接按稳定名字合同；在线他人占名需确认，unknown 交 Jenny |
+| 名字占用 unknown | 持久 context operation 返回 `pending`；不是注册成功 | 等待同一请求裁决续接；Jenny 自身 unknown 且本次用户明确恢复并确认接管时直接接管 Jenny/master |
 | `identity_update` | daemon 需要缺失事实或报告显式身份冲突；`registered=false`，`requires_identity_update.required=true` | 只读 `required_fields`/`reason`/`action`/`exact_error`；已授权初始化或已注册身份恢复中，若 action 是 factual supplement，可用一次 `collab context --provide` 补真实事实。成功注册前不执行角色协议；显式冲突保留原错，不选择 worker，不把 `collab init` 当第二次修复尝试 |
 | 可选通信诊断 pending | 原身份与当前 route 仍可用；诊断 reply 未完成 | 该诊断不是恢复前提；若显式使用，participant 从所选 adapter 读取 challenge 并从自身环境回传；`--query` 保持只读 |
 | `COLLAB_CONTEXT_UNRESOLVED` | 无 route、无 baseline、无 git 根（非零退出） | 保留原错，不自动换 cwd 重试；首次注册失败则独立继续，已注册者报告受影响协作，保留已领任务/claim |
@@ -1325,9 +1395,10 @@ register, the single state entry is:
 collab context
 ```
 
-The daemon-owned identity context completes the bootstrap. A conflicting claim
-on your tmux pane is replaced by the daemon inside this same call, so agents do
-not adjudicate pane conflicts and do not run a second command for them.
+The daemon-owned identity context completes the bootstrap. It reconciles
+delivery placement inside this call. Pane history does not select the name;
+same-name continuation, online takeover confirmation, and unknown adjudication
+follow the stable-name contract.
 `collab init` is not a second agent entry and not a second identity algorithm,
 but it drives the same daemon identity gate and stays the documented entry for
 existing AppSDK init consumers. Neither `collab init` nor AppSDK init creates,
@@ -1401,9 +1472,10 @@ read-only operator diagnostic.
 The daemon is the sole route selector. The current AppServer owner plus exact
 session/thread binding identifies a route. Historical routes and tombstones
 are not candidates. The daemon verifies the selected owner with native
-`thread/read`; a tmux socket + pane anchor recovers identity independently of
-native IDs. It never substitutes for an AppServer communication channel. The
-daemon reads tmux route ownership without an admission probe.
+`thread/read`; a tmux socket + pane locates transport only. Name ownership and
+the current agent sessionID determine continuation. Tmux never substitutes for
+an AppServer communication channel. The daemon reads tmux route ownership
+without an admission probe.
 
 `collab route resolve` exposes a read-only operator diagnostic for the current
 native thread; `--native-thread-id <id>` and `--session-id <id>` must match the

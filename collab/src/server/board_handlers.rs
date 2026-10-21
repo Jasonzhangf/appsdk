@@ -41,19 +41,46 @@ fn board_task_visible(state: &State, task: &TaskRec, viewer: Option<&str>) -> bo
     true
 }
 
+// Shared typed availability decision. Views and scheduling must use the same
+// current occupancy, presence and binding facts, never a projected board row.
+fn assignment_unavailability(state: &State, task: &TaskRec, route: Option<&RouteScope>) -> Option<&'static str> {
+    if matches!(task.status.as_str(), "closed" | "cancelled") { return None; }
+    let assignment = state.task_assignment(&task.id);
+    let occupancy = assignment.and_then(|assignment| route.and_then(|route|
+        state.name_occupancy(route.project_scope_id.as_str(), &assignment.name)));
+    if assignment.is_some() && occupancy.is_none() { return Some("name_unoccupied"); }
+    if occupancy.zip(route).is_some_and(|(occupancy, route)| {
+        state.agent_presence(route.project_scope_id.as_str(), &occupancy.worker_id)
+            .is_some_and(|presence| presence.session_id == occupancy.session_id
+                && presence.presence == name_state::AgentPresence::Offline)
+    }) { return Some("owner_offline"); }
+    let owner = occupancy.map_or(task.owner.as_str(), |occupancy| occupancy.worker_id.as_str());
+    if route.and_then(|route| state.workers.get(owner).and_then(|worker|
+        current_worker_binding(state, &route.project_scope_id, Some(&route.app_scope_id), worker))).is_none() {
+        return Some("owner_binding_missing");
+    }
+    None
+}
+
 fn board_task_view_with_master(state: &State, task: &TaskRec, viewer: Option<&str>, master: Option<&str>, route: Option<&RouteScope>) -> Option<BoardTaskView> {
     if !board_task_visible(state, task, viewer) { return None; }
     let details = state.board_details.get(&task.id)?;
     let lifecycle = state.task_lifecycle.get(&task.id);
     let cleanup = state.cleanup_receipts.get(&task.id);
-    let owner_binding_valid = route.and_then(|route| state.workers.get(&task.owner)
-        .and_then(|worker| current_worker_binding(state, &route.project_scope_id, Some(&route.app_scope_id), worker))).is_some();
-    let owner = if task.status != "closed" && !owner_binding_valid {
+    let assignment = state.task_assignment(&task.id);
+    let historical = matches!(task.status.as_str(), "closed" | "cancelled");
+    let occupancy = assignment.and_then(|assignment| route.and_then(|route|
+        state.name_occupancy(route.project_scope_id.as_str(), &assignment.name)));
+    let current_owner = if historical { Some(task.owner.as_str()) }
+        else if assignment.is_some() { occupancy.map(|occupancy| occupancy.worker_id.as_str()) }
+        else { Some(task.owner.as_str()) };
+    let reassignment_reason = assignment_unavailability(state, task, route).map(str::to_owned);
+    let owner = if reassignment_reason.is_some() {
         String::new()
     } else if details.public_visibility {
-        board_external_actor(state, &task.owner)
+        board_external_actor(state, current_owner.unwrap_or_default())
     } else {
-        task.owner.clone()
+        current_owner.unwrap_or_default().to_owned()
     };
     let publisher = if details.public_visibility {
         board_external_actor(state, &task.created_by)
@@ -68,7 +95,15 @@ fn board_task_view_with_master(state: &State, task: &TaskRec, viewer: Option<&st
         test_condition: details.test_condition.clone(),
         revision: details.revision,
         owner_display_name: if owner.is_empty() { String::new() }
-            else { worker_display_name(state, &owner, master == Some(owner.as_str())) },
+            else { assignment.filter(|_| current_owner == Some(owner.as_str()))
+                .map(|assignment| assignment.name.clone())
+                .unwrap_or_else(|| worker_display_name(state, &owner, master == Some(owner.as_str()))) },
+        owner_name: assignment.map(|assignment| assignment.name.clone()),
+        owner_session_id: if historical { assignment.map(|assignment| assignment.session_id.clone()) }
+            else if owner.is_empty() { None }
+            else { occupancy.map(|occupancy| occupancy.session_id.clone()) },
+        needs_reassignment: reassignment_reason.is_some(),
+        reassignment_reason,
         publisher_display_name: worker_display_name(state, &publisher, master == Some(publisher.as_str())),
         owner,
         publisher,
@@ -156,7 +191,7 @@ fn handle_board_show(server: &Server, viewer: Option<&str>) -> Resp {
             role: if master.as_deref() == Some(worker.id.as_str()) { "master" } else { "peer" }.into(),
             status: observations.get(&worker.id).map(|(status, _)| *status).unwrap_or("unknown").into(),
             task_ids: tasks.iter().filter(|task| task.owner == worker.id && board_execution_responsibility(&task.status)).map(|task| task.id.clone()).collect(),
-            invitation_ids: tasks.iter().filter(|task| task.status == "invited" && task.invited_peer.as_deref() == Some(worker.id.as_str())).map(|task| task.id.clone()).collect(),
+            invitation_ids: tasks.iter().filter(|task| task.invited_peer.as_deref() == Some(worker.id.as_str())).map(|task| task.id.clone()).collect(),
         }
     }).collect();
     workers.sort_by(|left, right| left.id.cmp(&right.id));

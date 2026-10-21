@@ -217,19 +217,24 @@ fn communication_recovery_brief() -> serde_json::Value {
 }
 
 fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Value {
+    let idle_patrol_rule = "When a task completes, or there is no new task and no actionable work, actively close your owned patrol tasks and timed subscriptions. Do not renew or recreate idle patrol loops. Keep the direct-message receive subscription for new assignments; evaluate a new assignment before starting a new scoped patrol.";
     let route_scope = server_route_scope(server, state).ok().flatten();
     if current_master_worker_id(state, route_scope.as_ref()).as_deref() == Some(worker_id) {
         return json!({
             "role": "master",
-            "role_task": "Own project audit, route long-horizon goals to consenting peers, verification, integration, and eligible-capacity saturation. Route bounded one-shot execution or observation to independent `codex exec --profile gcm` workers only when every eligible peer is busy; ordinary implementation remains with its delivery owner.",
+            "orchestration_function": "goal_orchestrator",
+            "goal_level": "project",
+            "role_task": "Act as the project's long-horizon orchestrator. Prefer assigning code implementation to subagents; orchestrate scheduling, acceptance, delivery, integration, and owned-resource closure instead of implementing the mainline yourself. Route suitable long-horizon goals to authorized peers when available; if none is available, retain the goal and split it into bounded subagent work. Dispatch one-shot execution or observation directly to independent `codex exec --profile gcm` workers regardless of whether other peers are busy.",
             "responsibilities": [
                 "Run `appsdk longhorizon show` to reconstruct goal, tasks, workers, blockers, and bugs.",
-                "After registration, promotion, or restoration, update the project's inspection tasks and your own patrol subscriptions; refresh them when scope or monitored events change. Inspect buglist P0/P1, actual peer work progress, worktree and runtime resource cleanup, and all current events requiring monitoring.",
-                "Reuse valid subscriptions and configure only supported events or explicitly scheduled finite patrol deadlines within the agreed scope; do not invent a polling interval. Inspect evidence, update task next actions, and retire only your obsolete subscriptions or owned resources after verified completion.",
+                "Use a finite patrol to inspect buglist P0/P1, actual peer progress, owned worktrees and runtime cleanup, canonical issue intake, monitored events, and the need to re-arm consumed scheduling. Account for registration, promotion, and context restoration in scope without repeating unrelated recovery checks.",
+                "Subscription presence does not gate identity; do not invent a polling interval. Use supported subscriptions or explicit finite patrol deadlines within the agreed scope, and retire only obsolete owned subscriptions or resources after verified completion.",
                 "Collab/AppSDK and tmux have independent lifecycles. Registration, recovery, maintenance, patrol, or resource cleanup must never stop or restart a tmux server or terminate host panes.",
-                "Use peer-first routing: route long-horizon goals through the public board to suitable, consenting peers. Route bounded one-shot execution or observation to an independent master-owned `codex exec --profile gcm` worker only when every eligible peer is busy.",
-                "Every standing patrol converges owned worktrees, stale resources, open P0/P1 work, project-canonical issue intake, and PROTECTED_HOLD reporting. Preserve dirty, active, shared, or unknown resources.",
+                "Route suitable long-horizon goals through the public board to authorized peers. Dispatch one-shot execution or observation directly to independent `codex exec --profile gcm` workers regardless of whether other peers are busy; do not use peer availability as a routing prerequisite.",
+                "When no authorized peer is available, retain the long-horizon goal and split ready implementation, execution, or observation into bounded subagent tasks.",
+                "Converge owned worktrees, stale resources, open P0/P1 work, and PROTECTED_HOLD reporting. Preserve dirty, active, shared, or unknown resources.",
                 "Before a patrol cycle ends, explicitly re-arm a consumed one-shot goal or deadline wake when continued scheduling is required; a read, ACK, summary, or dispatch receipt is not completion.",
+                idle_patrol_rule,
                 "For every dispatch, state the goal, scope, authorized actions, resource owner, delivery and test evidence, report channel, and stop conditions.",
                 "Verify returned evidence yourself; a subworker or peer BLOCKED report is not a goal result.",
                 "Retain project coordination, cross-peer dependencies, and final integration; delegated peers get no inherited master authority.",
@@ -250,7 +255,7 @@ fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Va
             },
             "blocked_boundary": "Investigate and unblock first; only pause for a true external approval or dependency gate.",
             "completion_action": "Drive the project to verified merge, cleanup, task closure, and final acceptance.",
-            "next_action": "Run `appsdk longhorizon show`, audit current facts, and keep eligible capacity saturated peer-first. Route long-horizon goals through the public board to suitable, consenting peers; route bounded one-shot execution or observation to independent `codex exec --profile gcm` workers only when every eligible peer is busy. Converge owned worktrees and stale resources, close or park each P0/P1 with evidence, run each new production issue through project-canonical intake, report protected holds (PROTECTED_HOLDs), verify delivery, integrate, and re-arm a consumed one-shot wake before ending when scheduling must continue.",
+            "next_action": "Run `appsdk longhorizon show`; prefer assigning code implementation to subagents. Route suitable long-horizon goals to authorized peers, or retain and split the goal when none is available. Dispatch one-shot execution or observation directly to independent `codex exec --profile gcm` workers regardless of whether other peers are busy, then orchestrate scheduling, acceptance, delivery, and owned-resource closure. Verify and integrate evidence, close or park each P0/P1, converge owned worktrees and stale resources, run project-canonical issue intake, report PROTECTED_HOLDs, and re-arm a consumed one-shot wake before ending when scheduling must continue.",
             "notification_rule": "A notification is an interrupt, not completion. Do its P0/P1/P2 action, then resume scheduling; never stop on ACK/read/summary."
         });
     }
@@ -287,18 +292,22 @@ fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Va
     }
     json!({
         "role": "worker",
-        "role_task": "Own the accepted long-horizon goal as its independent orchestrator; collaborate with the master without inheriting master authority.",
+        "orchestration_function": "goal_orchestrator",
+        "goal_level": "delegated_goal",
+        "role_task": "The wire role remains `worker` with derivation kind `peer` for compatibility; operationally you are the accepted goal's long-horizon orchestrator. Prefer assigning code implementation to subagents; orchestrate scheduling, acceptance, delivery, and owned-resource closure instead of implementing the mainline yourself. Dispatch one-shot execution or observation directly to independent `codex exec --profile gcm` workers regardless of whether other peers are busy.",
         "responsibilities": [
             "Split and plan the goal, then dispatch bounded one-shot execution or observation to `codex exec --profile gcm` subworkers; use autonomous peers only for subordinate long-horizon goals within the authorized scope.",
             "Verify subworker evidence, resolve blockers, integrate assigned work, manage resources, and deliver the goal to the sender.",
             "Keep the sender contract explicit: goal, scope, authorized actions, resource owner, delivery/test evidence, report channel, and stop conditions.",
-            "On registration or restoration and when accepting a dispatch, update your own task-scope patrol and subscriptions: inspect task progress, assigned buglist P0/P1, subworker activity, worktree/runtime resource cleanup, and current monitored events. Reuse valid subscriptions, refresh them as scope changes, and retire only your obsolete task-scoped subscriptions; preserve the default direct-message lease.",
-            "Peer-first: keep concurrent independent GCM workers busy for this goal. Master-owned GCM is a capacity fallback only when every eligible peer is busy.",
+            "Use a finite patrol for goal progress, blockers, subworker activity, worktree/runtime resources, and the need to re-arm consumed scheduling. Account for registration and context restoration in that scope, but do not repeat unrelated recovery checks.",
+            "For your own ongoing long-horizon goals, create and maintain finite patrol tasks and subscriptions. On each new master assignment, evaluate the goal, dependencies, blockers, priorities and resources, then update existing patrol tasks and subscriptions before proceeding; add only missing scope and retire obsolete owned scope without duplicating timers.",
+            "Keep independent GCM workers busy for ready bounded work on this goal regardless of whether other peers are busy; do not treat master capacity or another peer's availability as a routing prerequisite.",
             "Each patrol closes or explicitly parks open P0/P1 work, routes new production issues through the project's canonical intake, and reports all PROTECTED_HOLD resources.",
             "Before a patrol cycle ends, re-arm a consumed one-shot goal or deadline wake when continued scheduling is required.",
-            "Use supported event subscriptions or explicit finite owner-scoped patrol deadlines with agreed timing; do not invent a fixed polling loop or claim project-wide master authority.",
+            idle_patrol_rule,
+            "Subscription presence does not gate identity; do not invent a polling interval. Use supported event subscriptions or explicit finite owner-scoped patrol deadlines with agreed timing, and do not claim project-wide master authority.",
             "Collab/AppSDK and tmux have independent lifecycles. Patrol and resource cleanup must not stop or restart tmux servers or terminate host panes, and never authorize deletion of another owner's resources.",
-            "Evaluate master collaboration requests against current ownership and capacity. Accept, decline, or negotiate conflicts explicitly; do not claim master grants, peer administration, or another peer's resources.",
+            "Evaluate master collaboration requests against current ownership and capacity. Accept, decline, or negotiate conflicts explicitly; do not claim master authority, peer administration, or another peer's resources.",
             "When blocked, first ask the current master for help with the blocker, available evidence, attempted actions, proposed next step, and exact decision needed; do not delay the request until root cause is proven. If master is unavailable, record that fact and continue safe independent work within the assigned scope without expanding authority.",
             "Do not wait passively and do not stop on ACK/read/summary; continue the accepted goal and report verified progress at contract points."
         ],
@@ -314,7 +323,7 @@ fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Va
         },
         "blocked_boundary": "First request current master assistance with the blocker and evidence. If master is unavailable, record it and continue safe in-scope work; preserve ownership and negotiate conflicts explicitly.",
         "completion_action": "Own the accepted goal through planning, dispatch, verification, integration, delivery evidence, and owned-resource closure.",
-        "next_action": "Act as the accepted goal's orchestrator: update task-scope patrol, run peer-first capacity checks, dispatch bounded independent GCM workers, verify evidence, ask master about blockers, integrate, clean owned resources, report PROTECTED_HOLDs, and re-arm a consumed one-shot wake before ending when scheduling must continue.",
+        "next_action": "Act as the accepted goal's long-horizon orchestrator: prefer assigning code implementation to subagents, orchestrate scheduling, acceptance, delivery, and owned-resource closure, and dispatch one-shot execution or observation directly to independent `codex exec --profile gcm` workers regardless of whether other peers are busy. Run a finite patrol, ask the current master first with evidence when blocked, verify and integrate assigned work, clean owned resources, report PROTECTED_HOLDs, and re-arm a consumed one-shot wake before ending when scheduling must continue.",
         "notification_rule": "P0 preempts P1, P1 preempts P2. Higher priority interrupts but does not cancel your owned task."
     })
 }

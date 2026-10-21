@@ -756,6 +756,9 @@ fn responsibility_effect<'a>(state: &'a State, event: &'a Event) -> Responsibili
         // Replies, acks, and system notifications still land in the target's
         // mailbox, so all of them are additions for the receiving peer.
         Event::Sent { msg } => ResponsibilityEffect::Mutates(msg.to.as_str()),
+        Event::MailboxReassigned { handoff } => {
+            ResponsibilityEffect::Mutates(handoff.recipient.as_str())
+        }
         Event::WakeBound { message_id, .. } => match state.msgs.get(message_id) {
             Some(msg) => ResponsibilityEffect::Mutates(msg.to.as_str()),
             None => ResponsibilityEffect::Safe,
@@ -844,6 +847,25 @@ pub fn responsibility_preflight(st: &State, evs: &[Event]) -> Result<(), String>
             }
             Event::Sent { msg } => {
                 simulated_msgs.insert(msg.id.clone(), msg.clone());
+            }
+            Event::MailboxReassigned { handoff } => {
+                if let Some(message) = simulated_msgs.get_mut(&handoff.message_id) {
+                    if message.to == handoff.previous_recipient
+                        && matches!(message.state.as_str(), "pending" | "delivered")
+                    {
+                        message.to = handoff.recipient.clone();
+                        simulated_wake_bindings.insert(
+                            message.id.clone(),
+                            super::mailbox::default_direct_message_id(&handoff.recipient),
+                        );
+                    }
+                }
+            }
+            Event::WakeBound {
+                message_id,
+                subscription_id,
+            } => {
+                simulated_wake_bindings.insert(message_id.clone(), subscription_id.clone());
             }
             Event::Delivered { ids } => {
                 for id in ids {
@@ -1308,6 +1330,13 @@ pub enum Event {
     Sent {
         msg: Message,
     },
+    MailboxNameAddressed {
+        message_id: String,
+        address: crate::server::name_mailbox::MailboxNameAddress,
+    },
+    MailboxReassigned {
+        handoff: crate::server::name_mailbox::MailboxHandoff,
+    },
     DeliveryMode {
         msg_id: String,
         mode: String,
@@ -1405,6 +1434,28 @@ pub enum Event {
     },
     TaskCreated {
         task: TaskRec,
+    },
+    NameResolutionCommitted {
+        project_scope: String,
+        occupancy: super::name_state::NameOccupancy,
+        assignments: Vec<super::name_state::TaskAssignment>,
+    },
+    NameOccupancyRevisionRetained {
+        project_scope: String,
+        name: String,
+        revision: u64,
+    },
+    TaskAssignmentUpdated {
+        assignment: super::name_state::TaskAssignment,
+    },
+    NameRecoveryUpdated {
+        recovery: super::name_state::NameRecoveryPending,
+    },
+    AgentPresenceObserved {
+        presence: super::name_state::AgentPresenceRecord,
+    },
+    AgentActivityObserved {
+        activity: super::name_state::AgentActivityRecord,
     },
     SchedulerAdmission {
         admission: SchedulerAdmissionRecord,

@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-peer-lifecycle",
   "version": "0.1.0",
-  "description": "一次 Collab peer Create/Read/Update/Close/Snapshot 或自身显示名请求到一次结果。请求分类、分支准入、互斥分支调度、阶段读回和唯一结果出口构成 SESE。自身命名分支只验证当前身份和名称，原子提交显示名覆盖或 reset，再投影结果；不进入 host effect 或身份注册 saga。默认名称由当前角色和绑定派生：master 为 Jenny，普通 tmux peer 为 pane 标识；显式用户名称覆盖默认，角色变化不转移覆盖。名称不是稳定 ID、路由或授权依据。Create 复用已有创建和注册 owner。Close 在同一入口区分两种终态：他人宿主关闭通过所选 adapter 归档，并继续检查责任准入以保护未结工作；当前 pane 自注销由当前观察事实和项目内权威 daemon binding 定位自身，不依赖旧本地 token、目标快照、历史 generation 或未结任务/消息放行，只退役该身份的 binding、route、自身 master grant 与订阅，保留任务、消息和宿主 pane。Snapshot 只读当前缓存区，不消费消息或提交输入。唯一结果保留成功、拒绝、缺事实、partial、unknown、cancelled 或 cleanup-open；不新增自动重试、fallback 或第二状态 owner。",
+  "description": "一次 Collab peer Create/Read/Update/Close/Snapshot 或兼容显示名请求到一次结果。请求分类、分支准入、互斥分支调度、阶段读回和唯一结果出口构成 SESE。当前工作名字由 context 名字 owner 管理，Jenny 对应项目 master，普通名来自固定池；tmux pane/session/socket 只定位观测和投递，不派生名字或身份。自身显示名分支仅兼容没有当前工作名字的旧记录，不覆盖工作归属。Create 复用已有创建和注册 owner。Close 在同一入口区分两种终态：他人宿主关闭通过所选 adapter 归档，并继续检查责任准入以保护未结工作；当前 pane 自注销由当前观察事实和项目内权威 daemon binding 定位自身，不依赖旧本地 token、目标快照、历史 generation 或未结任务/消息放行，只退役该身份的 binding、route、自身 master grant 与订阅，保留名字下的任务、消息和宿主 pane。自注销后的普通恢复走 peer 池，不被历史 Jenny 占用要求授权。Snapshot 只读当前缓存区，不消费消息或提交输入。唯一结果保留成功、拒绝、缺事实、partial、unknown、cancelled 或 cleanup-open；不新增自动重试、fallback 或第二状态 owner。",
   "inputs": [
     {
       "id": "peer_lifecycle_request",
@@ -57,7 +57,7 @@
     },
     {
       "id": "按分支准入当前身份与责任边界",
-      "description": "self removal 先通过标准 context 自动恢复当前身份与当前通信，再用其现有认证能力只移除自身；不接收调用方指定的 pane、其他项目 target 或历史身份凭据作为授权。旧本地 token 由 context 自动修复，无用户补证、历史 fence 或未结任务门禁。关闭其他 peer 保留其原有权限与宿主边界。",
+      "description": "self removal 先通过标准 context 自动恢复当前身份与当前通信，再用其现有认证能力只移除自身；不接收调用方指定的 pane、其他项目 target 或历史身份凭据作为授权。旧本地 token 由 context 自动修复，无用户补证、历史 fence 或未结任务门禁。关闭其他 peer 保留其原有权限与宿主边界。Tmux 目标的当前项目权威 binding 与一致 endpoint 足以证明身份，不要求 route 索引存在，也不要求 agent sessionID 为空；endpoint present、missing 与 unknown 由后续独立 probe 决定关闭结果。",
       "operator": "appsdk.collab_peer_lifecycle.admit_request",
       "operator_version": "1",
       "inputs": [

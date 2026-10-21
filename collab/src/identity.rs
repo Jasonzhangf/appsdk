@@ -754,34 +754,6 @@ fn identity_by_current_anchors_at(
     if !identities_root.is_dir() {
         return Ok(None);
     }
-    if let Some(candidate) = observed.tmux.as_ref() {
-        let project = scope
-            .route_scope(AppServerId::new(CLI_APP_SERVER_ID)?)?
-            .project_scope_id;
-        let mut identities = BTreeMap::new();
-        for entry in std::fs::read_dir(&identities_root)? {
-            let entry = entry?;
-            if !entry.file_type()?.is_dir() {
-                continue;
-            }
-            let Some(identity) = read_identity(&entry.path().join("identity.json"))? else {
-                continue;
-            };
-            if identity.project_scope.as_ref() == Some(&project)
-                && identity
-                    .transport
-                    .as_ref()
-                    .and_then(|transport| transport.tmux_endpoint.as_ref())
-                    .is_some_and(|saved| same_tmux_session(saved, &candidate.endpoint))
-            {
-                identities.insert(identity.worker_id.clone(), identity);
-            }
-        }
-        return Ok(identities
-            .into_values()
-            .next()
-            .map(AnchorResolution::CurrentScope));
-    }
     let mut anchors = Vec::new();
     for value in observed.session_anchors() {
         anchors.push(("codex_session_id", value));
@@ -806,48 +778,43 @@ fn identity_by_current_anchors_at(
             .as_ref()
             .and_then(|transport| transport.tmux_endpoint.as_ref());
         for (name, value) in &anchors {
-            let matched =
-                match *name {
-                    "codex_session_id" => {
-                        persisted_endpoint
-                            .and_then(|persisted| persisted.codex_session_id.as_ref())
-                            .is_some_and(|persisted| persisted == value)
-                            || (identity.transport.as_ref().is_some_and(|transport| {
-                                transport.kind == TransportKind::AppServer
-                            }) && identity
-                                .runtime
-                                .as_ref()
-                                .and_then(|runtime| runtime.session_id.as_ref())
-                                .is_some_and(|persisted| persisted.as_str() == value))
-                    }
-                    "codex_thread_id" => {
-                        persisted_endpoint
-                            .and_then(|persisted| persisted.codex_thread_id.as_ref())
-                            .is_some_and(|persisted| persisted == value)
-                            || (identity.transport.as_ref().is_some_and(|transport| {
-                                transport.kind == TransportKind::AppServer
-                            }) && identity
-                                .runtime
-                                .as_ref()
-                                .and_then(|runtime| runtime.native_thread_id.as_ref())
-                                .is_some_and(|persisted| persisted.as_str() == value))
-                    }
-                    // The dsh anchor lives on the runtime binding, not on a tmux
-                    // endpoint: `RuntimeIdentity.session_id` carries the gateway
-                    // session id the adapter returned in its agent-facts reply.
-                    "dsh_session_id" => {
-                        identity
-                            .transport
+            let matched = match *name {
+                "codex_session_id" => {
+                    persisted_endpoint
+                        .and_then(|persisted| persisted.codex_session_id.as_ref())
+                        .is_some_and(|persisted| persisted == value)
+                        || identity
+                            .runtime
                             .as_ref()
-                            .is_some_and(|transport| transport.kind == TransportKind::Dsh)
-                            && identity
-                                .runtime
-                                .as_ref()
-                                .and_then(|runtime| runtime.session_id.as_ref())
-                                .is_some_and(|persisted| persisted.as_str() == value)
-                    }
-                    _ => false,
-                };
+                            .and_then(|runtime| runtime.session_id.as_ref())
+                            .is_some_and(|persisted| persisted.as_str() == value)
+                }
+                "codex_thread_id" => {
+                    persisted_endpoint
+                        .and_then(|persisted| persisted.codex_thread_id.as_ref())
+                        .is_some_and(|persisted| persisted == value)
+                        || identity
+                            .runtime
+                            .as_ref()
+                            .and_then(|runtime| runtime.native_thread_id.as_ref())
+                            .is_some_and(|persisted| persisted.as_str() == value)
+                }
+                // The dsh anchor lives on the runtime binding, not on a tmux
+                // endpoint: `RuntimeIdentity.session_id` carries the gateway
+                // session id the adapter returned in its agent-facts reply.
+                "dsh_session_id" => {
+                    identity
+                        .transport
+                        .as_ref()
+                        .is_some_and(|transport| transport.kind == TransportKind::Dsh)
+                        && identity
+                            .runtime
+                            .as_ref()
+                            .and_then(|runtime| runtime.session_id.as_ref())
+                            .is_some_and(|persisted| persisted.as_str() == value)
+                }
+                _ => false,
+            };
             if matched {
                 matches
                     .entry((*name).to_owned())
@@ -896,16 +863,9 @@ fn identity_by_current_anchors_at(
             ))
         }
         _ => anyhow::bail!(
-            "IDENTITY_RESTORE_CONFLICT: supplied tmux/Codex anchors identify different peers"
+            "IDENTITY_RESTORE_CONFLICT: supplied agent session anchors identify different peers"
         ),
     }
-}
-
-pub(crate) fn same_tmux_session(
-    left: &crate::proto::TmuxEndpoint,
-    right: &crate::proto::TmuxEndpoint,
-) -> bool {
-    left.tmux_session_id == right.tmux_session_id
 }
 
 /// Test-only adapter for the subagent launch harness, which names its child

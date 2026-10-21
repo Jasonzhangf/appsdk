@@ -161,6 +161,8 @@ fn public_details() -> crate::board::BoardTaskDetails {
             endpoint_generation: 13,
             message_id: "offer-message".into(),
             created_ms: 3,
+            original_status: None,
+            original_owner: None,
         }),
         last_response: Some("public-response".into()),
     }

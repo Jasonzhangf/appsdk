@@ -73,9 +73,23 @@ Playground/Active/Protected/generated 是消费者治理分区。不能据此把
 
 - AppSDK 全局项目/runtime/communication 真源：`~/.appsdk/` 的声明注册资源。
 - Collab 全局身份、route、mailbox 与 daemon 真源：`~/.collab/`，由 Collab 控制入口管理。
-- Collab 的 `cwd` 选择项目，当前 tmux session 选择该项目的 peer；pane 是当前投递位置。
-  socket 路径与 server PID 只用于通信观测，不参与身份选择或恢复准入。
+- Collab 的名字承载工作归属，sessionID 是当前执行载体。这是本项目一切命名、
+  注册、身份恢复与任务续接的统一规则。`cwd` 选择项目；注册提供 agent 会话的
+  sessionID 并绑定，不使用 tmux session ID 代替 agent sessionID。
+  名字仍归当前工作者而 sessionID 变化时，daemon 更新该名字的 sessionID，并自动
+  换绑 board 中该名字下全部未关闭任务的 sessionID；任务 ID、状态、历史、证据与
+  资源保持，已关闭任务保留历史。当前名字工作者继续任务，不以旧 sessionID 阻塞，
+  不要求 Jenny 对正常会话续接重新 assign，也不处理旧执行者。
+  Jenny 自身 unknown 且无法响应时，用户明确指定恢复 Jenny 并完成本次接管确认，
+  直接接管其名字和 master；用户确认高于 Jenny 裁决，不等待旧执行者。
+  名字交接时，未消费消息随名字交给当前持有者，并同步收件与唤醒归属；已消费消息
+  保留历史，不重放，不改写正文、消息 ID 或真实消费回执。
+  pane、tmux session、socket 路径和 server PID 只定位投递与观测，不作为工作归属。
   CLI 不从 `TMUX` 环境变量注入 socket 路径。历史 pane/native 绑定不否决当前恢复。
+- Collab 的 master 与 peer 具有相同编排功能，区别是目标层级：master 管理项目大目标，
+  peer 管理受托子目标；两者都负责拆解、派发、资源管理、验收与交付，优先交子 agent
+  完成具体编码、执行和观察。peer 不是直接执行 worker。注册和恢复须说明此职责，并
+  推荐对自身目标、阻塞和资源配置定时巡检；不以任务内容反推或限制协作身份。
 - `.agent-collab/` 为项目局部状态；存在目录不证明当前 peer 已注册。
 - AppSDK/Collab 不拥有 tmux server 的生命周期。tmux adaptor 只使用已存在的
   通信端点；安装、升级、daemon 维护、注册、恢复、巡检或数据迁移不关闭、

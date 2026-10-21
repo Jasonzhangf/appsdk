@@ -229,12 +229,33 @@ impl State {
 
     pub fn apply_checked(&mut self, ev: &Event) -> Result<(), String> {
         match ev {
+            Event::MailboxNameAddressed {
+                message_id,
+                address,
+            } => {
+                self.mailbox_name_addresses
+                    .insert(message_id.clone(), address.clone());
+            }
+            Event::MailboxReassigned { handoff } => {
+                // Older snapshots retain handoffs even after the name is released.
+                self.retain_name_occupancy_revision(
+                    &handoff.project_scope,
+                    &handoff.name,
+                    handoff.occupancy_revision,
+                );
+                self.apply_mailbox_handoff(handoff);
+            }
             Event::ProjectResetStarted {
                 project_scope,
                 clear_local,
                 worker_ids,
             } => {
-                crate::server::project_reset::clear_project(self, project_scope, *clear_local, worker_ids);
+                crate::server::project_reset::clear_project(
+                    self,
+                    project_scope,
+                    *clear_local,
+                    worker_ids,
+                );
                 self.pending_project_resets
                     .insert(project_scope.clone(), *clear_local);
             }
@@ -306,12 +327,14 @@ impl State {
                 self.worker_snapshots.remove(&worker.id);
                 self.workers.insert(worker.id.clone(), worker.clone());
             }
-            Event::WorkerNamed { worker_id, name } => {
-                match name {
-                    Some(name) => { self.worker_names.insert(worker_id.clone(), name.clone()); },
-                    None => { self.worker_names.remove(worker_id); },
+            Event::WorkerNamed { worker_id, name } => match name {
+                Some(name) => {
+                    self.worker_names.insert(worker_id.clone(), name.clone());
                 }
-            }
+                None => {
+                    self.worker_names.remove(worker_id);
+                }
+            },
             Event::LegacyWorkerRemoved { worker_id } => {
                 self.workers.remove(worker_id);
                 self.worker_names.remove(worker_id);
@@ -796,6 +819,32 @@ impl State {
                 }
                 self.tasks.insert(task.id.clone(), task.clone());
             }
+            Event::NameResolutionCommitted {
+                project_scope,
+                occupancy,
+                assignments,
+            } => {
+                self.apply_name_resolution(project_scope, occupancy, assignments)?;
+            }
+            Event::NameOccupancyRevisionRetained {
+                project_scope,
+                name,
+                revision,
+            } => {
+                self.retain_name_occupancy_revision(project_scope, name, *revision);
+            }
+            Event::TaskAssignmentUpdated { assignment } => {
+                self.apply_task_assignment(assignment)?;
+            }
+            Event::NameRecoveryUpdated { recovery } => {
+                self.apply_name_recovery(recovery)?;
+            }
+            Event::AgentPresenceObserved { presence } => {
+                self.apply_agent_presence(presence)?;
+            }
+            Event::AgentActivityObserved { activity } => {
+                self.apply_agent_activity(activity)?;
+            }
             Event::SchedulerAdmission { admission } => {
                 self.scheduler_admissions
                     .insert(admission.request_id.clone(), admission.clone());
@@ -1053,6 +1102,9 @@ impl State {
 
     pub fn drop_message(&mut self, id: &str) {
         self.msgs.remove(id);
+        self.mailbox_name_addresses.remove(id);
+        self.mailbox_handoffs
+            .retain(|handoff| handoff.message_id != id);
         self.notification_delivery_failures.remove(id);
         self.notification_delivery_accepted.remove(id);
         self.notification_delivery_evidence.remove(id);
@@ -1071,6 +1123,14 @@ impl State {
     /// The caller stores the counters in the replay-only envelope.
     pub fn snapshot_contents(&self) -> (u64, u64, Vec<Event>) {
         let mut events = Vec::new();
+        // History precedes current mailbox rows so restoration does not repeat
+        // a handoff or reset a later consumption or wake.
+        events.extend(
+            self.mailbox_handoffs
+                .iter()
+                .cloned()
+                .map(|handoff| Event::MailboxReassigned { handoff }),
+        );
         for (project_scope, clear_local) in &self.pending_project_resets {
             events.push(Event::ProjectResetStarted {
                 project_scope: project_scope.clone(),
@@ -1116,7 +1176,8 @@ impl State {
         let mut names: Vec<_> = self.worker_names.iter().collect();
         names.sort_by(|left, right| left.0.cmp(right.0));
         events.extend(names.into_iter().map(|(id, name)| Event::WorkerNamed {
-            worker_id: id.clone(), name: Some(name.clone()),
+            worker_id: id.clone(),
+            name: Some(name.clone()),
         }));
         let mut keepalives: Vec<_> = self.keepalives.iter().collect();
         keepalives.sort_by(|a, b| a.0.cmp(b.0));
@@ -1160,6 +1221,107 @@ impl State {
         let mut tasks: Vec<_> = self.tasks.values().cloned().collect();
         tasks.sort_by(|a, b| a.id.cmp(&b.id));
         events.extend(tasks.into_iter().map(|task| Event::TaskCreated { task }));
+        let mut revisions: Vec<_> = self
+            .name_occupancy_revisions
+            .iter()
+            .flat_map(|(project, names)| {
+                names
+                    .iter()
+                    .map(move |(name, revision)| (project.clone(), name.clone(), *revision))
+            })
+            .collect();
+        revisions.sort();
+        events.extend(
+            revisions
+                .into_iter()
+                .map(
+                    |(project_scope, name, revision)| Event::NameOccupancyRevisionRetained {
+                        project_scope,
+                        name,
+                        revision,
+                    },
+                ),
+        );
+        let mut occupancies: Vec<_> = self
+            .name_occupancies
+            .iter()
+            .flat_map(|(project_scope, names)| {
+                names
+                    .values()
+                    .map(move |occupancy| (project_scope.clone(), occupancy.clone()))
+            })
+            .collect();
+        occupancies.sort_by(|(left_scope, left), (right_scope, right)| {
+            (left_scope.as_str(), left.name.as_str())
+                .cmp(&(right_scope.as_str(), right.name.as_str()))
+        });
+        for (project_scope, occupancy) in occupancies {
+            let mut assignments: Vec<_> = self
+                .task_assignments
+                .values()
+                .filter(|assignment| {
+                    assignment.name == occupancy.name
+                        && assignment.session_id == occupancy.session_id
+                })
+                .cloned()
+                .collect();
+            assignments.sort_by(|left, right| left.task_id.cmp(&right.task_id));
+            events.push(Event::NameResolutionCommitted {
+                project_scope,
+                occupancy,
+                assignments,
+            });
+        }
+        let mut assignments: Vec<_> = self.task_assignments.values().cloned().collect();
+        assignments.sort_by(|left, right| left.task_id.cmp(&right.task_id));
+        events.extend(
+            assignments
+                .into_iter()
+                .map(|assignment| Event::TaskAssignmentUpdated { assignment }),
+        );
+        let mut recoveries: Vec<_> = self.name_recoveries.values().cloned().collect();
+        recoveries.sort_by(|left, right| left.operation_id.cmp(&right.operation_id));
+        events.extend(
+            recoveries
+                .into_iter()
+                .map(|recovery| Event::NameRecoveryUpdated { recovery }),
+        );
+        let mut presences: Vec<_> = self
+            .agent_presence
+            .iter()
+            .flat_map(|(project_scope, workers)| {
+                workers
+                    .values()
+                    .map(move |presence| (project_scope.clone(), presence.clone()))
+            })
+            .collect();
+        presences.sort_by(|(left_scope, left), (right_scope, right)| {
+            (left_scope.as_str(), left.worker_id.as_str())
+                .cmp(&(right_scope.as_str(), right.worker_id.as_str()))
+        });
+        events.extend(
+            presences
+                .into_iter()
+                .map(|(_, presence)| Event::AgentPresenceObserved { presence }),
+        );
+        let mut activities: Vec<_> = self
+            .agent_activity
+            .iter()
+            .flat_map(|(project_scope, workers)| {
+                workers
+                    .values()
+                    .map(move |activity| (project_scope.clone(), activity.clone()))
+            })
+            .collect();
+        activities.sort_by(|(left_scope, left), (right_scope, right)| {
+            (left_scope.as_str(), left.worker_id.as_str())
+                .cmp(&(right_scope.as_str(), right.worker_id.as_str()))
+        });
+        events.extend(
+            activities
+                .into_iter()
+                .map(|(_, activity)| Event::AgentActivityObserved { activity }),
+        );
         let mut scheduler_admissions: Vec<_> =
             self.scheduler_admissions.values().cloned().collect();
         scheduler_admissions.sort_by(|a, b| a.request_id.cmp(&b.request_id));
@@ -1238,6 +1400,12 @@ impl State {
         for msg in messages {
             let id = msg.id.clone();
             events.push(Event::Sent { msg });
+            if let Some(address) = self.mailbox_name_addresses.get(&id) {
+                events.push(Event::MailboxNameAddressed {
+                    message_id: id.clone(),
+                    address: address.clone(),
+                });
+            }
             if let Some(mode) = self.delivery_modes.get(&id) {
                 events.push(Event::DeliveryMode {
                     msg_id: id.clone(),
@@ -1379,7 +1547,10 @@ impl State {
 
     pub fn admission_frozen(&self) -> bool {
         self.journal_poison.is_some()
-            || self.pending_project_resets.values().any(|clear_local| *clear_local)
+            || self
+                .pending_project_resets
+                .values()
+                .any(|clear_local| *clear_local)
             || self
                 .migration
                 .as_ref()

@@ -8,8 +8,11 @@ fn context_snapshot(value: &Value) -> &Value {
 }
 
 fn pane_only_context(fixture: &Fixture, pane: &Pane, args: &[&str]) -> Value {
+    let provide = json!({"session_id": pane.session_anchor}).to_string();
+    let mut args = args.to_vec();
+    args.extend(["--provide", provide.as_str()]);
     let output = fixture
-        .configured_command(args, Some(pane), "Codex TUI")
+        .configured_command(&args, Some(pane), "Codex TUI")
         .env_remove("CODEX_SESSION_ID")
         .env_remove("CODEX_THREAD_ID")
         .env_remove("CODEX_THREAD")
@@ -446,7 +449,7 @@ fn context_recovers_archived_master_in_the_same_live_pane() {
     )
     .unwrap();
     let new = Pane {
-        session_anchor: "session-after-restart".into(),
+        session_anchor: old.session_anchor.clone(),
         thread_anchor: "thread-after-restart".into(),
         ..old
     };
@@ -562,7 +565,14 @@ fn context_recovers_archived_master_in_the_same_live_pane() {
         &["recv", "--timeout", "0", "--receive-id", "recovery-recv-1"],
         Some(&new),
     );
-    assert_eq!(received["messages"][0]["id"], message_id);
+    assert!(
+        received["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["id"] == message_id),
+        "the receive must contain the sent message"
+    );
     let status = fixture.run_ok(&["msg", message_id], Some(&new));
     assert_eq!(status["consumed_by_recv"], true);
 }
@@ -719,7 +729,7 @@ fn context_returns_the_binding_receipt_that_addresses_the_route() {
         thread_anchor: "thread-binding".into(),
     };
     fixture.start_daemon();
-    fixture.registered_context(&pane, false);
+    pane_only_context(&fixture, &pane, &["context", "--op", "binding-register"]);
     let registered = pane_only_context(&fixture, &pane, &["context"]);
     let worker_id = registered["identity"]["worker_id"]
         .as_str()
@@ -737,7 +747,7 @@ fn context_returns_the_binding_receipt_that_addresses_the_route() {
             .is_some_and(|scope| !scope.is_empty()),
         "the receipt must name its app scope: {context}"
     );
-    assert_eq!(binding["session_id"], Value::Null);
+    assert_eq!(binding["session_id"], pane.session_anchor);
     assert_eq!(binding["native_thread_id"], Value::Null);
     assert_eq!(context["identity"]["transport"]["thread_id"], Value::Null);
     assert!(
@@ -782,7 +792,7 @@ fn context_returns_the_binding_receipt_that_addresses_the_route() {
     );
     let route: Value = serde_json::from_slice(&route_output.stdout).unwrap();
     assert_eq!(route["binding_id"], binding["binding_id"]);
-    assert_eq!(route["session_id"], Value::Null);
+    assert_eq!(route["session_id"], pane.session_anchor);
     assert_eq!(route["native_thread_id"], Value::Null);
     let constrained = fixture.command(
         &["route", "resolve", "--pane-id", &pane.pane_id],

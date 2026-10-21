@@ -37,6 +37,7 @@ fn run_in_pane_at(
          unset COLLAB_SOCKET_PATH COLLAB_HOST_SOCKET COLLAB_LOCK_PATH COLLAB_HOST_LOCK COLLAB_APPSERVER_SOCKET CODEX_APP_SERVER_SOCKET COLLAB_APPSERVER_NAMESPACE COLLAB_WORKER CODEX_SESSION_ID CODEX_THREAD_ID CODEX_THREAD DSH_SESSION_ID\n\
          export COLLAB_STATE_DIR={state} CODEX_HOME={home} CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex TUI'\n\
          export TMUX={tmux_value} TMUX_PANE={pane_id}\n\
+         export CODEX_SESSION_ID={session_id}\n\
          {binary} {command} >{result} 2>{error}\n\
          printf done >{done}\n\
          sleep 600\n",
@@ -45,6 +46,7 @@ fn run_in_pane_at(
         home = shell_quote(&fixture.root.join("home").to_string_lossy()),
         tmux_value = shell_quote(tmux_value),
         pane_id = shell_quote(&pane.pane_id),
+        session_id = shell_quote(&pane.session_anchor),
         binary = shell_quote(&fixture.binary.to_string_lossy()),
         result = shell_quote(&result_path.to_string_lossy()),
         error = shell_quote(&error_path.to_string_lossy()),
@@ -158,6 +160,10 @@ fn board_reader_uses_current_route_instead_of_a_historical_session_receipt() {
     )
     .unwrap();
     let operations = std::fs::read(fixture.host_state.join("journal.jsonl")).unwrap();
+    let operation_path = fixture
+        .host_state
+        .join("context-operations/reader-context.json");
+    let operation = std::fs::read(&operation_path).unwrap();
     let board = run_in_pane_with_tmux(
         &fixture,
         &pane,
@@ -173,6 +179,27 @@ fn board_reader_uses_current_route_instead_of_a_historical_session_receipt() {
             .any(|row| row["id"] == worker),
         "{board}"
     );
+    let denied = fixture
+        .configured_command(&["reset", "--project"], Some(&pane), "Codex TUI")
+        .env_remove("CODEX_THREAD_ID")
+        .output()
+        .unwrap();
+    assert!(
+        !denied.status.success(),
+        "a peer must not reset the project"
+    );
+    assert!(
+        String::from_utf8_lossy(&denied.stderr).contains("RESET_MASTER_REQUIRED"),
+        "reset must reach authorization with the current credential: {} {}",
+        String::from_utf8_lossy(&denied.stdout),
+        String::from_utf8_lossy(&denied.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(old.join("identity.json")).unwrap())
+            .unwrap(),
+        stale,
+        "board and denied reset must preserve the historical credential"
+    );
     assert_eq!(
         std::fs::read(
             fixture
@@ -187,8 +214,9 @@ fn board_reader_uses_current_route_instead_of_a_historical_session_receipt() {
     assert_eq!(
         std::fs::read(fixture.host_state.join("journal.jsonl")).unwrap(),
         operations,
-        "board must not register, recover or start a context operation"
+        "board and denied reset must not register, recover or start a context operation"
     );
+    assert_eq!(std::fs::read(operation_path).unwrap(), operation);
 }
 
 struct SecondaryTmux {
@@ -301,8 +329,8 @@ fn current_pane_placement_ignores_tmux_value_and_preserves_session_peer() {
     let moved = Pane {
         server_pid: first.server_pid,
         pane_id: String::from_utf8(split.stdout).unwrap().trim().to_owned(),
-        session_anchor: "ignored-session".into(),
-        thread_anchor: "ignored-thread".into(),
+        session_anchor: first.session_anchor.clone(),
+        thread_anchor: first.thread_anchor.clone(),
     };
     let moved_context = run_in_pane_with_tmux(
         &fixture,

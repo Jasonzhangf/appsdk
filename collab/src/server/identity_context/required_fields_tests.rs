@@ -83,6 +83,8 @@ fn persisted_context_fixture() -> (
         host_root,
         root,
         IdentityFacts {
+            session_id: candidate.endpoint.codex_session_id.clone(),
+            thread_id: candidate.endpoint.codex_thread_id.clone(),
             tmux: Some(candidate),
             ..Default::default()
         },
@@ -138,7 +140,9 @@ fn session_move_retargets_owned_deadline_without_resetting_its_schedule() {
     );
     assert!(restored.ok, "{restored:?}");
     let after = runtime.state.lock().unwrap().notification_subscriptions[&before.id].clone();
-    assert_eq!(after.target, "%77");
+    assert_eq!(after.target, "saved-agent-thread");
+    let endpoint = restored.data["identity_receipt"]["transport"]["tmux_endpoint"].clone();
+    assert_eq!(endpoint["pane_id"], "%77");
     assert_eq!(after.status, "armed");
     assert_eq!(after.created_ms, before.created_ms);
     assert_eq!(after.expires_ms, before.expires_ms);
@@ -261,8 +265,6 @@ fn ordinary_persisted_context_has_no_registration_effects() {
     // An unavailable adjacent adaptor must never be admitted on restore.
     facts.endpoint = Some("unix:///tmp/unavailable-restore-adaptor.sock".into());
     facts.namespace = Some("codex_tui".into());
-    facts.session_id = Some("unselected-session".into());
-    facts.thread_id = Some("unselected-thread".into());
     let (_, restored) = manager.dispatch_sync(
         Some(context),
         Req::IdentityContext {
@@ -280,6 +282,7 @@ fn ordinary_persisted_context_has_no_registration_effects() {
     // The caller supplies its observed session even while delivery is offline.
     // A historical socket + pane alone is no longer an identity selector.
     let stable = IdentityFacts {
+        session_id: saved.transport.as_ref().unwrap().session_id.clone(),
         tmux: Some(crate::proto::TmuxCandidate {
             endpoint: saved
                 .transport
@@ -325,20 +328,23 @@ fn minimal_restore_master_grant_derives_current_identity_and_scope() {
         query_capability: "minimal-master-capability".into(),
         invocation_ticket: String::new(),
     };
-    let approved = match manager.approved_recovery_admission(&context, &request) {
-        Ok(Some(approved)) => approved,
-        Ok(None) => panic!("restore_master must be admitted as an approved operation"),
-        Err(_) => panic!("minimal restore_master approval must be admitted"),
-    };
-    assert_eq!(approved.identity.worker_id, saved.worker_id);
-    assert_eq!(approved.identity.token, saved.token);
-    assert_eq!(approved.identity_approval.action, "restore_master");
+    // Role restoration now uses the stable-name owner, not credential takeover.
+    assert!(matches!(
+        manager.approved_recovery_admission(&context, &request),
+        Ok(None)
+    ));
+    let (_, response) = manager.identity_context(context.clone(), request);
+    assert!(response.ok, "{response:?}");
+    assert_eq!(response.data["result"]["outcome"], "completed");
+    let snapshot = &response.data["result"]["snapshot"];
+    assert_eq!(snapshot["identity"]["worker_id"], saved.worker_id);
+    assert_eq!(snapshot["identity"]["role"], "master");
     assert_eq!(
-        approved.identity_approval.project_scope,
+        snapshot["scope"]["project_scope"],
         context.project_scope.as_str()
     );
     assert_eq!(
-        approved.identity_approval.app_scope_id,
+        snapshot["scope"]["app_scope_id"],
         context.app_scope_id.as_str()
     );
     drop(host);
@@ -721,7 +727,7 @@ fn context_binding_public_stale_runtime_rejects_then_context_repair_succeeds() {
 }
 
 #[test]
-fn current_project_session_retires_foreign_pane_authority_without_register() {
+fn current_project_session_does_not_process_foreign_pane_owner() {
     let (host, old_runtime, manager, host_root, old_root, facts, old_identity) =
         persisted_context_fixture();
     assert!(
@@ -796,17 +802,17 @@ fn current_project_session_retires_foreign_pane_authority_without_register() {
     );
     assert_eq!(restored.data["snapshot"]["identity"]["role"], "worker");
     let state = old_runtime.state.lock().unwrap();
-    assert!(!state.workers.contains_key(&old_identity.worker_id));
+    assert!(state.workers.contains_key(&old_identity.worker_id));
     let route_scope = RouteScope {
         app_scope_id: context.app_scope_id.clone(),
         project_scope_id: old_identity.project_scope.clone().unwrap(),
     };
-    assert!(current_master_grant(&state, Some(&route_scope)).is_none());
+    assert!(current_master_grant(&state, Some(&route_scope)).is_some());
     let old_binding = state
         .global
         .lookup_binding_for(&route_scope, &old_identity.runtime.unwrap().binding_id)
         .unwrap();
-    assert!(old_binding.tmux_endpoint.is_none());
+    assert!(old_binding.tmux_endpoint.is_some());
     drop(state);
     let after = std::fs::read_to_string(&new_runtime.journal_path).unwrap();
     assert_eq!(
@@ -837,6 +843,8 @@ fn minimal_role_intent_is_an_explicit_authority_approval() {
     let mut other = facts.tmux.clone().unwrap();
     other.endpoint.pane_id = "%4".into();
     other.endpoint.tmux_session_id = "$4".into();
+    other.endpoint.codex_session_id = Some("unrelated-agent-session".into());
+    other.endpoint.codex_thread_id = Some("unrelated-agent-thread".into());
     // The unrelated master is durable prior state, so seed a committed owner
     // instead of driving an initial Register: a tmux candidate can only finish
     // registration through a live participant return, which this fixture does
@@ -934,6 +942,7 @@ fn minimal_role_intent_is_an_explicit_authority_approval() {
         };
         if role == "master" {
             request.grant_approval = request.approval.take();
+            request.grant_approval.as_mut().unwrap()["replace_confirmed"] = json!(true);
         }
         let (_, result) = manager.identity_context(context.clone(), request.clone());
         assert!(result.ok, "{result:?}");
@@ -968,7 +977,7 @@ fn minimal_role_intent_is_an_explicit_authority_approval() {
         );
     }
     let before = std::fs::read(&runtime.journal_path).unwrap();
-    // A real read-only descriptor makes the authority owner append fail.
+    // A real read-only descriptor makes the atomic name/authority append fail.
     *runtime.journal.lock().unwrap() = std::fs::File::open(&runtime.journal_path).unwrap();
     let (_, failed) = manager.identity_context(context.clone(), IdentityContextRequest {
         operation_id: "ctxop-role-write-failure".into(), invocation: "approved_recovery".into(), action: "context".into(), facts,
@@ -977,10 +986,10 @@ fn minimal_role_intent_is_an_explicit_authority_approval() {
     });
     assert!(!failed.ok, "{failed:?}");
     assert!(
-        failed.data["result"]["owner_readback"]["master_grant"]["observed"]
+        failed.data["result"]["owner_readback"]["name_resolution"]["error"]
             .as_str()
             .unwrap()
-            .contains("MASTER_DURABILITY_FAILED"),
+            .contains("NAME_DURABILITY_FAILED"),
         "{failed:?}"
     );
     assert!(!failed.data["result"]["committed_phases"]
@@ -1002,6 +1011,7 @@ fn facts_from_saved_pane(saved: &identity::Identity) -> IdentityFacts {
         .as_ref()
         .unwrap();
     IdentityFacts {
+        session_id: saved.transport.as_ref().unwrap().session_id.clone(),
         tmux_anchor: Some(crate::proto::TmuxPaneAnchor {
             socket_path: endpoint.socket_path.clone(),
             pane_id: endpoint.pane_id.clone(),
@@ -1033,8 +1043,8 @@ fn context_success_receipts_use_the_registered_project_owner() {
             transport.kind = kind;
             transport.endpoint = Some(endpoint.socket_path.clone());
             transport.namespace = Some(endpoint.tmux_session_id.clone());
-            transport.session_id = None;
-            transport.thread_id = None;
+            transport.session_id = endpoint.codex_session_id.clone();
+            transport.thread_id = endpoint.codex_thread_id.clone();
             transport.tmux_endpoint = Some(endpoint);
         }
         let prepared = runtime
@@ -1149,8 +1159,8 @@ fn tmux_anchor() -> TmuxCandidate {
             tmux_session_id: "$7".into(),
             pane_id: "%3".into(),
             pane_pid: 99,
-            codex_session_id: None,
-            codex_thread_id: None,
+            codex_session_id: Some("saved-agent-session".into()),
+            codex_thread_id: Some("saved-agent-thread".into()),
         },
         cwd: "/tmp/project".into(),
     }
@@ -1168,10 +1178,15 @@ fn dsh_anchor_alone_requires_no_appserver_fields() {
 
 /// A tmux anchor with no observed endpoint is complete on its own.
 #[test]
-fn tmux_anchor_alone_requires_no_appserver_fields() {
+fn tmux_placement_requires_agent_session_but_no_appserver_fields() {
     let facts = IdentityFacts {
         tmux: Some(tmux_anchor()),
         ..IdentityFacts::default()
+    };
+    assert_eq!(required_fields(&facts), vec!["session_id"]);
+    let facts = IdentityFacts {
+        session_id: Some("current-agent".into()),
+        ..facts
     };
     assert!(required_fields(&facts).is_empty());
 }
@@ -1184,11 +1199,9 @@ fn an_observed_endpoint_still_requires_the_four_appserver_fields() {
         endpoint: Some("unix:///tmp/appserver.sock".into()),
         ..IdentityFacts::default()
     };
-    assert_eq!(
-        required_fields(&facts),
-        vec!["session_id", "thread_id", "namespace"]
-    );
+    assert_eq!(required_fields(&facts), vec!["thread_id", "namespace"]);
     let facts = IdentityFacts {
+        session_id: Some("current-agent".into()),
         tmux: Some(tmux_anchor()),
         endpoint: Some("unix:///tmp/appserver.sock".into()),
         ..IdentityFacts::default()
@@ -1279,6 +1292,7 @@ fn s23_dispatch_preserves_typed_identity_operation() {
         invocation: "automatic".into(),
         action: "context".into(),
         facts: IdentityFacts {
+            session_id: Some("dispatch-agent-session".into()),
             tmux: Some(TmuxCandidate {
                 endpoint: crate::proto::TmuxEndpoint {
                     socket_path: "/tmp/tmux-ctxop.sock".into(),

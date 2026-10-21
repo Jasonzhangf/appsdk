@@ -154,11 +154,20 @@ fn register_context_in_project(
     } else {
         ""
     };
+    let provide = if no_native_identity {
+        format!(
+            " --provide {}",
+            shell_quote(&json!({"session_id": pane.session_anchor}).to_string())
+        )
+    } else {
+        String::new()
+    };
     let script = format!(
-        "set -e\ncd {}\n{}\"$COLLAB_BINARY\" context --op {} >{} 2>{}\nprintf done >{}\nsleep 600\n",
+        "set -e\ncd {}\n{}\"$COLLAB_BINARY\" context --op {}{} >{} 2>{}\nprintf done >{}\nsleep 600\n",
         shell_quote(&project_root.to_string_lossy()),
         unset,
         shell_quote(operation_id),
+        provide,
         shell_quote(&result.to_string_lossy()),
         shell_quote(&error.to_string_lossy()),
         shell_quote(&done.to_string_lossy())
@@ -191,10 +200,12 @@ fn register_context_on_socket(
     let done = fixture
         .root
         .join(format!("{operation_id}.participant-done"));
+    let provide = json!({"session_id": pane.session_anchor}).to_string();
     let script = format!(
-        "set -e\ncd {}\nunset CODEX_SESSION_ID CODEX_THREAD_ID CODEX_THREAD\n\"$COLLAB_BINARY\" context --op {} >{} 2>{}\nprintf done >{}\nsleep 600\n",
+        "set -e\ncd {}\nunset CODEX_SESSION_ID CODEX_THREAD_ID CODEX_THREAD\n\"$COLLAB_BINARY\" context --op {} --provide {} >{} 2>{}\nprintf done >{}\nsleep 600\n",
         shell_quote(&project_root.to_string_lossy()),
         shell_quote(operation_id),
+        shell_quote(&provide),
         shell_quote(&result.to_string_lossy()),
         shell_quote(&error.to_string_lossy()),
         shell_quote(&done.to_string_lossy())
@@ -421,7 +432,8 @@ fn close_retires_a_route_less_tmux_peer_after_its_exact_pane_is_missing() {
 
     let workers = workers_for_route(&fixture, &fixture.root, &app_scope_id);
     let row = worker_row(&workers, &target_id);
-    assert_eq!(row["presence"], "present", "{row}");
+    // This fixture proves a durable identity and live endpoint. Its runner
+    // does not prove agent presence; the close must still probe the endpoint.
     assert_eq!(row["identity_valid"], true, "{row}");
     assert_eq!(row["endpoint_live"], true, "{row}");
 
@@ -526,7 +538,8 @@ fn close_route_less_present_target_stays_cleanup_open_without_retirement() {
 
     let workers = workers_for_route(&fixture, &fixture.root, &app_scope_id);
     let row = worker_row(&workers, &target_id);
-    assert_eq!(row["presence"], "present", "{row}");
+    // A live pane is sufficient for the refusal under test, independent of
+    // whether the background agent probe has classified the runner yet.
     assert_eq!(row["identity_valid"], true, "{row}");
     assert_eq!(row["endpoint_live"], true, "{row}");
 

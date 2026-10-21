@@ -14,6 +14,10 @@
       "path": "docs/dagpipe/collab-context.graph.json"
     },
     {
+      "id": "appsdk-collab-name-ownership",
+      "path": "docs/dagpipe/collab-name-ownership.graph.json"
+    },
+    {
       "id": "appsdk-collab-subagent-command",
       "path": "docs/dagpipe/collab-subagent-command.graph.json"
     },
@@ -52,6 +56,10 @@
     {
       "id": "appsdk-collab-dashboard-operation",
       "path": "docs/dagpipe/collab-dashboard.graph.json"
+    },
+    {
+      "id": "appsdk-collab-board-assignment-lifecycle",
+      "path": "docs/dagpipe/collab-board-assignment-lifecycle.graph.json"
     },
     {
       "id": "appsdk-collab-control-plane-reset",

@@ -1469,7 +1469,7 @@ fn handle_task_deliver_with_intent(
         "status": task.status,
         "evidence": evidence,
         "worktree": worktree,
-        "delivery_kind": delivery_kind,
+        "delivery_kind": delivery_kind.as_str(),
         "notification": "none",
         "next_action": task.next_step,
         "identity": {"worker_id": worker.id, "kind": "peer"},

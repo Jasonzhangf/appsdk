@@ -40,6 +40,10 @@ task-scoped subscriptions by ID.
 - An ordinary peer owns patrol only for its accepted goal and resources. It may
   use a finite owner-scoped generic `deadline` subscription for that patrol
   when a concrete later check is needed. The direct-message lease is separate.
+- Review acceptance wakes the current master only for the applicable code
+  delivery merge obligation. Explicit read-only delivery (`--no-candidate`)
+  reaches `no_merge_required`, creates no pending merge, and must not create a
+  merge wake.
 - Legacy managed records create no new patrol subscription, deadline schedule,
   dispatch, or execution authority.
 - Dirty, active, shared, or unknown resources are PROTECTED_HOLD. Preserve and

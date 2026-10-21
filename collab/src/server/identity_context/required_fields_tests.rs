@@ -395,6 +395,264 @@ fn same_session_endpoint_move_reuses_identity_without_register() {
 }
 
 #[test]
+fn context_binding_public_context_restore_reconciles_worker_projection() {
+    let (host, runtime, manager, host_root, root, facts, saved) = persisted_context_fixture();
+    let expected_endpoint = facts.tmux.as_ref().unwrap().endpoint.clone();
+    let authoritative = manager
+        .current_anchor_binding(&recovery_context(&root), &facts)
+        .unwrap()
+        .unwrap();
+    let expected_generation = authoritative.endpoint_generation;
+    let host_journal_before = std::fs::read(&host.journal_path).unwrap();
+    runtime
+        .commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+            binding: authoritative.clone(),
+        }])
+        .unwrap();
+
+    let mut stale_worker = runtime.state.lock().unwrap().workers[&saved.worker_id].clone();
+    let stale_transport = stale_worker.transport.as_mut().unwrap();
+    stale_transport.endpoint = Some("/tmp/stale-worker.sock".into());
+    let stale_endpoint = stale_transport.tmux_endpoint.as_mut().unwrap();
+    stale_endpoint.socket_path = "/tmp/stale-worker.sock".into();
+    stale_endpoint.pane_id = "%99".into();
+    stale_endpoint.pane_pid += 1;
+    runtime
+        .try_commit(&[Event::Registered {
+            worker: stale_worker,
+        }])
+        .unwrap();
+
+    let (_, restored) = manager.dispatch_sync(
+        Some(recovery_context(&root)),
+        Req::IdentityContext {
+            facts: facts.clone(),
+            identity_context: None,
+        },
+    );
+    assert!(restored.ok, "{restored:?}");
+
+    let actual = runtime.state.lock().unwrap().workers[&saved.worker_id]
+        .transport
+        .clone()
+        .expect("selected worker transport");
+    assert_eq!(
+        actual.tmux_endpoint.as_ref(),
+        Some(&expected_endpoint),
+        "ordinary context must reconcile the worker projection to the authoritative project binding"
+    );
+    assert_eq!(
+        actual.endpoint.as_deref(),
+        Some(expected_endpoint.socket_path.as_str())
+    );
+    assert_eq!(
+        manager
+            .current_anchor_binding(&recovery_context(&root), &facts)
+            .unwrap()
+            .unwrap()
+            .endpoint_generation,
+        expected_generation,
+        "repairing the worker projection must not manufacture a new binding generation"
+    );
+    assert_eq!(
+        std::fs::read(&host.journal_path).unwrap(),
+        host_journal_before,
+        "repairing a same-binding worker projection must not rewrite the host route journal"
+    );
+
+    let registered =
+        ProjectContext::for_registered_route(&root, saved.runtime.as_ref().unwrap()).unwrap();
+    let (_, status) = manager.dispatch_sync(
+        Some(registered.clone()),
+        Req::WorkerStatus {
+            worker_id: Some(saved.worker_id.clone()),
+        },
+    );
+    assert!(status.ok, "{status:?}");
+    let owner = status.data["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|worker| worker["id"] == saved.worker_id)
+        .expect("owner status");
+    assert_eq!(owner["identity_valid"], true, "{status:?}");
+    assert_eq!(owner["presence"], "present", "{status:?}");
+
+    let (_, published) = manager.dispatch_sync(
+        Some(registered.clone()),
+        Req::Board {
+            worker_id: saved.worker_id.clone(),
+            token: saved.token.clone(),
+            command: crate::board::BoardCommand::Publish {
+                id: "context-binding-atomic".into(),
+                title: "context binding atomic".into(),
+                description: "admit work through the repaired binding".into(),
+                delivery_condition: "context, status, and board use one binding".into(),
+                test_condition: "the public in-process regression passes".into(),
+                priority: "p1".into(),
+            },
+        },
+    );
+    assert!(published.ok, "{published:?}");
+    let (_, claimed) = manager.dispatch_sync(
+        Some(registered),
+        Req::Board {
+            worker_id: saved.worker_id.clone(),
+            token: saved.token.clone(),
+            command: crate::board::BoardCommand::Claim {
+                id: "context-binding-atomic".into(),
+                expected_revision: 1,
+            },
+        },
+    );
+    assert!(claimed.ok, "{claimed:?}");
+
+    drop(manager);
+    drop(runtime);
+    drop(host);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(host_root).unwrap();
+}
+
+#[test]
+fn context_binding_public_stale_runtime_rejects_then_context_repair_succeeds() {
+    let (host, runtime, manager, host_root, root, facts, saved) = persisted_context_fixture();
+    let retained_context =
+        ProjectContext::for_registered_route(&root, saved.runtime.as_ref().unwrap()).unwrap();
+    let retained_generation = retained_context
+        .runtime_context
+        .as_ref()
+        .unwrap()
+        .endpoint_generation;
+    let authoritative = manager
+        .current_anchor_binding(&recovery_context(&root), &facts)
+        .unwrap()
+        .unwrap();
+
+    let mut moved_facts = facts.clone();
+    let moved_endpoint = moved_facts.tmux.as_mut().unwrap();
+    moved_endpoint.endpoint.pane_id = "%4".into();
+    moved_endpoint.endpoint.pane_pid += 1;
+    let moved_candidate = moved_facts.tmux.as_ref().unwrap();
+    let mut advanced_identity = saved.clone();
+    let advanced = manager
+        .refresh_session_endpoint(
+            &runtime,
+            &authoritative,
+            moved_candidate,
+            &mut advanced_identity,
+            &Scope { root: root.clone() },
+        )
+        .unwrap();
+    assert_eq!(
+        advanced.endpoint_generation,
+        retained_generation + 1,
+        "the supported pane move must advance the authoritative generation"
+    );
+
+    let subscription_subject = "stale-context-repair";
+    let stale_request = Req::NotificationSubscribe {
+        worker_id: saved.worker_id.clone(),
+        token: saved.token.clone(),
+        event: "deadline".into(),
+        subject: Some(subscription_subject.into()),
+        trigger_ms: Some(now_ms() + 60_000),
+        trigger_times_ms: Vec::new(),
+        interval_ms: None,
+        repeat_count: 1,
+        ttl_seconds: 120,
+    };
+    let before_tasks = serde_json::to_value(&runtime.state.lock().unwrap().tasks).unwrap();
+    let before_worktrees =
+        serde_json::to_value(&runtime.state.lock().unwrap().worktree_bindings).unwrap();
+    let before_workers = serde_json::to_value(&runtime.state.lock().unwrap().workers).unwrap();
+    let before_subscriptions =
+        serde_json::to_value(&runtime.state.lock().unwrap().notification_subscriptions).unwrap();
+    let before_runtime_journal = std::fs::read(&runtime.journal_path).unwrap();
+    let before_host_journal = std::fs::read(&host.journal_path).unwrap();
+
+    let (_, rejected) = manager.dispatch_sync(Some(retained_context), stale_request.clone());
+    assert!(!rejected.ok, "{rejected:?}");
+    let error = rejected.error.as_deref().unwrap_or_default();
+    assert!(
+        error.starts_with("SESSION_THREAD_BINDING_MISMATCH:"),
+        "stale generation must be a typed rejection: {error}"
+    );
+    assert!(
+        error.contains(&format!("expected {}", retained_generation + 1))
+            && error.contains(&format!("observed {retained_generation}")),
+        "typed rejection must identify expected and observed generations: {error}"
+    );
+    assert!(
+        error.contains("collab context"),
+        "typed rejection must direct repair through collab context: {error}"
+    );
+    assert_eq!(
+        serde_json::to_value(&runtime.state.lock().unwrap().tasks).unwrap(),
+        before_tasks,
+        "stale request must not mutate task ownership"
+    );
+    assert_eq!(
+        serde_json::to_value(&runtime.state.lock().unwrap().worktree_bindings).unwrap(),
+        before_worktrees,
+        "stale request must not allocate resources"
+    );
+    assert_eq!(
+        serde_json::to_value(&runtime.state.lock().unwrap().workers).unwrap(),
+        before_workers,
+        "stale request must not rewrite identity"
+    );
+    assert_eq!(
+        serde_json::to_value(&runtime.state.lock().unwrap().notification_subscriptions).unwrap(),
+        before_subscriptions,
+        "stale request must not create a subscription"
+    );
+    assert_eq!(
+        std::fs::read(&runtime.journal_path).unwrap(),
+        before_runtime_journal
+    );
+    assert_eq!(
+        std::fs::read(&host.journal_path).unwrap(),
+        before_host_journal
+    );
+
+    let (_, repaired) = manager.dispatch_sync(
+        Some(recovery_context(&root)),
+        Req::IdentityContext {
+            facts: moved_facts,
+            identity_context: None,
+        },
+    );
+    assert!(repaired.ok, "{repaired:?}");
+    let receipt: identity::Identity =
+        serde_json::from_value(repaired.data["identity_receipt"].clone()).unwrap();
+    assert_eq!(
+        receipt.runtime.as_ref().unwrap().endpoint_generation,
+        retained_generation + 1
+    );
+    let repaired_context =
+        ProjectContext::for_registered_route(&root, receipt.runtime.as_ref().unwrap()).unwrap();
+    let (_, accepted) = manager.dispatch_sync(Some(repaired_context), stale_request);
+    assert!(accepted.ok, "{accepted:?}");
+    assert!(
+        runtime
+            .state
+            .lock()
+            .unwrap()
+            .notification_subscriptions
+            .values()
+            .any(|subscription| subscription.subject.as_deref() == Some(subscription_subject)),
+        "the retry with the context-returned binding must succeed"
+    );
+
+    drop(manager);
+    drop(runtime);
+    drop(host);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(host_root).unwrap();
+}
+
+#[test]
 fn current_project_session_retires_foreign_pane_authority_without_register() {
     let (host, old_runtime, manager, host_root, old_root, facts, old_identity) =
         persisted_context_fixture();

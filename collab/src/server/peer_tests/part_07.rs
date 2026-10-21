@@ -726,6 +726,9 @@ fn holder_close_persists_release_only_for_waiter() {
             .ok
         );
     }
+    let worktree = candidate_worktree(&root, "held");
+    git_ok(&worktree, &["commit", "--allow-empty", "-q", "-m", "candidate"]);
+    let candidate = current_head(&worktree);
     assert!(
         handle_task_deliver(
             &server,
@@ -733,7 +736,7 @@ fn holder_close_persists_release_only_for_waiter() {
             "token-holder".into(),
             "held".into(),
             Some("candidate verified".into()),
-            Some("/tmp/holder-worktree".into()),
+            Some(worktree.to_string_lossy().into_owned()),
         )
         .ok
     );
@@ -749,18 +752,19 @@ fn holder_close_persists_release_only_for_waiter() {
         )
         .ok
     );
-    initialize_main(&root);
+    git_ok(&root, &["merge", "--ff-only", &candidate]);
     assert!(
         handle_task_integrated(
             &server,
             "holder".into(),
             "token-holder".into(),
             "held".into(),
-            current_head(&root),
+            candidate,
             "main verified".into(),
         )
         .ok
     );
+    git_ok(&root, &["worktree", "remove", worktree.to_str().unwrap()]);
     assert!(
         handle_task_close(
             &server,

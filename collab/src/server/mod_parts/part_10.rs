@@ -769,7 +769,7 @@ fn validate_cli_register_rebind(
                 crate::identity::validate_binding(&registered_runtime, persisted_runtime).map_err(
                     |error| {
                         format!(
-                            "SESSION_THREAD_BINDING_MISMATCH: persisted identity runtime does not match the registered binding: {error}; preserve the registered binding, obtain the verified host session/thread pair, and explicitly rebind the same identity and runtime; do not edit or infer the binding"
+                            "SESSION_THREAD_BINDING_MISMATCH: persisted identity runtime does not match the registered binding: {error}; preserve the registered binding and use `collab context` as the only repair entry; do not edit or infer the binding"
                         )
                     },
                 )?;
@@ -906,7 +906,7 @@ fn project_route_actor(
         .map_err(|error| Resp::err(format!("RUNTIME_BINDING_REJECTED: {error}")))?;
     crate::identity::validate_binding(&registered, runtime).map_err(|error| {
         Resp::err(format!(
-            "SESSION_THREAD_BINDING_MISMATCH: {error}; preserve the registered binding, obtain the verified host session/thread pair, and explicitly rebind the same identity and runtime; do not edit or infer the binding"
+            "SESSION_THREAD_BINDING_MISMATCH: {error}; preserve the registered binding and use `collab context` as the only repair entry; do not edit or infer the binding"
         ))
     })?;
     Ok(worker)

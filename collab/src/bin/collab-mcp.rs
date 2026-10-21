@@ -121,7 +121,7 @@ fn tools() -> Value {
         ),
         tool(
             "collab_task_deliver",
-            "Deliver a claimed task through the Server. Code delivery requires a resolvable worktree. Set no_candidate=true only for explicit read-only work that has no code candidate.",
+            "Deliver a claimed task through the Server. Code delivery requires --worktree and its exact candidate must resolve before integration. Set no_candidate=true only for explicit read-only work that has no code candidate.",
             json!({"id":{"type":"string"},"evidence":{"type":"string"},"worktree":{"type":"string"},"no_candidate":{"type":"boolean"}}),
             &["id", "evidence"]
         ),
@@ -133,7 +133,7 @@ fn tools() -> Value {
         ),
         tool(
             "collab_task_integrated",
-            "Record exact integration of an accepted task on refs/heads/main and resolve its daemon-owned pending merge. Required before close; surfaced by collab_context, collab status --all pending_merges, appsdk longhorizon show, and master idle wake.",
+            "Code delivery only: record exact integration of an accepted task on refs/heads/main and resolve its applicable daemon-owned pending merge before close. Explicit read-only delivery returns TASK_NO_MERGE_REQUIRED and closes after review plus owned cleanup.",
             json!({"id":{"type":"string"},"commit":{"type":"string"},"evidence":{"type":"string"}}),
             &["id", "commit", "evidence"]
         ),

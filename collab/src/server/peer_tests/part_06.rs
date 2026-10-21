@@ -487,6 +487,9 @@ fn owner_completes_local_lifecycle_without_peer_reports() {
     let (server, root) = test_server();
     register(&server, "peer", "%peer");
     assert!(create_task(&server, "peer", "task", "feature").ok);
+    let worktree = candidate_worktree(&root, "task");
+    git_ok(&worktree, &["commit", "--allow-empty", "-q", "-m", "candidate"]);
+    let candidate = current_head(&worktree);
     assert!(
         handle_task_update(
             &server,
@@ -504,7 +507,7 @@ fn owner_completes_local_lifecycle_without_peer_reports() {
         "token-peer".into(),
         "task".into(),
         Some("tests and candidate commit verified".into()),
-        Some("/tmp/task-worktree".into()),
+        Some(worktree.to_string_lossy().into_owned()),
     );
     assert!(delivered.ok);
     assert_eq!(delivered.data["notification"], "none");
@@ -520,18 +523,19 @@ fn owner_completes_local_lifecycle_without_peer_reports() {
         )
         .ok
     );
-    initialize_main(&root);
+    git_ok(&root, &["merge", "--ff-only", &candidate]);
     assert!(
         handle_task_integrated(
             &server,
             "peer".into(),
             "token-peer".into(),
             "task".into(),
-            current_head(&root),
+            candidate,
             "main verified".into(),
         )
         .ok
     );
+    git_ok(&root, &["worktree", "remove", worktree.to_str().unwrap()]);
     let closed = handle_task_close(
         &server,
         "peer".into(),

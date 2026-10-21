@@ -22,6 +22,13 @@ Before review, prove the affected subset and every changed invariant:
 
 - architecture/resource/function/verification gates;
 - format, unit/state-machine tests, `scripts/build-collab.sh`;
+- explicit `task deliver --no-candidate` reaches reviewed `no_merge_required`,
+  creates no pending merge or merge wake, and can close after owned cleanup;
+- unresolved code delivery stays code, and accepted code cannot integrate or
+  close until the exact delivered candidate is reachable from `refs/heads/main`;
+- stale runtime generations reject with no durable side effects, ordinary
+  `collab context` repairs the worker/binding projection, and context, worker
+  status, and board admission then agree;
 - isolated two-peer AppServer blackbox in a disposable project: sender persists
   a message, native RPC starts/steers/queues the recipient thread, receiver runs
   `collab recv`, and sender observes the durable consumption receipt. Never

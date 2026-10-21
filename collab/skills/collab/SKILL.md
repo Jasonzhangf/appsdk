@@ -1038,20 +1038,31 @@ its own worktree and file scope. Independent peers may decline an invite to
 protect their current task. Wait for evidence summaries, verify them, then
 integrate. Chat tone is not completion.
 
-Delivery and review are not lifecycle endpoints. `task review --accept`
-registers a daemon-owned pending merge and notifies the current master; the
-obligation is durable, appears in `collab context`, `collab status --all`
-(`pending_merges`), `appsdk longhorizon show` (待合并), and master idle wake
-text, and `task close` fails with `TASK_MERGE_PENDING` until the master records
-`collab task integrated` (or, if the peer performed the verified merge itself under the conditions in the next section, that same recording step still applies). Never rely on remembering a merge from a message.
-After a delivered candidate, either the peer merges and pushes the verified candidate under the next section’s conditions, or the current master drives review, integration,
-cleanup, task close, and then the next ready assignment. Do not leave a peer
-idle merely because its last task returned `delivered`, `merged`, or a review
-verdict. Route the next non-overlapping P0/P1 work peer-first. Reuse an
-autonomous peer for another long-horizon goal. Start a master-owned independent
-GCM worker only when every eligible peer is busy. Closing or force-closing a
-stale task is a scheduling decision that must preserve evidence, not a reason
-to stop dispatching.
+Delivery and review are not lifecycle endpoints. `task deliver --no-candidate`
+explicitly classifies read-only work with no code candidate. When review
+accepts it, the typed disposition is `no_merge_required`; no pending merge or
+merge wake is created, and the owner can close normally after owned cleanup.
+`task integrated` is not applicable to this delivery kind.
+
+For code delivery, review acceptance creates the applicable daemon-owned
+pending merge and notifies the current master. The obligation is durable and
+appears in `collab context`, `collab status --all` (`pending_merges`),
+`appsdk longhorizon show` (待合并), and master idle wake text. The exact
+delivered candidate must be reachable from `refs/heads/main`; `task close`
+fails with `TASK_MERGE_PENDING` while the applicable master obligation remains.
+Never infer read-only work from a missing candidate. Never rely on remembering
+a merge from a message.
+
+After delivery, either the peer merges and pushes the verified code candidate
+under the next section's conditions, or the current master drives review,
+applicable integration, cleanup, task close, and then the next ready
+assignment. A reviewed read-only delivery proceeds directly through cleanup
+and normal close. Do not leave a peer idle merely because its last task
+returned `delivered`, `merged`, or a review verdict. Route the next
+non-overlapping P0/P1 work peer-first. Reuse an autonomous peer for another
+long-horizon goal. Start a master-owned independent GCM worker only when every
+eligible peer is busy. Closing or force-closing a stale task is a scheduling
+decision that must preserve evidence, not a reason to stop dispatching.
 
 ### Verified merge and resource cleanup DAG（单源单汇）
 
@@ -1181,7 +1192,7 @@ projections that used to require separate calls, so no agent flow needs to run
 | `master` | `collab master status` | current master authority projection (holder, scope, approval) and `master_wake`; transport liveness is a separate fact |
 | `peers`, `peer_count` | `collab who` | every registered peer with role and presence |
 | `summary`, `master_wake`, `subagents` | `collab status --all` | worker/message/task/subagent counts and the scheduling state |
-| `pending_merges` | `collab status --all` | durable merge obligations |
+| `pending_merges` | `collab status --all` | applicable durable code-delivery merge obligations; explicit read-only delivery has none |
 | `env` | `env \| rg '(COLLAB\|APPSDK\|CODEX\|HOME\|USER)'` | the identity-relevant variables of this agent's own process; credential-shaped names (`*TOKEN*`, `*KEY*`, `*SECRET*`, `*PASSWORD*`, `*CREDENTIAL*`) are dropped, so `CODEX_API_KEY` never appears |
 | `operations`, `next_actions` | — | the current role's required actions |
 | `requires_identity_update` | — | present only when the agent must repair its identity; see below |
@@ -1193,6 +1204,7 @@ projections that used to require separate calls, so no agent flow needs to run
 | Master authority must move to this peer | `collab master promote --approval "<user text>"` | promote without explicit user approval |
 | Master authority must be cleared for this project scope | `collab master clear --approval "<user text>"` | clear without explicit user approval; or expect clear to delete tasks, messages, peers, or bindings |
 | Thread/session changed, or after daemon restart | `collab context` (daemon reconciles identity in place) | manual identity or daemon lifecycle commands |
+| Worker status, board admission, or a mutation reports a stale binding generation or `SESSION_THREAD_BINDING_MISMATCH` | preserve the registered binding and run `collab context` as the only repair entry | manually rebind, edit routes or journals, or infer a binding |
 | Need peer list, master state, scheduling state, or env | read them from the single `collab context` snapshot | call `collab who`, `collab status --all`, `collab master status`, or grep the environment as a separate step |
 | `requires_identity_update` is present | read `required_fields` and `exact_error`; when the returned action is the factual supplement, run that one action with only the requested `session_id`, `thread_id`, `endpoint`, or `namespace` from their real source | select or guess a worker; run an identity selection or recovery command, or a status/route/init hunt; set an identity override or approval supplement |
 | `collab context` exits non-zero with `COLLAB_CONTEXT_UNRESOLVED` | preserve the error; failed initial registration continues independently; existing registered participants report the affected coordination without clearing owned tasks/claims | automatically retry from another cwd; edit routes/token state, copy identity, reset the project |
@@ -1264,12 +1276,22 @@ through the existing authority owner.
 
 `context_request` 是唯一入口，`state_snapshot` 是唯一成功出口，中间节点按
 DAGpipe 顺序执行：解析当前 cwd 项目 → 连接已有 daemon → 检查/创建基线 → daemon 身份门
-→ 环境投影 → 输出快照。CLI 自动观察可用事实；daemon 身份门负责选择、创建、
-恢复、更新身份，持久化 credential/binding/lease，并返回完整快照。缺失事实是本次
-调用的终态：`registered=false`、`identity=null`，`requires_identity_update`
-给出精确 `required_fields`、`reason`、`action` 和 `exact_error`。Agent 只按
-`required_fields` 使用一次 `collab context --provide` 补充真实事实。
-首次注册不等待 challenge。根解析失败和显式冲突/错误保持原错，不伪装为成功快照：
+→ binding convergence → 环境投影 → 输出快照。CLI 自动观察可用事实；daemon
+身份门负责选择、创建、恢复、更新身份，持久化 credential/binding/lease。
+Binding convergence makes context completion, worker status, and board admission
+read one authoritative project/app/agent binding and endpoint generation. Only
+context repairs; status and board admission are read-only consumers. Missing,
+ambiguous, stale, or principal-mismatched bindings return a typed
+`SESSION_THREAD_BINDING_MISMATCH` with known expected/observed generations and
+`collab context` as the only repair entry.
+
+Missing facts are the terminal of this invocation: `registered=false`,
+`identity=null`, and `requires_identity_update` gives exact `required_fields`,
+`reason`, `action`, and `exact_error`. The agent uses one
+`collab context --provide` only for the requested real facts. Initial
+registration does not wait for challenge. Root failures and explicit
+conflicts preserve the original error and do not masquerade as a successful
+snapshot:
 
 | 状态/终态 | 含义 | Agent 动作 |
 | --- | --- | --- |

@@ -837,10 +837,11 @@ collab task register <id> --feature <feature-id> --worktree <path> \
   --branch <branch> --base-commit <sha> --priority p2
 collab task wait <id> --for <blocking-task>
 collab task deliver <id> --evidence "commit=<sha>; gates=pass" --worktree <path>
+collab task deliver <id> --evidence "read-only evidence" --no-candidate
 collab task block <id> --next "blocked: <evidence and next condition>"
 collab task review <id> --accept --evidence "review gates=pass"
 collab task integrated <id> --commit <main-sha> --evidence "main gates=pass"
-collab task close <id>            # owner; verifies merged/clean, releases claim
+collab task close <id>            # owner; verifies applicable integration/read-only review and clean state
 collab task close <id> --force --reason "..."  # master/approved fallback close
 ```
 

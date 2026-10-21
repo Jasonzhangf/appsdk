@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-context",
-  "version": "0.12.0",
-  "description": "一次 context 请求到一次结果的 SESE 流程。当前 cwd 及既有 worktree 映射确定项目；require_daemon 只观察既有服务，不启动、重启 daemon 或 tmux。Collab 持久化真源统一为 host state root（生产默认 ~/.collab），项目 .agent-collab 仅可作发现标记；迁移由 daemon 的既有 route、materialization 和 writer owner 完成，不保留双写。identity_gate 先由 daemon 观察调用进程所属的当前 session/pane，再按项目与 tmux session ID 选择 peer；pane 是投递位置，socket 路径、server PID、旧 native thread 及历史退役 route 均不得选择或否决身份。CLI 不从 TMUX 环境变量注入 socket 路径；通信 owner 从自己的端点记录与当前 tmux 观察解析物理地址。缺基础观察能力时明确返回能力缺口，不要求 agent 猜地址。持久身份复用 worker/token，当前 placement 经 binding、transport、route 和 credential owner 一次对齐并退休旧投递位置；保留任务、消息和订阅。当前授权覆盖历史 pane 绑定，不保护旧身份。无 master 默认 peer；另有 master 时 peer 仍可通信，授权恢复 master 时直接替换，当前 master 不重复批准。非 tmux 保留既有 native 通道，不增加跨 transport fallback。operation journal 保持既有幂等与取消安全边界；query 只读。真实存储、迁移、能力或 I/O 失败显式隔离到所属项目；不增加身份注册表、审批层、socket 身份或维护入口。",
+  "version": "0.13.0",
+  "description": "一次 context 请求到一次权威结果的 SESE 流程。当前 cwd 及既有 worktree 映射确定项目；require_daemon 只观察既有服务，不启动、重启 daemon 或 tmux。Collab 持久化真源统一为 host state root（生产默认 ~/.collab），项目 .agent-collab 仅可作发现标记；迁移由 daemon 的既有 route、materialization 和 writer owner 完成，不保留双写。identity_gate 先由 daemon 观察调用进程所属的当前 session/pane，再按项目与 tmux session ID 选择 peer；pane 是投递位置，socket 路径、server PID、旧 native thread 及历史退役 route 均不得选择或否决身份。CLI 不从 TMUX 环境变量注入 socket 路径；通信 owner 从自己的端点记录与当前 tmux 观察解析物理地址。缺基础观察能力时明确返回能力缺口，不要求 agent 猜地址。持久身份复用 worker/token，当前 placement 经 binding、transport、route 和 credential owner 一次对齐并退休旧投递位置；保留任务、消息和订阅。binding_convergence 必须让 context 完成、worker status 与 board route admission 读取同一项目/app/agent binding 和 endpoint generation；仅 context 可执行恢复，status 与 board 只读并返回带 typed code、已知 generation 和 `collab context` 修复指令的诊断。endpoint 活跃度与持久身份有效性分离。当前授权覆盖历史 pane 绑定，不保护旧身份。无 master 默认 peer；另有 master 时 peer 仍可通信，授权恢复 master 时直接替换，当前 master 不重复批准。非 tmux 保留既有 native 通道，不增加跨 transport fallback。operation journal 保持既有幂等与取消安全边界；query 只读。真实存储、迁移、能力或 I/O 失败显式隔离到所属项目；不增加身份注册表、审批层、socket 身份或维护入口。",
   "inputs": [{"id": "context_request", "schema": "Object"}],
   "nodes": [
     {
@@ -30,8 +30,15 @@
       "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"
     },
     {
+      "id": "binding_convergence", "operator": "appsdk.collab_context.binding_convergence", "operator_version": "1",
+      "description": "Resolve the one project/app/agent runtime binding used by context completion, worker status, and board route admission. Context owns repair and publication reconciliation. Worker status and board admission only read this result. Missing, ambiguous, stale, or principal-mismatched bindings return a typed diagnosis code with known expected/observed generations and an explicit `collab context` repair instruction. Endpoint liveness stays separate from durable identity validity.",
+      "inputs": ["identity_operation_result"], "output": {"id": "authoritative_binding", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"
+    },
+    {
       "id": "env_view", "operator": "appsdk.collab_context.env_view", "operator_version": "2",
-      "inputs": ["identity_operation_result"], "output": {"id": "env_projection", "schema": "Object"},
+      "inputs": ["authoritative_binding"], "output": {"id": "env_projection", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
       "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"
     },
@@ -46,7 +53,8 @@
     {"from": "resolve_context_root", "to": "require_daemon", "arc_id": "resolved_scope"},
     {"from": "require_daemon", "to": "ensure_baseline", "arc_id": "daemon_ready"},
     {"from": "ensure_baseline", "to": "identity_gate", "arc_id": "baseline_ready"},
-    {"from": "identity_gate", "to": "env_view", "arc_id": "identity_operation_result"},
+    {"from": "identity_gate", "to": "binding_convergence", "arc_id": "identity_operation_result"},
+    {"from": "binding_convergence", "to": "env_view", "arc_id": "authoritative_binding"},
     {"from": "env_view", "to": "输出含显示名的权威快照", "arc_id": "env_projection"}
   ],
   "outputs": ["state_snapshot"]

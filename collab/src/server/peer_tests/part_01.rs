@@ -1086,7 +1086,8 @@ fn pending_merge_with_unbound_candidate_fails_closed_on_integrated() {
         assert_eq!(state.tasks["task"].status, "accepted");
     }
 
-    // An unrelated main-reachable SHA must not satisfy an unbound obligation.
+    // A main-reachable SHA must not satisfy an unbound code delivery; the
+    // unresolved candidate is the stronger typed failure, never read-only.
     let head = current_head(&root);
     let integrated = handle_task_integrated(
         &server,
@@ -1097,7 +1098,10 @@ fn pending_merge_with_unbound_candidate_fails_closed_on_integrated() {
         "unrelated main sha".into(),
     );
     assert!(!integrated.ok, "{integrated:?}");
-    assert_eq!(integrated.error.as_deref(), Some("TASK_MERGE_PENDING"));
+    assert_eq!(
+        integrated.error.as_deref(),
+        Some("TASK_DELIVERY_CANDIDATE_UNRESOLVED")
+    );
     assert!(
         integrated.data["candidate_commit"].is_null(),
         "the fail-closed response must expose the unbound candidate"

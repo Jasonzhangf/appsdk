@@ -18,12 +18,14 @@ latest main
      <project-main>/playground/<short-slug> remains valid during transition)
   -> register owned task
   -> implement and verify
-  -> candidate commit
-  -> sync latest main and verify exact integration candidate
-  -> acquire short integration/resource lease
-  -> integrate, verify main, push exact main HEAD
+  -> task deliver {code candidate | --no-candidate read-only evidence}
   -> task review --accept
-  -> task integrated --commit <main-sha> --evidence <main-gates>
+code -> sync latest main and verify exact delivered candidate
+     -> acquire short integration/resource lease
+     -> integrate, verify main, push main
+     -> task integrated --commit <main-sha> --evidence <main-gates>
+read-only -> typed no_merge_required
+either -> owned-resource cleanup
   -> cleanup_pending
   -> cleanup_verified receipt
   -> closed
@@ -33,6 +35,7 @@ States:
 
 ```text
 working -> verifying -> reviewed -> delivered -> accepted -> merged -> closed
+delivered(read-only) -> accepted -> cleanup_pending -> closed
 blocked -> waiting -> blocked|working
 delivered -> rework -> working
 accepted -> rework -> working
@@ -52,6 +55,8 @@ collab task update <task-id> --status verifying --next "<next evidence gate>"
 collab task update <task-id> --status reviewed
 collab task deliver <task-id> --evidence "commit=<sha>; gates=pass" \
   --worktree <configured-or-legacy-worktree>
+collab task deliver <task-id> --evidence "read-only evidence; gates=pass" \
+  --no-candidate
 collab task review <task-id> --accept --evidence "review gates=pass"
 collab task integrated <task-id> --commit <main-sha> --evidence "main gates=pass"
 collab task close <task-id>
@@ -98,37 +103,53 @@ lease. A specific owner-scoped lease can be cancelled with
 - Cancellation cannot bypass cleanup. Dirty/missing/unproven paths are never
   force-removed. Terminal state without a receipt is an audit failure.
 
-Delivery and integration are separate durable milestones. `task deliver`
-records candidate evidence; the task owner or current master uses
-`task review --accept|--rework` to record the review decision; `task integrated`
-accepts only the exact current `refs/heads/main` commit and records mainline
-evidence. Direct status updates cannot bypass review or integration for current
+Delivery, review, and applicable integration are separate durable milestones.
+`task deliver` records evidence and an explicit delivery kind. Code delivery
+uses `--worktree`; the exact delivered candidate must resolve before
+integration. Explicit read-only work uses `--no-candidate`; a missing or
+unresolved code candidate never becomes read-only by inference. The task owner
+or current master uses `task review --accept|--rework` to record the review
+decision. Accepted read-only work reaches the typed `no_merge_required`
+disposition and has no integration milestone. For code delivery, `task
+integrated` accepts a commit reachable from `refs/heads/main` and records
+mainline evidence, but the exact delivered candidate must also be reachable
+there. Direct status updates cannot bypass review or integration for current
 lifecycle records. A persisted pre-review `accepted` task with no lifecycle
 evidence retains an owner-local `accepted→merged` compatibility path; it
 records task state only and does not create review or integration evidence.
 
-`task review --accept` also registers a daemon-owned pending merge keyed by
-task id and notifies the current master. That registration, not a chat message,
-is the single source for the merge obligation: the master stays busy, changes
-session, or restarts, and the obligation survives. While it exists:
+For accepted code delivery, `task review --accept` also registers the
+applicable daemon-owned pending merge keyed by task id and notifies the current
+master. That registration, not a chat message, is the single source for the
+merge obligation: the master stays busy, changes session, or restarts, and the
+obligation survives. Explicit read-only acceptance creates no pending merge and
+no merge wake. While an applicable pending merge exists:
 
 - `collab context` for the current master lists a `merge_pending` operation.
 - `appsdk longhorizon show` prints a `待合并` section and includes
   `pending_merges` in `--json`.
 - master idle wake text and the idle batch body include `pending_merges`.
 
-The master resolves it only by moving the accepted candidate onto
+The master resolves an applicable code obligation only by moving the accepted candidate onto
 `refs/heads/main` and recording `collab task integrated --commit <sha>
 --evidence "<main gates>"`. That resolves the pending merge in the same
 transaction. `accepted -> rework`, cancellation, or an authorized force close
-also resolves it. `collab task close` on a still-pending merge fails with
+also resolves it. `collab task close` on a still-pending code merge fails with
 `TASK_MERGE_PENDING`; the master cannot lose the merge by staying busy, and the
 task cannot close before the merge is recorded.
 
 While the pending merge exists, only the current master may record `task
 integrated`; an owner that tries to self-integrate gets `TASK_MERGE_PENDING`.
 The obligation is registered only when a current master exists, so a master-less
-project keeps the plain owner self-integration lifecycle.
+project keeps the plain owner self-integration lifecycle while still requiring
+the exact delivered candidate to be reachable from main.
+
+`task integrated` on explicit read-only work returns
+`TASK_NO_MERGE_REQUIRED`. A code delivery whose candidate cannot be resolved
+returns `TASK_DELIVERY_CANDIDATE_UNRESOLVED` at integration or normal close;
+rework and redeliver it with the correct code intent. Once review and
+applicable integration are complete, the owner removes only its clean owned
+worktree, records the cleanup receipt, and closes normally.
 
 ## Task liveness and escalation
 
@@ -184,4 +205,8 @@ restores the current session identity and usable binding, route and lease
 together. Historical pane owners, old tasks, journals and project socket
 records do not gate restoration. User authorization directly replaces the
 project master. Agents never start, stop or restart the service.
+If worker status, board admission, or a mutation reports a stale binding
+generation or `SESSION_THREAD_BINDING_MISMATCH`, preserve the registered
+binding and run `collab context` as the only repair entry. Status and board
+admission do not repair state. Never manually rebind or infer a generation.
 Read task notes separately to resume work; they are not identity proof.

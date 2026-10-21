@@ -1,6 +1,41 @@
 use super::*;
 
 #[test]
+fn task_delivery_adapter_separates_code_and_explicit_read_only_work() {
+    assert_eq!(
+        build_argv(
+            "collab_task_deliver",
+            &json!({"id":"code-task","evidence":"candidate ready","worktree":"/owned/tree"})
+        )
+        .unwrap(),
+        [
+            "task",
+            "deliver",
+            "code-task",
+            "--evidence",
+            "candidate ready",
+            "--worktree",
+            "/owned/tree",
+        ]
+    );
+    assert_eq!(
+        build_argv(
+            "collab_task_deliver",
+            &json!({"id":"audit-task","evidence":"audit complete","no_candidate":true})
+        )
+        .unwrap(),
+        [
+            "task",
+            "deliver",
+            "audit-task",
+            "--evidence",
+            "audit complete",
+            "--no-candidate",
+        ]
+    );
+}
+
+#[test]
 fn scoped_cleanup_adapters_have_no_target_or_daemon_controls() {
     assert_eq!(
         build_argv("collab_worker_close_self", &json!({})).unwrap(),

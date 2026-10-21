@@ -1210,6 +1210,9 @@ fn last_task_close_keeps_default_lease_armed_and_preserves_pending_unread_payloa
             .ok
         );
     }
+    let worktree = candidate_worktree(&root, "task");
+    git_ok(&worktree, &["commit", "--allow-empty", "-q", "-m", "candidate"]);
+    let candidate = current_head(&worktree);
     assert!(
         handle_task_deliver(
             &server,
@@ -1217,7 +1220,7 @@ fn last_task_close_keeps_default_lease_armed_and_preserves_pending_unread_payloa
             "token-owner".into(),
             "task".into(),
             Some("candidate verified".into()),
-            Some("/tmp/lifecycle-r1-worktree".into()),
+            Some(worktree.to_string_lossy().into_owned()),
         )
         .ok
     );
@@ -1233,18 +1236,19 @@ fn last_task_close_keeps_default_lease_armed_and_preserves_pending_unread_payloa
         )
         .ok
     );
-    initialize_main(&root);
+    git_ok(&root, &["merge", "--ff-only", &candidate]);
     assert!(
         handle_task_integrated(
             &server,
             "owner".into(),
             "token-owner".into(),
             "task".into(),
-            current_head(&root),
+            candidate,
             "main verified".into(),
         )
         .ok
     );
+    git_ok(&root, &["worktree", "remove", worktree.to_str().unwrap()]);
 
     let closed = handle_task_close(
         &server,

@@ -981,6 +981,9 @@ fn delivery_review_and_exact_main_integration_are_durable() {
         )
         .ok
     );
+    let worktree = candidate_worktree(&root, "task");
+    git_ok(&worktree, &["commit", "--allow-empty", "-q", "-m", "candidate"]);
+    let candidate = current_head(&worktree);
     assert!(
         handle_task_deliver(
             &server,
@@ -988,7 +991,7 @@ fn delivery_review_and_exact_main_integration_are_durable() {
             "token-owner".into(),
             "task".into(),
             Some("candidate commit and gates passed".into()),
-            Some("candidate".into()),
+            Some(worktree.to_string_lossy().into_owned()),
         )
         .ok
     );
@@ -1015,42 +1018,19 @@ fn delivery_review_and_exact_main_integration_are_durable() {
         .ok
     );
 
-    for args in [
-        ["init", "-q"].as_slice(),
-        ["config", "user.email", "test@example.com"].as_slice(),
-        ["config", "user.name", "Collab Test"].as_slice(),
-        ["commit", "--allow-empty", "-q", "-m", "main"].as_slice(),
-        ["branch", "-M", "main"].as_slice(),
-    ] {
-        assert!(Command::new("git")
-            .current_dir(&root)
-            .args(args)
-            .status()
-            .unwrap()
-            .success());
-    }
-    let head = String::from_utf8(
-        Command::new("git")
-            .current_dir(&root)
-            .args(["rev-parse", "HEAD"])
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .unwrap()
-    .trim()
-    .to_owned();
+    git_ok(&root, &["merge", "--ff-only", &candidate]);
     assert!(
         handle_task_integrated(
             &server,
             "owner".into(),
             "token-owner".into(),
             "task".into(),
-            head,
+            candidate,
             "main integration verified".into(),
         )
         .ok
     );
+    git_ok(&root, &["worktree", "remove", worktree.to_str().unwrap()]);
     let state = server.state.lock().unwrap();
     assert_eq!(state.tasks["task"].status, "merged");
     let lifecycle = &state.task_lifecycle["task"];

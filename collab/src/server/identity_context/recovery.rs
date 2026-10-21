@@ -197,15 +197,6 @@ impl ProjectRuntimeManager {
         ident: &mut identity::Identity,
         scope: &Scope,
     ) -> anyhow::Result<RuntimeBinding> {
-        if saved.tmux_endpoint.as_ref() == Some(&candidate.endpoint) {
-            return Ok(saved.clone());
-        }
-        let mut next = saved.clone();
-        next.endpoint_generation = next
-            .endpoint_generation
-            .checked_add(1)
-            .ok_or_else(|| anyhow::anyhow!("IDENTITY_ENDPOINT_GENERATION_EXHAUSTED"))?;
-        next.tmux_endpoint = Some(candidate.endpoint.clone());
         let mut state = runtime.state.lock().unwrap();
         let mut worker = state
             .workers
@@ -218,14 +209,54 @@ impl ProjectRuntimeManager {
             .ok_or_else(|| anyhow::anyhow!("IDENTITY_TRANSPORT_MISSING"))?;
         transport.tmux_endpoint = Some(candidate.endpoint.clone());
         if transport.kind == TransportKind::Tmux {
-            next.session_id = candidate.endpoint.codex_session_id.clone()
-                .map(identity::SessionId::new).transpose()?;
-            next.native_thread_id = candidate.endpoint.codex_thread_id.clone()
-                .map(NativeThreadId::new).transpose()?;
             transport.endpoint = Some(candidate.endpoint.socket_path.clone());
             transport.namespace = Some(candidate.endpoint.tmux_session_id.clone());
             transport.session_id = candidate.endpoint.codex_session_id.clone();
             transport.thread_id = candidate.endpoint.codex_thread_id.clone();
+        }
+
+        if saved.tmux_endpoint.as_ref() == Some(&candidate.endpoint) {
+            let worker_changed = worker.transport.as_ref() != Some(&transport);
+            if worker_changed {
+                worker.transport = Some(transport.clone());
+                runtime.commit_locked(&mut state, &[Event::Registered { worker }])?;
+            }
+            drop(state);
+            if ident.transport.as_ref() != Some(&transport) {
+                let binding = ident
+                    .runtime
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("IDENTITY_RUNTIME_MISSING"))?;
+                identity::persist_registration_at(
+                    &self.host.host_paths,
+                    scope,
+                    ident,
+                    binding,
+                    transport,
+                )?;
+            }
+            return Ok(saved.clone());
+        }
+
+        let mut next = saved.clone();
+        next.endpoint_generation = next
+            .endpoint_generation
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("IDENTITY_ENDPOINT_GENERATION_EXHAUSTED"))?;
+        next.tmux_endpoint = Some(candidate.endpoint.clone());
+        if transport.kind == TransportKind::Tmux {
+            next.session_id = candidate
+                .endpoint
+                .codex_session_id
+                .clone()
+                .map(identity::SessionId::new)
+                .transpose()?;
+            next.native_thread_id = candidate
+                .endpoint
+                .codex_thread_id
+                .clone()
+                .map(NativeThreadId::new)
+                .transpose()?;
         }
         worker.transport = Some(transport.clone());
         let grant = current_master_grant(&state, Some(&saved.route_scope()))

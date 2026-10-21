@@ -85,7 +85,7 @@ stateDiagram-v2
 ## DAG 与数据契约（SESE）
 
 机器图：`docs/dagpipe/collab-context.graph.json`（root-owned）。当前版本为
-`appsdk-collab-context` 0.6.0，拓扑是一条 6 节点链：
+`appsdk-collab-context` 0.13.0，拓扑是一条 7 节点链：
 
 ```mermaid
 flowchart LR
@@ -93,7 +93,8 @@ flowchart LR
     R --> B[ensure_baseline]
     B --> D[ensure_daemon]
     D --> I[identity_gate]
-    I --> E[env_view]
+    I --> C[binding_convergence]
+    C --> E[env_view]
     E --> O[emit_snapshot]
 ```
 
@@ -105,7 +106,8 @@ ARC 契约：
 | `resolved_scope` | Object | 已解析 canonical project root |
 | `baseline_ready` | Object | `.agent-collab/` 基线就绪 |
 | `daemon_ready` | Object | daemon socket 就绪 |
-| `identity_result` | Object | daemon 身份门结果：已登记 snapshot、缺失事实终态或显式失败 |
+| `identity_operation_result` | Object | daemon 身份门结果：已登记 snapshot、缺失事实终态或显式失败 |
+| `authoritative_binding` | Object | context、worker status 和 board admission 共用的项目/app/agent binding 与 endpoint generation；仅 context 修复 |
 | `env_projection` | Object | 过滤后的 shell 环境子集（凭据形状的键已丢弃） |
 | `state_snapshot` | Object | 唯一出口；含完整项目、身份、daemon、subscriptions、master、peers、tasks、worktrees 和 env 投影 |
 
@@ -176,6 +178,7 @@ receipt 只供 daemon 和 immediate authenticated operation 使用；CLI 不显�
 | 创建基线 | `appsdk.collab_context.ensure_baseline` | `scope::init` / `collab/src/scope.rs` |
 | 启动守护 | `appsdk.collab_context.ensure_daemon` | `client::ensure_server` / `collab/src/client.rs` |
 | daemon 身份门 | `appsdk.collab_context.identity_gate` | daemon `IdentityContext`；identity resolver；既有 ProjectRuntimeManager Register transaction；`handle_context` snapshot |
+| binding convergence | `appsdk.collab_context.binding_convergence` | context repair 由 `ProjectRuntimeManager::refresh_session_endpoint` 与 `reconcile_binding_publication` 所属 owner 完成；worker status 与 board admission 只读同一项目 binding/generation |
 | 环境投影 | `appsdk.collab_context.env_view` | `context_env_view` / `collab/src/main_context.rs`；只取 `HOME`/`USER`/`LOGNAME`/`CARGO_HOME` 与 `COLLAB_`/`APPSDK_`/`CODEX_` 前缀，名字含 TOKEN/KEY/SECRET/PASSWORD/CREDENTIAL 的键一律丢弃 |
 | 输出快照 | `appsdk.collab_context.emit_snapshot` | `handle_context` / `collab/src/server/mod.rs` |
 
@@ -208,3 +211,6 @@ receipt 只供 daemon 和 immediate authenticated operation 使用；CLI 不显�
 supplement 时用一次 `collab context --provide` 提供请求的真实字段。`registered`
 与 `requires_identity_update` 才是判据；退出码 0 不代表身份已验真。显式冲突、token
 拒绝、route/runtime/transport 失败保留原始错误，不 fallback、不进入 pending workflow。
+worker status、board admission 或 mutation 返回 stale generation /
+`SESSION_THREAD_BINDING_MISMATCH` 时，保留 registered binding，只通过
+`collab context` 修复；不得手工 rebind、编辑 route/journal 或猜测 generation。

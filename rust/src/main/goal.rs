@@ -1462,7 +1462,9 @@ where
 2. 合法等待必须写清原因、责任人、解除条件和恢复触发：
    外部依赖、资源占用、凭证/批准缺失、跨 owner 决策等可以进入 waiting/blocked，
    但严禁只写“blocked”而不带恢复方案，也严禁因任务难就空等。
-3. 请立即核实等待性质：无法自己解除时，把具体方案交给 master；master 必须在周期内接管、改派或强制关闭。
+3. peer 保留受托范围的唯一交付责任。向 master 提交真实失败入口、原错/证据、已尝试解法及结果、授权内替代路径为何不可行、所需决定和恢复条件；求助不等于停工批准。
+4. master 独立检查或复现证据，核对权限、替代路径和影响范围后才认可阻塞；证据不足退回调查。不得为停止提醒强制关闭未完成任务。
+5. 巡检只是兜底唤醒，不是执行依赖。有可执行动作立即推进；等待决定时继续未受影响工作，不等下一次唤醒或别人代为解阻。
 ================================================================================"#;
 
         if format_json {
@@ -1473,7 +1475,7 @@ where
                 "reminders_stopped": false,
                 "reason": reason,
                 "collab_result": block_result,
-                "rule": "blocked/waiting must include cause, owner, unblock condition, and recovery trigger; master owns resolution",
+                "rule": "blocked/waiting needs original failure evidence, attempted remedies, unavailable authorized alternatives and a decision/resume condition; master independently verifies before accepting; peer retains delivery ownership unless explicitly reassigned; continue unaffected work without waiting for a patrol wake",
                 "notice": format!("{}\n{}", notice_title, notice_body)
             });
             println!("{}", serde_json::to_string_pretty(&resp).unwrap());

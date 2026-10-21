@@ -51,6 +51,10 @@ task-scoped subscriptions by ID.
 - A consumed one-shot wake for a goal or deadline does not renew itself. When the
   patrol must continue, explicitly re-arm it before the cycle ends. A read,
   ACK, summary, or dispatch receipt is not completion.
+  Rearming is a safety net, not permission to stop: immediately continue ready
+  authorized work. A future deadline or absent wake is not a task dependency.
+  Apply the main Skill's Registered patrol duties for evidence-based blocker
+  requests, master verification, and continued peer delivery ownership.
 
 Run `collab notify methods` against the current daemon before selecting an
 event or schedule. The current source defines `direct-message`,

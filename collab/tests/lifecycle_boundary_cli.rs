@@ -822,7 +822,7 @@ fn self_request_cannot_unbind_another_projects_pane() {
         socket: pane.socket.clone(),
         server_pid: pane.server_pid,
         pane_id: String::from_utf8(window.stdout).unwrap().trim().to_owned(),
-        session_anchor: pane.session_anchor.clone(),
+        session_anchor: "other-project-session".into(),
         thread_anchor: "other-project-thread".into(),
     };
     let other_context = fixture.command_at(&other, &other_pane, &["context"]);
@@ -959,8 +959,6 @@ fn project_master_resets_online_and_erases_its_history_without_touching_another_
         ],
     );
     assert!(promoted.status.success(), "{}", output_text(&promoted));
-    let named = fixture.command_with_pane(&pane, &["worker", "name", "erase-project-history"]);
-    assert!(named.status.success(), "{}", output_text(&named));
     let published = fixture.command_with_pane(
         &pane,
         &[
@@ -1003,7 +1001,7 @@ fn project_master_resets_online_and_erases_its_history_without_touching_another_
         socket: pane.socket.clone(),
         server_pid: pane.server_pid,
         pane_id: String::from_utf8(window.stdout).unwrap().trim().to_owned(),
-        session_anchor: pane.session_anchor.clone(),
+        session_anchor: "reset-other-project-session".into(),
         thread_anchor: "thread-other-project".into(),
     };
     let other_context = fixture.command_at(&other, &other_pane, &["context"]);

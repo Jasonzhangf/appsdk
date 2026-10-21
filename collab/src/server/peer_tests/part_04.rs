@@ -78,6 +78,51 @@ fn master_name_uses_authority_when_read_projection_is_peer() {
 }
 
 #[test]
+fn typed_waiting_user_projects_to_worker_status_without_becoming_idle() {
+    use crate::server::name_state::{AgentActivity, AgentActivityRecord, AgentPresence, AgentPresenceRecord};
+    let (mut server, root) = test_server();
+    register_appserver_worker(&server, &root, "waiting-peer", "waiting-thread");
+    let endpoint_missing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed_missing = endpoint_missing.clone();
+    server.appserver_thread_status = Arc::new(move |_, _| {
+        if observed_missing.load(Ordering::SeqCst) {
+            Err("APP_SERVER_THREAD_MISSING: controlled missing endpoint".into())
+        } else {
+            Ok(json!({"thread":{"status":{"type":"idle"}}}))
+        }
+    });
+    let server = Arc::new(server);
+    let worker = server.state.lock().unwrap().workers["waiting-peer"].clone();
+    let scope = GlobalState::canonical_project_scope(&root).unwrap();
+    let session = worker.transport.as_ref().unwrap().session_id.clone().unwrap();
+    for (presence, activity, expected) in [
+        (AgentPresence::Online, AgentActivity::WaitingUser, "waiting_user"),
+        (AgentPresence::Online, AgentActivity::Unknown, "unknown"),
+        (AgentPresence::Offline, AgentActivity::WaitingUser, "absent"),
+    ] {
+        endpoint_missing.store(presence == AgentPresence::Offline, Ordering::SeqCst);
+        server.commit(&[
+            Event::AgentPresenceObserved { presence: AgentPresenceRecord {
+                project_scope: scope.as_str().into(), worker_id: worker.id.clone(),
+                session_id: session.clone(), presence, reason: "controlled current-session observation".into(), observed_ms: now_ms(),
+            } },
+            Event::AgentActivityObserved { activity: AgentActivityRecord {
+                project_scope: scope.as_str().into(), worker_id: worker.id.clone(),
+                session_id: session.clone(), activity, background: false,
+                reason: "controlled approval prompt".into(), observed_ms: now_ms(),
+            } },
+        ]);
+        let response = dispatch(&server, Req::WorkerStatus { worker_id: Some(worker.id.clone()) });
+        assert!(response.ok, "{response:?}");
+        let summary = &response.data["workers"][0];
+        assert_eq!(summary["agent_state"], expected);
+        assert_ne!(summary["agent_state"], "idle");
+        assert_eq!(summary["status"], if expected == "absent" { "lost" } else { expected });
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn managed_subagent_send_binds_the_selected_child_when_multiple_children_are_assigned() {
     use crate::subagent::{Action, Record};
     let (server, root) = test_server();
@@ -784,8 +829,8 @@ fn lifecycle_close_retires_a_route_less_missing_tmux_target() {
         kind: TransportKind::Tmux,
         endpoint: Some(endpoint.socket_path.clone()),
         namespace: Some(endpoint.tmux_session_id.clone()),
-        session_id: None,
-        thread_id: None,
+        session_id: Some("route-less-agent-session".into()),
+        thread_id: Some("route-less-agent-thread".into()),
         tmux_endpoint: Some(endpoint),
         capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
         self_check: "route-less missing tmux target".into(),
@@ -799,6 +844,26 @@ fn lifecycle_close_retires_a_route_less_missing_tmux_target() {
         Some(app.clone()),
     );
     assert!(registered.ok, "{}", registered.error.unwrap_or_default());
+    // Model a persisted legacy no-session binding explicitly. New registrations
+    // require an agent session; this case tests retirement of historical data.
+    let mut legacy_binding = registered_binding(&server, "stale-peer");
+    legacy_binding.endpoint_generation += 1;
+    legacy_binding.session_id = None;
+    legacy_binding.native_thread_id = None;
+    let mut legacy_worker = server.state.lock().unwrap().workers["stale-peer"].clone();
+    let legacy_transport = legacy_worker.transport.as_mut().unwrap();
+    legacy_transport.session_id = None;
+    legacy_transport.thread_id = None;
+    server
+        .commit_checked(&[
+            Event::GlobalRuntimeBound {
+                binding: legacy_binding,
+            },
+            Event::Registered {
+                worker: legacy_worker,
+            },
+        ])
+        .unwrap();
     assert!(
         server
             .state
@@ -849,9 +914,12 @@ fn lifecycle_close_retires_a_route_less_missing_tmux_target() {
         "{}",
         read.data
     );
-    assert_eq!(
-        read.data["result"]["projection"]["transport_view"]["error"],
-        "TMUX_PANE_MISSING: target pane is gone",
+    assert_eq!(read.data["result"]["projection"]["endpoint_live"], false);
+    assert!(
+        read.data["result"]["projection"]["transport_view"]["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("TMUX_CAPTURE_FAILED: can't find pane:"),
         "{}",
         read.data
     );
@@ -1672,23 +1740,41 @@ fn master_promotion_requires_user_approval_and_existing_master_delegates() {
     let worker_registration = register_synthetic_peer(&server, "peer-a", "%a");
     let target_registration = register_synthetic_peer(&server, "peer-b", "%b");
     assert_eq!(worker_registration.data["role_brief"]["role"], "worker");
+    assert_eq!(
+        worker_registration.data["role_brief"]["derivation"]["kind"],
+        "peer"
+    );
     assert_eq!(target_registration.data["role_brief"]["role"], "worker");
-    let ordinary_role_task = worker_registration.data["role_brief"]["role_task"]
-        .as_str()
-        .unwrap();
-    let ordinary_responsibilities = worker_registration.data["role_brief"]["responsibilities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|line| line.as_str())
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase();
-    assert!(ordinary_role_task.contains("long-horizon"));
-    assert!(ordinary_role_task.contains("orchestrator"));
-    assert!(ordinary_responsibilities.contains("codex exec --profile gcm"));
-    assert!(ordinary_responsibilities.contains("verify subworker evidence"));
-    assert!(ordinary_responsibilities.contains("do not claim master grants"));
+    let role_text = |brief: &Value| {
+        let mut text = vec![
+            brief["role_task"].as_str().unwrap_or_default(),
+            brief["next_action"].as_str().unwrap_or_default(),
+        ];
+        text.extend(
+            brief["responsibilities"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str),
+        );
+        text.join(" ").to_lowercase()
+    };
+    let ordinary_text = role_text(&worker_registration.data["role_brief"]);
+    assert!(ordinary_text.contains("long-horizon orchestrator"));
+    assert!(ordinary_text.contains("prefer assigning code implementation to subagents"));
+    assert!(ordinary_text.contains("orchestrate scheduling, acceptance, delivery"));
+    assert!(ordinary_text.contains("owned-resource closure"));
+    assert!(ordinary_text.contains("codex exec --profile gcm"));
+    assert!(ordinary_text.contains("regardless of whether other peers are busy"));
+    assert!(ordinary_text.contains("verify subworker evidence"));
+    assert!(ordinary_text.contains("ask the current master"));
+    assert!(ordinary_text.contains("finite patrol"));
+    assert!(ordinary_text.contains("subscription presence does not gate identity"));
+    assert!(ordinary_text.contains("do not invent a polling interval"));
+    assert!(ordinary_text.contains("tmux"));
+    assert!(!ordinary_text.contains("only when every eligible peer is busy"));
+    assert!(!ordinary_text.contains("capacity fallback"));
+    assert!(!ordinary_text.contains("do not claim master grants"));
     assert_eq!(
         worker_registration.data["role_brief"]["communication_recovery"]["close_only_when"]
             .as_array()
@@ -1711,21 +1797,26 @@ fn master_promotion_requires_user_approval_and_existing_master_delegates() {
     assert!(promoted.ok, "{}", promoted.error.unwrap_or_default());
     assert_eq!(promoted.data["mode"], "user_approved_self_promotion");
     assert_eq!(promoted.data["role_brief"]["role"], "master");
-    let master_responsibilities = promoted.data["role_brief"]["responsibilities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|line| line.as_str())
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase();
-    assert!(master_responsibilities.contains("long-horizon goals"));
-    assert!(master_responsibilities.contains("bounded one-shot"));
-    assert!(master_responsibilities.contains("codex exec --profile gcm"));
-    assert!(!master_responsibilities.contains("saturate every live present peer first"));
+    let master_text = role_text(&promoted.data["role_brief"]);
+    assert!(master_text.contains("long-horizon orchestrator"));
+    assert!(master_text.contains("prefer assigning code implementation to subagents"));
+    assert!(master_text.contains("orchestrate scheduling, acceptance, delivery"));
+    assert!(master_text.contains("owned-resource closure"));
+    assert!(master_text.contains("codex exec --profile gcm"));
+    assert!(master_text.contains("regardless of whether other peers are busy"));
+    assert!(master_text.contains("p0/p1"));
+    assert!(master_text.contains("peer progress"));
+    assert!(master_text.contains("finite patrol"));
+    assert!(master_text.contains("subscription presence does not gate identity"));
+    assert!(master_text.contains("do not invent a polling interval"));
+    assert!(master_text.contains("tmux"));
+    assert!(!master_text.contains("only when every eligible peer is busy"));
+    assert!(!master_text.contains("capacity fallback"));
+    assert!(!master_text.contains("saturate every live present peer first"));
     let context = handle_context(&server, "peer-a".into(), "token-peer-a".into());
     assert_eq!(context.data["master"]["worker_id"], "peer-a");
     assert_eq!(context.data["role_brief"]["role"], "master");
+    assert_eq!(context.data["role_brief"], promoted.data["role_brief"]);
     let status = super::handle_master_status(&server);
     assert_eq!(status.data["master"]["worker_id"], "peer-a");
     assert_eq!(

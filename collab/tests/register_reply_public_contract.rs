@@ -41,9 +41,31 @@ fn initial_tmux_registers_once_without_participant_return() {
 }
 
 #[test]
+fn tmux_without_agent_session_requires_facts_before_registration() {
+    let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (fixture, pane) = Fixture::isolated("tmux-missing-agent-session");
+    let output = fixture
+        .configured_command(&["context", "--op", "missing-agent-session"], Some(&pane))
+        .env_remove("CODEX_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("CODEX_THREAD")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["result"]["outcome"], "missing_facts");
+    assert_eq!(
+        response["result"]["requires"]["fields"],
+        json!(["session_id"])
+    );
+    assert_eq!(response["result"]["committed_phases"], json!([]));
+    assert_eq!(registration_effects(&fixture), [0, 0]);
+}
+
+#[test]
 fn valid_tmux_ignores_unselected_appserver_facts() {
     let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
-    for (label, facts) in [
+    for (label, mut facts) in [
         (
             "tmux-partial-native",
             json!({"endpoint":"unix:///unused.sock"}),
@@ -51,6 +73,7 @@ fn valid_tmux_ignores_unselected_appserver_facts() {
         ("tmux-invalid-native", json!({"endpoint":"https://unused"})),
     ] {
         let (fixture, pane) = Fixture::isolated(label);
+        facts["session_id"] = json!(pane.session_anchor);
         let output = fixture
             .configured_command(
                 &["context", "--op", label, "--provide", &facts.to_string()],

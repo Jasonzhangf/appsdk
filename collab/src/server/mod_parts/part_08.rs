@@ -157,6 +157,38 @@ pub(crate) fn handle_send(
     )
 }
 
+#[cfg(test)]
+#[path = "../name_address_tests.rs"]
+mod name_address_tests;
+
+fn resolve_send_name_address(
+    server: &Server,
+    state: &State,
+    target: String,
+) -> Result<(String, Option<name_mailbox::MailboxNameAddress>), String> {
+    if target != "Jenny" && !name_resolution::ORDINARY_NAME_POOL.contains(&target.as_str()) {
+        return Ok((target, None));
+    }
+    let route = server_route_scope(server, state)?.ok_or_else(|| {
+        "NAME_ADDRESS_SCOPE_MISSING: current project route is unavailable".to_string()
+    })?;
+    let holder = state
+        .name_occupancies
+        .get(route.project_scope_id.as_str())
+        .and_then(|names| names.get(&target))
+        .ok_or_else(|| {
+            format!("NAME_ADDRESS_UNOCCUPIED: {target} has no current holder in this project")
+        })?;
+    authoritative_send_binding(state, &route, &holder.worker_id).map_err(str::to_owned)?;
+    Ok((
+        holder.worker_id.clone(),
+        Some(name_mailbox::MailboxNameAddress {
+            project_scope: route.project_scope_id.as_str().into(),
+            name: target,
+        }),
+    ))
+}
+
 fn authoritative_send_binding<'a>(
     state: &'a State,
     route_scope: &RouteScope,
@@ -341,6 +373,11 @@ pub(crate) fn handle_send_with_task(
         ));
     }
     let mut st = server.state.lock().unwrap();
+    // Resolve and retain the original name under the durable admission lock.
+    let (to, name_address) = match resolve_send_name_address(server, &st, to) {
+        Ok(to) => to,
+        Err(error) => return Resp::err(error),
+    };
     let managed_child = if assign_task {
         let Some(id) = managed_subagent_id else {
             return Resp::err("managed task requires an explicit subagent binding");
@@ -420,6 +457,7 @@ pub(crate) fn handle_send_with_task(
             && m.subject == msg.subject
             && m.body == msg.body
             && m.state == "pending"
+            && st.mailbox_name_addresses.get(&m.id) == name_address.as_ref()
     }) {
         let managed_duplicate = assign_task
             && managed_child.as_ref().is_some_and(|child| {
@@ -498,6 +536,12 @@ pub(crate) fn handle_send_with_task(
     } else {
         vec![Event::Sent { msg }]
     };
+    if let Some(address) = name_address {
+        events.push(Event::MailboxNameAddressed {
+            message_id: mid.clone(),
+            address,
+        });
+    }
     events.push(Event::DeliveryMode {
         msg_id: mid.clone(),
         mode: delivery_mode,

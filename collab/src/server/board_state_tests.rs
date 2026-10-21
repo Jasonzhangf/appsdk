@@ -1,6 +1,9 @@
 use super::*;
 use crate::server::peer_tests::test_server;
 
+include!("board_name_tests.rs");
+include!("board_reassign_tests.rs");
+
 /// Register a state-level worker without a transport fixture. These tests
 /// cover board projection and replay, not transport selection.
 fn register_worker(state: &mut State, id: &str) {
@@ -139,6 +142,8 @@ fn compact_snapshot_preserves_invitation_and_its_capacity_reservation() {
                     endpoint_generation: 8,
                     message_id: "offer-message".into(),
                     created_ms: now_ms(),
+                    original_status: None,
+                    original_owner: None,
                 }),
                 ..crate::board::BoardTaskDetails::default()
             },
@@ -279,7 +284,15 @@ fn authenticated_managed_queue_is_parent_visible_while_public_output_hides_child
     assert!(!serde_json::to_string(&public_view)
         .unwrap()
         .contains("child-peer"));
-    assert_eq!(public_view.owner_display_name, "Parent name");
+    assert_eq!(public_view.owner_display_name, "Alice");
+    assert_ne!(
+        public_view.owner_display_name,
+        worker_display_name(&state, "child-peer", false)
+    );
+    let child_name = worker_display_name(&state, "child-peer", false);
+    assert!(!serde_json::to_string(&public_view)
+        .unwrap()
+        .contains(&serde_json::to_string(&child_name).unwrap()));
     assert!(!serde_json::to_string(&public_view)
         .unwrap()
         .contains("Private child name"));

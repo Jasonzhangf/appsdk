@@ -22,8 +22,36 @@ impl ProjectRuntimeManager {
         }
         let _guard = self.identity_gate.lock().unwrap();
         if request.operation_id.is_empty() {
-            return match self.reconcile_identity_context(context, request.facts, None, None, true) {
-                Ok((runtime, response, _)) => (runtime, response),
+            match name_adjudication_control(&request) {
+                Ok(Some(_)) => {
+                    if let Err(ApprovedAdmissionError::Error(error)) =
+                        self.approved_recovery_admission(&context, &request)
+                    {
+                        return (self.host.clone(), Resp::err(error));
+                    }
+                }
+                Err(ApprovedAdmissionError::Error(error)) => {
+                    return (self.host.clone(), Resp::err(error))
+                }
+                Ok(None) => {}
+            }
+            return match self.reconcile_identity_context(
+                context.clone(),
+                request.facts.clone(),
+                None,
+                None,
+                true,
+            ) {
+                Ok((runtime, mut response, _)) => {
+                    if response.ok && !response.data["identity_receipt"].is_null() {
+                        if let Err(error) =
+                            self.resolve_context_name(&runtime, &context, &request, &mut response)
+                        {
+                            return (runtime, Resp::err_data(error, response.data));
+                        }
+                    }
+                    (runtime, response)
+                }
                 Err(error) => (self.host.clone(), Resp::err(format!("{error:#}"))),
             };
         }
@@ -43,10 +71,51 @@ impl ProjectRuntimeManager {
             if !continuing || existing.result.outcome == "completed" {
                 return match self.admit_identity_operation(&context, &request) {
                     Ok(_) => {
-                        let completed = existing.result.outcome == "completed";
-                        let (runtime, snapshot) = if completed && request.action == "context"
+                        let mut projection = existing.result;
+                        if let Some(readback) = self
+                            .name_recovery_readback(&context, &request.operation_id)
+                            .filter(|readback| {
+                                projection.phase
+                                    == crate::proto::IdentityOperationPhase::EffectObserved
+                                    && readback["outcome"] == "applied"
+                            })
                         {
-                            match self.completed_context_readback(&context, continuation_facts.as_ref().unwrap_or(&request.facts)) {
+                            let mut receipts = projection.business_receipts.clone();
+                            if receipts.iter().any(|receipt| receipt == "lease") {
+                                let effects: name_resolution::NameResolutionEffects =
+                                    match serde_json::from_value(readback["effects"].clone()) {
+                                        Ok(effects) => effects,
+                                        Err(error) => {
+                                            return (
+                                                self.host.clone(),
+                                                Resp::err(format!("NAME_EFFECTS_INVALID: {error}")),
+                                            )
+                                        }
+                                    };
+                                if effects.grant_committed
+                                    && !receipts.iter().any(|receipt| receipt == "grant")
+                                {
+                                    let position = receipts
+                                        .iter()
+                                        .position(|receipt| receipt == "lease")
+                                        .unwrap();
+                                    receipts.insert(position, "grant".into());
+                                }
+                                receipts.push("context_complete".into());
+                                projection = match self.finish_identity_operation(
+                                    &context, &request, None, true, receipts,
+                                ) {
+                                    Ok(projection) => projection,
+                                    Err(error) => return (self.host.clone(), Resp::err(error)),
+                                };
+                            }
+                        }
+                        let completed = projection.outcome == "completed";
+                        let (runtime, snapshot) = if completed && request.action == "context" {
+                            match self.completed_context_readback(
+                                &context,
+                                continuation_facts.as_ref().unwrap_or(&request.facts),
+                            ) {
                                 Ok((runtime, snapshot)) => (runtime, Some(snapshot)),
                                 Err(error) => {
                                     return (
@@ -60,8 +129,7 @@ impl ProjectRuntimeManager {
                         } else {
                             (self.host.clone(), None)
                         };
-                        let result =
-                            operation_result(&request, existing.result, completed, snapshot);
+                        let result = operation_result(&request, projection, completed, snapshot);
                         (runtime, typed_operation_resp(result))
                     }
                     Err(error) if error.starts_with("IDENTITY_OPERATION_INTENT_CONFLICT") => (
@@ -115,7 +183,10 @@ impl ProjectRuntimeManager {
                 return (self.host.clone(), Resp::err(error));
             }
         };
-        let facts = match self.preflight_identity_facts(&context, continuation_facts.unwrap_or_else(|| request.facts.clone())) {
+        let facts = match self.preflight_identity_facts(
+            &context,
+            continuation_facts.unwrap_or_else(|| request.facts.clone()),
+        ) {
             Ok(facts) => facts,
             Err(PreflightIdentityError::MissingFacts(data)) => {
                 // missing_facts is reported before admission: no operation
@@ -237,12 +308,66 @@ impl ProjectRuntimeManager {
                     return (runtime, typed_operation_resp(result));
                 }
                 let mut grant_committed = false;
+                if !response.data["identity_receipt"].is_null() {
+                    let resolution = self
+                        .operation_journal
+                        .begin_owner_start(&request.operation_id, "name")
+                        .and_then(|_| {
+                            self.resolve_context_name(&runtime, &context, &request, &mut response)
+                        });
+                    if resolution.is_err()
+                        || !matches!(
+                            response.data["snapshot"]["name_resolution"]["outcome"].as_str(),
+                            Some("committed" | "applied")
+                        )
+                    {
+                        let operation = if resolution.is_ok() {
+                            self.record_name_pending(
+                                &context,
+                                &request,
+                                admitted,
+                                business_receipts,
+                            )
+                        } else {
+                            self.record_incomplete_operation(
+                                &context,
+                                &request,
+                                admitted,
+                                nested.or_else(|| outer_binding.bound()),
+                                outer_binding.bound().is_some(),
+                                business_receipts,
+                            )
+                        };
+                        let mut result = operation_result(
+                            &request,
+                            operation,
+                            false,
+                            response.data.get("snapshot").cloned(),
+                        );
+                        if let Err(error) = resolution {
+                            result
+                                .owner_readback
+                                .insert("name_resolution".into(), json!({"error":error}));
+                        } else {
+                            result.requires.kind = response.data["snapshot"]["name_resolution"]
+                                ["outcome"]
+                                .as_str()
+                                .map(str::to_owned);
+                        }
+                        return (runtime, typed_operation_resp(result));
+                    }
+                    grant_committed = resolution
+                        .expect("successful name resolution")
+                        .grant_committed;
+                }
                 if let Some(approved) = approved.as_ref() {
                     // The distinct grant owner commits and reads back its own
                     // effect only when a separate grant approval was supplied.
                     // Identity-only recovery keeps the existing authority owner
                     // and never promotes, clears, or replaces it.
                     if approved.requires_grant_replacement() {
+                        self.operation_journal
+                            .reopen_safe(&request.operation_id, business_receipts.clone());
                         if let Err(reason) = self.replace_approved_master_grant(
                             &runtime,
                             &context,
@@ -307,9 +432,8 @@ impl ProjectRuntimeManager {
                     }
                 }
                 // The authority receipt sits between `credential` and `lease`
-                // in the accepted order; only a committed explicit replacement
-                // produces it.
-                if grant_committed {
+                // in the accepted order, from either successful authority owner.
+                if grant_committed && !business_receipts.iter().any(|receipt| receipt == "grant") {
                     let position = business_receipts
                         .iter()
                         .position(|receipt| receipt == "lease")
@@ -521,12 +645,20 @@ impl ProjectRuntimeManager {
         facts.caller_pid = None;
         facts.pane_hint = None;
         if record.transport.kind == TransportKind::Tmux {
-            facts.tmux = record.transport.tmux_endpoint.clone().map(|endpoint| crate::proto::TmuxCandidate {
-                endpoint, cwd: continuation.context.canonical_root.clone(),
+            facts.tmux = record.transport.tmux_endpoint.clone().map(|endpoint| {
+                crate::proto::TmuxCandidate {
+                    endpoint,
+                    cwd: continuation.context.canonical_root.clone(),
+                }
             });
             facts.tmux_anchor = None;
         }
-        self.identity_context_continue(continuation.context, continuation.request, true, Some(facts))
+        self.identity_context_continue(
+            continuation.context,
+            continuation.request,
+            true,
+            Some(facts),
+        )
     }
 
     /// Read current typed owners without loading a runtime or replaying any
@@ -641,8 +773,180 @@ impl ProjectRuntimeManager {
             anyhow::bail!("current readback owner or binding changed");
         }
         let mut snapshot = response.data;
+        name_resolution::project_registered_name(&runtime, &worker.id, &mut snapshot);
         add_optional_master_choice(&mut snapshot);
         Ok((runtime, snapshot))
+    }
+
+    fn resolve_context_name(
+        &self,
+        runtime: &Server,
+        context: &ProjectContext,
+        request: &IdentityContextRequest,
+        response: &mut Resp,
+    ) -> Result<name_resolution::NameResolutionEffects, String> {
+        let identity: identity::Identity =
+            serde_json::from_value(response.data["identity_receipt"].clone())
+                .map_err(|error| format!("NAME_IDENTITY_REQUIRED: {error}"))?;
+        let control = name_adjudication_control(request)
+            .map_err(|ApprovedAdmissionError::Error(error)| error)?;
+        let mut intent = name_resolution::parse_name_intent(
+            request
+                .grant_approval
+                .as_ref()
+                .or(request.approval.as_ref()),
+        )?;
+        if request
+            .grant_approval
+            .as_ref()
+            .or(request.approval.as_ref())
+            .is_some_and(|approval| approval["action"] == "restore_peer")
+        {
+            let state = runtime.state.lock().unwrap();
+            let name = name_resolution::available_ordinary_name(
+                &state,
+                context.project_scope.as_str(),
+                &identity.worker_id,
+            )?;
+            intent = Some(name_resolution::NameIntent {
+                requested_name: name,
+                user_authorized: true,
+                replace_confirmed: false,
+            });
+        }
+        let fallback = identity
+            .runtime
+            .as_ref()
+            .map(|binding| {
+                format!(
+                    "context-{}-{}",
+                    identity.worker_id, binding.endpoint_generation
+                )
+            })
+            .unwrap_or_default();
+        let operation = if request.operation_id.is_empty() {
+            fallback.as_str()
+        } else {
+            &request.operation_id
+        };
+        let outcome = if let Some((operation, verdict, evidence)) = control {
+            let adjudication = super::name_stewardship::adjudicate(
+                runtime,
+                &identity.worker_id,
+                &identity.token,
+                &operation,
+                verdict,
+                &evidence,
+            );
+            if !adjudication.ok {
+                let error = adjudication
+                    .error
+                    .unwrap_or_else(|| "NAME_ADJUDICATION_FAILED".into());
+                response.data["snapshot"]["name_resolution"] =
+                    json!({"outcome":"failed", "operation_id":operation, "error":error});
+                return Err(error);
+            }
+            adjudication.data
+        } else {
+            name_resolution::resolve_registered_name_with_authorization(
+                runtime,
+                &identity.worker_id,
+                operation,
+                &request.invocation,
+                intent,
+                request
+                    .grant_approval
+                    .as_ref()
+                    .or(request.approval.as_ref())
+                    .and_then(|approval| approval.get("authorization"))
+                    .and_then(serde_json::Value::as_str),
+            )?
+        };
+        let effects = serde_json::from_value(outcome["effects"].clone())
+            .map_err(|error| format!("NAME_EFFECTS_INVALID: {error}"))?;
+        let binding = identity
+            .runtime
+            .as_ref()
+            .ok_or("NAME_IDENTITY_REQUIRED: runtime missing")?;
+        let registered =
+            ProjectContext::for_registered_route(Path::new(&context.canonical_root), binding)
+                .map_err(|error| error.to_string())?;
+        let refreshed = self
+            .dispatch_sync(
+                Some(registered),
+                Req::Context {
+                    worker_id: identity.worker_id.clone(),
+                    token: identity.token.clone(),
+                },
+            )
+            .1;
+        if !refreshed.ok {
+            return Err(refreshed
+                .error
+                .unwrap_or_else(|| "NAME_READBACK_FAILED".into()));
+        }
+        response.data["snapshot"] = refreshed.data;
+        name_resolution::project_registered_name(
+            runtime,
+            &identity.worker_id,
+            &mut response.data["snapshot"],
+        );
+        response.data["snapshot"]["name_resolution"] = outcome;
+        add_optional_master_choice(&mut response.data["snapshot"]);
+        Ok(effects)
+    }
+
+    pub(super) fn name_recovery_readback(
+        &self,
+        context: &ProjectContext,
+        operation_id: &str,
+    ) -> Option<serde_json::Value> {
+        let runtime = self
+            .routes
+            .lock()
+            .unwrap()
+            .get(&Self::route_key(context))
+            .and_then(|route| route.runtime.clone())?;
+        let state = runtime.state.lock().unwrap();
+        let recovery = state.name_recovery(operation_id)?;
+        if recovery.project_scope != context.project_scope.as_str() {
+            return None;
+        }
+        Some(
+            json!({"outcome":recovery.progress, "operation_id":operation_id, "recovery":recovery,
+            "effects":name_resolution::NameResolutionEffects::from_recovery(recovery)}),
+        )
+    }
+
+    fn record_name_pending(
+        &self,
+        context: &ProjectContext,
+        request: &IdentityContextRequest,
+        admitted: crate::proto::IdentityOperationProjection,
+        receipts: Vec<String>,
+    ) -> crate::proto::IdentityOperationProjection {
+        use crate::proto::IdentityOperationPhase as Phase;
+        let mut current = self.latest_projection(context, request).unwrap_or(admitted);
+        for (from, to) in [
+            (Phase::Admitted, Phase::Validating),
+            (Phase::Validating, Phase::InnerDispatched),
+            (Phase::InnerDispatched, Phase::EffectObserved),
+        ] {
+            if current.phase == from
+                && !self.advance_operation(
+                    request,
+                    &mut current,
+                    to,
+                    None,
+                    None,
+                    Some(receipts.clone()),
+                )
+            {
+                break;
+            }
+        }
+        self.operation_journal.remove_live(&request.operation_id);
+        current
     }
 
     fn manual_communication_gate(

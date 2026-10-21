@@ -5,6 +5,10 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 
+mod codex_presence;
+
+pub use codex_presence::{AgentActivity, AgentObservation, AgentPresence};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PanePresence {
     Present,
@@ -452,12 +456,56 @@ pub fn notify(
     }))
 }
 
-pub fn view(endpoint: &TmuxEndpoint) -> Result<serde_json::Value, String> {
-    match probe(endpoint)? {
-        PanePresence::Missing => return Err("TMUX_PANE_MISSING: target pane is gone".into()),
-        PanePresence::Unknown => return Err("TMUX_PANE_UNKNOWN: target pane is uncertain".into()),
-        PanePresence::Present => {}
+/// Read-only observation directed at the current Codex TUI. Presence and
+/// activity remain separate, and every result carries a stable reason. The
+/// pane address is not treated as proof that an agent is present.
+pub fn observe_agent(endpoint: &TmuxEndpoint) -> Result<AgentObservation, String> {
+    validate_endpoint(endpoint)?;
+    match probe(endpoint) {
+        Ok(PanePresence::Missing) => {
+            return Ok(AgentObservation {
+                agent_presence: AgentPresence::Offline,
+                activity: AgentActivity::Unknown,
+                background: false,
+                foreground_command: None,
+                reason: "bound_pane_missing".into(),
+            });
+        }
+        Ok(PanePresence::Unknown) => {
+            return Ok(AgentObservation::unknown("bound_pane_unknown"));
+        }
+        Ok(PanePresence::Present) => {}
+        Err(_) => return Ok(AgentObservation::unknown("pane_probe_unavailable")),
     }
+
+    let foreground_command = match foreground_command(endpoint) {
+        Ok(command) => command,
+        Err(_) => return Ok(AgentObservation::unknown("foreground_query_failed")),
+    };
+    if let Some(observation) = codex_presence::classify_without_screen(&foreground_command) {
+        return Ok(observation);
+    }
+
+    let visible_screen = match capture_visible(endpoint) {
+        Ok(screen) => screen,
+        Err(_) => {
+            return Ok(AgentObservation {
+                agent_presence: AgentPresence::Online,
+                activity: AgentActivity::Unknown,
+                background: false,
+                foreground_command: Some(foreground_command),
+                reason: "visible_screen_unavailable".into(),
+            });
+        }
+    };
+    Ok(codex_presence::classify_codex(
+        &foreground_command,
+        &visible_screen,
+    ))
+}
+
+pub fn view(endpoint: &TmuxEndpoint) -> Result<serde_json::Value, String> {
+    let observation = observe_agent(endpoint)?;
     let output = capture(endpoint)?;
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -467,16 +515,30 @@ pub fn view(endpoint: &TmuxEndpoint) -> Result<serde_json::Value, String> {
         "{}\0{}\0{}",
         endpoint.socket_path, endpoint.tmux_session_id, endpoint.pane_id
     );
-    let (changed, observation) = record_observation(key, digest)?;
+    let (changed, pane_observation) = record_observation(key, digest)?;
+    let (thread_state, thread_status, can_accept_direct_input) = match observation.agent_presence {
+        AgentPresence::Online => match observation.activity {
+            AgentActivity::Busy => ("working", "working", Some(false)),
+            AgentActivity::Idle => ("idle", "idle", Some(true)),
+            AgentActivity::WaitingUser => ("waiting_user", "waiting_user", Some(false)),
+            AgentActivity::Unknown => ("unknown", "unknown", None),
+        },
+        AgentPresence::Offline | AgentPresence::Unknown => ("unknown", "unknown", None),
+    };
     Ok(serde_json::json!({
         "thread": {
-            "status": {"type": "unknown"},
-            "canAcceptDirectInput": null,
-            "turns": [{"status": "unknown"}]
+            "status": {"type": thread_status},
+            "canAcceptDirectInput": can_accept_direct_input,
+            "turns": [{"status": thread_status}]
         },
-        "thread_state": "unknown",
+        "thread_state": thread_state,
+        "agent_presence": observation.agent_presence,
+        "activity": observation.activity,
+        "background": observation.background,
+        "foreground_command": observation.foreground_command,
+        "reason": observation.reason,
         "pane_output_changed": changed,
-        "pane_output_observation": observation,
+        "pane_output_observation": pane_observation,
         "transport": "tmux"
     }))
 }
@@ -529,6 +591,32 @@ fn capture(endpoint: &TmuxEndpoint) -> Result<String, String> {
     )
     .map_err(|error| format!("TMUX_CAPTURE_FAILED: {error}"))?;
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn capture_visible(endpoint: &TmuxEndpoint) -> Result<String, String> {
+    let output = tmux_command(
+        &endpoint.socket_path,
+        &["capture-pane", "-p", "-t", &endpoint.pane_id],
+    )
+    .map_err(|error| format!("TMUX_CAPTURE_FAILED: {error}"))?;
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn foreground_command(endpoint: &TmuxEndpoint) -> Result<String, String> {
+    let output = tmux_command(
+        &endpoint.socket_path,
+        &[
+            "list-panes",
+            "-t",
+            &endpoint.pane_id,
+            "-F",
+            "#{session_id}\t#{pane_id}\t#{pane_current_command}",
+        ],
+    )
+    .map_err(|error| format!("TMUX_FOREGROUND_QUERY_FAILED: {error}"))?;
+    let text = String::from_utf8(output.stdout)
+        .map_err(|_| "TMUX_FOREGROUND_QUERY_FAILED: non-UTF-8 tmux metadata".to_owned())?;
+    codex_presence::parse_foreground_command(&endpoint.pane_id, &text)
 }
 
 fn capture_lines(endpoint: &TmuxEndpoint, lines: usize) -> Result<String, String> {
@@ -1044,11 +1132,38 @@ pub(crate) mod tests {
         let stable = view(&endpoint).unwrap();
         assert_eq!(stable["thread_state"], "unknown");
         assert_eq!(stable["thread"]["status"]["type"], "unknown");
+        assert_eq!(stable["agent_presence"], "offline");
+        assert_eq!(stable["activity"], "unknown");
         assert!(stable["pane_output_changed"].is_boolean());
         assert!(matches!(
             stable["pane_output_observation"].as_str(),
             Some("initial" | "changed" | "stable")
         ));
+    }
+
+    #[test]
+    fn view_reports_shell_offline_despite_historical_codex_busy_text() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let tmux = IsolatedTmux::start_with_command(Some(
+            "printf 'Codex history: esc to interrupt\\n'; exec sh -i",
+        ));
+        let endpoint = tmux.endpoint();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if capture(&endpoint).unwrap().contains("Codex history") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "shell fixture did not publish its historical line"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let observed = view(&endpoint).unwrap();
+        assert_eq!(observed["agent_presence"], "offline", "{observed}");
+        assert_eq!(observed["activity"], "unknown", "{observed}");
+        assert_eq!(observed["background"], false, "{observed}");
     }
 
     #[test]

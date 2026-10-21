@@ -20,6 +20,51 @@ fn collab_context_design_graph_is_single_source_single_sink_and_registered() {
 }
 
 #[test]
+fn name_ownership_and_board_assignment_graphs_are_embedded_and_registered() {
+    for (path, expected_id, expected_operators) in [
+        (
+            "docs/dagpipe/collab-name-ownership.graph.json",
+            "appsdk-collab-name-ownership",
+            vec![
+                "appsdk.collab_name.read_ownership",
+                "appsdk.collab_name.classify_resolution",
+                "appsdk.collab_name.commit_resolution",
+                "appsdk.collab_name.sync_open_assignments",
+                "appsdk.collab_name.emit_outcome",
+            ],
+        ),
+        (
+            "docs/dagpipe/collab-board-assignment-lifecycle.graph.json",
+            "appsdk-collab-board-assignment-lifecycle",
+            vec![
+                "appsdk.collab_assignment.read_task",
+                "appsdk.collab_assignment.classify_source",
+                "appsdk.collab_assignment.authorize_target",
+                "appsdk.collab_assignment.commit",
+                "appsdk.collab_assignment.emit_result",
+            ],
+        ),
+    ] {
+        let (_, source) = embedded_graph_paths()
+            .into_iter()
+            .find(|(embedded_path, _)| *embedded_path == path)
+            .unwrap_or_else(|| panic!("{path} is embedded"));
+        let graph = parse_graph_json(source).unwrap();
+        ensure_single_source_single_sink(&graph).unwrap();
+        validate_graph_registry(&graph).unwrap();
+        assert_eq!(graph.id, expected_id);
+        assert_eq!(
+            graph
+                .nodes
+                .iter()
+                .map(|node| node.operator.as_str())
+                .collect::<Vec<_>>(),
+            expected_operators
+        );
+    }
+}
+
+#[test]
 fn collab_subagent_command_design_graph_is_single_source_single_sink_and_registered() {
     let (_, source) = embedded_graph_paths()
         .into_iter()
@@ -110,6 +155,8 @@ fn graph_manifest_covers_every_embedded_graph_and_validate_reports_contracted_de
         .collect::<Vec<_>>();
     assert!(graph_ids.contains(&"appsdk-fix-lifecycle"));
     assert!(graph_ids.contains(&"appsdk-notification-object"));
+    assert!(graph_ids.contains(&"appsdk-collab-name-ownership"));
+    assert!(graph_ids.contains(&"appsdk-collab-board-assignment-lifecycle"));
     assert!(graph_ids.contains(&"appsdk-collab-subagent-command"));
     assert!(graph_ids.contains(&"appsdk-collab-stewardship-patrol"));
     assert!(graph_ids.contains(&"appsdk-collab-peer-lifecycle"));

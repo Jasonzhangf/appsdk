@@ -21,6 +21,12 @@
         dispatch: impl FnOnce(ProjectContext, Req) -> (Arc<Server>, Resp),
     ) -> (Arc<Server>, Resp) {
         let context = context.expect("participant project context");
+        if let Req::IdentityContext { facts, .. } = &mut request {
+            if facts.session_id.is_none() {
+                facts.session_id = facts.tmux.as_ref()
+                    .and_then(|candidate| candidate.endpoint.codex_session_id.clone());
+            }
+        }
         if matches!(&request, Req::Register { candidates: Some(candidates), .. }
             if candidates.appserver.is_some() && candidates.tmux.is_none()) {
             return dispatch(context, request);

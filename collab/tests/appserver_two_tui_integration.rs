@@ -13,11 +13,575 @@ use std::time::{Duration, Instant};
 mod board_cli;
 #[path = "board/central_storage.rs"]
 mod central_storage;
+#[path = "board/name_adjudication.rs"]
+mod name_adjudication;
+#[path = "board/name_confirmed_takeover.rs"]
+mod name_confirmed_takeover;
+#[path = "board/name_runtime.rs"]
+mod name_runtime_cli;
 #[path = "board/patrol_subscriptions.rs"]
 mod patrol_subscriptions;
 
 const THREAD_A: &str = "01a0d637-75e2-71b2-8634-2be0c08a9adc";
 const THREAD_B: &str = "01a0d639-dafc-7571-a0aa-bbc2bbbc04ce";
+
+#[test]
+fn name_mailbox_public_repeated_release_reallocation_keeps_current_carrier() {
+    let mut fixture = AppFixture::new();
+    let alice = fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    let master = r#"{"action":"restore_master","authorization":"fixture requests Jenny"}"#;
+    let peer = r#"{"action":"restore_peer","authorization":"fixture releases Jenny"}"#;
+    fixture.run_public(&["context", "--approve-grant", master], THREAD_A);
+    let history = fixture.run_public(
+        &[
+            "sendmessage",
+            "--to",
+            "Jenny",
+            "--subject",
+            "history",
+            "consumed history",
+        ],
+        THREAD_B,
+    );
+    let old_receipt = fixture.run_public(
+        &["recv", "--receive-id", "cycle-history", "--timeout", "0"],
+        THREAD_A,
+    );
+    let pending = fixture.run_public(
+        &[
+            "sendmessage",
+            "--to",
+            "Jenny",
+            "--subject",
+            "cycles",
+            "same unread body",
+        ],
+        THREAD_B,
+    );
+    let id = pending["msg_id"].as_str().unwrap();
+    let mut previous = THREAD_A;
+    for current in [THREAD_B, THREAD_A, THREAD_B] {
+        fixture.run_public(&["context", "--approve-grant", peer], previous);
+        // Replay while Jenny is vacant, when a current-occupancy-only counter is lost.
+        fixture.restart_daemon();
+        let wake_start = fixture
+            .state
+            .lock()
+            .unwrap()
+            .get(current)
+            .map_or(0, |s| s.inputs.len());
+        let next = fixture.run_public(&["context", "--approve-grant", master], current);
+        assert_eq!(next["name"], "Jenny");
+        let moved = fixture.run_public(&["msg", id], current);
+        assert_eq!(
+            moved["to"], next["identity"]["worker_id"],
+            "cycle to {current}: {moved}"
+        );
+        assert_eq!(moved["body"], "same unread body");
+        assert_eq!(moved["state"], "pending");
+        fixture.restart_daemon();
+        assert_eq!(fixture.run_public(&["msg", id], current)["to"], moved["to"]);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let woke = fixture.state.lock().unwrap().get(current).is_some_and(|s| {
+                s.inputs[wake_start..]
+                    .iter()
+                    .any(|input| input.to_string().contains(id))
+            });
+            if woke {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "message {id} did not wake current carrier {current}"
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+        previous = current;
+    }
+    let read = fixture.run_public(&["msg", history["msg_id"].as_str().unwrap()], THREAD_B);
+    assert_eq!(read["to"], alice["identity"]["worker_id"]);
+    assert_eq!(read["state"], "read");
+    let replay = fixture.run_public(
+        &["recv", "--receive-id", "cycle-history", "--timeout", "0"],
+        THREAD_A,
+    );
+    assert_eq!(replay["messages"], old_receipt["messages"]);
+    let received = fixture.run_public(
+        &["recv", "--receive-id", "cycle-final", "--timeout", "0"],
+        THREAD_B,
+    );
+    assert_eq!(received["count"], 1);
+    assert_eq!(received["messages"][0]["id"], id);
+    fixture.restart_daemon();
+    assert_eq!(fixture.run_public(&["msg", id], THREAD_B)["state"], "read");
+}
+
+#[test]
+fn name_mailbox_public_distinct_names_follow_address_after_release() {
+    let mut fixture = AppFixture::new();
+    let alice = fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    let old_worker = alice["identity"]["worker_id"].clone();
+    let jenny_owner = fixture.run_public(
+        &[
+            "context",
+            "--approve-grant",
+            r#"{"action":"restore_master","authorization":"isolated fixture requests Jenny"}"#,
+        ],
+        THREAD_A,
+    );
+    assert_eq!(jenny_owner["name"], "Jenny");
+    let history = fixture.run_public(
+        &[
+            "sendmessage",
+            "--to",
+            "Jenny",
+            "--subject",
+            "history",
+            "consumed history",
+        ],
+        THREAD_B,
+    );
+    fixture.run_public(
+        &["recv", "--receive-id", "before-rename", "--timeout", "0"],
+        THREAD_A,
+    );
+    let jenny = fixture.run_public(
+        &[
+            "sendmessage",
+            "--to",
+            "Jenny",
+            "--subject",
+            "same",
+            "same body",
+        ],
+        THREAD_B,
+    );
+    let peer = fixture.run_public(
+        &[
+            "context",
+            "--approve-grant",
+            r#"{"action":"restore_peer","authorization":"isolated fixture returns to peer"}"#,
+        ],
+        THREAD_A,
+    );
+    assert_eq!(peer["name"], "Alice");
+    let alice_message = fixture.run_public(
+        &[
+            "sendmessage",
+            "--to",
+            "Alice",
+            "--subject",
+            "same",
+            "same body",
+        ],
+        THREAD_B,
+    );
+    assert_ne!(jenny["msg_id"], alice_message["msg_id"]);
+    // Only this fixture's child restarts; the name association must replay.
+    fixture.restart_daemon();
+    let next = fixture.run_public(
+        &[
+            "context",
+            "--approve-grant",
+            r#"{"action":"restore_master","authorization":"isolated fixture requests Jenny"}"#,
+        ],
+        THREAD_B,
+    );
+    assert_eq!(next["name"], "Jenny");
+    let id = jenny["msg_id"].as_str().unwrap();
+    let moved = fixture.run_public(&["msg", id], THREAD_B);
+    assert_eq!(moved["to"], next["identity"]["worker_id"]);
+    assert_eq!(moved["body"], "same body");
+    assert_eq!(
+        moved["from"],
+        fixture.run_public(
+            &["msg", alice_message["msg_id"].as_str().unwrap()],
+            THREAD_B
+        )["from"]
+    );
+    let read = fixture.run_public(&["msg", history["msg_id"].as_str().unwrap()], THREAD_B);
+    assert_eq!(read["to"], old_worker);
+    assert_eq!(read["state"], "read");
+    let received = fixture.run_public(
+        &[
+            "recv",
+            "--receive-id",
+            "jenny-after-release",
+            "--timeout",
+            "0",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(received["count"], 1);
+    assert_eq!(received["messages"][0]["id"], id);
+    let replay = fixture.run_public(
+        &[
+            "recv",
+            "--receive-id",
+            "jenny-after-release",
+            "--timeout",
+            "0",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(replay["messages"], received["messages"]);
+    let retained = fixture.run_public(
+        &["recv", "--receive-id", "alice-retained", "--timeout", "0"],
+        THREAD_A,
+    );
+    assert_eq!(retained["count"], 1);
+    assert_eq!(retained["messages"][0]["id"], alice_message["msg_id"]);
+    assert_eq!(fixture.run_public(&["msg", id], THREAD_B)["state"], "read");
+}
+
+#[test]
+fn name_mailbox_public_handoff_recv_preserves_old_consumed_history() {
+    let mut fixture = AppFixture::new();
+    let alice = fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    let read = fixture.run_public(
+        &[
+            "sendmessage",
+            "--to",
+            "Alice",
+            "--subject",
+            "already read",
+            "history",
+        ],
+        THREAD_B,
+    );
+    fixture.run_public(
+        &["recv", "--receive-id", "old-read", "--timeout", "0"],
+        THREAD_A,
+    );
+    let pending = fixture.run_public(
+        &[
+            "sendmessage",
+            "--to",
+            "Alice",
+            "--subject",
+            "handoff",
+            "keep this body",
+        ],
+        THREAD_B,
+    );
+    let id = pending["msg_id"].as_str().unwrap();
+    assert_eq!(pending["consumed"], false);
+    fixture.append_name_events(&[json!({"ev":"AgentPresenceObserved", "presence":{
+        "project_scope":std::fs::canonicalize(&fixture.project).unwrap(),
+        "worker_id":alice["identity"]["worker_id"], "session_id":THREAD_A,
+        "presence":"online", "reason":"isolated fixture", "observed_ms":1
+    }})]);
+    let next = fixture.run_public(&["context", "--approve-grant",
+        r#"{"action":"restore_name","requested_name":"Alice","authorization":"fixture confirmed handoff","replace_confirmed":true}"#], THREAD_B);
+    let moved = fixture.run_public(&["msg", id], THREAD_B);
+    assert_eq!(moved["to"], next["identity"]["worker_id"]);
+    assert_eq!(moved["body"], "keep this body");
+    assert_eq!(moved["state"], "pending");
+    assert_eq!(
+        fixture.run_public(&["msg", read["msg_id"].as_str().unwrap()], THREAD_B)["to"],
+        alice["identity"]["worker_id"]
+    );
+    let received = fixture.run_public(
+        &["recv", "--receive-id", "new-read", "--timeout", "0"],
+        THREAD_B,
+    );
+    assert_eq!(received["count"], 1);
+    assert_eq!(received["messages"][0]["id"], id);
+    assert_eq!(fixture.run_public(&["msg", id], THREAD_B)["state"], "read");
+    let replay = fixture.run_public(
+        &["recv", "--receive-id", "new-read", "--timeout", "0"],
+        THREAD_B,
+    );
+    assert_eq!(replay["messages"], received["messages"]);
+    assert_eq!(
+        fixture.run_public(
+            &[
+                "recv",
+                "--receive-id",
+                "old-after-handoff",
+                "--timeout",
+                "0"
+            ],
+            THREAD_A
+        )["count"],
+        0
+    );
+}
+
+#[test]
+fn name_address_public_send_recv_reply() {
+    let fixture = AppFixture::new();
+    let alice = fixture.run_public(&["context"], THREAD_A);
+    assert_eq!(alice["name"], "Alice");
+    let jenny = fixture.run_public(
+        &[
+            "context",
+            "--approve-grant",
+            r#"{"action":"restore_master","authorization":"fixture user requests Jenny"}"#,
+        ],
+        THREAD_B,
+    );
+    assert_eq!(jenny["name"], "Jenny");
+
+    let sent = fixture.run_public(
+        &[
+            "sendmessage",
+            "--to",
+            "Alice",
+            "--subject",
+            "named delivery",
+            "hello Alice",
+        ],
+        THREAD_B,
+    );
+    let message_id = sent["msg_id"].as_str().unwrap();
+    assert_eq!(sent["notification"], "appserver-input-submitted");
+    assert_eq!(sent["consumed"], false);
+    let durable = fixture.run_public(&["msg", message_id], THREAD_B);
+    assert_eq!(durable["to"], alice["identity"]["worker_id"]);
+    assert_eq!(durable["state"], "pending");
+    let received = fixture.run_public(
+        &["recv", "--receive-id", "named-alice", "--timeout", "0"],
+        THREAD_A,
+    );
+    assert_eq!(received["count"], 1);
+    assert_eq!(received["messages"][0]["id"], message_id);
+    assert_eq!(
+        fixture.run_public(&["msg", message_id], THREAD_B)["state"],
+        "read"
+    );
+
+    let reply = fixture.run_public(
+        &[
+            "sendmessage",
+            "--to",
+            "Jenny",
+            "--subject",
+            "named reply",
+            "--in-reply-to",
+            message_id,
+            "hello Jenny",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(reply["notification"], "appserver-input-submitted");
+    assert_eq!(reply["consumed"], false);
+    let received = fixture.run_public(
+        &["recv", "--receive-id", "named-jenny", "--timeout", "0"],
+        THREAD_B,
+    );
+    assert_eq!(received["count"], 1);
+    assert_eq!(received["messages"][0]["id"], reply["msg_id"]);
+    assert_eq!(
+        received["messages"][0]["to"],
+        jenny["identity"]["worker_id"]
+    );
+    assert_eq!(received["messages"][0]["in_reply_to"], message_id);
+    assert_eq!(
+        fixture.run_public(&["msg", reply["msg_id"].as_str().unwrap()], THREAD_A)["state"],
+        "read"
+    );
+}
+
+#[test]
+fn context_names_allocate_idempotently_and_restore_jenny_with_authorization() {
+    let fixture = AppFixture::new();
+    let first = fixture.run_public(&["context"], THREAD_A);
+    assert_eq!(first["name"], "Alice", "{first}");
+    assert_eq!(first["name_resolution"]["outcome"], "committed");
+    let repeat = fixture.run_public(&["context"], THREAD_A);
+    assert_eq!(repeat["name"], "Alice");
+    assert_eq!(
+        repeat["identity"]["worker_id"],
+        first["identity"]["worker_id"]
+    );
+    let second = fixture.run_public(&["context"], THREAD_B);
+    assert_eq!(second["name"], "Bob");
+    let master = fixture.run_public(
+        &[
+            "context",
+            "--approve-grant",
+            r#"{"action":"restore_master","authorization":"user asked to restore Jenny"}"#,
+        ],
+        THREAD_A,
+    );
+    assert_eq!(master["name"], "Jenny", "{master}");
+    assert_eq!(
+        master["master"]["worker_id"],
+        first["identity"]["worker_id"]
+    );
+    assert_eq!(master["name_resolution"]["outcome"], "committed");
+}
+
+#[test]
+fn context_names_unknown_keeps_peer_and_query_is_read_only() {
+    let mut fixture = AppFixture::new();
+    let alice = fixture.run_public(&["context"], THREAD_A);
+    let bob = fixture.run_public(&["context"], THREAD_B);
+    let output = fixture.command_public(&["context", "--op", "names-pending",
+        "--approve-grant", r#"{"action":"restore_name","requested_name":"Alice","authorization":"restore my named work"}"#], THREAD_B);
+    let pending: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(pending["ok"], false, "{pending}");
+    assert_eq!(
+        pending["result"]["snapshot"]["name_resolution"]["outcome"], "pending",
+        "{pending}"
+    );
+    assert_eq!(pending["result"]["snapshot"]["name"], "Bob");
+    assert_eq!(
+        pending["result"]["snapshot"]["identity"]["worker_id"],
+        bob["identity"]["worker_id"]
+    );
+    fixture.restart_daemon();
+    let query = fixture.command_public(&["context", "--op", "names-pending", "--query"], THREAD_B);
+    let query: Value = serde_json::from_slice(&query.stdout).unwrap();
+    assert_eq!(
+        query["result"]["queried_operation"]["name_resolution"]["outcome"], "pending",
+        "{query}"
+    );
+    let after = fixture.run_public(&["context"], THREAD_A);
+    assert_eq!(
+        after["identity"]["worker_id"],
+        alice["identity"]["worker_id"]
+    );
+    assert_eq!(after["name"], "Alice");
+}
+
+#[test]
+fn context_names_current_worker_session_continues_without_another_approval() {
+    let mut fixture = AppFixture::new();
+    let first = fixture.run_public(&["context"], THREAD_A);
+    let worker = first["identity"]["worker_id"].as_str().unwrap();
+    let mut events = Vec::new();
+    for (id, status) in [
+        ("open-a", "working"),
+        ("open-b", "accepted"),
+        ("closed", "closed"),
+    ] {
+        events.push(json!({"ev":"TaskCreated", "task":{
+            "id":id,"owner":worker,"created_by":worker,"status":status,
+            "priority":"p2", "created_ms":1,"updated_ms":1
+        }}));
+        events.push(json!({"ev":"TaskAssignmentUpdated", "assignment":{
+            "task_id":id,"name":"Alice","session_id":THREAD_A,"assignment_revision":1,"updated_ms":1
+        }}));
+    }
+    fixture.append_name_events(&events);
+    fixture
+        .state
+        .lock()
+        .unwrap()
+        .get_mut(THREAD_A)
+        .unwrap()
+        .session_id = Some(THREAD_B.into());
+    let output = fixture.command_public_with_session(&["context"], THREAD_B, THREAD_A);
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["ok"], true, "{result}");
+    let snapshot = &result["result"]["snapshot"];
+    assert_eq!(
+        snapshot["identity"]["worker_id"],
+        first["identity"]["worker_id"]
+    );
+    assert_eq!(snapshot["name"], "Alice");
+    assert_eq!(snapshot["session_id"], THREAD_B, "{snapshot}");
+    assert_eq!(snapshot["binding"]["session_id"], THREAD_B);
+    let events = std::fs::read_to_string(fixture.name_journal()).unwrap();
+    let resolution: Value = events
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| event["ev"] == "NameResolutionCommitted")
+        .last()
+        .unwrap();
+    let assignments = resolution["assignments"].as_array().unwrap();
+    assert_eq!(assignments.len(), 2, "{resolution}");
+    for assignment in assignments {
+        assert_ne!(assignment["task_id"], "closed");
+        assert_eq!(assignment["session_id"], THREAD_B);
+        assert_eq!(assignment["assignment_revision"], 2);
+    }
+}
+
+#[test]
+fn context_names_online_replacement_needs_confirmation_and_keeps_old_executor() {
+    let mut fixture = AppFixture::new();
+    let alice = fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.append_name_events(&[json!({"ev":"AgentPresenceObserved", "presence":{
+        "project_scope":std::fs::canonicalize(&fixture.project).unwrap(),
+        "worker_id":alice["identity"]["worker_id"], "session_id":THREAD_A,
+        "presence":"online", "reason":"isolated current agent fact", "observed_ms":1
+    }})]);
+    let output = fixture.command_public(&["context", "--approve-grant",
+        r#"{"action":"restore_name","requested_name":"Alice","authorization":"restore my work"}"#], THREAD_B);
+    let refused: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(refused["ok"], false, "{refused}");
+    assert_eq!(
+        refused["result"]["snapshot"]["name_resolution"]["outcome"], "confirmation_required",
+        "{refused}"
+    );
+    assert_eq!(refused["result"]["snapshot"]["name"], "Bob");
+    let restored = fixture.run_public(&["context", "--approve-grant",
+        r#"{"action":"restore_name","requested_name":"Alice","authorization":"replace online holder","replace_confirmed":true}"#], THREAD_B);
+    assert_eq!(restored["name"], "Alice");
+    let events = std::fs::read_to_string(fixture.name_journal()).unwrap();
+    assert!(!events.contains("WorkerClosed"));
+    assert!(!events.contains("GlobalMasterRevoked"));
+}
+
+#[test]
+fn context_names_master_commands_and_peer_restore_keep_jenny_authority_consistent() {
+    let fixture = AppFixture::new();
+    let alice = fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "user assigned project goal",
+        ],
+        THREAD_A,
+    );
+    let attempted = fixture.command_public(
+        &["master", "promote", "--approval", "user requested Jenny"],
+        THREAD_B,
+    );
+    assert!(!attempted.status.success(), "{:?}", attempted);
+    let still_master = fixture.run_public(&["context"], THREAD_A);
+    assert_eq!(still_master["name"], "Jenny");
+    assert_eq!(
+        still_master["master"]["worker_id"],
+        alice["identity"]["worker_id"]
+    );
+    let legacy = fixture.command_public(&["worker", "name", "Carol"], THREAD_A);
+    assert!(!legacy.status.success(), "{:?}", legacy);
+    assert!(String::from_utf8_lossy(&legacy.stderr).contains("WORKER_NAME_RESTORE_REQUIRED"));
+    let peer = fixture.run_public(
+        &[
+            "context",
+            "--approve-grant",
+            r#"{"action":"restore_peer","authorization":"continue as peer"}"#,
+        ],
+        THREAD_A,
+    );
+    assert_ne!(peer["name"], "Jenny", "{peer}");
+    assert!(peer["master"].is_null(), "{peer}");
+    assert_eq!(peer["name_resolution"]["outcome"], "committed");
+    fixture.run_public(
+        &["master", "promote", "--approval", "restore project goal"],
+        THREAD_A,
+    );
+    fixture.run_public(
+        &["master", "clear", "--approval", "clear project role"],
+        THREAD_A,
+    );
+    let cleared = fixture.run_public(&["context"], THREAD_A);
+    assert_ne!(cleared["name"], "Jenny");
+    assert!(cleared["master"].is_null(), "{cleared}");
+}
 
 fn unique_root() -> PathBuf {
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -98,6 +662,31 @@ struct AppFixture {
 }
 
 impl AppFixture {
+    fn name_journal(&self) -> PathBuf {
+        let project = std::fs::canonicalize(&self.project).unwrap();
+        let record: Value = std::fs::read_to_string(self.host_state.join("routes.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .find(|record| record["project_scope"] == project.to_string_lossy().as_ref())
+            .unwrap();
+        PathBuf::from(record["storage_root"].as_str().unwrap())
+            .join(".agent-collab/server/journal.jsonl")
+    }
+
+    fn append_name_events(&mut self, events: &[Value]) {
+        self.stop_daemon();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(self.name_journal())
+            .unwrap();
+        for event in events {
+            writeln!(file, "{event}").unwrap();
+        }
+        file.sync_all().unwrap();
+        self.start_daemon();
+    }
+
     fn new() -> Self {
         Self::with_managed_socket(false)
     }
@@ -158,6 +747,10 @@ impl AppFixture {
     }
 
     fn command_public(&self, args: &[&str], thread: &str) -> Output {
+        self.command_public_with_session(args, thread, thread)
+    }
+
+    fn command_public_with_session(&self, args: &[&str], session: &str, thread: &str) -> Output {
         Command::new(binary())
             .args(args)
             .current_dir(&self.project)
@@ -166,7 +759,7 @@ impl AppFixture {
             .env_remove("CODEX_APP_SERVER_SOCKET")
             .env_remove("COLLAB_APPSERVER_NAMESPACE")
             .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex TUI")
-            .env("CODEX_SESSION_ID", thread)
+            .env("CODEX_SESSION_ID", session)
             .env("CODEX_THREAD_ID", thread)
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
@@ -385,6 +978,8 @@ impl Drop for AppFixture {
 
 #[derive(Clone, Debug)]
 struct ThreadState {
+    inputs: Vec<Value>,
+    session_id: Option<String>,
     status: String,
     active_turn: Option<String>,
     turns: Vec<Value>,
@@ -396,6 +991,8 @@ struct ThreadState {
 impl ThreadState {
     fn new() -> Self {
         Self {
+            inputs: Vec::new(),
+            session_id: None,
             status: "idle".into(),
             active_turn: None,
             turns: Vec::new(),
@@ -460,9 +1057,21 @@ fn dispatch(
             json!({"id": id, "error": {"code": -32601, "message": "unsupported"}})
         }
         "thread/turns/list" => thread_turns(params, id, state),
-        "turn/start" => turn_start(params, id, state),
-        "turn/steer" => turn_steer(params, id, state),
-        "thread/queue/add" => queue_add(params, id, state),
+        "turn/start" | "turn/steer" | "thread/queue/add" => {
+            let thread = params["threadId"].as_str().unwrap_or_default().to_owned();
+            state
+                .lock()
+                .unwrap()
+                .entry(thread)
+                .or_insert_with(ThreadState::new)
+                .inputs
+                .push(params.clone());
+            match method {
+                "turn/start" => turn_start(params, id, state),
+                "turn/steer" => turn_steer(params, id, state),
+                _ => queue_add(params, id, state),
+            }
+        }
         "thread/archive" => json!({"id": id, "result": {"archived": true}}),
         _ => json!({"id": id, "error": {"code": -32601, "message": "unsupported"}}),
     }
@@ -484,7 +1093,7 @@ fn thread_read(
         "result": {
             "thread": {
                 "id": thread_id,
-                "sessionId": thread_id.clone(),
+                "sessionId": entry.session_id.as_ref().unwrap_or(&thread_id),
                 "cwd": project_root,
                 "status": {"type": entry.status},
                 "turns": entry.turns
@@ -866,9 +1475,8 @@ fn wrong_appserver_endpoint_fails_closed() {
     );
 }
 
-/// B02/B11: an explicit approved promotion replaces the recorded holder even
-/// when the incumbent is unreachable, the replaced holder loses control, and
-/// the AppServer communication path keeps working for the new holder.
+/// B02/B11: a confirmed online name takeover transfers the typed grant and
+/// preserves the old peer and the public AppServer communication path.
 #[test]
 fn master_authority_appserver_explicit_replacement_keeps_holder_control() {
     let mut fixture = AppFixture::new();
@@ -904,16 +1512,19 @@ fn master_authority_appserver_explicit_replacement_keeps_holder_control() {
     assert_eq!(promoted_a["scope"]["project_scope"], project_scope);
     assert_eq!(promoted_a["scope"]["app_scope_id"], app_scope_id);
 
+    fixture.append_name_events(&[json!({"ev":"AgentPresenceObserved", "presence":{
+        "project_scope":project_scope, "worker_id":worker_a, "session_id":THREAD_A,
+        "presence":"online", "reason":"current online holder fixture", "observed_ms":1
+    }})]);
     let promoted_b = fixture.run_public(
         &[
-            "master",
-            "promote",
-            "--approval",
-            "user approved TUI worker B",
+            "context",
+            "--approve-grant",
+            r#"{"action":"restore_master","authorization":"user approved TUI worker B","replace_confirmed":true}"#,
         ],
         THREAD_B,
     );
-    assert_eq!(promoted_b["master"], worker_b);
+    assert_eq!(promoted_b["master"]["worker_id"], worker_b);
     assert_eq!(promoted_b["scope"]["project_scope"], project_scope);
     assert_eq!(promoted_b["scope"]["app_scope_id"], app_scope_id);
 

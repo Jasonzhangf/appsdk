@@ -651,6 +651,11 @@ impl ProjectRuntimeManager {
                                 self.inner_register_receipt_readback(&context, &envelope.result);
                             let mut result = serde_json::to_value(&envelope.result)
                                 .unwrap_or(serde_json::Value::Null);
+                            if let Some(recovery) = self
+                                .name_recovery_readback(&context, &identity_context.operation_id)
+                            {
+                                result["name_resolution"] = recovery;
+                            }
                             if let (Some(object), Some(readback)) =
                                 (result.as_object_mut(), nested_readback)
                             {

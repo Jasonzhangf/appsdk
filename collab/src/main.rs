@@ -56,50 +56,50 @@ fn me(scope: &Scope) -> anyhow::Result<Identity> {
     Ok(ident)
 }
 
-/// Board operations never bootstrap an identity or launch the daemon.
-fn registered_board_identity(scope: &Scope) -> anyhow::Result<Identity> {
+/// Registered project operations never bootstrap identity or launch the daemon.
+fn registered_project_identity(scope: &Scope) -> anyhow::Result<Identity> {
     let paths = scope::HostPaths::resolve()?;
-    let hint = crate::client::adapters::tmux::pane_hint_from_env();
-    if let Some(endpoint) = crate::client::adapters::tmux::observe_caller_at(
+    let facts = collect_identity_facts(None)?;
+    let session = facts.session_id.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("BOARD_IDENTITY_REQUIRED: current agent session id is required")
+    })?;
+    let endpoint = crate::client::adapters::tmux::observe_caller_at(
         paths.state_root(),
         std::process::id(),
-        hint.as_deref(),
+        facts.pane_hint.as_deref(),
     )
-    .map_err(anyhow::Error::msg)?
+    .map_err(anyhow::Error::msg)?;
+    let route = if let Some(mut endpoint) = endpoint {
+        // Placement locates the transport. Agent anchors must still match
+        // the current daemon binding before its credential can be selected.
+        endpoint.codex_session_id = Some(session.to_owned());
+        endpoint.codex_thread_id = facts.thread_id.clone();
+        client::resolve_route(&scope.sock_path(), &endpoint)?
+    } else {
+        let thread = facts.thread_id.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("BOARD_IDENTITY_REQUIRED: current agent thread id is required")
+        })?;
+        client::resolve_native_route(&scope.sock_path(), session, thread)?
+    };
+    let root = std::fs::canonicalize(&scope.root)?;
+    if route.project_scope.as_str() != root.to_string_lossy() {
+        anyhow::bail!("BOARD_STALE_IDENTITY: current route belongs to another project");
+    }
+    let identity = identity::load_existing_at(&paths, scope, Some(route.agent_id.to_string()))?
+        .ok_or_else(|| {
+            anyhow::anyhow!("BOARD_IDENTITY_REQUIRED: current route has no local credential")
+        })?;
+    let runtime = runtime_for_request(&identity)?;
+    if identity.worker_id != route.agent_id.as_str()
+        || identity.project_scope.as_ref() != Some(&route.project_scope)
+        || runtime.appserver_id != route.app_scope_id
+        || runtime.binding_id != route.binding_id
+        || runtime.endpoint_generation != route.endpoint_generation
+        || runtime.session_id != route.session_id
+        || runtime.native_thread_id != route.native_thread_id
     {
-        let route = client::resolve_route(&scope.sock_path(), &endpoint)?;
-        let root = std::fs::canonicalize(&scope.root)?;
-        if route.project_scope.as_str() != root.to_string_lossy() {
-            anyhow::bail!("BOARD_STALE_IDENTITY: current route belongs to another project");
-        }
-        let identity = identity::load_existing_at(&paths, scope, Some(route.agent_id.to_string()))?
-            .ok_or_else(|| {
-                anyhow::anyhow!("BOARD_IDENTITY_REQUIRED: current route has no local credential")
-            })?;
-        let runtime = runtime_for_request(&identity)?;
-        let placement_matches = identity
-            .transport
-            .as_ref()
-            .filter(|transport| transport.kind == TransportKind::Tmux)
-            .and_then(|transport| transport.tmux_endpoint.as_ref())
-            .is_some_and(|saved| crate::client::adapters::tmux::same_owned_pane(saved, &endpoint));
-        if identity.worker_id != route.agent_id.as_str()
-            || identity.project_scope.as_ref() != Some(&route.project_scope)
-            || runtime.appserver_id != route.app_scope_id
-            || runtime.binding_id != route.binding_id
-            || runtime.endpoint_generation != route.endpoint_generation
-            || !placement_matches
-        {
-            anyhow::bail!("BOARD_STALE_IDENTITY: credential does not match the current route");
-        }
-        return Ok(identity);
+        anyhow::bail!("BOARD_STALE_IDENTITY: credential does not match the current route");
     }
-    let identity = identity::load_existing_at(&paths, scope, None)?
-        .ok_or_else(|| anyhow::anyhow!("BOARD_IDENTITY_REQUIRED: run collab context from the owning TUI before opening the board"))?;
-    if !persisted_runtime_matches_scope(scope, &identity)? {
-        anyhow::bail!("BOARD_STALE_IDENTITY: run collab context to repair the project binding");
-    }
-    runtime_for_request(&identity)?;
     Ok(identity)
 }
 
@@ -113,20 +113,12 @@ fn persisted_runtime_matches_scope(scope: &Scope, ident: &Identity) -> anyhow::R
     let Some(transport) = ident.transport.as_ref() else {
         return Ok(false);
     };
-    if transport.kind == TransportKind::Tmux {
-        let Some(persisted_endpoint) = transport.tmux_endpoint.as_ref() else {
+    if transport.kind == TransportKind::Tmux || runtime.native_thread_id.is_some() {
+        let Some(session) = std::env::var("CODEX_SESSION_ID").ok() else {
             return Ok(false);
         };
-        let Ok(current) = crate::client::adapters::tmux::candidate_from_env() else {
-            return Ok(false);
-        };
-        if current.endpoint.tmux_session_id != persisted_endpoint.tmux_session_id {
-            return Ok(false);
-        }
-    } else if runtime.native_thread_id.is_some() {
-        let session = std::env::var("CODEX_SESSION_ID").ok();
         let thread = std::env::var("CODEX_THREAD_ID").ok();
-        if let (Some(session), Some(thread)) = (session, thread) {
+        {
             let persisted_thread = runtime
                 .native_thread_id
                 .as_ref()
@@ -135,7 +127,9 @@ fn persisted_runtime_matches_scope(scope: &Scope, ident: &Identity) -> anyhow::R
                 .session_id
                 .as_ref()
                 .map(crate::identity::SessionId::as_str);
-            if persisted_thread != Some(thread.as_str())
+            if thread
+                .as_deref()
+                .is_some_and(|thread| persisted_thread != Some(thread))
                 || persisted_session != Some(session.as_str())
             {
                 return Ok(false);
@@ -241,11 +235,8 @@ fn registered_runtime_projection(
             let expected_session = endpoint
                 .codex_session_id
                 .as_deref()
-                .unwrap_or(&endpoint.tmux_session_id);
-            let expected_thread = endpoint
-                .codex_thread_id
-                .as_deref()
-                .unwrap_or(&endpoint.pane_id);
+                .ok_or_else(|| anyhow::anyhow!("registered tmux transport has no agent session"))?;
+            let expected_thread = endpoint.codex_thread_id.as_deref();
             if runtime
                 .session_id
                 .as_ref()
@@ -257,7 +248,7 @@ fn registered_runtime_projection(
                     .as_ref()
                     .map(ToString::to_string)
                     .as_deref()
-                    != Some(expected_thread)
+                    != expected_thread
             {
                 anyhow::bail!("registered tmux endpoint does not match its runtime route");
             }
@@ -770,7 +761,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             };
             match cmd {
                 WorkerCmd::Name { name, reset: _ } => {
-                    let ident = registered_board_identity(&scope)?;
+                    let ident = registered_project_identity(&scope)?;
                     let value: Value = call_project(
                         &scope,
                         &ident,
@@ -889,7 +880,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     resolve_context_root(&scope::HostPaths::resolve()?, &std::env::current_dir()?)?
                         .0;
                 client::require_server(&scope.sock_path())?;
-                let ident = me(&scope)?;
+                let ident = registered_project_identity(&scope)?;
                 let value: Value = call_project(
                     &scope,
                     &ident,
@@ -1104,7 +1095,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
         }
         Cmd::Dashboard { port } => {
             let scope = Scope::resolve()?;
-            let identity = registered_board_identity(&scope)?;
+            let identity = registered_project_identity(&scope)?;
             let runtime = runtime_for_request(&identity)?;
             let context = proto::ProjectContext::for_registered_root_with_app(
                 &scope.root,
@@ -1114,7 +1105,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
         }
         Cmd::Board { cmd } => {
             let scope = Scope::resolve()?;
-            let ident = registered_board_identity(&scope)?;
+            let ident = registered_project_identity(&scope)?;
             let request = match cmd {
                 command => Req::Board {
                     worker_id: ident.worker_id.clone(),

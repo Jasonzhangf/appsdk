@@ -65,8 +65,9 @@ tmux. The path of an existing socket never blocks identity recovery.
 
 Production CLI observation does not parse `TMUX` to inject a socket path. The
 daemon observes the caller's actual pane and session through its known runtime
-endpoints. cwd selects the project; the current tmux session selects that
-project's peer. The observed socket and pane locate delivery only. A stale
+endpoints. cwd selects the project; the stable name owns the work and the
+reported agent sessionID is its current execution carrier. tmux session does
+not select identity. The observed socket and pane locate delivery only. A stale
 environment value or historical pane binding cannot override that observation.
 
 ## Project discovery and centralized persistence
@@ -90,11 +91,11 @@ identity recovery is not authorization to discard them.
 
 ## Identity and role
 
-- The current client is Codex only. The current route is bound to the verified
-  AppServer owner and exact sessionID/threadID pair. The daemon may use a
-  observed tmux socket + pane anchor independently of runtime IDs. Session and
-  process IDs remain observations. Do not reconstruct a new endpoint or
-  manually edit route state.
+- The current client is Codex only. Names own project work; the registered
+  agent sessionID is the current execution carrier. The current AppServer
+  route uses its verified owner and exact agent sessionID/threadID pair.
+  A tmux socket, pane, tmux session and process ID locate transport or probes;
+  they do not select identity. Do not reconstruct an endpoint or edit routes.
 - A Git worktree does not inherit `.agent-collab/` and is not an identity
   context. Run `collab context`; the CLI automatically observes runtime facts
   and the daemon owns identity selection, creation, recovery, update,

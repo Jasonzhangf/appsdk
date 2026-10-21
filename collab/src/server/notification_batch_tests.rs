@@ -754,3 +754,70 @@ fn wake_rebinds_a_stale_default_direct_message_binding() {
     assert_eq!(state.msgs["stale-default"].state, "pending");
     std::fs::remove_dir_all(root).unwrap();
 }
+
+fn owned_subscription(worker_id: &str, id: &str, status: &str) -> NotificationSubscription {
+    NotificationSubscription {
+        id: id.into(),
+        worker_id: worker_id.into(),
+        event: "deadline".into(),
+        subject: Some("goal:test".into()),
+        target: "thread-a".into(),
+        method: "appserver".into(),
+        trigger_ms: Some(2_000),
+        trigger_times_ms: vec![2_000, 4_000],
+        interval_ms: Some(2_000),
+        repeat_count: 4,
+        fired_count: 1,
+        expires_ms: 20_000,
+        status: status.into(),
+        created_ms: 100,
+        updated_ms: 1_500,
+        status_reason: (status == "cancelled").then(|| EXPLICIT_UNSUBSCRIBE_REASON.into()),
+    }
+}
+
+#[test]
+fn retarget_same_target_transport_lost_preserves_schedule_and_terminal_states() {
+    let worker_id = "worker-a";
+    let target = "thread-a";
+    let now = 10_000;
+    let mut state = State::default();
+    for (id, status) in [
+        ("sub-lost", "transport-lost"),
+        ("sub-cancelled", "cancelled"),
+        ("sub-expired", "expired"),
+        ("sub-consumed", "consumed"),
+    ] {
+        state
+            .notification_subscriptions
+            .insert(id.into(), owned_subscription(worker_id, id, status));
+    }
+    let transport = SelectedTransport {
+        kind: TransportKind::AppServer,
+        endpoint: Some("unix:///tmp/collab-test-appserver.sock".into()),
+        namespace: Some("codex_tui".into()),
+        session_id: Some("session-a".into()),
+        thread_id: Some(target.into()),
+        tmux_endpoint: None,
+        capabilities: vec!["send_message_to_thread".into()],
+        self_check: "test appserver".into(),
+    };
+
+    let events = retarget_owned_notification_events(&state, worker_id, &transport, now);
+    assert_eq!(events.len(), 1, "{events:?}");
+    let Event::NotificationSubscribed { subscription } = &events[0] else {
+        panic!("expected subscription rearm: {:?}", events[0]);
+    };
+    assert_eq!(subscription.id, "sub-lost");
+    assert_eq!(subscription.status, "armed");
+    assert_eq!(subscription.status_reason, None);
+    assert_eq!(subscription.method, "appserver");
+    assert_eq!(subscription.target, target);
+    assert_eq!(subscription.trigger_ms, Some(2_000));
+    assert_eq!(subscription.trigger_times_ms, vec![2_000, 4_000]);
+    assert_eq!(subscription.interval_ms, Some(2_000));
+    assert_eq!(subscription.repeat_count, 4);
+    assert_eq!(subscription.fired_count, 1);
+    assert_eq!(subscription.expires_ms, 20_000);
+    assert_eq!(subscription.updated_ms, now);
+}

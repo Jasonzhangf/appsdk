@@ -769,6 +769,25 @@ fn consume_register_typed(
     let committed = server.consume_prepared_register_with_approval(prepared, approval);
     match committed {
         Ok(outcome) => {
+            let name_resolution = match name_resolution::resolve_registered_name(
+                server,
+                worker_id,
+                outcome.receipt.operation_id.as_str(),
+                "register",
+                None,
+            ) {
+                Ok(resolution) => resolution,
+                Err(error) => {
+                    return Resp::err_data(
+                        error,
+                        json!({
+                            "command_id":outcome.receipt.command_id.as_str(),
+                            "operation_id":outcome.receipt.operation_id.as_str(),
+                            "registration_committed":true,
+                        }),
+                    )
+                }
+            };
             let (role_brief, _) = {
                 let st = server.state.lock().unwrap();
                 (role_brief(server, &st, worker_id), ())
@@ -779,6 +798,9 @@ fn consume_register_typed(
                 "transport_selected": transport,
                 "registered_at": iso(registered_at),
                 "role_brief": role_brief,
+                "name": name_resolution["name"],
+                "session_id": name_resolution["session_id"],
+                "name_resolution": name_resolution,
                 "typed": true,
                 "command_id": outcome.receipt.command_id.as_str(),
                 "operation_id": outcome.receipt.operation_id.as_str(),
@@ -875,13 +897,8 @@ fn register_typed_observed(
             return Resp::err(error);
         }
     }
-    let response = consume_register_typed(
-        server,
-        worker_id,
-        transport,
-        prepared,
-        register_approval,
-    );
+    let response =
+        consume_register_typed(server, worker_id, transport, prepared, register_approval);
     clear_context_cancel_operation();
     crate::server::clear_context_register_start_binding();
     response

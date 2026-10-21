@@ -385,7 +385,9 @@ fn retarget_owned_notification_events(
         subscription.worker_id == worker_id && subscription.id != default_id
             && subscription.expires_ms > now
             && matches!(subscription.status.as_str(), "armed" | "transport-lost")
-            && (subscription.method != transport.kind.as_str() || subscription.target != target)
+            && (subscription.status == "transport-lost"
+                || subscription.method != transport.kind.as_str()
+                || subscription.target != target)
     }).map(|subscription| {
         let mut subscription = subscription.clone();
         subscription.method = transport.kind.as_str().to_owned();
@@ -726,7 +728,11 @@ fn attempt_tmux_notification_with_retry(
     let unacked_notifications = state
         .msgs
         .values()
-        .filter(|message| message.to == recipient && message.state == "delivered")
+        .filter(|message| {
+            message.to == recipient
+                && message.state == "delivered"
+                && !state.handoff_wake_pending(message)
+        })
         .count();
     if unacked_notifications >= server.config.notifications.max_unacked as usize {
         return NotificationAttempt::NotAttempted(
@@ -774,11 +780,13 @@ fn attempt_tmux_notification_with_retry(
                     &sub.event,
                     &server.config.notifications,
                 ) == delay
-                && message.state == "pending"
+                && (message.state == "pending" || state.handoff_wake_pending(message))
                 && (if retry {
                     message.id == seed_id
                 } else {
-                    allow_retry || message.wake_attempt_count < MAX_WAKE_ATTEMPTS
+                    allow_retry
+                        || state.handoff_wake_pending(message)
+                        || message.wake_attempt_count < MAX_WAKE_ATTEMPTS
                 })
                 && sub.worker_id == recipient
                 && subscription_matches_transport(sub, transport)

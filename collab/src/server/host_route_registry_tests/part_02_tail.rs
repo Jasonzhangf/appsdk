@@ -87,12 +87,10 @@
         )
     }
 
-    /// An explicit, user-approved promotion replaces the recorded incumbent.
-    /// The incumbent's pane is only an address, so no probe can veto the
-    /// replacement: the approval itself is the authority. A promotion without
-    /// approval stays refused.
+    /// Approval does not classify an unknown name holder as offline. Pane
+    /// position cannot bypass the durable pending adjudication path.
     #[tokio::test]
-    async fn approved_promotion_replaces_the_incumbent_without_a_pane_taker() {
+    async fn approved_promotion_keeps_unknown_incumbent_without_a_pane_taker() {
         let (_host, host_root, runtime, project_root, _manager, app, _candidates, _master) =
             fenced_master_fixture("fenced-pane-master");
 
@@ -123,18 +121,14 @@
             peer_token.into(),
             "user approved the peer".into(),
         );
-        assert!(promoted.ok, "{promoted:?}");
-        assert_eq!(promoted.data["master"], peer_worker);
+        assert_unknown_promotion_preserves_holder(&runtime, &promoted, "fenced-pane-master");
         std::fs::remove_dir_all(host_root).unwrap();
         std::fs::remove_dir_all(project_root).unwrap();
     }
 
-    /// The live shape that produced the dead loop: a later Codex thread runs in
-    /// the recorded master's pane and is present, so the master can no longer
-    /// act on that anchor. The owner's explicit approval must then be able to
-    /// replace it instead of leaving the project with an unreachable authority.
+    /// Moving to the incumbent's pane supplies no name-presence observation.
     #[tokio::test]
-    async fn approved_promotion_replaces_the_master_when_a_live_peer_took_its_pane() {
+    async fn approved_promotion_keeps_unknown_name_when_peer_took_its_pane() {
         let (_host, host_root, runtime, project_root, _manager, app, mut candidates, _master) =
             fenced_master_fixture("taken-pane-master");
 
@@ -158,16 +152,14 @@
             peer_token.into(),
             "user approved the peer".into(),
         );
-        assert!(promoted.ok, "{promoted:?}");
+        assert_unknown_promotion_preserves_holder(&runtime, &promoted, "taken-pane-master");
         std::fs::remove_dir_all(host_root).unwrap();
         std::fs::remove_dir_all(project_root).unwrap();
     }
 
-    /// A peer that moved off the master pane is still replaced by an approved
-    /// promotion: pane position is an address, and the approval is the whole
-    /// authority for the transition.
+    /// Moving away likewise supplies no offline evidence or second confirmation.
     #[tokio::test]
-    async fn approved_promotion_replaces_the_incumbent_even_after_the_peer_moved_on() {
+    async fn approved_promotion_keeps_unknown_incumbent_after_peer_moved_on() {
         let (_host, host_root, runtime, project_root, _manager, app, mut candidates, _master) =
             fenced_master_fixture("moved-pane-master");
 
@@ -209,10 +201,19 @@
             peer_token.into(),
             "user approved the peer".into(),
         );
-        assert!(promoted.ok, "{promoted:?}");
-        assert_eq!(promoted.data["master"], peer_worker);
+        assert_unknown_promotion_preserves_holder(&runtime, &promoted, "moved-pane-master");
         std::fs::remove_dir_all(host_root).unwrap();
         std::fs::remove_dir_all(project_root).unwrap();
+    }
+
+    fn assert_unknown_promotion_preserves_holder(server: &Server, response: &Resp, incumbent: &str) {
+        assert!(!response.ok, "{response:?}");
+        assert!(response.error.as_deref().unwrap_or_default().starts_with("NAME_RECOVERY_REQUIRED:"), "{response:?}");
+        assert_eq!(response.data["outcome"], "pending");
+        let scope = GlobalState::canonical_project_scope(&server.root).unwrap();
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.name_occupancy(scope.as_str(), "Jenny").unwrap().worker_id, incumbent);
+        assert!(state.name_recoveries.values().any(|recovery| recovery.target_name == "Jenny"));
     }
 
     #[tokio::test]

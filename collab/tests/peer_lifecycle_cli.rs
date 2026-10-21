@@ -21,8 +21,14 @@ fn journal_excluding_background_maintenance(path: &std::path::Path) -> Vec<Strin
         .unwrap_or_default()
         .lines()
         .filter(|line| {
+            let record: Value = serde_json::from_str(line).expect("typed project event");
+            let background_adjudication_acceptance = record["ev"] == "NotificationDeliveryAccepted"
+                && record["message_id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("name-adjudication-presence-"));
             !line.contains("\"GlobalRuntimeBindingLedgerClassified\"")
                 && !line.contains("\"GlobalLedgerScanReceiptRecorded\"")
+                && !background_adjudication_acceptance
         })
         .map(str::to_owned)
         .collect()
@@ -186,6 +192,14 @@ fn worker_snapshot_public_cli_returns_bounded_tmux_buffer_without_a_write() {
         .as_str()
         .expect("snapshot peer has a worker id")
         .to_owned();
+    settle_snapshot_background_notifications(
+        &fixture,
+        &master,
+        seeded["result"]["snapshot"]["identity"]["worker_id"]
+            .as_str()
+            .expect("snapshot master has a worker id"),
+        &peer_id,
+    );
 
     let prepared = tmux(
         &fixture.tmux_socket,
@@ -311,6 +325,14 @@ fn top_level_snapshot_reads_a_peer_buffer_for_a_non_master_caller() {
         peer_seeded["result"]["snapshot"]["identity"]["role"], "worker",
         "snapshot caller must remain an ordinary peer: {peer_seeded}"
     );
+    settle_snapshot_background_notifications(
+        &fixture,
+        &master,
+        &master_id,
+        peer_seeded["result"]["snapshot"]["identity"]["worker_id"]
+            .as_str()
+            .expect("snapshot caller has a worker id"),
+    );
     let prepared = tmux(
         &fixture.tmux_socket,
         &[
@@ -370,6 +392,9 @@ fn top_level_snapshot_reads_a_peer_buffer_for_a_non_master_caller() {
         .as_str()
         .expect("queued message has an id")
         .to_owned();
+    let pending = fixture.run_ok(&["msg", &message_id], Some(&peer));
+    assert_eq!(pending["consumed_by_recv"], false, "{pending}");
+    eprintln!("snapshot target message before read: {pending}");
     let journal_before = journal_excluding_background_maintenance(&fixture.project_journal());
 
     let snapshot = fixture.run_ok(&["snapshot", &master_id, "--lines", "20"], Some(&peer));
@@ -399,6 +424,95 @@ fn top_level_snapshot_reads_a_peer_buffer_for_a_non_master_caller() {
         receipt["consumed_by_recv"], false,
         "snapshot must not consume the target mailbox: {receipt}"
     );
+    eprintln!("snapshot target message after read: {receipt}");
+}
+
+fn settle_snapshot_background_notifications(
+    fixture: &Fixture,
+    master: &Pane,
+    master_id: &str,
+    peer_id: &str,
+) {
+    let records = || {
+        std::fs::read_to_string(fixture.project_journal())
+            .expect("read snapshot fixture journal")
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("typed fixture event"))
+            .collect::<Vec<_>>()
+    };
+    let initial = records();
+    let occupancies = [master_id, peer_id].map(|worker_id| {
+        initial
+            .iter()
+            .rev()
+            .find(|event| {
+                event["ev"] == "NameResolutionCommitted"
+                    && event["occupancy"]["worker_id"] == worker_id
+            })
+            .expect("registered worker has a current typed occupancy")
+            .clone()
+    });
+    let mut deliveries = Vec::new();
+    assert!(
+        wait_until(Duration::from_secs(15), || {
+            let current = records();
+            deliveries = occupancies
+                .iter()
+                .filter_map(|event| {
+                    let occupancy = &event["occupancy"];
+                    let reference = json!({
+                        "project_scope": event["project_scope"],
+                        "name": occupancy["name"],
+                        "worker_id": occupancy["worker_id"],
+                        "session_id": occupancy["session_id"],
+                        "occupancy_revision": occupancy["occupancy_revision"]
+                    });
+                    let recovery = current.iter().rev().find(|record| {
+                        record["ev"] == "NameRecoveryUpdated"
+                            && record["recovery"]["occupancy_ref"] == reference
+                            && record["recovery"]["request"]["invocation"]
+                                == "presence_adjudication"
+                    })?;
+                    let op = recovery["recovery"]["operation_id"].as_str().unwrap();
+                    let id = format!("name-adjudication-{op}");
+                    let terminal = current.iter().rev().find(|record| {
+                        record["message_id"] == id
+                            && (record["ev"] == "NotificationDeliveryAccepted"
+                                || record["ev"] == "NotificationDeliveryFailed")
+                    })?;
+                    Some((reference, op.to_owned(), id, terminal.clone()))
+                })
+                .collect();
+            deliveries.len() == occupancies.len()
+        }),
+        "both current occupancies need exact adjudication delivery terminals: {occupancies:?}; {deliveries:?}"
+    );
+    // The Python runners are controlled simulated agents. Their inconclusive
+    // probes legitimately request adjudication. Finish those independent wakes
+    // before stamping the pure-read baseline; do not disable the monitor.
+    for delivery in &deliveries {
+        assert_eq!(
+            delivery.3["ev"], "NotificationDeliveryAccepted",
+            "{delivery:?}"
+        );
+        let receipt = fixture.run_ok(&["msg", &delivery.2], Some(master));
+        assert_eq!(receipt["consumed_by_recv"], false, "{receipt}");
+        eprintln!("snapshot background delivered: {delivery:?}; receipt={receipt}");
+    }
+    let received = fixture.run_ok(&["recv", "--timeout", "1"], Some(master));
+    for (_, _, id, _) in deliveries {
+        assert!(
+            received["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|msg| msg["id"] == id),
+            "background message {id} must actually be received: {received}"
+        );
+        let receipt = fixture.run_ok(&["msg", &id], Some(master));
+        assert_eq!(receipt["consumed_by_recv"], true, "{receipt}");
+        eprintln!("snapshot background consumed: {receipt}");
+    }
 }
 
 #[test]

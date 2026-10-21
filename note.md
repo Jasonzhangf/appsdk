@@ -257,3 +257,42 @@
   COLLAB_TEST_MCP_BINARY): `collab` 1048 passed, 1 ignored;
   `collab-mcp` 27 passed: `green/post-review-finding-full-binary-suite-green.log`.
 - Commit: `2bfc8277 fix(collab): preserve binding in worker status diagnosis`.
+
+## 2026-10-20 — stable names and runtime closure
+
+Names own project work; the agent sessionID is its current execution carrier.
+Current name/session recovery, fixed-pool allocation, confirmed Jenny takeover,
+Jenny adjudication, open-task/resource retarget, unread named-mail inheritance,
+finite peer patrol recovery and Codex presence/activity now share the declared
+owner boundaries. Master and peer orchestrate at different goal levels;
+one-shot execution/observation goes to GCM subworkers. Tmux only locates probes
+and delivery and never supplies a name or identity key.
+
+Late public consumers exposed and closed role/name delegation and clear,
+self-unregister peer recovery, grant-effect receipts, route-less tmux close,
+and denied-reset pre-authorization mutation. Current source evidence:
+1117 main unit tests, 26 MCP tests, 47 primary consumers, 64 context contracts
+and all 14 additional consumer targets pass via affected-scope reuse/retests;
+one existing unit test remains ignored. Graph, source-format and raw red/green
+receipts are in `~/.collab/runs/name-runtime-closure-20261020/verification.md`.
+This entry is source/candidate evidence. Independent milestone review,
+integration and formal installation follow. The global daemon is user-managed;
+no agent up/down/restart or tmux/pane lifecycle action was performed.
+
+Combined latest main 39d836aa and retained upstream recovery/status and
+read-only delivery behavior. Combined coverage passed 1320 Collab cases and
+16 graph gates, with one existing ignored case. Snapshot fixture readiness
+now waits for its independent background adjudication notices before the
+unchanged full-journal purity assertions.
+
+Independent whole review found four P1 gaps. Repairs retain project/name
+occupancy revision history across release/replay/snapshot, restore current
+daemon route selection before exact read-only credentials, and remove the
+remaining tmux identity and peer-all-busy GCM restrictions from source/global
+Skills. New public red cases reproduced repeated unread-mail handoff loss and
+same-session historical-credential ambiguity; affected green results are in
+`finding-mailbox-result.md` and `finding-reader-result.md` under the run.
+Independent findings-only follow-up closed all four P1s with no new findings;
+host schema classification passed. Final shared units: 1124 main passed,
+27 MCP passed, one existing ignored. Integration and installation are recorded
+separately in the run, including final-install.log and remote delivery receipt.

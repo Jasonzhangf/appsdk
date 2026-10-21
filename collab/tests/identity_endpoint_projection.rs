@@ -112,12 +112,17 @@ fn live_pane_reports_endpoint_live_true_and_output_keeps_identity() {
     assert_eq!(context["identity"]["role"], "master", "{context}");
     assert_eq!(context["master"]["endpoint_live"], true, "{context}");
     assert_eq!(context["liveness"]["live"], true, "{context}");
-    // Durable identity is Present while the agent activity stays unknown; a
-    // live pane endpoint must not fabricate thread or turn state.
-    assert_eq!(context["liveness"]["presence"], "present", "{context}");
-    assert_eq!(context["agent"]["thread_state"], "unknown", "{context}");
+    // The pane runner is not a confirmed agent. Endpoint reachability must
+    // not fabricate agent presence, activity, or turn state.
+    assert_eq!(context["liveness"]["presence"], "unknown", "{context}");
     assert_eq!(
-        context["agent"]["latest_turn_status"], "unknown",
+        context["agent"]["presence_observation"]["reason"], "unsupported_foreground_process",
+        "{context}"
+    );
+    assert_eq!(context["agent"]["thread_state"], "unknown", "{context}");
+    assert_eq!(context["agent"]["activity"], "unknown", "{context}");
+    assert!(
+        context["agent"]["latest_turn_status"].is_null(),
         "{context}"
     );
     assert!(

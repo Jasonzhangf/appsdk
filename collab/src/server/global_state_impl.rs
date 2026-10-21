@@ -579,6 +579,13 @@ impl GlobalState {
             return match self.lookup_current_thread_route(session, thread) {
                 None => CurrentThreadRouteReplayStatus::Missing,
                 Some(existing) if existing == binding => CurrentThreadRouteReplayStatus::Installed,
+                Some(existing)
+                    if existing.binding_id == binding.binding_id
+                        && existing.same_principal(binding)
+                        && existing.endpoint_generation <= binding.endpoint_generation =>
+                {
+                    CurrentThreadRouteReplayStatus::Installed
+                }
                 Some(existing) => CurrentThreadRouteReplayStatus::Ambiguous(existing.clone()),
             };
         };

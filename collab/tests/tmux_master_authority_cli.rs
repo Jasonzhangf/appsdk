@@ -256,6 +256,7 @@ fn master_authority_tmux_unknown_holder_keeps_control_and_projection() {
         "recorded_unusable must not carry a second authority model: {status}"
     );
 
+    wait_for_agent_observations(&registered);
     let context = fixture.run_context(&["context"], Some(&pane));
     assert_eq!(
         context["master"]["worker_id"], worker_id,

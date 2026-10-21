@@ -867,7 +867,11 @@ fn peer_lifecycle_self_unregister_public_cli_rebuilds_and_keeps_pane() {
         .as_str()
         .expect("self-unregister rebuild send has a message id");
     let received = fixture.run_ok(&["recv", "--timeout", "1"], Some(&pane));
-    assert_eq!(received["messages"][0]["id"], msg_id, "{received}");
+    assert!(
+        received["messages"].as_array().unwrap().iter()
+            .any(|message| message["id"] == msg_id),
+        "the exact rebuild message must be consumed alongside any existing patrol notices: {received}"
+    );
     let receipt = fixture.run_ok(&["msg", msg_id], Some(&pane));
     assert_eq!(receipt["consumed_by_recv"], true, "{receipt}");
 }

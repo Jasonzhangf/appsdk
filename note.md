@@ -328,3 +328,13 @@ deterministic red reproduced the erroneous journal write; all 15 batch units
 and all 8 public peer lifecycle cases pass after repair. The return class and
 actual delivery/consumption behavior remain explicit. Further review, final
 build activation and Linux confirmation follow in the run.
+
+Receipt repair passed independent targeted review and final shared units
+(1126 main, 27 MCP, one existing ignored); official 0.2.0302 installed.
+Fourth CI passed Snapshot and reached a second periodic-presence consumer.
+The two observation consumers now share one exact current-session readiness
+helper. Candidate endpoint2, peer8 and master-authority8 pass. The rebuild
+consumer now identifies its exact message among legitimate existing patrol
+mail and still checks its true consumption receipt. Release consumers exclude
+only the test-build fault-injection case; that case remains required/passing
+on the hook-enabled candidate. Final installed evidence is retained separately.

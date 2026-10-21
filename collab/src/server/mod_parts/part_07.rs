@@ -1,16 +1,37 @@
+// Project binding truth is independent of the host's current-route index.
+fn current_worker_binding<'a>(
+    state: &'a State,
+    project_scope: &crate::scope::ProjectScopeId,
+    app_scope: Option<&AppServerId>,
+    worker: &WorkerRec,
+) -> Option<&'a RuntimeBinding> {
+    let transport = worker.transport.as_ref()?;
+    let project = state.global.lookup_project(project_scope)?;
+    let mut bindings = project.runtime_bindings.values().filter(|binding| {
+        binding.agent_id.as_str() == worker.id
+            && app_scope.is_none_or(|app| binding.app_scope_id == *app)
+            && binding.tmux_endpoint == transport.tmux_endpoint
+            && binding.session_id.as_ref().map(|id| id.as_str()) == transport.session_id.as_deref()
+            && binding.native_thread_id.as_ref().map(|id| id.as_str()) == transport.thread_id.as_deref()
+    });
+    let binding = bindings.next()?;
+    bindings.next().is_none().then_some(binding)
+}
+
 // Pure persisted identity proof. Callers holding the reducer lock must use
 // their current snapshot instead of acquiring server.state again.
-fn tmux_identity_presence(state: &State, worker: &WorkerRec) -> IdentityPresence {
+fn tmux_identity_presence(server: &Server, state: &State, worker: &WorkerRec) -> IdentityPresence {
     let Some(endpoint) = worker.transport.as_ref().and_then(|transport| transport.tmux_endpoint.as_ref()) else {
         return IdentityPresence::Missing;
     };
     let current = state.workers.get(&worker.id).is_some_and(|current| {
         current.token == worker.token && current.transport == worker.transport
     });
-    let owned = state.global.lookup_unique_tmux_pane_route(endpoint).is_some_and(|binding| {
-        binding.agent_id.as_str() == worker.id
-            && state.global.lookup_binding_for(&binding.route_scope(), &binding.binding_id) == Some(binding)
-    });
+    let Ok(project_scope) = GlobalState::canonical_project_scope(&server.root) else {
+        return IdentityPresence::Missing;
+    };
+    let owned = current_worker_binding(state, &project_scope, None, worker)
+        .is_some_and(|binding| binding.tmux_endpoint.as_ref() == Some(endpoint));
     if current && owned { IdentityPresence::Present } else { IdentityPresence::Missing }
 }
 
@@ -21,7 +42,7 @@ fn worker_identity_presence(server: &Server, worker: &WorkerRec) -> IdentityPres
     match transport.kind {
         TransportKind::Tmux => {
             let state = server.state.lock().unwrap();
-            tmux_identity_presence(&state, worker)
+            tmux_identity_presence(server, &state, worker)
         }
         TransportKind::AppServer => {
             let Some(thread_id) = transport.thread_id.as_deref() else {
@@ -113,7 +134,7 @@ fn worker_presence_with_view(
 
 fn worker_presence_in_state(server: &Server, state: &State, worker: &WorkerRec) -> IdentityPresence {
     if selected_transport_for_worker(worker).is_some_and(|transport| transport.kind == TransportKind::Tmux) {
-        tmux_identity_presence(state, worker)
+        tmux_identity_presence(server, state, worker)
     } else {
         worker_presence(server, worker)
     }

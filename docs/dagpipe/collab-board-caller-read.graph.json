@@ -1,0 +1,14 @@
+{
+  "id": "appsdk-collab-board-caller-read",
+  "version": "1.0.0",
+  "description": "独立的 board 读取。tmux caller 由实际进程位置观察，daemon 的当前 route 决定请求 actor，精确 credential 必须与其 project/app/worker/binding/generation 一致；不得按历史凭据名称排序取第一条。native caller 保持现有语义。未关闭任务的负责人身份绑定失效时，任务保留且负责人显示为空，交由 master 重新安排；已关闭任务保留历史。读取不改变 TaskRec owner、状态、资源、证据或 revision，不注册、不恢复身份、不修改 route，也不参与 context 恢复成功判定。明确读取失败只结束本次 board 请求。实现 owner 为 main.rs registered_board_identity、既有纯 route resolve、精确 identity credential 读取及 board handler。",
+  "inputs": [{"id": "board_request", "schema": "Object"}],
+  "nodes": [
+    {"id": "observe_caller", "operator": "appsdk.collab_board_read.observe_caller", "operator_version": "1", "inputs": ["board_request"], "output": {"id": "caller_query", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "resolve_current_route", "operator": "appsdk.collab_board_read.resolve_current_route", "operator_version": "1", "inputs": ["caller_query"], "output": {"id": "current_actor", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "read_exact_credential", "operator": "appsdk.collab_board_read.read_exact_credential", "operator_version": "1", "inputs": ["current_actor"], "output": {"id": "authenticated_query", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "read_board", "operator": "appsdk.collab_board_read.read_board", "operator_version": "1", "inputs": ["authenticated_query"], "output": {"id": "board_result", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"}
+  ],
+  "edges": [{"from": "observe_caller", "to": "resolve_current_route", "arc_id": "caller_query"}, {"from": "resolve_current_route", "to": "read_exact_credential", "arc_id": "current_actor"}, {"from": "read_exact_credential", "to": "read_board", "arc_id": "authenticated_query"}],
+  "outputs": ["board_result"]
+}

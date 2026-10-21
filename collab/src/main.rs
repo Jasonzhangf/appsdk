@@ -58,7 +58,43 @@ fn me(scope: &Scope) -> anyhow::Result<Identity> {
 
 /// Board operations never bootstrap an identity or launch the daemon.
 fn registered_board_identity(scope: &Scope) -> anyhow::Result<Identity> {
-    let identity = identity::load_existing_at(&scope::HostPaths::resolve()?, scope, None)?
+    let paths = scope::HostPaths::resolve()?;
+    let hint = crate::client::adapters::tmux::pane_hint_from_env();
+    if let Some(endpoint) = crate::client::adapters::tmux::observe_caller_at(
+        paths.state_root(),
+        std::process::id(),
+        hint.as_deref(),
+    )
+    .map_err(anyhow::Error::msg)?
+    {
+        let route = client::resolve_route(&scope.sock_path(), &endpoint)?;
+        let root = std::fs::canonicalize(&scope.root)?;
+        if route.project_scope.as_str() != root.to_string_lossy() {
+            anyhow::bail!("BOARD_STALE_IDENTITY: current route belongs to another project");
+        }
+        let identity = identity::load_existing_at(&paths, scope, Some(route.agent_id.to_string()))?
+            .ok_or_else(|| {
+                anyhow::anyhow!("BOARD_IDENTITY_REQUIRED: current route has no local credential")
+            })?;
+        let runtime = runtime_for_request(&identity)?;
+        let placement_matches = identity
+            .transport
+            .as_ref()
+            .filter(|transport| transport.kind == TransportKind::Tmux)
+            .and_then(|transport| transport.tmux_endpoint.as_ref())
+            .is_some_and(|saved| crate::client::adapters::tmux::same_owned_pane(saved, &endpoint));
+        if identity.worker_id != route.agent_id.as_str()
+            || identity.project_scope.as_ref() != Some(&route.project_scope)
+            || runtime.appserver_id != route.app_scope_id
+            || runtime.binding_id != route.binding_id
+            || runtime.endpoint_generation != route.endpoint_generation
+            || !placement_matches
+        {
+            anyhow::bail!("BOARD_STALE_IDENTITY: credential does not match the current route");
+        }
+        return Ok(identity);
+    }
+    let identity = identity::load_existing_at(&paths, scope, None)?
         .ok_or_else(|| anyhow::anyhow!("BOARD_IDENTITY_REQUIRED: run collab context from the owning TUI before opening the board"))?;
     if !persisted_runtime_matches_scope(scope, &identity)? {
         anyhow::bail!("BOARD_STALE_IDENTITY: run collab context to repair the project binding");

@@ -83,7 +83,7 @@ fn board_invite(server: &Server, actor: String, token: String, id: String, to: S
     if let Some(subscription) = &subscription { events.push(Event::WakeBound { message_id: message_id.clone(), subscription_id: subscription.id.clone() }); }
     if let Err(error) = server.commit_locked_checked(&mut state, &events) { return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}")); }
     let master = current_master_worker_id(&state, Some(&route));
-    let data = json!({ "task": state.tasks.get(&id).and_then(|task| board_task_view_with_master(&state, task, Some(&actor), master.as_deref())), "msg_id": message_id, "consumed": false });
+    let data = json!({ "task": state.tasks.get(&id).and_then(|task| board_task_view_with_master(&state, task, Some(&actor), master.as_deref(), Some(&route))), "msg_id": message_id, "consumed": false });
     drop(state);
     let attempt = match &subscription {
         Some(subscription) => attempt_notification_detailed_with_at(server, &message_id, &subscription.id, now_ms()),

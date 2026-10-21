@@ -201,7 +201,7 @@ fn approved_promotion_supersedes_a_live_tmux_master() {
 }
 
 #[test]
-fn cross_project_send_queues_to_a_live_tmux_master_without_runtime_identity() {
+fn cross_project_send_queues_to_a_live_tmux_master_without_route_projection() {
     let (server, root) = test_server();
     register(&server, "target-master", "%target-master");
     promote_master(&server, "target-master", "user approved target-master");
@@ -224,8 +224,8 @@ fn cross_project_send_queues_to_a_live_tmux_master_without_runtime_identity() {
     );
     // Model the observed production drift: the pane address stays live and the
     // typed master grant stays valid, but the runtime route projection no
-    // longer claims the pane. Identity then reads Missing even though the
-    // durable mailbox address remains reachable.
+    // longer claims the pane. The project binding and durable mailbox address
+    // remain valid independently of that secondary route projection.
     {
         let mut st = server.state.lock().unwrap();
         st.global
@@ -239,8 +239,8 @@ fn cross_project_send_queues_to_a_live_tmux_master_without_runtime_identity() {
     }
     assert_eq!(
         worker_presence(&server, &worker),
-        IdentityPresence::Missing,
-        "the missing route projection makes runtime identity Missing"
+        IdentityPresence::Present,
+        "the project binding remains valid without the secondary route projection"
     );
     assert_eq!(
         worker_identity_and_endpoint(&server, &worker).1,

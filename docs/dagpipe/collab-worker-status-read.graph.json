@@ -1,0 +1,14 @@
+{
+  "id": "appsdk-collab-worker-status-read",
+  "version": "1.0.0",
+  "description": "独立的 worker 状态读取。请求选择所属项目；项目 reducer 的当前 worker 和适用 runtime binding 是身份事实，不能读取只属于 host 的 route 索引来否定项目身份。选定 adaptor 单独提供端点与活动观察。输出如实区分身份、端点和未知活动，不写身份、route、任务或凭据，不要求 board 或已分配任务存在。实现 owner 为 part_07.rs 的 worker identity/presence 与 part_10.rs 的 status projection。",
+  "inputs": [{"id": "status_request", "schema": "Object"}],
+  "nodes": [
+    {"id": "resolve_project", "operator": "appsdk.collab_worker_status.resolve_project", "operator_version": "1", "inputs": ["status_request"], "output": {"id": "project_query", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "read_project_binding", "operator": "appsdk.collab_worker_status.read_project_binding", "operator_version": "1", "inputs": ["project_query"], "output": {"id": "identity_fact", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "observe_selected_endpoint", "operator": "appsdk.collab_worker_status.observe_selected_endpoint", "operator_version": "1", "inputs": ["identity_fact"], "output": {"id": "status_facts", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "emit_status", "operator": "appsdk.collab_worker_status.emit_status", "operator_version": "1", "inputs": ["status_facts"], "output": {"id": "status_result", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"}
+  ],
+  "edges": [{"from": "resolve_project", "to": "read_project_binding", "arc_id": "project_query"}, {"from": "read_project_binding", "to": "observe_selected_endpoint", "arc_id": "identity_fact"}, {"from": "observe_selected_endpoint", "to": "emit_status", "arc_id": "status_facts"}],
+  "outputs": ["status_result"]
+}

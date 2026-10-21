@@ -12,29 +12,45 @@ fn board_external_actor(state: &State, actor: &str) -> String {
     board_parent_for_actor(state, actor).unwrap_or(actor).into()
 }
 
+#[cfg(test)]
 fn board_task_view(state: &State, task: &TaskRec) -> Option<BoardTaskView> {
     board_task_view_for(state, task, None)
 }
 
+#[cfg(test)]
 fn board_task_view_for(state: &State, task: &TaskRec, viewer: Option<&str>) -> Option<BoardTaskView> {
     let master = current_master_worker_id(state, None);
-    board_task_view_with_master(state, task, viewer, master.as_deref())
+    let route = state.workers.get(&task.owner).and_then(|worker| {
+        let project = GlobalState::canonical_project_scope(Path::new(&worker.cwd)).ok()?;
+        current_worker_binding(state, &project, None, worker).map(|binding| binding.route_scope())
+    });
+    board_task_view_with_master(state, task, viewer, master.as_deref(), route.as_ref())
 }
 
-fn board_task_view_with_master(state: &State, task: &TaskRec, viewer: Option<&str>, master: Option<&str>) -> Option<BoardTaskView> {
-    let details = state.board_details.get(&task.id)?;
+fn board_task_visible(state: &State, task: &TaskRec, viewer: Option<&str>) -> bool {
+    let Some(details) = state.board_details.get(&task.id) else { return false; };
     if let Some(viewer) = viewer {
         let private_owner = viewer == task.owner
             || board_parent_for_actor(state, &task.owner) == Some(viewer);
         if !details.public_visibility && !private_owner {
-            return None;
+            return false;
         }
     } else if !details.public_visibility {
-        return None;
+        return false;
     }
+    true
+}
+
+fn board_task_view_with_master(state: &State, task: &TaskRec, viewer: Option<&str>, master: Option<&str>, route: Option<&RouteScope>) -> Option<BoardTaskView> {
+    if !board_task_visible(state, task, viewer) { return None; }
+    let details = state.board_details.get(&task.id)?;
     let lifecycle = state.task_lifecycle.get(&task.id);
     let cleanup = state.cleanup_receipts.get(&task.id);
-    let owner = if details.public_visibility {
+    let owner_binding_valid = route.and_then(|route| state.workers.get(&task.owner)
+        .and_then(|worker| current_worker_binding(state, &route.project_scope_id, Some(&route.app_scope_id), worker))).is_some();
+    let owner = if task.status != "closed" && !owner_binding_valid {
+        String::new()
+    } else if details.public_visibility {
         board_external_actor(state, &task.owner)
     } else {
         task.owner.clone()
@@ -51,7 +67,8 @@ fn board_task_view_with_master(state: &State, task: &TaskRec, viewer: Option<&st
         delivery_condition: details.delivery_condition.clone(),
         test_condition: details.test_condition.clone(),
         revision: details.revision,
-        owner_display_name: worker_display_name(state, &owner, master == Some(owner.as_str())),
+        owner_display_name: if owner.is_empty() { String::new() }
+            else { worker_display_name(state, &owner, master == Some(owner.as_str())) },
         publisher_display_name: worker_display_name(state, &publisher, master == Some(publisher.as_str())),
         owner,
         publisher,
@@ -77,7 +94,7 @@ fn board_task_view_with_master(state: &State, task: &TaskRec, viewer: Option<&st
 fn board_task_response(server: &Server, state: &State, task_id: &str, viewer: &str) -> Resp {
     let route = match server_route_scope(server, state) { Ok(route) => route, Err(error) => return Resp::err(error) };
     let master = current_master_worker_id(state, route.as_ref());
-    match state.tasks.get(task_id).and_then(|task| board_task_view_with_master(state, task, Some(viewer), master.as_deref())) {
+    match state.tasks.get(task_id).and_then(|task| board_task_view_with_master(state, task, Some(viewer), master.as_deref(), route.as_ref())) {
         Some(task) => Resp::data(json!({ "task": task, "notification": "none" })),
         None => Resp::err("BOARD_TASK_NOT_PUBLIC: task does not belong to the public task board"),
     }
@@ -130,7 +147,7 @@ fn handle_board_show(server: &Server, viewer: Option<&str>) -> Resp {
         .get("worker_id")
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned);
-    let mut tasks: Vec<_> = state.tasks.values().filter_map(|task| board_task_view_with_master(&state, task, viewer, master.as_deref())).collect();
+    let mut tasks: Vec<_> = state.tasks.values().filter_map(|task| board_task_view_with_master(&state, task, viewer, master.as_deref(), route.as_ref())).collect();
     tasks.sort_by(|left, right| left.id.cmp(&right.id));
     let mut workers: Vec<_> = state.workers.values().filter(|worker| !is_managed_subagent(&state, &worker.id)).map(|worker| {
         BoardMemberView {
@@ -210,7 +227,7 @@ fn handle_board_command(server: &Server, actor: String, token: String, command: 
         };
         // Check visibility before reporting revision or lifecycle facts.
         if let Some(task) = task_id.and_then(|id| state.tasks.get(id)) {
-            if board_task_view_for(&state, task, Some(&actor)).is_none() {
+            if !board_task_visible(&state, task, Some(&actor)) {
                 return Resp::err("BOARD_PRIVATE_TASK: task is outside the caller's board view");
             }
         }

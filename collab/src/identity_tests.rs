@@ -496,10 +496,13 @@ fn resolver_rejects_duplicate_agent_session_owners_instead_of_using_current_pane
         ..Default::default()
     };
     let error = resolve_for_daemon_at(&host_paths, &scope, &facts).unwrap_err();
+    let message = error.to_string();
     assert!(
-        error.to_string().starts_with("IDENTITY_RESTORE_AMBIGUOUS:"),
-        "{error}"
+        message.starts_with("IDENTITY_RESTORE_AMBIGUOUS:"),
+        "{message}"
     );
+    assert!(message.contains("codex-%4"), "{message}");
+    assert!(message.contains("same-project-pane-peer"), "{message}");
     std::fs::remove_dir_all(root).ok();
 }
 

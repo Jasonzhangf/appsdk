@@ -338,7 +338,7 @@ fn worker_status_summary_with_maps(
     } else if status == "lost" {
         Some("registered transport is not live; verify the tmux pane binding")
     } else if status == "identity-mismatch" {
-        Some("selected transport does not prove the registered identity; verify its binding")
+        Some("SESSION_THREAD_BINDING_MISMATCH: selected transport does not prove the registered identity; preserve the registered binding and use `collab context` as the only repair entry; do not edit or infer the binding")
     } else {
         None
     };

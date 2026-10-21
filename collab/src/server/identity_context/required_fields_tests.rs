@@ -423,6 +423,76 @@ fn context_binding_public_context_restore_reconciles_worker_projection() {
         }])
         .unwrap();
 
+    let registered =
+        ProjectContext::for_registered_route(&root, saved.runtime.as_ref().unwrap()).unwrap();
+    let before_status_tasks = serde_json::to_value(&runtime.state.lock().unwrap().tasks).unwrap();
+    let before_status_projects =
+        serde_json::to_value(&runtime.state.lock().unwrap().global.projects).unwrap();
+    let before_status_workers =
+        serde_json::to_value(&runtime.state.lock().unwrap().workers).unwrap();
+    let before_status_subscriptions =
+        serde_json::to_value(&runtime.state.lock().unwrap().notification_subscriptions).unwrap();
+    let before_status_runtime_journal = std::fs::read(&runtime.journal_path).unwrap();
+    let before_status_host_journal = std::fs::read(&host.journal_path).unwrap();
+    let (_, status) = manager.dispatch_sync(
+        Some(registered.clone()),
+        Req::WorkerStatus {
+            worker_id: Some(saved.worker_id.clone()),
+        },
+    );
+    assert!(status.ok, "{status:?}");
+    let owner = status.data["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|worker| worker["id"] == saved.worker_id)
+        .expect("owner status");
+    assert_eq!(owner["identity_valid"], false, "{status:?}");
+    assert_eq!(owner["status"], "identity-mismatch", "{status:?}");
+    let diagnostic = owner["diagnostic"].as_str().unwrap_or_default();
+    assert!(
+        diagnostic.starts_with("SESSION_THREAD_BINDING_MISMATCH:"),
+        "worker status must return a typed binding diagnosis: {diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("preserve the registered binding"),
+        "worker status must preserve the binding: {diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("collab context"),
+        "worker status must direct repair through collab context: {diagnostic}"
+    );
+    assert_eq!(
+        serde_json::to_value(&runtime.state.lock().unwrap().tasks).unwrap(),
+        before_status_tasks,
+        "worker status diagnosis must not mutate task ownership"
+    );
+    assert_eq!(
+        serde_json::to_value(&runtime.state.lock().unwrap().global.projects).unwrap(),
+        before_status_projects,
+        "worker status diagnosis must not repair or rewrite the binding"
+    );
+    assert_eq!(
+        serde_json::to_value(&runtime.state.lock().unwrap().workers).unwrap(),
+        before_status_workers,
+        "worker status diagnosis must preserve the worker projection"
+    );
+    assert_eq!(
+        serde_json::to_value(&runtime.state.lock().unwrap().notification_subscriptions).unwrap(),
+        before_status_subscriptions,
+        "worker status diagnosis must not create or change subscriptions"
+    );
+    assert_eq!(
+        std::fs::read(&runtime.journal_path).unwrap(),
+        before_status_runtime_journal,
+        "worker status diagnosis must not append runtime events"
+    );
+    assert_eq!(
+        std::fs::read(&host.journal_path).unwrap(),
+        before_status_host_journal,
+        "worker status diagnosis must not append host events"
+    );
+
     let (_, restored) = manager.dispatch_sync(
         Some(recovery_context(&root)),
         Req::IdentityContext {
@@ -460,8 +530,6 @@ fn context_binding_public_context_restore_reconciles_worker_projection() {
         "repairing a same-binding worker projection must not rewrite the host route journal"
     );
 
-    let registered =
-        ProjectContext::for_registered_route(&root, saved.runtime.as_ref().unwrap()).unwrap();
     let (_, status) = manager.dispatch_sync(
         Some(registered.clone()),
         Req::WorkerStatus {

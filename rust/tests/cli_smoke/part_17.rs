@@ -853,7 +853,11 @@ exit 44
     assert_eq!(block_json["reminders_stopped"], false);
     assert_eq!(block_json["task_id"], "task-404");
     let rule = block_json["rule"].as_str().unwrap();
-    assert!(rule.contains("cause, owner, unblock condition"));
+    assert!(rule.contains("original failure evidence, attempted remedies"));
+    assert!(rule.contains("unavailable authorized alternatives and a decision/resume condition"));
+    assert!(rule.contains("master independently verifies before accepting"));
+    assert!(rule.contains("peer retains delivery ownership unless explicitly reassigned"));
+    assert!(rule.contains("continue unaffected work without waiting for a patrol wake"));
 
     // Also check human text output contains the prominent reminder
     let human_res = Command::new(binary())

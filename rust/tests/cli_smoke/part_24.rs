@@ -140,6 +140,29 @@ fn requirement_lock_original_text_versions_and_explicit_revoke() {
 }
 
 #[test]
+fn source_requirement_ledger_update_does_not_require_consumer_registration() {
+    let fixture = RequirementLockFixture::new("source-requirement-owner");
+    let first = fixture.request("source-first", "roles", 0, "create", "old role rule");
+    requirement_lock_json(fixture.apply(&first));
+    let correction = fixture.request("source-correction", "roles", 1, "replace", "master and peer each own their goal");
+    fs::remove_file(fixture.0.join(".appsdk/project.json")).unwrap();
+    let history = fixture.read("history");
+    assert_eq!(history["changes"].as_array().unwrap().len(), 1);
+    let corrected = requirement_lock_json(fixture.apply(&correction));
+    assert_eq!(corrected["version"], 2);
+    let ledger_path = fixture.0.join(".appsdk/requirements.json");
+    let bytes = fs::read(&ledger_path).unwrap();
+    let mut foreign = correction.clone();
+    foreign["request_id"] = serde_json::json!("foreign-project");
+    foreign["project_id"] = serde_json::json!("another-project");
+    let rejected = fixture.apply(&foreign);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("REQUIREMENTS_PROJECT_MISMATCH"));
+    assert_eq!(fs::read(ledger_path).unwrap(), bytes);
+    assert!(!fixture.0.join(".appsdk/project.json").exists());
+}
+
+#[test]
 fn requirement_lock_missing_authorization_scope_and_replay_preserve_history() {
     let f = RequirementLockFixture::new("requirement-lock-authorization");
     let first = f.request(

@@ -35,6 +35,22 @@ fn initial_tmux_registers_once_without_participant_return() {
                     && rule.contains("close your owned patrol tasks and timed subscriptions")
             })
     };
+    let owns_goal = |snapshot: &Value| {
+        snapshot["role_brief"]["responsibilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|rule| {
+                rule.contains("register your own accepted goal")
+                    && rule.contains("Never ask master to proxy-register a peer goal")
+                    && rule.contains("Stable name owns the goal")
+            })
+    };
+    assert!(
+        owns_goal(&response["result"]["snapshot"]),
+        "registration must explain self-owned goals: {response}"
+    );
     assert!(
         closes_idle_patrol(&response["result"]["snapshot"]),
         "{response}"
@@ -54,6 +70,10 @@ fn initial_tmux_registers_once_without_participant_return() {
         .exists());
     let replay = fixture.context(Some("gate-no-return"), Some(&pane));
     assert_eq!(replay["result"]["outcome"], "completed", "{replay}");
+    assert!(
+        owns_goal(&replay["result"]["snapshot"]),
+        "recovery must retain self-owned goals: {replay}"
+    );
     assert!(
         closes_idle_patrol(&replay["result"]["snapshot"]),
         "{replay}"

@@ -52,7 +52,7 @@
       "id": "提交名字绑定同步未关闭任务或持久待决",
       "operator": "appsdk.collab_context.commit_name_resolution",
       "operator_version": "1",
-      "description": "committed 分支由现有 context binding/route/credential owner 在 canonical project/app/agent scope 内收敛并发布同一 binding 与 endpoint generation，更新名字和当前 agent sessionID，换绑全部未关闭 board assignment，并同步该名字未消费消息的收件和唤醒目标；closed、任务状态、证据、资源、revision 历史、merge obligation、消息 ID/正文/原发送者与真实消费回执保持。worker status 与 board admission 只读该结果；缺失、歧义、陈旧或 principal 不符返回 typed code、已知 expected/observed generation 和 collab context 修复指令，不从 snapshot 重建控制状态。pending 只保存原操作、占用引用和投递进度；缺失 runtime facts 是本次调用终态，不伪装为名字裁决 pending。snapshot 失败、Jenny 不可用或仍 unknown 时原绑定不变，但 Jenny 自身 unknown 且无法响应并获本次明确恢复及接管确认时，直接提交 Jenny/master。提交前核对占用未变化，旧裁决不能覆盖后来者。",
+      "description": "committed 分支由现有 context binding/route/credential owner 在 canonical project/app/agent scope 内收敛并发布同一 binding 与 endpoint generation，更新名字和当前 agent sessionID，换绑全部未关闭 board assignment，并同步该名字未消费消息的收件和唤醒目标。该名字仍有效的 goal 订阅同时交给当前载体和当前 transport target，保留订阅 ID、schedule、TTL 和触发/消费历史，旧载体不再控制或接收后续 goal；终态不复活。closed、任务状态、证据、资源、revision 历史、merge obligation、消息 ID/正文/原发送者与真实消费回执保持。worker status 与 board admission 只读该结果；缺失、歧义、陈旧或 principal 不符返回 typed code、已知 expected/observed generation 和 collab context 修复指令，不从 snapshot 重建控制状态。pending 只保存原操作、占用引用和投递进度；缺失 runtime facts 是本次调用终态，不伪装为名字裁决 pending。snapshot 失败、Jenny 不可用或仍 unknown 时原绑定不变，但 Jenny 自身 unknown 且无法响应并获本次明确恢复及接管确认时，直接提交 Jenny/master。提交前核对占用未变化，旧裁决不能覆盖后来者。",
       "inputs": ["name_resolution_decision"],
       "output": {"id": "name_resolution_outcome", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},

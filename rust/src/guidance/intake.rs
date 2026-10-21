@@ -336,7 +336,7 @@ fn bootstrap_setup(root: &Path, project: &Value, selected_module: &Value, task: 
             },
             {
                 "question_id": "standard_workflows",
-                "prompt": "After reading the project documents, confirm the reusable develop, debug, review, delivery, integration, promotion, freeze, and cleanup flows; ask only unresolved questions.",
+                "prompt": "Resolve the applicable develop, debug, review, delivery, integration and cleanup flows from the project documents and existing authorization. Ask only material unresolved questions. Promotion and freeze apply only to an explicitly selected release flow, never ordinary development.",
                 "required": true
             },
             {
@@ -356,7 +356,7 @@ fn bootstrap_setup(root: &Path, project: &Value, selected_module: &Value, task: 
             }
         ],
         "proposal_schema": proposal_schema,
-        "agent_instruction": "Read the effective upper-level rules, local AGENTS and Skills, actual test commands, and CI/hook behavior before the AppSDK standard template. Treat the template as an advisory versioned reference. For each difference, record its path, owner, delete/merge/narrow/add action, basis, retained safeguards, and affected entrypoints. Reuse existing conversation authorization when it covers a difference, and obtain explicit user approval only for uncovered durable changes. When no relevant SDK resource changed, reuse valid audit evidence instead of repeating a whole-repository audit. Do not require Guidance compilation when Guidance is not selected. Do not modify AGENTS.md, Skills, machine contracts, project.json, lifecycle records, Active, Protected, compiled guidance, or task state before the required authorization.",
+        "agent_instruction": "Read the effective upper-level rules, local AGENTS and Skills, actual test commands, and CI/hook behavior before the advisory AppSDK template. Correct only affected contradictions and confirmed duplication at the unique owner; record material decisions in existing task notes without a separate difference ledger. Reuse existing authorization and valid audit evidence. Ask only about uncovered durable changes. Do not require Guidance compilation when Guidance is not selected. Do not modify out-of-scope project rules, contracts or runtime state.",
         "after_user_approval": {
             "condition": "only for uncovered durable changes; reuse existing session authorization when it covers the change",
             "actions": [
@@ -384,7 +384,7 @@ fn questions(mode: &str, goal: &Value) -> Vec<Value> {
     let mut values = vec![
         serde_json::json!({
             "question_id": "objective_confirmation",
-            "prompt": "After reading the declared AGENTS and Skills, confirm the bounded objective, non-goals, and acceptance evidence with the user.",
+            "prompt": "Read declared AGENTS and Skills, then resolve the objective, non-goals and acceptance evidence from the user request and existing decisions. Ask the user only about material unresolved ambiguity; do not repeat a confirmation already given.",
             "required": true
         }),
         serde_json::json!({
@@ -407,7 +407,7 @@ fn questions(mode: &str, goal: &Value) -> Vec<Value> {
             }),
             serde_json::json!({
                 "question_id": "delivery_depth",
-                "prompt": "Confirm whether acceptance ends at tests/build or also requires install, restart, deployed entrypoint replay, review, merge, promotion, and freeze.",
+                "prompt": "Apply the existing delivery contract and authorized acceptance depth: tests, applicable install/replay, review, merge and cleanup. Promotion and freeze belong only to an explicitly selected release. Do not ask again about already authorized delivery steps or impose release ceremony on ordinary work.",
                 "required": true
             }),
         ]),

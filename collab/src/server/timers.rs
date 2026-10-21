@@ -84,8 +84,8 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                 }
             }
         }
-        // Goal-deadline eligibility is decided by the current grant holder, not
-        // by whether that holder answers a transport probe.
+        // Project wait escalation uses master authority; owned goal deadlines
+        // are independent of that grant and its transport reachability.
         let master_holder = super::current_master_holder(server, &state);
         let mut subscriptions: Vec<_> = state.notification_subscriptions.values().collect();
         subscriptions
@@ -98,24 +98,7 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
             {
                 continue;
             }
-            let Ok(master_holder) = &master_holder else {
-                crate::server::presence::append_log(
-                    &server.log_path(),
-                    &format!(
-                        "TIMER_MASTER_SCOPE_UNKNOWN: {}",
-                        master_holder.as_ref().unwrap_err()
-                    ),
-                );
-                continue;
-            };
-            if master_holder.as_deref() != Some(subscription.worker_id.as_str()) {
-                lifecycle_events.push(Event::NotificationSuppressed {
-                    subscription_id: subscription.id.clone(),
-                    status: "suppressed".into(),
-                    reason: "goal-deadline-requires-current-master".into(),
-                    updated_ms: now,
-                });
-            } else if subscription.fired_count > 0 {
+            if subscription.fired_count > 0 {
                 lifecycle_events.push(Event::NotificationSuppressed {
                     subscription_id: subscription.id.clone(),
                     status: "consumed".into(),
@@ -263,8 +246,6 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
             if subscription.status != "armed"
                 || !server.config.timers.enabled
                 || !matches!(subscription.event.as_str(), "deadline" | "master-idle")
-                || (is_goal_deadline(subscription)
-                    && master_holder.as_deref() != Some(subscription.worker_id.as_str()))
                 || !master_idle_ready
                 || !master_idle_gate_open
                 || next_trigger.is_none_or(|trigger| trigger > now)
@@ -288,10 +269,12 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                 let revision = next_trigger
                     .and_then(|trigger| u64::try_from(trigger).ok())
                     .unwrap_or(0);
-                due_events.push(Event::MasterWakeSignal {
-                    signal: crate::server::state::MasterWakeSignal::GoalDue { revision },
-                    at_ms: now,
-                });
+                if master_holder.as_deref() == Some(subscription.worker_id.as_str()) {
+                    due_events.push(Event::MasterWakeSignal {
+                        signal: crate::server::state::MasterWakeSignal::GoalDue { revision },
+                        at_ms: now,
+                    });
+                }
             }
             let message_id = super::gen_msg_id();
             if subscription.event == "master-idle" {

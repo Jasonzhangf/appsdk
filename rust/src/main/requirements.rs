@@ -164,7 +164,13 @@ fn requirements_apply(root: &Path, input_path: &str) {
     if !request.is_object() {
         fail("INVALID_PRODUCER_INPUT");
     }
-    let project_id = read_project(root)
+    // An established ledger also belongs to a source repository that has not
+    // registered as an AppSDK consumer. Do not create a consumer contract just
+    // to record the user's correction to that existing source of truth.
+    let project = ledger_state(root)
+        .map(|(ledger, _)| ledger)
+        .unwrap_or_else(|| read_project(root));
+    let project_id = project
         .get("project_id")
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
@@ -359,7 +365,9 @@ fn ledger_state(root: &Path) -> Option<(Value, LedgerState)> {
     let ledger: Value =
         serde_json::from_str(&text).unwrap_or_else(|_| fail("REQUIREMENTS_INVALID"));
     let state = validate_ledger(&ledger);
-    if ledger.get("project_id") != read_project(root).get("project_id") {
+    if root.join(".appsdk/project.json").exists()
+        && ledger.get("project_id") != read_project(root).get("project_id")
+    {
         fail("REQUIREMENTS_PROJECT_MISMATCH");
     }
     Some((ledger, state))

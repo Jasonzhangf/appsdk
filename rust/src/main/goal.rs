@@ -28,7 +28,20 @@ where
 }
 
 pub(super) fn longhorizon_show(root: &Path, format_json: bool) {
-    let (record, record_error) = match long_horizon_record(root) {
+    let context = goal_context(root);
+    let role = context
+        .as_ref()
+        .map(execution_role)
+        .unwrap_or(ExecutionRole::Unknown);
+    let caller = context
+        .as_ref()
+        .ok()
+        .and_then(|context| context["identity"]["worker_id"].as_str())
+        .map(str::to_owned);
+    let (record, record_error) = match context
+        .and_then(|context| goal_scope_from_context(&context, root))
+        .and_then(|scope| goal_record_read(&scope))
+    {
         Ok(record) => (record, None),
         Err(error) => (None, Some(error)),
     };
@@ -40,7 +53,6 @@ pub(super) fn longhorizon_show(root: &Path, format_json: bool) {
         Ok(bugs) => (bugs, None),
         Err(err) => (Vec::new(), Some(err)),
     };
-    let role = execution_role(root, &status);
     let role_label = role.label();
     let charter = role.charter();
     let fleet_rules = role.fleet_rules();
@@ -76,8 +88,21 @@ pub(super) fn longhorizon_show(root: &Path, format_json: bool) {
             "blocked" | "waiting" | "resource-waiting"
         )
     };
-    let blocked_tasks: Vec<&Value> = tasks.iter().filter(|t| is_blocked(t)).collect();
-    let active_tasks: Vec<&Value> = tasks.iter().filter(|t| !is_blocked(t)).collect();
+    let in_goal_scope = |task: &Value| {
+        role == ExecutionRole::Master
+            || (role == ExecutionRole::Worker
+                && task["owner"]
+                    .as_str()
+                    .is_some_and(|owner| Some(owner) == caller.as_deref()))
+    };
+    let blocked_tasks: Vec<&Value> = tasks
+        .iter()
+        .filter(|t| in_goal_scope(t) && is_blocked(t))
+        .collect();
+    let active_tasks: Vec<&Value> = tasks
+        .iter()
+        .filter(|t| in_goal_scope(t) && !is_blocked(t))
+        .collect();
 
     // Spare capacity means a live App Server route holding no task. A worker
     // whose route is
@@ -106,6 +131,8 @@ pub(super) fn longhorizon_show(root: &Path, format_json: bool) {
             "goal": {
                 "registered": record.is_some(),
                 "record_error": record_error.as_deref(),
+                "owner": record.as_ref().and_then(|r| r["owner"].as_str()),
+                "record_source": record.as_ref().and_then(|r| r["record_source"].as_str()),
                 "path": goal_path.as_ref().map(|p| p.to_string_lossy().to_string()),
                 "interval": record.as_ref().and_then(|r| r["interval"].as_str()),
                 "active": record.as_ref().and_then(|r| r["active"].as_bool()),
@@ -263,7 +290,7 @@ pub(super) fn longhorizon_show(root: &Path, format_json: bool) {
     match role {
         ExecutionRole::Master => {
             println!("从以下四项中选一项并立即执行，不要以 ACK 或\"已读\"结束本轮：");
-            println!("1. Peer-first 派发 ready 长程工作给合适 peer；只有所有合适 peer 都忙时才启动独立 GCM worker；");
+            println!("1. 派发 ready 长程工作给获授权的合适 peer；一次性执行或观察直接派独立 GCM worker；");
             println!("2. 收敛一个 worktree、resource、P0/P1 或 canonical issue blocker；受保护资源显式保留；");
             println!("3. 合并一个 pending merge（accepted 任务）并记录 collab task integrated，再关闭 worktree；");
             println!("4. 用行为证据关闭阶段；仍需调度时在结束前重新武装一次性 wake。");
@@ -271,17 +298,15 @@ pub(super) fn longhorizon_show(root: &Path, format_json: bool) {
             println!("  collab master wake hold --reason \"<门禁与解除条件>\" --ttl-seconds <n>");
         }
         ExecutionRole::Worker => {
-            println!(
-                "继续当前已拥有的任务；运行 `collab context` 查看自己的 task/scope 后执行下一步。"
-            );
-            println!("不在任务范围内不要尝试全局调度或关闭其他 worker。");
+            println!("继续本人 goal 的编排：拆解、派发子任务、核验证据、解阻、集成与资源收口。");
+            println!("自行管理本人的 goal，不让 master 代登记；不接管他人的目标或项目仲裁权。");
         }
         ExecutionRole::ManagedSubagent => {
             println!("这是旧 managed-subagent 兼容记录，没有生产执行授权；不接新任务、不递归派发，向 peer/master 报告兼容限制后停止。");
         }
         ExecutionRole::Unknown => {
-            println!("身份未验证；先运行 `collab context` 确认当前 session/peer，恢复绑定后再做正常任务动作。");
-            println!("当前会话不获得 master 权力，不派单、不关闭其他 peer。");
+            println!("Collab 身份未验证；继续独立完成用户已授权的工作，可派独立 `codex exec --profile gcm` worker。");
+            println!("仅在用户明确要求时注册；当前不获得 Collab 管理权限，不关闭其他 peer。");
         }
     }
 }
@@ -378,7 +403,7 @@ where
                     GOAL_MIN_INTERVAL_MS / 60_000
                 ));
             }
-            let master_prompt = generate_long_horizon_master_prompt(&goal_path, &interval_str);
+            let goal_prompt = generate_long_horizon_goal_prompt(&goal_path, &interval_str);
             let canonical_goal_path = goal_path
                 .canonicalize()
                 .unwrap_or_else(|_| goal_path.clone());
@@ -393,15 +418,16 @@ where
                     )
                 });
 
-            let owner = match verified_goal_master(root) {
-                Ok(owner) => owner,
+            let scope = match resolve_goal_scope(root) {
+                Ok(scope) => scope,
                 Err(error) => goal_fail(format_json, &error, None),
             };
-            let _goal_lock = match GoalLock::acquire(root, &owner) {
+            let owner = scope.owner.clone();
+            let _goal_lock = match GoalLock::acquire(&scope) {
                 Ok(lock) => lock,
                 Err(error) => goal_fail(format_json, &error, None),
             };
-            let existing = match goal_record_read(root) {
+            let existing = match goal_record_read(&scope) {
                 Ok(existing) => existing,
                 Err(error) => {
                     drop(_goal_lock);
@@ -413,7 +439,7 @@ where
             if let Some(existing) = existing.as_ref() {
                 if existing["desired"].as_str() == Some("cancel_pending") {
                     if let Some(retained_id) = goal_record_subscription_id(existing) {
-                        match goal_subscription_status(root, &retained_id) {
+                        match goal_subscription_status(root, &scope, &retained_id) {
                             Ok((remote_status, remote_record)) => {
                                 if goal_subscription_is_terminal(&remote_status) {
                                     terminal_previous = Some((remote_status, remote_record));
@@ -441,6 +467,7 @@ where
                     }
                     match goal_subscription_by_subject_candidates(
                         root,
+                        &scope,
                         Some(existing),
                         &goal_subject,
                     ) {
@@ -469,6 +496,7 @@ where
                     let recovering = existing["desired"].as_str() == Some("recovery_required");
                     match goal_subscription_by_subject_candidates(
                         root,
+                        &scope,
                         Some(existing),
                         &goal_subject,
                     ) {
@@ -507,7 +535,7 @@ where
                                     (existing["revision"].as_u64().unwrap_or(0) + 1).into(),
                                 );
                                 response["idempotent"] = Value::Bool(true);
-                                response["master_prompt"] = Value::String(master_prompt);
+                                response["goal_prompt"] = Value::String(goal_prompt);
                                 if recovering {
                                     response["recovered_at"] =
                                         Value::String(chrono::Utc::now().to_rfc3339());
@@ -521,7 +549,7 @@ where
                                     });
                                     response["subject"] = Value::String(matched_subject);
                                 }
-                                if let Err(error) = goal_record_write(root, &response) {
+                                if let Err(error) = goal_record_write(&scope, &response) {
                                     drop(_goal_lock);
                                     goal_fail(format_json, &error, Some(&response));
                                 }
@@ -541,7 +569,7 @@ where
                         Ok(None) if recovering => {}
                         Ok(None) => {
                             let retained = goal_record_subscription_id(existing).map(|id| {
-                                goal_subscription_status(root, &id)
+                                goal_subscription_status(root, &scope, &id)
                                     .map(|(status, remote_record)| (status, remote_record))
                             });
                             match retained {
@@ -557,7 +585,7 @@ where
                                         &mut recovery,
                                         "GOAL_EXISTING_SUBSCRIPTION_NOT_RECONCILED: no armed deadline subscription matches the retained or canonical subject".into(),
                                     );
-                                    if let Err(error) = goal_record_write(root, &recovery) {
+                                    if let Err(error) = goal_record_write(&scope, &recovery) {
                                         drop(_goal_lock);
                                         goal_fail(format_json, &error, Some(&recovery));
                                     }
@@ -573,7 +601,7 @@ where
                         Err(error) => {
                             let mut recovery = existing.clone();
                             goal_mark_recovery_required(&mut recovery, error.clone());
-                            if let Err(write_error) = goal_record_write(root, &recovery) {
+                            if let Err(write_error) = goal_record_write(&scope, &recovery) {
                                 drop(_goal_lock);
                                 goal_fail(format_json, &write_error, Some(&recovery));
                             }
@@ -589,7 +617,7 @@ where
                             &mut recovery,
                             format!("GOAL_DUE_DEADLINE_REARM_CANCEL_FAILED:{}", error),
                         );
-                        if let Err(write_error) = goal_record_write(root, &recovery) {
+                        if let Err(write_error) = goal_record_write(&scope, &recovery) {
                             drop(_goal_lock);
                             goal_fail(format_json, &write_error, Some(&recovery));
                         }
@@ -655,7 +683,7 @@ where
                 }));
                 record["recovery_history"] = Value::Array(history);
             }
-            if let Err(error) = goal_record_write(root, &record) {
+            if let Err(error) = goal_record_write(&scope, &record) {
                 record["error"] = Value::String(error.clone());
                 drop(_goal_lock);
                 goal_fail(format_json, &error, Some(&record));
@@ -688,6 +716,14 @@ where
                     match parse_goal_subscription_response(&out.stdout) {
                         Ok((response, id)) => {
                             let subscription = response.get("subscription").unwrap_or(&response);
+                            if let Err(error) = goal_check_subscription_owner(&scope, subscription)
+                            {
+                                goal_mark_recovery_required(&mut record, error.clone());
+                                if let Err(write_error) = goal_record_write(&scope, &record) {
+                                    goal_fail(format_json, &write_error, Some(&record));
+                                }
+                                goal_fail(format_json, &error, Some(&record));
+                            }
                             let status = subscription
                                 .get("status")
                                 .and_then(Value::as_str)
@@ -776,7 +812,7 @@ where
                 }
             }
             record["revision"] = Value::Number(2.into());
-            if let Err(error) = goal_record_write(root, &record) {
+            if let Err(error) = goal_record_write(&scope, &record) {
                 record["active"] = Value::Bool(false);
                 record["observed"] = Value::String("unknown".into());
                 record["error"] = Value::String(error.clone());
@@ -793,7 +829,7 @@ where
                 goal_fail(format_json, error, Some(&record));
             } else if format_json {
                 let mut resp = record.clone();
-                resp["master_prompt"] = Value::String(master_prompt);
+                resp["goal_prompt"] = Value::String(goal_prompt);
                 println!("{}", serde_json::to_string_pretty(&resp).unwrap());
             } else {
                 println!("Long-horizon goal successfully registered:");
@@ -803,7 +839,7 @@ where
                     interval_str, interval_str, repeat_count, ttl_seconds
                 );
                 println!("- Collab notification status: one-shot armed; rearm is explicit and verifiable");
-                println!("\n{}", master_prompt);
+                println!("\n{}", goal_prompt);
             }
         }
         "status" => {
@@ -814,11 +850,15 @@ where
                     other => fail(format!("UNKNOWN_GOAL_STATUS_OPTION:{}", other)),
                 }
             }
-            let _goal_lock = match GoalLock::acquire(root, "status") {
+            let scope = match resolve_goal_scope(root) {
+                Ok(scope) => scope,
+                Err(error) => goal_fail(format_json, &error, None),
+            };
+            let _goal_lock = match GoalLock::acquire(&scope) {
                 Ok(lock) => lock,
                 Err(error) => goal_fail(format_json, &error, None),
             };
-            let existing = match goal_record_read(root) {
+            let existing = match goal_record_read(&scope) {
                 Ok(existing) => existing,
                 Err(error) => {
                     drop(_goal_lock);
@@ -859,7 +899,7 @@ where
             ) {
                 let by_id = subscription_id
                     .as_deref()
-                    .map(|id| goal_subscription_status(root, id));
+                    .map(|id| goal_subscription_status(root, &scope, id));
                 let by_id =
                     by_id.unwrap_or_else(|| Err("GOAL_STATUS_SUBSCRIPTION_ID_MISSING".into()));
                 match by_id {
@@ -894,6 +934,7 @@ where
                             .unwrap_or_default();
                         match goal_subscription_by_subject_candidates(
                             root,
+                            &scope,
                             Some(&record),
                             &canonical_subject,
                         ) {
@@ -958,10 +999,13 @@ where
                     }
                 }
             }
-            if record != old_record {
+            if (record != old_record || record["session_id"] != serde_json::json!(scope.session_id))
+                && old_record["record_source"] != "legacy-read-only"
+            {
+                record["session_id"] = serde_json::json!(scope.session_id);
                 let revision = old_record["revision"].as_u64().unwrap_or(0);
                 record["revision"] = Value::Number((revision + 1).into());
-                if let Err(error) = goal_record_write(root, &record) {
+                if let Err(error) = goal_record_write(&scope, &record) {
                     record["active"] = Value::Bool(false);
                     record["observed"] = Value::String("unknown".into());
                     record["error"] = Value::String(error.clone());
@@ -1017,15 +1061,16 @@ where
                     other => fail(format!("UNKNOWN_GOAL_CANCEL_OPTION:{}", other)),
                 }
             }
-            let owner = match verified_goal_master(root) {
-                Ok(owner) => owner,
+            let scope = match resolve_goal_scope(root) {
+                Ok(scope) => scope,
                 Err(error) => goal_fail(format_json, &error, None),
             };
-            let _goal_lock = match GoalLock::acquire(root, &owner) {
+            let owner = scope.owner.clone();
+            let _goal_lock = match GoalLock::acquire(&scope) {
                 Ok(lock) => lock,
                 Err(error) => goal_fail(format_json, &error, None),
             };
-            let Some(mut record) = (match goal_record_read(root) {
+            let Some(mut record) = (match goal_record_read(&scope) {
                 Ok(record) => record,
                 Err(error) => {
                     drop(_goal_lock);
@@ -1077,6 +1122,7 @@ where
             if subscription_id.is_none() {
                 let subject_result = goal_subscription_by_subject_candidates(
                     root,
+                    &scope,
                     Some(&record),
                     &canonical_subject,
                 );
@@ -1098,7 +1144,7 @@ where
                         record["active"] = Value::Bool(true);
                         record["revision"] =
                             Value::Number((record["revision"].as_u64().unwrap_or(0) + 1).into());
-                        if let Err(write_error) = goal_record_write(root, &record) {
+                        if let Err(write_error) = goal_record_write(&scope, &record) {
                             record["error"] = Value::String(format!(
                                 "GOAL_CANCEL_SUBJECT_BIND_RECORD_WRITE_FAILED:{}",
                                 write_error
@@ -1121,7 +1167,7 @@ where
                         record["remote_state"] = Value::String("no_matching_armed_subject".into());
                         record["revision"] =
                             Value::Number((record["revision"].as_u64().unwrap_or(0) + 1).into());
-                        if let Err(write_error) = goal_record_write(root, &record) {
+                        if let Err(write_error) = goal_record_write(&scope, &record) {
                             record["error"] = Value::String(format!(
                                 "GOAL_CANCEL_PENDING_RECORD_WRITE_FAILED:{}; original={}",
                                 write_error, error
@@ -1144,7 +1190,7 @@ where
                         record["remote_state"] = Value::String("unknown".into());
                         record["revision"] =
                             Value::Number((record["revision"].as_u64().unwrap_or(0) + 1).into());
-                        if let Err(write_error) = goal_record_write(root, &record) {
+                        if let Err(write_error) = goal_record_write(&scope, &record) {
                             record["error"] = Value::String(format!(
                                 "GOAL_CANCEL_PENDING_RECORD_WRITE_FAILED:{}; original={}",
                                 write_error, error
@@ -1167,6 +1213,7 @@ where
                 if subject.is_some() || !canonical_subject.is_empty() {
                     cancel_result = match goal_subscription_by_subject_candidates(
                         root,
+                        &scope,
                         Some(&record),
                         &canonical_subject,
                     ) {
@@ -1187,7 +1234,7 @@ where
                                 record["revision"] = Value::Number(
                                     (record["revision"].as_u64().unwrap_or(0) + 1).into(),
                                 );
-                                if let Err(write_error) = goal_record_write(root, &record) {
+                                if let Err(write_error) = goal_record_write(&scope, &record) {
                                     let error = format!(
                                         "GOAL_CANCEL_RECONCILIATION_RECORD_WRITE_FAILED:{}; original={}",
                                         write_error, original_error
@@ -1226,7 +1273,7 @@ where
                     record["remote_state"] = Value::String("unknown".into());
                     record["revision"] =
                         Value::Number((record["revision"].as_u64().unwrap_or(0) + 1).into());
-                    if let Err(write_error) = goal_record_write(root, &record) {
+                    if let Err(write_error) = goal_record_write(&scope, &record) {
                         record["error"] = Value::String(format!(
                             "GOAL_CANCEL_PENDING_RECORD_WRITE_FAILED:{}; original={}",
                             write_error, error
@@ -1251,7 +1298,7 @@ where
             record["cancelled_at"] = Value::String(chrono::Utc::now().to_rfc3339());
             record["revision"] =
                 Value::Number((record["revision"].as_u64().unwrap_or(0) + 1).into());
-            if let Err(error) = goal_record_write(root, &record) {
+            if let Err(error) = goal_record_write(&scope, &record) {
                 record["desired"] = Value::String("cancel_pending".into());
                 record["observed"] = Value::String("unknown".into());
                 record["active"] = Value::Bool(false);
@@ -1320,11 +1367,11 @@ where
                     goal_path.display()
                 ));
             }
-            if let Err(error) = verified_goal_master(root) {
+            if let Err(error) = resolve_goal_scope(root) {
                 goal_fail(false, &error, None);
             }
 
-            let prompt = generate_long_horizon_master_prompt(&goal_path, &interval_str);
+            let prompt = generate_long_horizon_goal_prompt(&goal_path, &interval_str);
             println!("{}", prompt);
         }
         _ => fail(format!("UNKNOWN_GOAL_SUBCOMMAND:{}", sub)),

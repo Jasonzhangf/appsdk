@@ -600,20 +600,22 @@ use super::*;
     }
 
     #[test]
-    fn goal_deadline_never_wakes_a_non_master_subscription() {
-        let (server, root) = test_server();
+    fn peer_goal_deadline_wakes_its_owner_once_without_master_wake() {
+        let (mut server, root) = test_server();
+        Arc::get_mut(&mut server).unwrap().config.notifications.mode = "immediate".into();
         register_master(&server);
         register(&server, "worker");
         let now = now_ms();
         let subscription_id = "sub-goal-worker".to_string();
+        let (target, method) = subscription_target(&server, "worker");
         server.commit(&[Event::NotificationSubscribed {
             subscription: NotificationSubscription {
                 id: subscription_id.clone(),
                 worker_id: "worker".into(),
                 event: "deadline".into(),
                 subject: Some("goal:worker".into()),
-                target: "thread-worker".into(),
-                method: "tmux".into(),
+                target,
+                method,
                 trigger_ms: Some(now - 1),
                 trigger_times_ms: Vec::new(),
                 interval_ms: None,
@@ -628,18 +630,30 @@ use super::*;
         }]);
 
         tick_with_idle(&server, &|_| false);
+        tick_with_idle(&server, &|_| false);
         let state = server.state.lock().unwrap();
-        assert!(subscription_messages(&state, &subscription_id).is_empty());
+        let messages = subscription_messages(&state, &subscription_id);
+        assert_eq!(messages.len(), 1, "peer goal must emit exactly once");
+        assert_eq!(messages[0].to, "worker");
+        let message_id = messages[0].id.clone();
+        assert!(!state.master_wake.goal_due, "peer goal cannot contaminate master wake");
+        drop(state);
+        server.commit(&[Event::NotificationConsumed {
+            subscription_id: subscription_id.clone(),
+            message_id,
+            consumed_ms: now_ms(),
+        }]);
+        tick_with_idle(&server, &|_| false);
+        let state = server.state.lock().unwrap();
+        assert_eq!(subscription_messages(&state, &subscription_id).len(), 1);
         assert_eq!(
             state.notification_subscriptions[&subscription_id].status,
-            "suppressed"
+            "consumed",
+            "subscription={:?} failures={:?}",
+            state.notification_subscriptions[&subscription_id],
+            state.notification_delivery_failures,
         );
-        assert_eq!(
-            state.notification_subscriptions[&subscription_id]
-                .status_reason
-                .as_deref(),
-            Some("goal-deadline-requires-current-master")
-        );
+        assert!(!state.master_wake.goal_due, "peer goal cannot contaminate master wake");
         drop(state);
         std::fs::remove_dir_all(root).ok();
     }

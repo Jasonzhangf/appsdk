@@ -18,7 +18,7 @@ mod long_horizon_role;
 mod memory;
 mod platform;
 
-use long_horizon_policy::{generate_long_horizon_master_prompt, ExecutionRole, POLICY};
+use long_horizon_policy::{generate_long_horizon_goal_prompt, ExecutionRole, POLICY};
 use long_horizon_role::execution_role;
 
 mod communication;
@@ -930,8 +930,9 @@ struct GoalLock {
 }
 
 impl GoalLock {
-    fn acquire(root: &Path, owner: &str) -> Result<Self, String> {
-        let control_dir = root.join(".appsdk-control");
+    fn acquire(scope: &GoalScope) -> Result<Self, String> {
+        let owner = &scope.owner;
+        let control_dir = scope.control_dir();
         fs::create_dir_all(&control_dir)
             .map_err(|error| format!("GOAL_CONTROL_DIR_CREATE_FAILED:{}", error))?;
         let path = control_dir.join("long-task-goal.lock");

@@ -165,9 +165,16 @@ assignment，不发送回流通知。Jenny 收到原因后显式 respond/assign�
 普通 peer 可以创建有限的、owner-scoped、与本人已分配工作相关的 subscription。
 事件类别、有限 schedule、TTL 和 subject 必须在持久化前校验。
 
-项目 goal deadline 与 master-idle reminder 只允许当前 master 创建。managed
-subworker 不能创建独立 deadline schedule。这里限制的是通知权限与资源归属，不是
-普通 peer 的工作执行权限。
+master 与普通 peer 各自创建和维护本人 goal deadline；按 canonical project 与
+稳定名字隔离 goal，sessionID 只表示当前执行载体。master 不代登记 peer goal。
+只有 master-idle reminder 要求当前 master 权限。managed subworker 不能创建独立
+deadline schedule。goal 的读取、更新、续订与取消均由本人完成，不以端点在线、
+tmux 或 Desktop/TUI 位置作为权限条件。
+
+名字换执行载体时，仍有效的本人 goal 订阅随名字接续到新 worker 和当前投递目标。
+订阅 ID、schedule、TTL、触发次数和消费历史保持；旧载体不再控制该订阅或接收
+后续 deadline。cancelled、expired 和 consumed 不因交接复活。旧版单例只从当前
+调用目录及规范项目的实际旧写入位置检查明确归属，保留原文件，不扫描其他目录。
 
 订阅生命周期是单向的：
 
@@ -268,7 +275,7 @@ flowchart TD
 | 同图 / 输出只读任务板结果 | board handler | 失败只结束本次请求；不恢复身份或启动 daemon |
 | `collab-subscription-lifecycle.graph.json` / 读取持久订阅与目标 | subscription owner | 从已提交 binding 读取，不重新选择身份 |
 | 同图 / 分类生命周期转换 | subscription owner | create、transport-loss、cancel、expire、consume 和 suppress 可区分 |
-| 同图 / 校验角色范围与有限计划 | subscription authority owner | peer 只限 owner-scoped 分内订阅；master-only goal/idle |
+| 同图 / 校验角色范围与有限计划 | subscription authority owner | master/peer 各自管理 owner-scoped goal；仅 master-idle 要求 master 权限 |
 | 同图 / 提交单向生命周期状态 | subscription owner | 同 target 恢复 armed 且不重置；终态不复活 |
 | 同图 / 投影订阅结果 | notification context owner | armed、cancelled、expired、consumed 与实际投递分开 |
 | `appserver-route-repair.graph.json` / 保留原错并显式终止 | AppServer notification adapter | 保留 RouteUnavailable；不自动发现、重绑、刷新或重试 |

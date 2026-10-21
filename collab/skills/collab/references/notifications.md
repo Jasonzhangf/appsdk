@@ -89,7 +89,9 @@ Up to three active subscriptions exist per agent.
 - Direct-message leases are owner-scoped and reusable until expiry. Resource
   subscriptions are exact-subject and one-shot. Generic deadline subscriptions
   consume their explicit finite occurrence count; `goal:` deadlines remain
-  one-shot and current-master-only.
+  one-shot and owned by the subscribing master or ordinary peer. Only
+  `master-idle` requires current-master authority. A peer's goal deadline must
+  wake that peer and must not alter the master's wake accumulator.
 - Success consumes only a one-shot event subscription. Expiry or unsubscribe
   ends any subscription; one attempted batch exhausts only its messages on a
   reusable direct-message lease.

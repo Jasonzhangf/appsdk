@@ -1,7 +1,7 @@
 {
   "id": "appsdk-user-requirement-consumption",
   "version": "0.3.0",
-  "description": "任务从唯一 ledger .appsdk/requirements.json 只读加载全部需求及历史，经版本状态核验、按版本绑定 goal.requirements_version 与候选 goal_hash、AppSDK 正式 review 材料组装、阶段适用审查证据，形成唯一准入结果。实现映射到requirements owner及既有goal/review消费边界；operator 名是设计责任映射。",
+  "description": "任务从唯一需求 ledger 加载有效需求及完整历史，按当前用户授权与适用版本组装 review 材料和准入结果。源码仓库已有有效 ledger 时，不要求为维护需求额外注册消费者合同；已有消费者合同时核对项目归属。缺失 ledger 沿既有跳过或初始化合同。此图不要求普通开发建立候选哈希、冻结或身份包装。",
   "inputs": [{"id": "task_requirement_request", "schema": "Object"}],
   "nodes": [
     {

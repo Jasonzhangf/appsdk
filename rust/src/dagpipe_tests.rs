@@ -23,6 +23,16 @@ fn collab_context_design_graph_is_single_source_single_sink_and_registered() {
 fn name_ownership_and_board_assignment_graphs_are_embedded_and_registered() {
     for (path, expected_id, expected_operators) in [
         (
+            "docs/dagpipe/collab-goal-ownership.graph.json",
+            "appsdk-collab-goal-ownership",
+            vec![
+                "appsdk.collab_goal.resolve_owner",
+                "appsdk.collab_goal.select_record",
+                "appsdk.collab_goal.apply_transition",
+                "appsdk.collab_goal.emit_result",
+            ],
+        ),
+        (
             "docs/dagpipe/collab-name-ownership.graph.json",
             "appsdk-collab-name-ownership",
             vec![

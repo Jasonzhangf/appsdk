@@ -1,9 +1,6 @@
-use std::path::Path;
-
 use serde_json::Value;
 
 use crate::long_horizon_policy::ExecutionRole;
-use crate::{collab_master_status, run_goal_collab_command, GOAL_COLLAB_READ_TIMEOUT};
 
 /// `collab context` returns its runtime binding under `result.snapshot`. The
 /// long-horizon role and owner gates share one normalized view so they never
@@ -19,119 +16,30 @@ pub(crate) fn normalized_collab_context(context: &Value) -> Value {
     context.clone()
 }
 
-/// Resolve the execution role only from a verified Collab context and live
-/// worker/master records. Any unavailable probe is surfaced and becomes
-/// `Unknown`; there is no master fallback.
-pub(crate) fn execution_role(root: &Path, status: &Option<Value>) -> ExecutionRole {
-    let context = match collab_context(root) {
-        Ok(context) => context,
-        Err(error) => {
-            eprintln!("{}", error);
-            return ExecutionRole::Unknown;
-        }
-    };
-    let context = normalized_collab_context(&context);
-    let Some(peer) = context["identity"]["worker_id"].as_str().map(str::to_owned) else {
-        return ExecutionRole::Unknown;
-    };
-
-    let Some(status) = status.as_ref() else {
-        return ExecutionRole::Unknown;
-    };
-    let Some(worker) = status["workers"].as_array().and_then(|workers| {
-        workers
-            .iter()
-            .find(|worker| worker["id"].as_str() == Some(peer.as_str()))
-    }) else {
-        return ExecutionRole::Unknown;
-    };
-    // `status.identity_valid` is a lagging projection. The authenticated
-    // context and the durable binding decide identity and role; a stale status
-    // row must not revoke an already accepted peer. Reachability is still a
-    // live observation gate, and an unavailable context probe returns Unknown.
-    let worker_is_reachable = worker["endpoint_live"].as_bool() == Some(true)
-        && worker["suspected_offline"].as_bool() == Some(false);
-    if !worker_is_reachable {
+/// Context owns identity. Reachability observations do not revoke a peer's
+/// orchestration role; project master authority still has its own owner.
+pub(crate) fn execution_role(context: &Value) -> ExecutionRole {
+    if context["identity"]["worker_id"]
+        .as_str()
+        .is_none_or(|id| id.trim().is_empty())
+    {
         return ExecutionRole::Unknown;
     }
 
-    let master_matches_context = match collab_master_matches_context(root, &peer, &context) {
-        Ok(value) => value,
-        Err(error) => {
-            eprintln!("{}", error);
-            return ExecutionRole::Unknown;
-        }
-    };
-    if master_matches_context == Some(true) {
-        return ExecutionRole::Master;
+    if context["identity"]["role"].as_str() == Some("managed-subagent")
+        || context["identity"]["kind"].as_str() == Some("managed-subagent")
+        || context["role_brief"]["derivation"]["kind"].as_str() == Some("managed-subagent")
+    {
+        return ExecutionRole::ManagedSubagent;
     }
-
-    match context["identity"]["role"].as_str() {
-        Some("master") => ExecutionRole::Unknown,
+    match context["identity"]["role"]
+        .as_str()
+        .or_else(|| context["role_brief"]["role"].as_str())
+    {
+        Some("master") => ExecutionRole::Master,
         Some("managed-subagent") => ExecutionRole::ManagedSubagent,
-        Some("worker") => ExecutionRole::Worker,
-        _ if matches!(worker["role"].as_str(), Some("peer") | Some("worker")) => {
-            ExecutionRole::Worker
-        }
-        _ if master_matches_context == Some(false) => ExecutionRole::Worker,
+        Some("peer" | "worker") => ExecutionRole::Worker,
+        None if context["identity"]["kind"].as_str() == Some("peer") => ExecutionRole::Worker,
         _ => ExecutionRole::Unknown,
     }
-}
-
-fn collab_context(root: &Path) -> Result<Value, String> {
-    let mut command = std::process::Command::new("collab");
-    command.arg("context").current_dir(root);
-    let out = run_goal_collab_command(command, GOAL_COLLAB_READ_TIMEOUT)
-        .map_err(|error| format!("COLLAB_CONTEXT_UNAVAILABLE:{}", error))?;
-    if !out.status.success() {
-        return Err(format!(
-            "COLLAB_CONTEXT_FAILED:exit={}",
-            out.status.code().unwrap_or(1)
-        ));
-    }
-    serde_json::from_slice(&out.stdout)
-        .map_err(|error| format!("COLLAB_CONTEXT_JSON_INVALID:{}", error))
-}
-
-fn collab_master_matches_context(
-    root: &Path,
-    peer: &str,
-    context: &Value,
-) -> Result<Option<bool>, String> {
-    let master_status = collab_master_status(root)?;
-    let master = match master_status
-        .get("master")
-        .filter(|value| value.is_object())
-    {
-        Some(master) => master,
-        None => return Ok(None),
-    };
-    let master_peer = match master["worker_id"]
-        .as_str()
-        .filter(|id| !id.trim().is_empty())
-    {
-        Some(peer) => peer,
-        None => return Ok(None),
-    };
-    if master["endpoint_live"].as_bool() != Some(true) {
-        return Ok(None);
-    }
-    if master_peer != peer {
-        return Ok(Some(false));
-    }
-    let context_transport = &context["identity"]["transport"];
-    let Some(transport_kind) = context_transport["kind"].as_str() else {
-        return Ok(None);
-    };
-    if !matches!(transport_kind, "appserver" | "tmux")
-        || context["liveness"]["live"].as_bool() != Some(true)
-        || context["liveness"]["transport_kind"].as_str() != Some(transport_kind)
-        || (transport_kind == "appserver"
-            && context_transport["thread_id"]
-                .as_str()
-                .map_or(true, |thread| thread.trim().is_empty()))
-    {
-        return Ok(None);
-    }
-    Ok(Some(true))
 }

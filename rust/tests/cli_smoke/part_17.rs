@@ -41,6 +41,7 @@ esac
     .unwrap();
     fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
 
+    install_goal_test_context(&fake_collab, &root);
     let subscribed = Command::new(binary())
         .args(["goal", "subscribe", "--goal", "long-task.md", "--json"])
         .current_dir(&root)
@@ -61,7 +62,7 @@ esac
     assert_eq!(cancel_json["desired"], "cancel_pending");
     assert_eq!(cancel_json["observed"], "unknown");
     assert_eq!(cancel_json["subscription_id"], "sub-exact");
-    assert!(root.join(".appsdk-control/long-task-goal.json").is_file());
+    assert!(goal_test_record_path(&root).is_file());
 
     let resubscribe = Command::new(binary())
         .args(["goal", "subscribe", "--goal", "long-task.md", "--json"])
@@ -142,6 +143,7 @@ esac
     .unwrap();
     fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
 
+    install_goal_test_context(&fake_collab, &root);
     let initial = Command::new(binary())
         .args([
             "goal",
@@ -167,7 +169,7 @@ esac
     ));
     assert!(initial_text.contains("one-shot armed; rearm is explicit and verifiable"));
 
-    let record_path = root.join(".appsdk-control/long-task-goal.json");
+    let record_path = goal_test_record_path(&root);
     let mut legacy: Value = serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
     legacy["subject"] = Value::String("goal:long-task.md".into());
     legacy["subscription_id"] = Value::Null;
@@ -347,6 +349,7 @@ esac
     .unwrap();
     fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
 
+    install_goal_test_context(&fake_collab, &root);
     let initial = Command::new(binary())
         .args(["goal", "subscribe", "--goal", "long-task.md", "--json"])
         .current_dir(&root)
@@ -390,7 +393,7 @@ esac
     assert_eq!(previous["collab_subscribed"], false);
     assert_eq!(previous["collab_subscription"]["id"], "sub-consumed");
     let persisted: Value = serde_json::from_slice(
-        &fs::read(root.join(".appsdk-control/long-task-goal.json")).unwrap(),
+        &fs::read(goal_test_record_path(&root)).unwrap(),
     )
     .unwrap();
     assert_eq!(persisted["subscription_id"], "sub-rearmed");
@@ -423,10 +426,13 @@ esac
     )
     .unwrap();
     fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+    install_goal_test_context(&fake_collab, &root);
+    fs::create_dir_all(goal_test_record_path(&root).parent().unwrap()).unwrap();
     fs::write(
-        root.join(".appsdk-control/long-task-goal.json"),
+        goal_test_record_path(&root),
         serde_json::json!({
             "schema_version": 1,
+            "owner": "master-peer",
             "goal_id": "sha256:current-goal",
             "goal_path": "long-task.md",
             "subject": "goal:retained-subject",
@@ -472,7 +478,7 @@ fn goal_subscribe_persistence_failure_retains_reconciliation_state() {
     let root = temp_root("goal-persistence-failure");
     fs::create_dir_all(&root).unwrap();
     fs::write(root.join("long-task.md"), "# Goal\n").unwrap();
-    let control_dir = root.join(".appsdk-control");
+    let control_dir = goal_test_record_path(&root).parent().unwrap().to_owned();
     fs::create_dir_all(&control_dir).unwrap();
     let fake_bin = root.join("fake-bin");
     fs::create_dir_all(&fake_bin).unwrap();
@@ -480,7 +486,7 @@ fn goal_subscribe_persistence_failure_retains_reconciliation_state() {
     let fake_touch = fake_bin.join("touch");
     fs::write(
         &fake_touch,
-        "#!/bin/sh\n/bin/chmod a-w .appsdk-control\n/usr/bin/touch \"$@\"\n",
+        "#!/bin/sh\n/bin/chmod a-w .appsdk-control/goals/6d61737465722d70656572\n/usr/bin/touch \"$@\"\n",
     )
     .unwrap();
     fs::set_permissions(&fake_touch, fs::Permissions::from_mode(0o755)).unwrap();
@@ -495,6 +501,7 @@ fn goal_subscribe_persistence_failure_retains_reconciliation_state() {
     .unwrap();
     fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
 
+    install_goal_test_context(&fake_collab, &root);
     let result = Command::new(binary())
         .args(["goal", "subscribe", "--goal", "long-task.md", "--json"])
         .current_dir(&root)
@@ -521,8 +528,14 @@ fn goal_subscribe_persistence_failure_retains_reconciliation_state() {
 #[test]
 fn goal_stale_lock_is_recovered_after_owner_exit() {
     let root = temp_root("goal-stale-lock");
-    let control_dir = root.join(".appsdk-control");
+    let control_dir = goal_test_record_path(&root).parent().unwrap().to_owned();
     fs::create_dir_all(&control_dir).unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    fs::write(fake_bin.join("collab"), "#!/bin/sh\nexit 64\n").unwrap();
+    install_goal_test_context(&fake_bin.join("collab"), &root);
+    let run_status = || Command::new(binary()).args(["goal", "status", "--json"])
+        .current_dir(&root).env("PATH", &fake_bin).output().unwrap();
     let mut exited = Command::new("/bin/sh")
         .args(["-c", "exit 0"])
         .spawn()
@@ -536,7 +549,7 @@ fn goal_stale_lock_is_recovered_after_owner_exit() {
     )
     .unwrap();
 
-    let status = run_in(&root, &["goal", "status", "--json"]);
+    let status = run_status();
     assert!(status.status.success());
     let payload: Value = serde_json::from_slice(&status.stdout).unwrap();
     assert_eq!(payload["error"], "GOAL_RECORD_NOT_FOUND");
@@ -565,7 +578,7 @@ fn goal_stale_lock_is_recovered_after_owner_exit() {
     );
 
     fs::write(&lock_path, "").unwrap();
-    let empty_lock = run_in(&root, &["goal", "status", "--json"]);
+    let empty_lock = run_status();
     assert!(empty_lock.status.success());
     let empty_payload: Value = serde_json::from_slice(&empty_lock.stdout).unwrap();
     assert_eq!(empty_payload["error"], "GOAL_RECORD_NOT_FOUND");
@@ -592,7 +605,7 @@ fn goal_stale_lock_is_recovered_after_owner_exit() {
     assert_eq!(recovery_receipt["reason"], "empty metadata");
 
     fs::write(&lock_path, "pid=").unwrap();
-    let truncated_lock = run_in(&root, &["goal", "status", "--json"]);
+    let truncated_lock = run_status();
     assert!(truncated_lock.status.success());
     let truncated_payload: Value = serde_json::from_slice(&truncated_lock.stdout).unwrap();
     assert_eq!(truncated_payload["error"], "GOAL_RECORD_NOT_FOUND");
@@ -628,7 +641,7 @@ fn goal_stale_lock_is_recovered_after_owner_exit() {
         format!("pid={} owner=live-owner\n", live_owner.id()),
     )
     .unwrap();
-    let reused_pid = run_in(&root, &["goal", "status", "--json"]);
+    let reused_pid = run_status();
     assert!(reused_pid.status.success());
     let reused_payload: Value = serde_json::from_slice(&reused_pid.stdout).unwrap();
     assert_eq!(reused_payload["error"], "GOAL_RECORD_NOT_FOUND");
@@ -645,13 +658,13 @@ fn goal_stale_lock_is_recovered_after_owner_exit() {
     )
     .unwrap();
     hold_advisory_lock(&held);
-    let busy = run_in(&root, &["goal", "status", "--json"]);
+    let busy = run_status();
     assert_eq!(busy.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&busy.stderr).contains("GOAL_LOCK_BUSY"));
     drop(held);
     live_owner.kill().unwrap();
     live_owner.wait().unwrap();
-    let recovered = run_in(&root, &["goal", "status", "--json"]);
+    let recovered = run_status();
     assert!(recovered.status.success());
 
     fs::remove_dir_all(root).unwrap();
@@ -670,6 +683,7 @@ fn goal_subscribe_timeout_failure_remains_explicit() {
     )
     .unwrap();
     fs::set_permissions(&fake_bin.join("collab"), fs::Permissions::from_mode(0o755)).unwrap();
+    install_goal_test_context(&fake_bin.join("collab"), &root);
 
     let result = Command::new(binary())
         .args([

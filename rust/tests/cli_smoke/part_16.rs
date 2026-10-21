@@ -27,6 +27,7 @@ esac
     .unwrap();
     fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
 
+    install_goal_test_context(&fake_collab, &root);
     // Without a registered goal the briefing still teaches the contract and
     // tells the master how to register one.
     let bare = Command::new(binary())
@@ -59,7 +60,7 @@ esac
     fs::write(
         root.join(".appsdk-control/long-task-goal.json"),
         format!(
-            r#"{{"schema_version":1,"goal_path":"{}","interval":"10m","active":true,"registered_at":"2026-09-07T00:00:00Z"}}"#,
+            r#"{{"schema_version":1,"owner":"master-peer","goal_path":"{}","interval":"10m","active":true,"registered_at":"2026-09-07T00:00:00Z"}}"#,
             goal_file.display()
         ),
     )
@@ -82,7 +83,7 @@ esac
     // Charter, fleet rules and notification rules all travel with the wake.
     assert!(text.contains("不要空转，不要假装完成"));
     assert!(text.contains("Peer-first"));
-    assert!(text.contains("只有所有合适 peer 都忙"));
+    assert!(text.contains("不以 peer 忙闲为前提"));
     assert!(!text.contains("`[subagent].max_concurrent`（默认 8）"));
     assert!(text.contains("绝不能以 ACK、已读或一段总结结束一轮"));
     assert!(text.contains("collab subagent"));
@@ -116,7 +117,7 @@ esac
     assert!(payload["charter"]
         .as_str()
         .unwrap()
-        .contains("只有所有合适 peer 都忙"));
+        .contains("不以 peer 忙闲为前提"));
     assert!(payload["notification_rules"]
         .as_str()
         .unwrap()
@@ -199,13 +200,13 @@ fn longhorizon_show_never_upgrades_worker_or_unknown_to_master() {
         r#"#!/bin/sh
 case "$1 $2" in
   "status --all")
-    printf '%s\n' '{"workers":[{"id":"worker-peer","role":"peer","active_task":"task-1","endpoint_live":true,"identity_valid":true,"suspected_offline":false,"agent_state":"working"}],"tasks":[{"id":"task-1","status":"working","owner":"worker-peer","next_step":"run tests"}],"subagents":[]}'
+    printf '%s\n' '{"workers":[{"id":"worker-peer","role":"peer","active_task":"task-1","endpoint_live":true,"identity_valid":true,"suspected_offline":false,"agent_state":"working"}],"tasks":[{"id":"task-1","status":"working","owner":"worker-peer","next_step":"run tests"},{"id":"other-goal","status":"working","owner":"another-peer"},{"id":"foreign-blocker","status":"blocked","owner":"another-peer"}],"subagents":[]}'
     ;;
   "master status")
     printf '%s\n' '{"master":{"worker_id":"other-peer","endpoint_live":true}}'
     ;;
   "context ")
-    printf '%s\n' '{"identity":{"worker_id":"worker-peer","kind":"peer","transport":{"kind":"appserver","thread_id":"thread-worker-peer"}},"liveness":{"live":true,"transport_kind":"appserver"},"tasks":[{"id":"task-1"}],"inbox":{"unread":0}}'
+    printf '%s\n' '{"identity":{"worker_id":"worker-peer","kind":"peer","role":"peer","transport":{"kind":"appserver","thread_id":"thread-worker-peer"}},"liveness":{"live":true,"transport_kind":"appserver"},"tasks":[{"id":"task-1"}],"inbox":{"unread":0}}'
     ;;
   *)
     exit 64
@@ -229,12 +230,15 @@ esac
         String::from_utf8_lossy(&worker.stderr)
     );
     let payload: Value = serde_json::from_slice(&worker.stdout).unwrap();
-    assert_eq!(payload["role"], "worker");
+    assert_eq!(payload["role"], "peer");
+    assert_eq!(payload["assigned"].as_array().unwrap().len(), 1);
+    assert_eq!(payload["assigned"][0]["id"], "task-1");
+    assert!(payload["blocked"].as_array().unwrap().is_empty());
     assert!(!payload["charter"]
         .as_str()
         .unwrap()
         .contains("你是本项目的 master"));
-    assert!(payload["charter"].as_str().unwrap().contains("独立 worker"));
+    assert!(payload["charter"].as_str().unwrap().contains("peer 不是执行 worker"));
 
     fs::write(
         &fake_collab,
@@ -277,7 +281,7 @@ esac
 }
 
 #[test]
-fn longhorizon_show_requires_authoritative_master_identity() {
+fn longhorizon_show_uses_current_context_role_independent_of_transport() {
     let root = temp_root("longhorizon-master-authority");
     fs::create_dir_all(&root).unwrap();
     let fake_bin = root.join("fake-bin");
@@ -304,9 +308,12 @@ case "$1 $2" in
     ;;
   "context ")
     case "${ROLE_CASE:-master}" in
-      tmux-master) printf '%s\n' '{"identity":{"worker_id":"current-peer","kind":"peer","transport":{"kind":"tmux","tmux_endpoint":{"pane_id":"%1"}}},"liveness":{"live":true,"transport_kind":"tmux"}}' ;;
-      transport-missing) printf '%s\n' '{"identity":{"worker_id":"current-peer","kind":"peer","transport":{"kind":"appserver"}},"liveness":{"live":true,"transport_kind":"appserver"}}' ;;
-      *) printf '%s\n' '{"identity":{"worker_id":"current-peer","kind":"peer","transport":{"kind":"appserver","thread_id":"thread-current-peer"}},"liveness":{"live":true,"transport_kind":"appserver"}}' ;;
+      tmux-master) printf '%s\n' '{"identity":{"worker_id":"current-peer","kind":"peer","role":"master","transport":{"kind":"tmux","tmux_endpoint":{"pane_id":"%1"}}},"liveness":{"live":true,"transport_kind":"tmux"}}' ;;
+      transport-missing) printf '%s\n' '{"identity":{"worker_id":"current-peer","kind":"peer","role":"master","transport":{"kind":"appserver"}},"liveness":{"live":false,"transport_kind":"appserver"}}' ;;
+      worker|mismatch) printf '%s\n' '{"identity":{"worker_id":"current-peer","kind":"peer","role":"peer"}}' ;;
+      subagent) printf '%s\n' '{"identity":{"worker_id":"current-peer","kind":"peer"},"role_brief":{"derivation":{"kind":"managed-subagent"}}}' ;;
+      missing) printf '%s\n' '{"identity":null}' ;;
+      *) printf '%s\n' '{"identity":{"worker_id":"current-peer","kind":"peer","role":"master","transport":{"kind":"appserver","thread_id":"thread-current-peer"}},"liveness":{"live":true,"transport_kind":"appserver"}}' ;;
     esac
     ;;
   *) exit 64 ;;
@@ -329,11 +336,11 @@ esac
     for (case_name, expected_role) in [
         ("master", "master"),
         ("tmux-master", "master"),
-        ("worker", "unknown"),
-        ("subagent", "unknown"),
+        ("worker", "peer"),
+        ("subagent", "managed-subagent"),
         ("missing", "unknown"),
-        ("mismatch", "worker"),
-        ("transport-missing", "unknown"),
+        ("mismatch", "peer"),
+        ("transport-missing", "master"),
     ] {
         let result = run(case_name);
         assert!(
@@ -345,6 +352,35 @@ esac
         assert_eq!(payload["role"], expected_role, "case={case_name}");
     }
 
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn longhorizon_role_uses_one_context_without_secondary_master_probe() {
+    let root = temp_root("longhorizon-context-owner");
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let context = serde_json::json!({"registered":true,"name":"Jenny",
+        "binding":{"project_scope":root.canonicalize().unwrap(),"session_id":"current-session"},
+        "identity":{"worker_id":"current-master","kind":"peer","role":"master"},
+        "role_brief":{"role":"master"},"liveness":{"live":false}});
+    let collab = fake_bin.join("collab");
+    fs::write(&collab, format!(r#"#!/bin/sh
+case "$1 $2" in
+  "context ") printf 'context\n' >> context-calls; printf '%s\n' '{context}' ;;
+  "status --all") printf '%s\n' '{{"workers":[],"tasks":[],"subagents":[]}}' ;;
+  "master status") printf 'forbidden\n' > secondary-master-call; exit 73 ;;
+  *) exit 64 ;;
+esac
+"#)).unwrap();
+    fs::set_permissions(&collab, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = Command::new(binary()).args(["longhorizon","show","--json"])
+        .current_dir(&root).env("PATH", &fake_bin).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let payload: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(payload["role"], "master", "current context owns role despite an unreachable endpoint: {payload}");
+    assert!(!root.join("secondary-master-call").exists());
+    assert_eq!(fs::read_to_string(root.join("context-calls")).unwrap().lines().count(), 1);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -377,10 +413,10 @@ esac
     fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
 
     for (variant, expected_role) in [
-        ("endpoint", "unknown"),
-        ("stale_identity", "worker"),
-        ("offline", "unknown"),
-        ("missing_worker", "unknown"),
+        ("endpoint", "peer"),
+        ("stale_identity", "peer"),
+        ("offline", "peer"),
+        ("missing_worker", "peer"),
     ] {
         let result = Command::new(binary())
             .args(["longhorizon", "show", "--json"])
@@ -395,7 +431,7 @@ esac
         assert_eq!(payload["role"], expected_role, "variant={variant}");
         if variant == "stale_identity" {
             assert_eq!(payload["assigned"][0]["id"], "stale-route-invite");
-            assert!(payload["charter"].as_str().unwrap().contains("独立 worker"));
+            assert!(payload["charter"].as_str().unwrap().contains("peer 不是执行 worker"));
         }
     }
 
@@ -515,7 +551,7 @@ esac
 }
 
 #[test]
-fn goal_subscription_and_master_prompt_lifecycle() {
+fn goal_subscription_and_goal_prompt_lifecycle() {
     let root = temp_root("goal-sub");
     fs::create_dir_all(&root).unwrap();
     let fake_bin = root.join("fake-bin");
@@ -580,6 +616,7 @@ esac
     .unwrap();
     fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
 
+    install_goal_test_context(&fake_collab, &root);
     // 1. Non-md file should fail
     let non_md = root.join("goal.txt");
     fs::write(&non_md, "some goal").unwrap();
@@ -628,9 +665,9 @@ esac
     assert_eq!(sub_json["observed"], "subscribed");
     assert_eq!(sub_json["goal_id"], sub_json["goal_id"]);
     assert!(sub_json["goal_id"].as_str().unwrap().starts_with("sha256:"));
-    let prompt = sub_json["master_prompt"].as_str().unwrap();
-    assert!(prompt.contains("Master 专属"));
-    assert!(prompt.contains("饱和"));
+    let prompt = sub_json["goal_prompt"].as_str().unwrap();
+    assert!(prompt.contains("Master / Peer"));
+    assert!(prompt.contains("peer 不是执行 worker"));
     assert!(prompt.contains("appsdk bug"));
     assert_eq!(sub_json["schedule"], "one-shot");
     assert_eq!(sub_json["local_schedule"], "periodic-rearm-intent");
@@ -695,7 +732,7 @@ esac
     assert_eq!(status_json["desired"], "subscribed");
     assert_eq!(status_json["observed"], "subscribed");
 
-    let record_path = root.join(".appsdk-control/long-task-goal.json");
+    let record_path = goal_test_record_path(&root);
     let mut record: Value =
         serde_json::from_str(&fs::read_to_string(&record_path).unwrap()).unwrap();
     record["subscription_id"] = Value::Null;
@@ -760,7 +797,13 @@ esac
     assert!(cancel_again_json["cancel_receipt"].is_object());
     assert!(cancel_again_json["revision"].as_u64().unwrap() >= 3);
 
-    let post_cancel_status = run_in(&root, &["goal", "status", "--json"]);
+    let post_cancel_status = Command::new(binary())
+        .args(["goal", "status", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
     assert!(post_cancel_status.status.success());
     let post_cancel_json: Value = serde_json::from_slice(&post_cancel_status.stdout).unwrap();
     assert_eq!(post_cancel_json["active"], false);
@@ -792,7 +835,7 @@ esac
 }
 
 #[test]
-fn goal_owner_gate_rejects_authoritative_master_mismatch() {
+fn goal_owner_gate_does_not_require_master_or_tmux() {
     let root = temp_root("goal-owner-gate-mismatch");
     fs::create_dir_all(&root).unwrap();
     fs::write(root.join("long-task.md"), "# Sample Long-Horizon Goal\n").unwrap();
@@ -825,7 +868,11 @@ esac
     .unwrap();
     fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
 
+    install_goal_test_context(&fake_collab, &root);
     let run = |extra_env: &[(&str, &str)]| {
+        if goal_test_record_path(&root).exists() {
+            fs::remove_file(goal_test_record_path(&root)).unwrap();
+        }
         let mut command = Command::new(binary());
         command
             .args(["goal", "subscribe", "--goal", "long-task.md", "--json"])
@@ -839,19 +886,13 @@ esac
     };
 
     let identity_mismatch = run(&[("MASTER_WORKER", "other-peer")]);
-    assert_eq!(identity_mismatch.status.code(), Some(1));
-    assert!(
-        String::from_utf8_lossy(&identity_mismatch.stderr).contains("GOAL_OWNER_IDENTITY_MISMATCH")
-    );
+    assert!(identity_mismatch.status.success());
 
     let transport_missing = run(&[("CONTEXT_TRANSPORT_KIND", "mailbox")]);
-    assert_eq!(transport_missing.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&transport_missing.stderr)
-        .contains("GOAL_OWNER_CONTEXT_TRANSPORT_NOT_LIVE"));
+    assert!(transport_missing.status.success());
 
     let offline_master = run(&[("MASTER_LIVE", "false")]);
-    assert_eq!(offline_master.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&offline_master.stderr).contains("GOAL_OWNER_MASTER_NOT_LIVE"));
+    assert!(offline_master.status.success());
 
     let stale_master_projection = run(&[("STATUS_VARIANT", "stale")]);
     assert!(
@@ -866,7 +907,7 @@ esac
 }
 
 #[test]
-fn goal_owner_gate_rejects_missing_worker_liveness_fields() {
+fn goal_owner_gate_uses_context_without_status_liveness_fields() {
     let root = temp_root("goal-owner-gate-missing-fields");
     fs::create_dir_all(&root).unwrap();
     fs::write(root.join("long-task.md"), "# Sample Long-Horizon Goal\n").unwrap();
@@ -895,7 +936,11 @@ esac
     .unwrap();
     fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
 
+    install_goal_test_context(&fake_collab, &root);
     let run = |variant: &str| {
+        if goal_test_record_path(&root).exists() {
+            fs::remove_file(goal_test_record_path(&root)).unwrap();
+        }
         Command::new(binary())
             .args(["goal", "subscribe", "--goal", "long-task.md", "--json"])
             .current_dir(&root)
@@ -906,15 +951,10 @@ esac
             .unwrap()
     };
 
-    for (variant, expected) in [
-        ("endpoint", "GOAL_OWNER_NOT_LIVE"),
-        ("identity", "GOAL_OWNER_IDENTITY_INVALID"),
-        ("offline", "GOAL_OWNER_SUSPECTED_OFFLINE"),
-    ] {
+    for variant in ["endpoint", "identity", "offline"] {
         let result = run(variant);
-        assert_eq!(result.status.code(), Some(1), "variant={variant}");
         assert!(
-            String::from_utf8_lossy(&result.stderr).contains(expected),
+            result.status.success(),
             "variant={variant} stderr={}",
             String::from_utf8_lossy(&result.stderr)
         );
@@ -935,9 +975,9 @@ fn goal_subscribe_drains_large_collab_output_without_timeout() {
         &fake_collab,
         r#"#!/bin/sh
 case "$1 $2" in
-  "status --all")
+  "notify subscribe")
     (
-      printf '%s' '{"workers":[{"id":"master-peer","endpoint_live":true,"identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[],"padding":"'
+      printf '%s' '{"subscription_id":"large-output-sub","padding":"'
       /bin/dd if=/dev/zero bs=4194304 count=1 2>/dev/null | /usr/bin/tr '\0' 'x'
       printf '%s\n' '"}'
     ) &
@@ -948,7 +988,6 @@ case "$1 $2" in
     ;;
   "master status") printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true}}' ;;
   "context ") printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"tmux","endpoint":"/tmp/collab.sock","tmux_endpoint":{"socket_path":"/tmp/collab.sock","server_pid":123,"tmux_session_id":"$1","pane_id":"%1","pane_pid":456}}},"liveness":{"live":true,"presence":"present","transport_kind":"tmux","endpoint":"/tmp/collab.sock"}}' ;;
-  "notify subscribe") printf '%s\n' '{"subscription_id":"large-output-sub"}' ;;
   *) exit 64 ;;
 esac
 "#,
@@ -956,6 +995,7 @@ esac
     .unwrap();
     fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
 
+    install_goal_test_context(&fake_collab, &root);
     let started = Instant::now();
     let result = Command::new(binary())
         .args(["goal", "subscribe", "--goal", "long-task.md", "--json"])
@@ -1014,6 +1054,7 @@ esac
     .unwrap();
     fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
 
+    install_goal_test_context(&fake_collab, &root);
     let started = Instant::now();
     let result = Command::new(binary())
         .args(["goal", "subscribe", "--goal", "long-task.md", "--json"])
@@ -1139,6 +1180,7 @@ esac
     .unwrap();
     fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
 
+    install_goal_test_context(&fake_collab, &root);
     let started = goal_now_ms_for_test();
     let subscribed = Command::new(binary())
         .args([
@@ -1255,6 +1297,7 @@ esac
     .unwrap();
     fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
 
+    install_goal_test_context(&fake_collab, &root);
     let subscribed = |due: bool| {
         Command::new(binary())
             .args([
@@ -1353,6 +1396,8 @@ fn goal_subscribe_failure_does_not_report_active() {
     .unwrap();
     fs::set_permissions(&fake_bin.join("collab"), fs::Permissions::from_mode(0o755)).unwrap();
 
+    install_goal_test_context(&fake_bin.join("collab"), &root);
+
     let sub = Command::new(binary())
         .args([
             "goal",
@@ -1426,6 +1471,7 @@ esac
     .unwrap();
     fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
 
+    install_goal_test_context(&fake_collab, &root);
     let subscribed = Command::new(binary())
         .args(["goal", "subscribe", "--goal", "long-task.md", "--json"])
         .current_dir(&root)
@@ -1466,7 +1512,183 @@ esac
     let cancel_json: Value = serde_json::from_slice(&cancel.stdout).unwrap();
     assert_eq!(cancel_json["desired"], "cancel_pending");
     assert_eq!(cancel_json["observed"], "unknown");
-    assert!(root.join(".appsdk-control/long-task-goal.json").is_file());
+    assert!(goal_test_record_path(&root).is_file());
 
     fs::remove_dir_all(root).unwrap();
+}
+#[test]
+fn goal_owner_scoped_peer_native_and_master_lifecycle() {
+    let root = temp_root("goal-owner-scoped");
+    fs::create_dir_all(root.join("fake-bin")).unwrap();
+    fs::write(root.join("goal.md"), "# Shared document\nDeliver own goal").unwrap();
+    let script = root.join("fake-bin/collab");
+    fs::write(&script, r#"#!/bin/sh
+case "$1 $2" in
+ "context ") printf '{"result":{"snapshot":{"binding":{"project_scope":"%s"},"name":"%s","session_id":"%s","identity":{"worker_id":"carrier-%s","role":"%s","kind":"peer","transport":{"kind":"appserver","thread_id":"native-thread"}},"role_brief":{"derivation":{"kind":"%s"}}}}}\n' "$PROJECT" "$OWNER" "${SESSION:-first}" "${CARRIER:-$OWNER}" "${ROLE:-peer}" "${DERIVATION:-peer}" ;;
+ "status --all") printf '{"workers":[{"id":"%s","role":"peer","endpoint_live":true,"suspected_offline":false}],"tasks":[]}' "$OWNER" ;;
+ "master status") printf '{"master":{"worker_id":"Jenny","endpoint_live":true}}' ;;
+ "notify subscribe")
+   while [ "$#" -gt 0 ]; do
+     if [ "$1" = "--subject" ]; then printf '%s' "$2" > "$PROJECT/$OWNER.subject"; fi
+     shift
+   done
+   printf 'armed' > "$PROJECT/$OWNER.state"
+   printf '{"subscription_id":"%s-sub"}' "$OWNER" ;;
+ "notify status")
+   [ "${STATUS_FAIL:-}" = 1 ] && exit 42
+   subject=$(/bin/cat "$PROJECT/$OWNER.subject" 2>/dev/null)
+   state=$(/bin/cat "$PROJECT/$OWNER.state" 2>/dev/null)
+   printf '{"subscriptions":[{"id":"%s-sub","owner":"%s","status":"%s","subject":"%s","event":"deadline"}]}' "$OWNER" "${REMOTE_OWNER:-$OWNER}" "${state:-armed}" "$subject" ;;
+ "notify unsubscribe") printf cancelled > "$PROJECT/$OWNER.state"; printf '{"subscription_id":"%s-sub","status":"cancelled"}' "$OWNER" ;;
+ *) exit 64 ;;
+esac
+"#).unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let run = |cwd: &Path, owner: &str, args: &[&str]| {
+        let out = Command::new(binary()).args(args).current_dir(cwd)
+            .env("PATH", root.join("fake-bin")).env("PROJECT", &root)
+            .env("OWNER", owner).env("SESSION", "continued-session").output().unwrap();
+        assert!(out.status.success(), "{} {}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()
+    };
+    let peer = run(&root, "Alice", &["goal", "subscribe", "--goal", "goal.md", "--json"]);
+    assert_eq!(peer["owner"], "Alice");
+    let master = run(&root, "Jenny", &["goal", "subscribe", "--goal", "goal.md", "--json"]);
+    assert_eq!(master["owner"], "Jenny");
+    let scoped_path = |owner: &str| root.join(".appsdk-control/goals")
+        .join(owner.as_bytes().iter().map(|b| format!("{b:02x}")).collect::<String>())
+        .join("long-task-goal.json");
+    let master_bytes = fs::read(scoped_path("Jenny")).unwrap();
+    let failed_status = Command::new(binary()).args(["goal", "status", "--json"])
+        .current_dir(&root).env("PATH", root.join("fake-bin"))
+        .env("PROJECT", &root).env("OWNER", "Alice").env("STATUS_FAIL", "1").output().unwrap();
+    let failed: Value = serde_json::from_slice(&failed_status.stdout).unwrap();
+    assert_eq!(failed["desired"], "recovery_required");
+    assert_eq!(fs::read(scoped_path("Jenny")).unwrap(), master_bytes);
+    let nested = root.join("worktree");
+    fs::create_dir_all(&nested).unwrap();
+    let continued = run(&nested, "Alice", &["goal", "status", "--json"]);
+    assert_eq!(continued["record"]["owner"], "Alice");
+    assert_eq!(continued["subscription_id"], "Alice-sub");
+    run(&nested, "Alice", &["goal", "cancel", "--json"]);
+    let untouched = run(&root, "Jenny", &["goal", "status", "--json"]);
+    assert_eq!(untouched["active"], true);
+    assert_eq!(untouched["subscription_id"], "Jenny-sub");
+    run(&root, "Alice", &["goal", "subscribe", "--goal", "goal.md", "--json"]);
+    assert_eq!(run(&root, "Alice", &["goal", "status", "--json"])["active"], true);
+    // Own-name continuation uses the current carrier but retains the goal.
+    assert_eq!(serde_json::from_slice::<Value>(&fs::read(scoped_path("Alice")).unwrap()).unwrap()["session_id"], "continued-session");
+    // A foreign legacy singleton never becomes this peer's goal.
+    let legacy_path = root.join(".appsdk-control/long-task-goal.json");
+    let mut legacy_record: Value = serde_json::from_slice(&master_bytes).unwrap();
+    legacy_record["owner"] = serde_json::json!("carrier-Jenny");
+    let legacy_bytes = serde_json::to_vec(&legacy_record).unwrap();
+    fs::write(&legacy_path, &legacy_bytes).unwrap();
+    assert_eq!(run(&root, "Bob", &["goal", "status", "--json"])["error"], "GOAL_RECORD_NOT_FOUND");
+    assert_eq!(fs::read(&legacy_path).unwrap(), legacy_bytes);
+    // Matching legacy reads are projections only; an explicit cancel promotes
+    // the retained subscription to the scoped record and preserves the source.
+    fs::remove_file(scoped_path("Jenny")).unwrap();
+    let legacy_status = run(&root, "Jenny", &["goal", "status", "--json"]);
+    assert_eq!(legacy_status["record"]["record_source"], "legacy-read-only");
+    assert_eq!(legacy_status["record"]["owner"], "Jenny");
+    assert!(!scoped_path("Jenny").exists());
+    run(&root, "Jenny", &["goal", "cancel", "--json"]);
+    assert_eq!(fs::read(&legacy_path).unwrap(), legacy_bytes);
+    assert_eq!(serde_json::from_slice::<Value>(&fs::read(scoped_path("Jenny")).unwrap()).unwrap()["observed"], "cancelled");
+    // Scoped owner mismatches fail before reconciliation or remote writes.
+    fs::write(scoped_path("Alice"), &master_bytes).unwrap();
+    let mismatch = Command::new(binary()).args(["goal", "status", "--json"])
+        .current_dir(&root).env("PATH", root.join("fake-bin"))
+        .env("PROJECT", &root).env("OWNER", "Alice").output().unwrap();
+    assert!(!mismatch.status.success());
+    assert!(String::from_utf8_lossy(&mismatch.stderr).contains("GOAL_RECORD_OWNER_MISMATCH"));
+    assert_eq!(fs::read(scoped_path("Alice")).unwrap(), master_bytes);
+    // The owner's held lock blocks only that owner. Independent names can
+    // register concurrently, even when they use the same goal document.
+    let held = OpenOptions::new().create(true).read(true).write(true)
+        .open(scoped_path("Alice").with_file_name("long-task-goal.lock")).unwrap();
+    hold_advisory_lock(&held);
+    let command = |owner: &str, args: &[&str]| {
+        let mut cmd = Command::new(binary());
+        cmd.args(args).current_dir(&root).env("PATH", root.join("fake-bin"))
+            .env("PROJECT", &root).env("OWNER", owner)
+            .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+        cmd
+    };
+    let bob = command("Bob", &["goal", "subscribe", "--goal", "goal.md", "--json"]).spawn().unwrap();
+    let carol = command("Carol", &["goal", "subscribe", "--goal", "goal.md", "--json"]).spawn().unwrap();
+    let busy = command("Alice", &["goal", "status", "--json"]).output().unwrap();
+    assert!(String::from_utf8_lossy(&busy.stderr).contains("GOAL_LOCK_BUSY"));
+    assert!(bob.wait_with_output().unwrap().status.success());
+    assert!(carol.wait_with_output().unwrap().status.success());
+    drop(held);
+    let continued = command("Bob", &["goal", "status", "--json"])
+        .env("SESSION", "second-session").env("CARRIER", "new-worker").output().unwrap();
+    assert!(continued.status.success());
+    assert_eq!(serde_json::from_slice::<Value>(&continued.stdout).unwrap()["record"]["session_id"], "second-session");
+    let native_brief = run(&root, "Bob", &["longhorizon", "show", "--json"]);
+    assert_eq!(native_brief["role"], "peer");
+    assert_eq!(native_brief["goal"]["owner"], "Bob");
+    assert!(native_brief["charter"].as_str().unwrap().contains("peer 不是执行 worker"));
+    let foreign_remote = command("Bob", &["goal", "status", "--json"])
+        .env("REMOTE_OWNER", "Jenny").output().unwrap();
+    assert_eq!(serde_json::from_slice::<Value>(&foreign_remote.stdout).unwrap()["active"], false);
+    assert_eq!(fs::read(root.join("Bob.state")).unwrap(), b"armed");
+    // Unknown / managed callers cannot mutate, including via prompt.
+    for args in [vec!["goal", "subscribe", "--goal", "goal.md", "--json"],
+        vec!["goal", "status", "--json"], vec!["goal", "cancel", "--json"],
+        vec!["goal", "prompt", "--goal", "goal.md"]] {
+        let denied = command("Dave", &args).env("ROLE", "managed-subagent").output().unwrap();
+        assert!(!denied.status.success());
+        assert!(String::from_utf8_lossy(&denied.stderr).contains("GOAL_OWNER_MANAGED_SUBAGENT"));
+        let derived = command("Dave", &args).env("DERIVATION", "managed-subagent").output().unwrap();
+        assert!(!derived.status.success());
+        assert!(String::from_utf8_lossy(&derived.stderr).contains("GOAL_OWNER_MANAGED_SUBAGENT"));
+        let unknown = command("", &args).output().unwrap();
+        assert!(!unknown.status.success());
+    }
+    assert!(!scoped_path("Dave").exists());
+    let managed_brief = command("Dave", &["longhorizon", "show", "--json"])
+        .env("DERIVATION", "managed-subagent").output().unwrap();
+    assert!(managed_brief.status.success());
+    let managed_brief: Value = serde_json::from_slice(&managed_brief.stdout).unwrap();
+    assert_eq!(managed_brief["role"], "managed-subagent");
+    assert_eq!(managed_brief["goal"]["registered"], false);
+    // Unowned/malformed legacy data cannot be imported, but it is not Dave's
+    // goal and must not block his explicitly requested independent goal.
+    for legacy in [br#"{"active":true,"goal_id":"old"}"#.as_slice(), b"{broken".as_slice()] {
+        fs::write(&legacy_path, legacy).unwrap();
+        let absent = run(&root, "Dave", &["goal", "status", "--json"]);
+        assert_eq!(absent["active"], false);
+        let own = run(&root, "Dave", &["goal", "subscribe", "--goal", "goal.md", "--json"]);
+        assert_eq!(own["owner"], "Dave");
+        assert_eq!(fs::read(&legacy_path).unwrap(), legacy);
+        run(&root, "Dave", &["goal", "cancel", "--json"]);
+        fs::remove_file(scoped_path("Dave")).unwrap();
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+// Lifecycle fixtures use the current authenticated context contract. Their
+// notify responses remain local to each failure-mode test.
+fn install_goal_test_context(collab: &Path, project: &Path) {
+    let delegate = collab.with_extension("delegate");
+    fs::rename(collab, &delegate).unwrap();
+    let context = serde_json::json!({
+        "result": {"snapshot": {
+            "name": "master-peer", "session_id": "test-session",
+            "binding": {"project_scope": project.canonicalize().unwrap()},
+            "identity": {"worker_id": "master-peer", "role": "master", "kind": "peer",
+                "transport": {"kind": "appserver", "thread_id": "test-thread"}}
+        }}
+    }).to_string();
+    let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+    fs::write(collab, format!("#!/bin/sh\nif [ \"$1\" = context ]; then printf '%s\\n' {}; else exec {} \"$@\"; fi\n",
+        quote(&context), quote(&delegate.to_string_lossy()))).unwrap();
+    fs::set_permissions(collab, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn goal_test_record_path(root: &Path) -> PathBuf {
+    root.join(".appsdk-control/goals/6d61737465722d70656572/long-task-goal.json")
 }

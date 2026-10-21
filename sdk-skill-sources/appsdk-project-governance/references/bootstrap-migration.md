@@ -174,19 +174,20 @@ appsdk guide status
 appsdk verify
 collab context
 # if required_fields are present, provide only those facts once
-# only when the context snapshot has no live master and the user approved
-# this exact peer:
+# only with explicit approval for this exact peer/project; complete the
+# current takeover confirmation when replacing a different online holder:
 collab master promote --approval "<user approval text>"
 collab context
 ```
 
-Do not promote while a live master already exists. `appsdk init` alone never
+Do not promote without the user's explicit approval. An approved takeover can
+replace a live or offline holder; liveness is not authority. `appsdk init` alone never
 creates master authority. If `appsdk init` reports Collab pending or a failed
 registration, preserve the exact error; do not report Collab as available and
 do not start a second daemon.
 
-Ordinary peer initialization, after the project already has
-`.appsdk/project.json` and a live master or parent:
+Ordinary peer registration or recovery uses the current project and caller
+context. It does not require a reachable master or a consumer project contract:
 
 ```bash
 cd /abs/path/project
@@ -196,11 +197,11 @@ collab context
 
 The peer must observe its own identity, liveness, presence, transport and peer
 role. Do not run a second identity bootstrap, do not promote itself, do
-not register a long-horizon goal, and do not fabricate a worker role from
-AppSDK initialization output.
+not fabricate a worker role from AppSDK initialization output. An ordinary peer
+is an autonomous goal orchestrator, not an execution subworker.
 
-Long-horizon master scheduling is a separate, master-only step. Create the
-plan file first, then register and verify:
+For accepted long-horizon work, master and peer each create their goal document,
+then register and verify their own goal. Master does not register a peer's goal:
 
 ```bash
 appsdk goal subscribe --goal docs/goals/<goal>-plan.md --interval 10m
@@ -449,52 +450,23 @@ authorized migration decision resolves it.
 
 ### 2. Collab migration or retirement
 
-`.agent-collab/` is owned by Collab. AppSDK reset does not remove it. If the
-project uses Collab v1 and the journal is replayable, use the authenticated
-migration transaction:
+`.agent-collab/` is owned by Collab. AppSDK reset does not remove it or require
+Collab migration. When the authorized plan actually changes Collab state, use
+the [migration Skill](../../appsdk-migration/SKILL.md) and current Collab
+contract. Do not duplicate a legacy offline reset transaction here.
 
-```bash
-collab migrate inspect
-collab migrate plan
-collab migrate apply
-# install the reviewed Collab binary, then:
-collab down
-collab up
-collab context
-collab migrate verify
-```
-
-`inspect` is read-only. `plan` does not freeze admission. `apply` freezes
-admission and persists the deterministic snapshot. `verify` resumes admission
-only after journal/mailbox/task/identity continuity passes. If the result is
-`reset_required`, `needs_operator`, `unknown`, or an owner/count mismatch, stop
-and resolve it through Collab's canonical owner; do not continue to the AppSDK
-reset as if the whole operation passed.
-
-When the operator explicitly authorizes abandoning the old Collab epoch
-instead of preserving it, use the single offline reset owner:
-
-```bash
-collab down
-collab reset --project --discard-legacy --approval "<explicit user authorization>"
-collab up
-collab context
-```
-
-`collab reset` archives the exact `.agent-collab/` and `.agent-collab-v2/`
-bytes, removes only Collab-owned project control state and stale routes, and
-rebuilds the current empty baseline. It never removes `.appsdk/` or
-`.appsdk-control/` and records `delivery_verified: false`. Never manually
-delete `.agent-collab/`, edit its JSON/JSONL, clear its mailbox, copy identity
-tokens, or start a second daemon. A project that has no valid Collab state to
-preserve still needs this explicit Collab retirement or the migration
-decision; AppSDK must not make that decision for it.
+The current project's master may reset that project's Collab assets online
+through `collab reset --project`. Global daemon lifecycle is user-managed and
+is not a reset prerequisite. Do not expose lifecycle commands or credentials
+in agent prompts. Never manually edit journals, clear mailboxes, copy tokens,
+or start a second daemon. Preserve the actual reset/migration receipt; neither
+operation proves delivery or communication.
 
 ### 3. AppSDK reset
 
-After the Collab side is either migrated/verified or explicitly retired by its
-owner, handle `.appsdk/` from a clean non-`main` owner worktree with no
-competing claim. For a project that must abandon the old governance epoch and
+Handle `.appsdk/` from a clean non-`main` owner worktree with no competing
+claim. A separate Collab operation is needed only if the authorized plan
+changes Collab state. For a project that must abandon the old governance epoch and
 start from the current SDK baseline, the preferred single entry is:
 
 ```bash

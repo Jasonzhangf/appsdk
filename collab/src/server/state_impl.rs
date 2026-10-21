@@ -618,15 +618,17 @@ impl State {
                     );
                 }
                 if is_goal_deadline(subscription) {
-                    let revision = u64::try_from(*due_ms).unwrap_or(0);
-                    crate::server::notification_state::accumulate_master_wake(
-                        &mut self.master_wake,
-                        &MasterWakeSignal::GoalDue { revision },
-                        *skipped_ms,
-                    );
-                    crate::server::notification_state::mark_master_wake_skipped_busy(
-                        &mut self.master_wake,
-                    );
+                    if affects_master_wake {
+                        let revision = u64::try_from(*due_ms).unwrap_or(0);
+                        crate::server::notification_state::accumulate_master_wake(
+                            &mut self.master_wake,
+                            &MasterWakeSignal::GoalDue { revision },
+                            *skipped_ms,
+                        );
+                        crate::server::notification_state::mark_master_wake_skipped_busy(
+                            &mut self.master_wake,
+                        );
+                    }
                     subscription.status_reason = Some(reason.clone());
                     subscription.updated_ms = *skipped_ms;
                     return Ok(());

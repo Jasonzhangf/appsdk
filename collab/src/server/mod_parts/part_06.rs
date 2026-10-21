@@ -63,8 +63,9 @@ fn handle_notification_subscribe(
     if event == "deadline" && is_managed_subagent(&state, &worker_id) {
         return Resp::err("managed subworkers cannot create independent deadline schedules");
     }
-    if event == "master-idle" || (event == "deadline" && goal_deadline) {
-        // Project goal deadlines and master-idle follow the current typed grant.
+    if event == "master-idle" {
+        // Only project-master idle reminders follow the current typed grant.
+        // Each ordinary peer owns its own goal deadlines.
         // Whether that holder is reachable is a separate communication fact and
         // must not decide authority.
         let holder = match current_master_holder(server, &state) {
@@ -72,13 +73,7 @@ fn handle_notification_subscribe(
             Err(error) => return Resp::err(error),
         };
         if holder.as_deref() != Some(worker_id.as_str()) {
-            return Resp::err(if event == "master-idle" {
-                "master-idle subscription requires the current registered master"
-            } else if holder.is_some() {
-                "master authority required for deadline subscriptions"
-            } else {
-                "no master is assigned; deadline subscriptions require an approved master"
-            });
+            return Resp::err("master-idle subscription requires the current registered master");
         }
     }
     let Some(worker) = state.workers.get(&worker_id).cloned() else {

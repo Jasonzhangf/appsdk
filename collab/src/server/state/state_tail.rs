@@ -99,8 +99,7 @@ fn subscription_affects_master_wake(
     subscription: &NotificationSubscription,
 ) -> bool {
     matches!(subscription.event.as_str(), "deadline" | "master-idle")
-        && (is_goal_deadline(subscription)
-            || state.master_worker_id.as_deref() == Some(subscription.worker_id.as_str())
+        && (state.master_worker_id.as_deref() == Some(subscription.worker_id.as_str())
             || has_current_master_grant(state, &subscription.worker_id, &subscription.target))
 }
 

@@ -581,6 +581,66 @@ pub(crate) fn build_name_resolution_events(
         project_scope,
         occupancy,
     ));
+    // The name carries its finite goal schedules to the new execution carrier.
+    // Reuse the subscription record/event so IDs, timing and terminal state stay
+    // intact, and the normal worker authorization still rejects the old caller.
+    if let Some(previous) = previous.filter(|previous| {
+        previous.worker_id != occupancy.worker_id || previous.session_id != occupancy.session_id
+    }) {
+        if let Some(transport) = state
+            .workers
+            .get(&occupancy.worker_id)
+            .and_then(super::selected_transport_for_worker)
+        {
+            if let Some(target) = super::notification_target(&transport) {
+                let mut subscriptions: Vec<_> = state
+                    .notification_subscriptions
+                    .values()
+                    .filter(|s| {
+                        s.worker_id == previous.worker_id
+                            && s.event == "deadline"
+                            && s.subject
+                                .as_deref()
+                                .is_some_and(|subject| subject.starts_with("goal:"))
+                            && matches!(s.status.as_str(), "armed" | "transport-lost" | "consumed")
+                            && s.expires_ms > occupancy.updated_ms
+                    })
+                    .cloned()
+                    .collect();
+                subscriptions.sort_by(|a, b| a.id.cmp(&b.id));
+                for mut subscription in subscriptions {
+                    subscription.worker_id = occupancy.worker_id.clone();
+                    subscription.method = transport.kind.as_str().into();
+                    subscription.target = target.into();
+                    subscription.updated_ms = occupancy.updated_ms;
+                    if subscription.status == "transport-lost" {
+                        subscription.status = "armed".into();
+                        subscription.status_reason = None;
+                    }
+                    // A deadline already in the mailbox must still consume its
+                    // own schedule after handoff, rather than the direct inbox.
+                    let bindings: Vec<_> = events
+                        .iter()
+                        .filter_map(|event| match event {
+                            Event::MailboxReassigned { handoff }
+                                if subscription.status == "armed"
+                                    && handoff.previous_subscription.as_deref()
+                                        == Some(subscription.id.as_str()) =>
+                            {
+                                Some(Event::WakeBound {
+                                    message_id: handoff.message_id.clone(),
+                                    subscription_id: subscription.id.clone(),
+                                })
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    events.push(Event::NotificationSubscribed { subscription });
+                    events.extend(bindings);
+                }
+            }
+        }
+    }
     events
 }
 

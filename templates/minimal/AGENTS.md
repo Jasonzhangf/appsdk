@@ -60,13 +60,14 @@ current ledger version, and use the SDK review context for all applicable items.
 - AppSDK quality, safety and evidence gates are mandatory when applicable.
   Guidance and Memory are auxiliary; no plan or memory write is required by
   default. Select persistent Guidance when it helps the task.
-- When using Guidance, bind plans to current goal, task, module, owner, scope,
-  declared rule sources, source commit, and tree.
+- When using Guidance, bind plans to current goal, task, module, owner, scope
+  and declared rule sources. Do not introduce candidate identity or freeze
+  ceremonies for ordinary development.
 - After an SDK or template upgrade, read the effective upstream rules, project
   AGENTS and Skills, actual test commands, and CI/hook entrypoints before
-  comparing the advisory template. Record each difference with location, owner,
-  delete/merge/narrow/add action, basis, retained safeguard, and entrypoint
-  impact. Reuse session authorization that already covers a difference; seek
+  comparing the advisory template. Correct affected contradictions and confirmed
+  duplication at the unique owner; record material decisions in existing notes,
+  without a separate difference ledger. Reuse session authorization and seek
   approval only for uncovered changes.
 - Guidance is optional for this audit. Repeated initialization and unrelated
   version refreshes do not trigger a whole-project rule audit. Run checks
@@ -116,7 +117,8 @@ clear. Guide may assist; enabling it is not a prerequisite.
 ## Evidence Boundary
 
 - Report source, test, build, installed artifact, restart, deployed-entrypoint
-  replay, review, merge, remote receipt, freeze, and cleanup separately.
+  replay, review, merge, remote receipt and cleanup separately. Freeze applies
+  only to an explicitly selected release flow, never ordinary delivery.
 - Never infer a later evidence level from an earlier one.
 - A blocked result names the first failing gate, preserved state, retry policy,
   owner, and one executable next action.

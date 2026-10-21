@@ -843,8 +843,40 @@ fn identity_by_current_anchors_at(
                 group = current_scope;
             }
         }
+        // Two persisted identities can carry the same Codex session anchor when
+        // a stale generation was never retired. The live caller's own endpoint
+        // says which record owns the current binding; this is disambiguation
+        // from the current observation, not a historical pane lookup.
         if group.len() > 1 {
-            anyhow::bail!("IDENTITY_RESTORE_AMBIGUOUS: {anchor} matches multiple persisted identities; the daemon cannot prove a unique owner");
+            if let Some(candidate) = observed.tmux.as_ref() {
+                let live_binding = group
+                    .iter()
+                    .filter(|identity| {
+                        identity
+                            .transport
+                            .as_ref()
+                            .and_then(|transport| transport.tmux_endpoint.as_ref())
+                            .is_some_and(|persisted| {
+                                crate::client::adapters::tmux::same_owned_pane(
+                                    persisted,
+                                    &candidate.endpoint,
+                                )
+                            })
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if live_binding.len() == 1 {
+                    group = live_binding;
+                }
+            }
+        }
+        if group.len() > 1 {
+            let conflicting = group
+                .iter()
+                .map(|identity| identity.worker_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::bail!("IDENTITY_RESTORE_AMBIGUOUS: {anchor} matches multiple persisted identities ({conflicting}); the daemon cannot prove a unique owner");
         }
         for identity in group {
             matched_workers.insert(identity.worker_id.clone(), identity);

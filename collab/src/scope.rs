@@ -806,6 +806,10 @@ finite subscriptions, worktrees, delivery and cleanup. Use the selected command'
 current help for its exact arguments. Do not keep a second command catalog or
 frozen workflow in this generated project reference.
 
+The project-agnostic Canonical patrol contract lives in that Skill. Each master
+patrols only its own project. Project-specific paths, commands and issue intake
+details belong to the owning project; they do not replace the shared contract.
+
 ## Notifications and waits
 
 Agent-owned subscriptions have explicit event, subject and finite lifetime.

@@ -950,6 +950,194 @@ fn runtime_binding_replay_restores_the_unique_current_thread_route() {
 }
 
 #[test]
+fn replay_restores_only_a_missing_route_and_preserves_explicit_pane_owner() {
+    let root = replay_test_root("pane-owner");
+    let journal = root.join(".agent-collab/server/journal.jsonl");
+    std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+    let scope = ProjectScopeId::new("/replay-pane-owner").unwrap();
+    let app = AppServerId::new("appserver-cli").unwrap();
+    let shared_pane = |session: &str, thread: &str| crate::proto::TmuxEndpoint {
+        socket_path: "/tmp/collab-replay-pane-owner.sock".into(),
+        server_pid: 11,
+        tmux_session_id: "$1".into(),
+        pane_id: "%7".into(),
+        pane_pid: 22,
+        codex_session_id: Some(session.into()),
+        codex_thread_id: Some(thread.into()),
+    };
+    let binding = |agent: &str, binding_id: &str, session: &str, thread: &str, pane: &str| {
+        let mut binding = RuntimeBinding::new_with_session(
+            scope.clone(),
+            app.clone(),
+            AgentId::new(agent).unwrap(),
+            RuntimeId::new(format!("runtime-{binding_id}")).unwrap(),
+            BindingId::new(binding_id).unwrap(),
+            1,
+            Some(SessionId::new(session).unwrap()),
+            Some(NativeThreadId::new(thread).unwrap()),
+        )
+        .unwrap();
+        binding.tmux_endpoint = Some(if pane == "%7" {
+            shared_pane(session, thread)
+        } else {
+            crate::proto::TmuxEndpoint {
+                socket_path: "/tmp/collab-replay-pane-owner.sock".into(),
+                server_pid: 11,
+                tmux_session_id: "$1".into(),
+                pane_id: pane.into(),
+                pane_pid: 33,
+                codex_session_id: Some(session.into()),
+                codex_thread_id: Some(thread.into()),
+            }
+        });
+        binding
+    };
+    let first = binding(
+        "pane-owner-a",
+        "binding-pane-owner-a",
+        "session-pane-owner-a",
+        "thread-1-a",
+        "%7",
+    );
+    let explicit_owner = binding(
+        "pane-owner-b",
+        "binding-pane-owner-b",
+        "session-pane-owner-b",
+        "thread-0-b",
+        "%7",
+    );
+    let missing = binding(
+        "route-backfill",
+        "binding-route-backfill",
+        "session-route-backfill",
+        "thread-2-missing",
+        "%8",
+    );
+    let events = vec![
+        Event::GlobalProjectRegistered {
+            registration: ProjectRegistration::new(scope, app).unwrap(),
+        },
+        Event::GlobalRuntimeBound {
+            binding: first.clone(),
+        },
+        Event::GlobalRuntimeBound {
+            binding: explicit_owner.clone(),
+        },
+        Event::GlobalRuntimeBound {
+            binding: missing.clone(),
+        },
+        // Explicit replay order leaves B as the pane owner. Bindings restore
+        // in thread order, so B sorts before A and the missing route after
+        // both; restoration must skip the occupied pane and backfill only the
+        // missing pane.
+        Event::GlobalCurrentThreadRouteSet {
+            binding: first.clone(),
+        },
+        Event::GlobalCurrentThreadRouteSet {
+            binding: explicit_owner.clone(),
+        },
+    ];
+    let body = events
+        .iter()
+        .map(|event| serde_json::to_string(event).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&journal, format!("{body}\n")).unwrap();
+
+    let replayed = crate::server::replay(&root).unwrap();
+    let claimants = replayed
+        .global
+        .tmux_pane_route_claimants(explicit_owner.tmux_endpoint.as_ref().unwrap());
+    assert_eq!(
+        claimants
+            .iter()
+            .map(|binding| binding.binding_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["binding-pane-owner-b"],
+        "binding restoration must preserve the pane owner established by replay"
+    );
+    assert_eq!(
+        replayed.global.lookup_current_thread_route(
+            missing.session_id.as_ref().unwrap(),
+            missing.native_thread_id.as_ref().unwrap(),
+        ),
+        Some(&missing),
+        "binding restoration must backfill the uniquely missing route"
+    );
+    replayed.global.validate().unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn replay_does_not_revive_a_tombstoned_durable_route() {
+    let root = replay_test_root("tombstoned-route");
+    let journal = root.join(".agent-collab/server/journal.jsonl");
+    std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+    let scope = ProjectScopeId::new("/replay-tombstoned-route").unwrap();
+    let app = AppServerId::new("appserver-cli").unwrap();
+    let old = RuntimeBinding::new_with_session(
+        scope.clone(),
+        app.clone(),
+        AgentId::new("agent-tombstoned").unwrap(),
+        RuntimeId::new("runtime-tombstoned").unwrap(),
+        BindingId::new("binding-tombstoned").unwrap(),
+        1,
+        Some(SessionId::new("session-tombstoned-old").unwrap()),
+        Some(NativeThreadId::new("thread-tombstoned-old").unwrap()),
+    )
+    .unwrap();
+    let rebound = RuntimeBinding::new_with_session(
+        scope.clone(),
+        app.clone(),
+        AgentId::new("agent-tombstoned").unwrap(),
+        RuntimeId::new("runtime-tombstoned").unwrap(),
+        BindingId::new("binding-tombstoned").unwrap(),
+        2,
+        Some(SessionId::new("session-tombstoned-new").unwrap()),
+        Some(NativeThreadId::new("thread-tombstoned-new").unwrap()),
+    )
+    .unwrap();
+    let tombstone =
+        crate::server::global_state::RuntimeBindingTombstone::new(&old, &rebound).unwrap();
+    let events = vec![
+        Event::GlobalProjectRegistered {
+            registration: ProjectRegistration::new(scope, app).unwrap(),
+        },
+        Event::GlobalRuntimeBound {
+            binding: old.clone(),
+        },
+        Event::GlobalCurrentThreadRouteTombstoneSet {
+            tombstone: tombstone.clone(),
+        },
+    ];
+    let body = events
+        .iter()
+        .map(|event| serde_json::to_string(event).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&journal, format!("{body}\n")).unwrap();
+
+    let replayed = crate::server::replay(&root).unwrap();
+    assert_eq!(
+        replayed.global.lookup_current_thread_route(
+            old.session_id.as_ref().unwrap(),
+            old.native_thread_id.as_ref().unwrap(),
+        ),
+        None,
+        "durable binding backfill must not revive a tombstoned route"
+    );
+    assert_eq!(
+        replayed.global.lookup_current_thread_route_tombstone(
+            old.session_id.as_ref().unwrap(),
+            old.native_thread_id.as_ref().unwrap(),
+        ),
+        Some(&tombstone)
+    );
+    replayed.global.validate().unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn runtime_binding_replay_rejects_ambiguous_current_thread_routes() {
     let root = replay_test_root("ambiguous");
     let journal = root.join(".agent-collab/server/journal.jsonl");
@@ -1075,10 +1263,9 @@ fn runtime_binding_replay_keeps_a_legacy_thread_only_binding_resolvable() {
 #[test]
 fn legacy_bindings_are_indexed_even_when_a_strict_route_is_present() {
     // The live routecodex journal shape: durable thread-only bindings and a
-    // single strict route event.  The strict route makes
-    // `restore_unique_current_thread_routes_from_bindings` skip, so the
-    // legacy index must be built independently or every pre-dual-key route
-    // becomes unresolvable after a restart.
+    // single strict route event.  The strict restoration path owns only dual-key
+    // routes, so the legacy index must be built independently or every
+    // pre-dual-key route becomes unresolvable after a restart.
     let scope = ProjectScopeId::new("/legacy-mixed").unwrap();
     let legacy = RuntimeBinding {
         project_scope: scope.clone(),
@@ -1120,8 +1307,8 @@ fn legacy_bindings_are_indexed_even_when_a_strict_route_is_present() {
         binding: strict.clone(),
     });
 
-    // Precondition: a strict route exists, so the bindings-based restore
-    // path is skipped in replay.
+    // Precondition: a strict route exists, but the legacy compatibility index
+    // has not yet been projected from durable bindings.
     assert!(st
         .global
         .lookup_current_thread_route(
@@ -1148,9 +1335,8 @@ fn legacy_bindings_are_indexed_even_when_a_strict_route_is_present() {
 #[test]
 fn snapshot_events_keep_legacy_routes_alongside_a_strict_route() {
     // A compacted journal may hold one strict dual-key route plus a
-    // pre-dual-key thread-only route.  Replay skips the bindings-based
-    // restoration as soon as it sees any strict route, so the snapshot
-    // itself must carry the legacy route or restart drops it.
+    // pre-dual-key thread-only route.  The snapshot itself must carry the
+    // legacy route or restart drops it.
     let legacy = RuntimeBinding {
         project_scope: ProjectScopeId::new("/snapshot-legacy").unwrap(),
         app_scope_id: AppServerId::new("appserver-cli").unwrap(),

@@ -301,7 +301,7 @@ fn master_authority_tmux_unknown_holder_keeps_control_and_projection() {
         "{next_action}"
     );
     assert!(
-        next_action_lower.contains("canonical issue intake"),
+        next_action_lower.contains("project-canonical intake"),
         "{next_action}"
     );
     assert!(

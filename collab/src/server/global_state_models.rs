@@ -296,6 +296,15 @@ pub struct RuntimeBinding {
     pub tmux_endpoint: Option<TmuxEndpoint>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CurrentThreadRouteReplayStatus {
+    Installed,
+    Missing,
+    Tombstoned,
+    Ambiguous(RuntimeBinding),
+    Contested,
+}
+
 impl RuntimeBinding {
     #[allow(clippy::too_many_arguments)]
     pub fn new(

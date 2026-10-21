@@ -129,3 +129,19 @@ copies are not silently rewritten or treated as installed truth. Existing
 consumer-specific custom documents and published historical snapshots remain
 unchanged; upgrades use the current source/Skill owners. No global daemon or
 tmux lifecycle action is part of this audit.
+
+## Latest-main integration
+
+The first candidate passed remote CI. Before merge, main advanced through
+PR38 (project-agnostic patrol guidance) and PR39 (exact-route replay and
+tombstones). The candidate incorporates both. The two text conflicts are
+resolved by retaining the current Skill as the shared patrol owner, keeping
+the generated project reference short, and combining the new non-overlapping
+peer scope wording with the existing shared own-goal rule. The generated-doc
+gate checks that owner reference; the embedded-Skill gate still verifies the
+actual patrol contract. Route replay/tombstone changes are preserved.
+
+The shared patrol contract offers delegated long-horizon work to available
+consenting peers while each orchestrator keeps its own goal. It does not force
+recursive delegation of every accepted goal or restore the GCM peer-busy gate.
+Combined installed behavior and integration review are recorded in the run.

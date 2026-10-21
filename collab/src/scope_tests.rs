@@ -1157,6 +1157,38 @@ fn init_releases_collab_doc_only_once() {
 }
 
 #[test]
+fn collab_doc_routes_to_canonical_project_agnostic_patrol_owner() {
+    let normalized = COLLAB_DOC.split_whitespace().collect::<Vec<_>>().join(" ");
+    for marker in [
+        "Read the current installed `collab` Skill",
+        "Canonical patrol contract lives in that Skill",
+        "patrols only its own project",
+        "Master authority is explicit user-approved project arbitration",
+        "separate from transport reachability",
+        "master does not proxy-register",
+    ] {
+        assert!(
+            normalized.contains(marker),
+            "project Collab projection is missing {marker:?}"
+        );
+    }
+    assert!(!normalized.contains("every eligible peer is busy"));
+    assert!(!normalized.contains("## Common commands"));
+    assert!(
+        !normalized.contains("RouteCodex"),
+        "canonical Collab contract must stay project-agnostic"
+    );
+    assert!(
+        !normalized.contains("live server-verified transport"),
+        "typed master grants must not depend on transport liveness"
+    );
+    assert!(
+        !normalized.contains("If a master grant exists, other peers cannot promote"),
+        "explicit user approval must be able to replace an existing master grant"
+    );
+}
+
+#[test]
 fn init_rejects_malformed_existing_configuration_without_overwriting_it() {
     let json_root = test_root("init-invalid-json");
     std::fs::create_dir_all(&json_root).unwrap();

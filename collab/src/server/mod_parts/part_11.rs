@@ -461,7 +461,8 @@ fn dispatch_with_route_context_bound(
             worker_id,
             token,
             task_id,
-        } => handle_task_finalize_cleanup(server, worker_id, token, task_id),
+            commit,
+        } => handle_task_finalize_cleanup(server, worker_id, token, task_id, commit),
         Req::TaskDispatch { worker_id, token } => handle_task_dispatch(server, worker_id, token),
         Req::TaskStatus { task_id } => {
             let st = server.state.lock().unwrap();

@@ -141,7 +141,15 @@ pub(crate) enum TaskCmd {
     /// with verified evidence, stops the owner's automatic lease once its last
     /// responsibility is verified, and releases dependent waiters exactly once.
     /// A retry resumes the remaining release instead of double-releasing.
-    FinalizeCleanup { id: String },
+    ///
+    /// When the task was force-closed without a recorded integration commit,
+    /// pass `--commit <sha>` with a commit reachable from `refs/heads/main`
+    /// (for example the squash commit) to authorize branch deletion.
+    FinalizeCleanup {
+        id: String,
+        #[arg(long)]
+        commit: Option<String>,
+    },
     /// Close a merged task and clean up its declared worktree/branch.
     /// With --force the current master may close any task. With no master
     /// assigned, the owner may close its task, or a registered peer may close an

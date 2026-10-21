@@ -1292,6 +1292,7 @@ fn close_task_resources(
     config: &crate::config::Config,
     worktree_path: Option<&str>,
     branch: Option<&str>,
+    recorded_integration: Option<&str>,
 ) -> Result<(), String> {
     if let Some(branch) = branch {
         let branch_ref = format!("refs/heads/{branch}");
@@ -1307,7 +1308,13 @@ fn close_task_resources(
                 .args(["merge-base", "--is-ancestor", &branch_ref, main_ref])
                 .output()
                 .map_err(|e| format!("cannot verify branch {branch}: {e}"))?;
-            if !merged.status.success() {
+            if !merged.status.success()
+                && !integration_commit_proves_branch_merged(
+                    root,
+                    main_ref,
+                    recorded_integration,
+                )?
+            {
                 return Err(format!(
                     "branch {branch} is not merged into {main_ref}; refusing delete"
                 ));
@@ -1371,6 +1378,41 @@ fn close_task_resources(
         }
     }
     Ok(())
+}
+
+/// A squash integration replaces the branch tip with a new commit, so the
+/// branch is not an ancestor of main even though its work landed. The recorded
+/// `integration.commit` is the authoritative proof in that case. The check is
+/// the same reachability question `collab task integrated` answers: resolve the
+/// commit, then require it to be reachable from `refs/heads/main`.
+fn integration_commit_proves_branch_merged(
+    root: &Path,
+    main_ref: &str,
+    recorded_integration: Option<&str>,
+) -> Result<bool, String> {
+    let Some(commit) = recorded_integration
+        .map(str::trim)
+        .filter(|commit| !commit.is_empty())
+    else {
+        return Ok(false);
+    };
+    let main_head = resolve_authoritative_main_head(root)
+        .map_err(|error| {
+            format!(
+                "cannot resolve {main_ref} while checking integration commit {commit}: {}",
+                error.error.unwrap_or_default()
+            )
+        })?;
+    match commit_is_integrated_in_main(root, commit) {
+        Ok(true) => Ok(true),
+        Ok(false) => Err(format!(
+            "integration commit {commit} is not reachable from {main_ref} (main_head {main_head}); expected a commit reachable from {main_ref}; refusing delete"
+        )),
+        Err(error) => Err(format!(
+            "integration commit {commit} cannot be resolved (main_head {main_head}): {}; expected a commit reachable from {main_ref}; refusing delete",
+            error.error.unwrap_or_default()
+        )),
+    }
 }
 
 fn cleanup_receipt_is_reusable(root: &Path, receipt: &CleanupReceipt) -> bool {

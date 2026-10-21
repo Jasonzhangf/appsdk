@@ -9,6 +9,7 @@ fn finalize_requires_a_closed_task_and_authorized_caller() {
         "owner".into(),
         "token-owner".into(),
         "open-task".into(),
+        None,
     );
     assert!(!not_closed.ok);
     assert!(
@@ -133,6 +134,7 @@ fn finalize_refuses_a_worktree_taken_over_by_another_open_task() {
         "master".into(),
         "token-master".into(),
         "held".into(),
+        None,
     );
     assert!(!refused.ok, "{refused:?}");
     assert!(
@@ -171,6 +173,7 @@ fn finalize_removes_the_worktree_when_the_closed_task_still_owns_it() {
         "master".into(),
         "token-master".into(),
         "held".into(),
+        None,
     );
     assert!(finalized.ok, "{}", finalized.error.unwrap_or_default());
     assert_eq!(finalized.data["cleanup"]["result"], "verified");
@@ -199,6 +202,7 @@ fn finalize_keeps_the_owner_default_lease_armed_on_last_responsibility() {
         "master".into(),
         "token-master".into(),
         "held".into(),
+        None,
     );
     assert!(finalized.ok, "{}", finalized.error.unwrap_or_default());
     let state = server.state.lock().unwrap();
@@ -460,13 +464,13 @@ fn repeated_orphan_force_close_is_idempotent_after_journal_replay() {
     );
     // The same orphan address proof must also authorize the existing cleanup
     // owner. This task declared no filesystem or Git resource to remove.
-    let finalized = handle_task_finalize_cleanup(&server, "peer".into(), "token-peer".into(), "orphan".into());
+    let finalized = handle_task_finalize_cleanup(&server, "peer".into(), "token-peer".into(), "orphan".into(), None);
     assert!(finalized.ok, "{finalized:?}");
     assert_eq!(finalized.data["cleanup"]["result"], "verified");
     let finalized_id = finalized.data["cleanup"]["receipt_id"].clone();
     let finalized_journal = std::fs::read(&journal_path).unwrap();
     *server.state.lock().unwrap() = replay(&root).unwrap();
-    let finalize_again = handle_task_finalize_cleanup(&server, "peer".into(), "token-peer".into(), "orphan".into());
+    let finalize_again = handle_task_finalize_cleanup(&server, "peer".into(), "token-peer".into(), "orphan".into(), None);
     assert!(finalize_again.ok, "{finalize_again:?}");
     assert_eq!(finalize_again.data["idempotent"], true);
     assert_eq!(finalize_again.data["cleanup"]["receipt_id"], finalized_id);

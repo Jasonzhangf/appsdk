@@ -652,14 +652,393 @@ fn cleanup_rejects_unmerged_then_removes_only_merged_clean_worktree() {
             .success()
     );
 
-    let refused = close_task_resources(&root, &crate::config::Config::default(), Some("playground/wt"), Some("feature"));
+    let refused = close_task_resources(&root, &crate::config::Config::default(), Some("playground/wt"), Some("feature"), None);
     assert!(refused.unwrap_err().contains("not merged"));
     assert!(playground.join("wt").is_dir());
 
     assert!(git(&["merge", "-q", "feature"]).status.success());
-    assert!(close_task_resources(&root, &crate::config::Config::default(), Some("playground/wt"), Some("feature")).is_ok());
+    assert!(close_task_resources(&root, &crate::config::Config::default(), Some("playground/wt"), Some("feature"), None).is_ok());
     assert!(!playground.join("wt").exists());
     assert!(!git(&["rev-parse", "--verify", "feature"]).status.success());
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn close_task_resources_accepts_squash_only_with_reachable_integration_commit() {
+    let root = std::env::temp_dir().join(format!(
+        "collab-close-squash-{}-{}",
+        std::process::id(),
+        now_ms()
+    ));
+    let playground = root.join("playground");
+    std::fs::create_dir_all(&playground).unwrap();
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .current_dir(&root)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    assert!(git(&["init", "-q", "--initial-branch=main"])
+        .status
+        .success());
+    assert!(git(&["config", "user.email", "test@example.com"])
+        .status
+        .success());
+    assert!(git(&["config", "user.name", "collab test"])
+        .status
+        .success());
+    std::fs::write(root.join("README.md"), "base\n").unwrap();
+    assert!(git(&["add", "README.md"]).status.success());
+    assert!(git(&["commit", "-q", "-m", "base"]).status.success());
+    assert!(
+        git(&["worktree", "add", "-q", "-b", "feature", "playground/wt"])
+            .status
+            .success()
+    );
+    std::fs::write(root.join("playground/wt/feature.txt"), "work\n").unwrap();
+    assert!(git(&["-C", "playground/wt", "add", "feature.txt"])
+        .status
+        .success());
+    assert!(
+        git(&["-C", "playground/wt", "commit", "-q", "-m", "feature"])
+            .status
+            .success()
+    );
+    let feature_tip = String::from_utf8_lossy(&git(&["rev-parse", "feature"]).stdout)
+        .trim()
+        .to_string();
+    assert!(git(&["merge", "--squash", "feature"]).status.success());
+    assert!(git(&["commit", "-q", "-m", "squash feature"]).status.success());
+    let squash = String::from_utf8_lossy(&git(&["rev-parse", "main"]).stdout)
+        .trim()
+        .to_string();
+
+    // No evidence and evidence outside main both keep the refusal.
+    assert!(close_task_resources(
+        &root,
+        &crate::config::Config::default(),
+        Some("playground/wt"),
+        Some("feature"),
+        None,
+    )
+    .unwrap_err()
+    .contains("not merged"));
+    assert!(close_task_resources(
+        &root,
+        &crate::config::Config::default(),
+        Some("playground/wt"),
+        Some("feature"),
+        Some(&feature_tip),
+    )
+    .unwrap_err()
+    .contains("not reachable from refs/heads/main"));
+    assert!(playground.join("wt").is_dir());
+    assert!(git(&["rev-parse", "--verify", "feature"]).status.success());
+
+    // The reachable squash commit proves the branch work is on main.
+    assert!(close_task_resources(
+        &root,
+        &crate::config::Config::default(),
+        Some("playground/wt"),
+        Some("feature"),
+        Some(&squash),
+    )
+    .is_ok());
+    assert!(!playground.join("wt").exists());
+    assert!(!git(&["rev-parse", "--verify", "feature"]).status.success());
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// Build a task whose branch was squash-merged into `main`. The squash commit
+/// replaces the branch tip, so the branch is not an ancestor of `main`. With
+/// `force_close` the task is closed manually without cleanup; otherwise the
+/// task is seeded as fully integrated and awaiting the normal close path.
+/// Returns the squash commit and the unreachable feature tip.
+fn squash_merged_holder(
+    server: &Server,
+    root: &Path,
+    task_id: &str,
+    recorded_integration: bool,
+    force_close: bool,
+) -> (String, String) {
+    let playground = root.join("playground");
+    std::fs::create_dir_all(&playground).unwrap();
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    assert!(git(&["init", "-q", "--initial-branch=main"])
+        .status
+        .success());
+    assert!(git(&["config", "user.email", "test@example.com"])
+        .status
+        .success());
+    assert!(git(&["config", "user.name", "collab test"])
+        .status
+        .success());
+    std::fs::write(root.join("README.md"), "base\n").unwrap();
+    assert!(git(&["add", "README.md"]).status.success());
+    assert!(git(&["commit", "-q", "-m", "base"]).status.success());
+    assert!(
+        git(&["worktree", "add", "-q", "-b", "feature", "playground/squash-wt"])
+            .status
+            .success()
+    );
+    std::fs::write(root.join("playground/squash-wt/feature.txt"), "work\n").unwrap();
+    assert!(git(&["-C", "playground/squash-wt", "add", "feature.txt"])
+        .status
+        .success());
+    assert!(
+        git(&["-C", "playground/squash-wt", "commit", "-q", "-m", "feature"])
+            .status
+            .success()
+    );
+    let feature_tip = String::from_utf8_lossy(&git(&["rev-parse", "feature"]).stdout)
+        .trim()
+        .to_string();
+    assert!(git(&["merge", "--squash", "feature"]).status.success());
+    assert!(git(&["commit", "-q", "-m", "squash feature"]).status.success());
+    let squash = String::from_utf8_lossy(&git(&["rev-parse", "main"]).stdout)
+        .trim()
+        .to_string();
+    assert_ne!(feature_tip, squash);
+
+    register_synthetic_peer(server, "holder", "%holder");
+    register_synthetic_peer(server, "master", "%master");
+    promote_master(server, "master", "user approved squash cleanup test");
+    let canonical_wt = root
+        .join("playground/squash-wt")
+        .canonicalize()
+        .unwrap()
+        .display()
+        .to_string();
+    let now = now_ms();
+    server.commit(&[Event::TaskCreated {
+        task: TaskRec {
+            id: task_id.into(),
+            owner: "holder".into(),
+            created_by: "holder".into(),
+            feature_id: None,
+            worktree_path: Some(canonical_wt),
+            branch: Some("feature".into()),
+            base_commit: None,
+            priority: default_priority(),
+            status: "working".into(),
+            next_step: None,
+            wait: None,
+            created_ms: now,
+            updated_ms: now,
+        },
+    }]);
+    if force_close {
+        let forced = handle_task_close(
+            server,
+            "master".into(),
+            "token-master".into(),
+            task_id.into(),
+            true,
+            Some("holder abandoned the worktree; force closing".into()),
+        );
+        assert!(forced.ok, "{}", forced.error.unwrap_or_default());
+        assert_eq!(forced.data["cleanup"]["result"], "unverified");
+        if recorded_integration {
+            server.commit(&[Event::TaskLifecycleUpdated {
+                task_id: task_id.into(),
+                record: crate::server::state::TaskLifecycleRecord {
+                    integration_commit: Some(squash.clone()),
+                    integration_evidence: Some("squash commit recorded on main".into()),
+                    integrated_ms: Some(now_ms()),
+                    ..Default::default()
+                },
+            }]);
+        }
+    } else {
+        let updated_ms = now_ms();
+        let mut merged = server.state.lock().unwrap().tasks[task_id].clone();
+        merged.status = "merged".into();
+        merged.updated_ms = updated_ms;
+        server.commit(&[
+            Event::TaskUpdated { task: merged },
+            Event::TaskLifecycleUpdated {
+                task_id: task_id.into(),
+                record: crate::server::state::TaskLifecycleRecord {
+                    delivery_kind: crate::server::state::TaskDeliveryKind::Code,
+                    delivery_evidence: Some("candidate delivered".into()),
+                    delivered_ms: Some(updated_ms),
+                    delivery_commit: Some(feature_tip.clone()),
+                    review_evidence: Some("review pass".into()),
+                    reviewer: Some("master".into()),
+                    reviewed_ms: Some(updated_ms),
+                    integration_commit: Some(squash.clone()),
+                    integration_evidence: Some("squash commit recorded on main".into()),
+                    integrated_ms: Some(updated_ms),
+                },
+            },
+        ]);
+    }
+    (squash, feature_tip)
+}
+
+#[test]
+fn finalize_accepts_squash_merged_branch_from_recorded_integration() {
+    let (server, root) = test_server();
+    squash_merged_holder(&server, &root, "squash-held", true, true);
+    let finalized = handle_task_finalize_cleanup(
+        &server,
+        "master".into(),
+        "token-master".into(),
+        "squash-held".into(),
+        None,
+    );
+    assert!(finalized.ok, "{finalized:?}");
+    assert_eq!(finalized.data["cleanup"]["result"], "verified");
+    assert!(!root.join("playground/squash-wt").exists());
+    assert!(!Command::new("git")
+        .current_dir(&root)
+        .args(["rev-parse", "--verify", "refs/heads/feature"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn finalize_keeps_refusal_without_integration_evidence() {
+    let (server, root) = test_server();
+    squash_merged_holder(&server, &root, "squash-held", false, true);
+    let refused = handle_task_finalize_cleanup(
+        &server,
+        "master".into(),
+        "token-master".into(),
+        "squash-held".into(),
+        None,
+    );
+    assert!(!refused.ok, "{refused:?}");
+    assert!(
+        refused
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("not merged")),
+        "{refused:?}"
+    );
+    assert!(root.join("playground/squash-wt").is_dir());
+    assert!(Command::new("git")
+        .current_dir(&root)
+        .args(["rev-parse", "--verify", "refs/heads/feature"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn finalize_rejects_unreachable_and_fabricated_commits_then_accepts_reachable_commit() {
+    let (server, root) = test_server();
+    let (squash, feature_tip) = squash_merged_holder(&server, &root, "squash-held", false, true);
+
+    // The feature tip resolves but never landed on main: fail closed.
+    let unreachable = handle_task_finalize_cleanup(
+        &server,
+        "master".into(),
+        "token-master".into(),
+        "squash-held".into(),
+        Some(feature_tip.clone()),
+    );
+    assert!(!unreachable.ok, "{unreachable:?}");
+    assert_eq!(
+        unreachable.error.as_deref(),
+        Some("CLEANUP_FINALIZE_COMMIT_NOT_IN_MAIN")
+    );
+    assert_eq!(unreachable.data["provided"], feature_tip);
+    assert!(unreachable.data["main_head"].is_string());
+    assert_eq!(
+        unreachable.data["expected"],
+        "a commit reachable from refs/heads/main"
+    );
+    assert!(root.join("playground/squash-wt").is_dir());
+
+    // A commit that does not exist cannot authorize deletion.
+    let fabricated = handle_task_finalize_cleanup(
+        &server,
+        "master".into(),
+        "token-master".into(),
+        "squash-held".into(),
+        Some("0123456789012345678901234567890123456789".into()),
+    );
+    assert!(!fabricated.ok, "{fabricated:?}");
+    assert!(
+        fabricated
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("TASK_INTEGRATION_COMMIT_UNRESOLVED")),
+        "{fabricated:?}"
+    );
+    assert!(root.join("playground/squash-wt").is_dir());
+
+    // An empty value is not evidence either.
+    let empty = handle_task_finalize_cleanup(
+        &server,
+        "master".into(),
+        "token-master".into(),
+        "squash-held".into(),
+        Some("   ".into()),
+    );
+    assert!(!empty.ok, "{empty:?}");
+    assert_eq!(
+        empty.error.as_deref(),
+        Some("CLEANUP_FINALIZE_COMMIT_INVALID")
+    );
+    assert!(root.join("playground/squash-wt").is_dir());
+
+    // The recorded squash commit authorizes the cleanup.
+    let finalized = handle_task_finalize_cleanup(
+        &server,
+        "master".into(),
+        "token-master".into(),
+        "squash-held".into(),
+        Some(squash.clone()),
+    );
+    assert!(finalized.ok, "{finalized:?}");
+    assert_eq!(finalized.data["cleanup"]["result"], "verified");
+    assert!(!root.join("playground/squash-wt").exists());
+    assert!(!Command::new("git")
+        .current_dir(&root)
+        .args(["rev-parse", "--verify", "refs/heads/feature"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn close_accepts_squash_integrated_branch_from_recorded_integration() {
+    let (server, root) = test_server();
+    squash_merged_holder(&server, &root, "squash-close", true, false);
+    let closed = handle_task_close(
+        &server,
+        "holder".into(),
+        "token-holder".into(),
+        "squash-close".into(),
+        false,
+        None,
+    );
+    assert!(closed.ok, "{closed:?}");
+    assert_eq!(closed.data["cleanup"]["result"], "verified");
+    assert!(!root.join("playground/squash-wt").exists());
+    assert!(!Command::new("git")
+        .current_dir(&root)
+        .args(["rev-parse", "--verify", "refs/heads/feature"])
+        .output()
+        .unwrap()
+        .status
+        .success());
     std::fs::remove_dir_all(root).ok();
 }
 

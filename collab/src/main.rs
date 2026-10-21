@@ -1268,10 +1268,11 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     force,
                     reason,
                 },
-                TaskCmd::FinalizeCleanup { id } => Req::TaskFinalizeCleanup {
+                TaskCmd::FinalizeCleanup { id, commit } => Req::TaskFinalizeCleanup {
                     worker_id: worker_id.clone(),
                     token: token.clone(),
                     task_id: id,
+                    commit,
                 },
                 TaskCmd::Status { id } => Req::TaskStatus { task_id: id },
             };

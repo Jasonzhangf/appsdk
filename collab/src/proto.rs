@@ -855,6 +855,8 @@ pub enum Req {
         worker_id: String,
         token: String,
         task_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        commit: Option<String>,
     },
     TaskDispatch {
         worker_id: String,

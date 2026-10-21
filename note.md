@@ -231,3 +231,29 @@
   All 7 tmux authority CLI cases and the embedded graph registry consumer test
   passed. These corrections change tests/design bindings only; installed
   runtime code is unchanged.
+
+## 2026-10-20 — r6 review finding: worker status binding diagnosis
+
+- Independent review found one P1 in `collab/src/server/mod_parts/part_10.rs`:
+  `identity-mismatch` worker status returned only
+  `selected transport does not prove the registered identity; verify its binding`,
+  so the typed failure surface did not identify the binding contract.
+- Fix: worker status now returns
+  `SESSION_THREAD_BINDING_MISMATCH: selected transport does not prove the
+  registered identity; preserve the registered binding and use `collab context`
+  as the only repair entry; do not edit or infer the binding`.
+- Tests in `required_fields_tests.rs` now assert immutable worker-status
+  diagnosis: `identity_valid=false`, `status=identity-mismatch`, typed
+  `SESSION_THREAD_BINDING_MISMATCH`, binding-preservation wording, `collab
+  context` as the repair entry, and no mutation of tasks, project bindings,
+  workers, subscriptions, runtime journal, or host journal. Existing
+  post-repair identity and board assertions remain.
+- Red evidence: `red/worker-status-binding-diagnosis-red.log`.
+- Focused green: `green/worker-status-binding-diagnosis-green.log`.
+- A full-suite attempt without the CI harness ran binaries in parallel and
+  omitted test binaries; its 11 failures were environmental/isolation failures,
+  not product findings: `red/public-binaries-without-harness-parallel-red.log`.
+- Correct full binary suite (serial, with COLLAB_TEST_BINARY and
+  COLLAB_TEST_MCP_BINARY): `collab` 1048 passed, 1 ignored;
+  `collab-mcp` 27 passed: `green/post-review-finding-full-binary-suite-green.log`.
+- Commit: `2bfc8277 fix(collab): preserve binding in worker status diagnosis`.

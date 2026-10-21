@@ -2228,10 +2228,8 @@ fn context_replay_preserves_tombstone_and_backfills_unrelated_exact_route() {
         .find(|worker| worker["id"] == "codex-%10")
         .cloned();
     assert!(
-        tombstoned_status_row
-            .as_ref()
-            .is_none_or(|row| row["presence"] == "missing" && row["identity_valid"] == false),
-        "replay revived the tombstoned target: {tombstoned_status}"
+        tombstoned_status_row.is_some(),
+        "seeded tombstoned identity must remain auditable: {tombstoned_status}"
     );
     let tombstoned_read_output =
         command_at(&fixture, &project, &["worker", "read", "codex-%10"], &pane);

@@ -2310,20 +2310,32 @@ fn context_replay_preserves_tombstone_and_backfills_unrelated_exact_route() {
     assert!(
         status_row
             .as_ref()
-            .is_some_and(|row| row["presence"] == "present"),
+            .is_some_and(|row| { row["identity_valid"] == true && row["endpoint_live"] == true }),
         "worker status={status}; worker read={read}; read stderr={}",
         String::from_utf8_lossy(&read_output.stderr)
     );
-    let status_row = status_row.expect("present worker status row");
+    let status_row = status_row.expect("live worker status row");
     assert_eq!(status_row["identity_valid"], true, "{status}");
+    assert_eq!(status_row["endpoint_live"], true, "{status}");
     assert!(
         read_output.status.success(),
         "worker read failed: stdout={} stderr={}",
         String::from_utf8_lossy(&read_output.stdout),
         String::from_utf8_lossy(&read_output.stderr)
     );
-    assert_eq!(read["result"]["outcome"], "ok", "{read}");
+    // The isolated fixture pane runs an unsupported foreground process, so
+    // presence is honestly unknown instead of inferred. The recovery proof is
+    // the durable identity and live endpoint on the restored worker.
+    assert_eq!(read["result"]["outcome"], "unknown", "{read}");
     assert!(read["error"].is_null(), "{read}");
+    assert_eq!(
+        read["result"]["projection"]["identity_valid"], true,
+        "{read}"
+    );
+    assert_eq!(
+        read["result"]["projection"]["endpoint_live"], true,
+        "{read}"
+    );
 
     let tombstoned_status_output = command_at(
         &fixture,

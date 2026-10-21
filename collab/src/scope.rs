@@ -828,9 +828,10 @@ bindings, and implementation details do not replace it.
 4. Worktree lifecycle is Close-Before-Open/SESE. Dirty, active, shared, or
    unknown resources are PROTECTED_HOLD. Do not run broad process kills or
    perform daemon or tmux lifecycle actions, including host-pane termination.
-5. New 400/502/598 production issues use project-canonical intake and
-   deduplication. Evidence separately identifies client-wire status, provider
-   HTTP status, typed internal terminal, and business response.
+5. New production issues use the project's canonical intake and deduplication
+   before repair or dispatch. Record evidence according to the owning project
+   contract; project-specific error codes, wire status, and response planes
+   stay in the owning project Skill.
 6. Continuous patrol uses existing goal or deadline one-shot wakes. Re-arm a
    consumed one-shot before a turn ends when scheduling continues. A read, ACK,
    status summary, or dispatch receipt is not completion.

@@ -108,11 +108,10 @@ or implementation details.
    unknown resources are PROTECTED_HOLD. Preserve and report them. Do not run
    broad process kills. Do not perform daemon or tmux lifecycle actions,
    including starting, stopping, restarting, or terminating a host pane.
-5. Send each new 400/502/598 production issue through the project-canonical
-   intake and deduplication path before repair or dispatch. Evidence must
-   identify these planes separately: client-wire status, provider HTTP status,
-   typed internal terminal, and business response. A missing plane remains
-   unresolved; it is not success.
+5. Send each new production issue through the project's canonical intake and
+   deduplication before repair or dispatch. Record evidence according to the
+   owning project contract; project-specific error codes, wire status, and
+   response planes stay in the owning project Skill.
 6. Continuous patrol uses existing goal or deadline one-shot wakes. Before a
    turn ends while scheduling continues, explicitly re-arm a consumed one-shot
    wake. A read, ACK, status summary, or dispatch receipt is not completion and

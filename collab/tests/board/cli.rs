@@ -1437,12 +1437,21 @@ fn peer_may_start_independent_work_while_an_invitation_is_pending() {
 fn role_patrol_context_reminders_follow_master_and_peer_roles_across_restoration() {
     let mut fixture = AppFixture::new();
     let first_peer = fixture.run_public(&["context"], THREAD_B);
-    assert_role_patrol_mentions(
-        "first peer context",
-        &first_peer,
-        "worker",
-        &["patrol", "subscription", "scope", "master", "block"],
-    );
+    let peer_keywords = [
+        "patrol",
+        "subscription",
+        "scope",
+        "master",
+        "block",
+        "non-overlapping bounded scopes",
+        "close-before-open/sese",
+        "canonical intake and deduplication",
+        "owning project contract",
+        "re-arm",
+        "report channel",
+        "stop conditions",
+    ];
+    assert_role_patrol_mentions("first peer context", &first_peer, "worker", &peer_keywords);
 
     fixture.run_public(&["context"], THREAD_A);
     let promoted = fixture.run_public(
@@ -1470,6 +1479,19 @@ fn role_patrol_context_reminders_follow_master_and_peer_roles_across_restoration
         "monitor",
         "event",
         "subscription",
+        "only its own project",
+        "canonical issue intake",
+        "currently supported monitored events",
+        "non-overlapping",
+        "close-before-open/sese",
+        "canonical intake and deduplication",
+        "owning project contract",
+        "goal",
+        "deadline",
+        "re-arm",
+        "dispatch receipt",
+        "report channel",
+        "stop conditions",
     ];
     assert_role_patrol_mentions("master promotion", &promoted, "master", &master_keywords);
     let repeated_master = fixture.run_public(&["context"], THREAD_A);
@@ -1486,7 +1508,7 @@ fn role_patrol_context_reminders_follow_master_and_peer_roles_across_restoration
         "demoted peer context",
         &demoted_peer,
         "worker",
-        &["patrol", "subscription", "scope", "master", "block"],
+        &peer_keywords,
     );
 
     let tasks_before = fixture.run_public(&["board", "show"], THREAD_A)["tasks"]
@@ -1516,7 +1538,7 @@ fn role_patrol_context_reminders_follow_master_and_peer_roles_across_restoration
         "restored peer context",
         &restored_peer,
         "worker",
-        &["patrol", "subscription", "scope", "master", "block"],
+        &peer_keywords,
     );
     assert_eq!(
         notification_subscription_count(&fixture, THREAD_B, "master after restoration"),

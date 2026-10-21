@@ -144,53 +144,64 @@ next authorized activation after registration, promotion, delegation, or
 recovery, update the existing scope; context restoration does not fabricate
 board tasks, timers, or subscriptions.
 
-- `master` reconciles patrol tasks for open buglist P0/P1 work, peer progress
-  evidence, owned worktree and stale-resource convergence, project-canonical
-  issue intake, and currently supported monitored events. Use durable board,
-  task, delivery, cleanup, and issue evidence; inactivity, heartbeat, and ACK
-  do not prove progress or completion. Close each P0/P1 with applicable
-  evidence or park it with owner, cause, and unblock condition. Dispatch ready
-  P0/P1 work before ending the scheduling turn.
-- An ordinary peer is the autonomous goal orchestrator for its accepted scope.
-  For its own ongoing long-horizon goals, it creates and maintains finite patrol
-  tasks and subscriptions. On each master assignment, first evaluate the goal,
-  dependencies, blockers, priorities and resources; then update the existing
-  patrol tasks and subscriptions before proceeding. Add only missing scope,
-  retire obsolete owned scope, and do not duplicate timers. Report the resulting
-  patrol scope or the concrete reason no subscription change is needed.
-  It owns scoped patrol of task progress, blockers, owned worktree/runtime
-  resources, canonical issue intake, cleanup, and only the explicit event
-  subscriptions needed for that scope. On a blocker, first report to the
-  current master with the task ID, evidence, attempted actions, proposed
-  solution, and help needed. If the master is unavailable, record the blocker
-  and continue safe independent work instead of waiting indefinitely.
-- Dirty, active, shared, or unknown resources are PROTECTED_HOLD. Preserve and
-  report them; never remove another owner's resource or perform broad process,
-  daemon, tmux, or host-pane termination.
-- Before a patrol cycle ends, explicitly re-arm a consumed one-shot goal or
-  deadline wake when continued scheduling is required. A read, ACK, status
-  summary, or dispatch receipt is not completion and does not renew a wake.
-- When a task completes, the owning master or peer actively closes that task's
-  patrol tasks and timed subscriptions. If there is no new task and no actionable
-  work, close the patrol; do not renew, recreate or keep idle polling loops.
-  Keep the direct-message receive subscription for new assignments. On a new
-  assignment, assess the required scope before starting another patrol. Close
-  only owned patrol scope; do not cancel another goal's subscriptions.
-- A legacy managed-subagent record creates no new patrol task, subscription,
-  dispatch, or execution authority. Its parent or master preserves it only for
-  diagnosis or migration.
+This contract is project-agnostic. Role-specific sections elaborate it, but
+they cannot replace it with project-specific paths, commands, issue bindings,
+or implementation details.
 
-Every sender states the goal, scope, authorized actions, resource owner,
-delivery and test evidence, report channel, and stop conditions. A receiver
-checks that contract against current responsibility, then accepts, rejects, or
-negotiates before work starts.
+1. A `master` patrols only its own project. The patrol covers open P0/P1 work,
+   real peer evidence, owned worktrees and stale resources, canonical issue
+   intake, and currently supported monitored events. Use durable board, task,
+   delivery, cleanup, and issue evidence; inactivity, heartbeat, and ACK prove
+   neither progress nor completion. Close each P0/P1 with applicable evidence
+   or park it with owner, cause, and unblock condition. Dispatch ready P0/P1
+   work before ending the scheduling turn.
+2. Offer every long-horizon goal through the public board to a consenting peer.
+   Each accepted peer partitions the goal into non-overlapping bounded scopes
+   and orchestrates independent `codex exec --profile gcm` workers. Planner and
+   Reviewer remain independent roles. Dispatch bounded one-shot execution or
+   observation directly to independent GCM workers regardless of whether other
+   peers are busy.
+3. A peer owns planning, execution, verification, unblocking, integration, and
+   resource closure for its accepted scope. Master verifies returned evidence,
+   coordinates cross-peer dependencies, integrates the delivery, and closes
+   project responsibilities. Neither role may infer completion from a message,
+   receipt, or report.
+4. Use Close-Before-Open/SESE at task-domain boundaries: prove the old owned
+   worktree is closed before opening its replacement. Dirty, active, shared, or
+   unknown resources are PROTECTED_HOLD. Preserve and report them. Do not run
+   broad process kills. Do not perform daemon or tmux lifecycle actions,
+   including starting, stopping, restarting, or terminating a host pane.
+5. Send each new production issue through the project's canonical intake and
+   deduplication before repair or dispatch. Record evidence according to the
+   owning project contract; project-specific error codes, wire status, and
+   response planes stay in the owning project Skill.
+6. Continuous patrol uses existing goal or deadline one-shot wakes. Before a
+   turn ends while scheduling continues, explicitly re-arm a consumed one-shot
+   wake. A read, ACK, status summary, or dispatch receipt is not completion and
+   does not renew a wake. Do not invent a periodic polling loop.
+7. Every dispatch states the goal, scope, authorized actions, resource owner,
+   delivery and test evidence, report channel, and stop conditions. The
+   receiver checks the contract against current responsibility, then accepts,
+   rejects, or negotiates before work starts.
 
-Use the board publish/invite lifecycle to offer a long-horizon goal to an
-ordinary peer. Bounded execution or observation uses an independent
-`codex exec --profile gcm` worker. The legacy child-private managed lifecycle
-is compatibility only. Planner and Reviewer remain independent roles with
-their existing model routing; the bounded GCM rule does not turn them into
-execution workers.
+8. For its own ongoing long-horizon goals, an accepted peer creates and
+   maintains finite patrol tasks and subscriptions. On each master assignment,
+   first evaluate the goal, dependencies, blockers, priorities and resources;
+   then update the existing patrol tasks and subscriptions before proceeding.
+   Add only missing scope, retire obsolete owned scope, and do not duplicate
+   timers. Report the resulting patrol scope or the concrete reason no
+   subscription change is needed.
+9. When a task completes, the owning master or peer actively closes that task's
+   patrol tasks and timed subscriptions. If there is no new task and no
+   actionable work, close the patrol; do not renew, recreate or keep idle
+   polling loops. Keep the direct-message receive subscription for new
+   assignments. On a new assignment, assess the required scope before starting
+   another patrol. Close only owned patrol scope; do not cancel another goal's
+   subscriptions.
+
+A legacy managed-subagent record creates no new patrol task, subscription,
+dispatch, or execution authority. Its parent or master preserves it only for
+diagnosis or migration.
 
 ## 稳定名字与旧版 display-label 迁移
 

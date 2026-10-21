@@ -1096,7 +1096,11 @@ fn attempt_notification_detailed_with_mode_at(
         // Never let a later pre-delivery skip overwrite the class of an
         // earlier native attempt. Accepted attempts leave no failure record
         // at all; unknown and decode failures keep their non-retryable class.
-        if !state
+        let current_wake_accepted = state.notification_delivery_accepted.contains_key(message_id)
+            && state.msgs.get(message_id).is_some_and(|message| {
+                !state.handoff_wake_pending(message)
+            });
+        if !current_wake_accepted && !state
             .notification_delivery_failures
             .contains_key(message_id)
         {

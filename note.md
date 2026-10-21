@@ -318,3 +318,13 @@ Second Linux CI passed C13 and all 64 context cases. Its next first failure
 was the endpoint projection test asserting periodic agent facts before the
 first observation. Added an exact project/worker/session fact readiness wait;
 all endpoint and agent-state assertions remain. Both endpoint cases pass.
+
+Third Linux CI reached Snapshot and exposed a production receipt bug: the
+first notification attempt accepted a batch, but a later empty-batch skip
+appended a failure for another message already accepted in that batch. The
+notification owner now preserves current-carrier acceptance on a skipped
+attempt. A pending name-handoff wake still records its own failure. A new
+deterministic red reproduced the erroneous journal write; all 15 batch units
+and all 8 public peer lifecycle cases pass after repair. The return class and
+actual delivery/consumption behavior remain explicit. Further review, final
+build activation and Linux confirmation follow in the run.

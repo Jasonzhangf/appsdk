@@ -134,6 +134,97 @@ fn queue_message(
 }
 
 #[test]
+fn accepted_batch_is_not_overwritten_by_a_later_empty_batch_skip() {
+    let (server, root) = test_server();
+    let subscription = register_and_subscribe(&server, "recipient");
+    let now = now_ms();
+    for id in ["notice-a", "notice-b"] {
+        queue_message(&server, "recipient", &subscription, id, now);
+        server.commit(&[Event::DeliveryMode {
+            msg_id: id.into(),
+            mode: "explicit-notification".into(),
+            source_thread_id: None,
+        }]);
+    }
+    let first = attempt_notification_detailed_with_at(&server, "notice-a", &subscription, now);
+    assert!(matches!(first, NotificationAttempt::Accepted), "{first:?}");
+    {
+        let state = server.state.lock().unwrap();
+        for id in ["notice-a", "notice-b"] {
+            assert!(state.notification_delivery_accepted.contains_key(id));
+            assert!(!state.notification_delivery_failures.contains_key(id));
+        }
+    }
+    let before = std::fs::read(&server.journal_path).unwrap();
+    let second = attempt_notification_detailed_with_at(&server, "notice-b", &subscription, now);
+    assert!(
+        matches!(second, NotificationAttempt::NotAttempted(_)),
+        "{second:?}"
+    );
+    assert_eq!(
+        std::fs::read(&server.journal_path).unwrap(),
+        before,
+        "a skipped second attempt must preserve both actual batch acceptance receipts"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn old_carrier_acceptance_does_not_hide_a_new_handoff_wake_failure() {
+    let (server, root) = test_server();
+    let old_subscription = register_and_subscribe(&server, "old");
+    let new_subscription = register_and_subscribe(&server, "new");
+    let now = now_ms();
+    queue_message(&server, "old", &old_subscription, "notice", now);
+    server.commit(&[Event::DeliveryMode {
+        msg_id: "notice".into(),
+        mode: "explicit-notification".into(),
+        source_thread_id: None,
+    }]);
+    assert!(
+        attempt_notification_detailed_with_at(&server, "notice", &old_subscription, now).accepted()
+    );
+    let (handoff, mut subscription) = {
+        let state = server.state.lock().unwrap();
+        (
+            super::name_mailbox::MailboxHandoff {
+                project_scope: "/project".into(),
+                name: "Jenny".into(),
+                occupancy_revision: 2,
+                session_id: "session-new".into(),
+                message_id: "notice".into(),
+                previous_recipient: "old".into(),
+                recipient: "new".into(),
+                wake_attempt_count: state.msgs["notice"].wake_attempt_count,
+                previous_subscription: Some(old_subscription),
+                accepted_ms: state.notification_delivery_accepted.get("notice").copied(),
+                evidence: state.notification_delivery_evidence.get("notice").cloned(),
+                failure: None,
+            },
+            state.notification_subscriptions[&new_subscription].clone(),
+        )
+    };
+    subscription.expires_ms = now - 1;
+    server.commit(&[
+        Event::MailboxReassigned { handoff },
+        Event::NotificationSubscribed { subscription },
+    ]);
+    let attempt = attempt_notification_detailed_with_at(&server, "notice", &new_subscription, now);
+    assert!(
+        matches!(attempt, NotificationAttempt::NotAttempted(_)),
+        "{attempt:?}"
+    );
+    let state = server.state.lock().unwrap();
+    assert!(state.handoff_wake_pending(&state.msgs["notice"]));
+    assert!(
+        state.notification_delivery_failures.contains_key("notice"),
+        "old carrier acceptance must not suppress the new carrier's failed wake"
+    );
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn explicit_notification_uses_sender_native_thread_for_delegation() {
     let (mut server, root) = test_server();
     let subscription_id = register_and_subscribe(&server, "recipient");

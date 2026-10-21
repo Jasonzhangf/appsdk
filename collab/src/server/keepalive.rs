@@ -103,20 +103,67 @@ pub(crate) fn tick_at(server: &Server, now: i64) {
         super::current_master_holder(server, &state).ok().flatten()
     };
     for worker in workers {
-        // App Server transport exposes thread liveness, not the agent's
-        // execution state. Managed children report that state through their
-        // typed lifecycle; ordinary peers are left unknown until they do.
+        // Periodic agent activity is distinct from endpoint/identity validity.
+        // Managed lifecycle records remain a compatibility source only.
         let agent = {
-            let state = server.state.lock().unwrap();
-            match state
-                .subagents
-                .values()
-                .find(|child| child.peer == worker.id)
-                .map(|child| child.status.as_str())
-            {
-                Some("working") => AgentState::Working,
-                Some("idle") => AgentState::Waiting,
-                _ => AgentState::Unknown,
+            let mut state = server.state.lock().unwrap();
+            if state.admission_frozen() {
+                return;
+            }
+            if state.workers.get(&worker.id) != Some(&worker) {
+                continue;
+            }
+            let (presence, activity) = super::worker_agent_facts(server, &state, &worker);
+            if let Some(activity) = activity {
+                let label = match (presence.map(|fact| fact.presence), activity.activity) {
+                    (Some(super::name_state::AgentPresence::Offline), _) => "unknown",
+                    (_, super::name_state::AgentActivity::Busy) => "working",
+                    (_, super::name_state::AgentActivity::Idle) => "idle",
+                    (_, super::name_state::AgentActivity::WaitingUser) => "waiting_user",
+                    _ => "unknown",
+                };
+                match label {
+                    "working" => AgentState::Working,
+                    "idle" => AgentState::Waiting,
+                    _ => {
+                        // An inconclusive or user-blocked peer is not idle capacity.
+                        // Retain working_seen so its next real idle can close the episode.
+                        let mut record = state
+                            .keepalives
+                            .get(&worker.id)
+                            .cloned()
+                            .unwrap_or_default();
+                        let mut events = Vec::new();
+                        if record.observed != label {
+                            record.observed = label.into();
+                            events.push(Event::KeepaliveUpdated {
+                                worker_id: worker.id.clone(),
+                                record,
+                            });
+                        }
+                        let mut wake = state.master_wake.clone();
+                        wake.idle_workers.retain(|id| id != &worker.id);
+                        wake.newly_idle_workers.retain(|id| id != &worker.id);
+                        if wake != state.master_wake {
+                            events.push(Event::MasterWakeUpdated { accumulator: wake });
+                        }
+                        if !events.is_empty() {
+                            server.commit_locked_reporting(&mut state, &events);
+                        }
+                        AgentState::Unknown
+                    }
+                }
+            } else {
+                match state
+                    .subagents
+                    .values()
+                    .find(|child| child.peer == worker.id)
+                    .map(|child| child.status.as_str())
+                {
+                    Some("working") => AgentState::Working,
+                    Some("idle") => AgentState::Waiting,
+                    _ => AgentState::Unknown,
+                }
             }
         };
         if agent == AgentState::Unknown {
@@ -127,7 +174,7 @@ pub(crate) fn tick_at(server: &Server, now: i64) {
         if state.admission_frozen() {
             return;
         }
-        if !state.workers.contains_key(&worker.id) {
+        if state.workers.get(&worker.id) != Some(&worker) {
             continue;
         }
         let mut tasks: Vec<_> = state
@@ -283,7 +330,6 @@ pub(crate) fn tick_at(server: &Server, now: i64) {
     }
     flush_idle_batches_if_ready(server, now);
 }
-
 fn flush_idle_batches_if_ready(server: &Server, now: i64) {
     if !server.config.notifications.enabled {
         return;
@@ -296,10 +342,12 @@ fn flush_idle_batches_if_ready(server: &Server, now: i64) {
         return;
     };
     let master_record = state.keepalives.get(&master_id).cloned();
-    if master_record
-        .as_ref()
-        .is_some_and(|record| record.observed == "working")
-    {
+    if master_record.as_ref().is_some_and(|record| {
+        matches!(
+            record.observed.as_str(),
+            "working" | "waiting_user" | "unknown"
+        )
+    }) {
         return;
     }
     if state.master_wake.newly_idle_workers.is_empty() {
@@ -324,7 +372,7 @@ fn flush_idle_batches_if_ready(server: &Server, now: i64) {
         "master-wake-batch".to_string()
     };
     let body = format!(
-        "newly_idle={} live_idle={} blocked={} pending_merges={} goal_due={}. Peer-first routing: assign long-horizon goals through the public board to a suitable consenting peer; that peer owns the goal without inheriting master authority and orchestrates bounded one-shot execution or observation through independent `codex exec --profile gcm` workers. Start a master-owned independent GCM worker only when every eligible peer is busy. For every assignment, state goal, scope, authorized actions, resource owner, delivery/test evidence, report and stop conditions. Standing patrol: remove unneeded owned worktrees after recoverable extraction; reclaim owned stale resources; close each open P0/P1 with evidence or explicitly park it with owner, cause, and unblock condition; run every new production issue through the project's canonical intake; preserve and report protected holds (dirty, active, shared, or unknown resources). Verify evidence and integrate accepted pending candidates. Before ending the patrol, re-arm a consumed one-shot goal or deadline wake with `appsdk goal subscribe` when continued scheduling is required; a read, ACK, summary, or dispatch receipt is not completion. Managed subagent records and `collab subagent dispatch` are legacy compatibility for diagnosis or migration only. Cancel scheduling only when no actionable task, dependency, resolvable blocker, or authorized open issue remains, using collab notify unsubscribe {} and recording the receipt.",
+        "newly_idle={} live_idle={} blocked={} pending_merges={} goal_due={}. Long-horizon orchestration: assign suitable long-horizon goals through the public board to authorized peers; if no peer is available, retain and split the goal. Prefer assigning code implementation to subagents; orchestrate scheduling, acceptance, delivery, integration, and owned-resource closure instead of implementing the mainline yourself. Dispatch one-shot execution or observation directly to independent `codex exec --profile gcm` workers regardless of whether other peers are busy. For every assignment, state goal, scope, authorized actions, resource owner, delivery/test evidence, report and stop conditions. Master finite patrol: inspect open P0/P1 work, actual peer progress, owned worktrees and runtime resources, project-canonical issue intake, and required rearm. Subscription presence does not gate identity; do not invent a polling interval. A peer-owned goal patrols goal progress, blockers, and owned resources, and asks the current master first when blocked. Remove unneeded owned worktrees after recoverable extraction; reclaim owned stale resources; close each open P0/P1 with evidence or explicitly park it with owner, cause, and unblock condition; preserve and report protected holds (dirty, active, shared, or unknown resources). Verify evidence and integrate accepted pending candidates. AppSDK/Collab and tmux lifecycles remain independent; never stop or restart a tmux server or terminate host panes during patrol or cleanup. Before ending the patrol, re-arm a consumed one-shot goal or deadline wake with `appsdk goal subscribe` when continued scheduling is required; a read, ACK, summary, or dispatch receipt is not completion. Managed subagent records and `collab subagent dispatch` are legacy compatibility for diagnosis or migration only. Cancel scheduling only when no actionable task, dependency, resolvable blocker, or authorized open issue remains, using collab notify unsubscribe {} and recording the receipt.",
         newly_idle.join(","),
         live_idle.join(","),
         blocked.join(","),
@@ -450,6 +498,320 @@ mod tests {
         let state = server.state.lock().unwrap();
         assert!(!state.keepalives.contains_key("worker"));
         assert!(state.msgs.is_empty());
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn observe(server: &Server, activity: super::super::name_state::AgentActivity, session: &str) {
+        use super::super::name_state::*;
+        let scope = server
+            .root
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        server.commit(&[
+            Event::AgentPresenceObserved {
+                presence: AgentPresenceRecord {
+                    project_scope: scope.clone(),
+                    worker_id: "worker".into(),
+                    session_id: session.into(),
+                    presence: AgentPresence::Online,
+                    reason: "fixture".into(),
+                    observed_ms: 1,
+                },
+            },
+            Event::AgentActivityObserved {
+                activity: AgentActivityRecord {
+                    project_scope: scope,
+                    worker_id: "worker".into(),
+                    session_id: session.into(),
+                    activity,
+                    background: false,
+                    reason: "fixture".into(),
+                    observed_ms: 1,
+                },
+            },
+        ]);
+    }
+
+    #[test]
+    fn ordinary_typed_activity_drives_one_idle_episode() {
+        use super::super::name_state::AgentActivity::*;
+        let (server, root) = test_server();
+        super::super::peer_tests::register_synthetic_peer(&server, "worker", "thread-worker");
+        server
+            .state
+            .lock()
+            .unwrap()
+            .workers
+            .get_mut("worker")
+            .unwrap()
+            .transport
+            .as_mut()
+            .unwrap()
+            .session_id = Some("current".into());
+        let now = super::super::state::now_ms();
+        observe(&server, Busy, "current");
+        tick_at(&server, now);
+        assert_eq!(
+            server.state.lock().unwrap().keepalives["worker"].observed,
+            "working"
+        );
+        for activity in [WaitingUser, Unknown] {
+            observe(&server, activity, "current");
+            tick_at(&server, now + 1);
+            assert!(server
+                .state
+                .lock()
+                .unwrap()
+                .master_wake
+                .newly_idle_workers
+                .is_empty());
+        }
+        observe(&server, Idle, "current");
+        tick_at(&server, now + 2);
+        {
+            let state = server.state.lock().unwrap();
+            assert_eq!(state.keepalives["worker"].observed, "idle");
+            assert!(!state.master_wake.newly_idle_workers.is_empty());
+        }
+        let wake = server.state.lock().unwrap().master_wake.clone();
+        tick_at(&server, now + 3);
+        assert_eq!(
+            serde_json::to_value(&server.state.lock().unwrap().master_wake).unwrap(),
+            serde_json::to_value(wake).unwrap()
+        );
+        observe(&server, WaitingUser, "current");
+        tick_at(&server, now + 4);
+        assert!(server
+            .state
+            .lock()
+            .unwrap()
+            .master_wake
+            .idle_workers
+            .is_empty());
+        assert!(server
+            .state
+            .lock()
+            .unwrap()
+            .master_wake
+            .newly_idle_workers
+            .is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ordinary_idle_sends_one_existing_batch_notification() {
+        use super::super::name_state::AgentActivity::*;
+        use super::super::peer_tests::register_synthetic_peer;
+        let (server, root) = test_server();
+        register_synthetic_peer(&server, "worker", "thread-worker");
+        register_synthetic_peer(&server, "master", "thread-master");
+        assert!(
+            super::super::handle_master_promote(
+                &server,
+                "master".into(),
+                "token-master".into(),
+                "user approved master".into()
+            )
+            .ok
+        );
+        server
+            .state
+            .lock()
+            .unwrap()
+            .workers
+            .get_mut("worker")
+            .unwrap()
+            .transport
+            .as_mut()
+            .unwrap()
+            .session_id = Some("current".into());
+        let now = super::super::state::now_ms();
+        observe(&server, Busy, "current");
+        tick_at(&server, now);
+        observe(&server, Idle, "current");
+        tick_at(&server, now + 1);
+        tick_at(&server, now + 2);
+        let state = server.state.lock().unwrap();
+        let notices: Vec<_> = state
+            .msgs
+            .values()
+            .filter(|m| m.to == "master" && m.subject.as_deref() == Some("worker-idle"))
+            .collect();
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].body.contains("newly_idle=worker"));
+        assert!(!state.subagents.values().any(|child| child.peer == "worker"));
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ordinary_stale_activity_does_not_override_current_session() {
+        use super::super::name_state::AgentActivity::*;
+        let (server, root) = test_server();
+        super::super::peer_tests::register_synthetic_peer(&server, "worker", "thread-worker");
+        server
+            .state
+            .lock()
+            .unwrap()
+            .workers
+            .get_mut("worker")
+            .unwrap()
+            .transport
+            .as_mut()
+            .unwrap()
+            .session_id = Some("current".into());
+        observe(&server, Idle, "previous");
+        tick_at(&server, super::super::state::now_ms());
+        assert!(!server
+            .state
+            .lock()
+            .unwrap()
+            .keepalives
+            .contains_key("worker"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ordinary_projection_separates_presence_activity_and_session() {
+        use super::super::name_state::{AgentActivity::*, AgentPresence};
+        let (server, root) = test_server();
+        super::super::peer_tests::register_synthetic_peer(&server, "worker", "thread-worker");
+        server
+            .state
+            .lock()
+            .unwrap()
+            .workers
+            .get_mut("worker")
+            .unwrap()
+            .transport
+            .as_mut()
+            .unwrap()
+            .session_id = Some("current".into());
+        let worker = server.state.lock().unwrap().workers["worker"].clone();
+        for (activity, label) in [
+            (Busy, "busy"),
+            (Idle, "idle"),
+            (WaitingUser, "waiting_user"),
+            (Unknown, "unknown"),
+        ] {
+            observe(&server, activity, "current");
+            let (presence, view) = super::super::worker_presence_with_view(&server, &worker);
+            assert_eq!(presence, super::super::IdentityPresence::Present);
+            assert_eq!(view["agent_presence"], "online");
+            assert_eq!(view["activity"], label);
+        }
+        let mut presence = {
+            let state = server.state.lock().unwrap();
+            super::super::worker_agent_facts(&server, &state, &worker)
+                .0
+                .unwrap()
+                .clone()
+        };
+        for (fact, expected, label) in [
+            (
+                AgentPresence::Unknown,
+                super::super::IdentityPresence::Unknown,
+                "unknown",
+            ),
+            (
+                AgentPresence::Offline,
+                super::super::IdentityPresence::Missing,
+                "offline",
+            ),
+        ] {
+            presence.presence = fact;
+            server.commit(&[Event::AgentPresenceObserved {
+                presence: presence.clone(),
+            }]);
+            let (actual, view) = super::super::worker_presence_with_view(&server, &worker);
+            assert_eq!(actual, expected);
+            assert_eq!(view["agent_presence"], label);
+            assert_eq!(server.state.lock().unwrap().workers["worker"], worker);
+        }
+        observe(&server, Idle, "old");
+        assert!(super::super::worker_agent_view(&server, &worker).is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ordinary_presence_edges_use_typed_online_and_offline_once() {
+        use super::super::name_state::{AgentActivity, AgentPresence};
+        use super::super::peer_tests::register_synthetic_peer;
+        let (server, root) = test_server();
+        register_synthetic_peer(&server, "worker", "thread-worker");
+        register_synthetic_peer(&server, "master", "thread-master");
+        assert!(
+            super::super::handle_master_promote(
+                &server,
+                "master".into(),
+                "token-master".into(),
+                "user approved master".into()
+            )
+            .ok
+        );
+        server
+            .state
+            .lock()
+            .unwrap()
+            .workers
+            .get_mut("worker")
+            .unwrap()
+            .transport
+            .as_mut()
+            .unwrap()
+            .session_id = Some("current".into());
+        observe(&server, AgentActivity::Unknown, "current");
+        super::super::record_ordinary_peer_presence_edges(&server, Some("worker"));
+        assert_eq!(
+            server.state.lock().unwrap().keepalives["worker"].notified_presence,
+            "online"
+        );
+        let mut presence = {
+            let state = server.state.lock().unwrap();
+            let worker = &state.workers["worker"];
+            super::super::worker_agent_facts(&server, &state, worker)
+                .0
+                .unwrap()
+                .clone()
+        };
+        for fact in [
+            AgentPresence::Unknown,
+            AgentPresence::Offline,
+            AgentPresence::Offline,
+            AgentPresence::Online,
+            AgentPresence::Online,
+        ] {
+            presence.presence = fact;
+            server.commit(&[Event::AgentPresenceObserved {
+                presence: presence.clone(),
+            }]);
+            super::super::record_ordinary_peer_presence_edges(&server, Some("worker"));
+        }
+        let state = server.state.lock().unwrap();
+        let subjects: Vec<_> = state
+            .msgs
+            .values()
+            .filter(|m| m.to == "master")
+            .filter_map(|m| m.subject.as_deref())
+            .collect();
+        assert_eq!(
+            subjects
+                .iter()
+                .filter(|s| **s == "worker-unresponsive: worker")
+                .count(),
+            1
+        );
+        assert_eq!(
+            subjects
+                .iter()
+                .filter(|s| **s == "worker-recovered: worker")
+                .count(),
+            1
+        );
+        assert_eq!(state.keepalives["worker"].notified_presence, "online");
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -701,7 +1063,10 @@ mod tests {
         let body = &batch[0].body;
         assert!(body.contains("newly_idle=subagent:managed"), "{body}");
         assert!(body.contains("live_idle=subagent:managed"), "{body}");
-        assert!(body.contains("every eligible peer is busy"), "{body}");
+        assert!(
+            body.contains("regardless of whether other peers are busy"),
+            "{body}"
+        );
         assert!(body.contains("protected holds"), "{body}");
         assert!(body.contains("one-shot goal or deadline wake"), "{body}");
         drop(state);
@@ -778,7 +1143,9 @@ mod tests {
         let batch = state
             .msgs
             .values()
-            .find(|message| message.to == "master" && message.body.contains("Peer-first routing"))
+            .find(|message| {
+                message.to == "master" && message.body.contains("Long-horizon orchestration")
+            })
             .expect("master idle batch");
         assert!(
             batch.body.contains("pending_merges=task-merge"),

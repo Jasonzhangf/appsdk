@@ -8,14 +8,21 @@ fn board_execution_gate(server: &Server, state: &State, actor: &str, task_id: &s
     Ok(binding)
 }
 
-/// A blocked owner may resume only after its other active obligation ends.
-/// Resource ownership remains intact while blocked and is checked here again.
+/// Peers orchestrate multiple goals. Admission checks the task's actual
+/// resource ownership, rather than treating another goal as a busy slot.
 fn board_resume_gate(state: &State, actor: &str, task_id: &str) -> Result<(), Resp> {
-    if board_peer_has_execution_reservation(state, actor, Some(task_id)) {
-        return Err(Resp::err("BOARD_PEER_BUSY: finish or decline your other responsibility before accepting"));
-    }
     if state.worktree_bindings.values().any(|resource| resource.task_id == task_id && resource.owner_agent_id != actor) {
         return Err(Resp::err("BOARD_RESOURCE_OWNER_CONFLICT: assignment resource belongs to another actor"));
+    }
+    if state.pending_merges.get(task_id).is_some_and(|request| request.owner != actor) {
+        return Err(Resp::err("BOARD_RESOURCE_OWNER_CONFLICT: pending merge belongs to another actor"));
+    }
+    if let Some(task) = state.tasks.get(task_id) {
+        if state.tasks.values().any(|other| other.id != task_id && task_resource_active(&other.status)
+            && (task.feature_id.is_some() && task.feature_id == other.feature_id
+                || task.worktree_path.is_some() && task.worktree_path == other.worktree_path)) {
+            return Err(Resp::err("TASK_RESOURCE_CONFLICT: another active task owns this feature/worktree"));
+        }
     }
     Ok(())
 }
@@ -35,15 +42,28 @@ fn board_claim(server: &Server, actor: String, token: String, id: String, expect
         );
     }
     if let Err(error) = board_unstarted_resources(&state, &task) { return error; }
-    if let Err(error) = board_execution_gate(server, &state, &actor, &id) { return error; }
+    let binding = match board_execution_gate(server, &state, &actor, &id) {
+        Ok(binding) => binding, Err(error) => return error,
+    };
+    let name_session = state.name_occupancies.get(binding.project_scope.as_str())
+        .and_then(|names| names.values().find(|occupancy| occupancy.worker_id == actor))
+        .map(|occupancy| (occupancy.name.clone(), occupancy.session_id.clone()));
     task.owner = actor.clone();
     task.status = "working".into();
     task.updated_ms = now_ms();
     details.revision += 1;
-    if let Err(error) = server.commit_locked_checked(&mut state, &[
+    let mut events = vec![
         Event::TaskUpdated { task },
         Event::BoardDetailsChanged { task_id: id.clone(), details },
-    ]) { return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}")); }
+    ];
+    if let Some((name, session_id)) = name_session {
+        events.push(Event::TaskAssignmentUpdated { assignment: name_state::TaskAssignment {
+            task_id: id.clone(), name, session_id,
+            assignment_revision: state.task_assignment(&id).map_or(1, |assignment| assignment.assignment_revision + 1),
+            reflow: None, updated_ms: now_ms(),
+        } });
+    }
+    if let Err(error) = server.commit_locked_checked(&mut state, &events) { return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}")); }
     board_task_response(server, &state, &id, &actor)
 }
 

@@ -66,6 +66,28 @@ fn register(server: &Server, worker_id: &str) {
     assert!(response.ok, "worker registration failed: {response:?}");
 }
 
+fn subscription_messages<'a>(
+    state: &'a State,
+    subscription_id: &str,
+) -> Vec<&'a crate::server::state::Message> {
+    state
+        .wake_bindings
+        .iter()
+        .filter(|(_, bound)| bound.as_str() == subscription_id)
+        .map(|(message_id, _)| &state.msgs[message_id])
+        .collect()
+}
+
+fn wait_timeout_messages(state: &State) -> Vec<&crate::server::state::Message> {
+    state
+        .msgs
+        .values()
+        .filter(|message| {
+            message.mtype == "notify" && message.subject.as_deref() == Some("wait-timeout:task")
+        })
+        .collect()
+}
+
 fn register_tmux(server: &Server, worker_id: &str, endpoint: crate::proto::TmuxEndpoint) {
     let response = crate::server::peer_tests::register_tmux(server, worker_id, endpoint);
     assert!(response.ok, "worker registration failed: {response:?}");

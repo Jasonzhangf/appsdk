@@ -105,8 +105,6 @@ impl AnchorObservation {
     fn has_anchor(&self) -> bool {
         self.session_id.is_some()
             || self.thread_id.is_some()
-            || self.tmux.is_some()
-            || self.tmux_anchor.is_some()
             || self.dsh_session_id.is_some()
     }
 }
@@ -159,7 +157,7 @@ pub(crate) fn resolve_for_daemon_with_route_at(
     let observed = AnchorObservation::from_facts(facts);
     if !observed.has_anchor() {
         anyhow::bail!(
-            "COLLAB_IDENTITY_ANCHOR_MISSING: identity requires a Codex session/thread, a tmux pane, a dsh session, or a native App Server endpoint"
+            "COLLAB_IDENTITY_ANCHOR_MISSING: identity requires the current agent session id"
         );
     }
     // Recover only from anchors the caller actually supplied. An unrelated
@@ -168,13 +166,7 @@ pub(crate) fn resolve_for_daemon_with_route_at(
     {
         return Ok(identity);
     }
-    let worker_id = if observed.tmux.is_some() {
-        // A fresh project/session has no persisted identity yet. Pane names
-        // are host-wide addresses and can belong to a former project.
-        format!("codex-session-{}", hex(12))
-    } else {
-        draft_worker_id_at(&observed)?
-    };
+    let worker_id = draft_worker_id_at(&observed)?;
     // Preserve an existing draft's exact token; never remint a stored credential.
     if let Some(existing) = read_identity(&identity_path_at(host_paths, &worker_id)?)? {
         let expected_scope = scope
@@ -191,9 +183,9 @@ pub(crate) fn resolve_for_daemon_with_route_at(
     draft_identity_with_id(scope, &worker_id)
 }
 
-/// Deterministic id for a genuine no-match anchor. Preserves the canonical
-/// `codex-<pane>` and `codex-thread-<hex>` naming so a fresh verified anchor
-/// keeps its stable, filesystem-safe identity.
+/// Deterministic id for a genuine no-match agent anchor. Tmux placement is
+/// deliberately absent: the same pane can host a new agent session, and the
+/// same agent session can move to another pane.
 fn draft_worker_id_at(observed: &AnchorObservation) -> anyhow::Result<String> {
     if let Some(dsh_session) = observed.dsh_session_id.as_deref() {
         let worker_id = format!("dsh-thread-{}", hex_encode(dsh_session));
@@ -207,15 +199,22 @@ fn draft_worker_id_at(observed: &AnchorObservation) -> anyhow::Result<String> {
         })?;
         return Ok(worker_id);
     }
-    let thread_id = observed.thread_id.as_deref().ok_or_else(|| {
-        anyhow::anyhow!(
-            "COLLAB_IDENTITY_ANCHOR_MISSING: a native App Server identity requires a thread id"
+    let (kind, anchor) = if let Some(thread_id) = observed.thread_id.as_deref() {
+        ("thread", thread_id)
+    } else {
+        (
+            "session",
+            observed.session_id.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "COLLAB_IDENTITY_ANCHOR_MISSING: a native App Server identity requires an agent session id"
+                )
+            })?,
         )
-    })?;
-    let worker_id = format!("codex-thread-{}", hex_encode(thread_id));
+    };
+    let worker_id = format!("codex-{kind}-{}", hex_encode(anchor));
     validate_id(&worker_id).map_err(|_| {
         anyhow::anyhow!(
-            "COLLAB_IDENTITY_ANCHOR_INVALID: CODEX_THREAD_ID is too long for a worker id ({MAX_ID_LENGTH} bytes)"
+            "COLLAB_IDENTITY_ANCHOR_INVALID: agent session/thread id is too long for a worker id ({MAX_ID_LENGTH} bytes)"
         )
     })?;
     Ok(worker_id)

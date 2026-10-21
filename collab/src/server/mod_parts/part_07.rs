@@ -12,7 +12,8 @@ fn current_worker_binding<'a>(
             && app_scope.is_none_or(|app| binding.app_scope_id == *app)
             && binding.tmux_endpoint == transport.tmux_endpoint
             && binding.session_id.as_ref().map(|id| id.as_str()) == transport.session_id.as_deref()
-            && binding.native_thread_id.as_ref().map(|id| id.as_str()) == transport.thread_id.as_deref()
+            && binding.native_thread_id.as_ref().map(|id| id.as_str())
+                == transport.thread_id.as_deref()
     });
     let binding = bindings.next()?;
     bindings.next().is_none().then_some(binding)
@@ -21,7 +22,11 @@ fn current_worker_binding<'a>(
 // Pure persisted identity proof. Callers holding the reducer lock must use
 // their current snapshot instead of acquiring server.state again.
 fn tmux_identity_presence(server: &Server, state: &State, worker: &WorkerRec) -> IdentityPresence {
-    let Some(endpoint) = worker.transport.as_ref().and_then(|transport| transport.tmux_endpoint.as_ref()) else {
+    let Some(endpoint) = worker
+        .transport
+        .as_ref()
+        .and_then(|transport| transport.tmux_endpoint.as_ref())
+    else {
         return IdentityPresence::Missing;
     };
     let current = state.workers.get(&worker.id).is_some_and(|current| {
@@ -32,7 +37,11 @@ fn tmux_identity_presence(server: &Server, state: &State, worker: &WorkerRec) ->
     };
     let owned = current_worker_binding(state, &project_scope, None, worker)
         .is_some_and(|binding| binding.tmux_endpoint.as_ref() == Some(endpoint));
-    if current && owned { IdentityPresence::Present } else { IdentityPresence::Missing }
+    if current && owned {
+        IdentityPresence::Present
+    } else {
+        IdentityPresence::Missing
+    }
 }
 
 fn worker_identity_presence(server: &Server, worker: &WorkerRec) -> IdentityPresence {
@@ -98,6 +107,89 @@ fn merge_transport_presence(
     }
 }
 
+/// Read periodic facts only for the current registered agent session.
+fn worker_agent_facts<'a>(
+    server: &Server,
+    state: &'a State,
+    worker: &WorkerRec,
+) -> (
+    Option<&'a name_state::AgentPresenceRecord>,
+    Option<&'a name_state::AgentActivityRecord>,
+) {
+    if state.workers.get(&worker.id) != Some(worker) {
+        return (None, None);
+    }
+    let Some(transport) = worker.transport.as_ref() else {
+        return (None, None);
+    };
+    let session = transport
+        .session_id
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            transport
+                .tmux_endpoint
+                .as_ref()?
+                .codex_session_id
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+        });
+    let Some(session) = session else {
+        return (None, None);
+    };
+    let Ok(scope) = GlobalState::canonical_project_scope(&server.root) else {
+        return (None, None);
+    };
+    (
+        state
+            .agent_presence(scope.as_str(), &worker.id)
+            .filter(|fact| fact.session_id == session),
+        state
+            .agent_activity(scope.as_str(), &worker.id)
+            .filter(|fact| fact.session_id == session),
+    )
+}
+
+fn worker_agent_view(
+    server: &Server,
+    worker: &WorkerRec,
+) -> Option<(IdentityPresence, serde_json::Value)> {
+    let state = server.state.lock().unwrap();
+    worker_agent_view_in_state(server, &state, worker)
+}
+
+fn worker_agent_view_in_state(
+    server: &Server,
+    state: &State,
+    worker: &WorkerRec,
+) -> Option<(IdentityPresence, serde_json::Value)> {
+    let (presence, activity) = worker_agent_facts(server, state, worker);
+    if presence.is_none() && activity.is_none() {
+        return None;
+    }
+    let observed_presence = match presence.map(|fact| fact.presence) {
+        Some(name_state::AgentPresence::Online) => IdentityPresence::Present,
+        Some(name_state::AgentPresence::Offline) => IdentityPresence::Missing,
+        _ => IdentityPresence::Unknown,
+    };
+    Some((
+        observed_presence,
+        serde_json::json!({
+            "agent_presence": presence.map(|fact| fact.presence),
+            "activity": activity.map(|fact| fact.activity),
+            "background": activity.map(|fact| fact.background),
+            "presence_observation": presence,
+            "activity_observation": activity,
+            "thread_state": match activity.map(|fact| fact.activity) {
+                Some(name_state::AgentActivity::Busy) => "working",
+                Some(name_state::AgentActivity::Idle) => "idle",
+                Some(name_state::AgentActivity::WaitingUser) => "waiting_user",
+                _ => "unknown",
+            },
+        }),
+    ))
+}
+
 fn worker_presence_with_view(
     server: &Server,
     worker: &WorkerRec,
@@ -108,9 +200,21 @@ fn worker_presence_with_view(
             serde_json::Value::Null,
         );
     }
+    if let Some(observation) = worker_agent_view(server, worker) {
+        return observation;
+    }
+    worker_transport_presence_with_view(server, worker)
+}
+
+fn worker_transport_presence_with_view(
+    server: &Server,
+    worker: &WorkerRec,
+) -> (IdentityPresence, serde_json::Value) {
     let identity_presence = worker_identity_presence(server, worker);
     let (status_presence, agent_view, _) = transport_agent_view(server, worker);
-    if selected_transport_for_worker(worker).is_some_and(|transport| transport.kind == TransportKind::Tmux) {
+    if selected_transport_for_worker(worker)
+        .is_some_and(|transport| transport.kind == TransportKind::Tmux)
+    {
         // Capture/view failure is activity telemetry. The persisted pane
         // binding remains the identity and address decision.
         return (identity_presence, agent_view);
@@ -132,16 +236,26 @@ fn worker_presence_with_view(
     (presence, agent_view)
 }
 
-fn worker_presence_in_state(server: &Server, state: &State, worker: &WorkerRec) -> IdentityPresence {
-    if selected_transport_for_worker(worker).is_some_and(|transport| transport.kind == TransportKind::Tmux) {
+fn worker_presence_in_state(
+    server: &Server,
+    state: &State,
+    worker: &WorkerRec,
+) -> IdentityPresence {
+    if selected_transport_for_worker(worker)
+        .is_some_and(|transport| transport.kind == TransportKind::Tmux)
+    {
         tmux_identity_presence(server, state, worker)
     } else {
-        worker_presence(server, worker)
+        worker_agent_view_in_state(server, state, worker)
+            .unwrap_or_else(|| worker_transport_presence_with_view(server, worker))
+            .0
     }
 }
 
 pub(crate) fn worker_presence(server: &Server, worker: &WorkerRec) -> IdentityPresence {
-    if selected_transport_for_worker(worker).is_some_and(|transport| transport.kind == TransportKind::Tmux) {
+    if selected_transport_for_worker(worker)
+        .is_some_and(|transport| transport.kind == TransportKind::Tmux)
+    {
         return worker_identity_presence(server, worker);
     }
     worker_presence_with_view(server, worker).0
@@ -160,19 +274,41 @@ pub(crate) struct CloseEndpointTarget {
 pub(crate) fn close_endpoint_target(state: &State, worker_id: &str) -> CloseEndpointTarget {
     CloseEndpointTarget {
         worker: state.workers.get(worker_id).cloned(),
-        bindings: state.global.projects.values().flat_map(|project| {
-            project.runtime_bindings.values().filter(|binding| binding.agent_id.as_str() == worker_id).cloned()
-        }).collect(),
-        routes: state.global.current_thread_routes.values()
-            .filter(|binding| binding.agent_id.as_str() == worker_id).cloned().collect(),
-        legacy_routes: state.global.legacy_thread_routes.values()
-            .filter(|binding| binding.agent_id.as_str() == worker_id).cloned().collect(),
+        bindings: state
+            .global
+            .projects
+            .values()
+            .flat_map(|project| {
+                project
+                    .runtime_bindings
+                    .values()
+                    .filter(|binding| binding.agent_id.as_str() == worker_id)
+                    .cloned()
+            })
+            .collect(),
+        routes: state
+            .global
+            .current_thread_routes
+            .values()
+            .filter(|binding| binding.agent_id.as_str() == worker_id)
+            .cloned()
+            .collect(),
+        legacy_routes: state
+            .global
+            .legacy_thread_routes
+            .values()
+            .filter(|binding| binding.agent_id.as_str() == worker_id)
+            .cloned()
+            .collect(),
     }
 }
 
 /// Observe the selected address outside the reducer lock. Tmux identity is
 /// durable; only the existing probe's definitive Missing grants an exemption.
-pub(crate) fn close_endpoint_presence(server: &Server, target: &CloseEndpointTarget) -> IdentityPresence {
+pub(crate) fn close_endpoint_presence(
+    server: &Server,
+    target: &CloseEndpointTarget,
+) -> IdentityPresence {
     let Some(worker) = target.worker.as_ref() else {
         return IdentityPresence::Missing;
     };
@@ -185,7 +321,9 @@ pub(crate) fn close_endpoint_presence(server: &Server, target: &CloseEndpointTar
     let Some(endpoint) = transport.tmux_endpoint.as_ref() else {
         return IdentityPresence::Unknown;
     };
-    let mut bindings = target.bindings.iter()
+    let mut bindings = target
+        .bindings
+        .iter()
         .filter(|binding| binding.tmux_endpoint.as_ref() == Some(endpoint));
     let Some(binding) = bindings.next() else {
         return IdentityPresence::Unknown;
@@ -207,32 +345,58 @@ mod close_endpoint_fence_tests {
     #[test]
     fn owner_fence_allows_unrelated_writes_but_rejects_token_transport_and_generation_changes() {
         let mut state = State::default();
-        state.workers.insert("peer".into(), WorkerRec {
-            id: "peer".into(), token: "token".into(), cwd: "/project".into(),
-            registered_ms: 1, transport: None,
-        });
+        state.workers.insert(
+            "peer".into(),
+            WorkerRec {
+                id: "peer".into(),
+                token: "token".into(),
+                cwd: "/project".into(),
+                registered_ms: 1,
+                transport: None,
+            },
+        );
         let binding = RuntimeBinding::new(
-            ProjectScopeId::new("/project").unwrap(), AppServerId::new("app").unwrap(),
-            AgentId::new("peer").unwrap(), RuntimeId::new("runtime").unwrap(),
-            BindingId::new("binding-peer").unwrap(), 1, None,
-        ).unwrap();
-        state.global.current_thread_routes.insert(("session".into(), "thread".into()), binding);
+            ProjectScopeId::new("/project").unwrap(),
+            AppServerId::new("app").unwrap(),
+            AgentId::new("peer").unwrap(),
+            RuntimeId::new("runtime").unwrap(),
+            BindingId::new("binding-peer").unwrap(),
+            1,
+            None,
+        )
+        .unwrap();
+        state
+            .global
+            .current_thread_routes
+            .insert(("session".into(), "thread".into()), binding);
         let observed = close_endpoint_target(&state, "peer");
         state.global.revision += 1;
-        state.keepalives.insert("other".into(), keepalive::Record::default());
+        state
+            .keepalives
+            .insert("other".into(), keepalive::Record::default());
         assert!(close_endpoint_target(&state, "peer") == observed);
         state.workers.get_mut("peer").unwrap().token = "replacement".into();
         assert!(close_endpoint_target(&state, "peer") != observed);
         state.workers.get_mut("peer").unwrap().token = "token".into();
         state.workers.get_mut("peer").unwrap().transport = Some(SelectedTransport {
-            kind: TransportKind::AppServer, endpoint: Some("unix:///new".into()),
-            namespace: Some("codex_app".into()), session_id: Some("session".into()),
-            thread_id: Some("thread".into()), tmux_endpoint: None,
-            capabilities: vec![], self_check: "bound".into(),
+            kind: TransportKind::AppServer,
+            endpoint: Some("unix:///new".into()),
+            namespace: Some("codex_app".into()),
+            session_id: Some("session".into()),
+            thread_id: Some("thread".into()),
+            tmux_endpoint: None,
+            capabilities: vec![],
+            self_check: "bound".into(),
         });
         assert!(close_endpoint_target(&state, "peer") != observed);
         state.workers.get_mut("peer").unwrap().transport = None;
-        state.global.current_thread_routes.values_mut().next().unwrap().endpoint_generation += 1;
+        state
+            .global
+            .current_thread_routes
+            .values_mut()
+            .next()
+            .unwrap()
+            .endpoint_generation += 1;
         assert!(close_endpoint_target(&state, "peer") != observed);
     }
 }
@@ -251,7 +415,8 @@ pub(crate) fn worker_identity_and_endpoint(
     };
     match transport.kind {
         TransportKind::Tmux => {
-            let identity_valid = worker_identity_presence(server, worker) == IdentityPresence::Present;
+            let identity_valid =
+                worker_identity_presence(server, worker) == IdentityPresence::Present;
             let endpoint_live = match transport
                 .tmux_endpoint
                 .as_ref()
@@ -485,7 +650,10 @@ pub(crate) fn registered_available_peer_for_admission(
             && !is_managed_subagent(&state, &worker.id)
             && !board_peer_has_execution_reservation(&state, &worker.id, None)
         {
-            return Some((worker.id, "identity-valid registered peer has no active task".into()));
+            return Some((
+                worker.id,
+                "identity-valid registered peer has no active task".into(),
+            ));
         }
     }
     None
@@ -508,9 +676,7 @@ pub(crate) fn idle_managed_subagent_for_admission(
                     .cloned()
                     .map(|worker| (record.clone(), worker))
             })
-            .filter(|(_, worker)| {
-                !board_peer_has_execution_reservation(&state, &worker.id, None)
-            })
+            .filter(|(_, worker)| !board_peer_has_execution_reservation(&state, &worker.id, None))
             .collect::<Vec<_>>();
         candidates.sort_by(|left, right| left.0.id.cmp(&right.0.id));
         candidates
@@ -570,7 +736,12 @@ pub(crate) fn live_managed_subagent_count(server: &Server, parent: &str) -> usiz
         .values()
         .filter(|record| record.parent == parent && record.status != "closed")
         .filter_map(|record| state.workers.get(&record.peer))
-        .filter(|worker| matches!(worker_presence_in_state(server, &state, worker), IdentityPresence::Present))
+        .filter(|worker| {
+            matches!(
+                worker_presence_in_state(server, &state, worker),
+                IdentityPresence::Present
+            )
+        })
         .count()
 }
 
@@ -719,9 +890,7 @@ fn scheduler_dispatch_recover_pending(server: &Server, request_id: &str) -> Opti
                     updated_ms: now_ms(),
                 }],
             ) {
-                return Some(Resp::err(format!(
-                    "SCHEDULER_DURABILITY_FAILED: {error}"
-                )));
+                return Some(Resp::err(format!("SCHEDULER_DURABILITY_FAILED: {error}")));
             }
         }
         state
@@ -757,9 +926,7 @@ fn scheduler_dispatch_recover_pending(server: &Server, request_id: &str) -> Opti
                     updated_ms: now_ms(),
                 }],
             ) {
-                return Some(Resp::err(format!(
-                    "SCHEDULER_DURABILITY_FAILED: {error}"
-                )));
+                return Some(Resp::err(format!("SCHEDULER_DURABILITY_FAILED: {error}")));
             }
             let admission = state.scheduler_admissions.get(request_id).cloned()?;
             return Some(Resp::data(json!({
@@ -798,9 +965,7 @@ fn scheduler_dispatch_recover_pending(server: &Server, request_id: &str) -> Opti
                     updated_ms: now_ms(),
                 }],
             ) {
-                return Some(Resp::err(format!(
-                    "SCHEDULER_DURABILITY_FAILED: {error}"
-                )));
+                return Some(Resp::err(format!("SCHEDULER_DURABILITY_FAILED: {error}")));
             }
             let admission = state.scheduler_admissions.get(request_id).cloned()?;
             return Some(Resp::data(json!({
@@ -1349,31 +1514,32 @@ fn handle_master_promote(
     if approval.trim().is_empty() {
         return Resp::err("master promotion requires explicit user approval");
     }
-    // An explicit user approval is the whole authority for this transition, so
-    // the recorded incumbent is replaced and never consulted for liveness. A
-    // tmux pane is an address, not a liveness credential: no probe in this path
-    // can tell whether the recorded master still runs. Keeping that question
-    // here is what strands a project with an authority that can neither act,
-    // nor be recovered, nor be replaced. The candidate is not probed either:
-    // the token already proves it owns this worker id, and a pane probe can only
-    // report that a pane exists, never that the peer behind it is live.
-    let route_scope = match server_route_scope(server, &state) {
-        Ok(Some(route_scope)) => route_scope,
-        Ok(None) => return Resp::err("master promotion requires a registered project route"),
+    drop(state);
+    let operation_id = format!("master-promote-{worker_id}-{}", now_ms());
+    let resolution = match name_resolution::resolve_registered_name_with_authorization(
+        server,
+        &worker_id,
+        &operation_id,
+        "master_promote",
+        Some(name_resolution::NameIntent {
+            requested_name: "Jenny".into(),
+            user_authorized: true,
+            replace_confirmed: false,
+        }),
+        Some(&approval),
+    ) {
+        Ok(resolution) => resolution,
         Err(error) => return Resp::err(error),
     };
-    let grant =
-        match master_grant_for_worker(&state, &route_scope, &worker_id, &worker_id, &approval) {
-            Ok(grant) => grant,
-            Err(error) => return Resp::err(error),
-        };
-    let events = master_authority_transfer_events(&state, &route_scope, grant);
-    if let Err(error) = server.commit_locked(&mut state, &events) {
-        return Resp::err(format!("MASTER_DURABILITY_FAILED: {error}"));
+    if resolution["outcome"] != "committed" {
+        return Resp::err_data("NAME_RECOVERY_REQUIRED: continue through collab context --approve-grant with restore_master and the reported confirmation or pending operation", resolution);
     }
+    let state = server.state.lock().unwrap();
+    let route_scope = server_route_scope(server, &state).ok().flatten();
     Resp::data(json!({
         "master": worker_id,
-        "scope": scope_view(Some(&route_scope)),
+        "scope": scope_view(route_scope.as_ref()),
+        "name_resolution": resolution,
         "mode": "user_approved_self_promotion",
         "role_brief": role_brief(server, &state, &worker_id)
     }))
@@ -1412,10 +1578,37 @@ fn handle_master_clear(
         Err(error) => return Resp::err(error),
     };
     let previous = current_master_worker_id(&state, Some(&route_scope));
-    let events = master_authority_revoke_events(&state, &route_scope);
+    let mut events = master_authority_revoke_events(&state, &route_scope);
     let was_empty = events.is_empty();
-    if !was_empty {
-        if let Err(error) = server.commit_locked(&mut state, &events) {
+    let mut resolution = serde_json::Value::Null;
+    if let Some(holder) = state.name_occupancy(route_scope.project_scope_id.as_str(), "Jenny") {
+        let name = match name_resolution::available_ordinary_name(
+            &state,
+            route_scope.project_scope_id.as_str(),
+            &holder.worker_id,
+        ) {
+            Ok(name) => name,
+            Err(error) => return Resp::err(error),
+        };
+        let occupancy = name_state::NameOccupancy {
+            occupancy_revision: state
+                .name_occupancy(route_scope.project_scope_id.as_str(), &name)
+                .map_or(1, |previous| previous.occupancy_revision + 1),
+            name,
+            worker_id: holder.worker_id.clone(),
+            session_id: holder.session_id.clone(),
+            updated_ms: now_ms(),
+        };
+        events.extend(name_resolution::build_name_resolution_events(
+            &state,
+            route_scope.project_scope_id.as_str(),
+            &occupancy,
+        ));
+        resolution = json!({"outcome":"committed", "name":occupancy.name,
+            "session_id":occupancy.session_id});
+    }
+    if !events.is_empty() {
+        if let Err(error) = server.commit_locked_checked(&mut state, &events) {
             return Resp::err(format!("MASTER_CLEAR_DURABILITY_FAILED: {error}"));
         }
     }
@@ -1425,6 +1618,7 @@ fn handle_master_clear(
         "was_empty": was_empty,
         "scope": scope_view(Some(&route_scope)),
         "mode": "user_approved_clear",
+        "name_resolution": resolution,
     }))
 }
 
@@ -1461,8 +1655,34 @@ fn handle_master_delegate(
         Ok(grant) => grant,
         Err(error) => return Resp::err(error),
     };
-    let events = master_authority_transfer_events(&state, &route_scope, grant);
-    if let Err(error) = server.commit_locked(&mut state, &events) {
+    let session_id = state
+        .global
+        .lookup_project_for_route(&route_scope)
+        .and_then(|project| project.runtime_bindings.get(grant.binding_id.as_str()))
+        .and_then(|binding| binding.session_id.as_ref());
+    let Some(session_id) = session_id else {
+        return Resp::err(
+            "NAME_IDENTITY_REQUIRED: master delegation requires target agent session",
+        );
+    };
+    // The current master hands off its own work. Its typed authority admits
+    // this transfer without manufacturing a user name-recovery approval.
+    let occupancy = name_state::NameOccupancy {
+        name: "Jenny".into(),
+        worker_id: target_id.clone(),
+        session_id: session_id.to_string(),
+        occupancy_revision: state
+            .name_occupancy(route_scope.project_scope_id.as_str(), "Jenny")
+            .map_or(1, |previous| previous.occupancy_revision + 1),
+        updated_ms: now_ms(),
+    };
+    let mut events = master_authority_transfer_events(&state, &route_scope, grant);
+    events.extend(name_resolution::build_name_resolution_events(
+        &state,
+        route_scope.project_scope_id.as_str(),
+        &occupancy,
+    ));
+    if let Err(error) = server.commit_locked_checked(&mut state, &events) {
         drop(state);
         return Resp::err(format!("MASTER_DELEGATE_DURABILITY_FAILED: {error}"));
     }
@@ -1475,6 +1695,11 @@ fn handle_master_delegate(
 }
 
 include!("part_07/worker_close.rs");
+
+#[cfg(test)]
+mod role_name_closure_tests {
+    include!("../role_name_closure_tests.rs");
+}
 
 fn handle_worker_snapshot(
     server: &Server,

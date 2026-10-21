@@ -90,14 +90,11 @@ fn exact_target(
         }
         Some(_) => return Err(PeerLifecycleOutcome::Unknown),
         None => {
-            // A persisted no-session tmux binding can lose its route while its
-            // exact pane endpoint remains. Admit that shape only; a live
-            // AppServer route is still required for every other binding.
-            if binding.session_id.is_some()
-                || binding.native_thread_id.is_some()
-                || binding.tmux_endpoint.is_none()
-                || transport.kind != TransportKind::Tmux
-            {
+            // A current tmux binding proves identity independently of the
+            // delivery index. Session IDs describe the agent, not whether
+            // its endpoint can be probed or retired. Exact fields are checked
+            // below; the close owner separately probes endpoint presence.
+            if binding.tmux_endpoint.is_none() || transport.kind != TransportKind::Tmux {
                 return Err(PeerLifecycleOutcome::Unknown);
             }
         }

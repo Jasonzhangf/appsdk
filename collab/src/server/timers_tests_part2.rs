@@ -374,7 +374,10 @@ use super::*;
         tick_with_idle(&server, &|_| false);
         tick_with_idle(&server, &|_| false);
         let state = server.state.lock().unwrap();
-        assert!(state.msgs.is_empty(), "a fired inactive goal cannot rearm");
+        assert!(
+            subscription_messages(&state, &subscription_id).is_empty(),
+            "a fired inactive goal cannot rearm"
+        );
         assert_eq!(
             state.notification_subscriptions[&subscription_id].status,
             "consumed",
@@ -397,7 +400,7 @@ use super::*;
         }
         tick_with_idle(&replayed, &|_| false);
         let replayed_state = replayed.state.lock().unwrap();
-        assert!(replayed_state.msgs.is_empty());
+        assert!(subscription_messages(&replayed_state, &subscription_id).is_empty());
         assert_eq!(
             replayed_state.notification_subscriptions[&subscription_id]
                 .status_reason
@@ -443,9 +446,10 @@ use super::*;
             .lock()
             .unwrap()
             .wake_bindings
-            .keys()
-            .next()
-            .cloned()
+            .iter()
+            .find_map(|(message_id, bound)| {
+                (bound == &subscription_id).then_some(message_id.clone())
+            })
             .expect("goal deadline message");
         server.commit(&[Event::NotificationConsumed {
             subscription_id: subscription_id.clone(),
@@ -454,7 +458,7 @@ use super::*;
         }]);
         tick_with_idle(&server, &|_| false);
         let state = server.state.lock().unwrap();
-        assert_eq!(state.msgs.len(), 1);
+        assert_eq!(subscription_messages(&state, &subscription_id).len(), 1);
         assert_eq!(
             state.notification_subscriptions[&subscription_id].status,
             "consumed",
@@ -537,7 +541,10 @@ use super::*;
 
         tick_with_idle(&server, &|_| true);
 
-        let delivered = delivered.lock().unwrap();
+        let deliveries = delivered.lock().unwrap();
+        // Stewardship uses explicit notifications. This timer's automatic
+        // delivery is independent of that name-adjudication traffic.
+        let delivered: Vec<_> = deliveries.iter().filter(|(explicit, _)| !explicit).collect();
         assert_eq!(delivered.len(), 1);
         assert!(
             !delivered[0].0,
@@ -573,13 +580,15 @@ use super::*;
             Err("ADAPTER_UNKNOWN: native frame exceeds maximum size".into())
         });
         register_master(&server);
-        periodic_deadline_subscription(&server, "master", "goal:oversized-frame");
+        let subscription_id =
+            periodic_deadline_subscription(&server, "master", "goal:oversized-frame");
 
         tick_with_idle(&server, &|_| true);
 
         let state = server.state.lock().unwrap();
-        assert_eq!(state.msgs.len(), 1);
-        let message_id = state.msgs.keys().next().unwrap();
+        let messages = subscription_messages(&state, &subscription_id);
+        assert_eq!(messages.len(), 1);
+        let message_id = &messages[0].id;
         assert_eq!(state.msgs[message_id].wake_attempt_count, 1);
         assert!(state.notification_delivery_failures[message_id]
             .error
@@ -620,7 +629,7 @@ use super::*;
 
         tick_with_idle(&server, &|_| false);
         let state = server.state.lock().unwrap();
-        assert!(state.msgs.is_empty());
+        assert!(subscription_messages(&state, &subscription_id).is_empty());
         assert_eq!(
             state.notification_subscriptions[&subscription_id].status,
             "suppressed"
@@ -672,7 +681,7 @@ use super::*;
         tick_with_idle(&server, &|_| false);
 
         let state = server.state.lock().unwrap();
-        assert!(state.msgs.is_empty());
+        assert!(subscription_messages(&state, &subscription_id).is_empty());
         assert_eq!(
             state.notification_subscriptions[&subscription_id].status,
             "cancelled"
@@ -681,6 +690,117 @@ use super::*;
             state.notification_subscriptions[&subscription_id].fired_count,
             0
         );
+        drop(state);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn unknown_adjudication_does_not_rearm_cancelled_deadline_or_spend_idle_budget() {
+        use crate::server::name_state::{
+            AgentActivity, AgentActivityRecord, AgentPresence, NameRecoveryProgress,
+        };
+
+        let (server, root) = test_server();
+        register_master(&server);
+        let deadline = periodic_deadline_subscription(&server, "master", "goal:cancelled-unknown");
+        let cancelled = super::super::handle_notification_unsubscribe(
+            &server,
+            "master".into(),
+            "token-master".into(),
+            deadline.clone(),
+        );
+        assert!(cancelled.ok, "{cancelled:?}");
+        let idle = master_idle_subscription(&server, 15 * 60 * 1000);
+        server.commit(&[Event::KeepaliveUpdated {
+            worker_id: "master".into(),
+            record: Record {
+                observed: "working".into(),
+                ..Record::default()
+            },
+        }]);
+
+        tick_with_idle(&server, &|_| false);
+        let adjudication_id = {
+            let state = server.state.lock().unwrap();
+            let recoveries: Vec<_> = state.name_recoveries.values().collect();
+            assert_eq!(recoveries.len(), 1);
+            let recovery = recoveries[0];
+            assert_eq!(recovery.target_name, "Jenny");
+            assert_eq!(
+                recovery.progress,
+                NameRecoveryProgress::AdjudicationRequested
+            );
+            assert_eq!(
+                state
+                    .agent_presence(&recovery.project_scope, "master")
+                    .unwrap()
+                    .presence,
+                AgentPresence::Unknown
+            );
+            let id = format!("name-adjudication-{}", recovery.operation_id);
+            let message = &state.msgs[&id];
+            assert_eq!(message.mtype, "notification");
+            assert_eq!(message.to, "master");
+            assert_eq!(
+                message.state, "pending",
+                "adapter acceptance is not consumption"
+            );
+            assert_eq!(state.wake_bindings[&id], "sub-default-direct-message-master");
+            assert!(subscription_messages(&state, &deadline).is_empty());
+            assert!(subscription_messages(&state, &idle).is_empty());
+            assert_eq!(state.keepalives["master"].idle_episode_notices, 0);
+            id
+        };
+
+        // Keepalive reads current typed activity. A bare KeepaliveUpdated
+        // cannot override the monitor's Unknown activity on the next tick.
+        // Presence adjudication remains pending while activity is now idle.
+        let activity = {
+            let state = server.state.lock().unwrap();
+            let recovery = state.name_recoveries.values().next().unwrap();
+            AgentActivityRecord {
+                project_scope: recovery.project_scope.clone(),
+                worker_id: "master".into(),
+                session_id: recovery.occupancy_ref.session_id.clone(),
+                activity: AgentActivity::Idle,
+                background: false,
+                reason: "controlled current idle observation after unknown".into(),
+                observed_ms: now_ms(),
+            }
+        };
+        let idle_at = activity.observed_ms + 1;
+        server.commit(&[Event::AgentActivityObserved { activity }]);
+        tick_with_idle_at(&server, idle_at, &|_| false);
+        let idle_message = {
+            let state = server.state.lock().unwrap();
+            let messages = subscription_messages(&state, &idle);
+            assert_eq!(
+                messages.len(), 1,
+                "adjudication must leave the idle episode budget available"
+            );
+            assert_eq!(state.keepalives["master"].idle_episode_notices, 1);
+            messages[0].id.clone()
+        };
+        server.commit(&[Event::NotificationConsumed {
+            subscription_id: idle.clone(),
+            message_id: idle_message,
+            consumed_ms: idle_at + 1,
+        }]);
+        tick_with_idle_at(&server, idle_at + 2, &|_| false);
+        tick_with_idle_at(&server, idle_at + 3, &|_| false);
+        let state = server.state.lock().unwrap();
+        assert_eq!(
+            state.msgs.len(), 2,
+            "one adjudication and one idle occurrence only"
+        );
+        assert_eq!(state.msgs[&adjudication_id].state, "pending");
+        assert_eq!(state.name_recoveries.len(), 1);
+        assert_eq!(state.keepalives["master"].idle_episode_notices, 1);
+        assert_eq!(subscription_messages(&state, &idle).len(), 1);
+        assert_eq!(state.notification_subscriptions[&idle].fired_count, 1);
+        assert!(subscription_messages(&state, &deadline).is_empty());
+        assert_eq!(state.notification_subscriptions[&deadline].status, "cancelled");
+        assert_eq!(state.notification_subscriptions[&deadline].fired_count, 0);
         drop(state);
         std::fs::remove_dir_all(root).ok();
     }
@@ -827,11 +947,9 @@ use super::*;
             .filter(|bound| *bound == &subscription_id)
             .count();
         assert_eq!(master_wakes, 1, "60-minute master wake must be non-vacuous");
-        assert!(state
-            .wake_bindings
-            .values()
-            .all(|bound| bound == &subscription_id));
-        assert!(state.msgs.values().all(|message| message.to == "master"));
+        assert!(subscription_messages(&state, &subscription_id)
+            .iter()
+            .all(|message| message.to == "master"));
         drop(state);
         std::fs::remove_dir_all(root).ok();
     }
@@ -850,7 +968,7 @@ use super::*;
             .wake_bindings
             .values()
             .all(|bound| bound != &subscription_id));
-        assert!(state.msgs.is_empty());
+        assert!(subscription_messages(&state, &subscription_id).is_empty());
         drop(state);
         std::fs::remove_dir_all(root).ok();
     }
@@ -876,7 +994,7 @@ use super::*;
             .wake_bindings
             .values()
             .all(|bound| bound != &subscription_id));
-        assert!(state.msgs.is_empty());
+        assert!(subscription_messages(&state, &subscription_id).is_empty());
         drop(state);
         std::fs::remove_dir_all(root).ok();
     }
@@ -967,7 +1085,7 @@ use super::*;
 
         let state = server.state.lock().unwrap();
         assert!(
-            state.msgs.is_empty(),
+            subscription_messages(&state, &subscription_id).is_empty(),
             "three keepalive notices stop timer wakes"
         );
         assert_eq!(
@@ -996,7 +1114,7 @@ use super::*;
         tick_with_idle(&server, &|_| false);
 
         let state = server.state.lock().unwrap();
-        assert_eq!(state.msgs.len(), 1);
+        assert_eq!(subscription_messages(&state, &subscription_id).len(), 1);
         assert_eq!(state.keepalives["master"].idle_episode_notices, 1);
         assert_eq!(
             state
@@ -1070,7 +1188,7 @@ use super::*;
             1,
             "Working -> Waiting must not reopen the consumed timer occurrence"
         );
-        assert_eq!(state.msgs.len(), 1);
+        assert_eq!(subscription_messages(&state, &subscription_id).len(), 1);
         assert_eq!(state.keepalives["master"].idle_episode_notices, 1);
         assert!(!state.keepalives["master"].idle_episode_stopped);
         assert_eq!(
@@ -1116,7 +1234,7 @@ use super::*;
         {
             let state = server.state.lock().unwrap();
             assert_eq!(state.keepalives["master"].idle_episode_notices, 1);
-            assert_eq!(state.msgs.len(), 1);
+            assert_eq!(subscription_messages(&state, &timer_subscription_id).len(), 1);
         }
         server.commit(&[
             Event::Delivered {
@@ -1167,7 +1285,7 @@ use super::*;
         tick_with_idle(&server, &|_| false);
 
         let state = server.state.lock().unwrap();
-        assert!(state.msgs.is_empty());
+        assert!(subscription_messages(&state, &subscription_id).is_empty());
         assert_eq!(
             state.notification_subscriptions[&subscription_id].fired_count,
             0
@@ -1284,8 +1402,10 @@ use super::*;
                     "WAIT_TIMEOUT waiting_for=holder responsible_actor=holder-owner reason=resource_conflict escalation=resource_owner_and_waiter_recheck"
                 )
             );
-            assert_eq!(state.msgs.len(), 1);
-            let (message_id, message) = state.msgs.iter().next().unwrap();
+            let messages = wait_timeout_messages(&state);
+            assert_eq!(messages.len(), 1);
+            let message = messages[0];
+            let message_id = &message.id;
             assert_eq!(message.to, "master");
             assert_eq!(message.subject.as_deref(), Some("wait-timeout:task"));
             assert!(message.body.contains("reason=resource_conflict"));
@@ -1300,14 +1420,14 @@ use super::*;
         // A repeated tick observes the blocked task and cannot create a second
         // scheduling reason or a second wake attempt during the retry window.
         tick_with_idle(&server, &|_| false);
-        assert_eq!(server.state.lock().unwrap().msgs.len(), 1);
+        assert_eq!(wait_timeout_messages(&server.state.lock().unwrap()).len(), 1);
         let state = server.state.lock().unwrap();
         assert_eq!(state.msgs[&message_id].to, message.to);
         assert_eq!(state.msgs[&message_id].subject, message.subject);
         assert_eq!(state.msgs[&message_id].body, message.body);
         assert_eq!(state.msgs[&message_id].state, "pending");
         assert_eq!(state.msgs[&message_id].wake_attempt_count, 1);
-        assert_eq!(state.msgs.len(), 1);
+        assert_eq!(wait_timeout_messages(&state).len(), 1);
         drop(state);
 
         // Snapshot replay retains the blocked task and its single mailbox
@@ -1320,7 +1440,7 @@ use super::*;
         tick_with_idle(&replayed, &|_| false);
         let replayed_state = replayed.state.lock().unwrap();
         assert_eq!(replayed_state.tasks["task"].status, "blocked");
-        assert_eq!(replayed_state.msgs.len(), 1);
+        assert_eq!(wait_timeout_messages(&replayed_state).len(), 1);
         assert_eq!(replayed_state.msgs[&message_id].to, "master");
         drop(replayed_state);
         std::fs::remove_dir_all(replay_root).ok();

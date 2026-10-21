@@ -33,6 +33,10 @@ pub const SKILL_FILES: &[(&str, &str)] = &[
         "references/state-paths.md",
         include_str!("../skills/collab/references/state-paths.md"),
     ),
+    (
+        "references/stable-name-recovery.md",
+        include_str!("../skills/collab/references/stable-name-recovery.md"),
+    ),
 ];
 
 /// Files embedded by retired skill bundles. `--force` removes only this

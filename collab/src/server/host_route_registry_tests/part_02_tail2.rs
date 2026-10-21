@@ -754,10 +754,10 @@ async fn a_rejected_registration_leaves_the_foreign_pane_claimant_bound() {
 }
 
 /// A pane anchor is a resource, not a scope lock: a later registration in
-/// another scope takes the pane, retires the foreign route and owns the
-/// anchor. No extra flag is needed, because the later registrant wins.
+/// the current CLI scope moves delivery to the reported agent session.
+/// No pane or tmux session supplies the incoming work identity.
 #[tokio::test]
-async fn a_later_registration_takes_a_foreign_scope_anchor() {
+async fn context_agent_session_takes_a_foreign_delivery_anchor() {
     let (server, root, _) = test_server();
     let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
     let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
@@ -765,7 +765,7 @@ async fn a_later_registration_takes_a_foreign_scope_anchor() {
     let candidates = test_candidates("thread-cross-scope-retire").unwrap();
     let anchor = candidates.tmux.as_ref().unwrap().endpoint.clone();
     let (_, first) = register_host_fixture(&manager,
-        Some(context_with_app(&root, "appserver-cli")),
+        Some(context_with_app(&root, "tui-other")),
         Req::register(
             "cross-scope-worker".into(),
             "token-cross-scope-worker".into(),
@@ -775,8 +775,9 @@ async fn a_later_registration_takes_a_foreign_scope_anchor() {
     );
     assert!(first.ok, "{first:?}");
 
-    // Same pane, no native thread: only the pane anchor can match.
-    let pane_only = || {
+    // Delivery may move across app scopes, but admission still needs the
+    // incoming agent session. The tmux placement cannot supply that identity.
+    let reported_session = || {
         let mut candidates = test_candidates("thread-cross-scope-probe").unwrap();
         let endpoint = &mut candidates.tmux.as_mut().unwrap().endpoint;
         endpoint.socket_path = anchor.socket_path.clone();
@@ -784,19 +785,32 @@ async fn a_later_registration_takes_a_foreign_scope_anchor() {
         endpoint.tmux_session_id = anchor.tmux_session_id.clone();
         endpoint.pane_id = anchor.pane_id.clone();
         endpoint.pane_pid = anchor.pane_pid;
-        endpoint.codex_session_id = None;
-        endpoint.codex_thread_id = None;
         candidates
     };
 
+    let mut missing_session = reported_session();
+    missing_session.tmux.as_mut().unwrap().endpoint.codex_session_id = None;
+    let (_, rejected) = register_host_fixture(&manager,
+        Some(context_with_app(&root, "appserver-cli")),
+        Req::IdentityContext {
+            facts: crate::proto::IdentityFacts { tmux: missing_session.tmux, ..Default::default() },
+            identity_context: None,
+        },
+    );
+    assert!(rejected.data["snapshot"]["requires_identity_update"]["required_fields"]
+        .as_array().unwrap().contains(&json!("session_id")), "pane placement cannot replace agent session: {rejected:?}");
+
     let (_, taken) = register_host_fixture(&manager,
-        Some(context_with_app(&root, "tui-other")),
-        Req::register(
-            "cross-scope-worker".into(),
-            "token-cross-scope-worker".into(),
-            root.display().to_string(),
-            Some(pane_only()),
-        ),
+        Some(context_with_app(&root, "appserver-cli")),
+        Req::IdentityContext {
+            facts: crate::proto::IdentityFacts {
+                session_id: Some("session-thread-cross-scope-probe".into()),
+                thread_id: Some("thread-cross-scope-probe".into()),
+                tmux: reported_session().tmux,
+                ..Default::default()
+            },
+            identity_context: None,
+        },
     );
     assert!(taken.ok, "{taken:?}");
 
@@ -821,11 +835,11 @@ async fn a_later_registration_takes_a_foreign_scope_anchor() {
     };
     let owners = pane_owners(&server);
     assert!(
-        !owners.iter().any(|scope| scope == "appserver-cli"),
+        !owners.iter().any(|scope| scope == "tui-other"),
         "the foreign route must be retired: {owners:?}"
     );
     assert!(
-        owners.iter().any(|scope| scope == "tui-other"),
+        owners.iter().any(|scope| scope == "appserver-cli"),
         "the current scope must own the anchor: {owners:?}"
     );
 

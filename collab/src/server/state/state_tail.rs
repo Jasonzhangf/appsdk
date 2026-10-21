@@ -18,7 +18,19 @@ pub struct State {
     pub peer_lifecycle_operations: HashMap<String, PeerLifecycleOperationRecord>,
     pub workers: HashMap<String, WorkerRec>,
     pub worker_names: HashMap<String, String>,
+    pub name_occupancies:
+        HashMap<String, HashMap<String, crate::server::name_state::NameOccupancy>>,
+    /// Per-project/name durable high watermark, including released names.
+    pub name_occupancy_revisions: HashMap<String, HashMap<String, u64>>,
+    pub task_assignments: HashMap<String, crate::server::name_state::TaskAssignment>,
+    pub name_recoveries: HashMap<String, crate::server::name_state::NameRecoveryPending>,
+    pub agent_presence:
+        HashMap<String, HashMap<String, crate::server::name_state::AgentPresenceRecord>>,
+    pub agent_activity:
+        HashMap<String, HashMap<String, crate::server::name_state::AgentActivityRecord>>,
     pub msgs: HashMap<String, Message>,
+    pub mailbox_name_addresses: HashMap<String, crate::server::name_mailbox::MailboxNameAddress>,
+    pub mailbox_handoffs: Vec<crate::server::name_mailbox::MailboxHandoff>,
     pub notification_delivery_failures: HashMap<String, NotificationDeliveryFailure>,
     /// Last native attempt accepted for a durable message, if any.
     pub notification_delivery_accepted: HashMap<String, i64>,
@@ -98,3 +110,7 @@ mod state_impl;
 #[cfg(test)]
 #[path = "../state_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../name_state_tests.rs"]
+mod name_state_tests;

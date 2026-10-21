@@ -147,14 +147,21 @@ fn context_gives_an_idle_master_one_canonical_scheduling_action() {
     let next_action = context.data["next_actions"][0].as_str().unwrap();
     let next_action_lower = next_action.to_ascii_lowercase();
     assert!(
-        next_action_lower.contains("every eligible peer is busy"),
+        next_action_lower.contains("long-horizon goals"),
         "{next_action}"
     );
     assert!(
-        next_action_lower.contains("protected hold"),
+        next_action_lower.contains("regardless of whether other peers are busy"),
         "{next_action}"
     );
-    assert!(next_action_lower.contains("re-arm"), "{next_action}");
+    assert!(
+        next_action_lower.contains("protected_holds"),
+        "{next_action}"
+    );
+    assert!(
+        next_action_lower.contains("re-arm"),
+        "{next_action}"
+    );
     let operations = context.data["operations"].as_array().expect("operations");
     assert!(
         !operations.is_empty(),
@@ -166,8 +173,8 @@ fn context_gives_an_idle_master_one_canonical_scheduling_action() {
             .any(|operation| operation["kind"] == "next_action"
                 && operation["action"].as_str().is_some_and(|action| {
                     let action = action.to_ascii_lowercase();
-                    action.contains("every eligible peer is busy")
-                        && action.contains("protected_hold")
+                    action.contains("regardless of whether other peers are busy")
+                        && action.contains("protected_holds")
                         && action.contains("re-arm")
                 }))
     );
@@ -181,7 +188,7 @@ fn context_gives_an_idle_master_one_canonical_scheduling_action() {
         .iter()
         .any(|line| {
             line.as_str().is_some_and(|line| {
-                line.contains("Every standing patrol") && line.contains("PROTECTED_HOLD")
+                line.contains("Converge owned worktrees") && line.contains("PROTECTED_HOLD")
             })
         }));
     assert_eq!(
@@ -218,7 +225,8 @@ fn master_context_routes_work_by_task_kind() {
         .join(" ")
         .to_lowercase();
     assert!(responsibilities.contains("long-horizon goals"));
-    assert!(responsibilities.contains("bounded one-shot"));
+    assert!(responsibilities.contains("bounded subagent tasks"));
+    assert!(responsibilities.contains("regardless of whether other peers are busy"));
     assert!(responsibilities.contains("codex exec --profile gcm"));
     assert!(!responsibilities.contains("saturate every live present peer first"));
     assert!(!context
@@ -325,7 +333,7 @@ fn board_invitation_uses_authoritative_binding_when_identity_projection_is_stale
         accepted_context.data["role_brief"]["next_action"]
             .as_str()
             .unwrap_or_default()
-            .contains("accepted goal's orchestrator"),
+            .contains("accepted goal's long-horizon orchestrator"),
         "{}",
         accepted_context.data["role_brief"]
     );
@@ -594,7 +602,10 @@ fn active_lifecycle_manifest_binds_every_registered_call_edge_to_source() {
         }
     }
     for path in manifest["canonical_docs"].as_array().unwrap() {
-        assert!(project_root.join(path.as_str().unwrap()).is_file());
+        assert!(
+            project_root.join(path.as_str().unwrap()).is_file(),
+            "missing canonical doc: {path}"
+        );
     }
 }
 
@@ -1288,13 +1299,12 @@ fn worker_freed_transitions_notify_live_master() {
     assert!(alert.body.contains("newly_idle=subagent:managed-worker"));
     assert!(alert.body.contains("live_idle=subagent:managed-worker"));
     assert!(alert.body.contains("long-horizon goals"));
-    assert!(
-        alert
-            .body
-            .contains("bounded one-shot execution or observation")
-    );
+    assert!(alert.body.contains("one-shot execution or observation"));
     assert!(alert.body.contains("codex exec --profile gcm"));
-    assert!(alert.body.contains("without inheriting master authority"));
+    assert!(alert.body.contains("authorized peers"));
+    assert!(alert
+        .body
+        .contains("regardless of whether other peers are busy"));
     assert!(!alert.body.contains("saturate live present peers first"));
     drop(state);
     std::fs::remove_dir_all(root).unwrap();

@@ -6,6 +6,7 @@
   "nodes": [
     {
       "id": "authorize_reset",
+      "description": "CLI 只读取当前项目已注册身份，不先执行 context 注册、名字恢复或任务同步。daemon 再验证当前 master；拒绝时不产生本次请求的名字、任务、授权或 reset 写入。",
       "operator": "appsdk.collab_control_plane.authorize_reset",
       "operator_version": "1",
       "inputs": ["reset_request"],

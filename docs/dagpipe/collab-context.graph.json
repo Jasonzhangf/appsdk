@@ -1,61 +1,94 @@
 {
   "id": "appsdk-collab-context",
   "version": "0.13.0",
-  "description": "一次 context 请求到一次权威结果的 SESE 流程。当前 cwd 及既有 worktree 映射确定项目；require_daemon 只观察既有服务，不启动、重启 daemon 或 tmux。Collab 持久化真源统一为 host state root（生产默认 ~/.collab），项目 .agent-collab 仅可作发现标记；迁移由 daemon 的既有 route、materialization 和 writer owner 完成，不保留双写。identity_gate 先由 daemon 观察调用进程所属的当前 session/pane，再按项目与 tmux session ID 选择 peer；pane 是投递位置，socket 路径、server PID、旧 native thread 及历史退役 route 均不得选择或否决身份。CLI 不从 TMUX 环境变量注入 socket 路径；通信 owner 从自己的端点记录与当前 tmux 观察解析物理地址。缺基础观察能力时明确返回能力缺口，不要求 agent 猜地址。持久身份复用 worker/token，当前 placement 经 binding、transport、route 和 credential owner 一次对齐并退休旧投递位置；保留任务、消息和订阅。binding_convergence 必须让 context 完成、worker status 与 board route admission 读取同一项目/app/agent binding 和 endpoint generation；仅 context 可执行恢复，status 与 board 只读并返回带 typed code、已知 generation 和 `collab context` 修复指令的诊断。endpoint 活跃度与持久身份有效性分离。当前授权覆盖历史 pane 绑定，不保护旧身份。无 master 默认 peer；另有 master 时 peer 仍可通信，授权恢复 master 时直接替换，当前 master 不重复批准。非 tmux 保留既有 native 通道，不增加跨 transport fallback。operation journal 保持既有幂等与取消安全边界；query 只读。真实存储、迁移、能力或 I/O 失败显式隔离到所属项目；不增加身份注册表、审批层、socket 身份或维护入口。",
+  "description": "一次 context 请求到一次结果的 SESE 流程。当前 cwd 与既有 worktree 映射决定 canonical project；client::require_server 只观察既有 user-managed daemon，不维护 daemon/tmux。host state root 是持久真源，项目 .agent-collab 仅作发现标记。名字是项目内工作归属，agent sessionID 是当前执行载体；tmux session、pane、socket、thread 和 route 只定位通信与观测，CLI 不从 TMUX 注入 socket。当前名字工作者 S1→S2 时同步全部未关闭 board assignment；closed 历史不回写。名字交接同步未消费消息收件与唤醒归属，保留已消费历史。在线他人占名须本次明确接管及二次确认；unknown 保存原操作、目标名字和占用引用，交 Jenny 裁决并返回 pending，下一 invocation 续接，无回边。Jenny 自身 unknown 且无法响应时，本次明确恢复 Jenny 并确认接管的用户授权优先，直接接管名字和 master。其余 snapshot 失败、Jenny 不可用或仍 unknown 保留原绑定。不处理旧执行者。context 在现有名字提交链中收敛同一项目/app/agent binding 和 endpoint generation；worker status 与 board admission 只读，缺失、歧义、陈旧或 principal 不符返回 typed 诊断与 context 修复指令。endpoint 活跃度与持久身份有效性分离，query 只读，保留 journal 幂等与取消边界，不增加跨 transport fallback。该图不声明安装版或 live runtime 已验收。",
   "inputs": [{"id": "context_request", "schema": "Object"}],
   "nodes": [
     {
-      "id": "resolve_context_root", "operator": "appsdk.collab_context.resolve_root", "operator_version": "1",
-      "inputs": ["context_request"], "output": {"id": "resolved_scope", "schema": "Object"},
+      "id": "解析项目与控制范围",
+      "operator": "appsdk.collab_context.resolve_root",
+      "operator_version": "1",
+      "description": "从实际调用 cwd、既有项目范围和 baseline 读取 canonical project；pane、socket 路径和 server PID 不决定名字或项目。",
+      "inputs": ["context_request"],
+      "output": {"id": "resolved_scope", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
-      "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
     },
     {
-      "id": "require_daemon", "operator": "appsdk.collab_context.require_daemon", "operator_version": "1",
-      "inputs": ["resolved_scope"], "output": {"id": "daemon_ready", "schema": "Object"},
+      "id": "读取现有服务",
+      "operator": "appsdk.collab_context.require_daemon",
+      "operator_version": "1",
+      "description": "只读取 user-managed daemon 是否可达。不可达返回原错并终止本次 context；CLI 不启动、停止、重启或替换服务。",
+      "inputs": ["resolved_scope"],
+      "output": {"id": "daemon_available", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
-      "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
     },
     {
-      "id": "ensure_baseline", "operator": "appsdk.collab_context.ensure_baseline", "operator_version": "1",
-      "inputs": ["daemon_ready"], "output": {"id": "baseline_ready", "schema": "Object"},
+      "id": "读取持久名字代理会话与占用",
+      "operator": "appsdk.collab_context.read_name_ownership",
+      "operator_version": "1",
+      "description": "读取 canonical project/app scope 内的名字占用、当前 agent sessionID、typed agent binding/route 与 endpoint generation、presence、activity、background 事实和持久 context operation。不从其他 scope 或历史 pane 选择身份。名字来自固定池，Jenny 不占普通名字名额；presence 与 activity 分开，waiting_user 不按 idle，background 不明时 activity unknown。",
+      "inputs": ["daemon_available"],
+      "output": {"id": "durable_name_scope", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
-      "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
     },
     {
-      "id": "identity_gate", "operator": "appsdk.collab_context.identity_gate", "operator_version": "2",
-      "description": "daemon 观察调用进程所属的当前 tmux session/pane，以 cwd 项目与 session ID 选择 peer。socket/server PID 只定位投递位置，历史 pane/native 绑定不享有身份保护。恢复复用 worker/token，同时恢复当前 binding、transport、route 和收信订阅；pane 移动同步投递事实并使旧 route 失效。完成验收包含 peer 与 master 的真实发送、接收和回复，不以角色字段代替通信，不要求用户另做恢复。授权恢复退役当前 pane 旧绑定、route 和 grant，包括旧项目；保留普通任务与消息。无 master 时直接为 peer；另有 master 时 peer 仍可通信，并提供可选替换。approve_grant 只需 action restore_master 与 authorization，直接替换服务端当前 incumbent；已是 master 不重复询问。首次建立复用 Register owner。真实 I/O 错误与 partial 显式返回，query 纯读。",
-      "inputs": ["baseline_ready"], "output": {"id": "identity_operation_result", "schema": "Object"},
+      "id": "判定续接分配占用确认或待决",
+      "operator": "appsdk.collab_context.classify_name_resolution",
+      "operator_version": "1",
+      "description": "同项目同 agent session 直接幂等恢复；同名字当前工作者 S1→S2 进入自动换绑；离线失去保持权后进入正常分配或继承；在线其他工作者默认不替换，仅本次用户明确要求且二次确认后进入替换；unknown 进入持久 pending 并请求当前 Jenny 裁决。历史 session 不是准入门禁。",
+      "inputs": ["durable_name_scope"],
+      "output": {"id": "name_resolution_decision", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
-      "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
     },
     {
-      "id": "binding_convergence", "operator": "appsdk.collab_context.binding_convergence", "operator_version": "1",
-      "description": "Resolve the one project/app/agent runtime binding used by context completion, worker status, and board route admission. Context owns repair and publication reconciliation. Worker status and board admission only read this result. Missing, ambiguous, stale, or principal-mismatched bindings return a typed diagnosis code with known expected/observed generations and an explicit `collab context` repair instruction. Endpoint liveness stays separate from durable identity validity.",
-      "inputs": ["identity_operation_result"], "output": {"id": "authoritative_binding", "schema": "Object"},
+      "id": "提交名字绑定同步未关闭任务或持久待决",
+      "operator": "appsdk.collab_context.commit_name_resolution",
+      "operator_version": "1",
+      "description": "committed 分支由现有 context binding/route/credential owner 在 canonical project/app/agent scope 内收敛并发布同一 binding 与 endpoint generation，更新名字和当前 agent sessionID，换绑全部未关闭 board assignment，并同步该名字未消费消息的收件和唤醒目标；closed、任务状态、证据、资源、revision 历史、merge obligation、消息 ID/正文/原发送者与真实消费回执保持。worker status 与 board admission 只读该结果；缺失、歧义、陈旧或 principal 不符返回 typed code、已知 expected/observed generation 和 collab context 修复指令，不从 snapshot 重建控制状态。pending 只保存原操作、占用引用和投递进度；缺失 runtime facts 是本次调用终态，不伪装为名字裁决 pending。snapshot 失败、Jenny 不可用或仍 unknown 时原绑定不变，但 Jenny 自身 unknown 且无法响应并获本次明确恢复及接管确认时，直接提交 Jenny/master。提交前核对占用未变化，旧裁决不能覆盖后来者。",
+      "inputs": ["name_resolution_decision"],
+      "output": {"id": "name_resolution_outcome", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
-      "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
     },
     {
-      "id": "env_view", "operator": "appsdk.collab_context.env_view", "operator_version": "2",
-      "inputs": ["authoritative_binding"], "output": {"id": "env_projection", "schema": "Object"},
+      "id": "生成安全环境投影",
+      "operator": "appsdk.collab_context.env_view",
+      "operator_version": "2",
+      "description": "只取允许的 HOME/USER/LOGNAME/CARGO_HOME 与 COLLAB_/APPSDK_/CODEX_ 子集；名字含 TOKEN/KEY/SECRET/PASSWORD/CREDENTIAL 的键丢弃。",
+      "inputs": ["name_resolution_outcome"],
+      "output": {"id": "env_projection", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
-      "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
     },
     {
-      "id": "输出含显示名的权威快照", "operator": "appsdk.collab_context.emit_snapshot", "operator_version": "2",
-      "inputs": ["env_projection"], "output": {"id": "state_snapshot", "schema": "Object"},
+      "id": "输出含名字归属的权威快照",
+      "operator": "appsdk.collab_context.emit_snapshot",
+      "operator_version": "2",
+      "description": "输出本次调用实际终态。snapshot 必须区分 committed、confirmation_required、pending、stale_decision 和 explicit_failure，并包含当前名字、agent sessionID、角色、binding、任务投影和续接引用；不得把 pending 或失败投影成已注册成功。",
+      "inputs": ["env_projection"],
+      "output": {"id": "state_snapshot", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
-      "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
     }
   ],
   "edges": [
-    {"from": "resolve_context_root", "to": "require_daemon", "arc_id": "resolved_scope"},
-    {"from": "require_daemon", "to": "ensure_baseline", "arc_id": "daemon_ready"},
-    {"from": "ensure_baseline", "to": "identity_gate", "arc_id": "baseline_ready"},
-    {"from": "identity_gate", "to": "binding_convergence", "arc_id": "identity_operation_result"},
-    {"from": "binding_convergence", "to": "env_view", "arc_id": "authoritative_binding"},
-    {"from": "env_view", "to": "输出含显示名的权威快照", "arc_id": "env_projection"}
+    {"from": "解析项目与控制范围", "to": "读取现有服务", "arc_id": "resolved_scope"},
+    {"from": "读取现有服务", "to": "读取持久名字代理会话与占用", "arc_id": "daemon_available"},
+    {"from": "读取持久名字代理会话与占用", "to": "判定续接分配占用确认或待决", "arc_id": "durable_name_scope"},
+    {"from": "判定续接分配占用确认或待决", "to": "提交名字绑定同步未关闭任务或持久待决", "arc_id": "name_resolution_decision"},
+    {"from": "提交名字绑定同步未关闭任务或持久待决", "to": "生成安全环境投影", "arc_id": "name_resolution_outcome"},
+    {"from": "生成安全环境投影", "to": "输出含名字归属的权威快照", "arc_id": "env_projection"}
   ],
   "outputs": ["state_snapshot"]
 }

@@ -259,28 +259,26 @@ fn missing_facts_result(
 
 /// Which facts the caller must still supply before an identity can be resolved.
 ///
-/// Only the App Server path has fields the caller may have to add: its
-/// endpoint, namespace, session and thread are four separate observations that
-/// can arrive incomplete. The tmux and dsh paths each present one designed
-/// anchor that is complete on its own, so they require nothing further.
-///
-/// A tmux or dsh anchor only short-circuits the request while no App Server
-/// endpoint was observed. If an endpoint *is* present, the four App Server
-/// facts are still demanded: the endpoint selects the App Server candidate
-/// below, which reads all four fields unconditionally.
+/// Every path needs a real agent session anchor. A tmux placement can locate
+/// delivery, but it cannot prove which agent session owns the name or identity.
 fn required_fields(facts: &IdentityFacts) -> Vec<&'static str> {
-    if facts.tmux.is_some() || (facts.dsh_session_id.is_some() && facts.endpoint.is_none()) {
-        return Vec::new();
+    let mut required = Vec::new();
+    if facts.session_id.is_none() && facts.dsh_session_id.is_none() {
+        required.push("session_id");
     }
-    [
-        ("session_id", &facts.session_id),
-        ("thread_id", &facts.thread_id),
-        ("endpoint", &facts.endpoint),
-        ("namespace", &facts.namespace),
-    ]
-    .into_iter()
-    .filter_map(|(name, value)| value.is_none().then_some(name))
-    .collect()
+    if facts.tmux.is_some() || (facts.dsh_session_id.is_some() && facts.endpoint.is_none()) {
+        return required;
+    }
+    required.extend(
+        [
+            ("thread_id", &facts.thread_id),
+            ("endpoint", &facts.endpoint),
+            ("namespace", &facts.namespace),
+        ]
+        .into_iter()
+        .filter_map(|(name, value)| value.is_none().then_some(name)),
+    );
+    required
 }
 
 enum PreflightIdentityError {
@@ -361,6 +359,32 @@ impl ApprovedAdmission {
 enum ApprovedAdmissionError {
     /// A malformed request or an internal invariant break.
     Error(String),
+}
+
+fn name_adjudication_control(
+    request: &IdentityContextRequest,
+) -> Result<Option<(String, super::name_state::NameRecoveryVerdict, String)>, ApprovedAdmissionError>
+{
+    let Some(raw) = request
+        .grant_approval
+        .as_ref()
+        .or(request.approval.as_ref())
+        .filter(|raw| raw["action"] == "adjudicate_name")
+    else {
+        return Ok(None);
+    };
+    let parse = || -> Result<_, String> {
+        let object = raw.as_object().ok_or("NAME_ADJUDICATION_INVALID")?;
+        let operation = required_approval_string(object, "operation_id")?;
+        let verdict = serde_json::from_value(raw["verdict"].clone())
+            .map_err(|_| "NAME_ADJUDICATION_VERDICT_INVALID".to_owned())?;
+        let evidence = raw["evidence"]
+            .as_str()
+            .ok_or("NAME_ADJUDICATION_EVIDENCE_REQUIRED")?
+            .to_owned();
+        Ok((operation, verdict, evidence))
+    };
+    parse().map(Some).map_err(ApprovedAdmissionError::Error)
 }
 
 fn validate_operation_request(request: &IdentityContextRequest) -> Result<(), String> {

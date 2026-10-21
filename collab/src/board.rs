@@ -28,7 +28,7 @@ pub enum BoardCommand {
         #[arg(long)]
         expected_revision: u64,
     },
-    /// Invite one registered idle ordinary peer; ownership transfers only on accept.
+    /// Invite a current name or registered peer; ownership transfers only on accept.
     Invite {
         id: String,
         #[arg(long)]
@@ -98,6 +98,10 @@ pub struct BoardInvitation {
     pub endpoint_generation: u64,
     pub message_id: String,
     pub created_ms: i64,
+    #[serde(default)]
+    pub original_status: Option<String>,
+    #[serde(default)]
+    pub original_owner: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -135,6 +139,10 @@ pub struct BoardTaskView {
     pub revision: u64,
     pub owner: String,
     pub owner_display_name: String,
+    pub owner_name: Option<String>,
+    pub owner_session_id: Option<String>,
+    pub reassignment_reason: Option<String>,
+    pub needs_reassignment: bool,
     pub publisher: String,
     pub publisher_display_name: String,
     pub priority: String,

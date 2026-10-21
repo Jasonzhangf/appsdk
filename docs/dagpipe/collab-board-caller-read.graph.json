@@ -1,14 +1,70 @@
 {
   "id": "appsdk-collab-board-caller-read",
-  "version": "1.0.0",
-  "description": "独立的 board 读取。tmux caller 由实际进程位置观察，daemon 的当前 route 决定请求 actor，精确 credential 必须与其 project/app/worker/binding/generation 一致；不得按历史凭据名称排序取第一条。native caller 保持现有语义。未关闭任务的负责人身份绑定失效时，任务保留且负责人显示为空，交由 master 重新安排；已关闭任务保留历史。读取不改变 TaskRec owner、状态、资源、证据或 revision，不注册、不恢复身份、不修改 route，也不参与 context 恢复成功判定。明确读取失败只结束本次 board 请求。实现 owner 为 main.rs registered_board_identity、既有纯 route resolve、精确 identity credential 读取及 board handler。",
+  "version": "1.1.0",
+  "description": "一次 board 只读请求的 SESE slice。调用者身份由实际进程位置和当前 typed binding/route 确定，精确 credential 必须匹配 project/app/worker/binding/generation；不得按历史凭据名称排序取第一条。读取只投影任务真源，不写 assignment、不换绑 session、不发回流通知、不恢复身份、不改 route，也不启动 daemon。名字当前无可用工作者时，未关闭任务执行者显示为空，但名字、任务、资源和历史保留；回流原因由 board mutation 或 timer owner 产生，读取只能投影既有原因。closed 历史保留关闭时 owner。明确读取失败只结束本次请求。该图不证明名字恢复目标已 runtime 验收。",
   "inputs": [{"id": "board_request", "schema": "Object"}],
   "nodes": [
-    {"id": "observe_caller", "operator": "appsdk.collab_board_read.observe_caller", "operator_version": "1", "inputs": ["board_request"], "output": {"id": "caller_query", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
-    {"id": "resolve_current_route", "operator": "appsdk.collab_board_read.resolve_current_route", "operator_version": "1", "inputs": ["caller_query"], "output": {"id": "current_actor", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
-    {"id": "read_exact_credential", "operator": "appsdk.collab_board_read.read_exact_credential", "operator_version": "1", "inputs": ["current_actor"], "output": {"id": "authenticated_query", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
-    {"id": "read_board", "operator": "appsdk.collab_board_read.read_board", "operator_version": "1", "inputs": ["authenticated_query"], "output": {"id": "board_result", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"}
+    {
+      "id": "观察只读调用者",
+      "operator": "appsdk.collab_board_read.observe_caller",
+      "operator_version": "1",
+      "description": "从实际进程位置观察 caller；tmux 变量不能注入 socket 或选择身份。native caller 保持既有语义。",
+      "inputs": ["board_request"],
+      "output": {"id": "caller_query", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "解析当前名字与通信绑定",
+      "operator": "appsdk.collab_board_read.resolve_current_route",
+      "operator_version": "1",
+      "description": "由 daemon 当前 route 决定 authenticated actor，并读取与其 project/app/worker/binding/generation 完全一致的 credential；名字用于工作责任投影，pane/socket 只定位投递，不决定名字。",
+      "inputs": ["caller_query"],
+      "output": {"id": "current_actor", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "读取任务真源与责任投影",
+      "operator": "appsdk.collab_board_read.read_board",
+      "operator_version": "1",
+      "description": "读取 TaskRec、名字占用投影、当前 sessionID 和既有调度回流原因。整个过程不改变 owner、状态、资源、证据、revision、journal、route 或 subscription。",
+      "inputs": ["current_actor"],
+      "output": {"id": "board_snapshot", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "投影无可用工作者的未关闭任务",
+      "operator": "appsdk.collab_board_read.project_owner",
+      "operator_version": "1",
+      "description": "当前名字已确认 offline 或没有可用工作者时，未关闭任务执行者投影为空，任务保持原名字归属、状态、资源、证据和 merge/cleanup obligation。不得把 Jenny 自动设为执行者；回流原因不是读取副作用。",
+      "inputs": ["board_snapshot"],
+      "output": {"id": "owner_projection", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "输出只读任务板结果",
+      "operator": "appsdk.collab_board_read.emit_result",
+      "operator_version": "1",
+      "description": "输出 caller 可见的任务、空 owner、保留历史、既有回流原因或明确读取失败。成功不代表身份恢复、assignment mutation 或通知已投递。",
+      "inputs": ["owner_projection"],
+      "output": {"id": "board_result", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
   ],
-  "edges": [{"from": "observe_caller", "to": "resolve_current_route", "arc_id": "caller_query"}, {"from": "resolve_current_route", "to": "read_exact_credential", "arc_id": "current_actor"}, {"from": "read_exact_credential", "to": "read_board", "arc_id": "authenticated_query"}],
+  "edges": [
+    {"from": "观察只读调用者", "to": "解析当前名字与通信绑定", "arc_id": "caller_query"},
+    {"from": "解析当前名字与通信绑定", "to": "读取任务真源与责任投影", "arc_id": "current_actor"},
+    {"from": "读取任务真源与责任投影", "to": "投影无可用工作者的未关闭任务", "arc_id": "board_snapshot"},
+    {"from": "投影无可用工作者的未关闭任务", "to": "输出只读任务板结果", "arc_id": "owner_projection"}
+  ],
   "outputs": ["board_result"]
 }

@@ -16,6 +16,8 @@ pub fn tick(server: &Arc<Server>) {
 
 fn tick_at(server: &Arc<Server>, now: i64) {
     super::keepalive::tick_at(server, now);
+    super::name_monitor::tick(server, now);
+    super::name_stewardship::tick(server, now);
     super::purge_expired_storage(server, now);
     tick_ledger_maintenance_at(server, now);
     if server.state.lock().unwrap().admission_frozen() {
@@ -352,6 +354,14 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
             .filter_map(|(message_id, subscription_id)| {
                 let message = state.msgs.get(message_id)?;
                 let subscription = state.notification_subscriptions.get(subscription_id)?;
+                // A name handoff grants one wake to the current carrier. Old
+                // acceptance, delivered state and exhausted budget are history.
+                if state.handoff_wake_pending(message) {
+                    return (subscription.worker_id == message.to
+                        && subscription.status == "armed"
+                        && subscription.expires_ms > now)
+                        .then(|| (message_id.clone(), subscription_id.clone()));
+                }
                 (message.state == "pending"
                     && message.wake_attempt_count < MAX_WAKE_ATTEMPTS
                     && (!super::mailbox::is_explicit_delivery_mode(&state, message)

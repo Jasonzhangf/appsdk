@@ -96,8 +96,8 @@ fn commit_tmux_typed_fixture(
         kind: TransportKind::Tmux,
         endpoint: Some(endpoint.socket_path.clone()),
         namespace: None,
-        session_id: Some(endpoint.tmux_session_id.clone()),
-        thread_id: Some(endpoint.pane_id.clone()),
+        session_id: endpoint.codex_session_id.clone(),
+        thread_id: endpoint.codex_thread_id.clone(),
         tmux_endpoint: Some(endpoint),
         capabilities: vec!["direct-input".into()],
         self_check: "typed fixture committed pane receipt".into(),
@@ -240,8 +240,8 @@ fn seed_committed_registration_fixture(
         kind: TransportKind::Tmux,
         endpoint: Some(endpoint.socket_path.clone()),
         namespace: Some(endpoint.tmux_session_id.clone()),
-        session_id: endpoint.codex_session_id.clone().or_else(|| Some(endpoint.tmux_session_id.clone())),
-        thread_id: endpoint.codex_thread_id.clone().or_else(|| Some(endpoint.pane_id.clone())),
+        session_id: endpoint.codex_session_id.clone(),
+        thread_id: endpoint.codex_thread_id.clone(),
         tmux_endpoint: Some(endpoint),
         capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
         self_check: "previously committed typed-owner fixture".into(),
@@ -580,8 +580,8 @@ fn persisted_tmux_master_status_does_not_relock_state() {
         tmux_session_id: "$1".into(),
         pane_id: "%1".into(),
         pane_pid: 2,
-        codex_session_id: None,
-        codex_thread_id: None,
+        codex_session_id: Some("session-pane-worker".into()),
+        codex_thread_id: Some("thread-pane-worker".into()),
     };
     commit_tmux_typed_fixture(
         &server,
@@ -640,8 +640,8 @@ fn tmux_registration_and_identity_do_not_require_a_live_probe() {
         tmux_session_id: "$1".into(),
         pane_id: "%1".into(),
         pane_pid: 2,
-        codex_session_id: None,
-        codex_thread_id: None,
+        codex_session_id: Some("session-pane-worker".into()),
+        codex_thread_id: Some("thread-pane-worker".into()),
     };
     let binding = commit_tmux_typed_fixture(
         &server,
@@ -716,8 +716,8 @@ fn identity_endpoint_projection_keeps_identity_and_never_reports_live() {
         tmux_session_id: "$1".into(),
         pane_id: "%1".into(),
         pane_pid: 2,
-        codex_session_id: None,
-        codex_thread_id: None,
+        codex_session_id: Some("session-pane-worker".into()),
+        codex_thread_id: Some("thread-pane-worker".into()),
     };
     let binding = commit_tmux_typed_fixture(
         &server,

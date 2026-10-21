@@ -64,7 +64,7 @@ impl ProjectRuntimeManager {
         context: &ProjectContext,
         facts: &IdentityFacts,
     ) -> anyhow::Result<Option<identity::Identity>> {
-        let Some(candidate) = facts.tmux.as_ref() else {
+        let Some(session_id) = facts.session_id.as_deref() else {
             return Ok(None);
         };
         if !self.routes.lock().unwrap().contains_key(&(
@@ -84,9 +84,9 @@ impl ProjectRuntimeManager {
         };
         let matches = |binding: &&RuntimeBinding| {
             binding
-                .tmux_endpoint
+                .session_id
                 .as_ref()
-                .is_some_and(|saved| identity::same_tmux_session(saved, &candidate.endpoint))
+                .is_some_and(|saved| saved.as_str() == session_id)
                 && state.workers.contains_key(binding.agent_id.as_str())
         };
         let bindings = project
@@ -95,6 +95,11 @@ impl ProjectRuntimeManager {
             .filter(matches)
             .collect::<Vec<_>>();
         let master = current_master_grant(&state, Some(&route));
+        if bindings.len() > 1 {
+            anyhow::bail!(
+                "IDENTITY_RESTORE_AMBIGUOUS: current agent session matches multiple runtime bindings"
+            );
+        }
         let binding = bindings
             .iter()
             .copied()
@@ -123,70 +128,6 @@ impl ProjectRuntimeManager {
             }),
             transport: worker.transport.clone(),
         }))
-    }
-
-    fn retire_superseded_pane_bindings(
-        &self,
-        context: &ProjectContext,
-        facts: &IdentityFacts,
-    ) -> anyhow::Result<()> {
-        let Some(candidate) = facts.tmux.as_ref() else {
-            return Ok(());
-        };
-        let scope = Scope {
-            root: PathBuf::from(&context.canonical_root),
-        };
-        let selected = match self.current_session_identity(context, facts)? {
-            Some(identity) => Some(identity),
-            None => identity::existing_for_daemon_at(&self.host.host_paths, &scope, facts)?,
-        };
-        let claimants = {
-            let state = self.host.state.lock().unwrap();
-            state
-                .global
-                .current_thread_routes
-                .values()
-                .chain(state.global.legacy_thread_routes.values())
-                .filter(|binding| {
-                    binding.tmux_endpoint.as_ref().is_some_and(|saved| {
-                        crate::client::adapters::tmux::same_owned_pane(saved, &candidate.endpoint)
-                    }) && !(binding.project_scope == context.project_scope
-                        && selected.as_ref().is_some_and(|identity| {
-                            identity.worker_id == binding.agent_id.as_str()
-                        }))
-                })
-                .cloned()
-                .fold(Vec::new(), |mut claims, binding| {
-                    if !claims.contains(&binding) { claims.push(binding); }
-                    claims
-                })
-        };
-        for previous in claimants {
-            let owner = ProjectContext::for_registered_root_with_app(
-                Path::new(previous.project_scope.as_str()),
-                previous.app_scope_id.clone(),
-            )?;
-            let mut events = pane_reclaim_events(
-                selected
-                    .as_ref()
-                    .map_or("context", |identity| identity.worker_id.as_str()),
-                &previous,
-            )
-            .map_err(anyhow::Error::msg)?;
-            events.push(Event::GlobalMasterRevoked {
-                project_scope: previous.project_scope.clone(),
-                binding_id: previous.binding_id.clone(),
-            });
-            if !project_reset::route_is_deinitialized(Path::new(previous.project_scope.as_str()))
-                .map_err(anyhow::Error::msg)?
-            {
-                let runtime = self.select_runtime(&owner).map_err(anyhow::Error::msg)?;
-                runtime.try_commit(&events).map_err(anyhow::Error::msg)?;
-            }
-            self.host
-                .commit_checked(&[Event::GlobalCurrentThreadRouteRetired { binding: previous }])?;
-        }
-        Ok(())
     }
 
     fn refresh_session_endpoint(
@@ -276,14 +217,28 @@ impl ProjectRuntimeManager {
         }
         runtime.commit_locked(&mut state, &events)?;
         drop(state);
-        self.host.commit_checked(&[
-            Event::GlobalCurrentThreadRouteRetired {
-                binding: saved.clone(),
-            },
-            Event::GlobalCurrentThreadRouteSet {
-                binding: next.clone(),
-            },
-        ])?;
+        let mut publications = vec![Event::GlobalCurrentThreadRouteRetired {
+            binding: saved.clone(),
+        }];
+        {
+            let state = self.host.state.lock().unwrap();
+            if let Some(previous) = state
+                .global
+                .lookup_unique_tmux_pane_route(&candidate.endpoint)
+            {
+                if previous != saved {
+                    // Retarget the delivery address only. The old project's
+                    // worker, name, role grant and execution stay untouched.
+                    publications.push(Event::GlobalCurrentThreadRouteRetired {
+                        binding: previous.clone(),
+                    });
+                }
+            }
+        }
+        publications.push(Event::GlobalCurrentThreadRouteSet {
+            binding: next.clone(),
+        });
+        self.host.commit_checked(&publications)?;
         let mut binding = ident
             .runtime
             .clone()
@@ -303,7 +258,7 @@ impl ProjectRuntimeManager {
             .current_session_identity(context, facts)?
             .and_then(|identity| identity.runtime.map(|runtime| runtime.binding_id));
         let state = self.host.state.lock().unwrap();
-        Ok(if let Some(tmux) = &facts.tmux {
+        Ok(if let Some(session) = &facts.session_id {
             state
                 .global
                 .current_thread_routes
@@ -315,18 +270,15 @@ impl ProjectRuntimeManager {
                             .as_ref()
                             .is_none_or(|id| &binding.binding_id == id)
                         && binding
-                            .tmux_endpoint
+                            .session_id
                             .as_ref()
-                            .is_some_and(|saved| identity::same_tmux_session(saved, &tmux.endpoint))
+                            .is_some_and(|saved| saved.as_str() == session)
+                        && match (&facts.thread_id, &binding.native_thread_id) {
+                            (Some(thread), Some(saved)) => saved.as_str() == thread,
+                            (Some(_), None) => false,
+                            (None, _) => true,
+                        }
                 })
-                .cloned()
-        } else if let (Some(session), Some(thread)) = (&facts.session_id, &facts.thread_id) {
-            state
-                .global
-                .lookup_current_thread_route(
-                    &identity::SessionId::new(session.clone())?,
-                    &NativeThreadId::new(thread.clone())?,
-                )
                 .cloned()
         } else {
             None
@@ -386,6 +338,11 @@ impl ProjectRuntimeManager {
         {
             anyhow::bail!("IDENTITY_RESTORE_CROSS_PROJECT: stable pane belongs to another scope");
         }
+        if facts.session_id.as_deref().is_none_or(|session| {
+            binding.session_id.as_ref().map(identity::SessionId::as_str) != Some(session)
+        }) {
+            anyhow::bail!("IDENTITY_RESTORE_NOT_FOUND: pane alone cannot select an agent identity; provide the current agent session");
+        }
         facts.tmux = Some(crate::proto::TmuxCandidate {
             endpoint: binding
                 .tmux_endpoint
@@ -401,6 +358,39 @@ impl ProjectRuntimeManager {
         request: &IdentityContextRequest,
     ) -> Result<Option<ApprovedAdmission>, ApprovedAdmissionError> {
         if request.approval.is_none() && request.grant_approval.is_none() {
+            return Ok(None);
+        }
+        if name_adjudication_control(request)?.is_some() {
+            let facts = self
+                .observe_identity_facts(context, &request.facts)
+                .map_err(|error| ApprovedAdmissionError::Error(error.to_string()))?;
+            if self
+                .current_session_identity(context, &facts)
+                .map_err(|error| ApprovedAdmissionError::Error(error.to_string()))?
+                .is_none()
+            {
+                return Err(ApprovedAdmissionError::Error(
+                    "NAME_ADJUDICATION_REGISTERED_ACTOR_REQUIRED".into(),
+                ));
+            }
+            return Ok(None);
+        }
+        if let Some(intent) = name_resolution::parse_name_intent(
+            request
+                .grant_approval
+                .as_ref()
+                .or(request.approval.as_ref()),
+        )
+        .map_err(ApprovedAdmissionError::Error)?
+        {
+            if !intent.user_authorized {
+                return Err(ApprovedAdmissionError::Error(
+                    "NAME_AUTHORIZATION_REQUIRED: name restoration needs user authorization".into(),
+                ));
+            }
+            // Name intent does not replace another principal's credential.
+            // Its role transition belongs to the typed grant owner after the
+            // current caller binding and the name decision are established.
             return Ok(None);
         }
         let observed_facts = self
@@ -708,7 +698,14 @@ impl ProjectRuntimeManager {
                     .error
                     .unwrap_or_else(|| "IDENTITY_ROLE_READBACK_FAILED".into()));
             }
+            let name_outcome = response.data["snapshot"]["name_resolution"].clone();
             response.data["snapshot"] = refreshed.data;
+            name_resolution::project_registered_name(
+                runtime,
+                &approval.target_identity,
+                &mut response.data["snapshot"],
+            );
+            response.data["snapshot"]["name_resolution"] = name_outcome;
             return Ok(());
         }
         let approval = approved
@@ -915,17 +912,12 @@ impl ProjectRuntimeManager {
             .map_err(anyhow::Error::msg)?;
         facts = self.observe_identity_facts(&context, &facts)?;
         validate_facts(&facts)?;
-        self.retire_superseded_pane_bindings(&context, &facts)?;
         let scope = Scope { root };
         let restoring_pane = self.has_persisted_pane_route(&context, &facts);
         if !restoring_pane && !required_fields(&facts).is_empty() {
             self.complete_persisted_native_facts(&scope, &mut facts)?;
         }
-        let required = if restoring_pane {
-            Vec::new()
-        } else {
-            required_fields(&facts)
-        };
+        let required = required_fields(&facts);
         if !required.is_empty() {
             let descriptions = json!({
                 "session_id": "Current runtime session identifier",
@@ -972,7 +964,11 @@ impl ProjectRuntimeManager {
                 .global
                 .lookup_unique_tmux_pane_route(&candidate.endpoint)
                 .cloned();
-            if let Some(host) = host_binding.as_ref() {
+            if let Some(host) = host_binding.as_ref().filter(|binding| {
+                facts.session_id.as_deref().is_some_and(|session| {
+                    binding.session_id.as_ref().map(identity::SessionId::as_str) == Some(session)
+                })
+            }) {
                 let runtime_context = ProjectContext::for_registered_root_with_app(
                     &scope.root,
                     context.app_scope_id.clone(),
@@ -1042,7 +1038,14 @@ impl ProjectRuntimeManager {
             Some(route.clone())
         } else if let Some(candidate) = facts.tmux.as_ref() {
             match self.resolve_route_by_tmux_endpoint(&candidate.endpoint) {
-                Ok(route) => Some(route),
+                Ok(route)
+                    if facts.session_id.as_deref().is_some_and(|session| {
+                        route.session_id.as_ref().map(identity::SessionId::as_str) == Some(session)
+                    }) =>
+                {
+                    Some(route)
+                }
+                Ok(_) => None,
                 // A stale host index, or no route at all, is not usable route
                 // evidence: the caller still bootstraps from its live anchors.
                 // Every other error stays fatal, so an ambiguity or a real
@@ -1108,10 +1111,31 @@ impl ProjectRuntimeManager {
                         })
                         .cloned()
                 };
-                if let (Some(saved), Some(candidate)) = (current.as_ref(), facts.tmux.as_ref()) {
-                    if saved.tmux_endpoint.as_ref().is_some_and(|endpoint| {
-                        identity::same_tmux_session(endpoint, &candidate.endpoint)
-                    }) {
+                let session_continuation = facts.session_id.as_deref().is_some_and(|session| {
+                    current.as_ref().is_some_and(|saved| {
+                        saved.session_id.as_ref().map(identity::SessionId::as_str) != Some(session)
+                    }) && runtime
+                        .state
+                        .lock()
+                        .unwrap()
+                        .name_occupancies
+                        .get(context.project_scope.as_str())
+                        .is_some_and(|names| {
+                            names
+                                .values()
+                                .any(|holder| holder.worker_id == ident.worker_id)
+                        })
+                });
+                if let (Some(saved), Some(candidate), Some(session)) = (
+                    current.as_ref(),
+                    facts.tmux.as_ref(),
+                    facts.session_id.as_ref(),
+                ) {
+                    if saved
+                        .session_id
+                        .as_ref()
+                        .is_some_and(|saved| saved.as_str() == session)
+                    {
                         current = Some(self.refresh_session_endpoint(
                             &runtime, saved, candidate, &mut ident, &scope,
                         )?);
@@ -1159,13 +1183,14 @@ impl ProjectRuntimeManager {
                     // while another claimant on this pane or native address
                     // still fails closed.
                     if let Some(saved) = current.as_ref() {
-                        self.reconcile_binding_publication(saved).map_err(anyhow::Error::msg)?;
+                        self.reconcile_binding_publication(saved)
+                            .map_err(anyhow::Error::msg)?;
                     }
                     published = current
                         .as_ref()
                         .is_some_and(|saved| host_has_publication(saved));
                 }
-                if published && anchor_agrees {
+                if published && anchor_agrees && !session_continuation {
                     let (runtime, mut snapshot) = self.dispatch_sync(
                         Some(registered_context),
                         Req::Context {
@@ -1199,7 +1224,7 @@ impl ProjectRuntimeManager {
                         None,
                     ));
                 }
-                if !approved_move || anchor_agrees {
+                if !session_continuation && (!approved_move || anchor_agrees) {
                     let retired = {
                         let state = runtime.state.lock().unwrap();
                         state.worker_closures.contains_key(&ident.worker_id)
@@ -1525,23 +1550,14 @@ impl ProjectRuntimeManager {
                 continue;
             };
             for binding in project.runtime_bindings.values() {
-                let anchor_matches = if let Some(tmux) = &facts.tmux {
-                    binding.tmux_endpoint.as_ref().is_some_and(|bound| {
-                        // Ownership follows the pane address, never the concrete
-                        // endpoint. A reissued shell pid in the same owned pane
-                        // is still this anchor, so this must agree with the
-                        // resolver's `same_owned_pane` arm.
-                        identity::same_tmux_session(bound, &tmux.endpoint)
-                    })
-                } else {
-                    binding.session_id.as_ref().map(identity::SessionId::as_str)
-                        == facts.session_id.as_deref()
-                        && binding
+                let anchor_matches = binding.session_id.as_ref().map(identity::SessionId::as_str)
+                    == facts.session_id.as_deref()
+                    && facts.thread_id.as_deref().is_none_or(|thread| {
+                        binding
                             .native_thread_id
                             .as_ref()
-                            .map(NativeThreadId::as_str)
-                            == facts.thread_id.as_deref()
-                };
+                            .is_some_and(|saved| saved.as_str() == thread)
+                    });
                 if binding.agent_id.as_str() != ident.worker_id || !anchor_matches {
                     continue;
                 }

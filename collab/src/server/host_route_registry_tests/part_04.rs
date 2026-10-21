@@ -1088,26 +1088,16 @@
         ).await;
         assert!(response.ok, "{response:?}");
         let project_scope = GlobalState::canonical_project_scope(&root).unwrap();
+        let promoted = handle_master_promote(&server, "wire-worker".into(),
+            "token-wire-worker".into(), "fixture grants Jenny through its name owner".into());
+        assert!(promoted.ok, "{promoted:?}");
         let grant = {
-            let mut state = server.state.lock().unwrap();
+            let state = server.state.lock().unwrap();
             let project = state.global.lookup_project(&project_scope).unwrap();
             let binding = project
                 .lookup_binding(&BindingId::new("binding-wire-worker").unwrap())
                 .unwrap();
-            let grant = crate::server::global_state::MasterGrant::new(
-                project_scope.clone(),
-                AppServerId::new("app-wire").unwrap(),
-                AgentId::new("wire-worker").unwrap(),
-                "route-scoped",
-                "operator",
-                "approved",
-                binding.binding_id.clone(),
-                binding.endpoint_generation,
-                now_ms(),
-            )
-            .unwrap();
-            state.global.grant_master(grant.clone()).unwrap();
-            grant
+            project.lookup_master_grant(&binding.binding_id).unwrap().clone()
         };
         let runtime = runtime_for_registered(&server, &root, "wire-worker", "app-wire");
         let before_journal = std::fs::read(&journal_path).unwrap();

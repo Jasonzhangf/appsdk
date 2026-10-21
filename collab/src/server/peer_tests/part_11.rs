@@ -893,7 +893,9 @@ fn user_approved_promotion_replaces_a_master_after_its_pane_is_taken() {
         .contains_key("old-master"));
 
     let promoted = approve_promotion(&server, "taker");
-    assert!(promoted.ok, "{promoted:?}");
+    assert!(!promoted.ok, "{promoted:?}");
+    assert_eq!(promoted.data["outcome"], "pending");
+    confirm_test_jenny_takeover(&server, "taker");
     assert_eq!(
         dispatch(&server, Req::MasterStatus).data["master"]["worker_id"],
         "taker"
@@ -902,8 +904,7 @@ fn user_approved_promotion_replaces_a_master_after_its_pane_is_taken() {
     std::fs::remove_dir_all(root).ok();
 }
 
-/// An explicit user approval strips the recorded grant. A different pane is
-/// still only an address, so the incumbent cannot veto the replacement.
+/// Replacing occupied Jenny needs confirmation in addition to role approval.
 #[test]
 fn user_approved_promotion_replaces_a_master_that_owns_its_anchor() {
     let (server, root) = test_server();
@@ -928,7 +929,13 @@ fn user_approved_promotion_replaces_a_master_that_owns_its_anchor() {
     assert!(register_tmux(&server, "other", other).ok);
 
     let promoted = approve_promotion(&server, "other");
-    assert!(promoted.ok, "{promoted:?}");
+    assert!(!promoted.ok, "{promoted:?}");
+    assert_eq!(promoted.data["outcome"], "pending");
+    assert_eq!(
+        dispatch(&server, Req::MasterStatus).data["master"]["worker_id"],
+        "master"
+    );
+    confirm_test_jenny_takeover(&server, "other");
     assert_eq!(
         dispatch(&server, Req::MasterStatus).data["master"]["worker_id"],
         "other"

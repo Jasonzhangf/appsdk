@@ -96,7 +96,7 @@ fn command_at(
     command.current_dir(project_root);
     if no_native_identity {
         command
-            .env_remove("CODEX_SESSION_ID")
+            .env("CODEX_SESSION_ID", &pane.session_anchor)
             .env_remove("CODEX_THREAD_ID")
             .env_remove("CODEX_THREAD");
     }
@@ -144,11 +144,20 @@ fn register_context(
     } else {
         ""
     };
+    let provide = if no_native_identity {
+        format!(
+            " --provide {}",
+            shell_quote(&json!({"session_id": pane.session_anchor}).to_string())
+        )
+    } else {
+        String::new()
+    };
     let script = format!(
-        "set -e\ncd {}\n{}\"$COLLAB_BINARY\" context --op {} >{} 2>{}\nprintf done >{}\nsleep 600\n",
+        "set -e\ncd {}\n{}\"$COLLAB_BINARY\" context --op {}{} >{} 2>{}\nprintf done >{}\nsleep 600\n",
         shell_quote(&project_root.to_string_lossy()),
         unset,
         shell_quote(operation_id),
+        provide,
         shell_quote(&result.to_string_lossy()),
         shell_quote(&error.to_string_lossy()),
         shell_quote(&done.to_string_lossy())

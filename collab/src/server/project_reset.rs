@@ -110,13 +110,18 @@ pub(super) fn clear_project(
     let messages: Vec<String> = state
         .msgs
         .values()
-        .filter(|message| {
-            workers.contains(&message.from)
-                || workers.contains(&message.to)
-                || (clear_local
-                    && !foreign_workers.contains(&message.from)
-                    && !foreign_workers.contains(&message.to))
-        })
+        .filter(
+            |message| match state.mailbox_name_addresses.get(&message.id) {
+                Some(address) => address.project_scope == scope,
+                None => {
+                    workers.contains(&message.from)
+                        || workers.contains(&message.to)
+                        || (clear_local
+                            && !foreign_workers.contains(&message.from)
+                            && !foreign_workers.contains(&message.to))
+                }
+            },
+        )
         .map(|m| m.id.clone())
         .collect();
     for id in messages {
@@ -125,6 +130,7 @@ pub(super) fn clear_project(
     state.tasks.retain(|id, _| !tasks.contains(id));
     state.board_details.retain(|id, _| !tasks.contains(id));
     state.task_lifecycle.retain(|id, _| !tasks.contains(id));
+    state.task_assignments.retain(|id, _| !tasks.contains(id));
     state.pending_merges.retain(|id, _| !tasks.contains(id));
     state
         .cleanup_receipts
@@ -161,6 +167,13 @@ pub(super) fn clear_project(
         .worktree_bindings
         .retain(|_, b| b.owning_project_scope != scope);
     state.worker_names.retain(|id, _| !workers.contains(id));
+    state.name_occupancies.remove(scope);
+    state.name_occupancy_revisions.remove(scope);
+    state
+        .name_recoveries
+        .retain(|_, recovery| recovery.project_scope != scope);
+    state.agent_presence.remove(scope);
+    state.agent_activity.remove(scope);
     state.delivery_modes.retain(|id, _| !workers.contains(id));
     state
         .delivery_source_threads

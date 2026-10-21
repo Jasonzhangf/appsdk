@@ -354,17 +354,17 @@ async fn split_journal_context_recovery(native: bool, public_cli: bool) {
                     "respawn owned public CLI pane: {}",
                     String::from_utf8_lossy(&respawn.stderr)
                 );
+                let mut completed_status = None;
                 for _ in 0..1000 {
-                    if cli_status.is_file() {
+                    completed_status = std::fs::read_to_string(&cli_status).ok()
+                        .and_then(|status| status.trim().parse::<i32>().ok());
+                    if completed_status.is_some() {
                         break;
                     }
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
-                let status = std::fs::read_to_string(&cli_status)
-                    .expect("public CLI in owned pane did not report exit status")
-                    .trim()
-                    .parse::<i32>()
-                    .unwrap();
+                let status = completed_status
+                    .expect("public CLI in owned pane did not report a complete exit status");
                 (
                     status,
                     std::fs::read(&cli_stdout).unwrap_or_default(),
@@ -516,6 +516,7 @@ async fn split_journal_context_recovery(native: bool, public_cli: bool) {
             facts: crate::proto::IdentityFacts {
                 // The staged proof uses the persisted exact endpoint and
                 // credential; this report is not live admission evidence.
+                session_id: new_candidates.tmux.as_ref().unwrap().endpoint.codex_session_id.clone(),
                 tmux: new_candidates.tmux.clone(),
                 ..Default::default()
             },
@@ -545,6 +546,7 @@ async fn split_journal_context_recovery(native: bool, public_cli: bool) {
         )),
         Req::IdentityContext {
             facts: crate::proto::IdentityFacts {
+                session_id: new_candidates.tmux.as_ref().unwrap().endpoint.codex_session_id.clone(),
                 tmux: new_candidates.tmux,
                 ..Default::default()
             },
@@ -1119,6 +1121,18 @@ async fn closed_same_pane_peer_keeps_the_pane_ownership() {
         Some(test_candidates(closer_worker).unwrap()),
     );
     assert!(closer.ok, "{closer:?}");
+    // This fixture needs a closer, not unknown adjudication. Explicitly
+    // observe the displaced incumbent offline before promoting the closer.
+    runtime.commit(&[Event::AgentPresenceObserved {
+        presence: crate::server::name_state::AgentPresenceRecord {
+            project_scope: scope.project_scope_id.as_str().into(),
+            worker_id: master_worker.into(),
+            session_id: master_binding.session_id.as_ref().unwrap().as_str().into(),
+            presence: crate::server::name_state::AgentPresence::Offline,
+            reason: "controlled displaced-incumbent observation".into(),
+            observed_ms: now_ms(),
+        },
+    }]);
     let closer_promoted = handle_master_promote(
         &runtime,
         closer_worker.into(),

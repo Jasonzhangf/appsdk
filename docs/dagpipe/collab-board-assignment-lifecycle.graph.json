@@ -1,0 +1,70 @@
+{
+  "id": "appsdk-collab-board-assignment-lifecycle",
+  "version": "0.1.0",
+  "description": "一次 board assignment mutation 的目标设计 SESE，覆盖同名当前工作者的自动 session 换绑，以及任意未关闭任务经现有 invite/respond 扩展显式改派。自动换绑不要求邀请；显式改派只改变归属，不重置任务状态、证据、资源、revision 历史、merge obligation 或 cleanup obligation。closed 与 cancelled 不进入 mutation。名字无可用工作者时保留持久工作归属并投影空执行者，由 mutation/timer owner 向当前 Jenny 回流原因一次；不自动把 Jenny 设为执行者。该图尚未完成 runtime 验收。",
+  "inputs": [{"id": "assignment_mutation_request", "schema": "Object"}],
+  "nodes": [
+    {
+      "id": "读取任务与当前归属",
+      "operator": "appsdk.collab_assignment.read_task",
+      "operator_version": "1",
+      "description": "读取 TaskRec、task ID、当前名字、agent sessionID、状态、revision、资源、证据和既有 merge/cleanup obligation。读取不得由 board show 或其他只读投影触发 assignment 写入。",
+      "inputs": ["assignment_mutation_request"],
+      "output": {"id": "task_assignment_scope", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "分类同名自动换绑或邀请回应改派",
+      "operator": "appsdk.collab_assignment.classify_source",
+      "operator_version": "1",
+      "description": "同名当前工作者 S1→S2 进入自动换绑，不要求 Jenny assign 或 target invitation。显式目标名字变更复用现有 invite/respond 接受语义，可作用于 pending、working、rework、delivered 和 accepted；不是新的平行 task 命令或第二状态机。",
+      "inputs": ["task_assignment_scope"],
+      "output": {"id": "assignment_source", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "校验目标名字权限与占用",
+      "operator": "appsdk.collab_assignment.authorize_target",
+      "operator_version": "1",
+      "description": "自动路径核对名字仍归属于同一当前工作者；显式路径核对 actor 权限、invite/respond 接受和 target 名字占用。在线其他工作者仍遵守占用与二次确认规则。目标无可用工作者时保留归属并记录回流原因，不自动选择 Jenny。",
+      "inputs": ["assignment_source"],
+      "output": {"id": "authorized_assignment", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "原子提交归属并保留任务义务",
+      "operator": "appsdk.collab_assignment.commit",
+      "operator_version": "1",
+      "description": "在 TaskRec/board mutation owner 内按 revision 原子更新 assignment，只改名字和当前 agent sessionID。保留 task ID、状态、证据、资源、revision 历史、pending merge 和 cleanup obligation；不把任务重置成 pending，不替代 review/accept/merge/close。closed 与 cancelled 明确拒绝。",
+      "inputs": ["authorized_assignment"],
+      "output": {"id": "assignment_commit", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "投影 assignment 结果",
+      "operator": "appsdk.collab_assignment.emit_result",
+      "operator_version": "1",
+      "description": "返回 task ID、旧/新名字、旧/新 agent sessionID、保留的状态和义务、revision 冲突或明确拒绝。无可用工作者时投影空执行者和既有回流原因，不写第二状态表。",
+      "inputs": ["assignment_commit"],
+      "output": {"id": "assignment_receipt", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {"from": "读取任务与当前归属", "to": "分类同名自动换绑或邀请回应改派", "arc_id": "task_assignment_scope"},
+    {"from": "分类同名自动换绑或邀请回应改派", "to": "校验目标名字权限与占用", "arc_id": "assignment_source"},
+    {"from": "校验目标名字权限与占用", "to": "原子提交归属并保留任务义务", "arc_id": "authorized_assignment"},
+    {"from": "原子提交归属并保留任务义务", "to": "投影 assignment 结果", "arc_id": "assignment_commit"}
+  ],
+  "outputs": ["assignment_receipt"]
+}

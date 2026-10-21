@@ -65,27 +65,25 @@ and its parent; the public board shows parent responsibility for public work.
 
 Long-horizon goals belong to the invited or claiming peer. That peer
 orchestrates bounded execution and observation through independent
-`codex exec --profile gcm` workers. A master-owned GCM worker is a capacity
-fallback only when every eligible peer is busy. `collab subagent dispatch`,
+`codex exec --profile gcm` workers. Master and peer have the same orchestration
+function at different goal levels: master coordinates the larger project goal,
+and peer coordinates a delegated subgoal. Bounded execution and observation go
+directly to subworkers regardless of peer idleness. `collab subagent dispatch`,
 `collab subagent send`, and managed-subagent records are legacy compatibility
 for diagnosis or migration, not a production assignment path.
 
-## Display names
+## Stable names and session handoff
 
-An ordinary tmux peer defaults to its bound pane identifier. The current master
-defaults to `Jenny`, unless the user explicitly chooses another name:
+Names own project work; the reported agent sessionID is the current execution
+carrier. Same-name session changes update all unclosed board assignments while
+preserving task identity, status, evidence and resources. Closed history stays
+unchanged. tmux session, pane and socket are transport placement only.
 
-```sh
-collab worker name "Alice"
-collab worker name --reset
-```
-
-Run the existing `collab context` initialization only when requested by the
-user. Naming operates on that registered caller, without a new registration.
-Overrides survive restart and stay with the identity across role changes.
-Reset restores its current default. Names are labels; routing, tasks and
-messages keep stable IDs. The board, dashboard, context and status views use
-the same display-name projection. MCP exposes `collab_worker_name`.
+The old pane-default display-label model is retired. Read the current
+[name and work ownership contract](../docs/design/collab-stable-name-work-ownership-20261020.md)
+and the [Skill upgrade handoff](skills/collab/SKILL.md) before recovery or
+migration. Those documents distinguish target design, source verification and
+loaded runtime evidence; updating a Skill does not activate a daemon version.
 
 ## Install
 

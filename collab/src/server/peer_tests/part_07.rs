@@ -1119,7 +1119,9 @@ fn migration_freeze_rejects_mutations_but_allows_rebind_and_reads() {
     // may rebind".
     let rebind_tmux = IsolatedTmux::start(&root);
     let mut rebind_endpoints = rebind_tmux.endpoints();
-    let endpoint = rebind_endpoints.remove(0);
+    let mut endpoint = rebind_endpoints.remove(0);
+    endpoint.codex_session_id = Some("session-thread-peer".into());
+    endpoint.codex_thread_id = Some("thread-peer".into());
     let rebound = dispatch(
         &server,
         Req::register("peer".into(),

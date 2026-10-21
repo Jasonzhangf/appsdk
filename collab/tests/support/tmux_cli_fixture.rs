@@ -27,6 +27,40 @@ struct Fixture {
     daemon: Option<std::process::Child>,
 }
 
+// Agent classification is timer-owned. Consumers which assert those facts
+// must wait for the first exact current-session observation.
+fn wait_for_agent_observations(registered: &Value) {
+    let worker_id = registered["identity"]["worker_id"].as_str().unwrap();
+    let journal = PathBuf::from(registered["daemon"]["storage_root"].as_str().unwrap())
+        .join(".agent-collab/server/journal.jsonl");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let records = std::fs::read_to_string(&journal).unwrap();
+        let events: Vec<Value> = records
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        let observed = |event: &str, field: &str| {
+            events.iter().any(|record| {
+                record["ev"] == event
+                    && record[field]["worker_id"] == worker_id
+                    && record[field]["session_id"] == registered["session_id"]
+                    && record[field]["project_scope"] == registered["scope"]["project_scope"]
+            })
+        };
+        if observed("AgentPresenceObserved", "presence")
+            && observed("AgentActivityObserved", "activity")
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "current agent probe facts not observed: {registered}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
 impl Fixture {
     fn start_daemon(&mut self) {
         std::fs::create_dir_all(&self.host_state).unwrap();

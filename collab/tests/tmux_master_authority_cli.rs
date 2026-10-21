@@ -26,8 +26,8 @@ fn context_session_reuse_and_minimal_master_approval() {
     let second = Pane {
         pane_id,
         server_pid: first.server_pid,
-        session_anchor: "new-native-session".into(),
-        thread_anchor: "new-native-thread".into(),
+        session_anchor: first.session_anchor.clone(),
+        thread_anchor: first.thread_anchor.clone(),
     };
     let moved = fixture.run_context(&["context", "--op", "identity-session-move"], Some(&second));
     assert_eq!(moved["identity"]["worker_id"], worker, "{moved}");
@@ -120,7 +120,7 @@ fn context_session_reuse_and_minimal_master_approval() {
             .any(|message| message["id"] == reply["msg_id"]),
         "{received}"
     );
-    let args = ["context", "--op", "identity-minimal-master", "--approve-grant", "{\"action\":\"restore_master\",\"authorization\":\"user approved current session master\"}"];
+    let args = ["context", "--op", "identity-minimal-master", "--approve-grant", "{\"action\":\"restore_master\",\"authorization\":\"user approved current session master\",\"replace_confirmed\":true}"];
     let master = fixture.run_context(&args, Some(&second));
     assert_eq!(master["identity"]["role"], "master", "{master}");
     assert_eq!(
@@ -229,7 +229,8 @@ fn master_authority_tmux_unknown_holder_keeps_control_and_projection() {
     assert!(ordinary_role_task.contains("orchestrator"));
     assert!(ordinary_responsibilities.contains("codex exec --profile gcm"));
     assert!(ordinary_responsibilities.contains("verify subworker evidence"));
-    assert!(ordinary_role_task.contains("without inheriting master authority"));
+    assert_eq!(registered["role_brief"]["goal_level"], "delegated_goal");
+    assert_eq!(registered["identity"]["role"], "worker");
     assert!(!ordinary_responsibilities.contains("saturate every live present peer first"));
 
     let promoted = fixture.run_ok(
@@ -255,6 +256,7 @@ fn master_authority_tmux_unknown_holder_keeps_control_and_projection() {
         "recorded_unusable must not carry a second authority model: {status}"
     );
 
+    wait_for_agent_observations(&registered);
     let context = fixture.run_context(&["context"], Some(&pane));
     assert_eq!(
         context["master"]["worker_id"], worker_id,
@@ -272,7 +274,12 @@ fn master_authority_tmux_unknown_holder_keeps_control_and_projection() {
         .join(" ")
         .to_lowercase();
     assert!(master_responsibilities.contains("long-horizon goals"));
-    assert!(master_responsibilities.contains("bounded one-shot"));
+    assert!(master_responsibilities.contains("one-shot execution or observation"));
+    assert!(master_responsibilities.contains("bounded subagent tasks"));
+    assert!(master_responsibilities.contains("no new task and no actionable work"));
+    assert!(
+        master_responsibilities.contains("close your owned patrol tasks and timed subscriptions")
+    );
     assert!(master_responsibilities.contains("codex exec --profile gcm"));
     assert!(master_responsibilities.contains("no inherited master authority"));
     assert!(!master_responsibilities.contains("saturate every live present peer first"));
@@ -285,13 +292,16 @@ fn master_authority_tmux_unknown_holder_keeps_control_and_projection() {
         "idle master next_actions must project role_brief.next_action: {context}"
     );
     let next_action_lower = next_action.to_lowercase();
-    assert!(next_action_lower.contains("peer-first"), "{next_action}");
+    assert!(
+        next_action_lower.contains("long-horizon goals to authorized peers"),
+        "{next_action}"
+    );
     assert!(
         next_action_lower.contains("codex exec --profile gcm"),
         "{next_action}"
     );
     assert!(
-        next_action_lower.contains("canonical intake"),
+        next_action_lower.contains("project-canonical intake"),
         "{next_action}"
     );
     assert!(
@@ -299,13 +309,17 @@ fn master_authority_tmux_unknown_holder_keeps_control_and_projection() {
         "{next_action}"
     );
     assert!(next_action_lower.contains("re-arm"), "{next_action}");
-    // Durable identity stays Present for the registered pane; endpoint
-    // reachability and agent activity are separate observations.
-    assert_eq!(context["liveness"]["presence"], "present");
+    // The fixture runner provides a reachable pane, but no confirmed agent.
+    assert_eq!(context["liveness"]["presence"], "unknown");
+    assert_eq!(
+        context["agent"]["presence_observation"]["reason"],
+        "unsupported_foreground_process"
+    );
     assert_eq!(context["liveness"]["live"], true);
     assert_eq!(context["master"]["endpoint_live"], true);
     assert_eq!(context["agent"]["thread_state"], "unknown");
-    assert_eq!(context["agent"]["latest_turn_status"], "unknown");
+    assert_eq!(context["agent"]["activity"], "unknown");
+    assert!(context["agent"]["latest_turn_status"].is_null());
     assert!(context["agent"]["can_accept_direct_input"].is_null());
 
     let published = fixture.run_ok(

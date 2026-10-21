@@ -1,60 +1,70 @@
 {
   "id": "appsdk-collab-subscription-lifecycle",
-  "version": "0.2.0",
-  "description": "SESE subscription lifecycle for registered workers. Consume the committed binding without selecting or probing communication again. The existing subscription owner commits default lease creation, explicit admission, alignment and durable active state; explicit unsubscribe starts a later lifecycle epoch. Ordinary peers may explicitly create finite owner-scoped generic deadline subscriptions for assigned patrol work. Master-idle and project goal deadlines require current master authority; managed subworkers cannot create independent deadline schedules. Schedule and TTL validation precede persistence. Role reminders require masters and peers to update patrol tasks and subscriptions without inventing schedules during registration or context restoration.",
-  "inputs": [
-    {
-      "id": "worker_transport_registration",
-      "schema": "Object"
-    }
-  ],
+  "version": "0.3.0",
+  "description": "一次 persisted subscription lifecycle transition 的目标设计 SESE。输入使用已提交的 worker binding，不重新选择身份。普通 peer 可创建有限的 owner-scoped 分内订阅；项目 goal deadline 和 master-idle reminder 只允许当前 master；managed subworker 不能创建独立 deadline。同 target 的 transport-lost 恢复回到 armed 时必须保留 subscription ID、schedule、TTL 和 fired count；explicit unsubscribe、expired 和 consumed 是单向终态，不复活。该图声明状态合同，不声明通知实现或 runtime 已验收。",
+  "inputs": [{"id": "subscription_transition_request", "schema": "Object"}],
   "nodes": [
     {
-      "id": "select_registered_transport",
-      "description": "Use the authenticated owner's committed transport. Explicit subscription admission validates event class, finite schedule and TTL before persistence; ordinary peer deadlines remain owner-scoped, while master-idle and goal deadlines retain current master authority.",
+      "id": "读取持久订阅与目标",
       "operator": "appsdk.collab_subscription.select_transport",
       "operator_version": "1",
-      "inputs": ["worker_transport_registration"],
-      "output": {"id": "transport_binding", "schema": "Object"},
+      "description": "读取 authenticated owner 的已提交 binding、subscription ID、事件类别、subject、schedule、TTL、fired count、当前生命周期状态和既有投递位置。不得重新注册身份或按 transport 猜测。",
+      "inputs": ["subscription_transition_request"],
+      "output": {"id": "subscription_scope", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
       "output_selector": {"include": [], "exclude": [], "predicate": null},
       "iterator": "Whole"
     },
     {
-      "id": "upsert_default_direct_message_lease",
-      "operator": "appsdk.collab_subscription.upsert_default_lease",
+      "id": "分类生命周期转换",
+      "operator": "appsdk.collab_subscription.classify_transition",
       "operator_version": "1",
-      "inputs": ["transport_binding"],
-      "output": {"id": "subscription_created", "schema": "Object"},
+      "description": "区分 create、同 target transport-lost 恢复、同 target transport 恢复、explicit unsubscribe、expired、consumed 和 suppressed。同 target 恢复不能被 method/target 未变跳过；终态不能进入 create 或 recovery。",
+      "inputs": ["subscription_scope"],
+      "output": {"id": "lifecycle_transition", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
       "output_selector": {"include": [], "exclude": [], "predicate": null},
       "iterator": "Whole"
     },
     {
-      "id": "verify_subscription_transport_alignment",
-      "operator": "appsdk.collab_subscription.verify_transport_alignment",
+      "id": "校验角色范围与有限计划",
+      "operator": "appsdk.collab_subscription.authorize_scope",
       "operator_version": "1",
-      "inputs": ["subscription_created"],
-      "output": {"id": "aligned_lease", "schema": "Object"},
+      "description": "普通 peer 只能创建 owner-scoped、与已分配工作相关且有限 schedule/TTL 的订阅。项目 goal deadline 和 master-idle reminder 核对当前 master authority；managed subworker 拒绝独立 deadline。事件类别、subject、schedule 和 TTL 在持久化前校验。",
+      "inputs": ["lifecycle_transition"],
+      "output": {"id": "authorized_subscription_transition", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
       "output_selector": {"include": [], "exclude": [], "predicate": null},
       "iterator": "Whole"
     },
     {
-      "id": "persist_active_subscription_state",
-      "operator": "appsdk.collab_subscription.persist_active_state",
+      "id": "提交单向生命周期状态",
+      "operator": "appsdk.collab_subscription.commit_state",
       "operator_version": "1",
-      "inputs": ["aligned_lease"],
-      "output": {"id": "active_subscription_state", "schema": "Object"},
+      "description": "创建或恢复后提交 armed。同 target transport 变化只更新投递位置，保留 subscription ID、trigger、schedule、expiry 和 fired count。explicit unsubscribe 提交 cancelled/suppressed；TTL 到期提交 expired；一次性通知消费提交 consumed。终态不自动 rearm。",
+      "inputs": ["authorized_subscription_transition"],
+      "output": {"id": "committed_subscription_state", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "投影订阅生命周期结果",
+      "operator": "appsdk.collab_subscription.emit_result",
+      "operator_version": "1",
+      "description": "输出 armed、cancelled、expired、consumed 或明确拒绝。持久订阅状态、adapter 接受、实际触发和消费回执分别报告，不以 RPC acceptance 代替消费。",
+      "inputs": ["committed_subscription_state"],
+      "output": {"id": "subscription_result", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
       "output_selector": {"include": [], "exclude": [], "predicate": null},
       "iterator": "Whole"
     }
   ],
   "edges": [
-    {"from": "select_registered_transport", "to": "upsert_default_direct_message_lease", "arc_id": "transport_binding"},
-    {"from": "upsert_default_direct_message_lease", "to": "verify_subscription_transport_alignment", "arc_id": "subscription_created"},
-    {"from": "verify_subscription_transport_alignment", "to": "persist_active_subscription_state", "arc_id": "aligned_lease"}
+    {"from": "读取持久订阅与目标", "to": "分类生命周期转换", "arc_id": "subscription_scope"},
+    {"from": "分类生命周期转换", "to": "校验角色范围与有限计划", "arc_id": "lifecycle_transition"},
+    {"from": "校验角色范围与有限计划", "to": "提交单向生命周期状态", "arc_id": "authorized_subscription_transition"},
+    {"from": "提交单向生命周期状态", "to": "投影订阅生命周期结果", "arc_id": "committed_subscription_state"}
   ],
-  "outputs": ["active_subscription_state"]
+  "outputs": ["subscription_result"]
 }

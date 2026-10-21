@@ -23,6 +23,30 @@ fn initial_tmux_registers_once_without_participant_return() {
     let response: Value = serde_json::from_slice(&output.stdout).expect("typed context result");
     assert!(output.status.success(), "{response}");
     assert_eq!(response["result"]["outcome"], "completed", "{response}");
+    let patrol_contract = "For your own ongoing long-horizon goals, create and maintain finite patrol tasks and subscriptions. On each new master assignment, evaluate the goal, dependencies, blockers, priorities and resources, then update existing patrol tasks and subscriptions before proceeding; add only missing scope and retire obsolete owned scope without duplicating timers.";
+    let closes_idle_patrol = |snapshot: &Value| {
+        snapshot["role_brief"]["responsibilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|rule| {
+                rule.contains("no new task and no actionable work")
+                    && rule.contains("close your owned patrol tasks and timed subscriptions")
+            })
+    };
+    assert!(
+        closes_idle_patrol(&response["result"]["snapshot"]),
+        "{response}"
+    );
+    assert!(
+        response["result"]["snapshot"]["role_brief"]["responsibilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|rule| rule == patrol_contract),
+        "registration must explain peer-owned patrol and assignment reassessment: {response}"
+    );
     assert_eq!(registration_effects(&fixture), [1, 1], "{response}");
     assert!(!fixture
         .host_state
@@ -30,6 +54,18 @@ fn initial_tmux_registers_once_without_participant_return() {
         .exists());
     let replay = fixture.context(Some("gate-no-return"), Some(&pane));
     assert_eq!(replay["result"]["outcome"], "completed", "{replay}");
+    assert!(
+        closes_idle_patrol(&replay["result"]["snapshot"]),
+        "{replay}"
+    );
+    assert!(
+        replay["result"]["snapshot"]["role_brief"]["responsibilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|rule| rule == patrol_contract),
+        "recovery must retain the peer patrol contract: {replay}"
+    );
     assert_eq!(registration_effects(&fixture), [1, 1]);
     let before = std::fs::read(fixture.project_journal()).unwrap();
     let query = fixture.context_query("gate-no-return", Some(&pane));
@@ -41,9 +77,31 @@ fn initial_tmux_registers_once_without_participant_return() {
 }
 
 #[test]
+fn tmux_without_agent_session_requires_facts_before_registration() {
+    let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (fixture, pane) = Fixture::isolated("tmux-missing-agent-session");
+    let output = fixture
+        .configured_command(&["context", "--op", "missing-agent-session"], Some(&pane))
+        .env_remove("CODEX_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("CODEX_THREAD")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["result"]["outcome"], "missing_facts");
+    assert_eq!(
+        response["result"]["requires"]["fields"],
+        json!(["session_id"])
+    );
+    assert_eq!(response["result"]["committed_phases"], json!([]));
+    assert_eq!(registration_effects(&fixture), [0, 0]);
+}
+
+#[test]
 fn valid_tmux_ignores_unselected_appserver_facts() {
     let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
-    for (label, facts) in [
+    for (label, mut facts) in [
         (
             "tmux-partial-native",
             json!({"endpoint":"unix:///unused.sock"}),
@@ -51,6 +109,7 @@ fn valid_tmux_ignores_unselected_appserver_facts() {
         ("tmux-invalid-native", json!({"endpoint":"https://unused"})),
     ] {
         let (fixture, pane) = Fixture::isolated(label);
+        facts["session_id"] = json!(pane.session_anchor);
         let output = fixture
             .configured_command(
                 &["context", "--op", label, "--provide", &facts.to_string()],

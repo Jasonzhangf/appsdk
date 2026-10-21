@@ -271,7 +271,9 @@ impl Server {
         });
         if (events
             .iter()
-            .any(|event| matches!(event, Event::Sent { .. }))
+            .any(|event| {
+                matches!(event, Event::Sent { .. } | Event::MailboxReassigned { .. })
+            })
             && !has_pending_scheduler_admission)
             || has_succeeded_scheduler_admission
             || events
@@ -540,7 +542,9 @@ impl Server {
                             })
                     })
         });
-        if (evs.iter().any(|event| matches!(event, Event::Sent { .. }))
+        if (evs.iter().any(|event| {
+            matches!(event, Event::Sent { .. } | Event::MailboxReassigned { .. })
+        })
             && !has_pending_scheduler_admission)
             || has_succeeded_scheduler_admission
             || evs
@@ -652,6 +656,13 @@ impl Server {
             if let Event::Sent { msg } = ev {
                 if let Err(error) = self.backup_message(msg) {
                     self.report_mailbox_projection_error(error);
+                }
+            }
+            if let Event::MailboxReassigned { handoff } = ev {
+                if let Some(msg) = st.msgs.get(&handoff.message_id) {
+                    if let Err(error) = self.backup_message(msg) {
+                        self.report_mailbox_projection_error(error);
+                    }
                 }
             }
             if let Event::Delivered { ids } = ev {

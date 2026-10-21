@@ -62,9 +62,10 @@ fn role_contract_is_identical_across_context_workers_and_status() {
             "master" => {
                 assert!(role_task.contains("long-horizon"));
                 assert!(role_task.contains("bounded"));
+                assert!(role_task.contains("orchestrator"));
                 assert!(responsibilities.contains("codex exec --profile gcm"));
-                assert!(responsibilities.contains("peer-first"));
-                assert!(responsibilities.contains("every eligible peer"));
+                assert!(responsibilities.contains("authorized peers"));
+                assert!(responsibilities.contains("regardless of whether other peers are busy"));
                 assert!(responsibilities.contains("protected_hold"));
                 assert!(responsibilities.contains("only its own project"));
                 assert!(responsibilities.contains("non-overlapping"));
@@ -87,7 +88,7 @@ fn role_contract_is_identical_across_context_workers_and_status() {
                 assert!(responsibilities.contains("canonical intake and deduplication"));
                 assert!(responsibilities.contains("owning project contract"));
                 assert!(responsibilities.contains("daemon or tmux lifecycle actions"));
-                assert!(responsibilities.contains("do not claim master grants"));
+                assert!(responsibilities.contains("do not claim master authority"));
                 assert_eq!(
                     context.data["role_brief"]["authority"],
                     serde_json::json!({
@@ -135,7 +136,7 @@ fn role_contract_is_identical_across_context_workers_and_status() {
 }
 
 #[test]
-fn absent_tmux_master_allows_approved_peer_promotion() {
+fn absent_tmux_master_requires_name_recovery_before_peer_promotion() {
     let (server, root) = test_server();
     register(&server, "peer-a", "thread-a");
     register(&server, "peer-b", "thread-b");
@@ -160,7 +161,18 @@ fn absent_tmux_master_allows_approved_peer_promotion() {
         "token-peer-b".into(),
         "user approved peer-b after the previous master runtime died".into(),
     );
-    assert!(promoted.ok, "{}", promoted.error.unwrap_or_default());
+    assert!(!promoted.ok, "{promoted:?}");
+    assert!(promoted
+        .error
+        .as_deref()
+        .unwrap()
+        .starts_with("NAME_RECOVERY_REQUIRED"));
+    assert_eq!(promoted.data["outcome"], "pending");
+    assert_eq!(
+        super::handle_master_status(&server).data["master"]["worker_id"],
+        "peer-a"
+    );
+    confirm_test_jenny_takeover(&server, "peer-b");
     assert_eq!(
         super::current_master_holder(&server, &server.state.lock().unwrap()).unwrap(),
         Some("peer-b".into())
@@ -171,11 +183,11 @@ fn absent_tmux_master_allows_approved_peer_promotion() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-/// The recorded grant is the only authority, and an explicit user-approved
-/// promotion replaces the incumbent even while the incumbent's pane answers.
-/// A pane is an address, so it cannot veto the owner's decision.
+/// Legacy approval alone cannot replace an occupied Jenny. A confirmed name
+/// recovery can replace it without requiring the previous executor to stop.
 #[test]
 fn approved_promotion_supersedes_a_live_tmux_master() {
+    use super::name_state::{AgentPresence, AgentPresenceRecord};
     let (server, root) = test_server();
     register(&server, "peer-a", "thread-a");
     register(&server, "peer-b", "thread-b");
@@ -197,19 +209,60 @@ fn approved_promotion_supersedes_a_live_tmux_master() {
     let context = handle_context(&server, "peer-b".into(), "token-peer-b".into());
     assert_eq!(context.data["master"]["worker_id"], "peer-a", "{context:?}");
 
+    // The name owner consumes current typed observations, not pane existence.
+    let binding = registered_binding(&server, "peer-a");
+    server
+        .commit_checked(&[Event::AgentPresenceObserved {
+            presence: AgentPresenceRecord {
+                project_scope: binding.project_scope.as_str().into(),
+                worker_id: "peer-a".into(),
+                session_id: binding.session_id.unwrap().to_string(),
+                presence: AgentPresence::Online,
+                reason: "controlled current-agent online observation".into(),
+                observed_ms: now_ms(),
+            },
+        }])
+        .unwrap();
+
     let promoted = super::handle_master_promote(
         &server,
         "peer-b".into(),
         "token-peer-b".into(),
         "user approved peer-b after the previous master thread became unusable".into(),
     );
-    assert!(promoted.ok, "{promoted:?}");
-    assert_eq!(promoted.data["master"], "peer-b");
+    assert!(!promoted.ok, "{promoted:?}");
+    assert!(promoted
+        .error
+        .as_deref()
+        .unwrap()
+        .starts_with("NAME_RECOVERY_REQUIRED"));
+    assert_eq!(promoted.data["outcome"], "confirmation_required");
+    assert_eq!(
+        super::handle_master_status(&server).data["master"]["worker_id"],
+        "peer-a"
+    );
+    confirm_test_jenny_takeover(&server, "peer-b");
     assert_eq!(
         super::current_master_holder(&server, &server.state.lock().unwrap()).unwrap(),
         Some("peer-b".into())
     );
     std::fs::remove_dir_all(root).unwrap();
+}
+
+fn confirm_test_jenny_takeover(server: &Server, worker_id: &str) {
+    let result = super::name_resolution::resolve_registered_name(
+        server,
+        worker_id,
+        &format!("confirmed-jenny-{worker_id}"),
+        "approved_recovery",
+        Some(super::name_resolution::NameIntent {
+            requested_name: "Jenny".into(),
+            user_authorized: true,
+            replace_confirmed: true,
+        }),
+    )
+    .unwrap();
+    assert_eq!(result["outcome"], "committed", "{result}");
 }
 
 #[test]
@@ -897,6 +950,16 @@ fn legacy_master_assignment_cannot_override_typed_grant_on_replay() {
     );
     assert!(promoted.ok, "{}", promoted.error.unwrap_or_default());
 
+    let binding = registered_binding(&server, "peer-appserver");
+    let typed_grant = server
+        .state
+        .lock()
+        .unwrap()
+        .global
+        .lookup_master_grant_for(&binding.route_scope(), &binding.binding_id)
+        .unwrap()
+        .clone();
+
     let legacy = Event::MasterAssigned {
         worker_id: "peer-appserver".into(),
         assigned_by: "legacy-operator".into(),
@@ -924,7 +987,7 @@ fn legacy_master_assignment_cannot_override_typed_grant_on_replay() {
         .global
         .lookup_master_grant_for(&binding.route_scope(), &binding.binding_id)
         .expect("typed grant must remain authoritative");
-    assert_eq!(grant.granted_by, "peer-appserver");
+    assert_eq!(grant, &typed_grant);
     std::fs::remove_dir_all(root).unwrap();
 }
 

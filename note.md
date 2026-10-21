@@ -257,3 +257,93 @@
   COLLAB_TEST_MCP_BINARY): `collab` 1048 passed, 1 ignored;
   `collab-mcp` 27 passed: `green/post-review-finding-full-binary-suite-green.log`.
 - Commit: `2bfc8277 fix(collab): preserve binding in worker status diagnosis`.
+
+## 2026-10-20 — stable names and runtime closure
+
+Names own project work; the agent sessionID is its current execution carrier.
+Current name/session recovery, fixed-pool allocation, confirmed Jenny takeover,
+Jenny adjudication, open-task/resource retarget, unread named-mail inheritance,
+finite peer patrol recovery and Codex presence/activity now share the declared
+owner boundaries. Master and peer orchestrate at different goal levels;
+one-shot execution/observation goes to GCM subworkers. Tmux only locates probes
+and delivery and never supplies a name or identity key.
+
+Late public consumers exposed and closed role/name delegation and clear,
+self-unregister peer recovery, grant-effect receipts, route-less tmux close,
+and denied-reset pre-authorization mutation. Current source evidence:
+1117 main unit tests, 26 MCP tests, 47 primary consumers, 64 context contracts
+and all 14 additional consumer targets pass via affected-scope reuse/retests;
+one existing unit test remains ignored. Graph, source-format and raw red/green
+receipts are in `~/.collab/runs/name-runtime-closure-20261020/verification.md`.
+This entry is source/candidate evidence. Independent milestone review,
+integration and formal installation follow. The global daemon is user-managed;
+no agent up/down/restart or tmux/pane lifecycle action was performed.
+
+Combined latest main 39d836aa and retained upstream recovery/status and
+read-only delivery behavior. Combined coverage passed 1320 Collab cases and
+16 graph gates, with one existing ignored case. Snapshot fixture readiness
+now waits for its independent background adjudication notices before the
+unchanged full-journal purity assertions.
+
+Independent whole review found four P1 gaps. Repairs retain project/name
+occupancy revision history across release/replay/snapshot, restore current
+daemon route selection before exact read-only credentials, and remove the
+remaining tmux identity and peer-all-busy GCM restrictions from source/global
+Skills. New public red cases reproduced repeated unread-mail handoff loss and
+same-session historical-credential ambiguity; affected green results are in
+`finding-mailbox-result.md` and `finding-reader-result.md` under the run.
+Independent findings-only follow-up closed all four P1s with no new findings;
+host schema classification passed. Final shared units: 1124 main passed,
+27 MCP passed, one existing ignored. Integration and installation are recorded
+separately in the run, including final-install.log and remote delivery receipt.
+
+Linux CI exposed C13's independent unknown-presence notification racing its
+post-restart journal baseline. The test now completes the exact seed name
+occupancy/binding notification before making credentials stale. Cancellation,
+query/retry and complete journal equality assertions remain intact. Exact C13
+and the full 64-case context target pass locally; only the test file changed.
+Installed/runtime product version remains 0.2.0300. User restarted the daemon;
+new PID57606 responds and the existing RouteCodex project's seven worker
+identities are valid. Linux CI confirmation and remote merge remain pending.
+
+User added peer patrol reassessment: peers own patrol tasks/subscriptions for
+their ongoing goals and evaluate/update existing patrol scope on every master
+assignment. The shared role brief carries this at registration, recovery and
+board invitation; source/global Skill and stable-name reference agree.
+Registration/recovery public red then 6-case green passed. Formal 0.2.0301
+installed and 8 installed registration/endpoint cases passed. Loaded daemon
+remains 0.2.0300 until the final user maintenance activation.
+
+Second Linux CI passed C13 and all 64 context cases. Its next first failure
+was the endpoint projection test asserting periodic agent facts before the
+first observation. Added an exact project/worker/session fact readiness wait;
+all endpoint and agent-state assertions remain. Both endpoint cases pass.
+
+Third Linux CI reached Snapshot and exposed a production receipt bug: the
+first notification attempt accepted a batch, but a later empty-batch skip
+appended a failure for another message already accepted in that batch. The
+notification owner now preserves current-carrier acceptance on a skipped
+attempt. A pending name-handoff wake still records its own failure. A new
+deterministic red reproduced the erroneous journal write; all 15 batch units
+and all 8 public peer lifecycle cases pass after repair. The return class and
+actual delivery/consumption behavior remain explicit. Further review, final
+build activation and Linux confirmation follow in the run.
+
+Receipt repair passed independent targeted review and final shared units
+(1126 main, 27 MCP, one existing ignored); official 0.2.0302 installed.
+Fourth CI passed Snapshot and reached a second periodic-presence consumer.
+The two observation consumers now share one exact current-session readiness
+helper. Candidate endpoint2, peer8 and master-authority8 pass. The rebuild
+consumer now identifies its exact message among legitimate existing patrol
+mail and still checks its true consumption receipt. Release consumers exclude
+only the test-build fault-injection case; that case remains required/passing
+on the hook-enabled candidate. Final installed evidence is retained separately.
+
+Main feature candidate a6c7b603 passed all applicable remote CI. User then
+required active patrol shutdown: master/peer must close owned patrol tasks and
+timed subscriptions after completion or when no new task/actionable work
+remains, without recreating idle loops. Direct-message reception remains.
+One shared runtime rule and source/global Collab/recovery/migration Skills now
+state this. Public registration red reproduced the missing rule; registration6
+and authority8 pass after the text change. Official 0.2.0303 is installed;
+final user activation and this small addition's CI remain pending.

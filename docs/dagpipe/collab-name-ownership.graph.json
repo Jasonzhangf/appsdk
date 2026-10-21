@@ -1,0 +1,70 @@
+{
+  "id": "appsdk-collab-name-ownership",
+  "version": "0.1.0",
+  "description": "一次名字注册、恢复、占用确认或待决续接的目标设计 SESE。名字是项目内工作归属，agent sessionID 是当前执行载体。当前名字工作者的 sessionID 变化时，更新名字并自动换绑同名全部未关闭任务；closed 历史不变。在线其他工作者默认保留，本次用户明确要求且二次确认后才替换。unknown 首次调用保存持久请求并返回 pending；裁决后的续接是下一次调用，从持久请求读取，不画回边。snapshot 失败、Jenny 不可用或仍 unknown 时保留原绑定。旧 session 不阻止新 session 执行，不通知、停止或撤权旧执行者。该图只声明目标逻辑，不声明 operator 已注册或 runtime 已验收。",
+  "inputs": [{"id": "name_context_request", "schema": "Object"}],
+  "nodes": [
+    {
+      "id": "读取当前项目名字占用",
+      "operator": "appsdk.collab_name.read_ownership",
+      "operator_version": "1",
+      "description": "读取项目隔离的固定名字池、持久名字占用、当前 agent sessionID、通信 binding 和既有 context operation。普通池顺序为 Alice, Bob, Carol, David, Emma, Frank, Grace, Henry, Iris, Jack, Kate, Leo, Mia, Noah, Olivia, Peter, Quinn, Rose, Sam, Tina；Jenny 不占普通名字名额。",
+      "inputs": ["name_context_request"],
+      "output": {"id": "name_scope", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "分类当前工作者与名字候选",
+      "operator": "appsdk.collab_name.classify_resolution",
+      "operator_version": "1",
+      "description": "同项目同 agent sessionID 幂等恢复；名字仍属于当前工作者时接受 S1→S2 session 更新；已确认 offline 的名字进入正常分配或继承；在线其他工作者默认保留并返回 confirmation_required；unknown 进入持久 pending 并形成当前 Jenny 裁决请求。Jenny 自身 unknown 且无法响应时，用户明确指定恢复 Jenny 并完成接管确认，直接接管其名字和 master，用户确认高于 Jenny 裁决。presence 与 activity 分开，waiting_user 不是 idle，background 不明时 activity unknown。",
+      "inputs": ["name_scope"],
+      "output": {"id": "name_decision", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "提交名字绑定或保存待决",
+      "operator": "appsdk.collab_name.commit_resolution",
+      "operator_version": "1",
+      "description": "committed 分支更新名字 owner、agent sessionID 和当前投递位置；Jenny 的主动委派在同一提交中交接 typed master grant 与名字，清除 master 时明确撤销当前 grant，不能依附历史占名者是否仍是 master。无 grant 的历史 Jenny 普通恢复走 peer 名字池，不自动要求 Jenny 授权。pending 分支只保存原操作、目标名字、占用引用和投递进度。占用变化时旧 pending/裁决不应用；snapshot 失败或 Jenny 不可用时保留原绑定。该节点不执行旧 session 拦截或旧执行者管控。",
+      "inputs": ["name_decision"],
+      "output": {"id": "name_commit_outcome", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "同步全部未关闭任务代理会话",
+      "operator": "appsdk.collab_name.sync_open_assignments",
+      "operator_version": "1",
+      "description": "仅 committed 分支执行。在同一提交中，将该名字下全部未关闭 board assignment 的 agent sessionID 更新为当前 session，并将旧持有者尚未消费的该名字消息及当前唤醒投递归属交给新持有者；不要求 Jenny 再 assign。消息 ID、正文、原发送者和真实回执保持；已消费消息及消费历史不迁移、不重放。保留 task ID、状态、证据、资源、revision 历史、merge obligation 和 cleanup obligation；closed 历史不回写。pending 或失败分支不改任务或邮箱。",
+      "inputs": ["name_commit_outcome"],
+      "output": {"id": "assignment_sync_outcome", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "投影本次名字归属结果",
+      "operator": "appsdk.collab_name.emit_outcome",
+      "operator_version": "1",
+      "description": "返回 committed、confirmation_required、pending、stale_decision 或 explicit_failure，并包含当前名字、当前 agent sessionID、未关闭任务 synced 数量和持久续接引用。不得将 pending 或失败表示为 registered/committed。",
+      "inputs": ["assignment_sync_outcome"],
+      "output": {"id": "name_resolution_outcome", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {"from": "读取当前项目名字占用", "to": "分类当前工作者与名字候选", "arc_id": "name_scope"},
+    {"from": "分类当前工作者与名字候选", "to": "提交名字绑定或保存待决", "arc_id": "name_decision"},
+    {"from": "提交名字绑定或保存待决", "to": "同步全部未关闭任务代理会话", "arc_id": "name_commit_outcome"},
+    {"from": "同步全部未关闭任务代理会话", "to": "投影本次名字归属结果", "arc_id": "assignment_sync_outcome"}
+  ],
+  "outputs": ["name_resolution_outcome"]
+}

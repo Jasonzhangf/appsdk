@@ -23,7 +23,7 @@ fn initial_tmux_registers_once_without_participant_return() {
     let response: Value = serde_json::from_slice(&output.stdout).expect("typed context result");
     assert!(output.status.success(), "{response}");
     assert_eq!(response["result"]["outcome"], "completed", "{response}");
-    let patrol_contract = "For your own ongoing long-horizon goals, create and maintain finite patrol tasks and subscriptions. On each new master assignment, evaluate the goal, dependencies, blockers, priorities and resources, then update existing patrol tasks and subscriptions before proceeding; add only missing scope and retire obsolete owned scope without duplicating timers.";
+    let patrol_contract = "For your own ongoing long-horizon goals, create and maintain finite patrol tasks and subscriptions. On each new master assignment, evaluate the goal, dependencies, blockers, priorities and resources, and update existing patrol scope as part of that assessment; add only missing scope and retire obsolete owned scope without duplicating timers. Subscription housekeeping does not gate ready authorized work.";
     let closes_idle_patrol = |snapshot: &Value| {
         snapshot["role_brief"]["responsibilities"]
             .as_array()

@@ -778,14 +778,7 @@ pub(crate) fn public_context_response(
 }
 
 pub(crate) fn lifecycle_identity(scope: &scope::Scope) -> anyhow::Result<Identity> {
-    let identity =
-        identity::load_existing_at(&scope.host_paths()?, scope, None)?.ok_or_else(|| {
-            anyhow::anyhow!(
-                "PEER_LIFECYCLE_IDENTITY_REQUIRED: no local peer identity exists for this project"
-            )
-        })?;
-    runtime_for_request(&identity)?;
-    Ok(identity)
+    crate::registered_project_identity(scope)
 }
 
 fn lifecycle_prep_read(

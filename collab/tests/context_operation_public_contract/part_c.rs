@@ -49,6 +49,101 @@ fn stale_seeded_identity(fixture: &Fixture, seed: &Value) -> IdentityFence {
     }
 }
 
+// Finish the simulated master's independent unknown-presence notification
+// while its seed binding and credentials are still current. Recovery keeps
+// this occupancy, so later query/retry baselines include the completed wake.
+fn c13_stale_master_after_background_readiness(
+    fixture: &Fixture,
+    pane: &Pane,
+    operation_id: &str,
+) -> IdentityFence {
+    let seed = fixture.registered_context(operation_id, pane);
+    assert_eq!(seed["result"]["outcome"], "completed", "{seed}");
+    fixture.run_ok(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "fixture approved grant seed",
+        ],
+        Some(pane),
+    );
+    let binding = &seed["result"]["snapshot"]["binding"];
+    let worker_id = &seed["result"]["snapshot"]["identity"]["worker_id"];
+    let initial = read_lines(&fixture.project_journal());
+    let event = initial
+        .iter()
+        .rev()
+        .find(|event| {
+            event["ev"] == "NameResolutionCommitted"
+                && event["project_scope"] == binding["project_scope"]
+                && event["occupancy"]["worker_id"] == *worker_id
+                && event["occupancy"]["session_id"] == binding["session_id"]
+        })
+        .expect("seed master has a current typed occupancy");
+    let occupancy = &event["occupancy"];
+    assert_eq!(occupancy["name"], "Jenny");
+    let reference = json!({
+        "project_scope": event["project_scope"],
+        "name": occupancy["name"],
+        "worker_id": occupancy["worker_id"],
+        "session_id": occupancy["session_id"],
+        "occupancy_revision": occupancy["occupancy_revision"]
+    });
+    let caller_binding = json!({
+        "app_scope_id": binding["app_scope_id"],
+        "binding_id": binding["binding_id"],
+        "endpoint_generation": binding["endpoint_generation"]
+    });
+    let mut delivery = None;
+    assert!(wait_until(Duration::from_secs(15), || {
+        let records = read_lines(&fixture.project_journal());
+        let Some(recovery) = records.iter().rev().find(|event| {
+            event["ev"] == "NameRecoveryUpdated"
+                && event["recovery"]["occupancy_ref"] == reference
+                && event["recovery"]["request"]["caller_binding"] == caller_binding
+                && event["recovery"]["request"]["invocation"] == "presence_adjudication"
+                && event["recovery"]["progress"] == "adjudication_requested"
+        }) else {
+            return false;
+        };
+        let id = format!(
+            "name-adjudication-{}",
+            recovery["recovery"]["operation_id"].as_str().unwrap()
+        );
+        delivery = records
+            .iter()
+            .rev()
+            .find(|event| {
+                event["message_id"] == id
+                    && matches!(
+                        event["ev"].as_str(),
+                        Some("NotificationDeliveryAccepted" | "NotificationDeliveryFailed")
+                    )
+            })
+            .map(|event| (id.clone(), event.clone()));
+        delivery.is_some()
+    }), "current master occupancy needs its exact adjudication delivery: {reference}; {caller_binding}; {delivery:?}");
+    let (id, terminal) = delivery.unwrap();
+    assert_eq!(terminal["ev"], "NotificationDeliveryAccepted", "{terminal}");
+    let receipt = fixture.run_ok(&["msg", &id], Some(pane));
+    assert_eq!(receipt["consumed_by_recv"], false, "{receipt}");
+    let received = fixture.run_ok(&["recv", "--timeout", "1"], Some(pane));
+    let messages = received["messages"].as_array().expect("received messages");
+    assert_eq!(
+        messages.len(),
+        1,
+        "only the exact seed background message is consumed: {received}"
+    );
+    assert_eq!(messages[0]["id"], id, "{received}");
+    let receipt = fixture.run_ok(&["msg", &id], Some(pane));
+    assert_eq!(receipt["consumed_by_recv"], true, "{receipt}");
+    eprintln!(
+        "C13 seed background ready: occupancy={reference}; binding={caller_binding}; message={id}"
+    );
+    stale_seeded_identity(fixture, &seed)
+}
+
 /// Cancel one CLI invocation at the pre-send boundary. The fixture holds the
 /// process before the first mutation byte, sends SIGINT, waits until the
 /// process acknowledges it consumed the signal, and only then releases the
@@ -571,8 +666,11 @@ fn c13_cancellation_after_owner_begins_never_claims_cancelled() {
         let mut harness = CancellationHarness::start(&unique_root("c13-partial-hook"));
         let (mut fixture, pane) = Fixture::isolated("collab-v23-c13-partial");
         fixture.enable_cancellation_hooks(harness.socket());
-        let identity_fence =
-            seed_stale_identity(&fixture, &pane, "ctxop-v23-c13-partial-seed", true);
+        let identity_fence = c13_stale_master_after_background_readiness(
+            &fixture,
+            &pane,
+            "ctxop-v23-c13-partial-seed",
+        );
         let status = master_status(&fixture, &pane);
         let expected_grant = grant_fence(&status);
         let identity_approval =
@@ -865,7 +963,11 @@ fn c13_cancellation_after_owner_begins_never_claims_cancelled() {
         let mut harness = CancellationHarness::start(&unique_root("c13-grant-hook"));
         let (mut fixture, pane) = Fixture::isolated("collab-v23-c13-grant");
         fixture.enable_cancellation_hooks(harness.socket());
-        let identity_fence = seed_stale_identity(&fixture, &pane, "ctxop-v23-c13-grant-seed", true);
+        let identity_fence = c13_stale_master_after_background_readiness(
+            &fixture,
+            &pane,
+            "ctxop-v23-c13-grant-seed",
+        );
         let status = master_status(&fixture, &pane);
         let expected_grant = grant_fence(&status);
         let identity_approval =

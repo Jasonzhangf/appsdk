@@ -296,3 +296,12 @@ Independent findings-only follow-up closed all four P1s with no new findings;
 host schema classification passed. Final shared units: 1124 main passed,
 27 MCP passed, one existing ignored. Integration and installation are recorded
 separately in the run, including final-install.log and remote delivery receipt.
+
+Linux CI exposed C13's independent unknown-presence notification racing its
+post-restart journal baseline. The test now completes the exact seed name
+occupancy/binding notification before making credentials stale. Cancellation,
+query/retry and complete journal equality assertions remain intact. Exact C13
+and the full 64-case context target pass locally; only the test file changed.
+Installed/runtime product version remains 0.2.0300. User restarted the daemon;
+new PID57606 responds and the existing RouteCodex project's seven worker
+identities are valid. Linux CI confirmation and remote merge remain pending.

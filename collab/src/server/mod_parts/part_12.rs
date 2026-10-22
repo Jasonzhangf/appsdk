@@ -339,7 +339,7 @@ async fn conn_task_routed(
         }
         if close_daemon {
             if let Some(sender) = &user_shutdown {
-                let _ = sender.send(()).await;
+                let _ = sender.try_send(());
             }
             break;
         }
@@ -368,19 +368,36 @@ async fn conn_task_degraded(
     operation_journal: Arc<crate::server::operation_journal::OperationJournal>,
     project_replay_failure: Arc<str>,
     stream: tokio::net::UnixStream,
+    host_paths: HostPaths,
+    maintenance_password: Arc<str>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+    user_shutdown: tokio::sync::mpsc::Sender<()>,
 ) {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
+    loop {
+        let line = tokio::select! {
+            _ = shutdown.changed() => break,
+            line = lines.next_line() => match line {
+                Ok(Some(line)) => line,
+                _ => break,
+            },
+        };
         if line.trim().is_empty() {
             continue;
         }
+        let mut close_daemon = false;
         let resp = match parse_wire_request(&line) {
             Ok((_, Req::Ping)) => Resp::data(json!({
                 "degraded": true,
                 "now": iso(now_ms()),
             })),
+            Ok((_, Req::Shutdown { password })) => {
+                let response = handle_host_shutdown(&host_paths, &maintenance_password, password.as_ref());
+                close_daemon = response.ok;
+                response
+            }
             Ok((
                 Some(project_context),
                 Req::IdentityContext {
@@ -434,7 +451,15 @@ async fn conn_task_degraded(
         };
         let mut out = serde_json::to_string(&resp).expect("serialize resp");
         out.push('\n');
-        if writer.write_all(out.as_bytes()).await.is_err() {
+        let written = tokio::select! {
+            _ = shutdown.changed() => break,
+            result = writer.write_all(out.as_bytes()) => result,
+        };
+        if written.is_err() {
+            break;
+        }
+        if close_daemon {
+            let _ = user_shutdown.try_send(());
             break;
         }
     }
@@ -1285,6 +1310,7 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
         Ok(state) => state,
         Err(error) => {
             let project_replay_failure = format!("{error:#}");
+            let maintenance_password: Arc<str> = crate::config::maintenance_password()?.into();
             append_log(
                 &host_paths.log_path(),
                 &format!("project replay failed; entering query-only degraded mode: {project_replay_failure}"),
@@ -1314,6 +1340,8 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
             })?;
             let pid_metadata = std::fs::symlink_metadata(&pid_path)?;
             let state_root_metadata = std::fs::symlink_metadata(host_paths.state_root())?;
+            let (connection_shutdown, connection_shutdown_rx) = tokio::sync::watch::channel(false);
+            let (user_shutdown_tx, mut user_shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
             let mut interrupt = Box::pin(tokio::signal::ctrl_c());
             let mut terminate = Box::pin(async {
                 let mut signal =
@@ -1335,6 +1363,7 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
             });
             let mut connection_tasks = tokio::task::JoinSet::new();
             tokio::select! {
+                _ = user_shutdown_rx.recv() => {}
                 _ = interrupt.as_mut() => {}
                 _ = terminate.as_mut() => {}
                 _ = state_root_removed.as_mut() => {}
@@ -1346,6 +1375,10 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
                                     operation_journal.clone(),
                                     Arc::from(project_replay_failure.as_str()),
                                     stream,
+                                    host_paths.clone(),
+                                    maintenance_password.clone(),
+                                    connection_shutdown_rx.clone(),
+                                    user_shutdown_tx.clone(),
                                 ));
                             }
                             Err(error) => append_log(
@@ -1356,6 +1389,7 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
                     }
                 } => result,
             }
+            connection_shutdown.send_replace(true);
             while connection_tasks.join_next().await.is_some() {}
             let _ = remove_listener_socket(&sock_path, &socket_metadata);
             if std::fs::symlink_metadata(&pid_path)

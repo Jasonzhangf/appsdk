@@ -231,6 +231,7 @@ pub struct NotificationSubscription {
     pub worker_id: String,
     pub event: String,
     pub subject: Option<String>,
+    #[serde(alias = "pane")]
     pub target: String,
     pub method: String,
     pub trigger_ms: Option<i64>,

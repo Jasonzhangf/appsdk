@@ -30,7 +30,7 @@
       "id": "读取持久名字代理会话与占用",
       "operator": "appsdk.collab_context.read_name_ownership",
       "operator_version": "1",
-      "description": "读取 canonical project/app scope 内的名字占用、当前 agent sessionID、typed agent binding/route 与 endpoint generation、presence、activity、background 事实和持久 context operation。不从其他 scope 或历史 pane 选择身份。名字来自固定池，Jenny 不占普通名字名额；presence 与 activity 分开，waiting_user 不按 idle，background 不明时 activity unknown。",
+      "description": "读取 canonical project/app scope 内的名字占用、当前 agent sessionID、typed agent binding/route 与 endpoint generation、presence、activity、background 事实和持久 context operation。不从其他 scope 或历史 pane 选择身份。显式通信恢复读取回投账本时，initial_register 与 desktop_registration 只作为退役历史跳过，不转成当前 manual challenge；JSON/framing 或其他有效记录错误仍在投递前明确失败。名字来自固定池，Jenny 不占普通名字名额；presence 与 activity 分开，waiting_user 不按 idle，background 不明时 activity unknown。",
       "inputs": ["daemon_available"],
       "output": {"id": "durable_name_scope", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},

@@ -60,7 +60,10 @@ fn records(root: &Path) -> Result<Vec<Record>, String> {
                 .map_err(|error| format!("REGISTER_REPLY_LEDGER_CORRUPT: {error}"))?;
             // Retired initial records are history only. They can neither
             // resume Register nor block explicit communication restoration.
-            if value["purpose"] == "initial_register" {
+            if matches!(
+                value["purpose"].as_str(),
+                Some("initial_register" | "desktop_registration")
+            ) {
                 return Ok(None);
             }
             serde_json::from_value(value)

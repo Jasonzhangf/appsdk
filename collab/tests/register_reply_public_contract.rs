@@ -196,6 +196,29 @@ fn manual_restore_case(returns: bool) {
     };
     let (fixture, pane) = Fixture::isolated(label);
     let seed = fixture.registered_context("manual-seed", &pane);
+    let ledger_path = fixture.host_state.join("register-reply-evidence.jsonl");
+    let historical = ["initial_register", "desktop_registration"]
+        .into_iter()
+        .map(|purpose| {
+            format!(
+                "{}\n",
+                json!({
+                    "purpose":purpose,
+                    "operation_id":format!("retired-{purpose}"),
+                    "worker_id":seed["result"]["snapshot"]["identity"]["worker_id"],
+                    "transport":seed["result"]["snapshot"]["identity"]["transport"],
+                    "prepared":{"historical_registration_intent":true},
+                    "continuation":null,
+                    "marker":"retired-fixture-challenge",
+                    "dispatched_ms":1,
+                    "dispatch_started":true,
+                    "dispatch_receipt":{"accepted":true},
+                    "verified":{"historical_participant_return":true}
+                })
+            )
+        })
+        .collect::<String>();
+    std::fs::write(&ledger_path, &historical).unwrap();
     fixture.run_ok(
         &[
             "master",
@@ -252,6 +275,9 @@ sleep 600
     );
     let challenge: Value =
         serde_json::from_slice(&std::fs::read(&challenge_file).unwrap()).unwrap();
+    assert!(std::fs::read(&ledger_path)
+        .unwrap()
+        .starts_with(historical.as_bytes()));
     let before: Value = serde_json::from_slice(&std::fs::read(endpoint_file).unwrap()).unwrap();
     let binding = before["result"]["snapshot"]["binding"].clone();
     let identity = before["result"]["snapshot"]["identity"].clone();
@@ -306,4 +332,48 @@ fn manual_communication_restore_success_keeps_identity_role_grant_and_binding() 
 fn manual_communication_restore_no_return_keeps_identity_role_grant_and_binding() {
     let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
     manual_restore_case(false);
+}
+
+#[test]
+fn manual_restore_still_rejects_corrupt_or_nonretired_records() {
+    let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
+    for (label, bytes) in [
+        (
+            "retired-malformed",
+            "{\"purpose\":\"desktop_registration\",}\n",
+        ),
+        (
+            "retired-incomplete",
+            "{\"purpose\":\"desktop_registration\"}",
+        ),
+        ("unknown-purpose", "{\"purpose\":\"future_registration\"}\n"),
+        (
+            "invalid-manual",
+            "{\"purpose\":\"manual_communication_restore\"}\n",
+        ),
+    ] {
+        let (fixture, pane) = Fixture::isolated(label);
+        let before = fixture.registered_context("reject-seed", &pane);
+        let ledger = fixture.host_state.join("register-reply-evidence.jsonl");
+        std::fs::write(&ledger, bytes).unwrap();
+        let output = fixture.command(
+            &["context", "--op", label, "--recover-communication"],
+            Some(&pane),
+        );
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(!output.status.success(), "{label}: {result}");
+        assert!(
+            result.to_string().contains("REGISTER_REPLY_LEDGER_CORRUPT"),
+            "{result}"
+        );
+        assert_eq!(std::fs::read(&ledger).unwrap(), bytes.as_bytes());
+        let after = fixture.context(Some("reject-after"), Some(&pane));
+        for field in ["identity", "binding", "master"] {
+            assert_eq!(
+                after["result"]["snapshot"][field], before["result"]["snapshot"][field],
+                "{label}: {field}"
+            );
+        }
+        assert_eq!(registration_effects(&fixture), [1, 1]);
+    }
 }

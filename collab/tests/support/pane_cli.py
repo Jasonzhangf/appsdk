@@ -9,6 +9,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import termios
 import tempfile
 import threading
 import time
@@ -66,11 +67,9 @@ def control_tmux():
 def send_request(socket, pane_id, request):
     tmux = control_tmux()
     subprocess.run(
-        [tmux, "-S", socket, "send-keys", "-t", pane_id, "-l", f"{MARKER}{request}"],
-        check=True,
-    )
-    subprocess.run(
-        [tmux, "-S", socket, "send-keys", "-t", pane_id, "Enter"],
+        # Keep the private frame and its delimiter in one tmux command so a
+        # real notification cannot be pasted between the path and Enter.
+        [tmux, "-S", socket, "send-keys", "-t", pane_id, "-l", f"{MARKER}{request}\n"],
         check=True,
     )
 
@@ -202,6 +201,14 @@ def run_runner(args):
     ready = ready_path(root, args.pane_id)
     children = set()
     child_lock = threading.Lock()
+    if sys.stdin.isatty():
+        # A TUI consumes long notification input without the canonical line
+        # limit. Keep echo for the existing visible tmux delivery assertions.
+        attributes = termios.tcgetattr(sys.stdin.fileno())
+        attributes[3] &= ~termios.ICANON
+        attributes[6][termios.VMIN] = 1
+        attributes[6][termios.VTIME] = 0
+        termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, attributes)
 
     def remember(process):
         with child_lock:

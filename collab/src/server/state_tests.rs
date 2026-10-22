@@ -808,6 +808,53 @@ fn goal_due_is_idempotent_per_revision_and_advances_for_new_revision() {
     assert_eq!(state.master_wake.last_updated_ms, 30);
 }
 
+#[test]
+fn consuming_a_master_goal_deadline_clears_goal_due() {
+    let mut state = State::default();
+    state.master_worker_id = Some("master".into());
+    state.apply(&Event::NotificationSubscribed {
+        subscription: NotificationSubscription {
+            id: "sub-goal-master".into(),
+            worker_id: "master".into(),
+            event: "deadline".into(),
+            subject: Some("goal:sha256:test".into()),
+            target: "thread-master".into(),
+            method: "appserver".into(),
+            trigger_ms: None,
+            trigger_times_ms: vec![9],
+            interval_ms: None,
+            repeat_count: 1,
+            fired_count: 0,
+            expires_ms: 100,
+            status: "armed".into(),
+            created_ms: 1,
+            updated_ms: 1,
+            status_reason: None,
+        },
+    });
+    state.apply(&Event::MasterWakeSignal {
+        signal: MasterWakeSignal::GoalDue { revision: 9 },
+        at_ms: 10,
+    });
+    assert!(state.master_wake.goal_due);
+
+    state.apply(&Event::NotificationConsumed {
+        subscription_id: "sub-goal-master".into(),
+        message_id: "goal-message".into(),
+        consumed_ms: 11,
+    });
+
+    assert!(
+        !state.master_wake.goal_due,
+        "consuming a master goal deadline must clear the master wake goal-due flag"
+    );
+    assert_eq!(state.master_wake.active_goal_revision, None);
+    assert_eq!(
+        state.notification_subscriptions["sub-goal-master"].status,
+        "consumed"
+    );
+}
+
 fn msg(id: &str, to: &str, mtype: &str) -> Message {
     Message {
         id: id.into(),

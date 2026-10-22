@@ -381,8 +381,8 @@ fn compose_notification_with_mtype(
 
     let head = format!("COLLAB_NOTIFY {} [{}] ", id, subject);
     let tail = format!(
-        " | {} ACTION: {}. Details: run `collab recv` to consume this durable notification; inspect `collab msg {}` for details. | {}",
-        priority, action, id, NOTIFY_PROTOCOL
+        " | {} ACTION: {}. Details: run `collab recv` once; it consumes and prints this durable notification. | {}",
+        priority, action, NOTIFY_PROTOCOL
     );
 
     // The protocol and action must survive a long body, so the body absorbs

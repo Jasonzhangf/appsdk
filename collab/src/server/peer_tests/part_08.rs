@@ -633,7 +633,7 @@ fn tmux_notification_requests_durable_receive() {
     .unwrap();
     assert_eq!(
         text,
-        "COLLAB_NOTIFY message-id [release] RESOURCE_RELEASED feature=shared | P1 ACTION: the resource is free; resume the task that waited on it. Details: run `collab recv` to consume this durable notification; inspect `collab msg message-id` for details. | READ IS NOT DONE: never end your turn on an ACK, a read, or a summary. After handling, resume your current task; if you own none, run `appsdk longhorizon show` and take work."
+        "COLLAB_NOTIFY message-id [release] RESOURCE_RELEASED feature=shared | P1 ACTION: the resource is free; resume the task that waited on it. Details: run `collab recv` once; it consumes and prints this durable notification. | READ IS NOT DONE: never end your turn on an ACK, a read, or a summary. After handling, resume your current task; if you own none, run `appsdk longhorizon show` and take work."
     );
     assert!(!text.contains("ACK this notice"));
     assert!(text.contains("READ IS NOT DONE"));
@@ -868,7 +868,7 @@ fn appserver_notification_abbreviates_subject_and_escapes_body_controls() {
     .unwrap();
     assert_eq!(
         text,
-        "COLLAB_NOTIFY message-id [this subject is deliberately longer than forty …] line one\\nline two\\t中文 | P1 ACTION: do the in-scope action the message asks for. Details: run `collab recv` to consume this durable notification; inspect `collab msg message-id` for details. | READ IS NOT DONE: never end your turn on an ACK, a read, or a summary. After handling, resume your current task; if you own none, run `appsdk longhorizon show` and take work."
+        "COLLAB_NOTIFY message-id [this subject is deliberately longer than forty …] line one\\nline two\\t中文 | P1 ACTION: do the in-scope action the message asks for. Details: run `collab recv` once; it consumes and prints this durable notification. | READ IS NOT DONE: never end your turn on an ACK, a read, or a summary. After handling, resume your current task; if you own none, run `appsdk longhorizon show` and take work."
     );
 }
 

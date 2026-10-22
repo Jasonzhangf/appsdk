@@ -178,6 +178,14 @@ impl GlobalState {
                 {
                     continue;
                 }
+                // A retired pane binding may predate the native session and
+                // thread anchors. It is already removed from the live index
+                // above, but it cannot supply the identity a tombstone must
+                // carry. Failing here would block the approved restore that
+                // replaces it with a complete binding.
+                if old.session_id.is_none() || old.native_thread_id.is_none() {
+                    continue;
+                }
                 let key = installed_route_address_key(&old).ok_or_else(|| {
                     StateError::invalid(
                         "current thread route tombstone",

@@ -2,6 +2,98 @@ use super::name_resolution::*;
 use super::name_state::*;
 use super::*;
 
+/// One agent session has one current name carrier. A later commit releases any
+/// other worker's name in that session, while task assignments and closed work
+/// history stay addressable. Journal replay applies the same rule in event
+/// order, so the last committer is the one replayed.
+#[test]
+fn same_session_name_commits_keep_one_carrier_and_replay_in_commit_order() {
+    let alice = NameOccupancy {
+        name: "Alice".into(),
+        worker_id: "old-a".into(),
+        session_id: "s1".into(),
+        occupancy_revision: 1,
+        updated_ms: 1,
+    };
+    let assignment = TaskAssignment {
+        task_id: "task-a".into(),
+        name: "Alice".into(),
+        session_id: "s1".into(),
+        assignment_revision: 1,
+        reflow: None,
+        updated_ms: 1,
+    };
+    let bob = NameOccupancy {
+        name: "Bob".into(),
+        worker_id: "old-b".into(),
+        session_id: "s1".into(),
+        occupancy_revision: 1,
+        updated_ms: 2,
+    };
+    let events = vec![
+        Event::NameResolutionCommitted {
+            project_scope: "/project".into(),
+            occupancy: alice,
+            assignments: vec![assignment.clone()],
+        },
+        Event::NameResolutionCommitted {
+            project_scope: "/project".into(),
+            occupancy: bob,
+            assignments: vec![],
+        },
+    ];
+    let mut state = State::default();
+    for event in &events {
+        state.apply_checked(event).unwrap();
+    }
+    assert!(state.name_occupancy("/project", "Alice").is_none());
+    assert_eq!(
+        state.name_occupancy("/project", "Bob").unwrap().worker_id,
+        "old-b"
+    );
+    assert_eq!(
+        state.task_assignment("task-a"),
+        Some(&assignment),
+        "removing an old session carrier must not delete its task history"
+    );
+
+    let mut replayed = State::default();
+    for event in &events {
+        replayed.apply_checked(event).unwrap();
+    }
+    assert!(replayed.name_occupancy("/project", "Alice").is_none());
+    assert_eq!(
+        replayed.name_occupancy("/project", "Bob").unwrap().worker_id,
+        "old-b"
+    );
+    assert_eq!(replayed.task_assignment("task-a"), Some(&assignment));
+
+    // Another session keeps its own name and does not become a replay
+    // ambiguity for the first session.
+    let other_session = NameOccupancy {
+        name: "Carol".into(),
+        worker_id: "other-session-worker".into(),
+        session_id: "s2".into(),
+        occupancy_revision: 1,
+        updated_ms: 3,
+    };
+    state
+        .apply_checked(&Event::NameResolutionCommitted {
+            project_scope: "/project".into(),
+            occupancy: other_session,
+            assignments: vec![],
+        })
+        .unwrap();
+    assert_eq!(
+        state.name_occupancy("/project", "Bob").unwrap().session_id,
+        "s1"
+    );
+    assert_eq!(
+        state.name_occupancy("/project", "Carol").unwrap().session_id,
+        "s2"
+    );
+}
+
 #[test]
 fn name_handoff_preserves_goal_schedule_and_terminal_history() {
     let (server, root) = peer_tests::test_server();

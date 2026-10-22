@@ -667,10 +667,16 @@ impl Server {
                             });
                         }
                     }
-                    // A pane has one owner. The later registrant therefore
-                    // replaces the previous claimant of this pane in this same
-                    // commit, so the ledger never holds two owners of one pane
-                    // and cannot fence the new owner on the next attempt.
+                    // A pane has one owner, and an agent session has one
+                    // current execution carrier. The later registrant
+                    // replaces both claimants in this same commit, so the
+                    // ledger never holds two current owners and cannot fence
+                    // the new owner on the next attempt. A same-binding retry
+                    // is excluded by the claimant filters below.
+                    let mut superseded = std::collections::BTreeMap::<
+                        (String, String),
+                        (RuntimeBinding, &'static str),
+                    >::new();
                     if let Some(endpoint) = binding.tmux_endpoint.as_ref() {
                         for claimant in pane_claimants(
                             &st,
@@ -678,11 +684,43 @@ impl Server {
                             &binding.route_scope(),
                             endpoint,
                         ) {
-                            events.extend(
-                                pane_reclaim_events(binding.agent_id.as_str(), &claimant)
-                                    .map_err(notification_contract::JournalError::InvalidCommand)?,
-                            );
+                            superseded
+                                .entry((
+                                    claimant.project_scope.as_str().to_owned(),
+                                    claimant.binding_id.as_str().to_owned(),
+                                ))
+                                .or_insert((
+                                    claimant,
+                                    "tmux pane reclaimed by a later registration",
+                                ));
                         }
+                    }
+                    for claimant in session_claimants(
+                        &st,
+                        binding.agent_id.as_str(),
+                        &binding.binding_id,
+                        &binding.route_scope(),
+                        &binding,
+                    ) {
+                        superseded
+                            .entry((
+                                claimant.project_scope.as_str().to_owned(),
+                                claimant.binding_id.as_str().to_owned(),
+                            ))
+                            .or_insert((
+                                claimant,
+                                "runtime session carrier replaced by a later registration",
+                            ));
+                    }
+                    for (_, (claimant, reason)) in superseded {
+                        events.extend(
+                            retire_claimant_events(
+                                binding.agent_id.as_str(),
+                                &claimant,
+                                reason,
+                            )
+                            .map_err(notification_contract::JournalError::InvalidCommand)?,
+                        );
                     }
                     events.push(Event::GlobalRuntimeBound {
                         binding: binding.clone(),

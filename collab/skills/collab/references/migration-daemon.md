@@ -1,210 +1,100 @@
-# Migration and User-Managed Daemon Boundary
+# Context-Owned Migration and User-Managed Daemon Boundary
 
-## Global truth and project-local state
+## Identity recovery includes legacy migration
 
-The host-wide runtime truth is the Collab state root resolved by the installed
-binary:
+Use `collab context` in the current project. Context owns compatibility with
+historical identity records, current name/session selection, registration,
+credential persistence, stale route retirement and communication binding.
+Agents do not inspect archives to choose an identity, close historical workers,
+copy tokens, edit control files or run a separate migration before recovery.
 
-```text
-$COLLAB_STATE_DIR for isolated tests, else $HOME/.collab
-  server.sock
-  daemon.lock
-  server.pid
-  events.jsonl
-  log.txt
-```
+The stable name owns work. The agent sessionID is its current execution carrier.
+Pane, tmux session, socket and server PID only locate delivery and observation.
+They do not establish identity ownership. A later committed registration for the
+same project, app and agent session replaces the previous carrier. It must not
+stop an old process or change another session's identity.
 
-Each registered project keeps its own `.agent-collab/` reducer input and
-project-scoped journal, mailbox projection, tasks, claims, bindings, and
-worktrees. It is project-local durable state, not a disposable cache and not
-the host-wide runtime socket. The global `~/.collab/` state owns the host
-socket, route table, and global identity/liveness records. AppSDK governance
-has a separate truth owner and reset transaction; neither owner may delete or
-rewrite the other's state.
+An explicit approved recovery target is resolved before historical ambiguity.
+Historical bindings cannot veto that authorization. Context supplies its own
+current scope and incumbent facts; agents do not invent fences, timestamps or
+archive choices. Existing approval remains valid for the authorized operation.
+For commands and online takeover confirmation, see
+[stable-name recovery](stable-name-recovery.md#恢复操作context-自己迁移agent-不做历史清理).
 
-For a new or explicitly authorized clean project, do not treat an existing
-project-local `.appsdk/`, `.appsdk-control/`, or `.agent-collab/` directory as
-the new version's baseline. The current global binary is the only runtime
-baseline. AppSDK removal belongs to AppSDK's reset owner; Collab removal belongs
-to the Collab reset/migration owner. Do not migrate or replay legacy local
-history merely to make initialization look clean.
+Context must converge legacy duplicates itself. It preserves name-owned open
+tasks, resources and unconsumed messages and updates their execution binding.
+Consumed messages and closed-task history remain historical. Migration does not
+grant master authority without the user's explicit master restoration approval.
 
-## Version upgrade and local installation cleanup
+If current endpoint facts are missing, provide only the requested factual fields
+through `collab context --provide`. If user intent is required, supply that intent
+through the context approval interface. Query an existing operation with
+`collab context --query --op <operation_id>`; a query does not perform migration.
+Pending or requested-input results are not successful recovery. Completion must
+include a successful registration receipt and current communication binding.
 
-Use the repository's install sequence from the reviewed current source:
+A raw historical ambiguity after valid approval is a runtime defect. Preserve
+the operation result and report the missing implementation or inactive version.
+Do not reinterpret it as missing user authorization, ask the agent to choose an
+archive, or discard project state to make recovery succeed. Real persistence,
+I/O and current endpoint errors remain explicit.
+
+## Persistence owners
+
+The installed binary resolves host-wide Collab state under `$HOME/.collab`;
+`COLLAB_STATE_DIR` is for isolated tests. This owner includes identity, routes,
+mailboxes and daemon runtime state. Project-local `.agent-collab/` may be a
+discovery or legacy input. Context and the server own its compatibility; it is
+not a second independent host truth. AppSDK `.appsdk/` and `.appsdk-control/`
+belong to AppSDK and are outside Collab recovery.
+
+Never manually delete journals, mailbox files, identity tokens or route state.
+Do not use `collab migrate inspect/plan/apply/verify` as an ordinary identity
+recovery sequence. Those operator storage-migration tools do not transfer
+context's migration responsibility to an agent.
+
+## Install and activate separately
+
+Use the formal installer from the reviewed current source:
 
 ```sh
 scripts/install-global-collab.sh
 ```
 
-The installer performs one versioned release build and installs those exact
-binaries under `$CARGO_HOME/bin`; the exact new binary refreshes the embedded
-Skill. It never removes `~/.collab/`, a project's `.agent-collab/`, AppSDK
-state, business source, or evidence. Legacy user-local copies are not removed
-automatically: first prove an exact copy is Collab from its own version
-response, then remove only that verified pair. Unverified path collisions
-remain untouched and must be reported.
+It builds and installs Collab and refreshes the embedded Skill. It does not
+activate the new global daemon or discard durable state. Verify the installed
+version and affected public behavior. Report installed and live versions
+separately; installation alone does not prove live identity or communication
+recovery. If an old binary shadows the installed binary, resolve that exact
+installation or command-cache problem. Do not retain an old runtime as a
+recovery fallback.
 
-The upgrade is a replacement, not a compatibility layer:
+Collab has one global user-managed daemon. Agents never start, stop, restart or
+kill it, request maintenance credentials, or create a second global runtime.
+User maintenance commands and credentials are outside the agent interface.
+When the service is unavailable, preserve durable state and report that fact.
+AppSDK/Collab maintenance never requires tmux server lifecycle operations or
+termination of the host pane.
 
-- Build and install from the reviewed `origin/main`; use only the installed
-  `$CARGO_HOME/bin/collab` and `$CARGO_HOME/bin/collab-mcp` for subsequent
-  checks.
-- Do not migrate, interpret, or read old local Collab control history merely
-  to keep an old project alive. For an explicitly authorized clean epoch, the
-  current project master may use `collab reset --project`; for replayable
-  state, use `collab migrate`.
-- If a verified legacy user-local Collab binary pair exists, remove only that
-  exact pair after the canonical pair is installed. Do not remove project
-  `.agent-collab/`, `~/.collab/`, AppSDK state, or business source.
-- If the installed path still resolves an old binary, fix `PATH` or the shell
-  command cache and verify `command -v` and `--version`; never keep an older
-  binary as a fallback.
-- After the installed version is current, verify `collab status --all`,
-  `collab context`, and one live tmux send/recv receipt replay. Binary
-  installation alone does not prove the running daemon or route is current.
+## Reset is explicit discard, not recovery
 
-Collab has one global user-managed daemon. Agents never start, stop or restart
-it, including for identity recovery or installation. User maintenance commands
-and credentials are outside the agent interface. Preserve identity and journals
-when the service is unavailable. Never use broad process kills, a second socket
-or an older binary as a fallback.
-
-## Formal v1 migration
-
-```text
-inspect -> plan -> admission freeze -> snapshot
-        -> install reviewed binaries with scripts/install-global-collab.sh
-        -> user-managed runtime activation, if required
-        -> identity rebind -> verify -> resume
-```
-
-```sh
-collab migrate inspect
-collab migrate plan
-collab migrate apply
-# installation does not change the user-managed running service
-collab migrate verify
-```
-
-Migration authenticates the initiator, holds one transaction lease, inspects
-legacy fields/waits/bindings/journal/counts/single-writer state, freezes after a
-deterministic snapshot, and verifies identity rebind plus snapshot/count
-continuity before resume. Unresolved owner/count mismatch requires an explicit
-operator decision; never invent an owner.
-
-Never delete/recreate `.agent-collab`, edit its truth files, clear
-evidence/mailbox, copy identity tokens, reset bindings, or mix old/new writers.
-
-## Legacy project migration or retirement
-
-Use this path when an existing project has `.agent-collab/` from an older
-version and the operator wants to move to the current Collab baseline:
-
-```sh
-cd /abs/path/project
-collab migrate inspect
-collab migrate plan
-collab migrate apply
-# install the reviewed Collab binary
-collab context
-collab migrate verify
-```
-
-`inspect` is read-only. `plan` does not freeze admission. `apply` freezes
-admission and persists the deterministic snapshot. `verify` resumes admission
-only after journal, mailbox, task, identity, and count continuity pass.
-
-Run the same operation from the project root whose `.agent-collab/` is being
-migrated. Do not run it in a worktree that merely points at another project's
-scope, and do not start a second daemon for the migration.
-
-If the result is `reset_required`, `needs_operator`, `unknown`, a malformed
-journal, a count mismatch, or an unresolved owner:
-
-1. Preserve the exact error, migration ID, snapshot, and source bytes.
-2. Stop admission and dependent writes.
-3. Resolve the named owner or blocker through the Collab server protocol.
-4. Create a new plan only after the source can be proved safe.
-
-When the current project master explicitly decides to abandon the old epoch
-instead of preserving it, and the project-local journal cannot be replayed
-under the current contract, run the online project reset from the current
-project:
+Only use a project reset when the user explicitly requests discarding that
+project's Collab epoch and the caller holds the current project master grant:
 
 ```sh
 collab reset --project
 ```
 
-`collab reset` is not `collab migrate`. It never imports history, never
-pretends to preserve counts, and never claims delivery, review, or install
-evidence. It deletes the current project's historical messages, routes, tasks,
-assets and load while preserving other projects and the user-managed global
-daemon. There is no offline prerequisite or archive prerequisite. Historical
-pane owners and open work do not block the reset. Real persistence, I/O or input
-safety errors remain explicit. No legacy discard mode or separate approval
-argument exists for this project reset.
+It clears this project's messages, routes, tasks, assets and load. It preserves
+other projects, AppSDK state and the global daemon. It is not a prerequisite
+for context recovery, an identity-conflict remedy or a history-preserving
+migration. Do not imitate reset by editing files.
 
-`.appsdk/` and `.appsdk-control/` are AppSDK-owned and are never removed by
-this command. The project-local `.agent-collab/` is a project scope input,
-while the host-wide runtime truth remains `~/.collab/` (`server.sock`,
-`events.jsonl`, `log.txt`, and route state). Do not manually remove
-`.agent-collab/server/journal.jsonl`, mailbox files, binding records or route
-state to imitate reset.
+## Master and deprecated interfaces
 
-Never manually delete `.agent-collab/`, edit journal or mailbox JSON, clear
-the mailbox, or copy identity tokens. Do not convert a failed migration into a
-fresh registration by deleting the source outside this command. AppSDK
-governance reset remains a separate owner and transaction; it never removes
-`.agent-collab/`.
-
-After `verify`, record the migration record ID, source and target versions,
-preserved counts and identity rebind. A restored peer and a restored master
-must each send, receive and reply through the current route for live acceptance.
-Migration verification does not prove AppSDK delivery, review, install, or
-freeze.
-
-## User-managed daemon boundary
-
-Agents do not perform daemon lifecycle actions or request credentials for them.
-Installation does not activate a new runtime. Report installed and live states
-separately. Restore peer identity with `collab context` against the existing
-service. Host reset and maintenance are outside the agent interface.
-
-### Native endpoint diagnostics
-
-`collab context` is the only agent identity entry. If it reports
-`requires_identity_update`, an agent supplies only the requested factual fields
-once through `collab context --provide`. The daemon validates the current
-session/thread or tmux anchor and owns identity selection, creation, recovery,
-update, registration, credential persistence, and binding. Read-only route and
-worker diagnostics are operator tools, not an agent recovery sequence.
-Notifications require the native AppServer route to pass self-check; do not
-switch that binding to tmux on failure. See
-[`state-paths.md`](state-paths.md#read-only-route-diagnostics).
-
-## Deprecated commands
-
-Never use implicit first-register master, master recovery, transfer-master,
-legacy central dispatch (`collab task dispatch`), or heartbeat recovery.
-Ordinary peer assignment uses the public board publish/claim/invite workflow.
-`collab subagent dispatch` and managed-subagent records are legacy compatibility
-for diagnosis or migration only; they grant no new production execution
-authority and are not a fallback after board refusal or admission failure.
-Collab master is a
-separate explicit user-approved authority
-decision, not Codex root, migration, or daemon recovery. The authority owner is
-the current typed grant in the exact project and app scope, with only empty or
-assigned states; the current holder controls independent of its liveness. An
-approved `collab master promote` replaces any recorded holder, only the current
-master grant holder may delegate, and an authenticated peer with explicit
-approval may `collab master clear` the scoped grant.
-Journal `RootAssigned` events become `MasterAssigned` on daemon replay.
-Hidden `collab root ...` commands run the same master protocol. AppSDK init and
-fresh governance init never clear master authority and are not an implicit
-authority reset. Independent peers may decline a master collaboration invite.
-Master-only rules require an explicitly authorized master grant. Legacy managed
-records do not create execution authority:
+Master is an explicit scoped authority. Context may restore it with the user's
+approved master intent. Peer recovery alone does not promote the caller.
+The supported separate authority interface is:
 
 ```text
 collab master status
@@ -213,13 +103,8 @@ collab master clear --approval "<user text>"
 collab master delegate <peer>
 ```
 
-Deprecated:
-
-```text
-collab role
-collab master recover
-collab transfer-master
-collab task claim
-collab task dispatch
-collab remove-worker
-```
+Do not use legacy `collab role`, `collab master recover`,
+`collab transfer-master`, `collab task claim`, `collab task dispatch` or
+`collab remove-worker` as recovery steps. Managed-subagent compatibility
+records do not grant execution authority. Master and peer both orchestrate
+long-horizon goals at different levels; one-shot execution goes to subagents.

@@ -103,9 +103,7 @@ impl AnchorObservation {
     }
 
     fn has_anchor(&self) -> bool {
-        self.session_id.is_some()
-            || self.thread_id.is_some()
-            || self.dsh_session_id.is_some()
+        self.session_id.is_some() || self.thread_id.is_some() || self.dsh_session_id.is_some()
     }
 }
 
@@ -161,10 +159,26 @@ pub(crate) fn resolve_for_daemon_with_route_at(
         );
     }
     // Recover only from anchors the caller actually supplied. An unrelated
-    // same-project cold/unknown peer is never adopted by recency.
-    if let Some(identity) = identity_by_current_anchors_same_scope_at(host_paths, scope, &observed)?
-    {
-        return Ok(identity);
+    // same-project cold/unknown peer is never adopted by recency. Historical
+    // pane placement is not owner evidence: the same pane can host a new agent
+    // session. Match archived credentials by the supplied session/thread
+    // anchors alone, so a unique archive stays authoritative while duplicate
+    // historical carriers fall through to the stable session carrier below
+    // instead of letting pane history choose or veto the recovery.
+    let anchor_match = AnchorObservation {
+        tmux: None,
+        tmux_anchor: None,
+        ..observed.clone()
+    };
+    match identity_by_current_anchors_same_scope_at(host_paths, scope, &anchor_match) {
+        Ok(Some(identity)) => return Ok(identity),
+        Ok(None) => {}
+        Err(error) if error.to_string().starts_with("IDENTITY_RESTORE_AMBIGUOUS:") => {
+            // Multiple historical archives carry this exact current session.
+            // They cannot prove a unique owner, so the current session derives
+            // its own stable carrier.
+        }
+        Err(error) => return Err(error),
     }
     let worker_id = draft_worker_id_at(&observed)?;
     // Preserve an existing draft's exact token; never remint a stored credential.
@@ -175,7 +189,22 @@ pub(crate) fn resolve_for_daemon_with_route_at(
         if existing.project_scope.as_ref() != Some(&expected_scope) {
             anyhow::bail!("IDENTITY_RESTORE_CROSS_PROJECT: the derived identity name belongs to another project");
         }
-        if existing.runtime.is_some() {
+        if existing
+            .runtime
+            .as_ref()
+            .is_some_and(|runtime| match observed.session_id.as_deref() {
+                Some(session) => {
+                    runtime.session_id.as_ref().map(SessionId::as_str) != Some(session)
+                }
+                None => {
+                    runtime
+                        .native_thread_id
+                        .as_ref()
+                        .map(NativeThreadId::as_str)
+                        != observed.thread_id.as_deref()
+                }
+            })
+        {
             anyhow::bail!("IDENTITY_RESTORE_CONFLICT: the derived identity name has a registered runtime with different observed anchors");
         }
         return Ok(existing);
@@ -199,12 +228,12 @@ fn draft_worker_id_at(observed: &AnchorObservation) -> anyhow::Result<String> {
         })?;
         return Ok(worker_id);
     }
-    let (kind, anchor) = if let Some(thread_id) = observed.thread_id.as_deref() {
-        ("thread", thread_id)
+    let (kind, anchor) = if let Some(session_id) = observed.session_id.as_deref() {
+        ("session", session_id)
     } else {
         (
-            "session",
-            observed.session_id.as_deref().ok_or_else(|| {
+            "thread",
+            observed.thread_id.as_deref().ok_or_else(|| {
                 anyhow::anyhow!(
                     "COLLAB_IDENTITY_ANCHOR_MISSING: a native App Server identity requires an agent session id"
                 )

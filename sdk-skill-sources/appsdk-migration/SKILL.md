@@ -17,6 +17,14 @@ Use this Skill for requested control-plane migration, version installation, iden
 
 ## 1. Identity & route recovery (no reset, no restart)
 
+`collab context` owns automatic compatibility and migration of old identity,
+binding, route, name/session and receive state. The agent never inventories
+duplicate credentials, chooses a historical worker, closes old peers as a
+prerequisite, or hand-edits the control plane. New identity semantics and the
+user's explicit current recovery intent take precedence over old records.
+Use the exact [recovery commands and receipt contract](../collab/references/stable-name-recovery.md#恢复操作context-自己迁移agent-不做历史清理).
+Do not reverse-engineer approval fields or run a separate migration ceremony.
+
 For ordinary peer or master recovery, use the existing user-managed daemon:
 
 ```sh
@@ -43,7 +51,7 @@ collab context
 printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"codex","version":"0.0.0"}}}\n' | collab-mcp
 ```
 
-Record old/new binary version, daemon PID/socket, `collab context` registration state, and MCP initialize receipt. Detailed procedures live in [`collab/references/migration-daemon.md`](../collab/references/migration-daemon.md) and [`collab/references/recovery-and-reset.md`](../collab/references/recovery-and-reset.md).
+Record installed and loaded-runtime evidence separately. Detailed maintenance boundaries live in [`collab/references/migration-daemon.md`](../collab/references/migration-daemon.md); ordinary identity migration remains internal to context.
 
 ## 3. Control-plane migration vs. authorized reset
 

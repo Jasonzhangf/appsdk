@@ -30,6 +30,12 @@ master 与 peer 均自行管理本人的 longhorizon goal；旧的“goal 只归
 
 ## 全局 daemon 与默认身份恢复
 
+`collab context` 是完整恢复与旧数据迁移入口，迁移是 daemon 的内部工作。agent
+不处理重复档案、旧 route 或旧身份清理。已有用户恢复/替换意图先于历史身份校验；
+同一 session 的后提交绑定收敛旧绑定，不让历史歧义成为 agent 的决策分支。
+准确命令、最小授权 JSON 与结果读取见
+[恢复操作](references/stable-name-recovery.md#恢复操作context-自己迁移agent-不做历史清理)。
+
 Collab 只有一个全局、由用户管理的 daemon。agent 不启动、关闭或重启它，也不为身份恢复申请维护窗口。用户维护命令、参数和凭据不属于 agent 接口。
 
 Collab/AppSDK 与 tmux 使用独立生命周期。Collab 安装、重启、注册、身份恢复、
@@ -1322,7 +1328,7 @@ projections that used to require separate calls, so no agent flow needs to run
 | Thread/session changed, or after daemon restart | `collab context` (daemon reconciles identity in place) | manual identity or daemon lifecycle commands |
 | Worker status, board admission, or a mutation reports a stale binding generation or `SESSION_THREAD_BINDING_MISMATCH` | preserve the registered binding and run `collab context` as the only repair entry | manually rebind, edit routes or journals, or infer a binding |
 | Need peer list, master state, scheduling state, or env | read them from the single `collab context` snapshot | call `collab who`, `collab status --all`, `collab master status`, or grep the environment as a separate step |
-| `requires_identity_update` is present | read `required_fields` and `exact_error`; when the returned action is the factual supplement, run that one action with only the requested `session_id`, `thread_id`, `endpoint`, or `namespace` from their real source | select or guess a worker; run an identity selection or recovery command, or a status/route/init hunt; set an identity override or approval supplement |
+| `requires_identity_update` is present | supply only requested real runtime facts; a user-authorized identity/name/role recovery uses the exact intent command in stable-name-recovery; context handles migration internally | guess archived workers, inspect routes/tokens, hand-edit state, invent approval or treat historical ambiguity as insufficient user authority |
 | `collab context` exits non-zero with `COLLAB_CONTEXT_UNRESOLVED` | preserve the error; failed initial registration continues independently; existing registered participants report the affected coordination without clearing owned tasks/claims | automatically retry from another cwd; edit routes/token state, copy identity, reset the project |
 | Default lease looks stopped | `collab context` re-arms it unless the owner explicitly unsubscribed | probe sockets, call a transport directly |
 | Notification arrived | `collab msg <id>`, then act; `collab recv` consumes | ACK-only, or treat submission as consumption |
@@ -1418,7 +1424,7 @@ snapshot:
 | `state_snapshot` 且 `registered=true` | 注册成功；含 role/operations/master/peers/peer_count/summary/master_wake/subagents/inbox/worktrees/tasks/env | 读快照执行已注册角色的 `operations`；无需再跑 who/status/master status |
 | 历史 pane claim 与当前投递位置不符 | daemon 对齐通信位置；不由 pane 决定名字归属 | 名字续接按稳定名字合同；在线他人占名需确认，unknown 交 Jenny |
 | 名字占用 unknown | 持久 context operation 返回 `pending`；不是注册成功 | 等待同一请求裁决续接；Jenny 自身 unknown 且本次用户明确恢复并确认接管时直接接管 Jenny/master |
-| `identity_update` | daemon 需要缺失事实或报告显式身份冲突；`registered=false`，`requires_identity_update.required=true` | 只读 `required_fields`/`reason`/`action`/`exact_error`；已授权初始化或已注册身份恢复中，若 action 是 factual supplement，可用一次 `collab context --provide` 补真实事实。成功注册前不执行角色协议；显式冲突保留原错，不选择 worker，不把 `collab init` 当第二次修复尝试 |
+| `identity_update` | daemon 缺少真实运行事实；`registered=false`，`requires_identity_update.required=true` | 按 `required_fields`/`reason`/`action` 只补实际缺项。已授权恢复意图按稳定名字合同提交；重复档案及旧绑定由 context 自行迁移。若仍泄漏裸历史冲突，保留原错作为实现缺陷，不让 agent 选旧身份或维护控制面 |
 | 可选通信诊断 pending | 原身份与当前 route 仍可用；诊断 reply 未完成 | 该诊断不是恢复前提；若显式使用，participant 从所选 adapter 读取 challenge 并从自身环境回传；`--query` 保持只读 |
 | `COLLAB_CONTEXT_UNRESOLVED` | 无 route、无 baseline、无 git 根（非零退出） | 保留原错，不自动换 cwd 重试；首次注册失败则独立继续，已注册者报告受影响协作，保留已领任务/claim |
 | 拒绝在 playground 创建基线 | 在 worktree 内引导（非零退出） | 保留原错，不改主树或删除旧身份；首次注册失败则独立继续，已注册者保留已有职责并报告协作缺口 |
@@ -1428,7 +1434,9 @@ snapshot:
 permission to select a worker. The supplement has exactly the four scalar fields
 `session_id`, `thread_id`, `endpoint`, and `namespace`. A value that conflicts
 with an automatically observed fact is `IDENTITY_FACT_CONFLICT`, not an override.
-Explicit conflicts, token rejection, route failure, runtime-binding failure, and
+Historical duplicate identities and retired carriers are context-owned migration
+inputs, not conflicts for the agent to resolve. Current user-approved recovery
+is evaluated before those records. Real input conflicts, token rejection, route failure, runtime-binding failure, and
 transport failure keep their original error and non-zero exit; unapproved
 automatic resolution cannot bypass them. A communication diagnostic can await
 a participant return; ordinary identity restoration does not.

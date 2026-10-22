@@ -767,10 +767,10 @@
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// Native facts do not claim tmux identity. Independent tmux sessions keep
-    /// separate routes even if they carry the same native observations.
+    /// An agent session has one current carrier even when its pane moves to
+    /// another tmux session. Placement cannot keep the old carrier current.
     #[tokio::test]
-    async fn codex_facts_on_another_tmux_session_do_not_block_registration() {
+    async fn same_agent_session_on_another_tmux_session_replaces_previous_carrier() {
         let (server, root, journal_path) = test_server();
         let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
         let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
@@ -800,8 +800,8 @@
         assert!(second_registration.ok, "{second_registration:?}");
         assert!(std::fs::read(&journal_path).unwrap().starts_with(&before));
         let first_endpoint = &initial_candidates.tmux.as_ref().unwrap().endpoint;
-        let owner = manager.resolve_route_by_tmux_endpoint(first_endpoint).unwrap();
-        assert_eq!(owner.agent_id.as_str(), "thread-owner-a");
+        assert!(manager.resolve_route_by_tmux_endpoint(first_endpoint).is_err());
+        assert!(!server.state.lock().unwrap().workers.contains_key("thread-owner-a"));
         let second_endpoint: crate::proto::TmuxEndpoint = serde_json::from_value(
             second_registration.data["command"]["binding"]["tmux_endpoint"].clone()).unwrap();
         let owner = manager.resolve_route_by_tmux_endpoint(&second_endpoint).unwrap();

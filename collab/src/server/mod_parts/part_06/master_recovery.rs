@@ -110,12 +110,75 @@ fn pane_claimants(
         .collect()
 }
 
-/// Events that hand one pane to a later registrant.
+/// Finds the bindings that an incoming registration reclaims by agent
+/// session in the same route scope.
 ///
-/// The previous claimant loses the pane, its current-thread route and its worker
-/// record in the same commit as the new binding, so the ledger cannot fence the
-/// new owner on the next attempt.
-fn pane_reclaim_events(taker: &str, previous: &RuntimeBinding) -> Result<Vec<Event>, String> {
+/// One agent session has one current execution carrier. A later registration
+/// on a different pane or native thread replaces the earlier carrier; the old
+/// binding stays in the ledger as history and never answers as the current
+/// receiver. A same-binding re-registration is not a takeover.
+///
+/// A tmux binding whose transport fell back to the tmux session id carries no
+/// agent session anchor, so it cannot decide carrier identity. Only a recorded
+/// Codex session (or a non-tmux session) converges here. Tmux session changes
+/// are placement changes and do not affect this identity comparison.
+fn agent_session_key(binding: &RuntimeBinding) -> Option<&str> {
+    let session = binding.session_id.as_ref()?.as_str();
+    if binding.tmux_endpoint.as_ref().is_some_and(|endpoint| {
+        endpoint.codex_session_id.is_none() && session == endpoint.tmux_session_id
+    }) {
+        // Legacy placement-only registrations used the tmux namespace here.
+        // That value cannot establish agent-session ownership.
+        None
+    } else {
+        Some(session)
+    }
+}
+
+fn same_agent_session(incoming: &RuntimeBinding, candidate: &RuntimeBinding) -> bool {
+    let Some(session) = agent_session_key(incoming) else {
+        return false;
+    };
+    agent_session_key(candidate) == Some(session)
+}
+
+fn session_claimants(
+    state: &State,
+    taker: &str,
+    binding_id: &BindingId,
+    route_scope: &RouteScope,
+    incoming: &RuntimeBinding,
+) -> Vec<RuntimeBinding> {
+    state
+        .global
+        .projects
+        .values()
+        .flat_map(|project| project.runtime_bindings.values())
+        .filter(|binding| {
+            binding.route_scope() == *route_scope
+                && binding.binding_id != *binding_id
+                && binding.agent_id.as_str() != taker
+                // A retired binding keeps its session record as history but
+                // has no route address, so one carrier takeover emits once.
+                && (binding.tmux_endpoint.is_some()
+                    || (binding.session_id.is_some() && binding.native_thread_id.is_some()))
+                && same_agent_session(incoming, binding)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Events that hand one anchor to a later registrant.
+///
+/// The previous claimant loses its anchor, its current-thread route and its
+/// worker record in the same commit as the new binding, so the ledger cannot
+/// fence the new owner on the next attempt. The caller names the concrete
+/// anchor so the existing pane reason stays unchanged.
+fn retire_claimant_events(
+    taker: &str,
+    previous: &RuntimeBinding,
+    reason: &str,
+) -> Result<Vec<Event>, String> {
     let next_generation = previous.endpoint_generation.checked_add(1).ok_or_else(|| {
         "RUNTIME_BINDING_REJECTED: reclaimed anchor generation overflow".to_owned()
     })?;
@@ -133,12 +196,17 @@ fn pane_reclaim_events(taker: &str, previous: &RuntimeBinding) -> Result<Vec<Eve
         events.push(Event::WorkerClosed {
             worker_id: previous.agent_id.as_str().to_owned(),
             closed_by: taker.to_owned(),
-            reason: "tmux pane reclaimed by a later registration".to_owned(),
+            reason: reason.to_owned(),
             snapshot_captured_ms: None,
             at_ms: now_ms(),
         });
     }
     Ok(events)
+}
+
+/// Events that hand one tmux pane to a later registrant.
+fn pane_reclaim_events(taker: &str, previous: &RuntimeBinding) -> Result<Vec<Event>, String> {
+    retire_claimant_events(taker, previous, "tmux pane reclaimed by a later registration")
 }
 
 fn current_master_grant(

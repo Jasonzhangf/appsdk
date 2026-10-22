@@ -1,4 +1,28 @@
 impl ProjectRuntimeManager {
+    fn recovered_binding_identity(
+        &self,
+        context: &ProjectContext,
+        binding: &RuntimeBinding,
+        state: &crate::server::state::State,
+    ) -> Option<identity::Identity> {
+        let worker = state.workers.get(binding.agent_id.as_str())?;
+        Some(identity::Identity {
+            worker_id: worker.id.clone(),
+            token: worker.token.clone(),
+            project_scope: Some(context.project_scope.clone()),
+            runtime: Some(RuntimeIdentity {
+                agent_id: binding.agent_id.clone(),
+                runtime_id: binding.runtime_id.clone(),
+                appserver_id: binding.app_scope_id.clone(),
+                endpoint_generation: binding.endpoint_generation,
+                binding_id: binding.binding_id.clone(),
+                session_id: binding.session_id.clone(),
+                native_thread_id: binding.native_thread_id.clone(),
+            }),
+            transport: worker.transport.clone(),
+        })
+    }
+
     /// Resolve the caller's current delivery placement from live, host-owned
     /// tmux endpoints. This is a read-only observation and runs only on the
     /// mutating admission/reconcile path.
@@ -82,52 +106,126 @@ impl ProjectRuntimeManager {
         let Some(project) = state.global.lookup_project_for_route(&route) else {
             return Ok(None);
         };
-        let matches = |binding: &&RuntimeBinding| {
-            binding
-                .session_id
-                .as_ref()
-                .is_some_and(|saved| saved.as_str() == session_id)
-                && state.workers.contains_key(binding.agent_id.as_str())
-        };
         let bindings = project
             .runtime_bindings
             .values()
-            .filter(matches)
+            .filter(|binding| {
+                binding
+                    .session_id
+                    .as_ref()
+                    .is_some_and(|saved| saved.as_str() == session_id)
+                    && state.workers.contains_key(binding.agent_id.as_str())
+            })
             .collect::<Vec<_>>();
         let master = current_master_grant(&state, Some(&route));
-        if bindings.len() > 1 {
-            anyhow::bail!(
-                "IDENTITY_RESTORE_AMBIGUOUS: current agent session matches multiple runtime bindings"
-            );
+
+        // Typed name occupancy is the authoritative current session owner.
+        // Historical runtime bindings that merely carry the same session
+        // address are not owner evidence and must not veto the selection.
+        let typed_owner = typed_session_owner(&state, context.project_scope.as_str(), session_id)?;
+        if let Some(worker_id) = typed_owner.as_deref() {
+            let binding = bindings
+                .iter()
+                .copied()
+                .find(|binding| binding.agent_id.as_str() == worker_id);
+            if let Some(binding) = binding {
+                return Ok(self.recovered_binding_identity(context, binding, &state));
+            }
         }
-        let binding = bindings
-            .iter()
-            .copied()
-            .find(|binding| {
-                master
-                    .as_ref()
-                    .is_some_and(|grant| grant.binding_id == binding.binding_id)
-            })
-            .or_else(|| bindings.first().copied());
-        let Some(binding) = binding else {
-            return Ok(None);
+
+        // A single current binding still resumes that worker. Multiple current
+        // bindings with no unique typed owner are historical candidates only;
+        // they must not be guessed and must not block a fresh stable carrier.
+        if bindings.len() == 1 {
+            let binding = bindings[0];
+            return Ok(self.recovered_binding_identity(context, binding, &state));
+        }
+        if let Some(binding) = bindings.iter().copied().find(|binding| {
+            master
+                .as_ref()
+                .is_some_and(|grant| grant.binding_id == binding.binding_id)
+        }) {
+            return Ok(self.recovered_binding_identity(context, binding, &state));
+        }
+        Ok(None)
+    }
+
+    /// Migrate duplicate carriers even when the selected owner can restore
+    /// directly without a new Register. Reuse Register's retirement events.
+    fn converge_session_carriers(
+        &self,
+        runtime: &Arc<Server>,
+        current: &RuntimeBinding,
+    ) -> anyhow::Result<bool> {
+        let events = {
+            let mut state = runtime.state.lock().unwrap();
+            let claimants = session_claimants(
+                &state,
+                current.agent_id.as_str(),
+                &current.binding_id,
+                &current.route_scope(),
+                current,
+            );
+            let mut events = Vec::new();
+            for claimant in claimants {
+                events.extend(retire_claimant_events(
+                    current.agent_id.as_str(),
+                    &claimant,
+                    "runtime session carrier reconciled by context",
+                ).map_err(anyhow::Error::msg)?);
+            }
+            if !events.is_empty() {
+                runtime.commit_locked(&mut state, &events)?;
+            }
+            events
         };
-        let worker = &state.workers[binding.agent_id.as_str()];
-        Ok(Some(identity::Identity {
-            worker_id: worker.id.clone(),
-            token: worker.token.clone(),
-            project_scope: Some(context.project_scope.clone()),
-            runtime: Some(RuntimeIdentity {
-                agent_id: binding.agent_id.clone(),
-                runtime_id: binding.runtime_id.clone(),
-                appserver_id: binding.app_scope_id.clone(),
-                binding_id: binding.binding_id.clone(),
-                endpoint_generation: binding.endpoint_generation,
-                session_id: binding.session_id.clone(),
-                native_thread_id: binding.native_thread_id.clone(),
-            }),
-            transport: worker.transport.clone(),
-        }))
+        let changed = !events.is_empty();
+        if !Arc::ptr_eq(runtime, &self.host) {
+            let publications = events.into_iter().filter(|event| matches!(
+                event,
+                Event::GlobalCurrentThreadRouteRetired { .. } | Event::GlobalRuntimeBound { .. }
+            )).collect::<Vec<_>>();
+            if !publications.is_empty() {
+                self.host.commit_checked(&publications)?;
+            }
+        }
+        Ok(changed)
+    }
+
+    /// Called only inside the existing name owner-start boundary. The
+    /// receipt is the adjacent authenticated context result, not user payload.
+    fn converge_context_session_carriers(
+        &self,
+        runtime: &Arc<Server>,
+        context: &ProjectContext,
+        response: &mut Resp,
+    ) -> Result<(), String> {
+        let identity: identity::Identity = serde_json::from_value(
+            response.data["identity_receipt"].clone(),
+        ).map_err(|error| format!("IDENTITY_RECEIPT_INVALID: {error}"))?;
+        let binding = identity.runtime.as_ref().ok_or("IDENTITY_RUNTIME_MISSING")?;
+        let saved = runtime.state.lock().unwrap().global.lookup_binding_for(
+            &RouteScope {
+                app_scope_id: context.app_scope_id.clone(),
+                project_scope_id: context.project_scope.clone(),
+            },
+            &binding.binding_id,
+        ).cloned().ok_or("IDENTITY_RUNTIME_MISSING")?;
+        if self.converge_session_carriers(runtime, &saved).map_err(|error| error.to_string())? {
+            let registered = ProjectContext::for_registered_route(
+                Path::new(&context.canonical_root), binding,
+            ).map_err(|error| error.to_string())?;
+            let (_, mut snapshot) = self.dispatch_sync(Some(registered), Req::Context {
+                worker_id: identity.worker_id,
+                token: identity.token,
+            });
+            if !snapshot.ok {
+                return Err(snapshot.error.unwrap_or_else(|| "CONTEXT_READBACK_FAILED".into()));
+            }
+            add_optional_master_choice(&mut snapshot.data);
+            response.data["snapshot"] = snapshot.data;
+        }
+        Ok(())
     }
 
     fn refresh_session_endpoint(
@@ -401,10 +499,11 @@ impl ProjectRuntimeManager {
             .as_ref()
             .or(request.approval.as_ref())
             .filter(|raw| {
-                matches!(
-                    raw["action"].as_str(),
-                    Some("restore_master" | "restore_peer")
-                )
+                raw.get("target_identity").is_none()
+                    && matches!(
+                        raw["action"].as_str(),
+                        Some("restore_master" | "restore_peer")
+                    )
             })
         {
             let scope = Scope {
@@ -427,10 +526,23 @@ impl ProjectRuntimeManager {
             self.reconcile_committed_credential(&scope, &observed_facts, &mut identity)
                 .map_err(|error| ApprovedAdmissionError::Error(error.to_string()))?;
             let mut intent = raw.clone();
-            intent["decision"] = json!("approved");
+            // Legacy role intent expresses approval through action plus the
+            // required authorization text. Preserve an explicit denial.
+            if intent.get("decision").is_none() {
+                intent["decision"] = json!("approved");
+            }
             intent["target_identity"] = json!(identity.worker_id);
             let mut identity_approval =
                 parse_identity_approval(&intent).map_err(ApprovedAdmissionError::Error)?;
+            if (!identity_approval.project_scope.is_empty()
+                && identity_approval.project_scope != context.project_scope.as_str())
+                || (!identity_approval.app_scope_id.is_empty()
+                    && identity_approval.app_scope_id != context.app_scope_id.as_str())
+            {
+                return Err(ApprovedAdmissionError::Error(
+                    "IDENTITY_APPROVAL_SCOPE_MISMATCH".into(),
+                ));
+            }
             identity_approval.project_scope = context.project_scope.as_str().into();
             identity_approval.app_scope_id = context.app_scope_id.as_str().into();
             identity_approval.decided_by = "user".into();
@@ -502,6 +614,11 @@ impl ProjectRuntimeManager {
                 .ok_or_else(|| {
                     ApprovedAdmissionError::Error("IDENTITY_APPROVAL_IDENTITY_NOT_FOUND".into())
                 })?;
+        if identity.project_scope.as_ref().is_some_and(|scope| scope != &context.project_scope) {
+            return Err(ApprovedAdmissionError::Error(
+                "IDENTITY_APPROVAL_SCOPE_MISMATCH".into(),
+            ));
+        }
         let route_scope = crate::scope::RouteScope {
             app_scope_id: context.app_scope_id.clone(),
             project_scope_id: context.project_scope.clone(),
@@ -915,7 +1032,11 @@ impl ProjectRuntimeManager {
         let scope = Scope { root };
         let restoring_pane = self.has_persisted_pane_route(&context, &facts);
         if !restoring_pane && !required_fields(&facts).is_empty() {
-            self.complete_persisted_native_facts(&scope, &mut facts)?;
+            self.complete_persisted_native_facts(
+                &scope,
+                &mut facts,
+                approved_identity.as_ref(),
+            )?;
         }
         let required = required_fields(&facts);
         if !required.is_empty() {
@@ -952,8 +1073,12 @@ impl ProjectRuntimeManager {
         // A pending project commit is a separate typed recovery path. It must
         // authenticate the stored credential before the ordinary resolver,
         // which continues to reject split host/project bindings.
-        let session_identity = self.current_session_identity(&context, &facts)?;
-        let staged_identity = if session_identity.is_some() {
+        let session_identity = if approved_identity.is_some() {
+            None
+        } else {
+            self.current_session_identity(&context, &facts)?
+        };
+        let staged_identity = if approved_identity.is_some() || session_identity.is_some() {
             None
         } else if let Some(candidate) = facts.tmux.as_ref() {
             let host_binding = self
@@ -1032,7 +1157,7 @@ impl ProjectRuntimeManager {
         } else {
             None
         };
-        let pane_route = if session_identity.is_some() {
+        let pane_route = if approved_identity.is_some() || session_identity.is_some() {
             None
         } else if let Some((_, route, _, _)) = staged_identity.as_ref() {
             Some(route.clone())
@@ -1227,13 +1352,13 @@ impl ProjectRuntimeManager {
                 if !session_continuation && (!approved_move || anchor_agrees) {
                     let retired = {
                         let state = runtime.state.lock().unwrap();
-                        state.worker_closures.contains_key(&ident.worker_id)
-                            && !state.workers.contains_key(&ident.worker_id)
+                        !state.workers.contains_key(&ident.worker_id)
                     };
                     if retired {
-                        // The persisted receipt belongs to a peer that
-                        // unregistered itself. Rebuild from the live anchor
-                        // instead of restoring the retired generation.
+                        // An archive cannot establish a current registration.
+                        // This includes old epochs without WorkerClosed events.
+                        // Re-register from the live session facts while keeping
+                        // the exact archived credential and name continuity.
                         ident.runtime = None;
                         ident.transport = None;
                     } else {
@@ -1415,10 +1540,23 @@ impl ProjectRuntimeManager {
         &self,
         scope: &Scope,
         facts: &mut IdentityFacts,
+        approved_target: Option<&identity::Identity>,
     ) -> anyhow::Result<()> {
-        let Some(existing) = identity::existing_for_daemon_at(&self.host.host_paths, scope, facts)?
-        else {
-            return Ok(());
+        // Enrich from the approved carrier itself. Historical archives cannot
+        // veto that target or substitute another carrier's endpoint.
+        let existing = if let Some(target) = approved_target {
+            target.clone()
+        } else {
+            match identity::existing_for_daemon_at(&self.host.host_paths, scope, facts) {
+                Ok(Some(existing)) => existing,
+                Ok(None) => return Ok(()),
+                // Optional endpoint enrichment cannot choose between archives.
+                // Leave facts missing so the current caller can supply them.
+                Err(error) if error.to_string().starts_with("IDENTITY_RESTORE_AMBIGUOUS:") => {
+                    return Ok(())
+                }
+                Err(error) => return Err(error),
+            }
         };
         let (Some(runtime), Some(transport)) = (existing.runtime, existing.transport) else {
             return Ok(());
@@ -1598,4 +1736,29 @@ impl ProjectRuntimeManager {
         }
         Ok(())
     }
+}
+
+/// Typed name occupancy for the current session in this project. It is the
+/// only owner evidence for a multi-binding current session; mtime, archive
+/// order, pane history and subjective liveness never select a peer.
+fn typed_session_owner(
+    state: &crate::server::state::State,
+    project_scope: &str,
+    session_id: &str,
+) -> anyhow::Result<Option<String>> {
+    let Some(names) = state.name_occupancies.get(project_scope) else {
+        return Ok(None);
+    };
+    let matches = names
+        .values()
+        .filter(|holder| {
+            holder.session_id == session_id && state.workers.contains_key(holder.worker_id.as_str())
+        })
+        .map(|holder| holder.worker_id.clone())
+        .collect::<Vec<_>>();
+    Ok(if matches.len() == 1 {
+        matches.into_iter().next()
+    } else {
+        None
+    })
 }

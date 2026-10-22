@@ -503,6 +503,444 @@ fn seed_shared_session_identities(fixture: &Fixture, pane: &Pane) {
     }
 }
 
+fn seed_matching_historical_identities(
+    fixture: &Fixture,
+    project_scope: &str,
+    session_id: &str,
+    thread_id: &str,
+    suffixes: &[&str],
+    matching_endpoint: Option<&Value>,
+) {
+    for suffix in suffixes {
+        let worker_id = format!("codex-session-history-{suffix}");
+        let identity_path = fixture
+            .host_state
+            .join("identities")
+            .join(&worker_id)
+            .join("identity.json");
+        fs::create_dir_all(identity_path.parent().unwrap())
+            .expect("create isolated historical identity");
+        let mut transport = json!({
+            "kind": "appserver",
+            "endpoint": "unix:///tmp/session-recovery-history.sock",
+            "namespace": "codex_tui",
+            "session_id": session_id,
+            "thread_id": thread_id,
+            "capabilities": [],
+            "self_check": "isolated historical identity fixture"
+        });
+        // One archive may still carry the pane this caller now occupies.
+        // Historical placement is not ownership evidence, so the fixture keeps
+        // the endpoint bytes to prove recovery does not select by placement.
+        if *suffix == suffixes[0] {
+            if let Some(endpoint) = matching_endpoint {
+                transport["kind"] = json!("tmux");
+                transport["endpoint"] = endpoint["socket_path"].clone();
+                transport["namespace"] = endpoint["tmux_session_id"].clone();
+                transport["tmux_endpoint"] = endpoint.clone();
+            }
+        }
+        fs::write(
+            &identity_path,
+            serde_json::to_vec_pretty(&json!({
+                "worker_id": worker_id,
+                "token": format!("fixture-history-token-{suffix}"),
+                "project_scope": project_scope,
+                "runtime": {
+                    "agent_id": worker_id,
+                    "runtime_id": format!("runtime-history-{suffix}"),
+                    "appserver_id": "appserver-cli",
+                    "endpoint_generation": 1,
+                    "binding_id": format!("binding-history-{suffix}"),
+                    "session_id": session_id,
+                    "native_thread_id": thread_id
+                },
+                "transport": transport
+            }))
+            .expect("serialize historical identity"),
+        )
+        .expect("write historical identity");
+    }
+}
+
+fn latest_runtime_binding_event(fixture: &Fixture, worker_id: &str) -> Value {
+    fs::read_to_string(fixture.project_journal())
+        .expect("read project journal")
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| {
+            event["ev"] == "GlobalRuntimeBound" && event["binding"]["agent_id"] == worker_id
+        })
+        .last()
+        .expect("registered worker has a runtime binding event")
+}
+
+fn append_project_event(fixture: &mut Fixture, event: &Value) {
+    fixture.stop_daemon();
+    {
+        use std::io::Write as _;
+        let mut journal = fs::OpenOptions::new()
+            .append(true)
+            .open(fixture.project_journal())
+            .expect("open isolated project journal");
+        serde_json::to_writer(&mut journal, event).expect("serialize isolated project event");
+        journal.write_all(b"\n").expect("terminate project event");
+    }
+    fixture.restart_daemon();
+}
+
+#[test]
+fn session_recovery_migrates_duplicate_historical_archives_without_current_workers() {
+    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (fixture, pane) = Fixture::isolated("session-recovery-history-only");
+    let root = canonical_root(&fixture);
+    let matching_endpoint = tmux_identity_facts(&fixture, &pane)["tmux"]["endpoint"].clone();
+    seed_matching_historical_identities(
+        &fixture,
+        &root,
+        &pane.session_anchor,
+        &pane.thread_anchor,
+        &["a", "b"],
+        Some(&matching_endpoint),
+    );
+    let before = identity_tree(&fixture.host_state);
+
+    let first = success_payload(&context_with_agent_session(
+        &fixture,
+        &fixture.root,
+        "session-recovery-history-first",
+        &pane,
+    ));
+    let worker = first["result"]["snapshot"]["identity"]["worker_id"]
+        .as_str()
+        .expect("recovered worker id");
+    assert!(
+        worker.starts_with("codex-session-"),
+        "no current owner must use the stable session carrier: {first}"
+    );
+    assert!(
+        first["result"]["snapshot"]["master"].is_null(),
+        "historical archives must not grant master authority: {first}"
+    );
+
+    let second = success_payload(&context_with_agent_session(
+        &fixture,
+        &fixture.root,
+        "session-recovery-history-second",
+        &pane,
+    ));
+    assert_eq!(
+        second["result"]["snapshot"]["identity"]["worker_id"],
+        worker,
+        "the derived carrier must remain stable across recovery calls"
+    );
+
+    let after = identity_tree(&fixture.host_state);
+    for (path, bytes) in before {
+        let saved = after
+            .iter()
+            .find(|(candidate, _)| candidate == &path)
+            .unwrap_or_else(|| panic!("historical identity {path} disappeared"));
+        assert_eq!(saved.1, bytes, "historical identity {path} changed");
+    }
+}
+
+#[test]
+fn session_recovery_explicit_target_bypasses_historical_archive_ambiguity() {
+    let fixture = Fixture::without_tmux("session-recovery-explicit-target");
+    let session_id = "explicit-target-session";
+    let thread_id = "explicit-target-thread";
+    let host = TestAppServer::start_with_effect_at(
+        &fixture.root,
+        "explicit-target.sock",
+        session_id,
+        thread_id,
+        "ack_only",
+    );
+    let seed = fixture.context_provide(
+        "session-recovery-explicit-target-seed",
+        &json!({
+            "session_id": session_id,
+            "thread_id": thread_id,
+            "endpoint": host.endpoint(),
+            "namespace": "codex_tui"
+        }),
+        None,
+    );
+    assert_eq!(seed["result"]["outcome"], "completed", "{seed}");
+    let target = seed["result"]["snapshot"]["identity"]["worker_id"]
+        .as_str()
+        .expect("target worker id")
+        .to_owned();
+    let target_path = fixture
+        .host_state
+        .join("identities")
+        .join(&target)
+        .join("identity.json");
+    let target_before = fs::read(&target_path).expect("read target identity");
+    let root = canonical_root(&fixture);
+    seed_matching_historical_identities(
+        &fixture,
+        &root,
+        session_id,
+        thread_id,
+        &["explicit-target-a", "explicit-target-b"],
+        None,
+    );
+    let histories_before = identity_tree(&fixture.host_state);
+
+    let output = run_context_cli(
+        &fixture,
+        None,
+        Some("session-recovery-explicit-target"),
+        None,
+        None,
+        Some(&json!({
+            "decision": "approved",
+            "action": "restore_peer",
+            "target_identity": target,
+            "authorization": "user explicitly restores this peer"
+        })),
+        None,
+        Some(&json!({"session_id": session_id})),
+        false,
+    );
+    let payload = success_payload(&output);
+    assert_eq!(
+        payload["result"]["snapshot"]["identity"]["worker_id"],
+        target,
+        "the approved target must win over historical archive ambiguity: {payload}"
+    );
+    assert!(
+        payload["result"]["snapshot"]["master"].is_null(),
+        "restore_peer must not grant master: {payload}"
+    );
+    assert_eq!(
+        fs::read(&target_path).expect("read restored target identity"),
+        target_before,
+        "same-target recovery must preserve the stored credential"
+    );
+    let histories_after = identity_tree(&fixture.host_state);
+    for (path, bytes) in histories_before
+        .into_iter()
+        .filter(|(path, _)| path != &format!("{target}/identity.json"))
+    {
+        let saved = histories_after
+            .iter()
+            .find(|(candidate, _)| candidate == &path)
+            .unwrap_or_else(|| panic!("historical identity {path} disappeared"));
+        assert_eq!(saved.1, bytes, "historical identity {path} changed");
+    }
+}
+
+#[test]
+fn session_recovery_typed_owner_disambiguates_multiple_bindings() {
+    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (mut fixture, pane) = Fixture::isolated("session-recovery-typed-owner");
+    let typed = fixture.registered_context("session-recovery-typed-owner-seed", &pane);
+    let typed_id = typed["result"]["snapshot"]["identity"]["worker_id"]
+        .as_str()
+        .expect("typed owner id")
+        .to_owned();
+    // Initial context assigns the project's first ordinary name through the
+    // typed name owner. Do not use the retired display-name mutation command.
+
+    let other_pane = second_pane(&fixture, "session-recovery-other", pane.server_pid);
+    let other = fixture.registered_context("session-recovery-other-seed", &other_pane);
+    let other_id = other["result"]["snapshot"]["identity"]["worker_id"]
+        .as_str()
+        .expect("other worker id")
+        .to_owned();
+
+    // Historical state: another worker binding carries the same agent session.
+    // This is a reducer replay fixture, not a successful Register convergence.
+    let mut binding = latest_runtime_binding_event(&fixture, &other_id);
+    binding["binding"]["session_id"] = json!(pane.session_anchor);
+    binding["binding"]["native_thread_id"] = json!(pane.thread_anchor);
+    let generation = binding["binding"]["endpoint_generation"]
+        .as_u64()
+        .expect("binding generation");
+    binding["binding"]["endpoint_generation"] = json!(generation + 1);
+    append_project_event(&mut fixture, &binding);
+
+    let approval = json!({
+        "decision": "approved",
+        "action": "restore_peer",
+        "target_identity": typed_id,
+        "authorization": "user restores the typed session owner"
+    })
+    .to_string();
+    let explicit = fixture.command(
+        &[
+            "context",
+            "--op",
+            "session-recovery-typed-owner-explicit",
+            "--approve-identity",
+            &approval,
+        ],
+        Some(&pane),
+    );
+    let explicit = success_payload(&explicit);
+    assert_eq!(
+        explicit["result"]["snapshot"]["identity"]["worker_id"],
+        typed_id,
+        "an explicit target must be selected before ordinary binding ambiguity: {explicit}"
+    );
+
+    let normal = success_payload(&context_with_agent_session(
+        &fixture,
+        &fixture.root,
+        "session-recovery-typed-owner-normal",
+        &pane,
+    ));
+    assert_eq!(
+        normal["result"]["snapshot"]["identity"]["worker_id"],
+        typed_id,
+        "the typed name owner must disambiguate multiple current bindings: {normal}"
+    );
+    assert!(
+        normal["result"]["snapshot"]["master"].is_null(),
+        "ordinary recovery must not grant master: {normal}"
+    );
+    assert!(
+        fs::read_to_string(fixture.project_journal()).unwrap().lines().any(|line| {
+            let event: Value = serde_json::from_str(line).unwrap();
+            event["ev"] == "WorkerClosed" && event["worker_id"] == other_id
+        }),
+        "context must retire the duplicate carrier, not only select its preferred identity"
+    );
+}
+
+#[test]
+fn session_recovery_no_target_peer_intent_uses_current_carrier() {
+    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (fixture, pane) = Fixture::isolated("session-recovery-peer-intent");
+    let seed = fixture.registered_context("session-recovery-peer-intent-seed", &pane);
+    let worker = seed["result"]["snapshot"]["identity"]["worker_id"]
+        .as_str()
+        .expect("current carrier id")
+        .to_owned();
+    let renamed = fixture.run_ok(&[
+        "context", "--op", "peer-intent-bob", "--approve-grant",
+        r#"{"decision":"approved","action":"restore_name","requested_name":"Bob","authorization":"user assigns Bob"}"#,
+    ], Some(&pane));
+    assert_eq!(renamed["result"]["snapshot"]["identity"]["display_name"], "Bob");
+    fixture.run_ok(&["task", "register", "peer-intent-task", "--next", "retain Bob work"], Some(&pane));
+    let task_before = fixture.run_ok(&["task", "status", "peer-intent-task"], Some(&pane));
+    fixture.run_ok(&["sendmessage", "--to", "Bob", "--subject", "Bob unread work", "--delivery", "queued", "retain Bob message"], Some(&pane));
+    let message = read_lines(&fixture.project_journal()).into_iter()
+        .find(|event| event["ev"] == "Sent" && event["msg"]["subject"] == "Bob unread work")
+        .expect("Bob message queued")["msg"].clone();
+    let output = fixture.command(
+        &[
+            "context",
+            "--op",
+            "session-recovery-peer-intent",
+            "--approve-grant",
+            r#"{"decision":"approved","action":"restore_peer","authorization":"user restores the ordinary peer"}"#,
+        ],
+        Some(&pane),
+    );
+    let payload = success_payload(&output);
+    assert_eq!(payload["result"]["snapshot"]["identity"]["display_name"], "Bob",
+        "ordinary peer recovery must keep Bob even when Alice is vacant: {payload}");
+    let task_after = fixture.run_ok(&["task", "status", "peer-intent-task"], Some(&pane));
+    assert_eq!(task_after["owner"], task_before["owner"]);
+    assert_eq!(task_after["status"], task_before["status"]);
+    let unread = payload["result"]["snapshot"]["inbox"]["messages"].as_array().unwrap()
+        .iter().find(|item| item["id"] == message["id"]).expect("Bob retains unread mail");
+    assert_eq!(unread["body"], message["body"]);
+    let receipt = fixture.run_ok(&["msg", message["id"].as_str().unwrap()], Some(&pane));
+    assert_eq!(receipt["consumed_by_recv"], false);
+    assert_eq!(
+        payload["result"]["snapshot"]["identity"]["worker_id"],
+        worker,
+        "a targetless peer intent must select the current carrier: {payload}"
+    );
+    assert!(
+        payload["result"]["snapshot"]["master"].is_null(),
+        "restore_peer must not grant master: {payload}"
+    );
+    let before_denial = identity_tree(&fixture.host_state);
+    let denied = fixture.command(&[
+        "context", "--op", "peer-intent-explicit-denial", "--approve-grant",
+        r#"{"decision":"denied","action":"restore_master","authorization":"user did not approve master"}"#,
+    ], Some(&pane));
+    assert!(!denied.status.success(), "explicit denial must not become approval");
+    assert!(text(&denied).contains("NAME_AUTHORIZATION_REQUIRED"));
+    assert_eq!(identity_tree(&fixture.host_state), before_denial);
+}
+
+#[test]
+fn session_recovery_rejects_foreign_scope_approval() {
+    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (fixture, pane) = Fixture::isolated("session-recovery-scope-reject");
+    let foreign_root = fixture.root.join("foreign-session-recovery");
+    seed_baseline(&foreign_root);
+    let foreign_pane = same_session_pane(
+        &fixture,
+        "session-recovery-foreign",
+        pane.server_pid,
+        &pane,
+    );
+    let foreign = registered_context_in(
+        &fixture,
+        &foreign_root,
+        "session-recovery-foreign-seed",
+        &foreign_pane,
+    );
+    let foreign_id = foreign["result"]["snapshot"]["identity"]["worker_id"]
+        .as_str()
+        .expect("foreign worker id")
+        .to_owned();
+    let foreign_scope = fs::canonicalize(&foreign_root)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let before = identity_tree(&fixture.host_state);
+
+    let approval = json!({
+        "decision": "approved",
+        "action": "restore_peer",
+        "target_identity": foreign_id,
+        "project_scope": foreign_scope,
+        "authorization": "user targets another project"
+    })
+    .to_string();
+    let output = fixture.command(
+        &[
+            "context",
+            "--op",
+            "session-recovery-scope-reject",
+            "--approve-identity",
+            &approval,
+        ],
+        Some(&pane),
+    );
+    let foreign_error = text(&output);
+    assert!(!output.status.success(), "foreign scope must fail: {foreign_error}");
+    assert!(
+        foreign_error.contains("IDENTITY_APPROVAL_SCOPE_MISMATCH"),
+        "foreign scope must produce its typed rejection: {foreign_error}"
+    );
+    assert_eq!(
+        identity_tree(&fixture.host_state),
+        before,
+        "a rejected scope must not mutate identity state"
+    );
+    let minimal = json!({
+        "decision":"approved", "action":"restore_peer", "target_identity":foreign_id,
+        "authorization":"user restores this target in the current project"
+    }).to_string();
+    let output = fixture.command(&[
+        "context", "--op", "session-recovery-foreign-target-reject",
+        "--approve-identity", &minimal,
+    ], Some(&pane));
+    assert!(!output.status.success(), "a foreign target cannot inherit the current scope: {}", text(&output));
+    assert!(text(&output).contains("IDENTITY_APPROVAL_SCOPE_MISMATCH"));
+    assert_eq!(identity_tree(&fixture.host_state), before);
+}
+
 #[test]
 fn public_context_prefers_current_project_for_a_shared_tmux_session() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();

@@ -389,3 +389,21 @@ goal subscriptions omitted from handoff; valid restored schedules now transfer
 and rearm without reviving terminal states. Name units60 and final AppSDK units59
 pass. Official Collab0.2.0307 installed; final installed consumers/finding recheck
 and integration continue in the same run. Global daemon remains user-managed.
+
+## 2026-10-21 Context-owned session recovery migration
+
+Context now evaluates explicit approved targets before archive resolution,
+converges duplicate same-session delivery carriers during registration and
+restoration, and keeps an ordinary peer's existing name and work. Historical
+pane placement cannot select an archive. Cold archives without a current worker
+re-register from current facts; foreign-project targets remain isolated.
+Migration uses the existing name owner-start/cancellation boundary. Shipped
+Collab and AppSDK migration Skills remove agent-owned archive selection,
+cleanup and manual migration prerequisites.
+
+Evidence: ~/.collab/runs/session-recovery-replacement-20261021/ contains the
+plan, SESE graph validation, red/green cases and independent review/recheck.
+Final public context71, name70 and resolver28 pass; prior shared-state1139
+pass/one existing ignored. Independent recheck PASS closes all three original
+P1 findings. Installation, main integration and user-managed daemon activation
+remain separate delivery facts; no global daemon or tmux lifecycle was touched.

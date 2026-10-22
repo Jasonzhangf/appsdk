@@ -673,15 +673,13 @@ where
                     previous["collab_subscribed"] = Value::Bool(false);
                     previous["collab_subscription"] = remote_record;
                 }
-                let mut history = previous["recovery_history"]
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default();
-                history.push(serde_json::json!({
+                if let Some(previous_object) = previous.as_object_mut() {
+                    previous_object.remove("recovery_history");
+                }
+                record["recovery_history"] = serde_json::json!([{
                     "previous_record": previous,
                     "recovered_at": chrono::Utc::now().to_rfc3339()
-                }));
-                record["recovery_history"] = Value::Array(history);
+                }]);
             }
             if let Err(error) = goal_record_write(&scope, &record) {
                 record["error"] = Value::String(error.clone());

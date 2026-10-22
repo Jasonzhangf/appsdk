@@ -61,6 +61,9 @@ pub(crate) fn parse_name_intent(
             .ok_or("NAME_INTENT_INVALID: restore_name requires requested_name")?,
         _ => return Ok(None),
     };
+    if object.get("decision").is_some_and(|decision| decision.as_str() != Some("approved")) {
+        return Err("IDENTITY_APPROVAL_NOT_APPROVED: decision must be approved".into());
+    }
     validate_name(name)?;
     let replace_confirmed = match object.get("replace_confirmed") {
         None => false,

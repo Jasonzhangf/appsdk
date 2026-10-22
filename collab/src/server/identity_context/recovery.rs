@@ -526,6 +526,11 @@ impl ProjectRuntimeManager {
             self.reconcile_committed_credential(&scope, &observed_facts, &mut identity)
                 .map_err(|error| ApprovedAdmissionError::Error(error.to_string()))?;
             let mut intent = raw.clone();
+            // Legacy role intent expresses approval through action plus the
+            // required authorization text. Preserve an explicit denial.
+            if intent.get("decision").is_none() {
+                intent["decision"] = json!("approved");
+            }
             intent["target_identity"] = json!(identity.worker_id);
             let mut identity_approval =
                 parse_identity_approval(&intent).map_err(ApprovedAdmissionError::Error)?;

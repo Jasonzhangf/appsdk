@@ -861,6 +861,14 @@ fn session_recovery_no_target_peer_intent_uses_current_carrier() {
         payload["result"]["snapshot"]["master"].is_null(),
         "restore_peer must not grant master: {payload}"
     );
+    let before_denial = identity_tree(&fixture.host_state);
+    let denied = fixture.command(&[
+        "context", "--op", "peer-intent-explicit-denial", "--approve-grant",
+        r#"{"decision":"denied","action":"restore_master","authorization":"user did not approve master"}"#,
+    ], Some(&pane));
+    assert!(!denied.status.success(), "explicit denial must not become approval");
+    assert!(text(&denied).contains("IDENTITY_APPROVAL_NOT_APPROVED"));
+    assert_eq!(identity_tree(&fixture.host_state), before_denial);
 }
 
 #[test]

@@ -202,6 +202,197 @@ fn name_handoff_preserves_goal_schedule_and_terminal_history() {
 }
 
 #[test]
+fn same_session_intermediate_name_commit_carries_goal_schedule() {
+    let (server, root) = peer_tests::test_server();
+    for id in ["old", "new"] {
+        assert!(peer_tests::register_synthetic_peer(&server, id, id).ok);
+    }
+    let mut state = server.state.lock().unwrap();
+    let scope = server_route_scope(&server, &state)
+        .unwrap()
+        .unwrap()
+        .project_scope_id
+        .as_str()
+        .to_owned();
+    let previous = NameOccupancy {
+        name: "Jenny".into(),
+        worker_id: "old".into(),
+        session_id: "shared-session".into(),
+        occupancy_revision: 1,
+        updated_ms: 1,
+    };
+    state
+        .name_occupancies
+        .entry(scope.clone())
+        .or_default()
+        .insert("Jenny".into(), previous);
+    let mut goal = state.notification_subscriptions
+        [&mailbox::default_direct_message_id("old")]
+        .clone();
+    goal.id = "goal-schedule".into();
+    goal.event = "deadline".into();
+    goal.subject = Some("goal:owned".into());
+    goal.status = "transport-lost".into();
+    goal.expires_ms = i64::MAX;
+    state
+        .notification_subscriptions
+        .insert(goal.id.clone(), goal);
+    state
+        .apply_checked(&Event::Sent {
+            msg: serde_json::from_value(json!({
+                "id":"pending-goal-message", "from":"collab-server", "to":"old",
+                "type":"notification", "subject":"deadline:goal:owned", "body":"original",
+                "in_reply_to":null, "created_ms":1, "state":"pending",
+                "wake_attempt_count":0, "last_wake_attempt_ms":0
+            }))
+            .unwrap(),
+        })
+        .unwrap();
+    state
+        .apply_checked(&Event::WakeBound {
+            message_id: "pending-goal-message".into(),
+            subscription_id: "goal-schedule".into(),
+        })
+        .unwrap();
+
+    // Registration can first assign an ordinary name; the promotion to Jenny
+    // happens after that same session has already released the old occupancy.
+    let intermediate = NameOccupancy {
+        name: "Bob".into(),
+        worker_id: "new".into(),
+        session_id: "shared-session".into(),
+        occupancy_revision: 2,
+        updated_ms: 2,
+    };
+    let events = build_name_resolution_events(&state, &scope, &intermediate);
+    for event in &events {
+        state.apply_checked(event).unwrap();
+    }
+    let moved = state.notification_subscriptions["goal-schedule"].clone();
+    assert_eq!(moved.worker_id, "new");
+    assert_eq!(moved.status, "armed");
+    assert_eq!(state.msgs["pending-goal-message"].to, "new");
+    assert_eq!(
+        state.wake_bindings["pending-goal-message"],
+        "goal-schedule",
+        "the pending goal wake must stay bound to its transferred schedule"
+    );
+
+    let promoted = NameOccupancy {
+        name: "Jenny".into(),
+        worker_id: "new".into(),
+        session_id: "shared-session".into(),
+        occupancy_revision: 3,
+        updated_ms: 3,
+    };
+    let events = build_name_resolution_events(&state, &scope, &promoted);
+    for event in &events {
+        state.apply_checked(event).unwrap();
+    }
+    assert_eq!(
+        state.notification_subscriptions["goal-schedule"].worker_id,
+        "new"
+    );
+    assert_eq!(state.msgs["pending-goal-message"].to, "new");
+    assert_eq!(
+        state.wake_bindings["pending-goal-message"],
+        "goal-schedule"
+    );
+    assert!(!state.notification_subscriptions.values().any(|subscription| {
+        subscription.worker_id == "old"
+            && subscription.event == "deadline"
+            && subscription
+                .subject
+                .as_deref()
+                .is_some_and(|subject| subject.starts_with("goal:"))
+    }));
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn public_handlers_move_goal_schedule_and_pending_wake_across_intermediate_name() {
+    let (server, root) = peer_tests::test_server();
+    let server = std::sync::Arc::new(server);
+    let register = |server: &Server, id: &str, pane: u32, session: &str| {
+        peer_tests::register_tmux(
+            server,
+            id,
+            crate::proto::TmuxEndpoint {
+                socket_path: format!("/tmp/collab-shared-{id}-{}", std::process::id()),
+                server_pid: 1,
+                tmux_session_id: format!("${pane}"),
+                pane_id: format!("%{pane}"),
+                pane_pid: 2,
+                codex_session_id: Some(session.into()),
+                codex_thread_id: Some(format!("thread-{id}")),
+            },
+        )
+    };
+    assert!(register(&server, "old", 1, "shared-session").ok);
+
+    let promoted =
+        handle_master_promote(&server, "old".into(), "token-old".into(), "user approved old".into());
+    assert!(promoted.ok, "{promoted:?}");
+
+    let subscribed = handle_notification_subscribe(
+        &server,
+        "old".into(),
+        "token-old".into(),
+        "deadline".into(),
+        Some("goal:shared-migration".into()),
+        Some(now_ms() + 5_000),
+        Vec::new(),
+        None,
+        1,
+        3_600,
+    );
+    assert!(subscribed.ok, "{subscribed:?}");
+    let goal_id = subscribed.data["subscription"]["id"]
+        .as_str()
+        .expect("goal subscription id")
+        .to_owned();
+
+    // The timer is the public scheduling path that arms one pending wake.
+    timers::tick_with_idle_at(&server, now_ms() + 6_000, &|_| true);
+    let pending_id = {
+        let state = server.state.lock().unwrap();
+        state
+            .wake_bindings
+            .iter()
+            .find_map(|(message_id, bound)| {
+                (*bound == goal_id && state.msgs[message_id].state == "pending")
+                    .then(|| message_id.clone())
+            })
+            .expect("goal timer produces a pending wake")
+    };
+
+    // Registration is the migration entry. It first assigns an ordinary name
+    // to the new same-session carrier; promotion to Jenny happens after that
+    // intermediate commit has already released the old Jenny occupancy.
+    assert!(register(&server, "new", 2, "shared-session").ok);
+
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.notification_subscriptions[&goal_id].worker_id, "new");
+    assert_eq!(state.msgs[&pending_id].to, "new");
+    assert_eq!(state.wake_bindings[&pending_id], goal_id);
+    drop(state);
+
+    let promoted =
+        handle_master_promote(&server, "new".into(), "token-new".into(), "user approved new".into());
+    assert!(promoted.ok, "{promoted:?}");
+
+    let old_denied =
+        handle_notification_unsubscribe(&server, "old".into(), "token-old".into(), goal_id.clone());
+    assert!(!old_denied.ok, "{old_denied:?}");
+    let cancelled =
+        handle_notification_unsubscribe(&server, "new".into(), "token-new".into(), goal_id.clone());
+    assert!(cancelled.ok, "{cancelled:?}");
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn confirmed_user_jenny_takeover_overrides_unknown_without_ordinary_name_bypass() {
     let mut state = State::default();
     let mut old = input("old", "s1");

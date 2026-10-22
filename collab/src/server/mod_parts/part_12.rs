@@ -1390,6 +1390,7 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
         mailbox_notify: Notify::new(),
     });
     restore_registered_peer_default_leases(&server);
+    reconcile_master_goal_due(&server);
     purge_expired_storage(&server, now_ms());
     let runtime_manager = ProjectRuntimeManager::new_with_operation_journal(
         server.clone(),
@@ -1500,4 +1501,20 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
         let _ = std::fs::remove_file(&pid_path);
     }
     Ok(())
+}
+
+fn reconcile_master_goal_due(server: &Server) {
+    let events = {
+        let mut state = server.state.lock().unwrap();
+        if state.reconcile_stale_master_goal_due(now_ms()) {
+            vec![Event::MasterWakeUpdated {
+                accumulator: state.master_wake.clone(),
+            }]
+        } else {
+            Vec::new()
+        }
+    };
+    if !events.is_empty() {
+        server.commit(&events);
+    }
 }

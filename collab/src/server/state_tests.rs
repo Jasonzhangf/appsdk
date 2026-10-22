@@ -855,6 +855,112 @@ fn consuming_a_master_goal_deadline_clears_goal_due() {
     );
 }
 
+#[test]
+fn recv_style_ack_clears_master_goal_due() {
+    let mut state = State::default();
+    state.master_worker_id = Some("master".into());
+    state.apply(&Event::NotificationSubscribed {
+        subscription: NotificationSubscription {
+            id: "sub-goal-master".into(),
+            worker_id: "master".into(),
+            event: "deadline".into(),
+            subject: Some("goal:sha256:test".into()),
+            target: "thread-master".into(),
+            method: "appserver".into(),
+            trigger_ms: None,
+            trigger_times_ms: vec![9],
+            interval_ms: None,
+            repeat_count: 1,
+            fired_count: 0,
+            expires_ms: 100,
+            status: "armed".into(),
+            created_ms: 1,
+            updated_ms: 1,
+            status_reason: None,
+        },
+    });
+    state.apply(&Event::MasterWakeSignal {
+        signal: MasterWakeSignal::GoalDue { revision: 9 },
+        at_ms: 10,
+    });
+    let mut notification = msg("goal-message", "master", "notification");
+    notification.from = "collab-server".into();
+    notification.subject = Some("deadline:goal:sha256:test".into());
+    state.apply(&Event::Sent { msg: notification });
+    state.apply(&Event::WakeBound {
+        message_id: "goal-message".into(),
+        subscription_id: "sub-goal-master".into(),
+    });
+    assert!(state.master_wake.goal_due);
+
+    // `collab recv` records Delivered + Acked, not NotificationConsumed.
+    state.apply(&Event::Delivered {
+        ids: vec!["goal-message".into()],
+    });
+    state.apply(&Event::Acked {
+        ids: vec!["goal-message".into()],
+    });
+
+    assert!(
+        !state.master_wake.goal_due,
+        "recv consumption of a master goal deadline must clear the master wake goal-due flag"
+    );
+    assert_eq!(state.master_wake.active_goal_revision, None);
+    assert_eq!(
+        state.notification_subscriptions["sub-goal-master"].status,
+        "consumed"
+    );
+}
+
+#[test]
+fn stale_master_goal_due_is_reconciled_when_no_armed_goal_deadline_remains() {
+    let mut state = State::default();
+    state.master_worker_id = Some("master".into());
+    state.apply(&Event::MasterWakeSignal {
+        signal: MasterWakeSignal::GoalDue { revision: 9 },
+        at_ms: 10,
+    });
+    assert!(state.master_wake.goal_due);
+
+    assert!(state.reconcile_stale_master_goal_due(100));
+    assert!(!state.master_wake.goal_due);
+    assert_eq!(state.master_wake.active_goal_revision, None);
+}
+
+#[test]
+fn master_goal_due_is_kept_while_an_armed_goal_deadline_exists() {
+    let mut state = State::default();
+    state.master_worker_id = Some("master".into());
+    state.apply(&Event::NotificationSubscribed {
+        subscription: NotificationSubscription {
+            id: "sub-goal-master".into(),
+            worker_id: "master".into(),
+            event: "deadline".into(),
+            subject: Some("goal:sha256:test".into()),
+            target: "thread-master".into(),
+            method: "appserver".into(),
+            trigger_ms: None,
+            trigger_times_ms: vec![9],
+            interval_ms: None,
+            repeat_count: 1,
+            fired_count: 0,
+            expires_ms: 200,
+            status: "armed".into(),
+            created_ms: 1,
+            updated_ms: 1,
+            status_reason: None,
+        },
+    });
+    state.apply(&Event::MasterWakeSignal {
+        signal: MasterWakeSignal::GoalDue { revision: 9 },
+        at_ms: 10,
+    });
+    assert!(state.master_wake.goal_due);
+
+    assert!(!state.reconcile_stale_master_goal_due(100));
+    assert!(state.master_wake.goal_due);
+}
+
 fn msg(id: &str, to: &str, mtype: &str) -> Message {
     Message {
         id: id.into(),

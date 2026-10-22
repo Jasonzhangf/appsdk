@@ -593,3 +593,145 @@ fn peer_lifecycle_c2_host_terminal_with_control_retirement_failure_stays_open() 
         "the control-plane fence remains visible after retirement fails"
     );
 }
+#[test]
+fn desktop_context_same_session_refreshes_native_thread_and_subscription() {
+    let mut fixture = Fixture::without_tmux("desktop-thread-refresh");
+    let old_host = TestAppServer::start_with_effect_at(
+        &fixture.root,
+        "old.sock",
+        "stable-desktop-session",
+        "old-desktop-thread",
+        "completed_turn",
+    );
+    let new_host = TestAppServer::start_with_effect_at(
+        &fixture.root,
+        "new.sock",
+        "stable-desktop-session",
+        "new-desktop-thread",
+        "completed_turn",
+    );
+    let restore = |operation: &str, thread: &str, host: &TestAppServer| {
+        let provide = json!({"session_id":"stable-desktop-session", "thread_id":thread,
+            "endpoint":host.endpoint(), "namespace":"codex_app"})
+        .to_string();
+        let output = fixture
+            .configured_command(&["context", "--op", operation, "--provide", &provide], None)
+            .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop")
+            .output()
+            .unwrap();
+        let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(output.status.success(), "{response}");
+        response
+    };
+    let old = restore("desktop-old", "old-desktop-thread", &old_host);
+    let saved_identity = lifecycle_identity(&fixture, &old);
+    assert_eq!(old["result"]["outcome"], "completed", "{old}");
+    let restored = restore("desktop-new", "new-desktop-thread", &new_host);
+    assert_eq!(restored["result"]["outcome"], "completed", "{restored}");
+    let before = &old["result"]["snapshot"];
+    let after = &restored["result"]["snapshot"];
+    assert_eq!(
+        after["identity"]["worker_id"],
+        before["identity"]["worker_id"]
+    );
+    assert_eq!(after["binding"]["session_id"], "stable-desktop-session");
+    assert_eq!(
+        after["binding"]["native_thread_id"], "new-desktop-thread",
+        "{restored}"
+    );
+    assert_eq!(
+        after["identity"]["transport"]["endpoint"],
+        new_host.endpoint()
+    );
+    assert_eq!(
+        after["identity"]["transport"]["thread_id"],
+        "new-desktop-thread"
+    );
+    let subscriptions = after["subscriptions"].as_array().unwrap();
+    assert!(
+        subscriptions
+            .iter()
+            .any(|s| s["event"] == "direct-message" && s["target"] == "new-desktop-thread"),
+        "{restored}"
+    );
+    let current_identity = lifecycle_identity(&fixture, &restored);
+    assert_eq!(current_identity["token"], saved_identity["token"]);
+    assert_eq!(
+        current_identity["runtime"]["native_thread_id"],
+        "new-desktop-thread"
+    );
+    assert!(
+        after["binding"]["endpoint_generation"].as_u64().unwrap()
+            > before["binding"]["endpoint_generation"].as_u64().unwrap()
+    );
+    let again = restore("desktop-repeat", "new-desktop-thread", &new_host);
+    assert_eq!(again["result"]["snapshot"]["binding"], after["binding"]);
+    let host_events: Vec<Value> = fs::read_to_string(fixture.project_journal())
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(host_events
+        .iter()
+        .any(|e| e["ev"] == "GlobalCurrentThreadRouteRetired"
+            && e["binding"]["native_thread_id"] == "old-desktop-thread"));
+    assert!(host_events
+        .iter()
+        .any(|e| e["ev"] == "GlobalCurrentThreadRouteSet"
+            && e["binding"]["native_thread_id"] == "new-desktop-thread"));
+    let before_replay = fs::read_to_string(fixture.project_journal()).unwrap();
+    fixture.restart_daemon();
+    let partial =
+        json!({"session_id":"stable-desktop-session","thread_id":"new-desktop-thread"}).to_string();
+    let output = fixture
+        .configured_command(
+            &["context", "--op", "desktop-replay", "--provide", &partial],
+            None,
+        )
+        .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop")
+        .output()
+        .unwrap();
+    let replay: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(output.status.success(), "{replay}");
+    assert_eq!(replay["result"]["snapshot"]["binding"], after["binding"]);
+    assert_eq!(lifecycle_identity(&fixture, &replay), current_identity);
+    let replay_journal = fs::read_to_string(fixture.project_journal()).unwrap();
+    assert_eq!(
+        replay_journal.matches("CommandStarted").count(),
+        before_replay.matches("CommandStarted").count()
+    );
+    assert!(
+        !fixture
+            .host_state
+            .join("register-reply-evidence.jsonl")
+            .exists(),
+        "ordinary restoration does not challenge"
+    );
+    let moved_thread =
+        json!({"session_id":"stable-desktop-session", "thread_id":"latest-desktop-thread"})
+            .to_string();
+    let output = fixture
+        .configured_command(
+            &[
+                "context",
+                "--op",
+                "desktop-thread-only",
+                "--provide",
+                &moved_thread,
+            ],
+            None,
+        )
+        .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop")
+        .output()
+        .unwrap();
+    let moved: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(output.status.success(), "{moved}");
+    assert_eq!(
+        moved["result"]["snapshot"]["binding"]["native_thread_id"],
+        "latest-desktop-thread"
+    );
+    assert_eq!(
+        moved["result"]["snapshot"]["identity"]["transport"]["endpoint"],
+        new_host.endpoint()
+    );
+}

@@ -252,7 +252,7 @@ impl ProjectRuntimeManager {
         let (binding, legacy) = {
             let state = self.host.state.lock().unwrap();
             if let Some(requested) = requested_tmux_endpoint {
-                if let Some(binding) = state.global.lookup_tmux_route(requested).cloned() {
+                if let Some(binding) = state.global.lookup_unique_tmux_pane_route(requested).cloned() {
                     (binding, false)
                 } else if let Some(tombstone) = state.global.lookup_tmux_route_tombstone(requested)
                 {

@@ -296,19 +296,24 @@
         .is_ok());
         let before = mutation_snapshot(&server);
         let journal_before = std::fs::read(&journal_path).unwrap();
-        // Persisted ownership resolves even when the daemon cannot probe this
-        // socket, and process/session drift is not a different pane address.
+        // The persisted socket+pane address is distinct from current
+        // ownership. A server restart reissues the same pane id, so only the
+        // exact observed server instance can resolve this route.
         let mut observed = server.state.lock().unwrap().workers["agent-wire-route"]
             .transport.as_ref().unwrap().tmux_endpoint.clone().unwrap();
         observed.server_pid += 1;
         observed.pane_pid += 1;
         observed.tmux_session_id = "$999".into();
-        let resolved = manager.resolve_route_by_tmux_endpoint(&observed).unwrap();
-        assert_eq!(resolved.agent_id.as_str(), "agent-wire-route");
+        let stale_resolved = manager.resolve_route_by_tmux_endpoint(&observed).unwrap_err();
+        assert!(
+            stale_resolved.starts_with("ROUTE_RESOLVE_NOT_FOUND:"),
+            "a reused pane id on another tmux server must not resolve the old route: {stale_resolved}"
+        );
         assert_eq!(mutation_snapshot(&server), before);
         assert_eq!(std::fs::read(&journal_path).unwrap(), journal_before);
+        let wire_manager = manager.clone();
         let (_, response) = dispatch_wire_routed(
-            manager,
+            wire_manager,
             None,
             Req::RouteResolve {
                 tmux_endpoint: crate::proto::TmuxEndpoint {
@@ -333,6 +338,146 @@
         ));
         assert_eq!(mutation_snapshot(&server), before);
         assert_eq!(std::fs::read(&journal_path).unwrap(), journal_before);
+        let (_, restarted_response) = dispatch_wire_routed(
+            manager,
+            None,
+            Req::RouteResolve {
+                tmux_endpoint: observed,
+            },
+            tokio::sync::watch::channel(false).1,
+        )
+        .await;
+        assert!(
+            !restarted_response.ok,
+            "a reused pane id after a server restart must not resolve the old route"
+        );
+        assert!(
+            restarted_response
+                .error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("ROUTE_RESOLVE_NOT_FOUND:")),
+            "{restarted_response:?}"
+        );
+        assert_eq!(mutation_snapshot(&server), before);
+        assert_eq!(std::fs::read(&journal_path).unwrap(), journal_before);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Acceptance 3 through the public registration entry: an approved
+    /// restore replaces a worker whose retired pane binding has no native
+    /// session anchors. The old address is retired without an invalid
+    /// tombstone, and the new route is published and resolvable.
+    #[tokio::test]
+    async fn registration_retires_a_sessionless_pane_binding_without_a_tombstone() {
+        let (server, root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+        let app = crate::identity::CLI_APP_SERVER_ID;
+        let candidates = test_candidates_at("thread-approved-restore", &root).unwrap();
+        let restored_endpoint = candidates.tmux.as_ref().unwrap().endpoint.clone();
+        let restored_worker = "worker-approved-restore";
+        let scope = GlobalState::canonical_project_scope(&root).unwrap();
+
+        let mut malformed = RuntimeBinding::new_with_session(
+            scope.clone(),
+            AppServerId::new(app).unwrap(),
+            AgentId::new(restored_worker).unwrap(),
+            RuntimeId::new(format!("runtime-{restored_worker}")).unwrap(),
+            BindingId::new(format!("binding-{restored_worker}")).unwrap(),
+            1,
+            None,
+            None,
+        )
+        .unwrap();
+        let retired_endpoint = crate::proto::TmuxEndpoint {
+            socket_path: root.join("retired-restore.sock").display().to_string(),
+            server_pid: 77,
+            tmux_session_id: "$3".into(),
+            pane_id: "%9".into(),
+            pane_pid: 88,
+            codex_session_id: None,
+            codex_thread_id: None,
+        };
+        malformed.tmux_endpoint = Some(retired_endpoint.clone());
+        let malformed_runtime = crate::identity::RuntimeIdentity {
+            agent_id: malformed.agent_id.clone(),
+            runtime_id: malformed.runtime_id.clone(),
+            appserver_id: malformed.app_scope_id.clone(),
+            endpoint_generation: malformed.endpoint_generation,
+            binding_id: malformed.binding_id.clone(),
+            session_id: None,
+            native_thread_id: None,
+        };
+        let context = context_with_runtime(&root, app, &malformed_runtime);
+        register_known_project_with_app(&server, &root, app);
+        server
+            .commit_checked(&[
+                Event::Registered {
+                    worker: WorkerRec {
+                        id: restored_worker.into(),
+                        token: "token-approved-restore".into(),
+                        cwd: root.display().to_string(),
+                        registered_ms: now_ms(),
+                        transport: Some(SelectedTransport {
+                            kind: TransportKind::Tmux,
+                            endpoint: Some(retired_endpoint.socket_path.clone()),
+                            namespace: Some(retired_endpoint.tmux_session_id.clone()),
+                            session_id: None,
+                            thread_id: None,
+                            tmux_endpoint: Some(retired_endpoint),
+                            capabilities: vec![
+                                "send_message_to_pane".into(),
+                                "probe_pane".into(),
+                            ],
+                            self_check: "retired pane-only fixture".into(),
+                        }),
+                    },
+                },
+                Event::GlobalRuntimeBound {
+                    binding: malformed.clone(),
+                },
+                Event::GlobalCurrentThreadRouteSet {
+                    binding: malformed.clone(),
+                },
+            ])
+            .unwrap();
+
+        let (_, response) = register_host_fixture(
+            &manager,
+            Some(context),
+            Req::register(
+                restored_worker.into(),
+                "token-approved-restore".into(),
+                root.display().to_string(),
+                Some(candidates),
+            ),
+        );
+        assert!(response.ok, "{response:?}");
+
+        let state = server.state.lock().unwrap();
+        assert!(
+            state
+                .global
+                .current_thread_routes
+                .values()
+                .all(|live| live != &malformed),
+            "the malformed address must still be retired"
+        );
+        assert!(
+            state.global.current_thread_route_tombstones.is_empty(),
+            "a binding without session/thread identity cannot supply a valid tombstone"
+        );
+        let restored = state
+            .global
+            .lookup_unique_tmux_pane_route(&restored_endpoint)
+            .cloned()
+            .expect("the restored route is the unique current claimant");
+        drop(state);
+        assert_eq!(restored.agent_id.as_str(), restored_worker);
+        assert!(manager
+            .resolve_route_by_tmux_endpoint(&restored_endpoint)
+            .is_ok());
 
         std::fs::remove_dir_all(root).unwrap();
     }

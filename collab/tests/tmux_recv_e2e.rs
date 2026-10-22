@@ -243,6 +243,43 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
         .expect("preserved send has a durable message id")
         .to_owned();
 
+    // An explicit owner re-subscription after unsubscribing the system default
+    // must still satisfy the context lease receipt after identity loss.
+    let notify_status = fixture.run_ok(&["notify", "status"], Some(&sender));
+    let default_subscription_id = notify_status["subscriptions"]
+        .as_array()
+        .expect("notify status lists subscriptions")
+        .iter()
+        .find(|subscription| {
+            subscription["event"] == "direct-message"
+                && subscription["id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("sub-default-direct-message-"))
+        })
+        .and_then(|subscription| subscription["id"].as_str())
+        .expect("registered sender has the default direct-message lease")
+        .to_owned();
+    fixture.run_ok(
+        &["notify", "unsubscribe", &default_subscription_id],
+        Some(&sender),
+    );
+    let resubscribed = fixture.run_ok(
+        &[
+            "notify",
+            "subscribe",
+            "--event",
+            "direct-message",
+            "--ttl-seconds",
+            "600",
+        ],
+        Some(&sender),
+    );
+    let resubscribed_id = resubscribed["subscription"]["id"]
+        .as_str()
+        .expect("explicit subscription has an id")
+        .to_owned();
+    assert_ne!(resubscribed_id, default_subscription_id);
+
     // Daemon restart and lost local receipt: the same actual tmux anchor must
     // return the same worker and generation without a fresh identity.
     let sender_identity = sender_context["identity"].clone();
@@ -289,7 +326,26 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
             .iter()
             .any(|subscription| subscription["event"] == "direct-message"
                 && subscription["status"] == "armed"),
-        "the default direct-message lease must be armed again after restart: {restart_context}"
+        "a direct-message lease must be armed after restart: {restart_context}"
+    );
+    let restart_subscriptions = fixture.run_ok(&["notify", "status"], Some(&sender));
+    let restart_subscriptions = restart_subscriptions["subscriptions"]
+        .as_array()
+        .expect("notify status lists subscriptions after restart");
+    assert!(
+        restart_subscriptions
+            .iter()
+            .any(|subscription| subscription["id"] == resubscribed_id
+                && subscription["status"] == "armed"),
+        "the explicit direct-message lease must survive restart: {restart_subscriptions:?}"
+    );
+    assert!(
+        restart_subscriptions.iter().any(|subscription| {
+            subscription["id"] == default_subscription_id
+                && subscription["status"] == "cancelled"
+                && subscription["status_reason"] == "explicit-unsubscribe"
+        }),
+        "the explicit unsubscribe must remain authoritative: {restart_subscriptions:?}"
     );
 
     // Mailbox and tasks are daemon state, not receipt state: they survive the

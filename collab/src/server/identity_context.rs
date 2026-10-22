@@ -696,26 +696,24 @@ fn business_receipts_for_success(
         return receipts;
     }
     receipts.push("credential".to_owned());
-    // Lease owner: the Register owner armed a default direct-message lease for
-    // this worker. It must still be live, not merely recorded.
+    // Lease owner: the worker must have a live direct-message receive channel.
+    // That can be the system-owned default lease or an explicit owner
+    // re-subscription created after the default was explicitly unsubscribed.
     let lease_proven = {
         let state = runtime.state.lock().unwrap();
+        let now = crate::server::state::now_ms();
         state
-            .notification_subscriptions
-            .get(&crate::server::mailbox::default_direct_message_id(
-                worker_id,
-            ))
-            .is_some_and(|subscription| {
-                subscription.worker_id == worker_id
-                    && subscription.status == "armed"
-                    && subscription.expires_ms > crate::server::state::now_ms()
-                    && state
-                        .workers
-                        .get(worker_id)
-                        .and_then(selected_transport_for_worker)
-                        .is_some_and(|transport| {
-                            subscription_matches_transport(subscription, &transport)
-                        })
+            .workers
+            .get(worker_id)
+            .and_then(selected_transport_for_worker)
+            .is_some_and(|transport| {
+                state
+                    .notification_subscriptions
+                    .values()
+                    .any(|subscription| {
+                        subscription.matches(worker_id, "direct-message", None, now)
+                            && subscription_matches_transport(subscription, &transport)
+                    })
             })
     };
     if lease_proven {

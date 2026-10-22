@@ -238,6 +238,65 @@ fn cli_cancel_at(
 }
 
 #[test]
+fn session_recovery_single_archive_without_runtime_is_migrated() {
+    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (fixture, pane) = Fixture::isolated("session-recovery-single-archive");
+    seed_matching_historical_identities(
+        &fixture, &canonical_root(&fixture), &pane.session_anchor,
+        &pane.thread_anchor, &["single"], None,
+    );
+    let output = context_with_agent_session(
+        &fixture, &fixture.root, "single-archive-recovery", &pane,
+    );
+    let result = success_payload(&output);
+    assert_eq!(result["result"]["snapshot"]["registered"], true);
+    assert!(result["result"]["snapshot"]["master"].is_null());
+}
+
+#[test]
+fn c15_direct_restore_cancellation_does_not_retire_a_duplicate_carrier() {
+    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let mut harness = CancellationHarness::start(&unique_root("c15-hook"));
+    let (mut fixture, pane) = Fixture::isolated("collab-v23-c15");
+    fixture.enable_cancellation_hooks(harness.socket());
+    fixture.registered_context("c15-current-seed", &pane);
+    let other_pane = second_pane(&fixture, "c15-other", pane.server_pid);
+    let other = fixture.registered_context("c15-other-seed", &other_pane);
+    let other_id = other["result"]["snapshot"]["identity"]["worker_id"]
+        .as_str().unwrap();
+    let mut binding = latest_runtime_binding_event(&fixture, other_id);
+    binding["binding"]["session_id"] = json!(pane.session_anchor);
+    binding["binding"]["native_thread_id"] = json!(pane.thread_anchor);
+    let generation = binding["binding"]["endpoint_generation"].as_u64().unwrap();
+    binding["binding"]["endpoint_generation"] = json!(generation + 1);
+    append_project_event(&mut fixture, &binding);
+
+    // Direct restore has no Register transaction. Cancellation at the safe
+    // boundary before name migration must prevent duplicate-carrier writes.
+    let cancelled = cli_cancel_at(
+        &fixture, &pane, &mut harness, "between_owners", "c15-cancelled", None, None,
+    );
+    assert_eq!(cancelled.status.code(), Some(2), "{}", text(&cancelled));
+    let cancelled = typed_failure(&cancelled);
+    assert_eq!(cancelled["result"]["outcome"], "cancelled");
+    assert!(!read_lines(&fixture.project_journal()).iter().any(|event| {
+        event["ev"] == "WorkerClosed" && event["worker_id"] == other_id
+    }), "a cancelled migration must leave the duplicate carrier intact");
+
+    let restored = fixture.registered_context("c15-restore", &pane);
+    assert_eq!(restored["result"]["outcome"], "completed", "{restored}");
+    assert_eq!(read_lines(&fixture.project_journal()).iter().filter(|event| {
+        event["ev"] == "WorkerClosed" && event["worker_id"] == other_id
+    }).count(), 1, "the next authorized context must converge exactly once");
+    let before = without_ledger_scans(&fs::read(fixture.project_journal()).unwrap());
+    let query = fixture.context_query("c15-cancelled", Some(&pane));
+    assert_eq!(query["result"]["queried_operation"]["outcome"], "cancelled");
+    let query = fixture.context_query("c15-restore", Some(&pane));
+    assert_eq!(query["result"]["queried_operation"]["outcome"], "completed");
+    assert_eq!(without_ledger_scans(&fs::read(fixture.project_journal()).unwrap()), before);
+}
+
+#[test]
 fn c12_sigint_before_admission_returns_local_cancelled_without_daemon_operation() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
     let mut harness = CancellationHarness::start(&unique_root("c12-hook"));

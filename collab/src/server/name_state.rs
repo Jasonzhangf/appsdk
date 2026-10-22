@@ -337,7 +337,7 @@ impl State {
     }
 
     fn commit_name_occupancy(&mut self, project_scope: &str, occupancy: NameOccupancy) {
-        // Releasing a worker's old name must not release that name's epoch.
+        // Releasing an old name must not release that name's epoch.
         self.retain_name_occupancy_revision(
             project_scope,
             &occupancy.name,
@@ -347,8 +347,13 @@ impl State {
             .name_occupancies
             .entry(project_scope.to_owned())
             .or_default();
+        // One agent session has one current name carrier. A later commit for
+        // the same session releases the previous worker's names too, while
+        // task assignments and message history stay in their own records.
         occupancies.retain(|name, current| {
-            name == &occupancy.name || current.worker_id != occupancy.worker_id
+            name == &occupancy.name
+                || (current.worker_id != occupancy.worker_id
+                    && current.session_id != occupancy.session_id)
         });
         occupancies.insert(occupancy.name.clone(), occupancy);
     }

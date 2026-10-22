@@ -88,6 +88,11 @@ Playground/Active/Protected/generated 是消费者治理分区。不能据此把
   保留历史，不重放，不改写正文、消息 ID 或真实消费回执。
   pane、tmux session、socket 路径和 server PID 只定位投递与观测，不作为工作归属。
   CLI 不从 `TMUX` 环境变量注入 socket 路径。历史 pane/native 绑定不否决当前恢复。
+  `collab context` 自己迁移历史身份、收敛重复 session 载体并恢复当前通信；不得让
+  agent 选择档案、清理旧 route、构造内部 fence 或运行独立迁移作为恢复前置。
+  本次明确用户恢复授权先于历史歧义处理；同项目/app/session 后提交的注册替换旧
+  执行载体，不停止旧进程，不影响其他 session。不同 session 在线占名仍沿本次
+  用户确认规则；已有授权不重复索取。
 - Collab 的 master 与 peer 具有相同编排功能，区别是目标层级：master 管理项目大目标，
   peer 管理受托子目标；两者都负责拆解、派发、资源管理、验收与交付，优先交子 agent
   完成具体编码、执行和观察。peer 不是直接执行 worker。注册和恢复须说明此职责，并

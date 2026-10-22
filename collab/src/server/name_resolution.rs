@@ -318,6 +318,14 @@ pub(crate) fn available_ordinary_name(
     project: &str,
     worker: &str,
 ) -> Result<String, String> {
+    // Recovery preserves an ordinary work identity. Pool order only chooses a
+    // name when this carrier has none, such as a transition away from Jenny.
+    if let Some(name) = ORDINARY_NAME_POOL.iter().find(|name| {
+        state.name_occupancy(project, name)
+            .is_some_and(|holder| holder.worker_id == worker)
+    }) {
+        return Ok((*name).to_owned());
+    }
     ORDINARY_NAME_POOL
         .iter()
         .find(|name| {

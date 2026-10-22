@@ -1367,3 +1367,235 @@ fn task_lifecycle_public_unresolved_code_delivery_is_not_read_only() {
     );
     std::fs::remove_dir_all(root).ok();
 }
+#[cfg(test)]
+fn same_session_appserver_transport(session: &str, thread: &str) -> SelectedTransport {
+    SelectedTransport {
+        kind: TransportKind::AppServer,
+        endpoint: Some("unix:///tmp/collab-session-carrier.sock".into()),
+        namespace: Some("codex_tui".into()),
+        session_id: Some(session.into()),
+        thread_id: Some(thread.into()),
+        tmux_endpoint: None,
+        capabilities: vec!["send_message_to_thread".into()],
+        self_check: "same session carrier fixture".into(),
+    }
+}
+
+/// A later successful Register for the same project/app/session replaces the
+/// previous runtime carrier. The old binding stays as retired history, while
+/// the new binding becomes the only current worker for that session.
+#[test]
+fn later_same_session_registration_reclaims_the_previous_carrier_once() {
+    let (server, root) = test_server();
+    let app = AppServerId::new("tui-default").unwrap();
+    let project_scope = GlobalState::canonical_project_scope(&root).unwrap();
+    let cwd = root.display().to_string();
+    let transport_a = same_session_appserver_transport("shared-session", "thread-a");
+    assert!(
+        seed_committed_owner(
+            &server,
+            "carrier-a",
+            "token-carrier-a",
+            &transport_a,
+            &cwd,
+            Some(app.clone()),
+        )
+        .ok
+    );
+    let first = registered_binding(&server, "carrier-a");
+    server
+        .commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+            binding: first.clone(),
+        }])
+        .unwrap();
+    let carried_name = server
+        .state
+        .lock()
+        .unwrap()
+        .name_occupancies
+        .get(project_scope.as_str())
+        .unwrap()
+        .values()
+        .find(|occupancy| occupancy.worker_id == "carrier-a")
+        .unwrap()
+        .name
+        .clone();
+
+    let transport_b = same_session_appserver_transport("shared-session", "thread-b");
+    let prepared_b = prepare_register_typed(
+        &server,
+        "carrier-b",
+        "token-carrier-b",
+        &transport_b,
+        &cwd,
+        Some(project_scope.clone()),
+        Some(app.clone()),
+        false,
+    )
+    .unwrap();
+    let registered = consume_prepared_register_typed(
+        &server,
+        "carrier-b",
+        &transport_b,
+        prepared_b.clone(),
+        None,
+    );
+    assert!(registered.ok, "{registered:?}");
+    let journal_before_retry = std::fs::read(&server.journal_path).unwrap();
+    let retried = consume_prepared_register_typed(
+        &server,
+        "carrier-b",
+        &transport_b,
+        prepared_b,
+        None,
+    );
+    assert!(retried.ok, "{retried:?}");
+    assert_eq!(retried.data["replayed"], true);
+    assert_eq!(
+        std::fs::read(&server.journal_path).unwrap(),
+        journal_before_retry,
+        "an identical Register retry must not append a second carrier takeover"
+    );
+
+    let state = server.state.lock().unwrap();
+    let retired = state
+        .global
+        .lookup_binding_for(&first.route_scope(), &first.binding_id)
+        .expect("the previous carrier binding remains as history");
+    assert_eq!(retired.endpoint_generation, first.endpoint_generation + 1);
+    assert!(retired.native_thread_id.is_none());
+    assert!(retired.tmux_endpoint.is_none());
+    assert!(!state.workers.contains_key("carrier-a"));
+    assert!(state.workers.contains_key("carrier-b"));
+    assert!(state
+        .global
+        .current_thread_routes
+        .values()
+        .all(|binding| binding.binding_id != first.binding_id));
+    let session_holders = state
+        .name_occupancies
+        .get(project_scope.as_str())
+        .unwrap()
+        .values()
+        .filter(|occupancy| occupancy.session_id == "shared-session")
+        .collect::<Vec<_>>();
+    assert_eq!(session_holders.len(), 1);
+    assert_eq!(session_holders[0].worker_id, "carrier-b");
+    assert_eq!(session_holders[0].name, carried_name);
+    drop(state);
+
+    let replayed = replay(&root).unwrap();
+    let replayed_holders = replayed
+        .name_occupancies
+        .get(project_scope.as_str())
+        .unwrap()
+        .values()
+        .filter(|occupancy| occupancy.session_id == "shared-session")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        replayed_holders.len(),
+        1,
+        "journal replay must keep one name carrier per session"
+    );
+    assert_eq!(replayed_holders[0].worker_id, "carrier-b");
+    assert!(!replayed.workers.contains_key("carrier-a"));
+    assert!(replayed
+        .global
+        .current_thread_routes
+        .values()
+        .all(|binding| binding.binding_id != first.binding_id));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Reclaiming is limited to the exact project/app/session. Another session or
+/// another project keeps its current carrier, and a same-binding retry stays
+/// idempotent instead of reclaiming the registrant itself.
+#[test]
+fn same_session_carrier_reclaim_is_scoped_and_self_idempotent() {
+    let (server, root) = test_server();
+    let app = AppServerId::new("tui-default").unwrap();
+    let project_scope = GlobalState::canonical_project_scope(&root).unwrap();
+    let cwd = root.display().to_string();
+    let transport_a = same_session_appserver_transport("session-isolated", "thread-a");
+    let prepared_a = prepare_register_typed(
+        &server,
+        "carrier-a",
+        "token-carrier-a",
+        &transport_a,
+        &cwd,
+        Some(project_scope.clone()),
+        Some(app.clone()),
+        false,
+    )
+    .unwrap();
+    assert!(server
+        .consume_prepared_register_with_approval(prepared_a.clone(), None)
+        .is_ok());
+    let first = registered_binding(&server, "carrier-a");
+
+    let retry_prepared = prepare_register_typed(
+        &server,
+        "carrier-a",
+        "token-carrier-a",
+        &transport_a,
+        &cwd,
+        Some(project_scope.clone()),
+        Some(app.clone()),
+        true,
+    )
+    .unwrap();
+    assert!(server
+        .consume_prepared_register_with_approval(retry_prepared, None)
+        .unwrap()
+        .replayed);
+    assert_eq!(registered_binding(&server, "carrier-a"), first);
+
+    let other_session = same_session_appserver_transport("session-other", "thread-b");
+    let prepared_b = prepare_register_typed(
+        &server,
+        "carrier-b",
+        "token-carrier-b",
+        &other_session,
+        &cwd,
+        Some(project_scope.clone()),
+        Some(app.clone()),
+        false,
+    )
+    .unwrap();
+    assert!(server
+        .consume_prepared_register_with_approval(prepared_b, None)
+        .is_ok());
+    assert_eq!(registered_binding(&server, "carrier-a"), first);
+    assert!(server.state.lock().unwrap().workers.contains_key("carrier-a"));
+
+    let other_project = ProjectScopeId::new("/other-project").unwrap();
+    let same_session_other_project =
+        same_session_appserver_transport("session-isolated", "thread-c");
+    let prepared_c = prepare_register_typed(
+        &server,
+        "carrier-c",
+        "token-carrier-c",
+        &same_session_other_project,
+        &cwd,
+        Some(other_project.clone()),
+        Some(app),
+        false,
+    )
+    .unwrap();
+    assert!(server
+        .consume_prepared_register_with_approval(prepared_c, None)
+        .is_ok());
+    assert_eq!(registered_binding(&server, "carrier-a"), first);
+    assert!(server.state.lock().unwrap().workers.contains_key("carrier-a"));
+    assert!(server
+        .state
+        .lock()
+        .unwrap()
+        .global
+        .lookup_project(&other_project)
+        .unwrap()
+        .runtime_bindings
+        .values()
+        .any(|binding| binding.agent_id.as_str() == "carrier-c"));
+    std::fs::remove_dir_all(root).unwrap();
+}

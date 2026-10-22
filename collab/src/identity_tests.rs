@@ -296,7 +296,7 @@ fn resolver_never_adopts_an_unrelated_same_project_peer() {
 }
 
 #[test]
-fn resolver_rejects_an_ambiguous_anchor_without_guessing_from_recency() {
+fn resolver_migrates_ambiguous_archives_to_a_stable_session_draft() {
     let _guard = ENV_LOCK.lock().unwrap();
     let root = test_root("ci-resolver-ambiguous");
     std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
@@ -318,10 +318,35 @@ fn resolver_rejects_an_ambiguous_anchor_without_guessing_from_recency() {
         None,
         None,
     );
-    // Unreachable endpoints cannot prove which of two records owns an anchor.
-    let error = resolve_for_daemon_at(&host_paths, &scope, &facts(Some("session-dup"), None, None))
-        .unwrap_err();
-    assert!(error.to_string().starts_with("IDENTITY_RESTORE_AMBIGUOUS:"));
+    // Archives do not prove current ownership. Derive the current carrier
+    // without adopting either archive or asking the agent to pick one.
+    let observed = facts(Some("session-dup"), None, None);
+    let draft = resolve_for_daemon_at(&host_paths, &scope, &observed).unwrap();
+    assert_ne!(draft.worker_id, "a-peer");
+    assert_ne!(draft.worker_id, "b-peer");
+    assert!(draft.worker_id.starts_with("codex-session-"));
+    assert_eq!(
+        resolve_for_daemon_at(&host_paths, &scope, &observed)
+            .unwrap()
+            .worker_id,
+        draft.worker_id
+    );
+    // A later cold recovery can see the derived carrier alongside the same
+    // old duplicates. Keep its credential instead of failing on its runtime.
+    saved_identity(
+        &host_paths,
+        &scope,
+        &draft.worker_id,
+        Some("session-dup"),
+        None,
+        None,
+    );
+    let saved = read_persisted(&host_paths, &draft.worker_id)
+        .unwrap()
+        .unwrap();
+    let restored = resolve_for_daemon_at(&host_paths, &scope, &observed).unwrap();
+    assert_eq!(restored.worker_id, saved.worker_id);
+    assert_eq!(restored.token, saved.token);
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -462,7 +487,7 @@ fn resolver_prefers_current_scope_for_a_shared_pane_anchor() {
 }
 
 #[test]
-fn resolver_rejects_duplicate_agent_session_owners_instead_of_using_current_pane() {
+fn resolver_migrates_duplicate_archives_without_using_pane_ownership() {
     let root = test_root("ci-resolver-shared-pane-current-scope-ambiguous");
     std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
     let scope = test_scope(root.clone());
@@ -495,23 +520,21 @@ fn resolver_rejects_duplicate_agent_session_owners_instead_of_using_current_pane
         dsh_session_id: None,
         ..Default::default()
     };
-    let error = resolve_for_daemon_at(&host_paths, &scope, &facts).unwrap_err();
-    let message = error.to_string();
-    assert!(
-        message.starts_with("IDENTITY_RESTORE_AMBIGUOUS:"),
-        "{message}"
-    );
-    assert!(message.contains("codex-%4"), "{message}");
-    assert!(message.contains("same-project-pane-peer"), "{message}");
+    let draft = resolve_for_daemon_at(&host_paths, &scope, &facts).unwrap();
+    assert_ne!(draft.worker_id, "codex-%4");
+    assert_ne!(draft.worker_id, "same-project-pane-peer");
+    assert!(draft.worker_id.starts_with("codex-session-"));
     std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
-fn resolver_disambiguates_a_shared_codex_anchor_by_the_live_binding() {
+fn resolver_migrates_duplicate_archives_with_one_matching_pane() {
     let root = test_root("ci-resolver-shared-anchor-live-binding");
     std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
     let scope = test_scope(root.clone());
     let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
+    // One archive names the current pane. Placement and recency are not owner
+    // evidence, so neither archive may be selected.
     let live = tmux_candidate(Some("session-shared"), Some("thread-shared"), "%6");
     let stale = tmux_candidate(Some("session-shared"), Some("thread-shared"), "%175");
     saved_identity(
@@ -537,7 +560,26 @@ fn resolver_disambiguates_a_shared_codex_anchor_by_the_live_binding() {
         &facts(Some("session-shared"), Some("thread-shared"), Some(live)),
     )
     .unwrap();
-    assert_eq!(found.worker_id, "codex-%12");
+    assert_ne!(found.worker_id, "codex-%12");
+    assert_ne!(found.worker_id, "codex-%175");
+    assert!(found.worker_id.starts_with("codex-session-"));
+    assert!(found.runtime.is_none());
+    assert_eq!(
+        read_persisted(&host_paths, "codex-%12")
+            .unwrap()
+            .unwrap()
+            .token,
+        "token-codex-%12",
+        "the archived credential must stay untouched"
+    );
+    assert_eq!(
+        read_persisted(&host_paths, "codex-%175")
+            .unwrap()
+            .unwrap()
+            .token,
+        "token-codex-%175",
+        "the stale archive must also stay untouched"
+    );
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -572,7 +614,7 @@ fn preserved_draft_token_is_not_reminted() {
     )
     .unwrap();
     assert_ne!(resolved.token, "stored-draft-token");
-    assert_eq!(resolved.worker_id, "codex-thread-7468726561642d35");
+    assert_eq!(resolved.worker_id, "codex-session-73657373696f6e2d35");
     std::fs::remove_dir_all(root).ok();
 }
 

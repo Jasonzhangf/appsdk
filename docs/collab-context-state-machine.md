@@ -38,7 +38,10 @@ socket、server PID、thread 和 route 只定位投递与观测。pane 相同不
 | --- | --- | --- |
 | 项目无法解析 | 无 canonical root | `explicit_failure`；不猜 route |
 | daemon 不可达 | `require_server` 失败 | 本次失败；不启动 daemon |
+| 已提供明确恢复授权 | 先解析本次用户意图 | 历史档案或旧 binding 不得先行否决；context 内部迁移并收敛 |
+| 同 session 留有重复档案或多个旧载体 | 内部兼容迁移 | 优先 typed 名字归属和已提交当前载体；无当前载体时建立当前 session 身份，不让 agent 选择档案 |
 | 同项目、同 agent sessionID | 幂等恢复 | `committed`；只同步投递位置 |
+| 同项目/app/session 后一次注册提交 | 当前执行载体替换 | 退役前一载体的投递绑定并收敛名字占用；不停止旧进程，不影响其他 session |
 | 同名字当前工作者从 S1 到 S2 | 正常 session 续接 | 更新名字 session，并换绑同名全部未关闭任务 |
 | 名字可分配或已确认 offline | 正常分配或继承 | `committed`；新名字绑定当前 session |
 | 其他工作者在线占名 | 尚需本次用户确认 | `confirmation_required`；保留现 owner |
@@ -172,8 +175,9 @@ journal 的幂等与取消边界保持。
 - Agent 只执行 `collab context`；缺事实时只执行一次 factual supplement
   `collab context --provide`，且只含 `session_id`、`thread_id`、`endpoint`、
   `namespace`。
-- Agent 不运行身份选择/恢复或 status/route 探测命令，也不设置身份覆盖
-  环境或 approval supplement。
+- Agent 不运行独立身份选择或 status/route 探测序列，也不设置身份覆盖环境。
+  用户已要求恢复或接管时，通过 context 的 approval 参数提交本次用户意图；不猜
+  历史 worker、fence、generation 或 scope，不重复索取已有授权。
 - pane 只是投递位置；当前明确授权覆盖历史 pane 绑定。名字归属仍按同名续接、在线
   二次确认与 unknown 裁决分类，不用“后注册 pane 取胜”代替名字合同。
 - `collab init` 不是 Agent 的默认入口，也不是第二套身份算法：它与 `collab context`
@@ -194,7 +198,8 @@ journal 的幂等与取消边界保持。
 `collab context`。若 snapshot 带 `requires_identity_update`，读取
 `required_fields`、`reason`、`action`、`exact_error`，并只在 action 为 factual
 supplement 时用一次 `collab context --provide` 提供请求的真实字段。`registered`
-与 `requires_identity_update` 才是判据；退出码 0 不代表身份已验真。显式冲突、token
+与 `requires_identity_update` 才是判据；退出码 0 不代表身份已验真。历史重复由 context
+自己迁移，不作为 agent 选择题。明确用户意图通过 context approval 提交。真实输入冲突、token
 拒绝、route/runtime/transport 失败保留原始错误，不 fallback、不伪装成名字裁决 pending。
 worker status、board admission 或 mutation 返回 stale generation /
 `SESSION_THREAD_BINDING_MISMATCH` 时，保留 registered binding，只通过

@@ -41,7 +41,7 @@
       "id": "判定续接分配占用确认或待决",
       "operator": "appsdk.collab_context.classify_name_resolution",
       "operator_version": "1",
-      "description": "同项目同 agent session 直接幂等恢复；同名字当前工作者 S1→S2 进入自动换绑；离线失去保持权后进入正常分配或继承；在线其他工作者默认不替换，仅本次用户明确要求且二次确认后进入替换；unknown 进入持久 pending 并请求当前 Jenny 裁决。历史 session 不是准入门禁。",
+      "description": "用户本次明确授权的 target/name/role 意图先于普通历史解析，不被旧档案、旧 token/generation 或重复 session 否决。同项目同 agent session 按 daemon 当前 typed 名字归属幂等恢复；无当前归属时由 session 派生稳定新载体，context 自行迁移兼容旧记录，不让 agent 清理或猜测。后提交绑定收敛同 scope/session 的旧绑定与 route。同名字当前工作者 S1→S2 自动换绑；离线失去保持权后正常分配；在线其他 session 占名默认不替换，已有本次用户接管确认直接应用，不重复索取。unknown 的名字归属沿既有裁决，明确用户接管优先。内部历史冲突不暴露为 agent 的选择题；仅真实缺事实或未提供的用户意图返回准确 requires 和完整下一步操作。",
       "inputs": ["durable_name_scope"],
       "output": {"id": "name_resolution_decision", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},

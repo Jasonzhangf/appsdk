@@ -186,6 +186,7 @@ impl ProjectRuntimeManager {
         let facts = match self.preflight_identity_facts(
             &context,
             continuation_facts.unwrap_or_else(|| request.facts.clone()),
+            approved.as_ref().map(|approved| &approved.identity),
         ) {
             Ok(facts) => facts,
             Err(PreflightIdentityError::MissingFacts(data)) => {
@@ -313,6 +314,7 @@ impl ProjectRuntimeManager {
                         .operation_journal
                         .begin_owner_start(&request.operation_id, "name")
                         .and_then(|_| {
+                            self.converge_context_session_carriers(&runtime, &context, &mut response)?;
                             self.resolve_context_name(&runtime, &context, &request, &mut response)
                         });
                     if resolution.is_err()
@@ -683,7 +685,7 @@ impl ProjectRuntimeManager {
             root: PathBuf::from(&context.canonical_root),
         };
         if facts.tmux.is_none() {
-            self.complete_persisted_native_facts(&scope, &mut facts)?;
+            self.complete_persisted_native_facts(&scope, &mut facts, None)?;
         }
         let host_binding = self.current_anchor_binding(context, &facts)?;
         let (app_scope, binding_id) = if let Some(binding) = host_binding.as_ref() {
@@ -1103,6 +1105,7 @@ impl ProjectRuntimeManager {
         &self,
         context: &ProjectContext,
         mut facts: IdentityFacts,
+        approved_target: Option<&identity::Identity>,
     ) -> Result<IdentityFacts, PreflightIdentityError> {
         if context.app_scope_id.as_str() != identity::CLI_APP_SERVER_ID
             || context.runtime_context.is_some()
@@ -1126,7 +1129,7 @@ impl ProjectRuntimeManager {
         let scope = Scope { root };
         let restoring_pane = self.has_persisted_pane_route(context, &facts);
         if !restoring_pane && !required_fields(&facts).is_empty() {
-            self.complete_persisted_native_facts(&scope, &mut facts)
+            self.complete_persisted_native_facts(&scope, &mut facts, approved_target)
                 .map_err(PreflightIdentityError::Error)?;
         }
         let required = if restoring_pane {

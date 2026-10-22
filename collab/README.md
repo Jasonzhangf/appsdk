@@ -11,6 +11,21 @@ the append-only journal, durable mailbox, task/resource state, and migration
 transaction. The server selects the App Server transport. Each subscribed
 wake is a bounded preview; the durable mailbox remains authoritative.
 
+## tmux socket configuration
+
+Collab observes tmux panes only through host-owned socket endpoints. The
+daemon state root also accepts a `tmux-endpoints.json` capability file. For a
+host-wide setting, list the sockets in `~/.appsdk/config.toml`:
+
+```toml
+[tmux]
+endpoints = ["/Users/me/.tmux/run/tmux-501/default"]
+```
+
+List both old and new sockets during a migration. Collab matches the caller's
+live pane ancestry, so a pane selects its own server without a caller-supplied
+socket path. Collab never reads the socket from the `TMUX` environment value.
+
 ## Model
 
 - Every registered identity is an equal peer. Declared `master`/`worker` roles

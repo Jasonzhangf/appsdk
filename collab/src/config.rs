@@ -19,6 +19,7 @@ pub struct Config {
     pub subagent: Subagent,
     pub retention: Retention,
     pub worktree: Worktree,
+    pub tmux: Tmux,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -30,11 +31,31 @@ impl Default for Config {
             subagent: Subagent::default(),
             retention: Retention::default(),
             worktree: Worktree::default(),
+            tmux: Tmux::default(),
         }
     }
 }
 
 pub const DEFAULT_MAINTENANCE_PASSWORD: &str = "admin";
+
+/// Host-wide tmux socket endpoints Collab may observe.
+///
+/// The socket path is host placement data. It must not come from the caller's
+/// `TMUX` environment value.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Tmux {
+    /// Absolute tmux socket paths. More than one is valid during a migration
+    /// because Collab matches the caller's live pane ancestry.
+    pub endpoints: Vec<String>,
+}
+impl Default for Tmux {
+    fn default() -> Self {
+        Self {
+            endpoints: Vec::new(),
+        }
+    }
+}
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -504,6 +525,9 @@ pub fn parse(text: &str, root: &Path) -> Result<Config> {
             if table.contains_key("maintenance") {
                 bail!("maintenance is global-only; project overrides are not supported");
             }
+            if table.contains_key("tmux") {
+                bail!("tmux is global-only; project overrides are not supported");
+            }
             let path = table
                 .remove("root")
                 .and_then(|v| v.as_str().map(PathBuf::from))
@@ -534,6 +558,9 @@ impl Config {
     fn validate(&self) -> Result<()> {
         if self.maintenance.password.is_empty() {
             bail!("maintenance.password must not be empty");
+        }
+        for endpoint in &self.tmux.endpoints {
+            validate_tmux_endpoint(endpoint)?;
         }
         if !(900..=86400).contains(&self.keepalive.interval_seconds)
             || !(1..=3).contains(&self.keepalive.max_unacked)
@@ -610,6 +637,16 @@ impl Config {
     }
 }
 
+fn validate_tmux_endpoint(endpoint: &str) -> Result<()> {
+    if endpoint.is_empty()
+        || !Path::new(endpoint).is_absolute()
+        || endpoint.chars().any(char::is_control)
+    {
+        bail!("tmux.endpoints requires absolute socket paths without control characters");
+    }
+    Ok(())
+}
+
 /// Read the user-only maintenance password from the global AppSDK config.
 ///
 /// This is a pure read: it never migrates, writes, or merges project
@@ -639,6 +676,43 @@ pub fn maintenance_password() -> Result<String> {
         bail!("maintenance.password must not be empty");
     }
     Ok(password.to_owned())
+}
+
+/// Read host-wide tmux socket endpoints from the global AppSDK config.
+///
+/// This is a pure read. Project overrides are ignored so a project checkout
+/// cannot redirect the host socket used to observe panes.
+pub fn tmux_endpoints() -> Result<Vec<String>> {
+    let path = path()?;
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let parsed: toml::Value =
+        toml::from_str(&text).map_err(|_| anyhow::anyhow!("invalid ~/.appsdk/config.toml"))?;
+    let Some(tmux) = parsed.get("tmux") else {
+        return Ok(Vec::new());
+    };
+    let tmux = tmux.as_table().context("tmux must be a table")?;
+    let Some(value) = tmux.get("endpoints") else {
+        return Ok(Vec::new());
+    };
+    let endpoints = value
+        .as_array()
+        .context("tmux.endpoints must be an array of strings")?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .context("tmux.endpoints must be an array of strings")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    for endpoint in &endpoints {
+        validate_tmux_endpoint(endpoint)?;
+    }
+    Ok(endpoints)
 }
 
 pub fn load(root: &Path) -> Result<Config> {
@@ -713,6 +787,27 @@ mod tests {
             "[retention]\nttl_days=0",
         ] {
             assert!(parse(s, Path::new("/project")).is_err());
+        }
+    }
+
+    #[test]
+    fn tmux_endpoints_are_global_absolute_sockets() {
+        let c = parse(
+            "[tmux]\nendpoints=['/tmp/tmux-a.sock','/tmp/tmux-b.sock']",
+            Path::new("/project"),
+        )
+        .unwrap();
+        assert_eq!(
+            c.tmux.endpoints,
+            vec!["/tmp/tmux-a.sock", "/tmp/tmux-b.sock"]
+        );
+        for text in [
+            "[tmux]\nendpoints=['relative.sock']",
+            "[tmux]\nendpoints=['']",
+            "[tmux]\nendpoints='/tmp/tmux.sock'",
+            "[[projects]]\nroot='/project'\n[projects.tmux]\nendpoints=['/tmp/tmux.sock']",
+        ] {
+            assert!(parse(text, Path::new("/project")).is_err(), "{text}");
         }
     }
 

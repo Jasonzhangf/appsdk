@@ -171,6 +171,11 @@ pub fn mark_master_wake_delivered(accumulator: &mut MasterWakeAccumulator) {
     accumulator.delivery_state = "notified_unconsumed".into();
 }
 
+pub fn clear_master_goal_due(accumulator: &mut MasterWakeAccumulator) {
+    accumulator.goal_due = false;
+    accumulator.active_goal_revision = None;
+}
+
 pub fn mark_master_wake_delivery_failed(accumulator: &mut MasterWakeAccumulator) {
     accumulator.delivery_state = "delivery_failed".into();
 }

@@ -692,7 +692,19 @@ impl State {
                 message_id: _,
                 consumed_ms,
             } => {
+                let clears_master_goal_due = self
+                    .notification_subscriptions
+                    .get(subscription_id)
+                    .is_some_and(|subscription| {
+                        is_goal_deadline(subscription)
+                            && subscription_affects_master_wake(self, subscription)
+                    });
                 self.consume_notification(subscription_id, Some(*consumed_ms));
+                if clears_master_goal_due {
+                    crate::server::notification_state::clear_master_goal_due(
+                        &mut self.master_wake,
+                    );
+                }
             }
             Event::WakeBound {
                 message_id,

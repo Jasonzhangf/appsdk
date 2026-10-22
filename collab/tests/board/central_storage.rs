@@ -156,6 +156,67 @@ fn start_daemon_from(fixture: &mut AppFixture, daemon_root: &std::path::Path) {
 }
 
 #[test]
+fn legacy_subscription_pane_migrates_and_daemon_serves_messages() {
+    let mut fixture = AppFixture::new();
+    let first = fixture.run_public(&["context"], THREAD_A);
+    let first_id = first["identity"]["worker_id"].as_str().unwrap().to_owned();
+    let journal = runtime_journals(&fixture.host_state)
+        .into_iter()
+        .next()
+        .unwrap();
+    let central_root = journal
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    fixture.stop_daemon();
+    move_runtime_data(&central_root, &fixture.project);
+    let legacy_journal = fixture.project.join(".agent-collab/server/journal.jsonl");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&legacy_journal)
+        .unwrap();
+    use std::io::Write;
+    writeln!(
+        file,
+        "{}",
+        json!({"ev":"NotificationSubscribed","subscription":{
+            "id":"legacy-pane-sub","worker_id":first_id,"event":"direct-message",
+            "subject":null,"pane":"%1","method":"tmux","trigger_ms":null,
+            "expires_ms":1,"status":"armed","created_ms":0,"updated_ms":0
+        }})
+    )
+    .unwrap();
+    writeln!(file, "{}", json!({"ev":"NotificationStatus","subscription_id":"legacy-pane-sub","status":"pane-lost","updated_ms":1})).unwrap();
+    drop(file);
+    let legacy_before = std::fs::read(&legacy_journal).unwrap();
+    std::fs::remove_file(fixture.host_state.join("routes.jsonl")).unwrap();
+    std::fs::remove_dir_all(&central_root).unwrap();
+    let project = fixture.project.clone();
+    start_daemon_from(&mut fixture, &project);
+    let restored = fixture.run_public(&["context"], THREAD_A);
+    assert_eq!(restored["identity"]["worker_id"], first_id);
+    let second = fixture.run_public(&["context"], THREAD_B);
+    let second_id = second["identity"]["worker_id"].as_str().unwrap();
+    let sent = fixture.run_public(
+        &[
+            "sendmessage",
+            "--to",
+            second_id,
+            "--subject",
+            "legacy replay",
+            "message after migration",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(sent["durable"], true);
+    assert_eq!(std::fs::read(&legacy_journal).unwrap(), legacy_before);
+}
+
+#[test]
 fn central_storage_survives_restart_and_stays_under_private_host() {
     let mut fixture = AppFixture::new();
     let first = fixture.run_public(&["context"], THREAD_A);

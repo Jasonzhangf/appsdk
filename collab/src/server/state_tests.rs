@@ -1,4 +1,21 @@
 use super::*;
+
+#[test]
+fn legacy_notification_pane_decodes_without_weakening_required_target() {
+    let legacy = serde_json::json!({"ev":"NotificationSubscribed","subscription":{
+        "id":"legacy-sub","worker_id":"legacy-peer","event":"direct-message",
+        "subject":null,"pane":"%1","method":"tmux","trigger_ms":null,
+        "expires_ms":1,"status":"armed","created_ms":0,"updated_ms":0
+    }});
+    let event: Event = serde_json::from_value(legacy.clone()).unwrap();
+    let canonical = serde_json::to_value(event).unwrap();
+    assert_eq!(canonical["subscription"]["target"], "%1");
+    assert!(canonical["subscription"].get("pane").is_none());
+    let _: Event = serde_json::from_value(canonical).unwrap();
+    let mut missing = legacy;
+    missing["subscription"].as_object_mut().unwrap().remove("pane");
+    assert!(serde_json::from_value::<Event>(missing).is_err());
+}
 use crate::identity::{AgentId, AppServerId, BindingId, NativeThreadId, RuntimeId, SessionId};
 use crate::scope::ProjectScopeId;
 use crate::server::global_state::{ProjectRegistration, RuntimeBinding};

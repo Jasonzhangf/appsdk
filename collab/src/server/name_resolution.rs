@@ -61,9 +61,6 @@ pub(crate) fn parse_name_intent(
             .ok_or("NAME_INTENT_INVALID: restore_name requires requested_name")?,
         _ => return Ok(None),
     };
-    if object.get("decision").is_some_and(|decision| decision.as_str() != Some("approved")) {
-        return Err("IDENTITY_APPROVAL_NOT_APPROVED: decision must be approved".into());
-    }
     validate_name(name)?;
     let replace_confirmed = match object.get("replace_confirmed") {
         None => false,
@@ -73,12 +70,13 @@ pub(crate) fn parse_name_intent(
     };
     Ok(Some(NameIntent {
         requested_name: name.into(),
-        user_authorized: object.get("decision").and_then(serde_json::Value::as_str)
-            == Some("approved")
-            || object
+        user_authorized: match object.get("decision") {
+            Some(decision) => decision.as_str() == Some("approved"),
+            None => object
                 .get("authorization")
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|text| !text.trim().is_empty()),
+        },
         replace_confirmed,
     }))
 }

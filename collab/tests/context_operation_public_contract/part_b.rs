@@ -867,7 +867,7 @@ fn session_recovery_no_target_peer_intent_uses_current_carrier() {
         r#"{"decision":"denied","action":"restore_master","authorization":"user did not approve master"}"#,
     ], Some(&pane));
     assert!(!denied.status.success(), "explicit denial must not become approval");
-    assert!(text(&denied).contains("IDENTITY_APPROVAL_NOT_APPROVED"));
+    assert!(text(&denied).contains("NAME_AUTHORIZATION_REQUIRED"));
     assert_eq!(identity_tree(&fixture.host_state), before_denial);
 }
 

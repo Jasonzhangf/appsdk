@@ -58,6 +58,19 @@ pub fn configured_endpoints(state_root: &Path) -> Result<Vec<String>, String> {
     Ok(capabilities.endpoints)
 }
 
+/// Host-owned endpoints available for observation: the typed capability file
+/// plus the global `[tmux] endpoints` configuration.
+pub fn host_endpoints_at(state_root: &Path) -> Result<Vec<String>, String> {
+    let mut endpoints = configured_endpoints(state_root)?;
+    endpoints.extend(
+        crate::config::tmux_endpoints()
+            .map_err(|error| format!("TMUX_OBSERVATION_CAPABILITY_INVALID: {error}"))?,
+    );
+    endpoints.sort();
+    endpoints.dedup();
+    Ok(endpoints)
+}
+
 pub fn observe_caller(
     endpoints: impl IntoIterator<Item = String>,
     caller_pid: u32,
@@ -203,7 +216,7 @@ pub fn persisted_identity_endpoints(state_root: &Path) -> Result<Vec<String>, St
 }
 
 pub fn known_endpoints_at(state_root: &Path) -> Result<Vec<String>, String> {
-    let mut endpoints = configured_endpoints(state_root)?;
+    let mut endpoints = host_endpoints_at(state_root)?;
     endpoints.extend(persisted_identity_endpoints(state_root)?);
     endpoints.sort();
     endpoints.dedup();
@@ -932,6 +945,47 @@ pub(crate) mod tests {
             vec!["/tmp/tmux-one.sock", "/tmp/tmux-two.sock"]
         );
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn config_endpoints_are_available_without_capability_file() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let original_home = std::env::var_os("HOME");
+        let home = std::env::temp_dir().join(format!(
+            "collab-tmux-config-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(home.join(".appsdk")).unwrap();
+        let tmux = IsolatedTmux::start();
+        std::fs::write(
+            home.join(".appsdk/config.toml"),
+            format!(
+                "[tmux]\nendpoints = [\"{}\"]\n",
+                tmux.socket.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        std::env::set_var("HOME", &home);
+        let state_root = home.join("state");
+        std::fs::create_dir_all(&state_root).unwrap();
+
+        let endpoint = tmux.endpoint();
+        let observed = observe_caller_at(&state_root, endpoint.pane_pid, Some(&endpoint.pane_id))
+            .unwrap()
+            .expect("configured tmux socket should identify the caller pane");
+        assert_eq!(observed.socket_path, endpoint.socket_path);
+        assert_eq!(observed.server_pid, endpoint.server_pid);
+        assert_eq!(observed.pane_id, endpoint.pane_id);
+
+        match original_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]

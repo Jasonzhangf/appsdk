@@ -35,7 +35,7 @@ fn run_in_pane_at(
         "set -e\n\
          cd {root}\n\
          unset COLLAB_SOCKET_PATH COLLAB_HOST_SOCKET COLLAB_LOCK_PATH COLLAB_HOST_LOCK COLLAB_APPSERVER_SOCKET CODEX_APP_SERVER_SOCKET COLLAB_APPSERVER_NAMESPACE COLLAB_WORKER CODEX_SESSION_ID CODEX_THREAD_ID CODEX_THREAD DSH_SESSION_ID\n\
-         export COLLAB_STATE_DIR={state} CODEX_HOME={home} CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex TUI'\n\
+         export HOME={home} COLLAB_STATE_DIR={state} CODEX_HOME={home} CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex TUI'\n\
          export TMUX={tmux_value} TMUX_PANE={pane_id}\n\
          export CODEX_SESSION_ID={session_id}\n\
          {binary} {command} >{result} 2>{error}\n\
@@ -236,6 +236,35 @@ impl Drop for SecondaryTmux {
             ])
             .output();
     }
+}
+
+#[test]
+fn configured_tmux_endpoint_is_used_without_capability_file() {
+    let (fixture, pane) = single_pane_fixture("identity-config-endpoint");
+    std::fs::remove_file(fixture.host_state.join("tmux-endpoints.json")).unwrap();
+    std::fs::create_dir_all(fixture.root.join("home/.appsdk")).unwrap();
+    std::fs::write(
+        fixture.root.join("home/.appsdk/config.toml"),
+        format!(
+            "[tmux]\nendpoints = [\"{}\"]\n",
+            fixture.tmux_socket.display()
+        ),
+    )
+    .unwrap();
+
+    let result = run_in_pane_with_tmux(
+        &fixture,
+        &pane,
+        "config-endpoint",
+        "not-a-tmux-value",
+        &["context", "--op", "config-endpoint"],
+    );
+    assert_eq!(result["ok"], true, "{result}");
+    assert_eq!(
+        context_snapshot(&result)["identity"]["transport"]["kind"],
+        "tmux",
+        "{result}"
+    );
 }
 
 #[test]

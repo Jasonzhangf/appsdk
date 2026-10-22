@@ -36,7 +36,7 @@ impl ProjectRuntimeManager {
             return Ok(facts);
         };
         let mut endpoints =
-            crate::client::adapters::tmux::configured_endpoints(self.host.host_paths.state_root())
+            crate::client::adapters::tmux::host_endpoints_at(self.host.host_paths.state_root())
                 .map_err(anyhow::Error::msg)?;
         {
             let state = self.host.state.lock().unwrap();

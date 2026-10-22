@@ -196,6 +196,55 @@ fn resolver_recovers_existing_identity_by_each_unique_anchor() {
     std::fs::remove_dir_all(root).ok();
 }
 
+/// Acceptance 2: a tmux restart reissues pane ids. Only the live server
+/// instance may disambiguate a persisted identity; an archived endpoint that
+/// shares the socket path and pane id is not the current owner.
+#[test]
+fn resolver_disambiguates_a_reissued_pane_by_tmux_server_instance() {
+    let root = test_root("ci-resolver-reissued-pane");
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    let scope = test_scope(root.clone());
+    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
+
+    let stale = tmux_candidate(Some("session-restart"), Some("thread-restart"), "%4");
+    saved_identity(
+        &host_paths,
+        &scope,
+        "codex-pane-stale",
+        Some("session-restart"),
+        Some("thread-restart"),
+        Some(stale.endpoint.clone()),
+    );
+
+    let mut current = stale.clone();
+    current.endpoint.server_pid += 1;
+    current.endpoint.pane_pid += 7;
+    saved_identity(
+        &host_paths,
+        &scope,
+        "codex-pane-current",
+        Some("session-restart"),
+        Some("thread-restart"),
+        Some(current.endpoint.clone()),
+    );
+
+    let resolved = existing_for_daemon_at(
+        &host_paths,
+        &scope,
+        &facts(
+            Some("session-restart"),
+            Some("thread-restart"),
+            Some(current),
+        ),
+    )
+    .expect("the live tmux server must resolve without identity ambiguity");
+    assert_eq!(
+        resolved.expect("the current identity").worker_id,
+        "codex-pane-current"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
 #[test]
 fn resolver_returns_the_exact_stored_token() {
     let root = test_root("ci-resolver-token");

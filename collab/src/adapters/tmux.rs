@@ -685,19 +685,21 @@ pub fn validate_endpoint(endpoint: &TmuxEndpoint) -> Result<(), String> {
     Ok(())
 }
 
-/// One pane on one tmux server.
+/// One owned pane on one tmux server instance.
 ///
-/// A pane id names a pane only together with the server that issued it, so the
-/// socket path completes the address. The tmux server pid, session id, and the
-/// pane's shell pid are *not* part of it: tmux reissues all three across
-/// restarts while the pane id stays the address. Use this predicate for every
+/// Ownership requires the server pid in addition to the persisted pane
+/// address: after a tmux restart the same socket path and pane id can be
+/// reissued to a different pane, so a pid mismatch is a new owner. Session
+/// and shell pid drift on the same server do not change ownership. Use
+/// `same_pane_route` for the persisted address and this predicate for every
 /// ownership question.
 pub fn same_owned_pane(left: &TmuxEndpoint, right: &TmuxEndpoint) -> bool {
-    same_pane_route(left, right)
+    left.server_pid == right.server_pid && same_pane_route(left, right)
 }
 
 /// The persisted pane address: socket path plus pane id. Runtime observations
 /// such as server/session/pane pids and native thread ids do not redefine it.
+/// Ownership additionally requires the server instance in `same_owned_pane`.
 pub fn same_pane_route(left: &TmuxEndpoint, right: &TmuxEndpoint) -> bool {
     left.socket_path == right.socket_path && left.pane_id == right.pane_id
 }
@@ -974,6 +976,59 @@ pub(crate) mod tests {
             },
         ] {
             assert!(!same_pane_route(&endpoint, &changed));
+        }
+    }
+
+    #[test]
+    fn pane_ownership_requires_the_same_tmux_server_instance() {
+        let endpoint = TmuxEndpoint {
+            socket_path: "/tmp/tmux-a.sock".into(),
+            server_pid: 11,
+            tmux_session_id: "$1".into(),
+            pane_id: "%2".into(),
+            pane_pid: 33,
+            codex_session_id: None,
+            codex_thread_id: None,
+        };
+        assert!(same_owned_pane(&endpoint, &endpoint));
+        for drifted in [
+            TmuxEndpoint {
+                tmux_session_id: "$3".into(),
+                ..endpoint.clone()
+            },
+            TmuxEndpoint {
+                pane_pid: 34,
+                ..endpoint.clone()
+            },
+        ] {
+            assert!(
+                same_owned_pane(&endpoint, &drifted),
+                "session and shell pid drift stay on the same owned pane"
+            );
+        }
+        let restarted = TmuxEndpoint {
+            server_pid: 12,
+            ..endpoint.clone()
+        };
+        assert!(
+            !same_owned_pane(&endpoint, &restarted),
+            "a reissued pane id on a new server instance is not the same owned pane"
+        );
+        assert!(
+            same_pane_route(&endpoint, &restarted),
+            "the persisted pane address still matches across server restarts"
+        );
+        for changed in [
+            TmuxEndpoint {
+                socket_path: "/tmp/tmux-b.sock".into(),
+                ..endpoint.clone()
+            },
+            TmuxEndpoint {
+                pane_id: "%4".into(),
+                ..endpoint.clone()
+            },
+        ] {
+            assert!(!same_owned_pane(&endpoint, &changed));
         }
     }
 

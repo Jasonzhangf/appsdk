@@ -593,9 +593,27 @@ pub(crate) fn build_name_resolution_events(
     // The name carries its finite goal schedules to the new execution carrier.
     // Reuse the subscription record/event so IDs, timing and terminal state stay
     // intact, and the normal worker authorization still rejects the old caller.
-    if let Some(previous) = previous.filter(|previous| {
+    let previous_changed = previous.as_ref().is_some_and(|previous| {
         previous.worker_id != occupancy.worker_id || previous.session_id != occupancy.session_id
-    }) {
+    });
+    let mut handoff_worker_ids: Vec<String> = state
+        .name_occupancies
+        .get(project_scope)
+        .into_iter()
+        .flat_map(|names| names.values())
+        .filter(|holder| {
+            holder.session_id == occupancy.session_id && holder.worker_id != occupancy.worker_id
+        })
+        .map(|holder| holder.worker_id.clone())
+        .collect();
+    if previous_changed {
+        if let Some(previous) = previous {
+            handoff_worker_ids.push(previous.worker_id.clone());
+        }
+    }
+    handoff_worker_ids.sort();
+    handoff_worker_ids.dedup();
+    if !handoff_worker_ids.is_empty() {
         if let Some(transport) = state
             .workers
             .get(&occupancy.worker_id)
@@ -606,7 +624,7 @@ pub(crate) fn build_name_resolution_events(
                     .notification_subscriptions
                     .values()
                     .filter(|s| {
-                        s.worker_id == previous.worker_id
+                        handoff_worker_ids.iter().any(|worker_id| *worker_id == s.worker_id)
                             && s.event == "deadline"
                             && s.subject
                                 .as_deref()
@@ -617,6 +635,13 @@ pub(crate) fn build_name_resolution_events(
                     .cloned()
                     .collect();
                 subscriptions.sort_by(|a, b| a.id.cmp(&b.id));
+                let already_handed_off: std::collections::BTreeSet<String> = events
+                    .iter()
+                    .filter_map(|event| match event {
+                        Event::MailboxReassigned { handoff } => Some(handoff.message_id.clone()),
+                        _ => None,
+                    })
+                    .collect();
                 for mut subscription in subscriptions {
                     subscription.worker_id = occupancy.worker_id.clone();
                     subscription.method = transport.kind.as_str().into();
@@ -626,6 +651,56 @@ pub(crate) fn build_name_resolution_events(
                         subscription.status = "armed".into();
                         subscription.status_reason = None;
                     }
+                    // A goal timer message can already be pending when the
+                    // session commits its next ordinary name. That message has
+                    // no name address, so the name mailbox selector above
+                    // cannot find it. Follow the subscription's own wake
+                    // binding and move the message with its schedule.
+                    let mut timer_handoffs = Vec::new();
+                    for (message_id, bound) in state.wake_bindings.iter() {
+                        if bound != &subscription.id
+                            || already_handed_off.contains(message_id)
+                        {
+                            continue;
+                        }
+                        let Some(message) = state.msgs.get(message_id) else {
+                            continue;
+                        };
+                        if !matches!(message.state.as_str(), "pending" | "delivered")
+                            || message.to == occupancy.worker_id
+                            || !handoff_worker_ids
+                                .iter()
+                                .any(|worker_id| *worker_id == message.to)
+                        {
+                            continue;
+                        }
+                        timer_handoffs.push(Event::MailboxReassigned {
+                            handoff: super::name_mailbox::MailboxHandoff {
+                                project_scope: project_scope.into(),
+                                name: occupancy.name.clone(),
+                                occupancy_revision: occupancy.occupancy_revision,
+                                session_id: occupancy.session_id.clone(),
+                                message_id: message.id.clone(),
+                                previous_recipient: message.to.clone(),
+                                recipient: occupancy.worker_id.clone(),
+                                wake_attempt_count: message.wake_attempt_count,
+                                previous_subscription: Some(subscription.id.clone()),
+                                accepted_ms: state
+                                    .notification_delivery_accepted
+                                    .get(&message.id)
+                                    .copied(),
+                                evidence: state
+                                    .notification_delivery_evidence
+                                    .get(&message.id)
+                                    .cloned(),
+                                failure: state
+                                    .notification_delivery_failures
+                                    .get(&message.id)
+                                    .cloned(),
+                            },
+                        });
+                    }
+                    events.extend(timer_handoffs);
                     // A deadline already in the mailbox must still consume its
                     // own schedule after handoff, rather than the direct inbox.
                     let bindings: Vec<_> = events

@@ -31,6 +31,8 @@ impl std::fmt::Debug for MaintenancePassword {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TransportKind {
+    #[serde(rename = "desktop_bridge")]
+    DesktopBridge,
     #[serde(rename = "appserver")]
     AppServer,
     #[serde(rename = "tmux")]
@@ -42,6 +44,7 @@ pub enum TransportKind {
 impl TransportKind {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::DesktopBridge => "desktop_bridge",
             Self::AppServer => "appserver",
             Self::Tmux => "tmux",
             Self::Dsh => "dsh",
@@ -50,7 +53,8 @@ impl TransportKind {
 
     /// Every kind, so callers that must accept "any known transport" can ask
     /// the enum instead of keeping their own list of strings.
-    pub const ALL: [TransportKind; 3] = [Self::AppServer, Self::Tmux, Self::Dsh];
+    pub const ALL: [TransportKind; 4] =
+        [Self::DesktopBridge, Self::AppServer, Self::Tmux, Self::Dsh];
 
     /// Parses the `as_str` form. Kept next to `as_str` on purpose: the two are
     /// one contract, and a subscription whose `method` is a string was the
@@ -100,6 +104,8 @@ pub struct DshCandidate {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransportCandidates {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_bridge: Option<AppServerCandidate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub appserver: Option<AppServerCandidate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tmux: Option<TmuxCandidate>,
@@ -112,6 +118,8 @@ pub struct TransportCandidates {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IdentityFacts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_bridge: Option<AppServerCandidate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

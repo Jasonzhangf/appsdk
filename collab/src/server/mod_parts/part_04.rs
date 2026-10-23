@@ -235,7 +235,7 @@ impl ProjectRuntimeManager {
         else {
             return Ok(());
         };
-        if candidates.appserver.is_some() {
+        if candidates.appserver.is_some() || candidates.desktop_bridge.is_some() {
             return Ok(());
         }
         let Some(candidate) = candidates.tmux.as_ref() else {
@@ -420,6 +420,12 @@ impl ProjectRuntimeManager {
                 })?
         };
         match transport.kind {
+            TransportKind::DesktopBridge => {
+                if requested_tmux_endpoint.is_some() {
+                    return Err("ROUTE_RESOLVE_NOT_FOUND: Desktop route has no tmux endpoint".into());
+                }
+                crate::client::adapters::desktop_bridge::read_thread_status(&transport, native_thread_id.as_str())?;
+            }
             TransportKind::Tmux => {
                 let endpoint = transport.tmux_endpoint.as_ref().ok_or_else(|| {
                     format!("ROUTE_RESOLVE_INVALID: tmux pane {native_thread_id} has no endpoint")

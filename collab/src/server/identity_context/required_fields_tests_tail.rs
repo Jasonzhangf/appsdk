@@ -93,6 +93,7 @@ fn appserver_candidate(
     thread: &str,
 ) -> TransportCandidates {
     TransportCandidates {
+        desktop_bridge: None,
         appserver: Some(AppServerCandidate {
             endpoint: format!("unix://{endpoint}"),
             namespace: "codex_tui".into(),

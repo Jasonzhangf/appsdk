@@ -257,7 +257,7 @@ fn registered_runtime_projection(
                 "processId": daemon_pid,
             }))
         }
-        crate::proto::TransportKind::AppServer => {
+        crate::proto::TransportKind::AppServer | crate::proto::TransportKind::DesktopBridge => {
             let session = transport.session_id.as_deref().ok_or_else(|| {
                 anyhow::anyhow!("registered App Server transport is missing its session id")
             })?;
@@ -282,7 +282,7 @@ fn registered_runtime_projection(
             Ok(json!({
                 "runtimeId": runtime.runtime_id,
                 "appserverId": runtime.appserver_id,
-                "transport": "appserver",
+                "transport": transport.kind.as_str(),
                 "endpoint": transport.endpoint,
                 "namespace": transport.namespace,
                 "sessionId": session,

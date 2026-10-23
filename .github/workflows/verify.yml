@@ -296,6 +296,8 @@ jobs:
               github_env.write(f"COLLAB_TEST_MCP_BINARY={required['collab-mcp']}\n")
           PY
       - run: cargo test --manifest-path collab/Cargo.toml --locked --features context-cancel-test-hooks -- --test-threads=1
+      - name: Desktop bridge MCP consumer
+        run: node --test collab/scripts/tests/desktop-bridge.test.mjs
 
   installer:
     name: Installer

@@ -1604,8 +1604,8 @@ fn handle_register_with_app_scope_inner_bound(
                 })
         });
         let same_transport_address = match selected.kind {
-            TransportKind::Dsh => selected_transport_for_worker(&existing).is_some_and(|old| {
-                old.kind == TransportKind::Dsh
+            TransportKind::Dsh | TransportKind::DesktopBridge => selected_transport_for_worker(&existing).is_some_and(|old| {
+                old.kind == selected.kind
                     && old.endpoint == selected.endpoint
                     && old.namespace == selected.namespace
             }),

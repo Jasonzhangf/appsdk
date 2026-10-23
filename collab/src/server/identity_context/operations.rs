@@ -740,7 +740,7 @@ impl ProjectRuntimeManager {
             let transport = selected_transport_for_worker(&worker)
                 .ok_or_else(|| anyhow::anyhow!("current worker selected transport is missing"))?;
             if transport.tmux_endpoint != binding.tmux_endpoint
-                || (transport.kind == TransportKind::AppServer
+                || (matches!(transport.kind, TransportKind::AppServer | TransportKind::DesktopBridge)
                     && transport.thread_id.as_deref()
                         != binding
                             .native_thread_id

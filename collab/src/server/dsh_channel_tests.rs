@@ -23,6 +23,7 @@ fn a_verified_dsh_candidate_is_admitted_as_the_dsh_transport() {
     let selected = validate_transport_candidates(
         &server,
         &TransportCandidates {
+            desktop_bridge: None,
             appserver: None,
             tmux: None,
             dsh: Some(candidate(&gateway.socket, &root)),
@@ -95,6 +96,7 @@ fn dsh_must_not_be_combined_with_a_pane_candidate() {
     let error = validate_transport_candidates(
         &server,
         &TransportCandidates {
+            desktop_bridge: None,
             appserver: None,
             tmux: Some(tmux),
             dsh: Some(candidate(&gateway.socket, &root)),
@@ -132,6 +134,7 @@ fn dsh_candidate_cwd_must_be_the_project_root() {
     let error = validate_transport_candidates(
         &server,
         &TransportCandidates {
+            desktop_bridge: None,
             appserver: None,
             tmux: None,
             dsh: Some(candidate(&gateway.socket, &other)),
@@ -175,6 +178,7 @@ fn a_gateway_reporting_another_runtime_is_rejected() {
     let error = validate_transport_candidates(
         &server,
         &TransportCandidates {
+            desktop_bridge: None,
             appserver: None,
             tmux: None,
             dsh: Some(candidate(&gateway.socket, &root)),
@@ -214,6 +218,7 @@ fn a_reply_that_does_not_echo_the_challenge_nonce_is_rejected() {
     let error = validate_transport_candidates(
         &server,
         &TransportCandidates {
+            desktop_bridge: None,
             appserver: None,
             tmux: None,
             dsh: Some(candidate(&gateway.socket, &root)),
@@ -738,6 +743,7 @@ fn every_transport_kind_round_trips_through_its_method_string() {
 fn dsh_candidate_serializes_additively_without_disturbing_pane_candidates() {
     let root = scratch("serde");
     let candidates = TransportCandidates {
+        desktop_bridge: None,
         appserver: None,
         tmux: None,
         dsh: Some(candidate(&root.join("control.sock"), &root)),
@@ -913,6 +919,7 @@ fn register_dsh(
         server.root.display().to_string(),
         Some(crate::identity::AppServerId::new("tui-default").unwrap()),
         Some(TransportCandidates {
+            desktop_bridge: None,
             appserver: None,
             tmux: None,
             dsh: Some(candidate_ids(socket, &server.root, runtime_id, agent_id)),
@@ -1132,6 +1139,7 @@ fn a_dsh_rebind_is_refused_without_pointing_at_a_tmux_pane() {
         "dsh-rebind",
         "token-dsh-rebind",
         &Some(TransportCandidates {
+            desktop_bridge: None,
             appserver: None,
             tmux: None,
             dsh: Some(candidate(&gateway.socket, &root)),

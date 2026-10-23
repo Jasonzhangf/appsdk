@@ -59,6 +59,7 @@ fn facts(
     tmux: Option<crate::proto::TmuxCandidate>,
 ) -> crate::proto::IdentityFacts {
     crate::proto::IdentityFacts {
+        desktop_bridge: None,
         session_id: session.map(str::to_owned),
         thread_id: thread.map(str::to_owned),
         endpoint: None,
@@ -752,6 +753,7 @@ fn archived_route_recovery_reads_without_calling_back() {
     // fail; the route-aware resolver returns the archived credential directly.
     let facts = crate::proto::IdentityFacts {
         session_id: Some("session-new".into()),
+        desktop_bridge: None,
         thread_id: Some("thread-new".into()),
         endpoint: None,
         namespace: None,

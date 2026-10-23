@@ -111,7 +111,7 @@ identity recovery is not authorization to discard them.
   identity-recovery steps.
 - If `collab context` reports `requires_identity_update`, read
   `required_fields`, `reason`, and `exact_error`. Supply only the requested
-  `session_id`, `thread_id`, `endpoint`, or `namespace` values for this invocation through
+  AppServer `session_id`, `thread_id`, `endpoint`, or `namespace` values for this invocation through
   `collab context --provide`. The daemon completes identity selection,
   recovery, registration, credential persistence, binding, and lease state.
   Explicit conflicts and errors preserve their original error.
@@ -121,9 +121,11 @@ identity recovery is not authorization to discard them.
 - Workers never choose transport themselves. The daemon validates runtime facts
   and selects the channel.
 - Initial registration prefers a verified current tmux pane, and the daemon
-  selects transport according to runtime facts. Persisted restoration reuses the
-  durable selected binding. Once an AppServer binding is selected, tmux is never
-  a communication, wake, presence, or status fallback.
+  selects transport according to runtime facts. Context reconciles the current
+  explicit capability with the durable binding. Supplying a current Desktop
+  bridge capability is an explicit transport update. An RPC error never selects
+  another transport or an old endpoint; tmux is not a native communication,
+  wake, presence, or status fallback.
 - Do not treat pane presence as evidence of Codex turn state or message
   consumption.
 
@@ -132,7 +134,7 @@ identity recovery is not authorization to discard them.
 Run `collab context`. It resolves the canonical project root, observes the
 available runtime facts, and asks the daemon to establish or recover the
 identity. If the snapshot contains `requires_identity_update`, supply only the
-requested current factual fields in this invocation. Every native context must
+requested current factual fields in this invocation. Every AppServer context must
 carry current session/thread/endpoint/namespace from the host environment or
 `--provide`; historical registration cannot fill missing current facts.
 MCP callers submit current facts through `provide` on each call. `--query` is
@@ -142,8 +144,12 @@ only a retained-operation read and needs no current endpoint:
 collab context --provide '{"session_id":"...","thread_id":"...","endpoint":"...","namespace":"..."}'
 ```
 
-The supplement accepts only the four scalar keys `session_id`, `thread_id`,
-`endpoint`, and `namespace`. It does not accept `worker_id`, approval, token,
+For the AppServer branch, the factual supplement uses `session_id`, `thread_id`,
+`endpoint`, and `namespace`. Desktop bridge instead obtains the current scoped
+capability and real caller metadata through its normal managed MCP entry.
+Do not supply a tools pipe as an AppServer endpoint or copy an old caller turn.
+The agent sessionID still identifies the execution carrier independently of
+the native thread. The supplement does not accept `worker_id`, approval, token,
 generation, binding, or project scope. Do not run `appsdk init`, run
 `collab init` as a substitute for `collab context`, run a manual identity
 recovery command, or start a status/route/archive hunt to repair identity. A

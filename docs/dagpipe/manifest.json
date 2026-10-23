@@ -14,6 +14,14 @@
       "path": "docs/dagpipe/collab-context.graph.json"
     },
     {
+      "id": "appsdk-collab-desktop-bridge-service",
+      "path": "docs/dagpipe/collab-desktop-bridge-service.graph.json"
+    },
+    {
+      "id": "appsdk-collab-desktop-bridge-delivery",
+      "path": "docs/dagpipe/collab-desktop-bridge-delivery.graph.json"
+    },
+    {
       "id": "appsdk-collab-name-ownership",
       "path": "docs/dagpipe/collab-name-ownership.graph.json"
     },

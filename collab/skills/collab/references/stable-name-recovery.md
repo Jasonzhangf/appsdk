@@ -4,7 +4,9 @@
 
 ## 恢复操作：context 自己迁移，agent 不做历史清理
 
-Desktop 的 agent sessionID 与 native thread ID 分开保存。当前 thread 或投递端点
+Desktop 的身份锚点就是当前 agent sessionID；名字继续承载工作归属。
+agent sessionID 与 native thread ID 分开保存，不能因示例中两值相同就互相替代。
+当前 thread 或投递端点
 变化时，`collab context` 必须保留原名字、身份和工作，更新 binding、transport、
 current route 与有效订阅目标，并退休旧 route；相同事实重复恢复不增加 generation。
 不要从旧 transcript 抄 thread ID，也不要因为已注册就继续沿用旧 thread。普通恢复
@@ -12,7 +14,7 @@ current route 与有效订阅目标，并退休旧 route；相同事实重复恢
 其真实回投结果与普通身份恢复分别验收。历史注册回投记录由 context 自动兼容，
 不要求 agent 编辑或清空账本。
 
-每次 native 注册或恢复，都由当前调用方提交本次的 sessionID、thread ID、AppServer
+每次 AppServer 注册或恢复，都由当前调用方提交本次的 sessionID、thread ID、AppServer
 endpoint 和 namespace。CLI 可从当前宿主明确提供的环境采集；缺少的字段必须在本次
 `--provide` 或 MCP `provide` 中提供。daemon 不知道调用方的新端点，不能从历史注册
 补齐本次事实。MCP 长驻进程的启动环境不能保证仍是当前事实，调用者须逐次提供
@@ -20,6 +22,18 @@ endpoint 和 namespace。CLI 可从当前宿主明确提供的环境采集；缺
 缺字段返回 `missing_facts`，保留持久身份和工作，不宣称恢复完成。
 普通恢复不增加回投挑战；`--query` 只读既有操作，不要求当前通信事实。
 tmux 与 DSH 继续按各自现有机制采集，不增加 native endpoint 要求。
+
+Desktop 使用正常受宿主管理的 MCP bridge 时，走独立的 Desktop transport。
+bridge 从本次 executor metadata 取得真实 caller thread/turn，并将当前受限本地
+入口交给 `context`；agent sessionID 仍来自当前执行会话，不能用 thread ID 替代。
+不要求 Desktop 填写不存在的 AppServer endpoint，不查询 managed AppServer
+是否加载聊天来否定 bridge 能力。普通工具参数不能自选上游 caller/turn 或任意目标。
+agent 注册、恢复、发信和收信可用 Collab CLI，不要求调用 MCP 工具。当前 CLI
+能力输入与自动发现缺口见[Desktop CLI 用法](migration-daemon.md#desktop-cli-registration-and-messaging)。
+缺 executor metadata 或 bridge 不可用时，保留明确错误，修所属 bridge 入口；
+不要抄旧 turn、猜 socket、启动 keeper、重启 tmux 或切换旧 transport。
+bridge 的宿主接受、实际新 turn、消费和回复分别验收；只有入队或 socket 可连接
+都不证明唤醒。源实现、正式安装与当前 MCP/daemon 是否加载仍分别报告。
 
 普通已注册命令读取身份时，由 daemon 按当前 project/app/agent sessionID 返回唯一
 当前绑定，再读取对应凭据。pane、tmux session、thread 和端点不选择工作身份，
@@ -32,7 +46,8 @@ tmux 与 DSH 继续按各自现有机制采集，不增加 native endpoint 要�
 collab context
 ```
 
-宿主环境缺字段时，在每次调用中提交从当前宿主取得的事实：
+AppServer 宿主环境缺字段时，在每次调用中提交从当前宿主取得的事实；
+下面的 AppServer 示例不用于替代 Desktop 的独立 bridge 能力输入：
 
 ```sh
 collab context --provide '{"session_id":"<当前 agent sessionID>","thread_id":"<当前 thread ID>","endpoint":"<当前 AppServer endpoint>","namespace":"codex_app"}'

@@ -444,7 +444,31 @@ and Node9 pass on the combined source. Formal Collab0.2.0340 installed; installe
 DSH6 and Desktop6 plus real gateway registration/restoration pass. The installed
 Skill removes duplicate stale host rules and validates. A previous installed
 private replay attempt failed before DSH admission; its raw error is retained,
-and no root cause is claimed. Fresh actual DSH post-registration reply/consumption
-is still pending explicit one-round send authorization. The global daemon is
-unchanged. Code finding recheck closes the inherited-launcher P1; the real-host
-receipt P1, final CI/main integration and resource cleanup remain pending.
+and no root cause is claimed. Real-host receipt completed 2026-10-23: the actual
+DSH session 4c7e81d2 (this delivered session) ran recipient-check.py against the
+author-owned isolated daemon; send m1792777784974-1 was received, replied
+(m1792777831722-2) and acked, status answered=true consumed_by_recv=true
+state=read, REAL_DSH_REGISTRATION_ROUNDTRIP_PASS with global_daemon_changed
+false. The global daemon is unchanged. Code finding recheck closes the
+inherited-launcher P1; the real-host receipt P1 is now closed; final CI/main
+integration and resource cleanup remain pending.
+
+## 2026-10-23 Collab 工作角色与指定分工交付
+
+工作角色按规范项目和稳定名字持久化。用户可在 context 中声明多个专长，当前 master
+可按用户指令设置他人角色。项目分类默认、目标分类默认和任务明确字段逐项覆盖，
+结果物化到任务。分派优先匹配角色；无匹配退选会保存原因；指定执行者不可用时等待。
+指定 reviewer 的当前名字持有者可审查，作者和 master 不能代审。返工、再交付和验收
+内容变化使旧审查失效，进度更新不失效。人工终止、清理和交付完成使用明确的独立结果。
+
+三张单源单汇 DAG 与唯一 owner 已接入现有图合同、journal、snapshot、任务板、CLI
+和 MCP。代码与当前 main 的 Desktop 能力发现修复已组合。PR #62 已合并到 main；
+独立整体 Review 通过，零 findings。核心回归 1159 例和公开 integration 197 例通过；
+组合最新 main 后的重叠公开入口 138 例、MCP 29 例、Node 9 例、DAGPipe 18 例通过。
+新增 reset 清理红测修复后，13 个 reset 相关用例和 5 个角色公开组合场景通过。
+
+远端检查已通过。AppSDK full 曾在未改的 registry reset 测试报锁占用；同候选另一条
+CI 和本地单例通过，失败 job 按原断言重跑后通过。原错和各轮验证范围分别保留。
+结案规则审计无需新增全局规则或修改受管记忆。详细计划、原错、验证、Review 和资源
+核销记录在 `/Volumes/Intel/playground/appsdk/plan-runs/collab-work-roles-20261023/`。
+本轮没有执行全局安装或 daemon 重启；用户当前运行进程是否加载新功能未验证。

@@ -3,6 +3,37 @@
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NameWorkRoles {
+    pub name: String,
+    #[serde(default)]
+    pub work_roles: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkPolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_roles: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executor_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewer_name: Option<String>,
+    /// Fields explicitly cleared at this scope. A cleared field blocks
+    /// inheritance from a broader scope instead of meaning "unspecified".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cleared_fields: Vec<String>,
+}
+
+pub(crate) fn apply_policy_field<T: Clone>(value: &Option<T>, clear: bool, target: &mut Option<T>) {
+    if clear {
+        *target = None;
+    } else if let Some(value) = value {
+        *target = Some(value.clone());
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Subcommand)]
 #[serde(tag = "action", rename_all = "kebab-case")]
 pub enum BoardCommand {
@@ -21,6 +52,16 @@ pub enum BoardCommand {
         test_condition: String,
         #[arg(long, default_value = "p2")]
         priority: String,
+        #[arg(long)]
+        work_kind: Option<String>,
+        #[arg(long)]
+        parent_task: Option<String>,
+        #[arg(long)]
+        prefer_role: Option<String>,
+        #[arg(long)]
+        executor: Option<String>,
+        #[arg(long)]
+        reviewer: Option<String>,
     },
     /// Atomically claim one pending task at the observed board revision.
     Claim {
@@ -89,6 +130,35 @@ pub enum BoardCommand {
         #[arg(long)]
         test_condition: String,
     },
+    /// Save project, goal, or task-scoped work assignment policy.
+    Policy {
+        #[arg(long)]
+        scope: String,
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long)]
+        work_kind: Option<String>,
+        #[arg(long)]
+        prefer_role: Option<String>,
+        #[arg(long)]
+        executor: Option<String>,
+        #[arg(long)]
+        reviewer: Option<String>,
+        #[arg(long)]
+        clear_prefer_role: bool,
+        #[arg(long)]
+        clear_executor: bool,
+        #[arg(long)]
+        clear_reviewer: bool,
+        #[arg(long)]
+        expected_revision: Option<u64>,
+    },
+    /// Resolve task policy and invite the selected executor.
+    Dispatch {
+        id: String,
+        #[arg(long)]
+        expected_revision: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,6 +182,16 @@ pub struct BoardTaskDetails {
     pub test_condition: String,
     pub revision: u64,
     pub public_visibility: bool,
+    #[serde(default)]
+    pub parent_task_id: Option<String>,
+    #[serde(default)]
+    pub work_policy: WorkPolicy,
+    #[serde(default)]
+    pub child_work_policies: std::collections::BTreeMap<String, WorkPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_selection: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_reason: Option<String>,
     pub invitation: Option<BoardInvitation>,
     pub last_response: Option<String>,
 }
@@ -148,6 +228,19 @@ pub struct BoardTaskView {
     pub priority: String,
     pub status: String,
     pub next_step: Option<String>,
+    pub work_kind: Option<String>,
+    pub parent_task_id: Option<String>,
+    pub child_work_policies: std::collections::BTreeMap<String, WorkPolicy>,
+    pub preferred_roles: Vec<String>,
+    pub executor_name: Option<String>,
+    pub reviewer_name: Option<String>,
+    pub dispatch_selection: Option<String>,
+    pub dispatch_reason: Option<String>,
+    pub review_subject_revision: u64,
+    pub reviewed_subject_revision: Option<u64>,
+    pub actual_reviewer_name: Option<String>,
+    pub completion_delivery_complete: bool,
+    pub completion_missing: Vec<String>,
     pub invited_peer: Option<String>,
     pub last_response: Option<String>,
     pub updated_at: String,
@@ -163,6 +256,7 @@ pub struct BoardMemberView {
     pub id: String,
     pub display_name: String,
     pub role: String,
+    pub work_roles: Vec<String>,
     pub status: String,
     pub task_ids: Vec<String>,
     pub invitation_ids: Vec<String>,

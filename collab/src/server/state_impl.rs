@@ -899,6 +899,19 @@ impl State {
             Event::TaskAssignmentUpdated { assignment } => {
                 self.apply_task_assignment(assignment)?;
             }
+            Event::NameWorkRolesUpdated {
+                project_scope,
+                record,
+            } => {
+                self.name_work_roles
+                    .entry(project_scope.clone())
+                    .or_default()
+                    .insert(record.name.clone(), record.clone());
+            }
+            Event::ProjectWorkPolicyUpdated { work_kind, policy } => {
+                self.project_work_policy
+                    .insert(work_kind.clone(), policy.clone());
+            }
             Event::NameRecoveryUpdated { recovery } => {
                 self.apply_name_recovery(recovery)?;
             }
@@ -1176,6 +1189,106 @@ impl State {
         self.wake_bindings.remove(id);
     }
 
+    /// Persisted work specialities for one stable name. Session carriers and
+    /// transport bindings are deliberately not consulted.
+    pub fn name_work_roles(&self, project_scope: &str, name: &str) -> Vec<String> {
+        self.name_work_roles
+            .get(project_scope)
+            .and_then(|names| names.get(name))
+            .map(|record| record.work_roles.clone())
+            .unwrap_or_default()
+    }
+
+    /// Materialize the effective policy for a task that is being published or
+    /// explicitly re-applied. Later changes to broader defaults must not mutate
+    /// this resolved contract.
+    pub fn materialize_work_policy(
+        &self,
+        work_kind: Option<&str>,
+        parent_task_id: Option<&str>,
+        explicit: &crate::board::WorkPolicy,
+    ) -> crate::board::WorkPolicy {
+        let work_kind = work_kind.or_else(|| parent_task_id
+            .and_then(|parent|self.board_details.get(parent))
+            .and_then(|details|details.work_policy.work_kind.as_deref()));
+        let mut layers = Vec::new();
+        if let Some(kind) = work_kind {
+            if let Some(policy) = self.project_work_policy.get(kind) {
+                layers.push(policy.clone());
+            }
+        }
+        if let Some(parent) = parent_task_id {
+            if let Some(details) = self.board_details.get(parent) {
+                if details.work_policy.work_kind.as_deref() == work_kind {
+                    layers.push(details.work_policy.clone());
+                }
+                if let Some(policy) = work_kind.and_then(|kind|details.child_work_policies.get(kind)) {
+                    layers.push(policy.clone());
+                }
+            }
+        }
+        layers.push(explicit.clone());
+        let mut effective = crate::board::WorkPolicy::default();
+        for layer in layers {
+            crate::server::overlay_work_policy(&mut effective,&layer);
+        }
+        if effective.work_kind.is_none() {
+            effective.work_kind = work_kind.map(str::to_owned);
+        }
+        effective
+    }
+
+    /// Task contract has already been materialized; read it without resolving
+    /// broader defaults again.
+    pub fn effective_work_policy(&self, task_id: &str) -> crate::board::WorkPolicy {
+        self.board_details
+            .get(task_id)
+            .map(|details| details.work_policy.clone())
+            .unwrap_or_default()
+    }
+
+    /// One completion projection shared by read-only views and lifecycle write
+    /// gates. Legacy tasks with no review-subject revision keep the previous
+    /// evidence-based acceptance behavior.
+    pub fn delivery_completion_projection(
+        &self,
+        task_id: &str,
+    ) -> (bool, Vec<String>) {
+        let Some(task) = self.tasks.get(task_id) else {
+            return (false, vec!["task".into()]);
+        };
+        let mut missing = Vec::new();
+        let Some(lifecycle) = self.task_lifecycle.get(task_id) else {
+            return (false, vec!["review".into()]);
+        };
+        if !crate::server::work_review_valid(self,task_id) {
+            missing.push("review".into());
+        }
+        if lifecycle.delivered_ms.is_none() || lifecycle.delivery_evidence.is_none() {
+            missing.push("delivery".into());
+        }
+        if lifecycle.delivery_kind == TaskDeliveryKind::Code
+            && lifecycle.integration_commit.is_none()
+        {
+            missing.push("integration".into());
+        }
+        let cleanup_ok = (task.worktree_path.is_none() && task.branch.is_none())
+            || self
+                .cleanup_receipts
+                .get(task_id)
+                .is_some_and(|receipt| receipt.verification == CleanupVerification::Verified);
+        if !cleanup_ok {
+            missing.push("cleanup".into());
+        }
+        if task.status != "closed" {
+            missing.push("close".into());
+        }
+        if self.cleanup_receipts.get(task_id).is_some_and(|receipt| receipt.manual_reason.is_some()) {
+            missing.push("manual_termination".into());
+        }
+        (missing.is_empty(), missing)
+    }
+
     pub fn snapshot_events(&self) -> Vec<Event> {
         let (sequence, revision, mut events) = self.snapshot_contents();
         events.push(Event::ReducerCheckpoint { sequence, revision });
@@ -1341,6 +1454,34 @@ impl State {
             assignments
                 .into_iter()
                 .map(|assignment| Event::TaskAssignmentUpdated { assignment }),
+        );
+        let mut role_records: Vec<_> = self
+            .name_work_roles
+            .iter()
+            .flat_map(|(project_scope, names)| {
+                names
+                    .values()
+                    .map(move |record| (project_scope.clone(), record.clone()))
+            })
+            .collect();
+        role_records.sort_by(|(left_scope, left), (right_scope, right)| {
+            (left_scope.as_str(), left.name.as_str()).cmp(&(right_scope.as_str(), right.name.as_str()))
+        });
+        events.extend(role_records.into_iter().map(|(project_scope, record)| {
+            Event::NameWorkRolesUpdated {
+                project_scope,
+                record,
+            }
+        }));
+        let mut project_policies: Vec<_> = self.project_work_policy.iter().collect();
+        project_policies.sort_by(|left, right| left.0.cmp(right.0));
+        events.extend(
+            project_policies
+                .into_iter()
+                .map(|(work_kind, policy)| Event::ProjectWorkPolicyUpdated {
+                    work_kind: work_kind.clone(),
+                    policy: policy.clone(),
+                }),
         );
         let mut recoveries: Vec<_> = self.name_recoveries.values().cloned().collect();
         recoveries.sort_by(|left, right| left.operation_id.cmp(&right.operation_id));

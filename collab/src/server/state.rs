@@ -58,6 +58,8 @@ pub struct WorkerRec {
     pub transport: Option<SelectedTransport>,
 }
 
+pub use crate::board::{NameWorkRoles, WorkPolicy};
+
 impl WorkerRec {
     pub fn transport_kind(&self) -> Option<TransportKind> {
         self.transport
@@ -1148,6 +1150,18 @@ pub struct TaskLifecycleRecord {
     pub integration_evidence: Option<String>,
     #[serde(default)]
     pub integrated_ms: Option<i64>,
+    /// Stable name the user or policy pinned for this task's review.
+    #[serde(default)]
+    pub required_reviewer_name: Option<String>,
+    /// Behavioral contract revision the current review must cover. This is not
+    /// a candidate hash or Git identity.
+    #[serde(default)]
+    pub review_subject_revision: u64,
+    #[serde(default)]
+    pub reviewed_subject_revision: Option<u64>,
+    /// Stable name of the peer who actually produced the accepted review.
+    #[serde(default)]
+    pub reviewer_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1463,6 +1477,17 @@ pub enum Event {
     },
     TaskAssignmentUpdated {
         assignment: super::name_state::TaskAssignment,
+    },
+    /// Stable-name work specialities. Session changes and daemon restart must
+    /// not drop them; the record is keyed by project scope and stable name.
+    NameWorkRolesUpdated {
+        project_scope: String,
+        record: NameWorkRoles,
+    },
+    /// Project-level default policy for one exact `work_kind`.
+    ProjectWorkPolicyUpdated {
+        work_kind: String,
+        policy: WorkPolicy,
     },
     NameRecoveryUpdated {
         recovery: super::name_state::NameRecoveryPending,

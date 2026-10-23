@@ -1,0 +1,18 @@
+{
+  "id": "collab-work-role-registration",
+  "version": "1",
+  "description": "候选设计：单次工作角色注册、更新或查询请求。复用当前身份及稳定名字，不赋予 master 权限，不新增身份恢复条件。每个阶段保留显式错误，失败不执行后续写入，统一返回操作结果。工作角色通过现有 journal 持久化并进入 snapshot；普通恢复只读回当前名字角色，不重新声明、不要求通信回环。",
+  "inputs": [{"id": "角色请求", "schema": "Object"}],
+  "nodes": [
+    {"id": "解析当前身份与目标名字", "operator": "collab.work_roles.resolve_identity", "operator_version": "1", "inputs": ["角色请求"], "output": {"id": "角色操作范围", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "区分协作职责与工作专长", "operator": "collab.work_roles.validate_specialties", "operator_version": "1", "inputs": ["角色操作范围"], "output": {"id": "角色变更意图", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "按稳定名字保存或读取角色", "operator": "collab.work_roles.persist", "operator_version": "1", "inputs": ["角色变更意图"], "output": {"id": "持久角色结果", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "返回角色与明确错误", "operator": "collab.work_roles.emit", "operator_version": "1", "inputs": ["持久角色结果"], "output": {"id": "角色操作结果", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"}
+  ],
+  "edges": [
+    {"from": "解析当前身份与目标名字", "to": "区分协作职责与工作专长", "arc_id": "角色操作范围"},
+    {"from": "区分协作职责与工作专长", "to": "按稳定名字保存或读取角色", "arc_id": "角色变更意图"},
+    {"from": "按稳定名字保存或读取角色", "to": "返回角色与明确错误", "arc_id": "持久角色结果"}
+  ],
+  "outputs": ["角色操作结果"]
+}

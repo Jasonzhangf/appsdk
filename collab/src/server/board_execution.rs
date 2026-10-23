@@ -1,6 +1,7 @@
 /// Final public work-start gate shared by board acceptance and legal legacy
 /// assignments. No caller may start a peer's work by changing status alone.
 fn board_execution_gate(server: &Server, state: &State, actor: &str, task_id: &str) -> Result<RuntimeBinding, Resp> {
+    work_executor_gate(server,state,task_id,actor)?;
     board_resume_gate(state, actor, task_id)?;
     let route = server_route_scope(server, state).map_err(Resp::err)?
         .ok_or_else(|| Resp::err("BOARD_ROUTE_REQUIRED: public execution requires a unique project route"))?;

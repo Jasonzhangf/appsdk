@@ -2,6 +2,18 @@
   "schema_version": 1,
   "graphs": [
     {
+      "id": "collab-work-role-registration",
+      "path": "docs/dagpipe/collab-work-role-registration.graph.json"
+    },
+    {
+      "id": "collab-role-assignment",
+      "path": "docs/dagpipe/collab-role-assignment.graph.json"
+    },
+    {
+      "id": "collab-required-review",
+      "path": "docs/dagpipe/collab-required-review.graph.json"
+    },
+    {
       "id": "appsdk-fix-lifecycle",
       "path": "contracts/dagpipe/fix-lifecycle.graph.json"
     },

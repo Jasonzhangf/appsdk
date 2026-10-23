@@ -193,6 +193,15 @@ fn tools() -> Value {
         ),
         peer_lifecycle_tool()
     ]);
+    if let Some(context) = tools
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|entry| entry["name"] == "collab_context")
+    {
+        context["inputSchema"]["properties"]["work_roles"] = json!({"type":"array","items":{"type":"string"},"description":"Set work specialties for the current stable name; an empty array clears them. Omit to preserve."});
+        context["inputSchema"]["properties"]["for_name"] = json!({"type":"string","description":"Current master may set this stable name's work specialties."});
+    }
     tools
         .as_array_mut()
         .expect("tool list")
@@ -528,6 +537,21 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
         "collab_inbox" => argv.push("inbox".into()),
         "collab_context" => {
             argv.push("context".into());
+            if let Some(roles) = args.get("work_roles") {
+                let roles = roles.as_array().ok_or("work_roles must be an array")?;
+                let roles: Result<Vec<_>, _> = roles
+                    .iter()
+                    .map(|value| {
+                        let role = value.as_str().ok_or("work_roles must contain strings")?;
+                        if role.contains(',') {
+                            return Err("work_roles entries must not contain commas");
+                        }
+                        Ok(role)
+                    })
+                    .collect();
+                argv.extend(["--work-roles".into(), roles?.join(",")]);
+            }
+            optional_flag(&mut argv, args, "for_name", "--for-name")?;
             if let Some(operation_id) = args.get("operation_id").and_then(Value::as_str) {
                 if operation_id.trim().is_empty() {
                     return Err("operation_id must not be empty".into());

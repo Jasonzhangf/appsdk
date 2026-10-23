@@ -935,6 +935,12 @@ pub enum Req {
         token: String,
         name: Option<String>,
     },
+    WorkRolesSet {
+        worker_id: String,
+        token: String,
+        name: Option<String>,
+        roles: Vec<String>,
+    },
     WorkerSnapshot {
         worker_id: String,
         token: String,

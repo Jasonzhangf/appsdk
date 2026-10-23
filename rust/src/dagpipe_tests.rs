@@ -1,6 +1,26 @@
 use super::*;
 
 #[test]
+fn collab_work_role_graphs_are_embedded_single_entry_exit_and_registered() {
+    for path in [
+        "docs/dagpipe/collab-work-role-registration.graph.json",
+        "docs/dagpipe/collab-role-assignment.graph.json",
+        "docs/dagpipe/collab-required-review.graph.json",
+    ] {
+        let (_, source) = embedded_graph_paths()
+            .into_iter()
+            .find(|(candidate, _)| *candidate == path)
+            .expect("work-role operation graph must remain embedded");
+        let graph = parse_graph_json(source).unwrap();
+        ensure_single_source_single_sink(&graph).unwrap();
+        validate_graph_registry(&graph).unwrap();
+        let mut unregistered = graph.clone();
+        unregistered.nodes[0].operator = "collab.work_roles.unregistered".into();
+        assert!(validate_graph_registry(&unregistered).is_err());
+    }
+}
+
+#[test]
 fn desktop_bridge_graphs_are_embedded_and_registered() {
     for path in [
         "docs/dagpipe/collab-desktop-bridge-service.graph.json",

@@ -169,6 +169,7 @@ pub(super) fn clear_project(
     state.worker_names.retain(|id, _| !workers.contains(id));
     state.name_occupancies.remove(scope);
     state.name_occupancy_revisions.remove(scope);
+    state.name_work_roles.remove(scope);
     state
         .name_recoveries
         .retain(|_, recovery| recovery.project_scope != scope);
@@ -191,6 +192,7 @@ pub(super) fn clear_project(
         state.master_assigned_ms = None;
     }
     if clear_local {
+        state.project_work_policy.clear();
         state.master_wake = Default::default();
         state.migration = None;
     }

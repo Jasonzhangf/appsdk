@@ -84,6 +84,44 @@ mod work_role_state_tests {
     use super::*;
 
     #[test]
+    fn project_reset_removes_local_specialties_and_defaults_but_keeps_other_scope() {
+        let mut state = State::default();
+        for project_scope in ["/project", "/other-project"] {
+            state
+                .apply_checked(&Event::NameWorkRolesUpdated {
+                    project_scope: project_scope.into(),
+                    record: crate::board::NameWorkRoles {
+                        name: "Alice".into(),
+                        work_roles: vec!["designer".into()],
+                    },
+                })
+                .unwrap();
+        }
+        state
+            .apply_checked(&Event::ProjectWorkPolicyUpdated {
+                work_kind: "frontend".into(),
+                policy: crate::board::WorkPolicy {
+                    executor_name: Some("Alice".into()),
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        state
+            .apply_checked(&Event::ProjectResetStarted {
+                project_scope: "/project".into(),
+                clear_local: true,
+                worker_ids: vec![],
+            })
+            .unwrap();
+        assert!(state.name_work_roles("/project", "Alice").is_empty());
+        assert_eq!(
+            state.name_work_roles("/other-project", "Alice"),
+            ["designer"]
+        );
+        assert!(state.project_work_policy.is_empty());
+    }
+
+    #[test]
     fn specialties_follow_name_session_handoff_and_survive_compaction() {
         let mut state = State::default();
         for (worker, session, revision) in [("old", "s1", 1), ("current", "s2", 2)] {

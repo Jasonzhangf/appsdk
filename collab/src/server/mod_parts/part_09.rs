@@ -717,6 +717,7 @@ fn handle_task_close(
     }
 
     let subscribed_notifications = release_dependents_of_closed_task(server, &mut st, &closed.id);
+    let (delivery_complete,completion_missing)=st.delivery_completion_projection(&closed.id);
 
     let stale_workers =
         stale_worker_views(&st, &|worker| worker_presence_in_state(server, &st, worker));
@@ -728,7 +729,8 @@ fn handle_task_close(
         "task": closed.id,
         "status": closed.status,
         "owner": closed.owner,
-        "delivery_complete": true,
+        "delivery_complete": delivery_complete,
+        "completion_missing": completion_missing,
         "disposition": if lifecycle.delivery_kind == state::TaskDeliveryKind::ReadOnly {
             "no_merge_required"
         } else {

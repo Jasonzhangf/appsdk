@@ -152,6 +152,28 @@ fn roles_registration_master_update_clear_and_replay_are_public() {
     fixture.run_public(&["context", "--work-roles", ""], THREAD_B);
     let cleared = fixture.run_public(&["context"], THREAD_B);
     assert_eq!(cleared["work_roles"], json!([]));
+    fixture.run_public(
+        &[
+            "board",
+            "policy",
+            "--scope",
+            "project",
+            "--work-kind",
+            "frontend",
+            "--executor",
+            "Alice",
+        ],
+        THREAD_A,
+    );
+    let journal = fixture.name_journal();
+    fixture.run_public(&["reset", "--project"], THREAD_A);
+    let retained = std::fs::read_to_string(journal).unwrap_or_default();
+    assert!(!retained.contains("NameWorkRolesUpdated"));
+    assert!(!retained.contains("ProjectWorkPolicyUpdated"));
+    assert!(
+        fixture.host_state.join("server.sock").exists(),
+        "project reset preserves the host daemon"
+    );
 }
 
 #[test]

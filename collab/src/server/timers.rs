@@ -8,6 +8,32 @@ use crate::server::Server;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+/// Test-only pause between deriving a scheduler due batch and committing it.
+/// Regression tests use it to force the goal-reconcile interleaving that the
+/// real guard now prevents. The pair names the one subscription whose due
+/// batch engages the pause, so parallel timer tests cannot hit it.
+#[cfg(test)]
+pub(super) static TIMER_DUE_COMMIT_PAUSE: std::sync::Mutex<
+    Option<(String, Box<dyn Fn() + Send + Sync>)>,
+> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn timer_due_commit_pause_hook(due_events: &[Event]) {
+    let hook = TIMER_DUE_COMMIT_PAUSE.lock().unwrap();
+    let Some((subscribe_id, hook)) = hook.as_ref() else {
+        return;
+    };
+    let batch_targets_this_subscription = due_events.iter().any(|event| {
+        matches!(
+            event,
+            Event::WakeBound { subscription_id, .. } if subscription_id == subscribe_id
+        )
+    });
+    if batch_targets_this_subscription {
+        hook();
+    }
+}
+
 /// Server-side scheduler for finite subscriptions and bounded waits. It never
 /// creates task continuations or infers that ordinary work needs a wake.
 pub fn tick(server: &Arc<Server>) {
@@ -20,6 +46,7 @@ fn tick_at(server: &Arc<Server>, now: i64) {
     super::name_stewardship::tick(server, now);
     super::purge_expired_storage(server, now);
     tick_ledger_maintenance_at(server, now);
+    tick_default_lease_maintenance_at(server, now);
     if server.state.lock().unwrap().admission_frozen() {
         return;
     }
@@ -27,6 +54,38 @@ fn tick_at(server: &Arc<Server>, now: i64) {
     // outside this contract. Deadline wakeups use the normal notification
     // path; pane output is observation only, never a consumption receipt.
     tick_with_deadline_wake_at(server, now);
+}
+
+/// Refresh daemon-owned default direct-message leases from ordinary
+/// maintenance. The cheap gate scans only registered workers and their own
+/// lease row; the message-wide reconcile owner runs only when a lease is
+/// missing, retired, bound to a stale transport, or due for half-life renewal.
+fn tick_default_lease_maintenance_at(server: &Arc<Server>, now: i64) {
+    if !server.config.timers.enabled {
+        return;
+    }
+    let needs_reconcile = {
+        let state = server.state.lock().unwrap();
+        let refresh_after_ms = super::DEFAULT_DIRECT_MESSAGE_TTL_SECONDS as i64 * 1000 / 2;
+        state.workers.values().any(|worker| {
+            let Some(transport) = super::selected_transport_for_worker(worker) else {
+                return false;
+            };
+            let Some(lease) = state
+                .notification_subscriptions
+                .get(&super::default_direct_message_id(&worker.id))
+            else {
+                return true;
+            };
+            lease.status != "armed"
+                || !super::subscription_matches_transport(lease, &transport)
+                || lease.expires_ms <= now
+                || lease.expires_ms - now < refresh_after_ms
+        })
+    };
+    if needs_reconcile {
+        super::restore_registered_peer_default_leases_at(server, now);
+    }
 }
 
 #[cfg(test)]
@@ -173,7 +232,7 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
 
     let mut due_events = Vec::new();
     {
-        let state = server.state.lock().unwrap();
+        let mut state = server.state.lock().unwrap();
         let mut idle_gate_records = HashMap::new();
         let mut goal_deadline_keys = state
             .wake_bindings
@@ -324,9 +383,18 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                 },
             ]);
         }
-    }
-    if !due_events.is_empty() {
-        server.commit(&due_events);
+        // A due batch must land in the same guard that derived it. Goal
+        // reconciliation takes this same lock, so an ended or replaced
+        // occurrence is either already retired when the batch is derived, or
+        // supersedes the batch in the same commit that retires it. Committing
+        // after the guard is released lets a late batch resurrect a goal whose
+        // receipt is already terminal, and raises the master goal-due latch
+        // again.
+        if !due_events.is_empty() {
+            #[cfg(test)]
+            timer_due_commit_pause_hook(&due_events);
+            server.commit_locked_reporting(&mut state, &due_events);
+        }
     }
 
     let candidates: Vec<(String, String)> = {

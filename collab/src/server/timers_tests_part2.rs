@@ -1785,12 +1785,17 @@ use super::*;
         let (server, root) = test_server();
         register_master(&server);
         register(&server, "waiter");
-        server
-            .state
-            .lock()
-            .unwrap()
-            .notification_subscriptions
-            .remove("sub-default-direct-message-master");
+        {
+            let mut state = server.state.lock().unwrap();
+            state
+                .notification_subscriptions
+                .remove("sub-default-direct-message-master");
+            // Without a selected transport the daemon has no address to
+            // reconcile the daemon-owned lease to. This is the remaining
+            // mailbox-only case; a registered, reachable master now receives
+            // a refreshed default lease from ordinary maintenance.
+            state.workers.get_mut("master").unwrap().transport = None;
+        }
         working_task(&server, "waiter");
         let now = now_ms();
         let mut task = server.state.lock().unwrap().tasks["task"].clone();
@@ -2166,5 +2171,286 @@ use super::*;
             &|_| true,
             &|_, _| panic!("older backlog must not be pushed later"),
         ));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    // The pause hook is process-global, so the two interleaving tests that use
+    // it run serially. Each hook names its own subscription to avoid pausing
+    // unrelated timer tests that run concurrently.
+    static DUE_BATCH_RACE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct DueBatchPause {
+        entered: bool,
+        release: bool,
+    }
+
+    fn install_due_batch_pause(
+        subscription_id: &str,
+    ) -> Arc<(std::sync::Mutex<DueBatchPause>, std::sync::Condvar)> {
+        let pause = Arc::new((
+            std::sync::Mutex::new(DueBatchPause {
+                entered: false,
+                release: false,
+            }),
+            std::sync::Condvar::new(),
+        ));
+        let hook_pause = Arc::clone(&pause);
+        *super::TIMER_DUE_COMMIT_PAUSE.lock().unwrap() = Some((
+            subscription_id.to_owned(),
+            Box::new(move || {
+                let (lock, cv) = &*hook_pause;
+                let mut state = lock.lock().unwrap();
+                state.entered = true;
+                cv.notify_all();
+                while !state.release {
+                    let (guard, timed_out) = cv
+                        .wait_timeout(state, std::time::Duration::from_secs(15))
+                        .unwrap();
+                    state = guard;
+                    if timed_out.timed_out() {
+                        break;
+                    }
+                }
+            }),
+        ));
+        pause
+    }
+
+    fn wait_for_due_batch_pause(
+        pause: &Arc<(std::sync::Mutex<DueBatchPause>, std::sync::Condvar)>,
+    ) {
+        let (lock, cv) = &**pause;
+        let mut state = lock.lock().unwrap();
+        while !state.entered {
+            let (guard, _) = cv
+                .wait_timeout(state, std::time::Duration::from_secs(10))
+                .unwrap();
+            state = guard;
+            assert!(state.entered, "timer must reach the due-batch pause");
+        }
+    }
+
+    fn release_due_batch_pause(
+        pause: &Arc<(std::sync::Mutex<DueBatchPause>, std::sync::Condvar)>,
+    ) {
+        let (lock, cv) = &**pause;
+        lock.lock().unwrap().release = true;
+        cv.notify_all();
+    }
+
+    /// Run one timer tick paused before its due commit, then run the goal
+    /// reconcile in the only order today's state lock permits. A serialized
+    /// commit lands first and the reconcile supersedes it; the old two-phase
+    /// commit released the guard, so the reconcile lands first and the stale
+    /// batch arrives afterwards.
+    fn tick_with_paused_due_batch(
+        server: &Arc<Server>,
+        now: i64,
+        subscription_id: &str,
+        mut reconcile: impl FnMut(),
+    ) {
+        let pause = install_due_batch_pause(subscription_id);
+        let tick_server = Arc::clone(server);
+        let tick = std::thread::spawn(move || {
+            tick_with_idle_at(&tick_server, now, &|_| false);
+        });
+        wait_for_due_batch_pause(&pause);
+        let commit_serialized = server.state.try_lock().is_err();
+        if !commit_serialized {
+            reconcile();
+        }
+        release_due_batch_pause(&pause);
+        tick.join().expect("timer tick must finish");
+        *super::TIMER_DUE_COMMIT_PAUSE.lock().unwrap() = None;
+        if commit_serialized {
+            reconcile();
+        }
+    }
+
+    #[test]
+    fn goal_reconcile_ended_receipt_survives_concurrent_timer_due_batch() {
+        let _race = DUE_BATCH_RACE_LOCK.lock().unwrap();
+        let (server, root) = test_server();
+        register_master(&server);
+        let now = now_ms();
+        let (target, method) = subscription_target(&server, "master");
+        let subscription_id = "sub-goal-ended-race".to_string();
+        server.commit(&[Event::NotificationSubscribed {
+            subscription: NotificationSubscription {
+                id: subscription_id.clone(),
+                worker_id: "master".into(),
+                event: "deadline".into(),
+                subject: Some("goal:ended-race".into()),
+                target,
+                method,
+                trigger_ms: Some(now - 1),
+                trigger_times_ms: Vec::new(),
+                interval_ms: None,
+                repeat_count: 1,
+                fired_count: 0,
+                expires_ms: now + 86_400_000,
+                status: "armed".into(),
+                created_ms: now,
+                updated_ms: now,
+                status_reason: None,
+            },
+        }]);
+        server.commit(&[Event::MasterWakeUpdated {
+            accumulator: crate::server::state::MasterWakeAccumulator {
+                goal_due: true,
+                active_goal_revision: Some(5),
+                last_updated_ms: now,
+                ..Default::default()
+            },
+        }]);
+
+        tick_with_paused_due_batch(&server, now + 1, &subscription_id, || {
+            let ended = super::super::handle_goal_schedule_reconcile(
+                &server,
+                "master".into(),
+                "token-master".into(),
+                "ended-race".into(),
+                "Jenny".into(),
+                "ended".into(),
+                None,
+                None,
+                None,
+                Some("goal-finished".into()),
+            );
+            assert!(ended.ok, "{}", ended.error.unwrap_or_default());
+        });
+
+        let state = server.state.lock().unwrap();
+        let subscription = &state.notification_subscriptions[&subscription_id];
+        assert_eq!(subscription.status, "cancelled");
+        let due_messages = state
+            .wake_bindings
+            .iter()
+            .filter_map(|(message_id, bound)| {
+                let message = state.msgs.get(message_id)?;
+                (message.to == "master" && bound == &subscription_id).then(|| message_id.clone())
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !due_messages
+                .iter()
+                .any(|id| state.msgs[id].state == "pending"),
+            "a late timer batch must not leave a pending scheduler message after an ended receipt: {due_messages:?}"
+        );
+        assert!(
+            !state.master_wake.goal_due,
+            "an ended receipt must stay terminal against a late timer batch"
+        );
+        assert!(state.master_wake.active_goal_revision.is_none());
+        drop(state);
+
+        tick_with_idle_at(&server, now + 2, &|_| false);
+        let state = server.state.lock().unwrap();
+        assert!(
+            state
+                .msgs
+                .values()
+                .filter(|message| message.to == "master" && message.state == "pending")
+                .all(|message| !state
+                    .wake_bindings
+                    .get(&message.id)
+                    .is_some_and(|bound| bound == &subscription_id)),
+            "a repeated tick must not re-emit the ended occurrence"
+        );
+        drop(state);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn goal_reconcile_rearm_receipt_survives_concurrent_timer_due_batch() {
+        let _race = DUE_BATCH_RACE_LOCK.lock().unwrap();
+        let (server, root) = test_server();
+        register_master(&server);
+        let now = now_ms();
+        let (target, method) = subscription_target(&server, "master");
+        let subscription_id = "sub-goal-rearm-race".to_string();
+        server.commit(&[Event::NotificationSubscribed {
+            subscription: NotificationSubscription {
+                id: subscription_id.clone(),
+                worker_id: "master".into(),
+                event: "deadline".into(),
+                subject: Some("goal:rearm-race".into()),
+                target: target.clone(),
+                method: method.clone(),
+                trigger_ms: Some(now - 1),
+                trigger_times_ms: Vec::new(),
+                interval_ms: None,
+                repeat_count: 1,
+                fired_count: 0,
+                expires_ms: now + 86_400_000,
+                status: "armed".into(),
+                created_ms: now,
+                updated_ms: now,
+                status_reason: None,
+            },
+        }]);
+        server.commit(&[Event::MasterWakeUpdated {
+            accumulator: crate::server::state::MasterWakeAccumulator {
+                goal_due: true,
+                active_goal_revision: Some(7),
+                last_updated_ms: now,
+                ..Default::default()
+            },
+        }]);
+
+        tick_with_paused_due_batch(&server, now + 1, &subscription_id, || {
+            let rearmed = super::super::handle_goal_schedule_reconcile(
+                &server,
+                "master".into(),
+                "token-master".into(),
+                "rearm-race".into(),
+                "Jenny".into(),
+                "active".into(),
+                Some(now + 120_000),
+                Some(3600),
+                None,
+                Some("goal-rearm".into()),
+            );
+            assert!(rearmed.ok, "{}", rearmed.error.unwrap_or_default());
+        });
+
+        let state = server.state.lock().unwrap();
+        assert_eq!(
+            state.notification_subscriptions[&subscription_id].status,
+            "cancelled",
+            "the replaced occurrence must be retired"
+        );
+        let active = state
+            .notification_subscriptions
+            .values()
+            .filter(|subscription| {
+                subscription.worker_id == "master"
+                    && is_goal_deadline(subscription)
+                    && subscription.subject.as_deref() == Some("goal:rearm-race")
+                    && subscription.status == "armed"
+            })
+            .count();
+        assert_eq!(active, 1, "rearm must leave exactly one active occurrence");
+        let pending_from_retired = state
+            .wake_bindings
+            .iter()
+            .filter(|(message_id, bound)| {
+                **bound == subscription_id
+                    && state
+                        .msgs
+                        .get(*message_id)
+                        .is_some_and(|m| m.state == "pending")
+            })
+            .count();
+        assert_eq!(
+            pending_from_retired, 0,
+            "a late timer batch must not leave a pending scheduler message for the replaced occurrence"
+        );
+        assert!(
+            !state.master_wake.goal_due,
+            "replacing a due occurrence must clear the master latch against a late timer batch"
+        );
+        assert!(state.master_wake.active_goal_revision.is_none());
+        drop(state);
         std::fs::remove_dir_all(root).ok();
     }

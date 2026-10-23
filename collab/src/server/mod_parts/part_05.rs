@@ -415,11 +415,6 @@ fn default_direct_message_events(
         if message.to != worker_id || message.mtype != "notify" || message.state != "pending" {
             continue;
         }
-        if message.subject.as_deref().is_some_and(|subject| {
-            subject.starts_with("deadline:") || subject.starts_with("master-idle:")
-        }) {
-            continue;
-        }
         if message.wake_attempt_count > 0
             || message.retry_attempted
             || state.notification_delivery_accepted.contains_key(&message.id)
@@ -447,7 +442,15 @@ fn default_direct_message_events(
                             && binding.expires_ms > now => {
                         pending_direct_message_ids.insert(message.id.clone());
                     }
-                    Some(_) => {
+                    Some(binding) => {
+                        // A message bound to a finite schedule keeps its
+                        // scheduler ownership. `mtype == "notify"` alone does
+                        // not make it ordinary payload, and the subject is
+                        // user-controlled public text rather than a termination
+                        // marker.
+                        if binding.event != "direct-message" {
+                            continue;
+                        }
                         pending_direct_message_ids.insert(message.id.clone());
                     }
                     None => {
@@ -610,9 +613,13 @@ fn registered_peer_default_events(state: &State, now: i64) -> Vec<Event> {
 }
 
 fn restore_registered_peer_default_leases(server: &Server) {
+    restore_registered_peer_default_leases_at(server, now_ms());
+}
+
+fn restore_registered_peer_default_leases_at(server: &Server, now: i64) {
     let events = {
         let state = server.state.lock().unwrap();
-        registered_peer_default_events(&state, now_ms())
+        registered_peer_default_events(&state, now)
     };
     if !events.is_empty() {
         server.commit(&events);

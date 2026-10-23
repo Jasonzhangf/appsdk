@@ -558,7 +558,20 @@ fn cleared_master_goal_due_event(
     retired: &[String],
     now: i64,
 ) -> Option<Event> {
-    if !state.master_wake.goal_due {
+    // A delivery may clear `goal_due` while keeping the notified revision so
+    // a same-revision replay cannot raise the latch again. Retiring that
+    // occurrence still ends its revision, so a delivered-but-unconsumed due
+    // goal cannot leave a stale active revision behind the ended receipt.
+    let retired_revision = state.master_wake.active_goal_revision.is_some_and(|revision| {
+        retired.iter().any(|subscription_id| {
+            state
+                .notification_subscriptions
+                .get(subscription_id)
+                .and_then(crate::server::state::subscription_goal_deadline_revision)
+                == Some(revision)
+        })
+    });
+    if !state.master_wake.goal_due && !retired_revision {
         return None;
     }
     let other_due_goal = state.notification_subscriptions.values().any(|subscription| {

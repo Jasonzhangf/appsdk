@@ -1012,6 +1012,7 @@ fn handle_task_relocate(
     if task.owner != worker_id {
         return Resp::err("only the task owner may relocate its worktree");
     }
+    if let Err(error)=work_executor_gate(server,&st,&task_id,&worker_id) {return error;}
     if matches!(task.status.as_str(), "closed" | "cancelled") {
         return Resp::err("terminal tasks cannot be relocated");
     }
@@ -1090,6 +1091,7 @@ fn handle_task_accept(server: &Server, worker_id: String, token: String, task_id
     if task.owner != worker_id {
         return Resp::err("only the task owner may accept its assignment");
     }
+    if let Err(error) = work_executor_gate(server,&st, &task_id, &worker_id) { return error; }
     let Some(admission) = st
         .scheduler_admissions
         .values()
@@ -1175,6 +1177,10 @@ fn task_update_locked(
     if task.owner != worker_id {
         return Resp::err("only the task owner may update its lifecycle");
     }
+    let original_status = task.status.clone();
+    if status.as_deref().is_some_and(|value|matches!(value,"working"|"verifying"|"reviewed")) {
+        if let Err(error)=work_executor_gate(server,st,&task_id,&worker_id) {return error;}
+    }
     if let Some(new_status) = status {
         if !TASK_STATUSES.contains(&new_status.as_str()) {
             return Resp::err(format!(
@@ -1198,7 +1204,8 @@ fn task_update_locked(
         // review records continue through the evidence-bearing integrated path.
         let legacy_accepted_merge = new_status == "merged"
             && task.status == "accepted"
-            && !st.task_lifecycle.contains_key(&task.id);
+            && !st.task_lifecycle.contains_key(&task.id)
+            && required_work_reviewer(st, &task.id).is_none();
         if new_status == "accepted" || (new_status == "merged" && !legacy_accepted_merge) {
             return Resp::err(
                 "use collab task review/integrated for integration-owned lifecycle transitions",
@@ -1234,6 +1241,14 @@ fn task_update_locked(
     // A registered merge obligation exists iff the task is still awaiting the
     // merge of an accepted candidate. Any other transition (rework, cancel,
     // legacy merge) ends that obligation in the same transaction.
+    if original_status != task.status && st.task_lifecycle.contains_key(&task_id)
+        && matches!(task.status.as_str(), "working" | "verifying" | "rework" | "cancelled")
+    {
+        let mut record = st.task_lifecycle[&task_id].clone();
+        let reviewer = required_work_reviewer(st, &task_id);
+        events.extend(invalidate_work_review(st, &task, &mut record, reviewer));
+        events.push(Event::TaskLifecycleUpdated { task_id:task_id.clone(),record });
+    }
     if task.status != "accepted" && st.pending_merges.contains_key(&task_id) {
         let stale_notices = pending_merge_notice_ids(&st, &task_id);
         events.push(Event::MergeResolved {
@@ -1484,6 +1499,7 @@ fn handle_task_deliver_with_intent(
             task_id, task.status
         ));
     }
+    if let Err(error)=work_executor_gate(server,&st,&task_id,&worker_id) {return error;}
 
     let Some(evidence) = evidence.filter(|value| !value.trim().is_empty()) else {
         return Resp::err("task deliver requires non-empty --evidence");
@@ -1517,6 +1533,8 @@ fn handle_task_deliver_with_intent(
     );
     task.updated_ms = now;
     let mut lifecycle = st.task_lifecycle.get(&task.id).cloned().unwrap_or_default();
+    let required_reviewer = required_work_reviewer(&st, &task_id);
+    let mut events = invalidate_work_review(&st, &task, &mut lifecycle, required_reviewer.clone());
     lifecycle.delivery_kind = if no_candidate {
         state::TaskDeliveryKind::ReadOnly
     } else {
@@ -1536,30 +1554,68 @@ fn handle_task_deliver_with_intent(
         .as_deref()
         .and_then(|worktree| resolve_candidate_commit(&server.root, &task, worktree));
     let delivery_kind = lifecycle.delivery_kind;
-    if let Err(error) = server.commit_locked(
-        &mut st,
-        &[
+    let mut review_notice = None;
+    let mut reviewer_waiting = None;
+    if let Some(name) = required_reviewer.as_deref() {
+        task.next_step = Some(format!("await review by {name}; use collab task review --accept or --rework"));
+        let route = match server_route_scope(server, &st) {
+            Ok(Some(route)) => route,
+            _ => return Resp::err("required reviewer project route is not ready"),
+        };
+        if let Some(recipient) = st.name_occupancy(route.project_scope_id.as_str(), name)
+            .map(|entry| entry.worker_id.clone()).filter(|id| st.workers.contains_key(id))
+        {
+            let message_id = gen_msg_id();
+            events.push(Event::Sent { msg: Message {
+                id:message_id.clone(),from:worker_id.clone(),to:recipient.clone(),mtype:"request".into(),
+                subject:Some(format!("review-required:{task_id}")),
+                body:format!("Task {task_id} is delivered and requires your review as {name}. Read its task status and evidence. Submit collab task review with --accept or --rework and your evidence. The author's delivery evidence is: {evidence}"),
+                in_reply_to:None,created_ms:now,state:"pending".into(),wake_attempt_count:0,
+                last_wake_attempt_ms:0,retry_attempted:false,
+            }});
+            events.push(Event::DeliveryMode { msg_id:message_id.clone(),mode:"explicit-notification".into(),source_thread_id:None });
+            let subscription = st.matching_subscription(&recipient,"direct-message",None,now).cloned();
+            if let Some(subscription) = &subscription {
+                events.push(Event::WakeBound { message_id:message_id.clone(),subscription_id:subscription.id.clone() });
+            }
+            review_notice = Some((message_id,subscription,notification_method_for_worker(&st,&recipient)));
+        } else { reviewer_waiting = Some(format!("reviewer {name} is currently unavailable")); }
+    }
+    events.extend([
             Event::TaskUpdated { task: task.clone() },
             Event::TaskLifecycleUpdated {
                 task_id: task.id.clone(),
                 record: lifecycle,
             },
-        ],
-    ) {
+        ]);
+    if let Err(error) = server.commit_locked(&mut st, &events) {
         drop(st);
         return Resp::err(format!("TASK_DELIVER_DURABILITY_FAILED: {error}"));
     }
 
-    Resp::data(json!({
+    drop(st);
+    let data = json!({
         "delivered": task.id,
         "status": task.status,
         "evidence": evidence,
         "worktree": worktree,
         "delivery_kind": delivery_kind.as_str(),
         "notification": "none",
+        "required_reviewer": required_reviewer,
+        "review_waiting": reviewer_waiting,
+        "delivery_complete": false,
         "next_action": task.next_step,
         "identity": {"worker_id": worker.id, "kind": "peer"},
-    }))
+    });
+    if let Some((message_id,subscription,method)) = review_notice {
+        let attempt = match &subscription {
+            Some(subscription) => attempt_notification_detailed_with_at(server,&message_id,&subscription.id,now_ms()),
+            None => NotificationAttempt::NotAttempted(NOTIFICATION_SUBSCRIPTION_MISSING_ERROR.into()),
+        };
+        let mut data = data;
+        data["review_message_id"] = json!(message_id);
+        notification_send_response(data,subscription.is_some(),method,&attempt)
+    } else { Resp::data(data) }
 }
 
 fn resolve_candidate_commit(root: &Path, task: &TaskRec, worktree: &str) -> Option<String> {

@@ -67,6 +67,8 @@ fn board_task_view_with_master(state: &State, task: &TaskRec, viewer: Option<&st
     let details = state.board_details.get(&task.id)?;
     let lifecycle = state.task_lifecycle.get(&task.id);
     let cleanup = state.cleanup_receipts.get(&task.id);
+    let policy=state.effective_work_policy(&task.id);
+    let (completion_delivery_complete,completion_missing)=state.delivery_completion_projection(&task.id);
     let assignment = state.task_assignment(&task.id);
     let historical = matches!(task.status.as_str(), "closed" | "cancelled");
     let occupancy = assignment.and_then(|assignment| route.and_then(|route|
@@ -110,6 +112,19 @@ fn board_task_view_with_master(state: &State, task: &TaskRec, viewer: Option<&st
         priority: task.priority.clone(),
         status: task.status.clone(),
         next_step: task.next_step.clone(),
+        work_kind:policy.work_kind,
+        parent_task_id:details.parent_task_id.clone(),
+        child_work_policies:details.child_work_policies.clone(),
+        preferred_roles:policy.preferred_roles.unwrap_or_default(),
+        executor_name:policy.executor_name,
+        reviewer_name:policy.reviewer_name,
+        dispatch_selection:details.dispatch_selection.clone(),
+        dispatch_reason:details.dispatch_reason.clone(),
+        review_subject_revision:lifecycle.map_or(0,|record|record.review_subject_revision),
+        reviewed_subject_revision:lifecycle.and_then(|record|record.reviewed_subject_revision),
+        actual_reviewer_name:lifecycle.and_then(|record|record.reviewer_name.clone()),
+        completion_delivery_complete,
+        completion_missing,
         invited_peer: details.invitation.as_ref().map(|invite| invite.peer_id.clone()),
         last_response: details.last_response.clone(),
         updated_at: iso(task.updated_ms),
@@ -189,6 +204,7 @@ fn handle_board_show(server: &Server, viewer: Option<&str>) -> Resp {
             id: worker.id.clone(),
             display_name: worker_display_name(&state, &worker.id, master.as_deref() == Some(worker.id.as_str())),
             role: if master.as_deref() == Some(worker.id.as_str()) { "master" } else { "peer" }.into(),
+            work_roles:worker_work_roles(&state,route.as_ref().map_or("",|route|route.project_scope_id.as_str()),&worker.id),
             status: observations.get(&worker.id).map(|(status, _)| *status).unwrap_or("unknown").into(),
             task_ids: tasks.iter().filter(|task| task.owner == worker.id && board_execution_responsibility(&task.status)).map(|task| task.id.clone()).collect(),
             invitation_ids: tasks.iter().filter(|task| task.invited_peer.as_deref() == Some(worker.id.as_str())).map(|task| task.id.clone()).collect(),
@@ -203,6 +219,7 @@ fn handle_board_show(server: &Server, viewer: Option<&str>) -> Resp {
         "master": authority,
         "tasks": tasks,
         "workers": workers,
+        "work_policies": state.project_work_policy,
     }))
 }
 
@@ -255,10 +272,11 @@ fn handle_board_command(server: &Server, actor: String, token: String, command: 
         if let Err(error) = board_check_actor(&state, &actor, &token) { return error; }
         let task_id = match &command {
             BoardCommand::Show | BoardCommand::Publish { .. } => None,
+            BoardCommand::Policy {id,..} => id.as_ref(),
             BoardCommand::Claim { id, .. } | BoardCommand::Update { id, .. }
             | BoardCommand::Describe { id, .. } | BoardCommand::Invite { id, .. }
             | BoardCommand::Respond { id, .. } | BoardCommand::DeclineAssigned { id, .. }
-            | BoardCommand::Withdraw { id, .. } => Some(id),
+            | BoardCommand::Withdraw { id, .. } | BoardCommand::Dispatch {id,..} => Some(id),
         };
         // Check visibility before reporting revision or lifecycle facts.
         if let Some(task) = task_id.and_then(|id| state.tasks.get(id)) {
@@ -269,7 +287,8 @@ fn handle_board_command(server: &Server, actor: String, token: String, command: 
     }
     match command {
         BoardCommand::Show => handle_board_show(server, Some(&actor)),
-        BoardCommand::Publish { id, title, description, delivery_condition, test_condition, priority } => {
+        BoardCommand::Publish { id, title, description, delivery_condition, test_condition, priority,
+            work_kind,parent_task,prefer_role,executor,reviewer } => {
             if [&id, &title, &description, &delivery_condition, &test_condition].iter().any(|text| text.trim().is_empty()) {
                 return Resp::err("BOARD_DESCRIPTION_REQUIRED: provide task id, title, description, delivery condition and test condition");
             }
@@ -279,6 +298,15 @@ fn handle_board_command(server: &Server, actor: String, token: String, command: 
             let mut state = server.state.lock().unwrap();
             if let Err(error) = board_check_actor(&state, &actor, &token) { return error; }
             if state.tasks.contains_key(&id) { return Resp::err("task id already exists"); }
+            if let Some(parent)=parent_task.as_deref() {
+                let Some(task)=state.tasks.get(parent) else {return Resp::err("WORK_PARENT_NOT_FOUND");};
+                if !board_task_visible(&state,task,Some(&actor)) {return Resp::err("BOARD_PRIVATE_TASK");}
+                if parent==id {return Resp::err("WORK_PARENT_CYCLE");}
+            }
+            let explicit=match parse_work_policy(work_kind,prefer_role,executor,reviewer,false,false,false) {
+                Ok(policy)=>policy,Err(error)=>return error,
+            };
+            let work_policy=state.materialize_work_policy(explicit.work_kind.as_deref(),parent_task.as_deref(),&explicit);
             let public_visibility = !is_managed_subagent(&state, &actor);
             let now = now_ms();
             let task = TaskRec {
@@ -289,6 +317,7 @@ fn handle_board_command(server: &Server, actor: String, token: String, command: 
             };
             let details = BoardTaskDetails {
                 title, description, delivery_condition, test_condition,
+                parent_task_id:parent_task,work_policy,
                 revision: 1, public_visibility, ..BoardTaskDetails::default()
             };
             if let Err(error) = server.commit_locked_checked(&mut state, &[Event::TaskCreated { task }, Event::BoardDetailsChanged { task_id: id.clone(), details }]) {
@@ -309,17 +338,30 @@ fn handle_board_command(server: &Server, actor: String, token: String, command: 
         BoardCommand::Describe { id, expected_revision, title, description, delivery_condition, test_condition } => {
             let mut state = server.state.lock().unwrap();
             if let Err(error) = board_check_actor(&state, &actor, &token) { return error; }
-            let Some(task) = state.tasks.get(&id) else { return Resp::err("task not found"); };
+            let Some(mut task) = state.tasks.get(&id).cloned() else { return Resp::err("task not found"); };
             if task.owner != actor { return Resp::err("only the task owner may describe it"); }
             let Some(mut details) = state.board_details.get(&id).cloned() else { return Resp::err("task description record missing"); };
             if details.revision != expected_revision { return Resp::err("BOARD_STALE_REVISION: reread the board"); }
             if [&title, &description, &delivery_condition, &test_condition].iter().any(|text| text.trim().is_empty()) { return Resp::err("description and conditions must not be empty"); }
             if task.status == "invited" { return Resp::err("withdraw the invitation before changing its contract"); }
+            if matches!(task.status.as_str(),"merged"|"closed"|"cancelled") {return Resp::err("WORK_CONTRACT_TERMINAL: create a follow-up task");}
+            let changed=details.title!=title || details.description!=description
+                || details.delivery_condition!=delivery_condition || details.test_condition!=test_condition;
+            let mut events=Vec::new();
+            if changed {
+                if let Some(mut record)=state.task_lifecycle.get(&id).cloned() {
+                    events.extend(invalidate_work_review(&state,&task,&mut record,details.work_policy.reviewer_name.clone()));
+                    events.push(Event::TaskLifecycleUpdated {task_id:id.clone(),record});
+                    if matches!(task.status.as_str(),"accepted"|"delivered") {task.status="rework".into();}
+                }
+            }
             details.title = title; details.description = description;
             details.delivery_condition = delivery_condition; details.test_condition = test_condition;
             // Editing a claimed public task does not make it a private child assignment.
             details.public_visibility |= !is_managed_subagent(&state, &actor); details.revision += 1;
-            if let Err(error) = server.commit_locked_checked(&mut state, &[Event::BoardDetailsChanged { task_id: id.clone(), details }]) {
+            task.updated_ms=now_ms();
+            events.extend([Event::TaskUpdated {task},Event::BoardDetailsChanged { task_id: id.clone(), details }]);
+            if let Err(error) = server.commit_locked_checked(&mut state, &events) {
                 return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}"));
             }
             board_task_response(server, &state, &id, &actor)
@@ -331,5 +373,12 @@ fn handle_board_command(server: &Server, actor: String, token: String, command: 
         },
         BoardCommand::DeclineAssigned { id, expected_revision, reason } => board_decline_assigned(server, actor, token, id, expected_revision, reason),
         BoardCommand::Withdraw { id, expected_revision, reason } => board_withdraw(server, actor, token, id, expected_revision, reason),
+        BoardCommand::Dispatch {id,expected_revision} => board_dispatch_work(server,actor,token,id,expected_revision),
+        BoardCommand::Policy {scope,id,work_kind,prefer_role,executor,reviewer,clear_prefer_role,clear_executor,clear_reviewer,expected_revision} => {
+            let patch=match parse_work_policy(work_kind,prefer_role,executor,reviewer,clear_prefer_role,clear_executor,clear_reviewer) {
+                Ok(policy)=>policy,Err(error)=>return error,
+            };
+            board_work_policy(server,actor,token,scope,id,patch,expected_revision)
+        },
     }
 }

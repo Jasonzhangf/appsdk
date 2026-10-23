@@ -832,7 +832,11 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     operation_id,
                 } => {
                     if self_current {
-                        let ident = me(&scope)?;
+                        // Explicit self removal retains the lifecycle contract:
+                        // reconcile current facts and repair its credential first.
+                        let (snapshot, receipt) =
+                            identity_context_response(&scope, collect_identity_facts(None)?)?;
+                        let ident = receipt.ok_or_else(|| identity_context_required(&snapshot))?;
                         let response = client::call_with_context_response(
                             &scope.sock_path(),
                             &Req::UnregisterSelf {

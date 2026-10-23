@@ -965,9 +965,18 @@ fn peer_lifecycle_create_cli_and_mcp_round_trip_through_isolated_daemon() {
     );
     assert!(!unknown_close.status.success());
     assert!(!String::from_utf8_lossy(&unknown_close.stderr).contains("IDENTITY_RESTORE_AMBIGUOUS"));
+    let mut historical_thread = fixture.configured_command(&["worker", "read"], None);
+    configure_runtime(&mut historical_thread);
+    historical_thread.env("CODEX_THREAD_ID", "historical-thread");
+    let historical_thread = historical_thread.output().unwrap();
+    assert!(
+        historical_thread.status.success(),
+        "a thread locator must not override the current session actor: {}",
+        String::from_utf8_lossy(&historical_thread.stderr)
+    );
     let mut missing_route = fixture.configured_command(&["worker", "read"], None);
     configure_runtime(&mut missing_route);
-    missing_route.env("CODEX_THREAD_ID", "historical-thread");
+    missing_route.env("CODEX_SESSION_ID", "unregistered-lifecycle-session");
     let missing_route = missing_route.output().unwrap();
     assert!(
         !missing_route.status.success(),

@@ -1133,7 +1133,9 @@ impl ProjectRuntimeManager {
         if facts.tmux.is_none() && facts.dsh_session_id.is_some() && facts.dsh.is_none()
             && identity::existing_for_daemon_at(&self.host.host_paths, &Scope { root: root.clone() }, &facts)
                 .map_err(PreflightIdentityError::Error)?.is_none() {
-            required.push("dsh");
+            if self.current_session_identity(context, &facts).map_err(PreflightIdentityError::Error)?.is_none() {
+                required.push("dsh");
+            }
         }
         if !required.is_empty() {
             let descriptions = json!({

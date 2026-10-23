@@ -762,13 +762,21 @@ fn identity_by_current_anchors_same_scope_at(
 /// An explicit API must match the saved target. Without a report, the scoped
 /// resolver can recover only a unique durable session owner.
 fn dsh_api_matches(observed: &AnchorObservation, transport: &SelectedTransport) -> bool {
-    if let Some(candidate) = observed.dsh.as_ref() {
-        return transport.endpoint.as_deref() == Some(candidate.endpoint.as_str())
-            && transport.namespace.as_deref() == Some(candidate.runtime_id.as_str())
-            && transport.thread_id.as_deref() == Some(candidate.agent_id.as_str())
-            && transport.session_id.as_deref() == Some(candidate.session_id.as_str());
-    }
-    true
+    observed
+        .dsh
+        .as_ref()
+        .is_none_or(|candidate| dsh_transport_matches(candidate, transport))
+}
+
+pub(crate) fn dsh_transport_matches(
+    candidate: &crate::proto::DshCandidate,
+    transport: &SelectedTransport,
+) -> bool {
+    transport.kind == TransportKind::Dsh
+        && transport.endpoint.as_deref() == Some(candidate.endpoint.as_str())
+        && transport.namespace.as_deref() == Some(candidate.runtime_id.as_str())
+        && transport.thread_id.as_deref() == Some(candidate.agent_id.as_str())
+        && transport.session_id.as_deref() == Some(candidate.session_id.as_str())
 }
 
 fn identity_by_current_anchors_at(

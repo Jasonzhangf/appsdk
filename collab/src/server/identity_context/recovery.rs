@@ -88,7 +88,9 @@ impl ProjectRuntimeManager {
         context: &ProjectContext,
         facts: &IdentityFacts,
     ) -> anyhow::Result<Option<identity::Identity>> {
-        let Some(session_id) = facts.session_id.as_deref() else {
+        let dsh_session = facts.dsh_session_id.as_deref()
+            .or_else(|| facts.dsh.as_ref().map(|candidate| candidate.session_id.as_str()));
+        let Some(session_id) = dsh_session.or(facts.session_id.as_deref()) else {
             return Ok(None);
         };
         if !self.routes.lock().unwrap().contains_key(&(
@@ -106,7 +108,7 @@ impl ProjectRuntimeManager {
         let Some(project) = state.global.lookup_project_for_route(&route) else {
             return Ok(None);
         };
-        let bindings = project
+        let mut bindings = project
             .runtime_bindings
             .values()
             .filter(|binding| {
@@ -115,8 +117,19 @@ impl ProjectRuntimeManager {
                     .as_ref()
                     .is_some_and(|saved| saved.as_str() == session_id)
                     && state.workers.contains_key(binding.agent_id.as_str())
+                    && (dsh_session.is_none() || state.workers.get(binding.agent_id.as_str())
+                        .and_then(|worker| worker.transport.as_ref()).is_some_and(|transport| transport.kind == TransportKind::Dsh))
             })
             .collect::<Vec<_>>();
+        if let Some(candidate) = facts.dsh.as_ref() {
+            let had_session = !bindings.is_empty();
+            bindings.retain(|binding| state.workers.get(binding.agent_id.as_str())
+                .and_then(|worker| worker.transport.as_ref())
+                .is_some_and(|transport| identity::dsh_transport_matches(candidate, transport)));
+            if had_session && bindings.is_empty() {
+                anyhow::bail!("IDENTITY_RESTORE_CONFLICT: DSH communication API differs from the current binding");
+            }
+        }
         let master = current_master_grant(&state, Some(&route));
 
         // Typed name occupancy is the authoritative current session owner.
@@ -139,6 +152,9 @@ impl ProjectRuntimeManager {
         if bindings.len() == 1 {
             let binding = bindings[0];
             return Ok(self.recovered_binding_identity(context, binding, &state));
+        }
+        if dsh_session.is_some() && bindings.len() > 1 {
+            anyhow::bail!("IDENTITY_RESTORE_AMBIGUOUS: multiple current DSH bindings carry this session");
         }
         if let Some(binding) = bindings.iter().copied().find(|binding| {
             master

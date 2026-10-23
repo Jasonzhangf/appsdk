@@ -219,11 +219,15 @@ impl Fixture {
                 if exists {
                     // A bound socket path can precede listen readiness.
                     if let Ok(mut stream) = UnixStream::connect(self.state.join("server.sock")) {
-                        stream.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+                        stream
+                            .set_read_timeout(Some(Duration::from_millis(200)))
+                            .unwrap();
                         if writeln!(stream, "{}", json!({"op":"Ping"})).is_ok() {
                             let mut line = String::new();
                             if BufReader::new(stream).read_line(&mut line).is_ok()
-                                && serde_json::from_str::<Value>(&line).is_ok_and(|reply| reply["ok"] == true) {
+                                && serde_json::from_str::<Value>(&line)
+                                    .is_ok_and(|reply| reply["ok"] == true)
+                            {
                                 return;
                             }
                         }
@@ -561,6 +565,68 @@ fn dsh_context_registers_from_typed_gateway_facts() {
     assert_eq!(
         status["wake_transport_evidence"]["consumed"], false,
         "gateway acceptance alone is not consumption: {status}"
+    );
+    fixture.finish();
+}
+
+#[test]
+fn dsh_context_recovers_a_gateway_registered_binding_without_cli_archive() {
+    let mut fixture = Fixture::new();
+    fixture.start_daemon();
+    let registered = register(
+        &fixture,
+        "gateway-owned-worker",
+        "gateway-owned-token",
+        "agentA",
+    );
+    assert_ok(&registered);
+    let context = binding_context(&registered, &fixture.root);
+    assert_ok(&authority(
+        &fixture,
+        "MasterPromote",
+        "gateway-owned-worker",
+        "gateway-owned-token",
+        &context,
+        json!({"approval":"isolated DSH gateway recovery acceptance"}),
+    ));
+    assert!(!fixture
+        .state
+        .join("identities/gateway-owned-worker/identity.json")
+        .exists());
+    let count = fixture.registrations();
+    let restored = fixture.dsh_command(&["context"], "agentA");
+    assert!(
+        restored.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&restored.stdout),
+        String::from_utf8_lossy(&restored.stderr)
+    );
+    let restored: Value = serde_json::from_slice(&restored.stdout).unwrap();
+    assert_eq!(
+        restored["result"]["snapshot"]["identity"]["worker_id"],
+        "gateway-owned-worker"
+    );
+    assert_eq!(
+        restored["result"]["snapshot"]["binding"]["binding_id"],
+        registered["command"]["binding"]["binding_id"]
+    );
+    assert_eq!(fixture.registrations(), count);
+    assert_eq!(
+        status(&fixture, &fixture.root)["master"]["worker_id"],
+        "gateway-owned-worker"
+    );
+    fixture.restart_daemon();
+    let restored = fixture.dsh_command(&["context"], "agentA");
+    assert!(
+        restored.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&restored.stdout),
+        String::from_utf8_lossy(&restored.stderr)
+    );
+    assert_eq!(fixture.registrations(), count);
+    assert_eq!(
+        status(&fixture, &fixture.root)["master"]["worker_id"],
+        "gateway-owned-worker"
     );
     fixture.finish();
 }

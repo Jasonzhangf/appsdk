@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-dsh-channel",
-  "version": "0.1.0",
-  "description": "DSH channel slice of dsh-gateway/docs/COLLAB-DSH-CHANNEL-DESIGN.md (frozen at dsh-gateway 81f3fd3): a dsh-gateway-proxied registration makes one DSH agent appear as an independent collab peer with its own durable mailbox, and each direction carries one real round trip. SESE: one entry (the registration intent), one sink (the round-trip evidence), every node single-entry single-exit. N2 consumes the section 3.7 challenge (agent-facts over the gateway control plane) and N7 consumes the section 3.7 enqueue; both are cross-side interfaces that must be frozen before either side writes code. dsh is mutually exclusive with appserver/tmux: an ambiguous candidate set is rejected outright, never silently resolved by priority. The section 3.6 phase-B quorum is deliberately NOT a node here: it does not exist in code (T1/T2 unstarted) and DSH stays enabled false until it lands, so this graph covers only the channel-level slice S1-S14/S16/S17 of section 5, not S15.",
+  "version": "0.2.0",
+  "description": "DSH 注册后通信的单入口单出口对象流。公开 CLI/MCP context 报告 typed DSH 能力，daemon 将其接入既有 Register。复用已经验证的 gateway 基础通信，不增加首次注册消息挑战。普通身份恢复属于 collab-context 图，直接读取持久身份和绑定，不进入本图的新注册分支。缺事实、拒绝或未知结果作为当前阶段的明确结果向后传递，不产生后续副作用；仅已提交注册进入实际消息收发。成功终点区分入队、adaptor 接受、接收、回复和消费。相同 session 的显式 API 冲突不覆盖旧身份、角色或工作。全局 daemon 与 tmux 生命周期不属于本图。",
   "inputs": [
     {
       "id": "dsh_registration_intent",
@@ -11,6 +11,7 @@
   "nodes": [
     {
       "id": "build_dsh_candidate",
+      "description": "解析公开 context 的 DSH endpoint/runtime/agent/session/cwd 事实。DSH 不借用 AppServer namespace，不要求 Codex thread。缺事实或相互矛盾返回明确结果。",
       "operator": "appsdk.collab_dsh_channel.build_dsh_candidate",
       "operator_version": "1",
       "inputs": ["dsh_registration_intent"],
@@ -21,6 +22,7 @@
     },
     {
       "id": "admit_dsh_transport",
+      "description": "daemon 通过既有 agent-facts 核实 DSH 候选；拒绝或 unknown 不发布绑定。此事实核实不增加消息回复挑战。",
       "operator": "appsdk.collab_dsh_channel.admit_dsh_transport",
       "operator_version": "1",
       "inputs": ["dsh_candidate"],
@@ -31,6 +33,7 @@
     },
     {
       "id": "bind_and_receipt",
+      "description": "通过既有注册事务提交持久身份和 DSH 绑定，返回真实回执。显式 API 冲突不得经 session-only draft 取回旧凭据。",
       "operator": "appsdk.collab_dsh_channel.bind_and_receipt",
       "operator_version": "1",
       "inputs": ["admitted_transport"],
@@ -41,6 +44,7 @@
     },
     {
       "id": "publish_route",
+      "description": "发布并读回已提交的 project/app scope route；前序失败保持原状态。",
       "operator": "appsdk.collab_dsh_channel.publish_route",
       "operator_version": "1",
       "inputs": ["registration_receipt"],
@@ -51,6 +55,7 @@
     },
     {
       "id": "arm_default_lease",
+      "description": "注册成功后建立默认收件订阅；普通恢复复用持久身份，不重新 Register 或验证通信。",
       "operator": "appsdk.collab_dsh_channel.arm_default_lease",
       "operator_version": "1",
       "inputs": ["route_address"],
@@ -61,6 +66,7 @@
     },
     {
       "id": "project_presence",
+      "description": "context 返回当前身份与项目状态，身份有效性与通信可达性分别投影。",
       "operator": "appsdk.collab_dsh_channel.project_presence",
       "operator_version": "1",
       "inputs": ["subscription_state"],
@@ -71,6 +77,7 @@
     },
     {
       "id": "deliver_wake",
+      "description": "注册后的真实消息经 daemon 持久 mailbox 与 gateway enqueue 唤醒；接受回执不冒充接收或消费。",
       "operator": "appsdk.collab_dsh_channel.deliver_wake",
       "operator_version": "1",
       "inputs": ["presence_projection"],
@@ -81,6 +88,7 @@
     },
     {
       "id": "send_to_peer",
+      "description": "经公开 recv/send/ack 验证接收、回复和消费，形成可关联通信证据或明确失败结果。",
       "operator": "appsdk.collab_dsh_channel.send_to_peer",
       "operator_version": "1",
       "inputs": ["wake_evidence"],

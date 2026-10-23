@@ -50,8 +50,7 @@ fn observation(
         }),
         tmux,
         dsh_session_id: None,
-        endpoint: None,
-        namespace: None,
+        dsh: None,
     }
 }
 
@@ -61,6 +60,7 @@ fn facts(
     tmux: Option<crate::proto::TmuxCandidate>,
 ) -> crate::proto::IdentityFacts {
     crate::proto::IdentityFacts {
+        dsh: None,
         desktop_bridge: None,
         session_id: session.map(str::to_owned),
         thread_id: thread.map(str::to_owned),
@@ -196,11 +196,19 @@ fn dsh_facts(
     session_id: &str,
     endpoint: Option<&str>,
     namespace: Option<&str>,
+    agent_id: &str,
 ) -> crate::proto::IdentityFacts {
     let mut facts = facts(None, None, None);
     facts.dsh_session_id = Some(session_id.into());
-    facts.endpoint = endpoint.map(str::to_owned);
-    facts.namespace = namespace.map(str::to_owned);
+    facts.dsh = endpoint
+        .zip(namespace)
+        .map(|(endpoint, namespace)| crate::proto::DshCandidate {
+            endpoint: endpoint.into(),
+            runtime_id: namespace.into(),
+            agent_id: agent_id.into(),
+            session_id: session_id.into(),
+            cwd: "/tmp".into(),
+        });
     facts
 }
 
@@ -810,6 +818,7 @@ fn archived_route_recovery_reads_without_calling_back() {
     // No socket exists under the state root, so any daemon-to-self RPC would
     // fail; the route-aware resolver returns the archived credential directly.
     let facts = crate::proto::IdentityFacts {
+        dsh: None,
         session_id: Some("session-new".into()),
         desktop_bridge: None,
         thread_id: Some("thread-new".into()),
@@ -1035,7 +1044,12 @@ fn resolver_matches_a_dsh_identity_by_its_compound_anchor() {
     let found = resolve_for_daemon_at(
         &host_paths,
         &scope,
-        &dsh_facts("6162", Some(endpoint), Some(namespace)),
+        &dsh_facts(
+            "6162",
+            Some(endpoint),
+            Some(namespace),
+            "agent-dsh-gateway-a",
+        ),
     )
     .unwrap();
     assert_eq!(found.worker_id, worker_id);
@@ -1050,12 +1064,11 @@ fn resolver_matches_a_dsh_identity_by_its_compound_anchor() {
             "6162",
             Some("unix:///tmp/gateway-b.sock"),
             Some("runtime-b"),
+            "agent-dsh-gateway-a",
         ),
     )
-    .unwrap();
-    assert_ne!(other.worker_id, worker_id);
-    assert_ne!(other.token, "token-dsh-gateway-a");
-    assert!(other.runtime.is_none());
+    .unwrap_err();
+    assert!(other.to_string().starts_with("IDENTITY_RESTORE_CONFLICT:"));
 
     std::fs::remove_dir_all(root).ok();
 }
@@ -1092,7 +1105,12 @@ fn resolver_disambiguates_same_session_different_gateway() {
     let from_a = resolve_for_daemon_at(
         &host_paths,
         &scope,
-        &dsh_facts("6162", Some(gateway_a.0), Some(gateway_a.1)),
+        &dsh_facts(
+            "6162",
+            Some(gateway_a.0),
+            Some(gateway_a.1),
+            "agent-dsh-gateway-a",
+        ),
     )
     .unwrap();
     assert_eq!(from_a.worker_id, "dsh-gateway-a");
@@ -1101,14 +1119,19 @@ fn resolver_disambiguates_same_session_different_gateway() {
     let from_b = resolve_for_daemon_at(
         &host_paths,
         &scope,
-        &dsh_facts("6162", Some(gateway_b.0), Some(gateway_b.1)),
+        &dsh_facts(
+            "6162",
+            Some(gateway_b.0),
+            Some(gateway_b.1),
+            "agent-dsh-gateway-b",
+        ),
     )
     .unwrap();
     assert_eq!(from_b.worker_id, "dsh-gateway-b");
     assert_eq!(from_b.token, "token-dsh-gateway-b");
 
     // The session anchor alone cannot choose a gateway.
-    let error = existing_for_daemon_at(&host_paths, &scope, &dsh_facts("6162", None, None))
+    let error = existing_for_daemon_at(&host_paths, &scope, &dsh_facts("6162", None, None, ""))
         .unwrap_err()
         .to_string();
     assert!(error.starts_with("IDENTITY_RESTORE_AMBIGUOUS:"), "{error}");

@@ -407,3 +407,31 @@ Final public context71, name70 and resolver28 pass; prior shared-state1139
 pass/one existing ignored. Independent recheck PASS closes all three original
 P1 findings. Installation, main integration and user-managed daemon activation
 remain separate delivery facts; no global daemon or tmux lifecycle was touched.
+
+## 2026-10-23 DSH public context registration
+
+CLI context and MCP collab_context now accept a typed DSH capability report
+and pass it to the existing daemon registration owner. Session-only restoration
+reuses a unique saved scoped identity. Explicit gateway API/target conflicts
+cannot recover an old credential through the draft path. Missing first-use
+facts are reported before operation admission. Initial registration adds no
+message challenge; gateway admission still verifies actual reported facts.
+
+The public consumer starts without an identity, checks the committed DSH
+binding and default lease, repeats and restarts without a new registration,
+rejects API conflict without replacing the saved credential, then verifies
+send/receive/linked reply/read acknowledgements. Gateway queue acceptance
+remains distinct from receiver consumption. MCP and invalid-report consumers
+use the same real CLI/daemon path. All four DSH public cases pass, alongside
+identity30, context29, MCP27, DSH/adaptor52, Desktop2 and serial context-public73.
+A real current gateway admission plus session-only restore also passes through
+an isolated daemon; no target messages or global daemon changes were made.
+
+Evidence: ~/.collab/runs/dsh-registration-delivery-20261023/. The inherited
+worktree and tests were preserved, then combined with current main. Shared
+units initially passed1154 with six failures: one missing candidate binary
+parameter and five fixture failures from an obsolete no-identity error-code
+assertion. Scoped rechecks pass12 plus the exact staged-restore consumer1.
+The read-only test still rejects identity selection from a fake TMUX string.
+Final review, remote CI, main integration and formal installation are recorded
+separately; installation does not activate the user-managed global daemon.

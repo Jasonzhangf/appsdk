@@ -20,11 +20,11 @@ fn context_collector_never_derives_a_socket_from_the_tmux_environment() {
         }
     }
     let facts = result.expect("stable pane facts must reach daemon despite a live display failure");
+    // With no declared endpoint and no agent anchor, a read finds no identity.
+    // The injected TMUX string must not create an endpoint or select a peer.
     assert!(
-        read_only.as_ref().is_err_and(|error| error
-            .to_string()
-            .contains("TMUX_OBSERVATION_CAPABILITY_MISSING")),
-        "a caller-supplied TMUX value must not become a socket capability: {read_only:?}"
+        matches!(read_only, Ok(None)),
+        "a caller-supplied TMUX value must not select an identity: {read_only:?}"
     );
     assert!(facts.tmux_anchor.is_none());
     assert_eq!(facts.caller_pid, Some(std::process::id()));

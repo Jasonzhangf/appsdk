@@ -1445,6 +1445,9 @@ impl ProjectRuntimeManager {
             );
             (runtime, receipt, Some((staged_runtime, transport)))
         } else {
+            if facts.dsh_session_id.is_some() && facts.dsh.is_none() && facts.tmux.is_none() {
+                return Err(anyhow::anyhow!("IDENTITY_INFORMATION_REQUIRED: first DSH registration requires dsh endpoint, runtime_id, agent_id, session_id and cwd facts").into());
+            }
             let candidates = TransportCandidates {
                 desktop_bridge: facts.desktop_bridge,
                 // A pane needs no native IDs. Only construct the adjacent
@@ -1468,7 +1471,7 @@ impl ProjectRuntimeManager {
                     _ => None,
                 },
                 tmux: facts.tmux,
-                dsh: None,
+                dsh: facts.dsh,
             };
             let provisional = RuntimeIdentity::cli_adapter(&ident.worker_id)?;
             let register_runtime = ident.runtime.as_ref().unwrap_or(&provisional);

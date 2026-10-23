@@ -311,6 +311,8 @@ pub(crate) fn context_env_view() -> serde_json::Value {
 #[serde(deny_unknown_fields)]
 struct IdentitySupplement {
     #[serde(default)]
+    dsh: Option<proto::DshCandidate>,
+    #[serde(default)]
     desktop_bridge: Option<proto::AppServerCandidate>,
     #[serde(default, deserialize_with = "provided_string")]
     session_id: Option<String>,
@@ -357,10 +359,13 @@ fn parse_identity_supplement(raw: &str) -> anyhow::Result<IdentityFacts> {
         && supplement.endpoint.is_none()
         && supplement.namespace.is_none()
         && supplement.desktop_bridge.is_none()
+        && supplement.dsh.is_none()
     {
         anyhow::bail!("IDENTITY_FACT_INVALID: --provide must contain at least one identity fact");
     }
     Ok(IdentityFacts {
+        dsh_session_id: supplement.dsh.as_ref().map(|dsh| dsh.session_id.clone()),
+        dsh: supplement.dsh,
         desktop_bridge: supplement.desktop_bridge,
         session_id: supplement.session_id,
         thread_id: supplement.thread_id,
@@ -370,7 +375,6 @@ fn parse_identity_supplement(raw: &str) -> anyhow::Result<IdentityFacts> {
         pane_hint: None,
         tmux: None,
         tmux_anchor: None,
-        dsh_session_id: None,
     })
 }
 
@@ -398,6 +402,31 @@ pub(crate) fn collect_identity_facts(provide: Option<&str>) -> anyhow::Result<Id
     let Some(supplied) = supplied else {
         return Ok(facts);
     };
+    if let Some(candidate) = supplied.dsh {
+        if supplied.desktop_bridge.is_some()
+            || supplied.session_id.is_some()
+            || supplied.thread_id.is_some()
+            || supplied.endpoint.is_some()
+            || supplied.namespace.is_some()
+        {
+            anyhow::bail!(
+                "IDENTITY_FACT_INVALID: DSH report cannot be mixed with Desktop or AppServer facts"
+            );
+        }
+        merge_supplied_fact(
+            "dsh_session_id",
+            &mut facts.dsh_session_id,
+            Some(candidate.session_id.clone()),
+        )?;
+        // The explicit report describes the DSH caller. A surrounding Codex
+        // launcher may export its own native host metadata to child tools.
+        facts.session_id = None;
+        facts.thread_id = None;
+        facts.endpoint = None;
+        facts.namespace = None;
+        facts.dsh = Some(candidate);
+        return Ok(facts);
+    }
     if supplied.desktop_bridge.is_some() {
         facts.session_id = supplied.session_id;
         facts.thread_id = supplied.thread_id;

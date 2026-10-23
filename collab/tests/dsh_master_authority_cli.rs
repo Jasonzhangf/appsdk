@@ -146,7 +146,11 @@ impl Fixture {
     }
 
     fn configured_command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(&self.binary);
+        self.configured_program(&self.binary, args)
+    }
+
+    fn configured_program(&self, binary: &Path, args: &[&str]) -> Command {
+        let mut command = Command::new(binary);
         command
             .args(args)
             .current_dir(&self.root)
@@ -173,6 +177,34 @@ impl Fixture {
             .read_line(&mut line)
             .expect("read daemon reply");
         serde_json::from_str(&line).expect("daemon JSON reply")
+    }
+
+    fn dsh_command(&self, args: &[&str], session: &str) -> Output {
+        self.configured_command(args)
+            .env("DSH_SESSION_ID", session)
+            .output()
+            .unwrap()
+    }
+
+    fn registrations(&self) -> usize {
+        fn count(path: &Path) -> usize {
+            if path.is_dir() {
+                return std::fs::read_dir(path)
+                    .unwrap()
+                    .map(|entry| count(&entry.unwrap().path()))
+                    .sum();
+            }
+            if path.file_name().is_none_or(|name| name != "journal.jsonl") {
+                return 0;
+            }
+            std::fs::read_to_string(path)
+                .unwrap()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .filter(|event| event["ev"] == "Registered")
+                .count()
+        }
+        count(&self.state)
     }
 
     fn wait_socket(&self, exists: bool) {
@@ -334,6 +366,308 @@ fn must_refuse(reply: &Value) {
         reply["error"].is_string(),
         "missing explicit error: {reply}"
     );
+}
+
+#[test]
+fn dsh_context_registers_from_typed_gateway_facts() {
+    let mut fixture = Fixture::new();
+    fixture.start_daemon();
+    let facts = json!({"dsh":{
+        "endpoint":fixture.gateway.endpoint(),
+        "runtime_id":"gateway-runtime", "agent_id":"agentA",
+        "session_id":"agentA", "cwd":fixture.root
+    }})
+    .to_string();
+    let output = fixture.command(&["context", "--provide", &facts]);
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: Value = serde_json::from_slice(&output.stdout).expect("context JSON");
+    assert_eq!(response["result"]["outcome"], "completed", "{response}");
+    let snapshot = &response["result"]["snapshot"];
+    assert_eq!(
+        snapshot["identity"]["transport"]["kind"], "dsh",
+        "{response}"
+    );
+    let worker = snapshot["identity"]["worker_id"].as_str().unwrap();
+    let binding = snapshot["binding"].clone();
+    assert!(binding["binding_id"].is_string(), "{response}");
+    let registered = fixture.registrations();
+    assert!(registered > 0, "context must commit a real registration");
+    let saved_path = fixture
+        .state
+        .join("identities")
+        .join(worker)
+        .join("identity.json");
+    let saved = std::fs::read(&saved_path).unwrap();
+    let repeated = fixture.dsh_command(&["context", "--provide", &facts], "agentA");
+    assert!(
+        repeated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&repeated.stderr)
+    );
+    assert_eq!(
+        fixture.registrations(),
+        registered,
+        "ordinary context must not Register again"
+    );
+    let leases = fixture.dsh_command(&["notify", "status"], "agentA");
+    assert!(
+        leases.status.success(),
+        "{}",
+        String::from_utf8_lossy(&leases.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&leases.stdout).contains("direct-message"),
+        "{}",
+        String::from_utf8_lossy(&leases.stdout)
+    );
+    let conflicting = json!({"dsh":{
+        "endpoint":fixture.gateway.endpoint(), "runtime_id":"different-api",
+        "agent_id":"agentA", "session_id":"agentA", "cwd":fixture.root
+    }})
+    .to_string();
+    let rejected = fixture.dsh_command(&["context", "--provide", &conflicting], "agentA");
+    assert!(
+        !rejected.status.success(),
+        "explicit API conflict must fail: {}",
+        String::from_utf8_lossy(&rejected.stdout)
+    );
+    assert_eq!(
+        std::fs::read(&saved_path).unwrap(),
+        saved,
+        "conflict must preserve the credential and binding"
+    );
+    assert_eq!(fixture.registrations(), registered);
+    fixture.restart_daemon();
+    let restored = fixture.dsh_command(&["context"], "agentA");
+    assert!(
+        restored.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&restored.stdout),
+        String::from_utf8_lossy(&restored.stderr)
+    );
+    let restored: Value = serde_json::from_slice(&restored.stdout).unwrap();
+    assert_eq!(restored["result"]["snapshot"]["binding"], binding);
+    assert_eq!(
+        fixture.registrations(),
+        registered,
+        "restart recovery must not Register"
+    );
+    let sent = fixture.dsh_command(
+        &[
+            "sendmessage",
+            "--to",
+            worker,
+            "--subject",
+            "dsh-context-message",
+            "real registered message",
+        ],
+        "agentA",
+    );
+    assert!(
+        sent.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&sent.stdout),
+        String::from_utf8_lossy(&sent.stderr)
+    );
+    let sent: Value = serde_json::from_slice(&sent.stdout).unwrap();
+    assert_eq!(sent["durable"], true, "{sent}");
+    let received = fixture.dsh_command(
+        &[
+            "recv",
+            "--timeout",
+            "0",
+            "--receive-id",
+            "dsh-context-receive",
+        ],
+        "agentA",
+    );
+    assert!(
+        received.status.success(),
+        "{}",
+        String::from_utf8_lossy(&received.stderr)
+    );
+    let received: Value = serde_json::from_slice(&received.stdout).unwrap();
+    assert!(
+        received["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["subject"] == "dsh-context-message"),
+        "{received}"
+    );
+    let message_id = received["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["subject"] == "dsh-context-message")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+    let reply = fixture.dsh_command(
+        &[
+            "send",
+            "--to",
+            worker,
+            "--subject",
+            "dsh-context-reply",
+            "--in-reply-to",
+            message_id,
+            "handled registered message",
+        ],
+        "agentA",
+    );
+    assert!(
+        reply.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reply.stderr)
+    );
+    let ack = fixture.dsh_command(&["ack", message_id], "agentA");
+    assert!(
+        ack.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ack.stderr)
+    );
+    let status = fixture.dsh_command(&["msg", message_id], "agentA");
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["answered"], true, "{status}");
+    assert_eq!(status["consumed_by_recv"], true, "{status}");
+    assert_eq!(status["state"], "read", "{status}");
+    assert_eq!(
+        status["wake_transport_evidence"]["queued"], true,
+        "{status}"
+    );
+    assert_eq!(
+        status["wake_transport_evidence"]["consumed"], false,
+        "gateway acceptance alone is not consumption: {status}"
+    );
+    fixture.finish();
+}
+
+#[test]
+fn dsh_context_rejects_missing_invalid_and_conflicting_facts_without_registration() {
+    let mut fixture = Fixture::new();
+    fixture.start_daemon();
+    let missing = fixture.dsh_command(&["context"], "agentA");
+    assert!(!missing.status.success());
+    let missing: Value = serde_json::from_slice(&missing.stdout).unwrap();
+    assert_eq!(missing["result"]["outcome"], "missing_facts", "{missing}");
+    assert_eq!(
+        missing["result"]["requires"]["fields"],
+        json!(["dsh"]),
+        "{missing}"
+    );
+    let facts = json!({"dsh":{
+        "endpoint":fixture.gateway.endpoint(), "runtime_id":"gateway-runtime",
+        "agent_id":"agentA", "session_id":"agentA", "cwd":fixture.root
+    }});
+    let conflict = fixture.dsh_command(&["context", "--provide", &facts.to_string()], "agentB");
+    assert!(!conflict.status.success());
+    assert!(String::from_utf8_lossy(&conflict.stderr).contains("IDENTITY_FACT_CONFLICT"));
+    for (field, invalid) in [
+        ("endpoint", "relative.sock"),
+        ("agent_id", "unknown-agent"),
+        ("cwd", "/different-project"),
+    ] {
+        let mut invalid_facts = facts.clone();
+        invalid_facts["dsh"][field] = json!(invalid);
+        let rejected = fixture.command(&["context", "--provide", &invalid_facts.to_string()]);
+        assert!(
+            !rejected.status.success(),
+            "invalid {field} must fail: {}",
+            String::from_utf8_lossy(&rejected.stdout)
+        );
+        assert_eq!(
+            fixture.registrations(),
+            0,
+            "invalid {field} must not register"
+        );
+    }
+    assert!(
+        !fixture.state.join("identities").exists()
+            || std::fs::read_dir(fixture.state.join("identities"))
+                .unwrap()
+                .next()
+                .is_none()
+    );
+    fixture.finish();
+}
+
+#[test]
+fn dsh_mcp_registers_from_typed_gateway_facts() {
+    let mut fixture = Fixture::new();
+    fixture.start_daemon();
+    let binary = std::env::var_os("COLLAB_TEST_MCP_BINARY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_collab-mcp")));
+    let mut child = fixture
+        .configured_program(&binary, &[])
+        .env("COLLAB_BIN", &fixture.binary)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    writeln!(
+        input,
+        "{}",
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}})
+    )
+    .unwrap();
+    writeln!(
+        input,
+        "{}",
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"collab_context","arguments":{"provide":{"dsh":{
+                "endpoint":fixture.gateway.endpoint(), "runtime_id":"gateway-runtime",
+                "agent_id":"agentB", "session_id":"agentB", "cwd":fixture.root
+            }}}
+        }})
+    )
+    .unwrap();
+    drop(input);
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let replies: Vec<Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(
+        replies
+            .iter()
+            .any(|reply| reply["id"] == 1 && reply["result"].is_object()),
+        "{replies:?}"
+    );
+    let reply = replies.iter().find(|reply| reply["id"] == 2).unwrap();
+    assert_ne!(reply["result"]["isError"], true, "{reply}");
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    let response: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(response["result"]["outcome"], "completed", "{response}");
+    assert_eq!(
+        response["result"]["snapshot"]["identity"]["transport"]["kind"],
+        "dsh"
+    );
+    assert!(fixture.registrations() > 0);
+    assert!(
+        !text.contains("\"token\""),
+        "MCP must not expose stored credentials"
+    );
+    fixture.finish();
 }
 
 #[test]

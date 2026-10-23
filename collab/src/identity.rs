@@ -736,7 +736,19 @@ fn identity_by_current_anchors_same_scope_at(
     scope: &Scope,
     observed: &AnchorObservation,
 ) -> anyhow::Result<Option<Identity>> {
-    match identity_by_current_anchors_at(host_paths, scope, observed)? {
+    let resolution = identity_by_current_anchors_at(host_paths, scope, observed)?;
+    if resolution.is_none() && observed.dsh.is_some() {
+        let session_only = AnchorObservation {
+            dsh: None,
+            ..observed.clone()
+        };
+        if identity_by_current_anchors_at(host_paths, scope, &session_only)?.is_some() {
+            anyhow::bail!(
+                "IDENTITY_RESTORE_CONFLICT: DSH communication API differs from the saved identity"
+            );
+        }
+    }
+    match resolution {
         Some(AnchorResolution::CurrentScope(identity)) => Ok(Some(identity)),
         Some(AnchorResolution::CrossProject) => anyhow::bail!(
             "IDENTITY_RESTORE_CROSS_PROJECT: a unique tmux/Codex anchor belongs to another project"
@@ -747,37 +759,16 @@ fn identity_by_current_anchors_same_scope_at(
 
 /// The dsh compound anchor's communication API dimension.
 ///
-/// A dsh identity is owned by one gateway session *and* one communication API:
-/// the gateway control socket and gateway runtime id the daemon observed. When
-/// the caller observed a concrete API, only a record that carries that same API
-/// is the caller's identity; a session-only guess across gateways cannot prove
-/// an owner. A record that predates the API fields keeps the legacy
-/// session-only match.
+/// An explicit API must match the saved target. Without a report, the scoped
+/// resolver can recover only a unique durable session owner.
 fn dsh_api_matches(observed: &AnchorObservation, transport: &SelectedTransport) -> bool {
-    let observed_api = observed
-        .endpoint
-        .as_deref()
-        .or(observed.namespace.as_deref());
-    let persisted_api = transport
-        .endpoint
-        .as_deref()
-        .or(transport.namespace.as_deref());
-    match (observed_api, persisted_api) {
-        (None, _) | (_, None) => true,
-        (Some(_), Some(_)) => {
-            (transport.endpoint.as_deref().is_none_or(|persisted| {
-                observed
-                    .endpoint
-                    .as_deref()
-                    .is_none_or(|observed| observed == persisted)
-            })) && (transport.namespace.as_deref().is_none_or(|persisted| {
-                observed
-                    .namespace
-                    .as_deref()
-                    .is_none_or(|observed| observed == persisted)
-            }))
-        }
+    if let Some(candidate) = observed.dsh.as_ref() {
+        return transport.endpoint.as_deref() == Some(candidate.endpoint.as_str())
+            && transport.namespace.as_deref() == Some(candidate.runtime_id.as_str())
+            && transport.thread_id.as_deref() == Some(candidate.agent_id.as_str())
+            && transport.session_id.as_deref() == Some(candidate.session_id.as_str());
     }
+    true
 }
 
 fn identity_by_current_anchors_at(

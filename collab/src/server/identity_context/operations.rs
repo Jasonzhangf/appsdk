@@ -1125,13 +1125,19 @@ impl ProjectRuntimeManager {
         validate_facts(&facts).map_err(PreflightIdentityError::Error)?;
         // Preserve the existing pane recovery contract. Native communication
         // facts must come from this invocation, never the saved transport.
-        let required = if self.has_persisted_pane_route(context, &facts) {
+        let mut required = if self.has_persisted_pane_route(context, &facts) {
             Vec::new()
         } else {
             required_fields(&facts)
         };
+        if facts.tmux.is_none() && facts.dsh_session_id.is_some() && facts.dsh.is_none()
+            && identity::existing_for_daemon_at(&self.host.host_paths, &Scope { root: root.clone() }, &facts)
+                .map_err(PreflightIdentityError::Error)?.is_none() {
+            required.push("dsh");
+        }
         if !required.is_empty() {
             let descriptions = json!({
+                "dsh": "Current DSH gateway endpoint, runtime_id, agent_id, session_id and cwd",
                 "session_id": "Current runtime session identifier",
                 "thread_id": "Current native thread identifier",
                 "endpoint": "Current native AppServer unix socket endpoint",

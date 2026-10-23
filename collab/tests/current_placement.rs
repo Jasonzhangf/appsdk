@@ -179,6 +179,16 @@ fn board_reader_uses_current_route_instead_of_a_historical_session_receipt() {
             .any(|row| row["id"] == worker),
         "{board}"
     );
+    // Ordinary authenticated reads must use the same daemon-selected owner,
+    // not choose from historical credential files or run implicit context.
+    let tasks = run_in_pane_with_tmux(
+        &fixture,
+        &pane,
+        "reader-tasks",
+        "invalid",
+        &["task", "status"],
+    );
+    assert!(tasks["tasks"].is_array(), "{tasks}");
     let denied = fixture
         .configured_command(&["reset", "--project"], Some(&pane), "Codex TUI")
         .env_remove("CODEX_THREAD_ID")
@@ -533,6 +543,11 @@ fn current_pane_placement_ignores_tmux_value_and_preserves_session_peer() {
             .iter()
             .any(|message| message["id"] == reply_id),
         "{reply_received}"
+    );
+    assert_eq!(
+        persisted_identity(&fixture, &worker_id)["transport"]["tmux_endpoint"]["pane_id"],
+        moved.pane_id,
+        "ordinary sends from the same agent session must not rebind its delivery pane"
     );
 }
 

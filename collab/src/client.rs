@@ -147,10 +147,34 @@ pub fn resolve_native_route(
         sock,
         &Req::RouteResolveNative {
             session_id: session_id.to_owned(),
-            native_thread_id: native_thread_id.to_owned(),
+            native_thread_id: Some(native_thread_id.to_owned()),
         },
     )?;
     validate_route_resolution(route, Some(session_id), Some(native_thread_id))
+}
+
+/// Read the current scoped owner without requiring a communication endpoint
+/// or treating a stored thread as a newly observed runtime fact.
+pub fn resolve_native_session_route(
+    sock: &Path,
+    session_id: &str,
+    context: crate::proto::ProjectContext,
+) -> anyhow::Result<RouteResolution> {
+    let route: RouteResolution = call_with_context(
+        sock,
+        &Req::RouteResolveNative {
+            session_id: session_id.to_owned(),
+            native_thread_id: None,
+        },
+        Some(context.clone()),
+    )?;
+    let route = validate_route_resolution(route, Some(session_id), None)?;
+    if route.project_scope != context.project_scope || route.app_scope_id != context.app_scope_id {
+        anyhow::bail!(
+            "ROUTE_RESOLVE_INVALID: daemon returned another project/app for this session"
+        );
+    }
+    Ok(route)
 }
 
 fn validate_route_resolution(

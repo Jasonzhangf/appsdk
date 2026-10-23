@@ -47,9 +47,15 @@ fn out<T: serde::Serialize>(v: &T) {
     println!("{}", serde_json::to_string_pretty(v).unwrap());
 }
 
-/// Resolve the authenticated worker through the daemon-owned identity context.
+/// Use a retained credential for ordinary commands. Only context reconciles
+/// current communication facts; reading an identity must not refresh a route.
 fn me(scope: &Scope) -> anyhow::Result<Identity> {
     let facts = collect_identity_facts(None)?;
+    if facts.dsh_session_id.is_none() || facts.endpoint.is_some() {
+        return registered_project_identity(scope);
+    }
+    // DSH retains its gateway-owned identity path. It has no native endpoint
+    // supplement and is outside the native context fact contract.
     let (snapshot, receipt) = identity_context_response(scope, facts)?;
     let ident = receipt.ok_or_else(|| identity_context_required(&snapshot))?;
     runtime_for_request(&ident)?;
@@ -63,24 +69,13 @@ fn registered_project_identity(scope: &Scope) -> anyhow::Result<Identity> {
     let session = facts.session_id.as_deref().ok_or_else(|| {
         anyhow::anyhow!("BOARD_IDENTITY_REQUIRED: current agent session id is required")
     })?;
-    let endpoint = crate::client::adapters::tmux::observe_caller_at(
-        paths.state_root(),
-        std::process::id(),
-        facts.pane_hint.as_deref(),
-    )
-    .map_err(anyhow::Error::msg)?;
-    let route = if let Some(mut endpoint) = endpoint {
-        // Placement locates the transport. Agent anchors must still match
-        // the current daemon binding before its credential can be selected.
-        endpoint.codex_session_id = Some(session.to_owned());
-        endpoint.codex_thread_id = facts.thread_id.clone();
-        client::resolve_route(&scope.sock_path(), &endpoint)?
-    } else {
-        let thread = facts.thread_id.as_deref().ok_or_else(|| {
-            anyhow::anyhow!("BOARD_IDENTITY_REQUIRED: current agent thread id is required")
-        })?;
-        client::resolve_native_route(&scope.sock_path(), session, thread)?
-    };
+    // Names own work; the agent session identifies the current actor. Pane,
+    // thread and endpoint belong to transport recovery, not credential reads.
+    let route = client::resolve_native_session_route(
+        &scope.sock_path(),
+        session,
+        cli_project_context(&scope.root)?,
+    )?;
     let root = std::fs::canonicalize(&scope.root)?;
     if route.project_scope.as_str() != root.to_string_lossy() {
         anyhow::bail!("BOARD_STALE_IDENTITY: current route belongs to another project");
@@ -837,7 +832,11 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     operation_id,
                 } => {
                     if self_current {
-                        let ident = me(&scope)?;
+                        // Explicit self removal retains the lifecycle contract:
+                        // reconcile current facts and repair its credential first.
+                        let (snapshot, receipt) =
+                            identity_context_response(&scope, collect_identity_facts(None)?)?;
+                        let ident = receipt.ok_or_else(|| identity_context_required(&snapshot))?;
                         let response = client::call_with_context_response(
                             &scope.sock_path(),
                             &Req::UnregisterSelf {

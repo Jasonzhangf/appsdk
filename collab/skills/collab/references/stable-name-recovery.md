@@ -12,10 +12,30 @@ current route 与有效订阅目标，并退休旧 route；相同事实重复恢
 其真实回投结果与普通身份恢复分别验收。历史注册回投记录由 context 自动兼容，
 不要求 agent 编辑或清空账本。
 
-普通注册或恢复只调用：
+每次 native 注册或恢复，都由当前调用方提交本次的 sessionID、thread ID、AppServer
+endpoint 和 namespace。CLI 可从当前宿主明确提供的环境采集；缺少的字段必须在本次
+`--provide` 或 MCP `provide` 中提供。daemon 不知道调用方的新端点，不能从历史注册
+补齐本次事实。MCP 长驻进程的启动环境不能保证仍是当前事实，调用者须逐次提供
+当前 native facts。不能猜 socket，也不能把 tools pipe 当成 AppServer endpoint。
+缺字段返回 `missing_facts`，保留持久身份和工作，不宣称恢复完成。
+普通恢复不增加回投挑战；`--query` 只读既有操作，不要求当前通信事实。
+tmux 与 DSH 继续按各自现有机制采集，不增加 native endpoint 要求。
+
+普通已注册命令读取身份时，由 daemon 按当前 project/app/agent sessionID 返回唯一
+当前绑定，再读取对应凭据。pane、tmux session、thread 和端点不选择工作身份，
+普通读取和收发不隐式执行 context，也不把投递位置换回旧 pane。该查询是只读，
+不能把它返回的历史通信字段补进新的 context。DSH 保留 gateway 身份路径。
+
+当前宿主已提供完整事实时，普通注册或恢复调用：
 
 ```sh
 collab context
+```
+
+宿主环境缺字段时，在每次调用中提交从当前宿主取得的事实：
+
+```sh
+collab context --provide '{"session_id":"<当前 agent sessionID>","thread_id":"<当前 thread ID>","endpoint":"<当前 AppServer endpoint>","namespace":"codex_app"}'
 ```
 
 daemon 负责旧身份兼容、重复 session 收敛、旧 route 退役、当前名字/session/通信

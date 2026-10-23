@@ -160,8 +160,14 @@ async fn dispatch_wire_routed(
             session_id,
             native_thread_id,
         } => {
+            let resolved = match native_thread_id.as_deref() {
+                Some(thread) => manager.resolve_route_by_native_thread(&session_id, thread),
+                None => project_context.as_ref()
+                    .ok_or_else(|| "PROJECT_CONTEXT_REQUIRED: session route reads require project/app scope".to_owned())
+                    .and_then(|context| manager.resolve_route_by_native_session(context, &session_id)),
+            };
             let response =
-                match manager.resolve_route_by_native_thread(&session_id, &native_thread_id) {
+                match resolved {
                     Ok(route) => match serde_json::to_value(route) {
                         Ok(value) => Resp::data(value),
                         Err(error) => {

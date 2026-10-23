@@ -205,7 +205,7 @@ fn collab_init_is_not_exposed_by_mcp() {
 }
 
 #[test]
-fn context_schema_exposes_only_optional_fact_supplement() {
+fn context_schema_requires_current_native_facts_and_preserves_query() {
     let definitions = tools();
     let context = definitions
         .as_array()
@@ -219,7 +219,11 @@ fn context_schema_exposes_only_optional_fact_supplement() {
     assert!(context["description"]
         .as_str()
         .unwrap()
-        .contains("required_fields"));
+        .contains("On every new native context call"));
+    assert!(context["description"]
+        .as_str()
+        .unwrap()
+        .contains("Query only reads retained progress and needs no current endpoint"));
     assert!(
         definitions
             .as_array()
@@ -401,6 +405,11 @@ fn context_forwards_provide_object_and_string_unchanged() {
     assert_eq!(argv[0], "context");
     assert_eq!(argv[1], "--provide");
     assert_eq!(serde_json::from_str::<Value>(&argv[2]).unwrap(), object);
+    // Each request forwards only its own facts, with no carry-over from the
+    // previous tool call. The daemon reports this request's missing endpoint.
+    let partial = json!({"session_id":"session-1","thread_id":"thread-2","namespace":"codex_tui"});
+    let next = build_argv("collab_context", &json!({"provide":partial.clone()})).unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&next[2]).unwrap(), partial);
 
     let raw = r#"{"session_id":"session-1"}"#;
     assert_eq!(

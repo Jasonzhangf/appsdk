@@ -1541,36 +1541,6 @@ If an AppServer endpoint is unavailable before registration, the existing
 transport selection rules apply. Once an AppServer binding is selected, do not
 switch transports after an RPC error.
 
-## 三种宿主的注册方式与锚点（DSH / Codex TUI / Codex Desktop）
-
-三种宿主的注册入口是同一个 `collab context`，但各自的锚点、必填事实和
-互斥规则不同。先确认自己运行在哪种宿主，再决定要报告哪些事实。
-
-| 宿主 | 身份锚点 | 注册时报告的事实 | 不许做的事 |
-| --- | --- | --- | --- |
-| Codex TUI / CLI | AppServer session + thread，或当前 tmux pane | `session_id`、`thread_id`、`endpoint`、`namespace`；CLI 自动读 `CODEX_SESSION_ID`、`CODEX_THREAD_ID`、`TMUX_PANE` | 不填 tmux pane 冒充 Codex 会话；不借用其他进程的 AppServer endpoint |
-| Codex Desktop | AppServer session + thread，经受管 MCP bridge | 同 TUI 字段；bridge 的 executor metadata 提供真实 caller thread/turn，daemon 只连该 bridge 的 UDS | 不连 tools pipe，不猜测不存在的 AppServer endpoint，不把 recipient target 当 caller |
-| DSH | gateway session（`DSH_SESSION_ID`）+ communication API（gateway 控制 socket 与 runtime id） | `{"dsh":{"endpoint":"unix:///…/control.sock","runtime_id":"…","agent_id":"…","session_id":"…","cwd":"…"}}`，来自当前 gateway 的真实能力 | 不填 Codex thread/namespace；不与 appserver/tmux 候选混报；不用 tmux pane 当锚点 |
-
-锚点归属规则：
-
-- 一个宿主只有一个锚点。DSH 的锚点是 gateway session 加 gateway 控制面标识，
-  不是 tmux pane。DSH 会话若在 tmux 里启动，那个 pane 只定位观测，不承载身份。
-- 同一 session 可以出现在多个 gateway 或 API 上。daemon 用 session 加
-  communication API 联合判定；仅 session 相同会显式冲突失败，不会静默覆盖
-  已有身份、角色或工作。
-- 普通身份恢复只读持久身份和绑定，不重新 Register、不回环、不要求通信可达。
-- 只有显式 `--recover-communication` 才做通信回环验证，且这是通信诊断，
-  不是身份恢复前提。
-
-注册为 peer 还是 master 与宿主无关：任何宿主注册后默认都是 peer，master
-只能由用户明确批准 `collab master promote --approval '…'` 或已授权 peer 的
-`collab master delegate` 产生。宿主只决定锚点形态，不决定角色。
-
-发现自己的 DSH 会话缺少 gateway 能力事实时，先确认当前 gateway 的真实
-endpoint 与 ids（从 gateway 自身接口读，不猜、不复用旧日志），再报告。
-缺事实时 context 返回 `requires_identity_update`，此时不要伪造一个值。
-
 ## Worktree identity
 
 A Git worktree is a task execution directory, not a second identity or a

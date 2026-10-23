@@ -435,3 +435,16 @@ assertion. Scoped rechecks pass12 plus the exact staged-restore consumer1.
 The read-only test still rejects identity selection from a fake TMUX string.
 Final review, remote CI, main integration and formal installation are recorded
 separately; installation does not activate the user-managed global daemon.
+
+Latest main Desktop discovery has been combined. Additional public red/green
+cases cover inherited Codex launcher variables and gateway-owned registration
+without a CLI archive. Six DSH public cases now pass, including same binding
+and master grant across restart without another Register. Desktop6, MCP27
+and Node9 pass on the combined source. Formal Collab0.2.0340 installed; installed
+DSH6 and Desktop6 plus real gateway registration/restoration pass. The installed
+Skill removes duplicate stale host rules and validates. A previous installed
+private replay attempt failed before DSH admission; its raw error is retained,
+and no root cause is claimed. Fresh actual DSH post-registration reply/consumption
+is still pending explicit one-round send authorization. The global daemon is
+unchanged. Code finding recheck closes the inherited-launcher P1; the real-host
+receipt P1, final CI/main integration and resource cleanup remain pending.

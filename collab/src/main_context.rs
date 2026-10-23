@@ -616,18 +616,18 @@ pub(crate) fn context_operation_with_intent(
         )?
     } else {
         let mut facts = collect_identity_facts(provide)?;
-        let explicit_transport = provide
-            .map(serde_json::from_str::<Value>)
-            .transpose()?
-            .is_some_and(|value| {
-                ["desktop_bridge", "endpoint", "namespace"]
-                    .iter()
-                    .any(|key| value.get(key).is_some())
-            });
+        let explicit_transport = facts.endpoint.is_some()
+            || provide
+                .map(serde_json::from_str::<Value>)
+                .transpose()?
+                .is_some_and(|value| {
+                    ["desktop_bridge", "endpoint", "namespace"]
+                        .iter()
+                        .any(|key| value.get(key).is_some())
+                });
         let origin = std::env::var("CODEX_INTERNAL_ORIGINATOR_OVERRIDE").unwrap_or_default();
         let desktop = origin == "Codex Desktop"
-            || (std::env::var_os("CODEX_APP_TOOLS_PIPE_PATH").is_some()
-                && !matches!(origin.as_str(), "Codex CLI" | "Codex TUI"));
+            || (origin.is_empty() && std::env::var_os("CODEX_APP_TOOLS_PIPE_PATH").is_some());
         if desktop && !explicit_transport && facts.dsh_session_id.is_none() {
             let candidate = crate::desktop_capability::discover(
                 host_paths.state_root(),

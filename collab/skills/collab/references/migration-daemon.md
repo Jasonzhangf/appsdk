@@ -112,6 +112,8 @@ collab recv
 Registration/recovery uses the live bridge's scoped current capability. With
 a genuinely enrolled bridge, ordinary `collab context` reads its exact current
 declaration automatically. No manual endpoint or agent-side MCP call is needed.
+An explicitly supplied AppServer endpoint, including the calling host's
+endpoint environment, retains its direct AppServer path and skips discovery.
 The daemon verifies the declared candidate through its existing adapter.
 An actual verified current tmux pane retains its existing admission priority;
 an inherited Desktop environment marker does not make unused bridge facts

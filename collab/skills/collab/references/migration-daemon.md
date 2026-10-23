@@ -78,6 +78,9 @@ Desktop's Collab MCP entry is the installed `~/.cargo/bin/collab-desktop-mcp`.
 Configure this command through the normal Desktop MCP configuration and load
 it through the host's normal mechanism. It proxies Collab tools and publishes
 a scoped bridge on each new `collab_context` call from real executor metadata.
+The MCP config must pass through `CODEX_APP_TOOLS_PIPE_PATH`,
+`CODEX_MCP_NODE_PATH`, `CODEX_SESSION_ID` and `CODEX_INTERNAL_ORIGINATOR_OVERRIDE`
+via `env_vars`; do not replace host-provided values with copied paths or IDs.
 Use `project_scope` for project selection; `provide` may contain the current
 agent `session_id` when needed. Do not configure a tools-pipe path or caller
 turn. An old `collab-mcp` process does not gain bridge support from a daemon

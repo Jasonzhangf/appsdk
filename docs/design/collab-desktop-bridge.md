@@ -82,9 +82,11 @@ launcher 优先使用宿主 `CODEX_MCP_NODE_PATH`，缺省使用 PATH 中的 Nod
 ```toml
 [mcp_servers.collab]
 command = "/Users/your-user/.cargo/bin/collab-desktop-mcp"
+env_vars = ["CODEX_APP_TOOLS_PIPE_PATH", "CODEX_MCP_NODE_PATH", "CODEX_SESSION_ID", "CODEX_INTERNAL_ORIGINATOR_OVERRIDE"]
 ```
 
-将示例中的 home 换为实际安装目录。不要配置 tools pipe、caller thread 或 turn。
+将示例中的 home 换为实际安装目录。`env_vars` 传递宿主当前提供的值，不能省略。
+不要手填 tools pipe、caller thread 或 turn。
 用正常 Desktop MCP 配置加载这个入口后，在当前聊天调用 `collab_context`。
 wrapper 从该次 executor metadata 注入新 bridge；daemon 不从历史端点恢复它。
 CLI 不拥有 Desktop MCP 的启动，也不会为 CLI 调用另起后台 bridge。

@@ -61,6 +61,44 @@ fn validate_facts(facts: &IdentityFacts) -> anyhow::Result<()> {
     if facts.tmux.is_some() {
         return Ok(());
     }
+    if let Some(candidate) = facts.dsh.as_ref() {
+        if facts.desktop_bridge.is_some()
+            || facts.session_id.is_some()
+            || facts.thread_id.is_some()
+            || facts.endpoint.is_some()
+            || facts.namespace.is_some()
+        {
+            anyhow::bail!("IDENTITY_FACT_INVALID: DSH facts cannot be mixed with native AppServer or Desktop facts");
+        }
+        if facts
+            .dsh_session_id
+            .as_deref()
+            .is_some_and(|session| session != candidate.session_id)
+        {
+            anyhow::bail!(
+                "IDENTITY_FACT_CONFLICT: DSH candidate differs from the current DSH session"
+            );
+        }
+        for (name, value) in [
+            ("endpoint", &candidate.endpoint),
+            ("runtime_id", &candidate.runtime_id),
+            ("agent_id", &candidate.agent_id),
+            ("session_id", &candidate.session_id),
+            ("cwd", &candidate.cwd),
+        ] {
+            if value.trim().is_empty() || value.chars().any(char::is_control) {
+                anyhow::bail!("IDENTITY_FACT_INVALID: dsh.{name} must be non-empty and contain no control characters");
+            }
+        }
+        let path = candidate.endpoint.strip_prefix("unix://").ok_or_else(|| {
+            anyhow::anyhow!("IDENTITY_FACT_INVALID: dsh.endpoint must be unix://")
+        })?;
+        if !Path::new(path).is_absolute() || !Path::new(&candidate.cwd).is_absolute() {
+            anyhow::bail!("IDENTITY_FACT_INVALID: DSH endpoint and cwd must be absolute");
+        }
+        identity::validate_id_for_protocol(&candidate.session_id)?;
+        return Ok(());
+    }
     if let Some(candidate) = facts.desktop_bridge.as_ref() {
         if facts.session_id.as_deref() != Some(candidate.session_id.as_str())
             || facts.thread_id.as_deref() != Some(candidate.thread_id.as_str())
@@ -272,10 +310,11 @@ fn missing_facts_result(
 /// delivery, but it cannot prove which agent session owns the name or identity.
 fn required_fields(facts: &IdentityFacts) -> Vec<&'static str> {
     let mut required = Vec::new();
-    if facts.session_id.is_none() && facts.dsh_session_id.is_none() {
+    if facts.session_id.is_none() && facts.dsh_session_id.is_none() && facts.dsh.is_none() {
         required.push("session_id");
     }
-    if facts.desktop_bridge.is_some()
+    if facts.dsh.is_some()
+        || facts.desktop_bridge.is_some()
         || facts.tmux.is_some()
         || (facts.dsh_session_id.is_some() && facts.endpoint.is_none())
     {

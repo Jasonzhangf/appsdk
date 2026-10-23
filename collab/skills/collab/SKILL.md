@@ -471,20 +471,22 @@ Tmux identity uses current project and socket/server/session facts. Pane, pane
 PID, native thread, activity and capture do not select the identity. Endpoint
 status and message delivery remain separate from identity restoration.
 
-You observe nothing by hand. `DSH_SESSION_ID`, `CODEX_SESSION_ID`,
-`CODEX_THREAD_ID` and the tmux pane are all read by the CLI. A gateway control
-socket is not something to look for: the dsh anchor is `DSH_SESSION_ID`, which
-is observable without a gateway.
+The CLI reads `DSH_SESSION_ID`, `CODEX_SESSION_ID`, `CODEX_THREAD_ID` and
+current pane facts. A unique saved DSH identity restores from its current
+session in the same scope without Register or a communication challenge.
+Gateway unreachability does not revoke that identity or its work.
 
-That anchor settles *who* you are, not *how* you register. A dsh transport
-needs the gateway's `endpoint`, `runtime_id` and `agent_id`, which the CLI
-cannot observe. With no gateway, a dsh caller — new or already persisted —
-fails at `TRANSPORT_NONE`. That is a gateway failure, not a missing identity,
-and it never retires the peer.
+For a new DSH identity, report the actual gateway capability through
+`collab context --provide '{"dsh":{"endpoint":"unix:///actual/control.sock","runtime_id":"actual-runtime","agent_id":"actual-agent","session_id":"actual-session","cwd":"/actual/project"}}'`.
+MCP `collab_context` accepts the same object in `provide`. Obtain these facts
+from the current DSH gateway API; do not guess them or reuse stale logs.
+The daemon verifies the report and uses the existing DSH registration owner.
+Do not supply Codex thread or namespace fields for this path. An explicit
+API conflict fails without replacing the saved identity, role or work.
 
 When the snapshot contains `requires_identity_update`, read
-`required_fields`, `reason`, and `exact_error`. Only the AppServer path returns
-fields here. Supply the requested current facts from their real source in this invocation:
+`required_fields`, `reason`, and `exact_error`. Supply requested current facts
+from their real source in this invocation. The AppServer form is:
 
 ```sh
 collab context --provide '{"session_id":"...","thread_id":"...","endpoint":"...","namespace":"..."}'
@@ -1522,6 +1524,31 @@ existing AppSDK init consumers. Neither `collab init` nor AppSDK init creates,
 changes, or clears master authority; init is not an implicit authority reset.
 Agents do not run a separate identity, route or archive probe, or a manual
 subscription, as part of bootstrap.
+
+## 三种宿主的注册方式与锚点（DSH / Codex TUI / Codex Desktop）
+
+注册入口对三种宿主相同：`collab context`。宿主只决定锚点与要报告的事实，
+不决定角色：任何宿主注册后默认是 peer；成为 master 只能由用户明确授权
+（`collab master promote --approval '…'` 或 `collab context --approve-grant`
+action=restore_master），或由已授权 master 委托。注册前先确认自己运行在哪种
+宿主，再报告该宿主的真实事实，不要伪造或复用旧值。
+
+| 宿主 | 身份锚点 | 注册时报告的事实 | 不许做的事 |
+| --- | --- | --- | --- |
+| DSH | gateway session（`DSH_SESSION_ID`）+ communication API（gateway 控制 socket 与 runtime id） | `{"dsh":{"endpoint":"unix:///…/control.sock","runtime_id":"…","agent_id":"…","session_id":"…","cwd":"…"}}`，来自当前 gateway 的真实能力 | 不填 Codex thread/namespace；不与 appserver/tmux 候选混报；不用 tmux pane 当锚点 |
+| Codex TUI / CLI | AppServer session + thread，或当前 tmux pane | `session_id`、`thread_id`、`endpoint`、`namespace`；CLI 自动读 `CODEX_SESSION_ID`、`CODEX_THREAD_ID`、`TMUX_PANE` | 不假设自己一定有 tmux pane；不填 pane 冒充 Codex 会话；不借用其他进程的 AppServer endpoint |
+| Codex Desktop | AppServer session + thread，经受管 MCP bridge | 同 TUI 字段；bridge 的 executor metadata 提供真实 caller thread/turn，daemon 只连该 bridge 的 UDS | 不连 tools pipe，不猜测不存在的 AppServer endpoint，不把 recipient target 当 caller |
+
+锚点归属规则：一个宿主只有一个锚点；DSH 的锚点是 gateway session 加 gateway
+控制面标识，不是 tmux pane，即使该 DSH 会话在 tmux 里启动，pane 也只定位
+观测、不承载身份。普通身份恢复只读持久身份与绑定，不重新 Register、不回环、
+不要求通信可达；只有显式 `--recover-communication` 才做通信回环验证，那是
+通信诊断、不是恢复前提。同一 session 出现在多个 API 上时，daemon 用 session
+加 communication API 联合判定；仅 session 相同会显式冲突失败，不会静默覆盖
+已有身份、角色或工作。DSH 会话缺 gateway 能力事实时，先确认当前 gateway 的
+真实 endpoint 与 ids（从 gateway 自身接口读），再报告；缺事实时 context 返回
+`requires_identity_update`，此时不要伪造一个值。详见下文 AppServer runtime
+registration 与 DSH 段的验证规则。
 
 ## AppServer runtime registration
 

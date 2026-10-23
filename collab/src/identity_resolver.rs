@@ -12,6 +12,8 @@ struct AnchorObservation {
     /// The dsh adapter's primary anchor. Read from `DSH_SESSION_ID`, which the
     /// DSH runtime exports for the current agent session.
     dsh_session_id: Option<String>,
+    /// Current gateway API and target, separate from AppServer host facts.
+    dsh: Option<crate::proto::DshCandidate>,
 }
 
 impl AnchorObservation {
@@ -29,7 +31,9 @@ impl AnchorObservation {
                         pane_id: candidate.endpoint.pane_id.clone(),
                     })
             }),
-            dsh_session_id: non_empty(facts.dsh_session_id.as_deref()),
+            dsh_session_id: non_empty(facts.dsh_session_id.as_deref())
+                .or_else(|| facts.dsh.as_ref().map(|dsh| dsh.session_id.clone())),
+            dsh: facts.dsh.clone(),
         }
     }
 
@@ -62,6 +66,7 @@ impl AnchorObservation {
             tmux,
             tmux_anchor: None,
             dsh_session_id: non_empty(std::env::var("DSH_SESSION_ID").ok().as_deref()),
+            dsh: None,
         })
     }
 
@@ -173,7 +178,8 @@ pub(crate) fn resolve_for_daemon_with_route_at(
     match identity_by_current_anchors_same_scope_at(host_paths, scope, &anchor_match) {
         Ok(Some(identity)) => return Ok(identity),
         Ok(None) => {}
-        Err(error) if error.to_string().starts_with("IDENTITY_RESTORE_AMBIGUOUS:") => {
+        Err(error) if observed.dsh_session_id.is_none()
+            && error.to_string().starts_with("IDENTITY_RESTORE_AMBIGUOUS:") => {
             // Multiple historical archives carry this exact current session.
             // They cannot prove a unique owner, so the current session derives
             // its own stable carrier.
@@ -183,6 +189,10 @@ pub(crate) fn resolve_for_daemon_with_route_at(
     let worker_id = draft_worker_id_at(&observed)?;
     // Preserve an existing draft's exact token; never remint a stored credential.
     if let Some(existing) = read_identity(&identity_path_at(host_paths, &worker_id)?)? {
+        if observed.dsh_session_id.is_some() && existing.transport.as_ref().is_some_and(|transport|
+            transport.kind != TransportKind::Dsh || !dsh_api_matches(&observed, transport)) {
+            anyhow::bail!("IDENTITY_RESTORE_CONFLICT: DSH communication API differs from the saved identity");
+        }
         let expected_scope = scope
             .route_scope(AppServerId::new(CLI_APP_SERVER_ID)?)?
             .project_scope_id;
@@ -195,6 +205,10 @@ pub(crate) fn resolve_for_daemon_with_route_at(
             .is_some_and(|runtime| match observed.session_id.as_deref() {
                 Some(session) => {
                     runtime.session_id.as_ref().map(SessionId::as_str) != Some(session)
+                }
+                None if observed.dsh_session_id.is_some() => {
+                    runtime.session_id.as_ref().map(SessionId::as_str)
+                        != observed.dsh_session_id.as_deref()
                 }
                 None => {
                     runtime

@@ -453,6 +453,151 @@ fn close_reports_archive_failed_when_archiving_returns_an_unclassified_error() {
 }
 
 #[test]
+fn close_keeps_worker_registered() {
+    let (mut server, root) = crate::server::peer_tests::test_server();
+    let registered = crate::server::peer_tests::register(&server, "parent", "thread-parent");
+    assert!(registered.ok, "{registered:?}");
+    let child_id = "child-close-keeps-worker";
+    let (_app_scope, _session_id, native_thread_id, _route_scope, _binding_id) =
+        register_child_route(&server, &root, child_id, "thread-child-close-keeps-worker");
+    let record = crate::server::peer_tests::bind_test_subagent_record(
+        &server,
+        Record {
+            id: "subagent-close-keeps-worker".into(),
+            parent: "parent".into(),
+            peer: child_id.into(),
+            status: "idle".into(),
+            thread_id: Some(native_thread_id.to_string()),
+            profile: None,
+            created_ms: 0,
+            ready_deadline_ms: 0,
+            last_message: None,
+            error: None,
+            probe_failures: vec![],
+            runtime: Some("codex".into()),
+            create_operation_id: None,
+            binding_id: None,
+            endpoint_generation: None,
+        },
+    );
+    server.commit(&[Event::SubagentUpdated { subagent: record }]);
+    server.commit(&[Event::SubagentSnapshotCaptured {
+        subagent_id: "subagent-close-keeps-worker".into(),
+        thread_id: native_thread_id.to_string(),
+        captured_ms: now_ms(),
+    }]);
+    let server = std::sync::Arc::new(server);
+
+    let response = crate::subagent::handle(
+        &server,
+        "parent",
+        "token-parent",
+        Action::Close {
+            id: "subagent-close-keeps-worker".into(),
+        },
+    );
+
+    assert!(response.ok, "{response:?}");
+    assert_eq!(response.data["close_outcome"], "closed_record_only");
+    let state = server.state.lock().unwrap();
+    assert_eq!(
+        state.subagents["subagent-close-keeps-worker"].status,
+        "closed"
+    );
+    assert!(
+        state.workers.contains_key(child_id),
+        "close marks only the managed record; the peer worker was registered through its own \
+         external transport and must stay registered"
+    );
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn no_provenance_record_refuses_send_and_ready() {
+    let (server, root) = crate::server::peer_tests::test_server();
+    let registered = crate::server::peer_tests::register(&server, "parent", "thread-parent");
+    assert!(registered.ok, "{registered:?}");
+    let child_id = "child-no-provenance";
+    let (_app_scope, _session_id, native_thread_id, _route_scope, _binding_id) =
+        register_child_route(&server, &root, child_id, "thread-child-no-provenance");
+    server.commit(&[Event::SubagentUpdated {
+        subagent: Record {
+            id: "subagent-no-provenance".into(),
+            parent: "parent".into(),
+            peer: child_id.into(),
+            status: "idle".into(),
+            thread_id: Some(native_thread_id.to_string()),
+            profile: None,
+            created_ms: 0,
+            ready_deadline_ms: 0,
+            last_message: None,
+            error: None,
+            probe_failures: vec![],
+            runtime: Some("codex".into()),
+            create_operation_id: None,
+            binding_id: None,
+            endpoint_generation: None,
+        },
+    }]);
+    let server = std::sync::Arc::new(server);
+
+    let send = crate::subagent::handle(
+        &server,
+        "parent",
+        "token-parent",
+        Action::Send {
+            id: "subagent-no-provenance".into(),
+            subject: "task".into(),
+            body: "work".into(),
+        },
+    );
+    assert!(!send.ok, "{send:?}");
+    assert!(
+        send.error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("provenance is absent or stale"),
+        "{send:?}"
+    );
+
+    let ready = crate::subagent::handle(
+        &server,
+        child_id,
+        &format!("token-{child_id}"),
+        Action::Ready {
+            id: "subagent-no-provenance".into(),
+        },
+    );
+    assert!(!ready.ok, "{ready:?}");
+    assert!(
+        ready
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("provenance is absent or stale"),
+        "{ready:?}"
+    );
+
+    let status = crate::subagent::handle(
+        &server,
+        "parent",
+        "token-parent",
+        Action::Status {
+            id: "subagent-no-provenance".into(),
+        },
+    );
+    assert!(status.ok, "{status:?}");
+    assert_eq!(status.data["subagent"]["status"], "idle");
+
+    let list = crate::subagent::handle(&server, "parent", "token-parent", Action::List);
+    assert!(list.ok, "{list:?}");
+    assert_eq!(list.data["subagents"].as_array().unwrap().len(), 1);
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn missing_rollout_notification_failure_keeps_durable_child_route_binding() {
     let (server, root) = crate::server::peer_tests::test_server();
     let child_id = "child-missing-rollout";

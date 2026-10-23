@@ -50,6 +50,7 @@ fn observation(
         }),
         tmux,
         dsh_session_id: None,
+        dsh: None,
     }
 }
 
@@ -59,6 +60,7 @@ fn facts(
     tmux: Option<crate::proto::TmuxCandidate>,
 ) -> crate::proto::IdentityFacts {
     crate::proto::IdentityFacts {
+        dsh: None,
         desktop_bridge: None,
         session_id: session.map(str::to_owned),
         thread_id: thread.map(str::to_owned),
@@ -144,6 +146,70 @@ fn saved_identity(
         transport: Some(transport),
     };
     write_identity(&identity_path_at(host_paths, worker_id).unwrap(), &identity).unwrap();
+}
+
+/// Persist a dsh identity. Its communication API is the concrete gateway
+/// control socket plus gateway runtime id, and it is part of the compound
+/// anchor the resolver must compare.
+fn saved_dsh_identity(
+    host_paths: &HostPaths,
+    scope: &Scope,
+    worker_id: &str,
+    session_id: &str,
+    endpoint: &str,
+    namespace: &str,
+) {
+    let runtime = RuntimeIdentity {
+        agent_id: AgentId::new(worker_id).unwrap(),
+        runtime_id: RuntimeId::new(format!("runtime-{worker_id}")).unwrap(),
+        appserver_id: AppServerId::new(CLI_APP_SERVER_ID).unwrap(),
+        endpoint_generation: 1,
+        binding_id: BindingId::new(format!("binding-{worker_id}")).unwrap(),
+        session_id: Some(SessionId::new(session_id).unwrap()),
+        native_thread_id: Some(NativeThreadId::new(format!("agent-{worker_id}")).unwrap()),
+    };
+    let transport = SelectedTransport {
+        kind: TransportKind::Dsh,
+        endpoint: Some(endpoint.into()),
+        namespace: Some(namespace.into()),
+        session_id: Some(session_id.into()),
+        thread_id: Some(format!("agent-{worker_id}")),
+        tmux_endpoint: None,
+        capabilities: vec!["enqueue_wake".into()],
+        self_check: "test dsh transport".into(),
+    };
+    let project_scope = scope
+        .route_scope(runtime.appserver_id.clone())
+        .unwrap()
+        .project_scope_id;
+    let identity = Identity {
+        worker_id: worker_id.into(),
+        token: format!("token-{worker_id}"),
+        project_scope: Some(project_scope),
+        runtime: Some(runtime),
+        transport: Some(transport),
+    };
+    write_identity(&identity_path_at(host_paths, worker_id).unwrap(), &identity).unwrap();
+}
+
+fn dsh_facts(
+    session_id: &str,
+    endpoint: Option<&str>,
+    namespace: Option<&str>,
+    agent_id: &str,
+) -> crate::proto::IdentityFacts {
+    let mut facts = facts(None, None, None);
+    facts.dsh_session_id = Some(session_id.into());
+    facts.dsh = endpoint
+        .zip(namespace)
+        .map(|(endpoint, namespace)| crate::proto::DshCandidate {
+            endpoint: endpoint.into(),
+            runtime_id: namespace.into(),
+            agent_id: agent_id.into(),
+            session_id: session_id.into(),
+            cwd: "/tmp".into(),
+        });
+    facts
 }
 
 #[test]
@@ -752,6 +818,7 @@ fn archived_route_recovery_reads_without_calling_back() {
     // No socket exists under the state root, so any daemon-to-self RPC would
     // fail; the route-aware resolver returns the archived credential directly.
     let facts = crate::proto::IdentityFacts {
+        dsh: None,
         session_id: Some("session-new".into()),
         desktop_bridge: None,
         thread_id: Some("thread-new".into()),
@@ -958,57 +1025,117 @@ fn observation_anchors_include_tmux_codex_ids() {
     assert!(!observation(None, None, None).has_anchor());
 }
 
-/// The dsh anchor is a designed anchor, not a guess: `DSH_SESSION_ID` alone
-/// must make the caller resolvable and recover the persisted dsh identity.
+/// The dsh anchor is compound: the gateway session id plus the communication
+/// API (gateway control socket and gateway runtime id). A single record must be
+/// matched by that API; the session id alone is not owner proof because another
+/// gateway can reuse it.
 #[test]
-fn resolver_recovers_a_dsh_identity_from_its_session_anchor_alone() {
-    let root = test_root("ci-resolver-dsh-anchor");
+fn resolver_matches_a_dsh_identity_by_its_compound_anchor() {
+    let root = test_root("ci-resolver-dsh-compound-anchor");
     std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
     let scope = test_scope(root.clone());
     let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
 
-    let worker_id = "dsh-thread-6162";
-    let runtime = RuntimeIdentity {
-        agent_id: AgentId::new(worker_id).unwrap(),
-        runtime_id: RuntimeId::new("runtime-dsh").unwrap(),
-        appserver_id: AppServerId::new(CLI_APP_SERVER_ID).unwrap(),
-        endpoint_generation: 3,
-        binding_id: BindingId::new("binding-dsh").unwrap(),
-        session_id: Some(SessionId::new("6162").unwrap()),
-        native_thread_id: Some(NativeThreadId::new("agent-7").unwrap()),
-    };
-    let transport = SelectedTransport {
-        kind: TransportKind::Dsh,
-        endpoint: Some("unix:///tmp/gateway-control.sock".into()),
-        namespace: Some("runtime-dsh".into()),
-        session_id: Some("6162".into()),
-        thread_id: Some("agent-7".into()),
-        tmux_endpoint: None,
-        capabilities: vec!["enqueue_wake".into()],
-        self_check: "test dsh transport".into(),
-    };
-    let project_scope = scope
-        .route_scope(runtime.appserver_id.clone())
-        .unwrap()
-        .project_scope_id;
-    let identity = Identity {
-        worker_id: worker_id.into(),
-        token: "token-dsh".into(),
-        project_scope: Some(project_scope),
-        runtime: Some(runtime),
-        transport: Some(transport),
-    };
-    write_identity(
-        &identity_path_at(&host_paths, worker_id).unwrap(),
-        &identity,
+    let worker_id = "dsh-gateway-a";
+    let endpoint = "unix:///tmp/gateway-a.sock";
+    let namespace = "runtime-a";
+    saved_dsh_identity(&host_paths, &scope, worker_id, "6162", endpoint, namespace);
+
+    let found = resolve_for_daemon_at(
+        &host_paths,
+        &scope,
+        &dsh_facts(
+            "6162",
+            Some(endpoint),
+            Some(namespace),
+            "agent-dsh-gateway-a",
+        ),
     )
     .unwrap();
-
-    let mut facts = facts(None, None, None);
-    facts.dsh_session_id = Some("6162".into());
-    let found = resolve_for_daemon_at(&host_paths, &scope, &facts).unwrap();
     assert_eq!(found.worker_id, worker_id);
-    assert_eq!(found.token, "token-dsh");
+    assert_eq!(found.token, "token-dsh-gateway-a");
+
+    // The same session reported through another gateway must not adopt this
+    // record: the API dimension of the compound anchor disagrees.
+    let other = resolve_for_daemon_at(
+        &host_paths,
+        &scope,
+        &dsh_facts(
+            "6162",
+            Some("unix:///tmp/gateway-b.sock"),
+            Some("runtime-b"),
+            "agent-dsh-gateway-a",
+        ),
+    )
+    .unwrap_err();
+    assert!(other.to_string().starts_with("IDENTITY_RESTORE_CONFLICT:"));
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// Two dsh records can share one gateway session id on different communication
+/// APIs. A concrete API observation selects exactly one record; a session-only
+/// observation cannot prove an owner and stays ambiguous.
+#[test]
+fn resolver_disambiguates_same_session_different_gateway() {
+    let root = test_root("ci-resolver-dsh-two-gateways");
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    let scope = test_scope(root.clone());
+    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
+
+    let gateway_a = ("unix:///tmp/gateway-a.sock", "runtime-a");
+    let gateway_b = ("unix:///tmp/gateway-b.sock", "runtime-b");
+    saved_dsh_identity(
+        &host_paths,
+        &scope,
+        "dsh-gateway-a",
+        "6162",
+        gateway_a.0,
+        gateway_a.1,
+    );
+    saved_dsh_identity(
+        &host_paths,
+        &scope,
+        "dsh-gateway-b",
+        "6162",
+        gateway_b.0,
+        gateway_b.1,
+    );
+
+    let from_a = resolve_for_daemon_at(
+        &host_paths,
+        &scope,
+        &dsh_facts(
+            "6162",
+            Some(gateway_a.0),
+            Some(gateway_a.1),
+            "agent-dsh-gateway-a",
+        ),
+    )
+    .unwrap();
+    assert_eq!(from_a.worker_id, "dsh-gateway-a");
+    assert_eq!(from_a.token, "token-dsh-gateway-a");
+
+    let from_b = resolve_for_daemon_at(
+        &host_paths,
+        &scope,
+        &dsh_facts(
+            "6162",
+            Some(gateway_b.0),
+            Some(gateway_b.1),
+            "agent-dsh-gateway-b",
+        ),
+    )
+    .unwrap();
+    assert_eq!(from_b.worker_id, "dsh-gateway-b");
+    assert_eq!(from_b.token, "token-dsh-gateway-b");
+
+    // The session anchor alone cannot choose a gateway.
+    let error = existing_for_daemon_at(&host_paths, &scope, &dsh_facts("6162", None, None, ""))
+        .unwrap_err()
+        .to_string();
+    assert!(error.starts_with("IDENTITY_RESTORE_AMBIGUOUS:"), "{error}");
+
     std::fs::remove_dir_all(root).ok();
 }
 

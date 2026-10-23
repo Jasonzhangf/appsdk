@@ -20,12 +20,17 @@ fn context_collector_never_derives_a_socket_from_the_tmux_environment() {
         }
     }
     let facts = result.expect("stable pane facts must reach daemon despite a live display failure");
-    assert!(
-        read_only.as_ref().is_err_and(|error| error
-            .to_string()
-            .contains("TMUX_OBSERVATION_CAPABILITY_MISSING")),
-        "a caller-supplied TMUX value must not become a socket capability: {read_only:?}"
-    );
+    // A host can lack tmux observation, or observe no caller. Neither result
+    // may turn the injected TMUX string into an identity or endpoint.
+    match read_only {
+        Ok(identity) => assert!(identity.is_none(), "fake TMUX must not select an identity"),
+        Err(error) => assert!(
+            error
+                .to_string()
+                .contains("TMUX_OBSERVATION_CAPABILITY_MISSING"),
+            "{error}"
+        ),
+    }
     assert!(facts.tmux_anchor.is_none());
     assert_eq!(facts.caller_pid, Some(std::process::id()));
     assert_eq!(facts.pane_hint.as_deref(), Some("%3"));

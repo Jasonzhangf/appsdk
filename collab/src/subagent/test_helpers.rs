@@ -407,6 +407,7 @@ fn launch(
         server.root.display().to_string(),
         app_scope.cloned(),
         Some(crate::proto::TransportCandidates {
+            desktop_bridge: None,
             appserver: Some(candidate),
             tmux: None,
             // A subagent is a child App Server thread. dsh peers register as

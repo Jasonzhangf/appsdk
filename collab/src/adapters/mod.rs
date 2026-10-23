@@ -12,6 +12,7 @@
 //! scope/role from business payloads.
 
 pub mod codex_app_server;
+pub mod desktop_bridge;
 pub mod dsh;
 pub mod tmux;
 

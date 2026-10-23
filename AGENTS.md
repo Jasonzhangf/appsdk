@@ -75,6 +75,15 @@ Playground/Active/Protected/generated 是消费者治理分区。不能据此把
 
 - AppSDK 全局项目/runtime/communication 真源：`~/.appsdk/` 的声明注册资源。
 - Collab 全局身份、route、mailbox 与 daemon 真源：`~/.collab/`，由 Collab 控制入口管理。
+- Desktop 通信使用正常受宿主管理的 MCP bridge，daemon 只连接其本地 UDS，
+  agent 使用 Collab CLI 注册、恢复、收发；调用 MCP 工具不是前置条件。
+  Desktop 的身份锚点是 agent sessionID，沿用既有名字与工作继承规则；
+  native thread ID 与 bridge endpoint 只定位通信，不因端点变化创建新身份。
+  不把 app-tools pipe 当作 AppServer WebSocket endpoint。真实 caller thread/turn
+  来自 executor metadata；投递目标来自当前注册 route，两者不由消息发送者互相替代。
+  服务遵守宿主正常停止，不使用 detached keeper、忽略终止或伪造调用上下文。
+  bridge 接受、实际新 turn、消费和回复分别验收；其他 transport 的失败不否定
+  已验证的 bridge 能力，选定 bridge 后也不回退旧 socket 或其他 transport。
 - Collab 的名字承载工作归属，sessionID 是当前执行载体。这是本项目一切命名、
   注册、身份恢复与任务续接的统一规则。`cwd` 选择项目；注册提供 agent 会话的
   sessionID 并绑定，不使用 tmux session ID 代替 agent sessionID。

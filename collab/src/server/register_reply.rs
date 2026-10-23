@@ -151,6 +151,11 @@ pub(crate) fn enforce(root: &Path, mut record: Record) -> Result<(), String> {
             })
         );
         let receipt = match record.transport.kind {
+            TransportKind::DesktopBridge => {
+                return Err(
+                    "REGISTER_REPLY_UNSUPPORTED: Desktop context uses a scoped bridge probe".into(),
+                )
+            }
             TransportKind::Tmux => crate::client::adapters::tmux::notify(
                 record
                     .transport
@@ -200,6 +205,11 @@ pub(crate) fn enforce(root: &Path, mut record: Record) -> Result<(), String> {
     }
     // Return to release tmux's initiating pane. Only a typed return verifies it.
     let evidence = match record.transport.kind {
+        TransportKind::DesktopBridge => {
+            return Err(
+                "REGISTER_REPLY_UNSUPPORTED: Desktop context uses a scoped bridge probe".into(),
+            )
+        }
         TransportKind::Tmux => {
             return Err("REGISTER_REPLY_PENDING: participant return required".into())
         }

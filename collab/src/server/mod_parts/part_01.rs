@@ -179,6 +179,7 @@ pub(crate) fn default_appserver_notification_sink() -> Arc<TmuxNotificationSink>
             // which sent any new kind into the tmux sink and failed with
             // "Collab notifications require tmux".
             match transport.kind {
+                TransportKind::DesktopBridge => crate::client::adapters::desktop_bridge::send(transport, body),
                 TransportKind::AppServer => {
                     // `message_id` is the mailbox id. An App Server client id
                     // shares its namespace with the user's own messages, so a
@@ -288,6 +289,7 @@ fn notification_sink(server: &Server) -> &Arc<TmuxNotificationSink> {
 
 fn default_appserver_thread_status() -> Arc<AppServerThreadStatus> {
     Arc::new(|transport, thread_id| match transport.kind {
+        TransportKind::DesktopBridge => crate::client::adapters::desktop_bridge::read_thread_status(transport, thread_id),
         // A tmux transport has no App Server endpoint to query, so this oracle
         // refuses it. The pane is an address, never a liveness credential: a
         // caller must not read presence out of a pane probe.
@@ -329,7 +331,7 @@ fn default_appserver_thread_status() -> Arc<AppServerThreadStatus> {
 
 pub(crate) fn default_appserver_thread_archive() -> Arc<AppServerThreadArchive> {
     Arc::new(|transport, _thread_id| match transport.kind {
-        TransportKind::Tmux | TransportKind::AppServer => {
+        TransportKind::DesktopBridge | TransportKind::Tmux | TransportKind::AppServer => {
             Err("TRANSPORT_UNSUPPORTED: tmux has no Codex thread archive operation".into())
         }
         // A dsh agent's lifecycle belongs to the gateway: collab never archives

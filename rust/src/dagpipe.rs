@@ -300,7 +300,7 @@ fn ensure_graph_nodes_use_registered_operators(
 mod notification;
 use notification::{register_notification_operator, validate_notification_objects};
 
-fn embedded_graph_paths() -> [(&'static str, &'static str); 23] {
+fn embedded_graph_paths() -> [(&'static str, &'static str); 25] {
     [
         (
             "contracts/dagpipe/fix-lifecycle.graph.json",
@@ -313,6 +313,14 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 23] {
         (
             "docs/dagpipe/collab-context.graph.json",
             include_str!("../../docs/dagpipe/collab-context.graph.json"),
+        ),
+        (
+            "docs/dagpipe/collab-desktop-bridge-service.graph.json",
+            include_str!("../../docs/dagpipe/collab-desktop-bridge-service.graph.json"),
+        ),
+        (
+            "docs/dagpipe/collab-desktop-bridge-delivery.graph.json",
+            include_str!("../../docs/dagpipe/collab-desktop-bridge-delivery.graph.json"),
         ),
         (
             "docs/dagpipe/collab-name-ownership.graph.json",
@@ -397,9 +405,11 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 23] {
     ]
 }
 
-fn design_graph_ids() -> [&'static str; 21] {
+fn design_graph_ids() -> [&'static str; 23] {
     [
         "appsdk-collab-context",
+        "appsdk-collab-desktop-bridge-service",
+        "appsdk-collab-desktop-bridge-delivery",
         "appsdk-collab-name-ownership",
         "appsdk-collab-goal-ownership",
         "appsdk-collab-subagent-command",
@@ -423,7 +433,7 @@ fn design_graph_ids() -> [&'static str; 21] {
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 103] {
+fn design_graph_operator_names() -> [&'static str; 112] {
     [
         "appsdk.collab.board.admit_request",
         "appsdk.collab.board.apply",
@@ -448,6 +458,15 @@ fn design_graph_operator_names() -> [&'static str; 103] {
         "appsdk.collab_context.env_view",
         "appsdk.collab_context.read_name_ownership",
         "appsdk.collab_context.require_daemon",
+        "appsdk.collab_desktop_bridge.initialize",
+        "appsdk.collab_desktop_bridge.publish",
+        "appsdk.collab_desktop_bridge.serve",
+        "appsdk.collab_desktop_bridge.retire",
+        "appsdk.collab_desktop_delivery.resolve",
+        "appsdk.collab_desktop_delivery.authorize",
+        "appsdk.collab_desktop_delivery.invoke",
+        "appsdk.collab_desktop_delivery.classify",
+        "appsdk.collab_desktop_delivery.commit",
         "appsdk.collab_context.resolve_root",
         "appsdk.collab_control_plane.authorize_reset",
         "appsdk.collab_control_plane.online_project_reset",

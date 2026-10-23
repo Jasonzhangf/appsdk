@@ -100,6 +100,16 @@ and the [Skill upgrade handoff](skills/collab/SKILL.md) before recovery or
 migration. Those documents distinguish target design, source verification and
 loaded runtime evidence; updating a Skill does not activate a daemon version.
 
+Desktop agents use Collab CLI for registration and messaging; MCP tool calls
+are optional. The identity anchor remains the agent sessionID. Desktop bridge
+uses a separate normally managed transport. Its caller
+context comes from executor metadata, and its recipient comes from the current
+registered route. The daemon connects the bridge's local socket rather than
+the Desktop tools pipe or an unrelated managed AppServer. See the
+[Desktop bridge design and acceptance boundary](../docs/design/collab-desktop-bridge.md).
+Source, installed MCP/daemon loading, native acceptance, actual wake, consumption
+and reply evidence are reported separately.
+
 ## Install
 
 Build once from the reviewed current source, install those exact binaries, then
@@ -138,13 +148,17 @@ identity, verifies the native endpoint or tmux pane, persists the binding, and
 restores the default notification lease. It returns the complete state snapshot.
 If facts are missing, `requires_identity_update.required_fields` names them.
 Supply only those real values once with `collab context --provide '<JSON>'`.
-Allowed supplement keys are `session_id`, `thread_id`, `endpoint`, and
-`namespace`; no worker selector or recovery command is needed.
+AppServer supplement keys are `session_id`, `thread_id`, `endpoint`, and
+`namespace`; Desktop uses the separate `desktop_bridge` capability. See
+[Desktop CLI registration](skills/collab/references/migration-daemon.md#desktop-cli-registration-and-messaging)
+for the verified command shape and automatic-discovery limitation. No worker
+selector or separate migration command is needed.
 
 The context bootstrap also merges the shared `collab-mcp` server into project
 `.mcp.json` and writes the project CLI permissions Codex and Claude Code need
 so `collab` can reach the App Server socket without a sandbox prompt. The
-`collab` CLI is a complete fallback when MCP tools are not listed.
+`collab` CLI is the ordinary agent action entry, whether MCP tools are listed
+or not. Desktop still needs a live bridge for daemon-to-chat delivery.
 
 For an ordinary long-horizon assignment, publish the task with delivery and
 test conditions, then claim it or invite a suitable peer and respond with the

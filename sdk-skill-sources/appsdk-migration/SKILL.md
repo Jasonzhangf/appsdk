@@ -25,7 +25,13 @@ user's explicit current recovery intent take precedence over old records.
 Use the exact [recovery commands and receipt contract](../collab/references/stable-name-recovery.md#恢复操作context-自己迁移agent-不做历史清理).
 Do not reverse-engineer approval fields or run a separate migration ceremony.
 
-For ordinary peer or master recovery, use the existing user-managed daemon:
+For ordinary peer or master recovery, use the existing user-managed daemon.
+Desktop also uses Collab CLI. Its identity anchor is the current agent
+sessionID; thread and bridge endpoint only locate communication. Agent-side
+MCP calls are optional. Follow [Desktop CLI registration and messaging](../collab/references/migration-daemon.md#desktop-cli-registration-and-messaging)
+for scoped bridge input, current automatic-discovery limitations and receipts.
+Do not supply an AppServer endpoint for Desktop. Only AppServer supplements
+the top-level endpoint in the example below:
 
 ```sh
 collab context
@@ -35,7 +41,7 @@ collab context --provide '{"session_id":"...","thread_id":"...","endpoint":"..."
 
 - Context restores current identity, binding, route, receive lease and existing valid owned subscriptions together. cwd selects project; the stable name owns work, and the reported agent sessionID is its current carrier. Same-name session changes automatically update all unclosed board assignments. Explicitly retire the old rule that a tmux session selects peer identity: tmux sessions, socket paths, server PIDs and pane history are placement only. The CLI does not parse the `TMUX` value. Migration never requires restarting tmux or rewriting historical task evidence.
 - An existing master does not block ordinary peer recovery. Name/session takeover follows the [Collab name contract](../collab/references/stable-name-recovery.md). Explicitly confirmed user takeover of unavailable unknown Jenny takes precedence over Jenny adjudication; do not wait for the old executor. Do not simulate recovery by changing a display label.
-- Recovery acceptance includes real send, receive and reply. A role field alone is not communication recovery. Do not reset a project or operate daemon lifecycle for identity recovery.
+- Explicit communication repairs and communication-feature delivery require real send, receive and reply evidence. Ordinary identity recovery adds no communication round trip. Do not reset a project or operate daemon lifecycle for identity recovery.
 - After recovery, evaluate owned patrol tasks and timed subscriptions. Close them when their task is complete or no new task and no actionable work remains; do not recreate idle patrol loops. Keep direct-message reception for new assignments.
 - Master and peer each restore and manage their own goal under the current stable name. Recovery does not transfer a peer goal to master, require master proxy registration, or grant project-master authority to a peer.
 - Do not hand-edit `routes.jsonl`, `identities/`, or `.agent-collab/` files.
@@ -51,7 +57,11 @@ collab context
 printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"codex","version":"0.0.0"}}}\n' | collab-mcp
 ```
 
-Record installed and loaded-runtime evidence separately. Detailed maintenance boundaries live in [`collab/references/migration-daemon.md`](../collab/references/migration-daemon.md); ordinary identity migration remains internal to context.
+For Desktop, keep the CLI entry; use the current Desktop bridge capability as
+documented above. Installing files does not activate a bridge service. Record
+installed and loaded-runtime evidence separately; do not require an MCP tool
+call or ask the user to find an assumed reconnect control.
+Detailed maintenance boundaries live in [`collab/references/migration-daemon.md`](../collab/references/migration-daemon.md); ordinary identity migration remains internal to context.
 
 ## 3. Control-plane migration vs. authorized reset
 

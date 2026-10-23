@@ -64,14 +64,25 @@ peer 仍负责按自己的目标创建或续订所需的巡检范围。
 
 Durable identity, role, mailbox, task, and subscription truth lives in the
 Collab daemon. Transport selection is decided by the daemon based on runtime
-facts; initial registration prefers a verified current tmux pane. Persisted
-restoration reuses the durable selected binding. Once an AppServer binding is
-selected, tmux is never a message, wake, presence, or status fallback. Its
+facts; initial registration prefers a verified current tmux pane. Restoration
+reconciles the current explicit capability with the durable binding through
+context. An explicit current Desktop bridge capability is a transport update,
+not an error-driven fallback. Once a native binding is selected, tmux is never
+a message, wake, presence, or status fallback. Its
 observed tmux endpoint is delivery placement only. cwd selects the project,
 and the stable name owns the work. The reported agent sessionID is the current
 execution carrier; tmux session, pane, socket and server PID locate transport
 only. Same-name session changes update all unclosed board assignments. Pane
 history and old native addresses do not select or protect identity.
+Desktop agents use the same CLI entry as other hosts: `collab context`,
+`collab sendmessage` and `collab recv`. Calling an MCP tool is not an identity
+or messaging prerequisite. Desktop's identity anchor is the current agent
+sessionID; the stable name owns work. Thread IDs and bridge sockets locate
+communication and never replace that anchor. A Desktop-owned bridge carries
+daemon-to-chat delivery; its lifecycle is separate from the agent's choice of
+CLI or MCP. See [Desktop CLI registration and messaging](references/migration-daemon.md#desktop-cli-registration-and-messaging)
+for current capability input, commands, receipts and the remaining automatic
+discovery limitation. Do not guess or reuse an AppServer socket.
 Production projects use the globally installed Collab v1.
 Candidate consumers may use the existing `COLLAB_TEST_BINARY` seam to select
 the exact tested binary. Candidate results do not prove the canonical installed
@@ -276,15 +287,18 @@ sink DAG. Every applicable node must finish before claiming delivery:
 latest_main_candidate
   -> targeted_tests + build/install
   -> user-managed runtime activation when applicable (outside the agent interface)
-  -> installed binary + collab context + collab-mcp initialize live checks
+  -> installed binary + collab context + affected bridge service live checks
   -> black-box live behavior replay + author debug complete
   -> applicable independent architecture review PASS
   -> commit/merge/push and cleanup
 ```
 
 For ordinary peer bootstrap and identity recovery, the only entry remains
-`collab context`. Every native call must carry its current session, thread,
-endpoint and namespace, from the current host environment or this call's `--provide`.
+`collab context`. Each AppServer context call carries its current session,
+thread, endpoint and namespace from the host or this call's `--provide`.
+Desktop CLI uses the current scoped bridge capability described above.
+The managed MCP entry can also supply it from executor metadata; invoking that
+tool is optional, and agent sessionID remains the identity anchor.
 That command is not a daemon lifecycle owner. A Collab runtime
 delivery that changes server, notification, identity, route, MCP, CLI, or daemon
 behavior must cross the runtime lifecycle boundary in the same delivery unit
@@ -441,16 +455,17 @@ fields here. Supply the requested current facts from their real source in this i
 collab context --provide '{"session_id":"...","thread_id":"...","endpoint":"...","namespace":"..."}'
 ```
 
-Every native context invocation must carry the current session, thread, endpoint
-and namespace. The daemon never fills these current facts from historical
-registration. CLI facts may come from the current host environment or this
-invocation's `--provide`; MCP callers must submit current facts through `provide`
-on each call, since the MCP process's startup environment may be stale.
+Each AppServer context invocation carries the current session, thread, endpoint
+and namespace. The daemon never fills these facts from historical registration.
+AppServer CLI facts come from the current host or this invocation's `--provide`;
+AppServer MCP callers submit them on each call because startup facts may be stale.
+Desktop uses the separate bridge capability through CLI or the optional MCP
+entry, not this AppServer supplement.
 Missing facts preserve durable identity and work but do not complete restoration.
 `--query` only reads retained progress and needs no current endpoint.
 See [current-fact recovery](references/stable-name-recovery.md) for the contract.
 
-The supplement accepts only the missing scalar facts `session_id`, `thread_id`,
+The AppServer supplement accepts only the scalar facts `session_id`, `thread_id`,
 `endpoint`, and `namespace`. It rejects any other key. An agent never guesses,
 selects, or hunts a worker, and never supplies `worker_id`, approval, token,
 generation, binding, or project scope. Invalid or unsupported input fails
@@ -640,7 +655,9 @@ With a matching live subscription, the first pending message opens a fixed
 batched delivery globally or per project; `appsdk config` shows effective
 policy. All eligible unsent messages for that recipient are combined
 into the selected transport (up to 3 previews per notification, with overflow
-retained in the inbox). On an AppServer binding, the daemon uses
+retained in the inbox). On a Desktop bridge binding, the daemon calls the
+bridge's native `send_message_to_thread`; the sender still uses the CLI.
+On an AppServer binding, the daemon uses
 `turn/start`, `turn/steer`, or `thread/queue/add`; on a tmux-only binding it
 submits a bounded wake to that pane. Neither transport acceptance proves that
 the peer consumed the durable message, and neither binding falls back to the
@@ -1491,7 +1508,7 @@ adapter returns no AppServer candidate and may continue through another
 existing transport only after that transport's normal verification. Never
 default an unidentified session to `codex_tui`.
 
-The Collab client accepts only `COLLAB_APPSERVER_SOCKET` or
+For the AppServer branch, the Collab client accepts only `COLLAB_APPSERVER_SOCKET` or
 `CODEX_APP_SERVER_SOCKET` supplied by the current runtime as the endpoint for
 the current session. In particular, never derive
 `$CODEX_HOME/app-server-control/app-server-control.sock` or
@@ -1505,10 +1522,17 @@ prove that the current client uses that AppServer. If the current runtime does
 not provide its endpoint, do not register an AppServer route or guess one; use
 another already verified transport only when it belongs to this peer, otherwise
 report that registration lacks a current-session endpoint. `CODEX_APP_TOOLS_PIPE_PATH`
-is a tool pipe, not an AppServer endpoint. The daemon still verifies the exact
-thread/session/project tuple before committing a supplied route.
+is a tool pipe, not an AppServer endpoint. Desktop uses its separate normally
+managed MCP bridge: executor metadata supplies the true caller thread/turn,
+and the bridge publishes its scoped local capability to context. The daemon
+connects only that bridge UDS; it does not connect the tools pipe or require
+a nonexistent AppServer endpoint. The original real caller context remains
+separate from the registered recipient target and the message sender. See
+[current recovery facts](references/stable-name-recovery.md).
+The daemon still verifies the exact thread/session/project tuple before
+committing a supplied route.
 
-The selected namespace is persisted with the recipient route. `turn/start`
+The AppServer namespace is persisted with the recipient route. Its `turn/start`
 notifications use that stored recipient namespace (`codex_app` or
 `codex_tui`); they never infer it from the sender or hardcode the TUI namespace.
 If an AppServer endpoint is unavailable before registration, the existing

@@ -1,0 +1,14 @@
+{
+  "id": "appsdk-collab-desktop-bridge-service",
+  "version": "1.0.0",
+  "description": "设计合同：一次 Desktop 正常 MCP 管理实例到一次正常退出。bridge 是前台受管服务，连接宿主明确提供的 app-tools pipe，单 owner 读取上游。每次 context 从 executor metadata 捕获真实 caller/turn，授予仅此注册收件 thread 的控制引用；caller 与通知发送者分开，不接受客户端自选上游身份。请求处理是服务内部事件循环，不在图中画回边。stdin 结束、正常信号或上游断开使本实例失效，仅清理自有 socket。不 detach、不忽略终止、不拥有 Collab daemon 或 tmux 生命周期。基础 active 和 idle 唤醒已在 bridge-proof-20261023 实测，正式 MCP 和 Collab 组合仍需验收。",
+  "inputs": [{"id":"desktop_mcp_start","schema":"Object"}],
+  "nodes": [
+    {"id":"读取宿主能力并初始化服务","operator":"appsdk.collab_desktop_bridge.initialize","operator_version":"1","inputs":["desktop_mcp_start"],"output":{"id":"managed_bridge","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"发布自有本地通信入口","operator":"appsdk.collab_desktop_bridge.publish","operator_version":"1","inputs":["managed_bridge"],"output":{"id":"owned_endpoint","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"处理绑定范围内的请求","operator":"appsdk.collab_desktop_bridge.serve","operator_version":"1","inputs":["owned_endpoint"],"output":{"id":"service_terminal","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"停止服务并撤销自有入口","operator":"appsdk.collab_desktop_bridge.retire","operator_version":"1","inputs":["service_terminal"],"output":{"id":"bridge_stopped","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"}
+  ],
+  "edges":[{"from":"读取宿主能力并初始化服务","to":"发布自有本地通信入口","arc_id":"managed_bridge"},{"from":"发布自有本地通信入口","to":"处理绑定范围内的请求","arc_id":"owned_endpoint"},{"from":"处理绑定范围内的请求","to":"停止服务并撤销自有入口","arc_id":"service_terminal"}],
+  "outputs":["bridge_stopped"]
+}

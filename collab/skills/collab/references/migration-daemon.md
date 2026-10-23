@@ -26,9 +26,13 @@ tasks, resources and unconsumed messages and updates their execution binding.
 Consumed messages and closed-task history remain historical. Migration does not
 grant master authority without the user's explicit master restoration approval.
 
-Every new native context must carry current session/thread/endpoint/namespace
+Every new AppServer context must carry current session/thread/endpoint/namespace
 from the calling host or this invocation's `--provide` (MCP: `provide` on each
-call). Historical registration never supplies missing current facts. Missing
+call). Desktop uses its current scoped bridge capability, including through
+CLI `--provide`; agent-side MCP calls are optional. The installed MCP bridge
+can obtain that capability from real executor metadata. Desktop does not
+require an AppServer endpoint or borrow the managed
+AppServer socket. Historical registration never supplies missing current facts. Missing
 facts preserve identity and work and return `missing_facts`. If user intent is required, supply that intent
 through the context approval interface. Query an existing operation with
 `collab context --query --op <operation_id>`; a query does not perform migration.
@@ -70,6 +74,74 @@ separately; installation alone does not prove live identity or communication
 recovery. If an old binary shadows the installed binary, resolve that exact
 installation or command-cache problem. Do not retain an old runtime as a
 recovery fallback.
+
+One supported Desktop bridge service entry is the installed `~/.cargo/bin/collab-desktop-mcp`.
+Configure this command through the normal Desktop MCP configuration and load
+it through the host's normal mechanism. It proxies Collab tools and publishes
+a scoped bridge on each new `collab_context` call from real executor metadata.
+The MCP config must pass through `CODEX_APP_TOOLS_PIPE_PATH`,
+`CODEX_MCP_NODE_PATH`, `CODEX_SESSION_ID` and `CODEX_INTERNAL_ORIGINATOR_OVERRIDE`
+via `env_vars`; do not replace host-provided values with copied paths or IDs.
+Use `project_scope` for project selection; `provide` may contain the current
+agent `session_id` when needed. Do not configure a tools-pipe path or caller
+turn. An old `collab-mcp` process does not gain bridge support from a daemon
+reload. Verify service activation separately from daemon activation. Check
+project-local `.codex/config.toml` as well as global configuration: an obsolete
+project override can select direct `collab-mcp` despite a correct global entry.
+Do not assume Desktop exposes a reconnect button, ask agents to find one, or
+prescribe another app restart without identifying the actual stale owner.
+
+## Desktop CLI registration and messaging
+
+Desktop's identity anchor is the current agent sessionID, supplied by the
+calling runtime (for Codex, `CODEX_SESSION_ID`). cwd selects the project; the
+stable name owns its goal, tasks, resources and unread messages. Native thread
+ID, bridge endpoint, pane and tmux session only locate communication. An equal
+session/thread value in a sample does not make these fields interchangeable.
+Changing a thread or bridge endpoint must not allocate a new name or role.
+Same-name session changes follow the existing name-recovery contract.
+
+Use the CLI in the project directory:
+
+```sh
+collab context
+collab sendmessage --to <registered-recipient> --subject <topic> "<message>"
+collab recv
+```
+
+Registration/recovery needs the live bridge's scoped current capability.
+When that capability is available from this bridge's current initialization or
+registration receipt, the CLI accepts the following shape. Substitute only
+those actual returned values; never copy sample or historical socket paths:
+
+```sh
+collab context --provide '{"session_id":"<current agent sessionID>","thread_id":"<current native thread ID>","desktop_bridge":{"endpoint":"<current bridge unix:// endpoint>","namespace":"codex_app","session_id":"<current agent sessionID>","thread_id":"<current native thread ID>","cwd":"<canonical project cwd>"}}'
+```
+
+The bridge retains its real native caller context. CLI parameters do not
+invent a turn ID, authorize an arbitrary target or connect the daemon directly
+to the Desktop tools pipe. `desktop_bridge.endpoint` is the bridge UDS;
+top-level `endpoint` is the separate AppServer field and is not its replacement.
+Normal restoration preserves the name and role and lets context update routes,
+valid reception subscriptions and open-task session bindings.
+
+Current verified behavior: installed CLI context with a current bridge
+capability, CLI send, automatic entry into the Desktop chat and CLI receive
+all work. Automatic CLI discovery of that capability is not yet complete:
+plain Desktop `collab context` can incorrectly ask for an AppServer endpoint.
+Treat this as a registration implementation gap, not a requirement that the
+agent call MCP, guess a socket, edit identity state or restart a service. Do
+not claim CLI-only automatic bootstrap is delivered. A task-owned foreground
+bridge experiment proves only that experiment's lifetime, not unattended
+production service availability. Fix capability publication/discovery in its
+runtime owner; keep unaffected work moving.
+
+`sendmessage` returns a durable message ID; native adapter acceptance is a
+separate fact. Confirm actual arrival in the target chat. Run `collab recv`
+once for that notification; it consumes and prints the durable messages and
+needs no follow-up ACK. `collab inbox` and `collab msg <id>` only inspect.
+A reply uses `collab sendmessage` to the original sender when authorized.
+Queue acceptance, actual arrival, consumption and reply are separate evidence.
 
 Collab has one global user-managed daemon. Agents never start, stop, restart or
 kill it, request maintenance credentials, or create a second global runtime.

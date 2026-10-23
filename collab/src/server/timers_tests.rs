@@ -667,6 +667,88 @@ fn restart_does_not_reset_exhausted_direct_message_attempts() {
     std::fs::remove_dir_all(root).ok();
 }
 
+/// After a daemon restart the timer replays only undelivered pending mail. A
+/// pending message inside its retry budget is attempted again; a message that
+/// already reached `delivered` is never re-sent. Their durable states stay
+/// distinguishable so a restart cannot replay consumed work.
+#[test]
+fn restart_replays_only_undelivered_pending() {
+    let (server, root) = test_server();
+    register(&server, "owner");
+    let subscription_id = subscribe(&server, "owner", "direct-message", None, None);
+    let undelivered =
+        bind_message_with_type(&server, "owner", &subscription_id, "undelivered", "notify");
+    let delivered =
+        bind_message_with_type(&server, "owner", &subscription_id, "delivered", "notify");
+    server.commit(&[Event::Delivered {
+        ids: vec![delivered.clone()],
+    }]);
+    drop(server);
+
+    let replayed = super::super::replay(&root).unwrap();
+    let journal = std::fs::OpenOptions::new()
+        .append(true)
+        .open(root.join(".agent-collab/server/journal.jsonl"))
+        .unwrap();
+    let restarted = Arc::new(Server {
+        config: crate::config::Config::default(),
+        root: root.clone(),
+        storage_root: root.clone(),
+        journal_path: root.join(".agent-collab/server/journal.jsonl"),
+        host_paths: crate::scope::HostPaths::for_state_root(root.join("host-state")).unwrap(),
+        state: Mutex::new(replayed),
+        journal: Mutex::new(journal),
+        appserver_candidate_check: super::super::default_appserver_candidate_check(),
+        appserver_notification_sink: Arc::new(|_, _, _, _, _, _| {
+            Ok(serde_json::json!({"accepted": true}))
+        }),
+        appserver_thread_status: super::super::default_appserver_thread_status(),
+        appserver_thread_archive: super::super::default_appserver_thread_archive(),
+        mailbox_notify: tokio::sync::Notify::new(),
+    });
+
+    tick_with_idle_at(&restarted, now_ms(), &|_| true);
+
+    let state = restarted.state.lock().unwrap();
+    assert_eq!(
+        state.msgs[&undelivered].state, "pending",
+        "a replayed message stays pending until a receive receipt exists"
+    );
+    assert_eq!(
+        state.msgs[&undelivered].wake_attempt_count, 1,
+        "restart must replay a pending message inside its retry budget"
+    );
+    assert!(
+        state
+            .notification_delivery_accepted
+            .contains_key(&undelivered),
+        "the replayed pending message must record its new delivery"
+    );
+    assert_eq!(
+        state.msgs[&delivered].state, "delivered",
+        "the delivered message keeps its durable state across restart"
+    );
+    assert_eq!(
+        state.msgs[&delivered].wake_attempt_count, 0,
+        "restart must not replay a delivered message"
+    );
+    assert!(
+        !state
+            .notification_delivery_accepted
+            .contains_key(&delivered),
+        "a delivered message must not gain a second delivery"
+    );
+    drop(state);
+
+    // A later tick inside the batch window replays neither message.
+    tick_with_idle_at(&restarted, now_ms(), &|_| true);
+    let state = restarted.state.lock().unwrap();
+    assert_eq!(state.msgs[&undelivered].wake_attempt_count, 1);
+    assert_eq!(state.msgs[&delivered].wake_attempt_count, 0);
+    drop(state);
+    std::fs::remove_dir_all(root).ok();
+}
+
 #[test]
 fn successful_event_notification_consumes_one_shot_subscription() {
     let (server, root) = test_server();

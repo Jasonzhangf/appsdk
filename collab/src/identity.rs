@@ -745,6 +745,41 @@ fn identity_by_current_anchors_same_scope_at(
     }
 }
 
+/// The dsh compound anchor's communication API dimension.
+///
+/// A dsh identity is owned by one gateway session *and* one communication API:
+/// the gateway control socket and gateway runtime id the daemon observed. When
+/// the caller observed a concrete API, only a record that carries that same API
+/// is the caller's identity; a session-only guess across gateways cannot prove
+/// an owner. A record that predates the API fields keeps the legacy
+/// session-only match.
+fn dsh_api_matches(observed: &AnchorObservation, transport: &SelectedTransport) -> bool {
+    let observed_api = observed
+        .endpoint
+        .as_deref()
+        .or(observed.namespace.as_deref());
+    let persisted_api = transport
+        .endpoint
+        .as_deref()
+        .or(transport.namespace.as_deref());
+    match (observed_api, persisted_api) {
+        (None, _) | (_, None) => true,
+        (Some(_), Some(_)) => {
+            (transport.endpoint.as_deref().is_none_or(|persisted| {
+                observed
+                    .endpoint
+                    .as_deref()
+                    .is_none_or(|observed| observed == persisted)
+            })) && (transport.namespace.as_deref().is_none_or(|persisted| {
+                observed
+                    .namespace
+                    .as_deref()
+                    .is_none_or(|observed| observed == persisted)
+            }))
+        }
+    }
+}
+
 fn identity_by_current_anchors_at(
     host_paths: &HostPaths,
     scope: &Scope,
@@ -802,17 +837,15 @@ fn identity_by_current_anchors_at(
                 // The dsh anchor lives on the runtime binding, not on a tmux
                 // endpoint: `RuntimeIdentity.session_id` carries the gateway
                 // session id the adapter returned in its agent-facts reply.
-                "dsh_session_id" => {
-                    identity
-                        .transport
-                        .as_ref()
-                        .is_some_and(|transport| transport.kind == TransportKind::Dsh)
+                "dsh_session_id" => identity.transport.as_ref().is_some_and(|transport| {
+                    transport.kind == TransportKind::Dsh
                         && identity
                             .runtime
                             .as_ref()
                             .and_then(|runtime| runtime.session_id.as_ref())
                             .is_some_and(|persisted| persisted.as_str() == value)
-                }
+                        && dsh_api_matches(observed, transport)
+                }),
                 _ => false,
             };
             if matched {

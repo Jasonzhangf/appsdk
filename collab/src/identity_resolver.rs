@@ -12,6 +12,13 @@ struct AnchorObservation {
     /// The dsh adapter's primary anchor. Read from `DSH_SESSION_ID`, which the
     /// DSH runtime exports for the current agent session.
     dsh_session_id: Option<String>,
+    /// The observed dsh communication API: the gateway control socket and the
+    /// gateway runtime id. Together with `dsh_session_id` they form the
+    /// compound anchor, so a session reused on another gateway is not the same
+    /// identity. The daemon bootstrap observes them from typed facts; the
+    /// env-based CLI path cannot, and stays session-only.
+    endpoint: Option<String>,
+    namespace: Option<String>,
 }
 
 impl AnchorObservation {
@@ -30,6 +37,8 @@ impl AnchorObservation {
                     })
             }),
             dsh_session_id: non_empty(facts.dsh_session_id.as_deref()),
+            endpoint: non_empty(facts.endpoint.as_deref()),
+            namespace: non_empty(facts.namespace.as_deref()),
         }
     }
 
@@ -62,6 +71,8 @@ impl AnchorObservation {
             tmux,
             tmux_anchor: None,
             dsh_session_id: non_empty(std::env::var("DSH_SESSION_ID").ok().as_deref()),
+            endpoint: None,
+            namespace: None,
         })
     }
 

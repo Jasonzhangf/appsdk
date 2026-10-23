@@ -27,9 +27,23 @@ fn handle_task_review(
             task_id, task.status
         ));
     }
-    if !task_integration_authorized(server, &st, &task, &worker_id) {
+    let required_reviewer = required_work_reviewer(&st, &task_id);
+    let reviewer_name = if let Some(name) = required_reviewer.as_deref() {
+        let route = match server_route_scope(server,&st) {
+            Ok(Some(route)) => route,
+            _ => return Resp::err("required reviewer project route is not ready"),
+        };
+        if st.name_occupancy(route.project_scope_id.as_str(),name)
+            .is_none_or(|entry| entry.worker_id != worker_id)
+        { return Resp::err("TASK_REQUIRED_REVIEWER: only the named reviewer's current holder may review this task"); }
+        Some(name.to_owned())
+    } else {
+        if !task_integration_authorized(server, &st, &task, &worker_id) {
         return Resp::err("task review requires task owner or live master authority");
-    }
+        }
+        st.name_occupancies.values().flat_map(|names|names.values())
+            .find(|entry|entry.worker_id==worker_id).map(|entry|entry.name.clone())
+    };
     let now = now_ms();
     let mut reviewed = task;
     let mut lifecycle = st.task_lifecycle.get(&task_id).cloned().unwrap_or_default();
@@ -50,6 +64,9 @@ fn handle_task_review(
     lifecycle.review_evidence = Some(evidence.to_owned());
     lifecycle.reviewer = Some(worker_id.clone());
     lifecycle.reviewed_ms = Some(now);
+    lifecycle.required_reviewer_name = required_reviewer;
+    lifecycle.reviewer_name = reviewer_name;
+    lifecycle.reviewed_subject_revision = accept.then_some(lifecycle.review_subject_revision);
     let delivery_commit = lifecycle.delivery_commit.clone();
     let mut events = vec![
         Event::TaskUpdated {
@@ -60,6 +77,8 @@ fn handle_task_review(
             record: lifecycle,
         },
     ];
+    let review_notices=work_review_notice_ids(&st,&task_id);
+    if !review_notices.is_empty() {events.push(Event::Superseded {ids:review_notices});}
     let mut pending_notification = None;
     let mut notification_missing = false;
     let mut merge_pending_registered = false;
@@ -152,6 +171,7 @@ fn handle_task_review(
     let mut review_data = json!({
         "task": task_id,
         "status": reviewed.status,
+        "delivery_complete": false,
         "reviewer": worker_id,
         "evidence": evidence,
         "merge_pending": merge_pending_registered,
@@ -207,6 +227,7 @@ fn handle_task_integrated(
     if !task_integration_authorized(server, &st, &task, &worker_id) {
         return Resp::err("task integrated requires task owner or live master authority");
     }
+    if let Err(error) = work_review_gate(&st,&task_id) { return error; }
     let lifecycle = st.task_lifecycle.get(&task_id).cloned().unwrap_or_default();
     if lifecycle.delivery_kind == state::TaskDeliveryKind::ReadOnly {
         return Resp::err_data(
@@ -424,6 +445,7 @@ fn handle_task_close(
                     "status": task.status,
                     "owner": task.owner,
                     "manual": true,
+                    "delivery_complete": st.delivery_completion_projection(&task.id).0,
                     "reason": receipt.manual_reason,
                     "receipt_id": receipt.id,
                     "cleanup": {
@@ -436,7 +458,7 @@ fn handle_task_close(
                     }),
                     "idempotent": true,
                     "next_action": if cleanup_verified {
-                        "lifecycle complete; keepalives for this task owner stopped"
+                        "manual close recorded; resource cleanup complete"
                     } else {
                         "manual close recorded; worktree/branch cleanup remains unverified"
                     },
@@ -522,6 +544,7 @@ fn handle_task_close(
             "status": closed.status,
             "owner": closed.owner,
             "manual": true,
+            "delivery_complete": false,
             "reason": reason,
             "receipt_id": receipt.id,
             "cleanup": {
@@ -551,6 +574,7 @@ fn handle_task_close(
             .is_some_and(|value| !value.trim().is_empty())
         && lifecycle.reviewer.is_some()
         && lifecycle.reviewed_ms.is_some();
+    if let Err(error) = work_review_gate(&st,&task_id) { return error; }
     if task.status != "merged" && !read_only_accepted {
         if task.status == "accepted"
             && lifecycle.delivery_kind == state::TaskDeliveryKind::Code
@@ -704,6 +728,7 @@ fn handle_task_close(
         "task": closed.id,
         "status": closed.status,
         "owner": closed.owner,
+        "delivery_complete": true,
         "disposition": if lifecycle.delivery_kind == state::TaskDeliveryKind::ReadOnly {
             "no_merge_required"
         } else {
@@ -955,6 +980,7 @@ fn handle_task_finalize_cleanup(
             .map(|waiter| waiter.id)
             .collect::<Vec<_>>();
         let notifications = resume_cleanup_release(server, &mut st, &task.id);
+        let (delivery_complete,completion_missing) = st.delivery_completion_projection(&task.id);
         drop(st);
         for (message_id, subscription_id) in notifications {
             attempt_notification(server, &message_id, &subscription_id);
@@ -964,8 +990,10 @@ fn handle_task_finalize_cleanup(
             "owner": task.owner,
             "cleanup": {"result": "verified", "receipt_id": receipt_id},
             "idempotent": true,
+            "delivery_complete": delivery_complete,
+            "completion_missing": completion_missing,
             "released_dependents": released,
-            "next_action": "lifecycle complete",
+            "next_action": "resource cleanup complete; inspect task delivery status",
         }));
     }
     // A closed task is not a scheduling holder, so another task can take over
@@ -1040,6 +1068,7 @@ fn handle_task_finalize_cleanup(
         .map(|waiter| waiter.id)
         .collect::<Vec<_>>();
     let notifications = resume_cleanup_release(server, &mut st, &task.id);
+    let (delivery_complete,completion_missing) = st.delivery_completion_projection(&task.id);
     let stale_workers =
         stale_worker_views(&st, &|worker| worker_presence_in_state(server, &st, worker));
     drop(st);
@@ -1059,8 +1088,10 @@ fn handle_task_finalize_cleanup(
         "released_dependents": released,
         "stale_workers": stale_workers,
         "finalized": true,
+        "delivery_complete": delivery_complete,
+        "completion_missing": completion_missing,
         "idempotent": false,
-        "next_action": "lifecycle complete",
+        "next_action": "resource cleanup complete; inspect task delivery status",
     }))
 }
 
@@ -1068,6 +1099,8 @@ fn task_view(state: &State, task: &TaskRec) -> serde_json::Value {
     let cleanup_required = task.worktree_path.is_some();
     let cleanup_receipt = state.cleanup_receipts.get(&task.id);
     let lifecycle = state.task_lifecycle.get(&task.id);
+    let (delivery_complete,completion_missing) = state.delivery_completion_projection(&task.id);
+    let policy = state.effective_work_policy(&task.id);
     json!({
         "id": task.id,
         "owner": task.owner,
@@ -1080,6 +1113,10 @@ fn task_view(state: &State, task: &TaskRec) -> serde_json::Value {
         "status": task.status,
         "next_step": task.next_step,
         "wait": task.wait,
+        "work_policy": policy,
+        "child_work_policies": state.board_details.get(&task.id).map(|details|&details.child_work_policies),
+        "delivery_complete": delivery_complete,
+        "completion_missing": completion_missing,
         "delivery": {
             "kind": lifecycle.map(|record| record.delivery_kind).unwrap_or_default(),
             "evidence": lifecycle.and_then(|record| record.delivery_evidence.clone()),
@@ -1097,6 +1134,11 @@ fn task_view(state: &State, task: &TaskRec) -> serde_json::Value {
             "evidence": lifecycle.and_then(|record| record.review_evidence.clone()),
             "reviewer": lifecycle.and_then(|record| record.reviewer.clone()),
             "at": lifecycle.and_then(|record| record.reviewed_ms.map(iso)),
+            "required_reviewer_name": required_work_reviewer(state,&task.id),
+            "reviewer_name": lifecycle.and_then(|record|record.reviewer_name.clone()),
+            "subject_revision": lifecycle.map(|record|record.review_subject_revision),
+            "reviewed_subject_revision": lifecycle.and_then(|record|record.reviewed_subject_revision),
+            "valid": work_review_valid(state,&task.id),
         },
         "integration": {
             "commit": lifecycle.and_then(|record| record.integration_commit.clone()),
@@ -1327,6 +1369,10 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
     let mut subagents: Vec<crate::subagent::Record> = st.subagents.values().cloned().collect();
     subagents.sort_by(|left, right| left.id.cmp(&right.id));
     let display_name = worker_display_name(&st, &worker.id, role == "master");
+    let work_roles_by_worker: std::collections::HashMap<_, _> = st.workers.keys()
+        .map(|id| (id.clone(), worker_work_roles(&st, route_scope.as_ref().map_or("",|route|route.project_scope_id.as_str()), id)))
+        .collect();
+    let work_policies=st.project_work_policy.clone();
     drop(st);
 
     // Normal Context records presence before this pure projection. A completed
@@ -1377,6 +1423,7 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
                 "display_name": display_name,
                 "id": peer.id,
                 "role": peer_role,
+                "work_roles": work_roles_by_worker.get(&peer.id).cloned().unwrap_or_default(),
                 "presence": match peer_presence {
                     IdentityPresence::Present => "present",
                     IdentityPresence::Cold => "cold",
@@ -1533,6 +1580,8 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
             "transport": transport,
         },
         "role_brief": current_role_brief,
+        "work_roles": work_roles_by_worker.get(&worker.id).cloned().unwrap_or_default(),
+        "work_policies": work_policies,
         "liveness": {
             // `live` stays reserved for an endpoint that is resident now.
             // Durable identity presence is reported separately below.

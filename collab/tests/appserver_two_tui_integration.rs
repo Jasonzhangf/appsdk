@@ -23,6 +23,8 @@ mod name_confirmed_takeover;
 mod name_runtime_cli;
 #[path = "board/patrol_subscriptions.rs"]
 mod patrol_subscriptions;
+#[path = "board/work_roles.rs"]
+mod work_roles_cli;
 
 const THREAD_A: &str = "01a0d637-75e2-71b2-8634-2be0c08a9adc";
 const THREAD_B: &str = "01a0d639-dafc-7571-a0aa-bbc2bbbc04ce";

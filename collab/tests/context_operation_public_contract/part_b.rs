@@ -435,7 +435,7 @@ fn current_pane_command(
         shell_quote(&result.to_string_lossy()), shell_quote(&done.to_string_lossy()),
     );
     let consumer = fixture.run_in_pane(pane, label, &script);
-    assert!(wait_until(Duration::from_secs(15), || done.exists()), "pane command did not finish: {}", consumer.output());
+    assert!(wait_until(Duration::from_secs(15), || fs::read_to_string(&done).is_ok_and(|value| !value.is_empty())), "pane command did not finish: {}", consumer.output());
     let code: i32 = fs::read_to_string(done).unwrap().parse().unwrap();
     std::process::Output {
         status: std::process::ExitStatus::from_raw(code << 8),

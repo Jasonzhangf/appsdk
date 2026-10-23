@@ -5,6 +5,41 @@ description: "仅约束已成功注册 Collab 的 peer；master 权限需另行�
 
 # Collab
 
+## 工作角色与用户指定分工
+
+工作角色是稳定名字的专长，例如 `designer`、`reviewer`。同一 peer 可有多个专长。
+它们不改变 master/peer 职责，也不增加项目权限。省略 `--work-roles` 保留原值，
+明确传空字符串清空。当前 master 可按用户指令为其他稳定名字设置角色。
+
+```sh
+collab context --work-roles designer,reviewer
+collab context --for-name Alice --work-roles designer
+collab board policy --scope project --work-kind frontend --prefer-role designer
+collab board policy --scope project --work-kind frontend --executor Alice --reviewer Bob
+collab board publish frontend-task --title "前端页面" --description "任务范围" \
+  --delivery-condition "页面与交互通过审查" --test-condition "公开入口验收" \
+  --work-kind frontend
+collab board dispatch frontend-task --expected-revision 1
+```
+
+用户在 master 任务中指派某类工作时，master 将要求保存为明确分工字段。
+项目默认、目标默认、任务明确字段逐项覆盖。目标使用已有 board 任务，子任务用
+`--parent-task` 引用。已保存的任务约束不随默认规则变化而自动改变。
+`board policy --scope goal --id <目标任务>` 保存目标默认；`--scope task` 修改指定任务，
+两者使用当前 `--expected-revision`。清除约束使用 `--clear-executor`、
+`--clear-reviewer` 或 `--clear-prefer-role`，不能用空名字猜测清除意图。
+
+明确指定执行者时，只能邀请该名字当前持有者；不可用就报告等待，不自行换人。
+只有角色偏好时优先选匹配者；无匹配可退选其他可用 peer，并保存理由。
+邀请不等于接受，接受后才转移执行责任。peer 可编排多个目标，仍须遵守真实资源约束。
+
+明确指定 reviewer 时，将交付交给该名字当前持有者审查。作者或 master 不能代审。
+`task deliver` 表示提交待审；审查通过后仍须完成原有代码集成或只读交付流程。
+重新交付或实质改变验收合同会使旧审查失效；普通进度更新和同名换会话不会。
+人工终止、资源清理和验收完成分别报告，不能以 `closed` 或清理成功替代交付证据。
+
+源码合同与三张操作图见 [工作角色与分工设计](../../docs/design/work-roles-and-assignment.md)。
+
 ## 升级交接：明确弃用 tmux session 身份规则
 
 名字承载工作归属，agent sessionID 是当前执行载体。注册报告并绑定 agent sessionID；

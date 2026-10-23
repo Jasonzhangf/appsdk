@@ -1,0 +1,20 @@
+{
+  "id": "collab-required-review",
+  "version": "1",
+  "description": "候选设计：单次交付、审查、集成或关闭请求。复用 TaskLifecycleRecord。交付产物可以进入 delivered 待审，不能在指定审查前 accepted、集成或验收关闭。只有指定名字当前持有者可以提交所需审查结果；实现者/master 不能替代指定人。返工保留问题，再交付清除旧通过；影响任务约束的变更使旧审查失效。普通状态更新、显式改派及强制关闭不能伪造审查通过；取消和人工终止须显式区分于验收成功。审查请求复用 durable mailbox，入队不是通过；通知失败不撤销持久待审事实。错误统一返回，不执行下游副作用。",
+  "inputs": [{"id": "交付审查请求", "schema": "Object"}],
+  "nodes": [
+    {"id": "读取任务约束与交付记录", "operator": "collab.required_review.read", "operator_version": "1", "inputs": ["交付审查请求"], "output": {"id": "交付审查上下文", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "核对指定审查者与当前审查结果", "operator": "collab.required_review.check", "operator_version": "1", "inputs": ["交付审查上下文"], "output": {"id": "审查门禁结果", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "提交待审返工或原有交付状态", "operator": "collab.required_review.commit", "operator_version": "1", "inputs": ["审查门禁结果"], "output": {"id": "持久交付结果", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "派送审查请求并区分回执", "operator": "collab.required_review.notify", "operator_version": "1", "inputs": ["持久交付结果"], "output": {"id": "审查通知结果", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "返回交付结果与下一步", "operator": "collab.required_review.emit", "operator_version": "1", "inputs": ["审查通知结果"], "output": {"id": "交付操作结果", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"}
+  ],
+  "edges": [
+    {"from": "读取任务约束与交付记录", "to": "核对指定审查者与当前审查结果", "arc_id": "交付审查上下文"},
+    {"from": "核对指定审查者与当前审查结果", "to": "提交待审返工或原有交付状态", "arc_id": "审查门禁结果"},
+    {"from": "提交待审返工或原有交付状态", "to": "派送审查请求并区分回执", "arc_id": "持久交付结果"},
+    {"from": "派送审查请求并区分回执", "to": "返回交付结果与下一步", "arc_id": "审查通知结果"}
+  ],
+  "outputs": ["交付操作结果"]
+}

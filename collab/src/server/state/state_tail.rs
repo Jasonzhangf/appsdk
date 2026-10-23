@@ -23,6 +23,10 @@ pub struct State {
     /// Per-project/name durable high watermark, including released names.
     pub name_occupancy_revisions: HashMap<String, HashMap<String, u64>>,
     pub task_assignments: HashMap<String, crate::server::name_state::TaskAssignment>,
+    pub name_work_roles:
+        HashMap<String, HashMap<String, crate::board::NameWorkRoles>>,
+    /// Project-level default policy keyed by exact `work_kind`.
+    pub project_work_policy: HashMap<String, crate::board::WorkPolicy>,
     pub name_recoveries: HashMap<String, crate::server::name_state::NameRecoveryPending>,
     pub agent_presence:
         HashMap<String, HashMap<String, crate::server::name_state::AgentPresenceRecord>>,

@@ -20,6 +20,7 @@ const child=spawn(process.env.COLLAB_MCP_BIN||path.join(cargoHome,'bin','collab-
 const bindings=new Map();
 const clients=new Set();
 const pending=new Map();
+const publicationFiles=new Set();
 let sequence=0,stopping=false,ownedSocket=false,listener,upstream,tools,hostFailure;
 
 function encoded(value){
@@ -77,7 +78,58 @@ async function handleLocal(request){
   if(!result.ok)result.error='DESKTOP_BRIDGE_NATIVE_REJECTED';
   return result;
 }
+function controlDirectory(target){
+  fs.mkdirSync(stateRoot,{recursive:true,mode:0o700});
+  let current=fs.realpathSync(stateRoot);
+  const check=p=>{const stat=fs.lstatSync(p);if(!stat.isDirectory()||stat.isSymbolicLink()||stat.uid!==process.getuid()||(stat.mode&0o022))throw Error('DESKTOP_BRIDGE_DECLARATION_UNSAFE: control directory');};
+  check(current);
+  for(const component of path.relative(stateRoot,target).split(path.sep)){
+    if(!component||component==='.'||component==='..')throw Error('DESKTOP_BRIDGE_DECLARATION_INVALID: control path');
+    current=path.join(current,component);
+    try{fs.mkdirSync(current,{mode:0o700});}catch(error){if(error.code!=='EEXIST')throw error;}
+    check(current);
+  }
+  return current;
+}
+async function publishCapability(binding){
+  const response=await nativeCall(binding,'read_thread',{threadId:binding.thread,turnLimit:1,includeOutputs:false,maxOutputCharsPerItem:1});
+  if(response.error)throw Error(JSON.stringify(response.error));
+  const native=response.result;
+  if(native?.success!==true)throw Error(`DESKTOP_BRIDGE_PUBLICATION_FAILED: ${JSON.stringify(native)}`);
+  const content=native.contentItems?.find(item=>item.type==='inputText'&&typeof item.text==='string');
+  const observed=content?JSON.parse(content.text):undefined;
+  if(observed?.thread?.id!==binding.thread||typeof observed.thread.cwd!=='string')throw Error('DESKTOP_BRIDGE_PUBLICATION_FAILED: missing current native scope');
+  const cwd=fs.realpathSync(observed.thread.cwd);
+  if(stopping)throw Error('DESKTOP_BRIDGE_UNAVAILABLE: retiring');
+  const candidate={endpoint:`unix://${socketPath}`,namespace:tools.get('send_message_to_thread').namespace,session_id:binding.session,thread_id:binding.thread,cwd};
+  let directory=path.join(runtimeDir,'capabilities','v1');
+  for(const [label,value] of [['cwd',cwd],['session',binding.session],['thread',binding.thread]])directory=path.join(directory,label,...Buffer.from(value).toString('hex').match(/.{1,120}/g));
+  directory=controlDirectory(directory);
+  const owner=path.join(directory,`${path.basename(socketPath)}.json`);
+  const temporary=owner+'.tmp';
+  let createdOwner=false;
+  try{
+    if(!publicationFiles.has(owner)){
+      fs.writeFileSync(owner,JSON.stringify({schema:'collab-desktop-capability/v1',desktop_bridge:candidate}),{flag:'wx',mode:0o600});
+      publicationFiles.add(owner);createdOwner=true;
+    }
+    fs.linkSync(owner,temporary);publicationFiles.add(temporary);
+    fs.renameSync(temporary,path.join(directory,'current.json'));
+    // POSIX rename is a no-op when both names already link the same inode.
+    // Repeated publication must also remove that still-owned temporary link.
+    removePublicationFile(temporary);
+  }catch(error){
+    if(publicationFiles.has(temporary))removePublicationFile(temporary);
+    if(createdOwner)removePublicationFile(owner);
+    throw Error(`DESKTOP_BRIDGE_PUBLICATION_FAILED: ${error.message}`);
+  }
+  return candidate;
+}
+function removePublicationFile(file){
+  try{fs.unlinkSync(file);publicationFiles.delete(file);}catch(error){if(error.code==='ENOENT')publicationFiles.delete(file);else process.stderr.write(`Desktop publication cleanup: ${error.message}\n`);}
+}
 function removeSocket(){
+  for(const file of publicationFiles)removePublicationFile(file);
   if(!ownedSocket)return;
   ownedSocket=false;
   try{fs.unlinkSync(socketPath);}catch(error){if(error.code!=='ENOENT')process.stderr.write(`Desktop bridge cleanup: ${error.message}\n`);}
@@ -97,7 +149,7 @@ function stop(code){
 }
 async function openHost(){
   if(!desktop)return;
-  fs.mkdirSync(runtimeDir,{recursive:true,mode:0o700});
+  controlDirectory(runtimeDir);
   upstream=net.createConnection(pipe);
   readNative(upstream,response=>{
     const entry=pending.get(String(response.id));
@@ -185,9 +237,9 @@ async function forward(body,kind){
       if(['caller','caller_thread_id','caller_turn_id','turn_id'].some(k=>k in facts))throw Error('DESKTOP_BRIDGE_INVALID_FACTS: caller context is executor-owned');
       const session=stringValue(facts,['session_id'])||stringValue(process.env,['CODEX_SESSION_ID']);
       if(!session)throw Error('DESKTOP_BRIDGE_SESSION_REQUIRED: provide the current agent session_id');
-      const candidate={endpoint:`unix://${socketPath}`,namespace:tools.get('send_message_to_thread').namespace,
-        session_id:session,thread_id:context.thread,cwd:path.resolve(args.project_scope||process.cwd())};
-      bindings.set(key(session,context.thread),{session,thread:context.thread,callerThread:context.thread,callerTurn:context.turn});
+      const binding={session,thread:context.thread,callerThread:context.thread,callerTurn:context.turn};
+      bindings.set(key(session,context.thread),binding);
+      const candidate=await publishCapability(binding);
       facts.session_id=session;facts.thread_id=context.thread;facts.desktop_bridge=candidate;
       delete facts.endpoint;delete facts.namespace;
       request.params.arguments={...args,provide:JSON.stringify(facts)};

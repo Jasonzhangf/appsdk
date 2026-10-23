@@ -40,6 +40,7 @@ impl Scratch {
     fn cmd(&self) -> Command {
         let mut command = Command::new(binary());
         command
+            .env("GIT_CEILING_DIRECTORIES", &self.base)
             .env("APPSDK_HOME", self.base.join("appsdk-home"))
             .env("COLLAB_STATE_DIR", self.base.join("collab-state"));
         command

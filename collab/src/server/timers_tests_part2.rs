@@ -565,7 +565,10 @@ use super::*;
             .wake_bindings
             .values()
             .any(|bound| bound == &subscription_id));
-        assert!(state.master_wake.goal_due);
+        // The adaptor accepted this one-shot goal deadline, so the latch is
+        // cleared while the revision stays recorded for same-revision dedup.
+        assert!(!state.master_wake.goal_due);
+        assert!(state.master_wake.active_goal_revision.is_some());
         drop(state);
         std::fs::remove_dir_all(root).ok();
     }
@@ -595,6 +598,10 @@ use super::*;
             .contains("native frame exceeds maximum size"));
         assert_eq!(state.master_wake.delivery_state, "delivery_failed");
         assert_ne!(state.master_wake.delivery_state, "notified_unconsumed");
+        assert!(
+            state.master_wake.goal_due,
+            "delivery failure must keep the master goal-due latch raised"
+        );
         drop(state);
         std::fs::remove_dir_all(root).ok();
     }

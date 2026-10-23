@@ -73,6 +73,10 @@ Collab has one global user-managed daemon. Agents never start, stop, restart or
 kill it, request maintenance credentials, or create a second global runtime.
 User maintenance commands and credentials are outside the agent interface.
 When the service is unavailable, preserve durable state and report that fact.
+Project replay failure must not disable authenticated user maintenance: its
+credential check and shutdown path belong to the host, independently of the
+project reducer. Agents report the failure and do not edit journals or acquire
+maintenance authority to compensate.
 AppSDK/Collab maintenance never requires tmux server lifecycle operations or
 termination of the host pane.
 

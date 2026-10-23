@@ -231,6 +231,7 @@ pub struct NotificationSubscription {
     pub worker_id: String,
     pub event: String,
     pub subject: Option<String>,
+    #[serde(alias = "pane")]
     pub target: String,
     pub method: String,
     pub trigger_ms: Option<i64>,
@@ -1076,6 +1077,21 @@ pub fn goal_deadline_key(subscription: &NotificationSubscription) -> Option<(Str
         subscription.subject.clone()?,
         trigger,
     ))
+}
+
+/// The trigger that created this bound goal deadline occurrence. A goal
+/// deadline is one-shot, so the subscription carries exactly one absolute
+/// trigger even after it is consumed.
+pub fn subscription_goal_deadline_revision(subscription: &NotificationSubscription) -> Option<u64> {
+    if !is_goal_deadline(subscription) {
+        return None;
+    }
+    let trigger = subscription
+        .trigger_times_ms
+        .first()
+        .copied()
+        .or(subscription.trigger_ms)?;
+    u64::try_from(trigger).ok()
 }
 
 pub use super::notification_state::{MasterWakeAccumulator, MasterWakeSignal};

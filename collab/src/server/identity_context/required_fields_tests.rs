@@ -1100,6 +1100,54 @@ fn context_success_receipts_use_the_registered_project_owner() {
             ),
             vec!["nested_register", "route", "credential", "lease"]
         );
+        // An explicit owner re-subscription uses a generated id after the
+        // system-owned default lease was explicitly unsubscribed. The live
+        // direct-message channel still proves the lease receipt.
+        {
+            let mut state = runtime.state.lock().unwrap();
+            let default_id = crate::server::mailbox::default_direct_message_id(worker);
+            let mut lease = state
+                .notification_subscriptions
+                .remove(&default_id)
+                .expect("registration created the default direct-message lease");
+            lease.id = "sub-explicit-direct-message".into();
+            lease.status = "armed".into();
+            lease.status_reason = None;
+            lease.expires_ms = crate::server::state::now_ms() + 60_000;
+            state
+                .notification_subscriptions
+                .insert(lease.id.clone(), lease);
+        }
+        assert_eq!(
+            business_receipts_for_success(
+                &host,
+                &runtime,
+                &context,
+                None,
+                &response,
+                Some(&nested)
+            ),
+            vec!["nested_register", "route", "credential", "lease"]
+        );
+        {
+            let mut state = runtime.state.lock().unwrap();
+            state
+                .notification_subscriptions
+                .get_mut("sub-explicit-direct-message")
+                .unwrap()
+                .status = "cancelled".into();
+        }
+        assert_eq!(
+            business_receipts_for_success(
+                &host,
+                &runtime,
+                &context,
+                None,
+                &response,
+                Some(&nested)
+            ),
+            vec!["nested_register", "route", "credential"]
+        );
         let mut stale = Resp::data(response.data.clone());
         stale.data["identity_receipt"]["runtime"]["endpoint_generation"] = json!(2);
         assert_eq!(

@@ -4,6 +4,14 @@
 
 ## 恢复操作：context 自己迁移，agent 不做历史清理
 
+Desktop 的 agent sessionID 与 native thread ID 分开保存。当前 thread 或投递端点
+变化时，`collab context` 必须保留原名字、身份和工作，更新 binding、transport、
+current route 与有效订阅目标，并退休旧 route；相同事实重复恢复不增加 generation。
+不要从旧 transcript 抄 thread ID，也不要因为已注册就继续沿用旧 thread。普通恢复
+不重新注册或挑战；显式通信修复使用 `collab context --recover-communication`，
+其真实回投结果与普通身份恢复分别验收。历史注册回投记录由 context 自动兼容，
+不要求 agent 编辑或清空账本。
+
 普通注册或恢复只调用：
 
 ```sh

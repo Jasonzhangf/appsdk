@@ -182,7 +182,7 @@ pub fn batch_notification_text(
     let older = (remaining > 0)
         .then(|| format!(" older_messages={remaining}; run collab inbox"))
         .unwrap_or_default();
-    format!("Batch wake: message_ids={message_ids} task_ids={task_ids} action_categories={actions}. Run `collab recv` once to consume and read this durable batch; execute the actions, do not ACK-only.{older}")
+    format!("Batch wake: message_ids={message_ids} task_ids={task_ids} action_categories={actions}. Read full durable details from collab inbox; execute the actions, do not ACK-only.{older}")
 }
 
 #[derive(Debug)]
@@ -381,7 +381,7 @@ fn compose_notification_with_mtype(
 
     let head = format!("COLLAB_NOTIFY {} [{}] ", id, subject);
     let tail = format!(
-        " | {} ACTION: {}. Details: run `collab recv` once to consume and read this durable notification. | {}",
+        " | {} ACTION: {}. Details: run `collab recv` once; it consumes and prints this durable notification. | {}",
         priority, action, NOTIFY_PROTOCOL
     );
 

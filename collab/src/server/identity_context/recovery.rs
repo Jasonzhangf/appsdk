@@ -236,15 +236,10 @@ impl ProjectRuntimeManager {
         ident: &mut identity::Identity,
         scope: &Scope,
     ) -> anyhow::Result<RuntimeBinding> {
-        let mut state = runtime.state.lock().unwrap();
-        let mut worker = state
+        let mut transport = runtime.state.lock().unwrap()
             .workers
             .get(&ident.worker_id)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("IDENTITY_WORKER_MISSING"))?;
-        let mut transport = worker
-            .transport
-            .clone()
+            .and_then(|worker| worker.transport.clone())
             .ok_or_else(|| anyhow::anyhow!("IDENTITY_TRANSPORT_MISSING"))?;
         transport.tmux_endpoint = Some(candidate.endpoint.clone());
         if transport.kind == TransportKind::Tmux {
@@ -254,7 +249,27 @@ impl ProjectRuntimeManager {
             transport.thread_id = candidate.endpoint.codex_thread_id.clone();
         }
 
-        if saved.tmux_endpoint.as_ref() == Some(&candidate.endpoint) {
+        self.refresh_session_transport(runtime, saved, transport, ident, scope)
+    }
+
+    fn refresh_session_transport(
+        &self,
+        runtime: &Server,
+        saved: &RuntimeBinding,
+        transport: SelectedTransport,
+        ident: &mut identity::Identity,
+        scope: &Scope,
+    ) -> anyhow::Result<RuntimeBinding> {
+        let mut state = runtime.state.lock().unwrap();
+        let mut worker = state.workers.get(&ident.worker_id).cloned()
+            .ok_or_else(|| anyhow::anyhow!("IDENTITY_WORKER_MISSING"))?;
+        let same_placement = saved.tmux_endpoint == transport.tmux_endpoint
+            && saved.session_id.as_ref().map(identity::SessionId::as_str) == transport.session_id.as_deref()
+            && saved.native_thread_id.as_ref().map(NativeThreadId::as_str) == transport.thread_id.as_deref()
+            && (transport.kind == TransportKind::Tmux
+                || worker.transport.as_ref().is_some_and(|old| old.kind == transport.kind
+                    && old.endpoint == transport.endpoint && old.namespace == transport.namespace));
+        if same_placement {
             let worker_changed = worker.transport.as_ref() != Some(&transport);
             if worker_changed {
                 worker.transport = Some(transport.clone());
@@ -282,21 +297,9 @@ impl ProjectRuntimeManager {
             .endpoint_generation
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("IDENTITY_ENDPOINT_GENERATION_EXHAUSTED"))?;
-        next.tmux_endpoint = Some(candidate.endpoint.clone());
-        if transport.kind == TransportKind::Tmux {
-            next.session_id = candidate
-                .endpoint
-                .codex_session_id
-                .clone()
-                .map(identity::SessionId::new)
-                .transpose()?;
-            next.native_thread_id = candidate
-                .endpoint
-                .codex_thread_id
-                .clone()
-                .map(NativeThreadId::new)
-                .transpose()?;
-        }
+        next.tmux_endpoint = transport.tmux_endpoint.clone();
+        next.session_id = transport.session_id.clone().map(identity::SessionId::new).transpose()?;
+        next.native_thread_id = transport.thread_id.clone().map(NativeThreadId::new).transpose()?;
         worker.transport = Some(transport.clone());
         let grant = current_master_grant(&state, Some(&saved.route_scope()))
             .filter(|grant| grant.binding_id == saved.binding_id);
@@ -320,9 +323,8 @@ impl ProjectRuntimeManager {
         }];
         {
             let state = self.host.state.lock().unwrap();
-            if let Some(previous) = state
-                .global
-                .lookup_unique_tmux_pane_route(&candidate.endpoint)
+            if let Some(previous) = transport.tmux_endpoint.as_ref()
+                .and_then(|endpoint| state.global.lookup_unique_tmux_pane_route(endpoint))
             {
                 if previous != saved {
                     // Retarget the delivery address only. The old project's
@@ -1266,6 +1268,22 @@ impl ProjectRuntimeManager {
                         )?);
                     }
                 }
+                if facts.tmux.is_none() {
+                    if let (Some(saved), Some(mut transport)) = (current.as_ref(), ident.transport.clone()) {
+                        if transport.kind == TransportKind::AppServer
+                            && saved.session_id.as_ref().map(identity::SessionId::as_str) == facts.session_id.as_deref()
+                        {
+                            transport.session_id = facts.session_id.clone();
+                            transport.thread_id = facts.thread_id.clone().or(transport.thread_id);
+                            transport.endpoint = facts.endpoint.clone().or(transport.endpoint);
+                            transport.namespace = facts.namespace.clone().or(transport.namespace);
+                            transport.tmux_endpoint = None;
+                            current = Some(self.refresh_session_transport(
+                                &runtime, saved, transport, &mut ident, &scope,
+                            )?);
+                        }
+                    }
+                }
                 let binding = ident.runtime.clone().expect("restored runtime");
                 let registered_context =
                     ProjectContext::for_registered_route(&scope.root, &binding)?;
@@ -1571,13 +1589,6 @@ impl ProjectRuntimeManager {
         if transport.kind != TransportKind::AppServer
             || facts.session_id.as_deref().is_some_and(|value| {
                 runtime.session_id.as_ref().map(identity::SessionId::as_str) != Some(value)
-            })
-            || facts.thread_id.as_deref().is_some_and(|value| {
-                runtime
-                    .native_thread_id
-                    .as_ref()
-                    .map(NativeThreadId::as_str)
-                    != Some(value)
             })
         {
             return Ok(());

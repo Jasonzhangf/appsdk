@@ -2,6 +2,30 @@ use super::*;
 use crate::server::global_state::CurrentThreadRouteReplayStatus;
 
 impl State {
+    /// Clear a persisted goal-due wake that no longer has an armed goal
+    /// deadline owned by the master. Old daemons could snapshot `goal_due`
+    /// after the one-shot wake was already consumed; replay restores that
+    /// stale flag unless it is reconciled against live subscriptions.
+    pub(crate) fn reconcile_stale_master_goal_due(&mut self, now: i64) -> bool {
+        if !self.master_wake.goal_due {
+            return false;
+        }
+        let has_armed_master_goal_deadline = self
+            .notification_subscriptions
+            .values()
+            .any(|subscription| {
+                is_goal_deadline(subscription)
+                    && subscription.status == "armed"
+                    && subscription.expires_ms > now
+                    && subscription_affects_master_wake(self, subscription)
+            });
+        if has_armed_master_goal_deadline {
+            return false;
+        }
+        crate::server::notification_state::clear_master_goal_due(&mut self.master_wake);
+        true
+    }
+
     /// Backfill strict routes that replay did not establish.
     ///
     /// Route events are authoritative for existing ownership. Durable
@@ -172,6 +196,14 @@ impl State {
     }
 
     fn consume_notification(&mut self, subscription_id: &str, consumed_ms: Option<i64>) {
+        let clears_master_goal_due = self
+            .notification_subscriptions
+            .get(subscription_id)
+            .is_some_and(|subscription| {
+                subscription.status != "cancelled"
+                    && is_goal_deadline(subscription)
+                    && subscription_affects_master_wake(self, subscription)
+            });
         let Some(subscription) = self.notification_subscriptions.get_mut(subscription_id) else {
             return;
         };
@@ -184,6 +216,9 @@ impl State {
             subscription.status_reason = Some("goal-deadline-one-shot-delivered".into());
             if let Some(consumed_ms) = consumed_ms {
                 subscription.updated_ms = consumed_ms;
+            }
+            if clears_master_goal_due {
+                crate::server::notification_state::clear_master_goal_due(&mut self.master_wake);
             }
             return;
         }
@@ -580,6 +615,32 @@ impl State {
                 if let Some(evidence) = evidence {
                     self.notification_delivery_evidence
                         .insert(message_id.clone(), evidence.clone());
+                }
+                let accepted_goal_deadline_revision =
+                    self.msgs.get(message_id).is_some_and(|message| {
+                        message.from == "collab-server"
+                            && self
+                                .wake_bindings
+                                .get(message_id)
+                                .and_then(|subscription_id| {
+                                    self.notification_subscriptions.get(subscription_id)
+                                })
+                                .is_some_and(|subscription| {
+                                    is_goal_deadline(subscription)
+                                        && subscription_affects_master_wake(self, subscription)
+                                        && message.to == subscription.worker_id
+                                        && self.master_wake.active_goal_revision.is_some_and(
+                                            |revision| {
+                                                subscription_goal_deadline_revision(subscription)
+                                                    == Some(revision)
+                                            },
+                                        )
+                                })
+                    });
+                if accepted_goal_deadline_revision {
+                    crate::server::notification_state::clear_delivered_master_goal_due(
+                        &mut self.master_wake,
+                    );
                 }
             }
             Event::NotificationSubscribed { subscription } => {

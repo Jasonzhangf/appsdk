@@ -624,3 +624,142 @@ fn role_patrol_peer_deadline_is_finite_owned_and_consumable() {
         );
     }
 }
+
+#[test]
+fn accepted_master_goal_deadline_clears_goal_due_before_recv() {
+    let fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(
+        &["master", "promote", "--approval", "public-governance-latch"],
+        THREAD_A,
+    );
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let master_at = (now + 200).to_string();
+    let master = fixture.run_public(
+        &[
+            "notify",
+            "subscribe",
+            "--event",
+            "deadline",
+            "--subject",
+            "goal:accepted-latch",
+            "--at-ms",
+            &master_at,
+            "--ttl-seconds",
+            "60",
+        ],
+        THREAD_A,
+    );
+    let master_sub = master["subscription"]["id"].as_str().unwrap();
+    native_deadline(&fixture, THREAD_A, master_sub, Duration::from_secs(10)).unwrap();
+
+    let context = fixture.run_public(&["context"], THREAD_A);
+    assert_eq!(
+        context["master_wake"]["goal_due"], false,
+        "an accepted but unconsumed master goal deadline must clear goal_due: {context}"
+    );
+
+    fixture.run_public(&["context"], THREAD_B);
+    let peer_at = (SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        + 250)
+        .to_string();
+    let peer = fixture.run_public(
+        &[
+            "notify",
+            "subscribe",
+            "--event",
+            "deadline",
+            "--subject",
+            "goal:peer-latch",
+            "--at-ms",
+            &peer_at,
+            "--ttl-seconds",
+            "60",
+        ],
+        THREAD_B,
+    );
+    let peer_sub = peer["subscription"]["id"].as_str().unwrap();
+    native_deadline(&fixture, THREAD_B, peer_sub, Duration::from_secs(10)).unwrap();
+    let context = fixture.run_public(&["context"], THREAD_A);
+    assert_eq!(
+        context["master_wake"]["goal_due"], false,
+        "a peer-owned goal deadline must not pollute master goal_due: {context}"
+    );
+
+    fixture
+        .state
+        .lock()
+        .unwrap()
+        .get_mut(THREAD_A)
+        .unwrap()
+        .reject_input = true;
+    let later_at = (SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        + 200)
+        .to_string();
+    let later = fixture.run_public(
+        &[
+            "notify",
+            "subscribe",
+            "--event",
+            "deadline",
+            "--subject",
+            "goal:later-latch",
+            "--at-ms",
+            &later_at,
+            "--ttl-seconds",
+            "60",
+        ],
+        THREAD_A,
+    );
+    let later_sub = later["subscription"]["id"].as_str().unwrap();
+    let until = Instant::now() + Duration::from_secs(10);
+    let later_message = loop {
+        let events: Vec<Value> = std::fs::read_to_string(fixture.name_journal())
+            .unwrap()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        let bound = events
+            .iter()
+            .find(|e| e["ev"] == "WakeBound" && e["subscription_id"] == later_sub)
+            .and_then(|e| e["message_id"].as_str());
+        if let Some(message_id) = bound {
+            if events
+                .iter()
+                .any(|e| e["ev"] == "NotificationDeliveryFailed" && e["message_id"] == message_id)
+            {
+                break message_id.to_owned();
+            }
+        }
+        assert!(
+            Instant::now() < until,
+            "later master deadline never produced a rejected delivery for {later_sub}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    };
+    let events: Vec<Value> = std::fs::read_to_string(fixture.name_journal())
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    assert!(
+        !events.iter().any(|e| {
+            e["ev"] == "NotificationDeliveryAccepted" && e["message_id"] == later_message
+        }),
+        "a rejected delivery must not record adaptor acceptance"
+    );
+    let context = fixture.run_public(&["context"], THREAD_A);
+    assert_eq!(
+        context["master_wake"]["goal_due"], true,
+        "a later master deadline must re-raise goal_due until accepted: {context}"
+    );
+}

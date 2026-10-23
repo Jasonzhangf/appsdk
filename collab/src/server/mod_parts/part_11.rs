@@ -994,10 +994,18 @@ fn validate_wire_route_principals(
 /// is not the daemon's startup project. Operations for that route remain
 /// explicitly not-ready until a project reducer/journal owner is available.
 fn handle_user_shutdown(server: &Server, password: Option<&crate::proto::MaintenancePassword>) -> Resp {
-    if !password.is_some_and(|value| value.expose() == server.config.maintenance.password) {
+    handle_host_shutdown(&server.host_paths, &server.config.maintenance.password, password)
+}
+
+fn handle_host_shutdown(
+    host_paths: &HostPaths,
+    expected_password: &str,
+    password: Option<&crate::proto::MaintenancePassword>,
+) -> Resp {
+    if !password.is_some_and(|value| value.expose() == expected_password) {
         return Resp::err("MAINTENANCE_AUTHENTICATION_FAILED");
     }
-    if let Err(error) = std::fs::write(server.host_paths.state_root().join("DOWN"), b"user stopped\n") {
+    if let Err(error) = std::fs::write(host_paths.state_root().join("DOWN"), b"user stopped\n") {
         return Resp::err(format!("DAEMON_SHUTDOWN_FAILED: {error}"));
     }
     Resp::data(json!({"authorized": true, "capability": "user-maintenance"}))

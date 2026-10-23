@@ -68,6 +68,54 @@ fn legacy_host_fence_is_isolated_with_a_custom_state_root() {
 }
 
 #[tokio::test]
+async fn concurrent_degraded_shutdown_notifications_coalesce() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let root = test_root("maintenance-coalesce");
+    let paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+    paths.ensure_root().unwrap();
+    let journal = Arc::new(
+        crate::server::operation_journal::OperationJournal::open(paths.journal_path()).unwrap(),
+    );
+    let (_shutdown, receiver) = tokio::sync::watch::channel(false);
+    let (sender, mut pending) = tokio::sync::mpsc::channel(1);
+    let mut tasks = Vec::new();
+    for _ in 0..3 {
+        let (server, mut client) = tokio::net::UnixStream::pair().unwrap();
+        tasks.push(tokio::spawn(conn_task_degraded(
+            journal.clone(),
+            Arc::from("fixture replay error"),
+            server,
+            paths.clone(),
+            Arc::from("fixture-only"),
+            receiver.clone(),
+            sender.clone(),
+        )));
+        client
+            .write_all(b"{\"op\":\"Shutdown\",\"password\":\"fixture-only\"}\n")
+            .await
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(client).read_line(&mut line).await.unwrap();
+        let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["authorized"], true);
+    }
+    // Keep the listener's notification receiver alive but do not drain it.
+    // Every accepted connection must still finish after writing its response.
+    tokio::time::timeout(Duration::from_secs(1), async {
+        for task in tasks {
+            task.await.unwrap();
+        }
+    })
+    .await
+    .expect("shutdown notifications must coalesce without blocking connections");
+    assert_eq!(pending.try_recv(), Ok(()));
+    assert!(pending.try_recv().is_err());
+    assert!(paths.state_root().join("DOWN").exists());
+    drop(journal);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn timer_scheduler_does_not_overlap_ticks() {
     let (stop_tx, stop_rx) = tokio::sync::mpsc::channel(1);
     let in_flight = Arc::new(AtomicBool::new(false));

@@ -26,10 +26,12 @@ Use the exact [recovery commands and receipt contract](../collab/references/stab
 Do not reverse-engineer approval fields or run a separate migration ceremony.
 
 For ordinary peer or master recovery, use the existing user-managed daemon.
-Desktop invokes `collab_context` through the installed managed MCP entry; follow
-the [normal MCP activation contract](../collab/references/migration-daemon.md#install-and-activate-separately).
-Do not supply an AppServer endpoint for Desktop. The CLI example below is for
-tmux or AppServer; only AppServer supplements the returned current facts:
+Desktop also uses Collab CLI. Its identity anchor is the current agent
+sessionID; thread and bridge endpoint only locate communication. Agent-side
+MCP calls are optional. Follow [Desktop CLI registration and messaging](../collab/references/migration-daemon.md#desktop-cli-registration-and-messaging)
+for scoped bridge input, current automatic-discovery limitations and receipts.
+Do not supply an AppServer endpoint for Desktop. Only AppServer supplements
+the top-level endpoint in the example below:
 
 ```sh
 collab context
@@ -55,9 +57,10 @@ collab context
 printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"codex","version":"0.0.0"}}}\n' | collab-mcp
 ```
 
-For Desktop, replace the CLI `collab context` check above with `collab_context`
-through its normally loaded managed MCP entry. Installing the files does not
-reload that MCP process. Record installed and loaded-runtime evidence separately.
+For Desktop, keep the CLI entry; use the current Desktop bridge capability as
+documented above. Installing files does not activate a bridge service. Record
+installed and loaded-runtime evidence separately; do not require an MCP tool
+call or ask the user to find an assumed reconnect control.
 Detailed maintenance boundaries live in [`collab/references/migration-daemon.md`](../collab/references/migration-daemon.md); ordinary identity migration remains internal to context.
 
 ## 3. Control-plane migration vs. authorized reset

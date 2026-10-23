@@ -4,7 +4,9 @@
 
 ## 恢复操作：context 自己迁移，agent 不做历史清理
 
-Desktop 的 agent sessionID 与 native thread ID 分开保存。当前 thread 或投递端点
+Desktop 的身份锚点就是当前 agent sessionID；名字继续承载工作归属。
+agent sessionID 与 native thread ID 分开保存，不能因示例中两值相同就互相替代。
+当前 thread 或投递端点
 变化时，`collab context` 必须保留原名字、身份和工作，更新 binding、transport、
 current route 与有效订阅目标，并退休旧 route；相同事实重复恢复不增加 generation。
 不要从旧 transcript 抄 thread ID，也不要因为已注册就继续沿用旧 thread。普通恢复
@@ -26,7 +28,9 @@ bridge 从本次 executor metadata 取得真实 caller thread/turn，并将当�
 入口交给 `context`；agent sessionID 仍来自当前执行会话，不能用 thread ID 替代。
 不要求 Desktop 填写不存在的 AppServer endpoint，不查询 managed AppServer
 是否加载聊天来否定 bridge 能力。普通工具参数不能自选上游 caller/turn 或任意目标。
-缺 executor metadata 或 bridge 不可用时，保留明确错误，按正式 MCP 入口恢复；
+agent 注册、恢复、发信和收信可用 Collab CLI，不要求调用 MCP 工具。当前 CLI
+能力输入与自动发现缺口见[Desktop CLI 用法](migration-daemon.md#desktop-cli-registration-and-messaging)。
+缺 executor metadata 或 bridge 不可用时，保留明确错误，修所属 bridge 入口；
 不要抄旧 turn、猜 socket、启动 keeper、重启 tmux 或切换旧 transport。
 bridge 的宿主接受、实际新 turn、消费和回复分别验收；只有入队或 socket 可连接
 都不证明唤醒。源实现、正式安装与当前 MCP/daemon 是否加载仍分别报告。
@@ -43,7 +47,7 @@ collab context
 ```
 
 AppServer 宿主环境缺字段时，在每次调用中提交从当前宿主取得的事实；
-下面的 AppServer 示例不用于替代 Desktop bridge 的 MCP 上下文：
+下面的 AppServer 示例不用于替代 Desktop 的独立 bridge 能力输入：
 
 ```sh
 collab context --provide '{"session_id":"<当前 agent sessionID>","thread_id":"<当前 thread ID>","endpoint":"<当前 AppServer endpoint>","namespace":"codex_app"}'

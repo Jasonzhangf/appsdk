@@ -74,12 +74,15 @@ and the stable name owns the work. The reported agent sessionID is the current
 execution carrier; tmux session, pane, socket and server PID locate transport
 only. Same-name session changes update all unclosed board assignments. Pane
 history and old native addresses do not select or protect identity.
-For Desktop, configure the installed `~/.cargo/bin/collab-desktop-mcp` as the
-Collab MCP entry and invoke `collab_context` there. That managed entry supplies
-the current bridge from executor metadata; do not guess or reuse an AppServer
-socket. Use `project_scope` to select the project and provide the current agent
-session if the host does not supply it. Plain CLI context cannot create this
-Desktop capability. See [activation](references/migration-daemon.md#install-and-activate-separately).
+Desktop agents use the same CLI entry as other hosts: `collab context`,
+`collab sendmessage` and `collab recv`. Calling an MCP tool is not an identity
+or messaging prerequisite. Desktop's identity anchor is the current agent
+sessionID; the stable name owns work. Thread IDs and bridge sockets locate
+communication and never replace that anchor. A Desktop-owned bridge carries
+daemon-to-chat delivery; its lifecycle is separate from the agent's choice of
+CLI or MCP. See [Desktop CLI registration and messaging](references/migration-daemon.md#desktop-cli-registration-and-messaging)
+for current capability input, commands, receipts and the remaining automatic
+discovery limitation. Do not guess or reuse an AppServer socket.
 Production projects use the globally installed Collab v1.
 Candidate consumers may use the existing `COLLAB_TEST_BINARY` seam to select
 the exact tested binary. Candidate results do not prove the canonical installed
@@ -284,7 +287,7 @@ sink DAG. Every applicable node must finish before claiming delivery:
 latest_main_candidate
   -> targeted_tests + build/install
   -> user-managed runtime activation when applicable (outside the agent interface)
-  -> installed binary + collab context + collab-mcp initialize live checks
+  -> installed binary + collab context + affected bridge service live checks
   -> black-box live behavior replay + author debug complete
   -> applicable independent architecture review PASS
   -> commit/merge/push and cleanup
@@ -293,8 +296,9 @@ latest_main_candidate
 For ordinary peer bootstrap and identity recovery, the only entry remains
 `collab context`. Each AppServer context call carries its current session,
 thread, endpoint and namespace from the host or this call's `--provide`.
-Desktop uses the managed MCP entry described above; it supplies current
-executor metadata and the scoped bridge, with a real agent session if needed.
+Desktop CLI uses the current scoped bridge capability described above.
+The managed MCP entry can also supply it from executor metadata; invoking that
+tool is optional, and agent sessionID remains the identity anchor.
 That command is not a daemon lifecycle owner. A Collab runtime
 delivery that changes server, notification, identity, route, MCP, CLI, or daemon
 behavior must cross the runtime lifecycle boundary in the same delivery unit
@@ -455,7 +459,8 @@ Each AppServer context invocation carries the current session, thread, endpoint
 and namespace. The daemon never fills these facts from historical registration.
 AppServer CLI facts come from the current host or this invocation's `--provide`;
 AppServer MCP callers submit them on each call because startup facts may be stale.
-Desktop uses the managed MCP entry above, not this AppServer supplement.
+Desktop uses the separate bridge capability through CLI or the optional MCP
+entry, not this AppServer supplement.
 Missing facts preserve durable identity and work but do not complete restoration.
 `--query` only reads retained progress and needs no current endpoint.
 See [current-fact recovery](references/stable-name-recovery.md) for the contract.
@@ -650,7 +655,9 @@ With a matching live subscription, the first pending message opens a fixed
 batched delivery globally or per project; `appsdk config` shows effective
 policy. All eligible unsent messages for that recipient are combined
 into the selected transport (up to 3 previews per notification, with overflow
-retained in the inbox). On an AppServer binding, the daemon uses
+retained in the inbox). On a Desktop bridge binding, the daemon calls the
+bridge's native `send_message_to_thread`; the sender still uses the CLI.
+On an AppServer binding, the daemon uses
 `turn/start`, `turn/steer`, or `thread/queue/add`; on a tmux-only binding it
 submits a bounded wake to that pane. Neither transport acceptance proves that
 the peer consumed the durable message, and neither binding falls back to the

@@ -87,9 +87,12 @@ env_vars = ["CODEX_APP_TOOLS_PIPE_PATH", "CODEX_MCP_NODE_PATH", "CODEX_SESSION_I
 
 将示例中的 home 换为实际安装目录。`env_vars` 传递宿主当前提供的值，不能省略。
 不要手填 tools pipe、caller thread 或 turn。
-用正常 Desktop MCP 配置加载这个入口后，在当前聊天调用 `collab_context`。
-wrapper 从该次 executor metadata 注入新 bridge；daemon 不从历史端点恢复它。
-CLI 不拥有 Desktop MCP 的启动，也不会为 CLI 调用另起后台 bridge。
+这是 bridge 服务的一种正常加载方式，不要求 agent 用 MCP 工具注册或发信。
+MCP `collab_context` 可从该次 executor metadata 注入新 bridge；CLI 则接受本次
+bridge 的当前受限能力，详见[CLI 用法与当前缺口](../../collab/skills/collab/references/migration-daemon.md#desktop-cli-registration-and-messaging)。
+Desktop 身份锚点始终是 agent sessionID，thread 和 socket 不选择身份。
+当前默认 CLI 的能力自动发现仍待补齐，不能用文档宣称已经完成。CLI 不拥有
+Desktop MCP 的启动，也不会为 CLI 调用另起后台 bridge。
 
 先保留旧候选在 Desktop candidate 上失败的公开入口红测，再验证新分支。
 组合验收必须从正式 `context` 和 `collab sendmessage` 进入，取得 durable msg ID、

@@ -72,12 +72,11 @@ pub fn accumulate_master_wake(
 ) {
     let changed = match signal {
         MasterWakeSignal::GoalDue { revision } => {
-            let changed = !accumulator.goal_due
-                || accumulator
-                    .active_goal_revision
-                    .is_none_or(|current| *revision > current);
-            accumulator.goal_due = true;
+            let changed = accumulator
+                .active_goal_revision
+                .is_none_or(|current| *revision > current);
             if changed {
+                accumulator.goal_due = true;
                 accumulator.active_goal_revision = Some(*revision);
             }
             changed
@@ -169,6 +168,12 @@ pub fn accumulate_master_wake(
 
 pub fn mark_master_wake_delivered(accumulator: &mut MasterWakeAccumulator) {
     accumulator.delivery_state = "notified_unconsumed".into();
+}
+
+/// Clear the delivered goal-due latch while keeping the notified revision so a
+/// same-revision replay does not raise it again.
+pub fn clear_delivered_master_goal_due(accumulator: &mut MasterWakeAccumulator) {
+    accumulator.goal_due = false;
 }
 
 pub fn clear_master_goal_due(accumulator: &mut MasterWakeAccumulator) {

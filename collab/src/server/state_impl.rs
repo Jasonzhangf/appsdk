@@ -616,6 +616,32 @@ impl State {
                     self.notification_delivery_evidence
                         .insert(message_id.clone(), evidence.clone());
                 }
+                let accepted_goal_deadline_revision =
+                    self.msgs.get(message_id).is_some_and(|message| {
+                        message.from == "collab-server"
+                            && self
+                                .wake_bindings
+                                .get(message_id)
+                                .and_then(|subscription_id| {
+                                    self.notification_subscriptions.get(subscription_id)
+                                })
+                                .is_some_and(|subscription| {
+                                    is_goal_deadline(subscription)
+                                        && subscription_affects_master_wake(self, subscription)
+                                        && message.to == subscription.worker_id
+                                        && self.master_wake.active_goal_revision.is_some_and(
+                                            |revision| {
+                                                subscription_goal_deadline_revision(subscription)
+                                                    == Some(revision)
+                                            },
+                                        )
+                                })
+                    });
+                if accepted_goal_deadline_revision {
+                    crate::server::notification_state::clear_delivered_master_goal_due(
+                        &mut self.master_wake,
+                    );
+                }
             }
             Event::NotificationSubscribed { subscription } => {
                 self.notification_subscriptions

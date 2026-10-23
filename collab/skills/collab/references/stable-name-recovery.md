@@ -47,7 +47,7 @@ collab context
 ```
 
 AppServer 宿主环境缺字段时，在每次调用中提交从当前宿主取得的事实；
-下面的 AppServer 示例不用于替代 Desktop bridge 的 MCP 上下文：
+下面的 AppServer 示例不用于替代 Desktop 的独立 bridge 能力输入：
 
 ```sh
 collab context --provide '{"session_id":"<当前 agent sessionID>","thread_id":"<当前 thread ID>","endpoint":"<当前 AppServer endpoint>","namespace":"codex_app"}'

@@ -287,7 +287,7 @@ sink DAG. Every applicable node must finish before claiming delivery:
 latest_main_candidate
   -> targeted_tests + build/install
   -> user-managed runtime activation when applicable (outside the agent interface)
-  -> installed binary + collab context + collab-mcp initialize live checks
+  -> installed binary + collab context + affected bridge service live checks
   -> black-box live behavior replay + author debug complete
   -> applicable independent architecture review PASS
   -> commit/merge/push and cleanup
@@ -296,8 +296,9 @@ latest_main_candidate
 For ordinary peer bootstrap and identity recovery, the only entry remains
 `collab context`. Each AppServer context call carries its current session,
 thread, endpoint and namespace from the host or this call's `--provide`.
-Desktop uses the managed MCP entry described above; it supplies current
-executor metadata and the scoped bridge, with a real agent session if needed.
+Desktop CLI uses the current scoped bridge capability described above.
+The managed MCP entry can also supply it from executor metadata; invoking that
+tool is optional, and agent sessionID remains the identity anchor.
 That command is not a daemon lifecycle owner. A Collab runtime
 delivery that changes server, notification, identity, route, MCP, CLI, or daemon
 behavior must cross the runtime lifecycle boundary in the same delivery unit
@@ -458,7 +459,8 @@ Each AppServer context invocation carries the current session, thread, endpoint
 and namespace. The daemon never fills these facts from historical registration.
 AppServer CLI facts come from the current host or this invocation's `--provide`;
 AppServer MCP callers submit them on each call because startup facts may be stale.
-Desktop uses the managed MCP entry above, not this AppServer supplement.
+Desktop uses the separate bridge capability through CLI or the optional MCP
+entry, not this AppServer supplement.
 Missing facts preserve durable identity and work but do not complete restoration.
 `--query` only reads retained progress and needs no current endpoint.
 See [current-fact recovery](references/stable-name-recovery.md) for the contract.

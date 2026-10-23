@@ -33,9 +33,9 @@ bridge 只开放已绑定收件范围所需的投递与观测操作。它不提�
 
 ```mermaid
 flowchart TD
-  S([Desktop 正常启动 MCP]):::boundary --> A[读取宿主能力并初始化]:::action
+  S([启动受管 bridge]):::boundary --> A[读取宿主能力并初始化]:::action
   A --> B[(发布自有本地入口)]:::data
-  B --> C[处理绑定范围内的请求]:::action
+  B --> C[真实会话绑定后发布当前能力并处理请求]:::action
   C --> D[响应正常停止或上游断开]:::action
   D --> E([清理自有入口并退出]):::boundary
   classDef boundary fill:#E9EEF5,stroke:#64748B,color:#0F172A,stroke-width:1.5px
@@ -44,11 +44,43 @@ flowchart TD
 ```
 
 运行中的多请求由服务事件循环处理。图不为轮询或重试造回边。
-stdin 结束、正常信号或上游关闭时，服务退出或明确失效。只清理自己创建的 socket，
+stdin 结束、正常信号或上游关闭时，服务退出或明确失效。只清理自有文件和 socket，
 不逃离宿主管理，不忽略终止，不拥有 Collab daemon 或 tmux 的生命周期。
 正式 runtime 目录位于用户私有持久根下，不把生产 UDS 固定到临时目录。
 
 机器图：[服务生命周期](../dagpipe/collab-desktop-bridge-service.graph.json)。
+
+## CLI 当前能力发现
+
+bridge 在真实 executor enrollment 后，用原绑定读取 native thread 的实际 cwd。
+以 canonical cwd、agent sessionID、native thread ID 三项 scope 发布当前能力。
+sessionID 锚定身份，另外两项限制本次通信范围，不创建第二套身份注册表。
+
+能力声明位于 `~/.collab/runtime/desktop/capabilities/v1/`。路径依次为 `cwd/`、
+cwd 的 UTF-8 小写 hex、`session/`、sessionID 的 hex、`thread/`、thread ID 的 hex，
+每个编码值按最多 120 字符分段，末尾为 `current.json`。这是可逆精确索引，不是
+socket 扫描或历史身份推断。文件仅包含 schema 与既有 `desktop_bridge` candidate，
+不包含名字、角色、token、caller turn、时间戳或 verified 标记。
+
+发布者先写好本实例独占的不可变文件，再在同目录建立临时硬链接，并原子 rename
+为 `current.json`。同 scope 后一次成功发布替换前者。退出时仅删除本实例独占文件，
+不删除共享 `current.json`，因此旧进程不能删掉后继能力，也没有崩溃后遗留的目录锁。
+每个 scope 可留一份失活声明；新发布直接替换。崩溃遗留文件不授予能力、不阻止
+后继发布；本增量不承诺自动回收所有异常退出的孤立文件。
+
+CLI 在 mutating context 准备操作前按当前 scope 读取一次声明；显式提供 transport
+时沿原路径，query 和普通身份读取不发现能力。CLI 核对私有控制目录、常规文件、
+64 KiB 大小上限、schema、scope 和 endpoint 范围，不跟随符号链接。然后把候选交给
+daemon 原有 adapter 验证，不重复 probe，不修改 daemon 协议。错误保留身份和工作，
+不转投旧 socket 或 AppServer，不要求 agent 调 MCP。
+
+Desktop 环境标记可能被 tmux 子进程继承。声明读取失败时，CLI 复用既有 ancestry
+observer 核对真实当前 pane；证实存在时让 daemon 继续原有 tmux 优先 admission。
+不凭 `TMUX_PANE` 字符串认定在场，也不让未选用 Desktop 字段挡住可用 pane。
+
+首次启动而没有真实 executor enrollment 的 bridge 不能发布这份能力。CLI 不从
+session/thread 环境变量编造 turn。该场景返回明确的 Desktop 能力缺失；已登记的
+当前能力发现与全新聊天的无人介入首次绑定分别验收。
 
 ## 一次消息投递
 
@@ -88,11 +120,11 @@ env_vars = ["CODEX_APP_TOOLS_PIPE_PATH", "CODEX_MCP_NODE_PATH", "CODEX_SESSION_I
 将示例中的 home 换为实际安装目录。`env_vars` 传递宿主当前提供的值，不能省略。
 不要手填 tools pipe、caller thread 或 turn。
 这是 bridge 服务的一种正常加载方式，不要求 agent 用 MCP 工具注册或发信。
-MCP `collab_context` 可从该次 executor metadata 注入新 bridge；CLI 则接受本次
-bridge 的当前受限能力，详见[CLI 用法与当前缺口](../../collab/skills/collab/references/migration-daemon.md#desktop-cli-registration-and-messaging)。
+MCP `collab_context` 可从该次 executor metadata 注入新 bridge；普通 CLI 自动读取
+该 bridge 当前发布的受限能力，详见[CLI 用法](../../collab/skills/collab/references/migration-daemon.md#desktop-cli-registration-and-messaging)。
 Desktop 身份锚点始终是 agent sessionID，thread 和 socket 不选择身份。
-当前默认 CLI 的能力自动发现仍待补齐，不能用文档宣称已经完成。CLI 不拥有
-Desktop MCP 的启动，也不会为 CLI 调用另起后台 bridge。
+CLI 不拥有 Desktop MCP 的启动，也不会为 CLI 调用另起后台 bridge。bridge 服务
+必须先具备真实 enrollment；无此能力的首次绑定不因发现逻辑而自动成立。
 
 先保留旧候选在 Desktop candidate 上失败的公开入口红测，再验证新分支。
 组合验收必须从正式 `context` 和 `collab sendmessage` 进入，取得 durable msg ID、

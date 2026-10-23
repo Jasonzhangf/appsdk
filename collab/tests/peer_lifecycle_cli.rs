@@ -832,6 +832,20 @@ fn settle_snapshot_background_notifications(
         assert_eq!(receipt["consumed_by_recv"], true, "{receipt}");
         eprintln!("snapshot background consumed: {receipt}");
     }
+    // Name-adjudication delivery can finish before the first keepalive tick.
+    // Establish both timer-owned baselines before asserting snapshot purity;
+    // keep the journal assertion sensitive to subsequent keepalive writes.
+    assert!(
+        wait_until(Duration::from_secs(15), || {
+            let current = records();
+            [master_id, peer_id].iter().all(|worker_id| {
+                current.iter().any(|event| {
+                    event["ev"] == "KeepaliveUpdated" && event["worker_id"] == *worker_id
+                })
+            })
+        }),
+        "both workers must finish their initial keepalive observation before snapshot"
+    );
 }
 
 #[test]

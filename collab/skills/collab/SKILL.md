@@ -81,8 +81,8 @@ sessionID; the stable name owns work. Thread IDs and bridge sockets locate
 communication and never replace that anchor. A Desktop-owned bridge carries
 daemon-to-chat delivery; its lifecycle is separate from the agent's choice of
 CLI or MCP. See [Desktop CLI registration and messaging](references/migration-daemon.md#desktop-cli-registration-and-messaging)
-for current capability input, commands, receipts and the remaining automatic
-discovery limitation. Do not guess or reuse an AppServer socket.
+for automatic current-capability discovery, commands, receipts and the
+first-enrollment limit. Do not guess or reuse an AppServer socket.
 Production projects use the globally installed Collab v1.
 Candidate consumers may use the existing `COLLAB_TEST_BINARY` seam to select
 the exact tested binary. Candidate results do not prove the canonical installed

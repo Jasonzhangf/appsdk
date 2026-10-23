@@ -109,10 +109,17 @@ collab sendmessage --to <registered-recipient> --subject <topic> "<message>"
 collab recv
 ```
 
-Registration/recovery needs the live bridge's scoped current capability.
-When that capability is available from this bridge's current initialization or
-registration receipt, the CLI accepts the following shape. Substitute only
-those actual returned values; never copy sample or historical socket paths:
+Registration/recovery uses the live bridge's scoped current capability. With
+a genuinely enrolled bridge, ordinary `collab context` reads its exact current
+declaration automatically. No manual endpoint or agent-side MCP call is needed.
+An explicitly supplied AppServer endpoint, including the calling host's
+endpoint environment, retains its direct AppServer path and skips discovery.
+The daemon verifies the declared candidate through its existing adapter.
+An actual verified current tmux pane retains its existing admission priority;
+an inherited Desktop environment marker does not make unused bridge facts
+mandatory. A pane environment string alone cannot establish that placement.
+For an explicit current capability supplied by the host, the CLI also accepts
+the shape below. Use only actual current values; never copy historical paths:
 
 ```sh
 collab context --provide '{"session_id":"<current agent sessionID>","thread_id":"<current native thread ID>","desktop_bridge":{"endpoint":"<current bridge unix:// endpoint>","namespace":"codex_app","session_id":"<current agent sessionID>","thread_id":"<current native thread ID>","cwd":"<canonical project cwd>"}}'
@@ -125,16 +132,22 @@ top-level `endpoint` is the separate AppServer field and is not its replacement.
 Normal restoration preserves the name and role and lets context update routes,
 valid reception subscriptions and open-task session bindings.
 
-Current verified behavior: installed CLI context with a current bridge
-capability, CLI send, automatic entry into the Desktop chat and CLI receive
-all work. Automatic CLI discovery of that capability is not yet complete:
-plain Desktop `collab context` can incorrectly ask for an AppServer endpoint.
-Treat this as a registration implementation gap, not a requirement that the
-agent call MCP, guess a socket, edit identity state or restart a service. Do
-not claim CLI-only automatic bootstrap is delivered. A task-owned foreground
-bridge experiment proves only that experiment's lifetime, not unattended
-production service availability. Fix capability publication/discovery in its
-runtime owner; keep unaffected work moving.
+The declaration is current bridge-owned control, not a persisted identity
+record. Discovery matches canonical invocation cwd, current agent sessionID
+and current native thread ID. It does not search sockets, reuse old routes,
+infer caller turns, or alter names. Explicit transport input keeps its own
+path; queries and ordinary identity reads do not discover or update transport.
+An exited bridge can leave inactive `current.json` metadata. The daemon still
+verifies actual native capability; a genuine replacement publishes over it
+without an identity takeover or stale-lock cleanup by the agent.
+
+If no bridge has genuine executor enrollment, no current capability can be
+published. Return the precise Desktop capability error. Do not ask for an
+AppServer endpoint, require an MCP tool invocation, guess a socket, edit
+identity state or restart a service. Discovery of an enrolled bridge does not
+prove unattended first bootstrap of a new chat. A task-owned foreground bridge
+experiment proves only that experiment's lifetime. Report source, installed
+publisher/CLI loading and actual Desktop delivery separately.
 
 `sendmessage` returns a durable message ID; native adapter acceptance is a
 separate fact. Confirm actual arrival in the target chat. Run `collab recv`

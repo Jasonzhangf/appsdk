@@ -3,6 +3,7 @@ mod client;
 mod config;
 mod context_operation;
 mod dashboard;
+mod desktop_capability;
 mod identity;
 mod install_skills;
 pub(crate) mod migration;

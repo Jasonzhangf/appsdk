@@ -1421,12 +1421,17 @@ fn desktop_managed_socket_is_not_inferred_without_explicit_endpoint() {
     let output = fixture.command_desktop_without_explicit_endpoint(&["context"], THREAD_A);
     assert!(
         !output.status.success(),
-        "missing endpoint is an actionable typed result"
+        "unenrolled Desktop must report its actual bridge capability gap"
     );
-    let context: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(context["ok"], false);
-    assert_eq!(context["result"]["outcome"], "missing_facts");
-    assert_eq!(context["result"]["requires"]["fields"], json!(["endpoint"]));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("DESKTOP_BRIDGE_CAPABILITY_REQUIRED"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "no fabricated AppServer requirement projection"
+    );
     assert_eq!(
         fixture.appserver_connections.load(Ordering::Relaxed),
         0,

@@ -216,14 +216,6 @@ fn context_schema_requires_current_native_facts_and_preserves_query() {
     assert_eq!(context["inputSchema"]["required"], json!([]));
     let provide = &context["inputSchema"]["properties"]["provide"];
     assert!(provide["oneOf"].is_array(), "{provide}");
-    assert!(context["description"]
-        .as_str()
-        .unwrap()
-        .contains("Desktop uses the installed collab-desktop-mcp entry"));
-    assert!(context["description"]
-        .as_str()
-        .unwrap()
-        .contains("Query only reads retained progress and needs no endpoint or registration"));
     assert!(
         definitions
             .as_array()

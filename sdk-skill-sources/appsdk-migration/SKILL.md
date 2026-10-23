@@ -29,7 +29,7 @@ For ordinary peer or master recovery, use the existing user-managed daemon.
 Desktop also uses Collab CLI. Its identity anchor is the current agent
 sessionID; thread and bridge endpoint only locate communication. Agent-side
 MCP calls are optional. Follow [Desktop CLI registration and messaging](../collab/references/migration-daemon.md#desktop-cli-registration-and-messaging)
-for scoped bridge input, current automatic-discovery limitations and receipts.
+for automatic current bridge discovery, the first-enrollment limit and receipts.
 Do not supply an AppServer endpoint for Desktop. Only AppServer supplements
 the top-level endpoint in the example below:
 

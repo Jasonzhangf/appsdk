@@ -355,8 +355,10 @@ fn handle_goal_schedule_reconcile(
                 && subscription.repeat_count == 1
                 && subscription.expires_ms > now
         }).cloned() {
+            let retained_id = existing.id.clone();
             let mut events = Vec::new();
-            let mut deduplicated = true;
+            let mut retired = Vec::new();
+            let mut superseded = Vec::new();
             if existing.method != transport.kind.as_str() || existing.target != target {
                 existing.method = transport.kind.as_str().into();
                 existing.target = target.to_owned();
@@ -364,7 +366,36 @@ fn handle_goal_schedule_reconcile(
                 events.push(Event::NotificationSubscribed {
                     subscription: existing.clone(),
                 });
-                deduplicated = false;
+            }
+            for subscription in matching.iter().filter(|subscription| {
+                subscription.id != retained_id
+                    && matches!(
+                        subscription.status.as_str(),
+                        "armed" | "consumed" | "transport-lost"
+                    )
+            }) {
+                retired.push(subscription.id.clone());
+                if matches!(subscription.status.as_str(), "armed" | "transport-lost") {
+                    events.push(Event::NotificationSuppressed {
+                        subscription_id: subscription.id.clone(),
+                        status: "cancelled".into(),
+                        reason: "goal-schedule-rearmed".into(),
+                        updated_ms: now,
+                    });
+                }
+                superseded.extend(pending_messages_for_subscription(&state, &subscription.id));
+            }
+            superseded.sort();
+            superseded.dedup();
+            if !superseded.is_empty() {
+                events.push(Event::Superseded { ids: superseded.clone() });
+            }
+            if caller_is_master {
+                if let Some(event) =
+                    cleared_master_goal_due_event(&state, &worker_id, &retired, now)
+                {
+                    events.push(event);
+                }
             }
             if !events.is_empty() {
                 if let Err(error) = server.commit_locked(&mut state, &events) {
@@ -377,9 +408,9 @@ fn handle_goal_schedule_reconcile(
                 "desired": "active",
                 "status": "armed",
                 "subscription": existing,
-                "retired_subscription_ids": [],
-                "superseded_message_ids": [],
-                "deduplicated": deduplicated,
+                "retired_subscription_ids": retired,
+                "superseded_message_ids": superseded,
+                "deduplicated": events.is_empty(),
                 "one_shot": true,
                 "max_repeat_count": crate::server::state::MAX_NOTIFICATION_REPEATS,
             }));

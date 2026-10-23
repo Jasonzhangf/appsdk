@@ -165,33 +165,34 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
         .as_str()
         .expect("daemon receipt names sender worker")
         .to_owned();
-    let sender_name = sender_context["name"]
+    let receiver_name = receiver_context["name"]
         .as_str()
-        .expect("context names the caller's stable occupancy")
+        .expect("context names the receiver's stable occupancy")
         .to_owned();
-    // Own a finite goal schedule through the public reconcile so the test can
-    // prove that ending it terminates the occurrence without touching the
-    // daemon-owned direct-message reception below.
-    let sender_goal_id = "tmux-e2e-finite-goal";
-    let finite_trigger_ms = now_epoch_ms() + 60_000;
+    // The eventual recipient owns and ends this finite schedule, so the test
+    // proves that ending an owner's finite schedule preserves that owner's own
+    // daemon-owned direct-message reception. The trigger is close enough that
+    // the fixture actually crosses it before asserting termination.
+    let receiver_goal_id = "tmux-e2e-finite-goal";
+    let finite_trigger_ms = now_epoch_ms() + 5_000;
     let armed_finite = fixture.run_ok(
         &[
             "goal",
             "reconcile",
             "--goal-id",
-            sender_goal_id,
+            receiver_goal_id,
             "--owner",
-            &sender_name,
+            &receiver_name,
             "--desired",
             "active",
             "--at-ms",
             &finite_trigger_ms.to_string(),
             "--ttl-seconds",
-            "120",
+            "300",
             "--reason",
             "owned finite schedule",
         ],
-        Some(&sender),
+        Some(&receiver),
     );
     let finite_subscription_id = armed_finite["subscription"]["id"]
         .as_str()
@@ -203,15 +204,15 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
             "goal",
             "reconcile",
             "--goal-id",
-            sender_goal_id,
+            receiver_goal_id,
             "--owner",
-            &sender_name,
+            &receiver_name,
             "--desired",
             "ended",
             "--reason",
             "owned finite schedule ended",
         ],
-        Some(&sender),
+        Some(&receiver),
     );
     assert_eq!(ended_finite["status"], "ended");
     assert!(
@@ -220,7 +221,7 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
             .is_some_and(|ids| ids.iter().any(|id| id == &finite_subscription_id)),
         "the ended receipt must retire the owned occurrence: {ended_finite}"
     );
-    let ended_status = fixture.run_ok(&["notify", "status"], Some(&sender));
+    let ended_status = fixture.run_ok(&["notify", "status"], Some(&receiver));
     let ended_occurrence = ended_status["subscriptions"]
         .as_array()
         .expect("notify status lists subscriptions")
@@ -232,6 +233,16 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
         ended_occurrence["event"], "deadline",
         "the ended schedule must not be a direct-message lease"
     );
+    // Cross the bounded trigger window so the assertion cannot pass merely
+    // because the run finished before the trigger time.
+    let crossed_by = Instant::now() + Duration::from_secs(15);
+    while now_epoch_ms() <= finite_trigger_ms + 1_500 {
+        assert!(
+            Instant::now() < crossed_by,
+            "fixture did not cross the bounded goal trigger window"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
     let ended_journal = std::fs::read_to_string(owned_journal(&fixture)).unwrap();
     let ended_wake_count = ended_journal
         .lines()
@@ -243,6 +254,15 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
     assert_eq!(
         ended_wake_count, 0,
         "an ended owned finite schedule must not emit a further occurrence: {ended_journal}"
+    );
+    let ended_deadline_messages = ended_journal
+        .lines()
+        .filter(|line| line.contains("\"ev\":\"Sent\""))
+        .filter(|line| line.contains(&format!("\"subject\":\"deadline:goal:{receiver_goal_id}\"")))
+        .count();
+    assert_eq!(
+        ended_deadline_messages, 0,
+        "an ended finite schedule must not send a deadline wake: {ended_journal}"
     );
 
     let route = fixture.run_ok(
@@ -521,7 +541,7 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
         fixture.run_ok(&["msg", &after_goal_id], Some(&sender))["consumed_by_recv"],
         true
     );
-    let after_goal_status = fixture.run_ok(&["notify", "status"], Some(&sender));
+    let after_goal_status = fixture.run_ok(&["notify", "status"], Some(&receiver));
     assert!(
         after_goal_status["subscriptions"]
             .as_array()
@@ -530,6 +550,15 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
             .find(|subscription| subscription["id"] == finite_subscription_id)
             .is_some_and(|subscription| subscription["status"] == "cancelled"),
         "the ended finite schedule must stay terminal: {after_goal_status}"
+    );
+    assert!(
+        after_goal_status["subscriptions"]
+            .as_array()
+            .expect("notify status lists subscriptions")
+            .iter()
+            .find(|subscription| subscription["id"] == finite_subscription_id)
+            .is_some_and(|subscription| subscription["worker_id"] == receiver_id),
+        "the finite schedule that ended must belong to the receiving owner: {after_goal_status}"
     );
     assert!(
         after_goal_status["subscriptions"]

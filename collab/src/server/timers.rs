@@ -397,9 +397,20 @@ fn automatic_delivery_candidate(state: &super::state::State, message: &Message) 
                 && !state
                     .notification_delivery_accepted
                     .contains_key(&message.id)
-                && !state
+                && state
                     .notification_delivery_failures
-                    .contains_key(&message.id)
+                    .get(&message.id)
+                    .is_none_or(|failure| {
+                        // A max_unacked admission deferral records a retryable
+                        // `notification.not_attempted` failure before any
+                        // adaptor I/O. Its zero attempt facts distinguish it
+                        // from an attempted or uncertain delivery, so the
+                        // existing automatic attempt owner may resume it once
+                        // the safety limit clears.
+                        failure.operation == "notification.not_attempted"
+                            && failure.retryable
+                            && message.wake_attempt_count == 0
+                    })
         }
         Some("explicit-notification") => false,
         // Internal daemon markers predate the explicit delivery domain and

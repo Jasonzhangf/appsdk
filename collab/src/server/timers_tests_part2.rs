@@ -843,6 +843,119 @@ use super::*;
     }
 
     #[test]
+    fn goal_reconcile_retained_occurrence_retires_transport_lost_predecessor() {
+        let (server, root) = test_server();
+        register_master(&server);
+        let now = now_ms();
+        let transport = server
+            .state
+            .lock()
+            .unwrap()
+            .workers
+            .get("master")
+            .and_then(|worker| worker.transport.clone())
+            .expect("registered master transport");
+        let (target, method) = subscription_target(&server, "master");
+        let seed = |id: &str, status: &str, trigger_ms: i64| {
+            server.commit(&[Event::NotificationSubscribed {
+                subscription: NotificationSubscription {
+                    id: id.into(),
+                    worker_id: "master".into(),
+                    event: "deadline".into(),
+                    subject: Some("goal:retained".into()),
+                    target: target.clone(),
+                    method: method.clone(),
+                    trigger_ms: Some(trigger_ms),
+                    trigger_times_ms: Vec::new(),
+                    interval_ms: None,
+                    repeat_count: 1,
+                    fired_count: 0,
+                    expires_ms: now + 86_400_000,
+                    status: status.into(),
+                    created_ms: now - 1_000,
+                    updated_ms: now,
+                    status_reason: (status == "transport-lost")
+                        .then(|| "fixture transport-lost".into()),
+                },
+            }]);
+        };
+        let retained_trigger = now + 120_000;
+        seed("sub-goal-predecessor", "transport-lost", now + 60_000);
+        seed("sub-goal-retained", "armed", retained_trigger);
+        // A pending scheduler message from the older occurrence must be
+        // superseded in the same commit as the retirement.
+        let pending_id = bind_message_with_id(
+            &server,
+            "master",
+            "sub-goal-predecessor",
+            "msg-predecessor-deadline",
+        );
+
+        let reconciled = super::super::handle_goal_schedule_reconcile(
+            &server,
+            "master".into(),
+            "token-master".into(),
+            "retained".into(),
+            "Jenny".into(),
+            "active".into(),
+            Some(retained_trigger),
+            Some(3600),
+            None,
+            Some("goal-rearm".into()),
+        );
+        assert!(reconciled.ok, "{}", reconciled.error.unwrap_or_default());
+        assert_eq!(
+            reconciled.data["retired_subscription_ids"],
+            serde_json::json!(["sub-goal-predecessor"])
+        );
+        assert_eq!(
+            reconciled.data["superseded_message_ids"],
+            serde_json::json!(["msg-predecessor-deadline"])
+        );
+        {
+            let state = server.state.lock().unwrap();
+            assert_eq!(
+                state.notification_subscriptions["sub-goal-predecessor"].status,
+                "cancelled"
+            );
+            assert_eq!(
+                state.notification_subscriptions["sub-goal-retained"].status,
+                "armed"
+            );
+            assert_eq!(state.msgs[&pending_id].state, "superseded");
+            let recoverable = state
+                .notification_subscriptions
+                .values()
+                .filter(|subscription| {
+                    subscription.worker_id == "master"
+                        && is_goal_deadline(subscription)
+                        && subscription.subject.as_deref() == Some("goal:retained")
+                        && matches!(subscription.status.as_str(), "armed" | "transport-lost")
+                })
+                .count();
+            assert_eq!(
+                recoverable, 1,
+                "retaining a matching occurrence must leave exactly one recoverable occurrence"
+            );
+        }
+
+        // Context retarget must not revive the retired predecessor.
+        let retarget = super::super::retarget_owned_notification_events(
+            &server.state.lock().unwrap(),
+            "master",
+            &transport,
+            now + 1,
+        );
+        assert!(
+            retarget.iter().all(|event| !matches!(event, Event::NotificationSubscribed {
+                subscription
+            } if subscription.id == "sub-goal-predecessor")),
+            "a retired predecessor must stay terminal: {retarget:?}"
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn master_goal_due_reconciles_post_transition_and_ignores_peer_goals() {
         let (server, root) = test_server();
         register_master(&server);
@@ -1873,6 +1986,114 @@ use super::*;
             server.state.lock().unwrap().msgs[&id4].wake_attempt_count,
             1
         );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn immediate_automatic_delivery_resumes_after_max_unacked_ack() {
+        let (mut server, root) = test_server();
+        Arc::get_mut(&mut server).unwrap().config.notifications.mode = "immediate".into();
+        let submitted = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        {
+            let submitted = Arc::clone(&submitted);
+            Arc::get_mut(&mut server).unwrap().appserver_notification_sink =
+                Arc::new(move |_transport, _, _, message_id, _, _mode| {
+                    submitted.lock().unwrap().push(message_id.to_string());
+                    Ok(serde_json::json!({"accepted": true}))
+                });
+        }
+        let server = Arc::new(server);
+        register(&server, "recovered-peer");
+        let subscription_id = subscribe(&server, "recovered-peer", "direct-message", None, None);
+
+        // Saturate the ACK safety limit with three distinct delivered rows.
+        let mut delivered_ids = Vec::new();
+        for index in 0..3 {
+            let id = bind_message_with_id(
+                &server,
+                "recovered-peer",
+                &subscription_id,
+                &format!("msg-unacked-{index}"),
+            );
+            assert!(super::super::attempt_notification_with_default(
+                &server,
+                &id,
+                &subscription_id,
+                &|_| true,
+                &|_, _| true,
+            ));
+            server.commit(&[Event::Delivered { ids: vec![id.clone()] }]);
+            delivered_ids.push(id);
+        }
+
+        // The recovered immediate report has persisted immediate mode and zero
+        // attempt facts, like a daemon-restored pending direct message.
+        let recovered_id = bind_message_with_id(
+            &server,
+            "recovered-peer",
+            &subscription_id,
+            "msg-recovered-immediate",
+        );
+        server.commit(&[Event::DeliveryMode {
+            msg_id: recovered_id.clone(),
+            mode: "immediate".into(),
+            source_thread_id: None,
+        }]);
+
+        // The first automatic pass is a pre-I/O admission deferral: it records
+        // the retryable not_attempted failure but no wake attempt.
+        let now = now_ms();
+        tick_with_idle_at(&server, now, &|_| true);
+        {
+            let state = server.state.lock().unwrap();
+            let message = &state.msgs[&recovered_id];
+            assert_eq!(message.wake_attempt_count, 0, "safety deferral must not claim an attempt");
+            assert_eq!(message.last_wake_attempt_ms, 0);
+            assert_eq!(
+                state.notification_delivery_failures[&recovered_id].operation,
+                "notification.not_attempted"
+            );
+            assert!(state.notification_delivery_failures[&recovered_id].retryable);
+            assert!(!state.notification_delivery_accepted.contains_key(&recovered_id));
+        }
+        assert!(submitted.lock().unwrap().is_empty());
+
+        // ACK clears the safety limit. The zero-attempt message must stay
+        // eligible for the same automatic attempt owner.
+        server.commit(&[Event::Acked { ids: delivered_ids }]);
+        assert_eq!(
+            server
+                .state
+                .lock()
+                .unwrap()
+                .msgs
+                .values()
+                .filter(|message| message.to == "recovered-peer" && message.state == "delivered")
+                .count(),
+            0
+        );
+
+        tick_with_idle_at(&server, now + 1, &|_| true);
+        assert_eq!(
+            submitted.lock().unwrap().as_slice(),
+            [recovered_id.as_str()],
+            "the never-attempted immediate message must resume after ACK"
+        );
+        {
+            let state = server.state.lock().unwrap();
+            assert_eq!(state.msgs[&recovered_id].wake_attempt_count, 1);
+            assert!(state.notification_delivery_accepted.contains_key(&recovered_id));
+        }
+
+        // Accepted delivery is never resubmitted by a later tick.
+        tick_with_idle_at(&server, now + 2, &|_| true);
+        assert_eq!(submitted.lock().unwrap().len(), 1);
+        assert_eq!(
+            server.state.lock().unwrap().msgs[&recovered_id].wake_attempt_count,
+            1
+        );
+
+        drop(server);
         std::fs::remove_dir_all(root).ok();
     }
 

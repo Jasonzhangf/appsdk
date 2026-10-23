@@ -701,6 +701,7 @@ use super::*;
             "ended".into(),
             None,
             None,
+            None,
             Some("goal-finished".into()),
         );
         assert!(cancelled.ok, "{}", cancelled.error.unwrap_or_default());
@@ -721,6 +722,293 @@ use super::*;
     }
 
     #[test]
+    fn goal_reconcile_retires_transport_lost_and_rearm_leaves_one_active() {
+        let (server, root) = test_server();
+        register_master(&server);
+        let now = now_ms();
+        let transport = server
+            .state
+            .lock()
+            .unwrap()
+            .workers
+            .get("master")
+            .and_then(|worker| worker.transport.clone())
+            .unwrap();
+        let seed_lost = |id: &str, subject: &str| {
+            server.commit(&[Event::NotificationSubscribed {
+                subscription: NotificationSubscription {
+                    id: id.into(),
+                    worker_id: "master".into(),
+                    event: "deadline".into(),
+                    subject: Some(subject.into()),
+                    target: "thread-master".into(),
+                    method: "tmux".into(),
+                    trigger_ms: Some(now + 60_000),
+                    trigger_times_ms: Vec::new(),
+                    interval_ms: None,
+                    repeat_count: 1,
+                    fired_count: 0,
+                    expires_ms: now + 86_400_000,
+                    status: "transport-lost".into(),
+                    created_ms: now,
+                    updated_ms: now,
+                    status_reason: Some("fixture transport-lost".into()),
+                },
+            }]);
+        };
+
+        seed_lost("sub-goal-lost", "goal:shared");
+        let ended = super::super::handle_goal_schedule_reconcile(
+            &server,
+            "master".into(),
+            "token-master".into(),
+            "shared".into(),
+            "Jenny".into(),
+            "ended".into(),
+            None,
+            None,
+            None,
+            Some("goal-finished".into()),
+        );
+        assert!(ended.ok, "{}", ended.error.unwrap_or_default());
+        {
+            let state = server.state.lock().unwrap();
+            assert_eq!(
+                state.notification_subscriptions["sub-goal-lost"].status,
+                "cancelled"
+            );
+            // Context retarget only restores armed/transport-lost occurrences.
+            let retarget = super::super::retarget_owned_notification_events(
+                &state,
+                "master",
+                &transport,
+                now + 1,
+            );
+            assert!(
+                retarget
+                    .iter()
+                    .all(|event| !matches!(event, Event::NotificationSubscribed {
+                        subscription
+                    } if subscription.id == "sub-goal-lost")),
+                "a cancelled transport-lost goal must stay terminal: {retarget:?}"
+            );
+            let snapshot = state.snapshot_events();
+            drop(state);
+            let (replayed, replay_root) = test_server();
+            for event in &snapshot {
+                replayed.commit(std::slice::from_ref(event));
+            }
+            let replay_state = replayed.state.lock().unwrap();
+            assert_eq!(
+                replay_state.notification_subscriptions["sub-goal-lost"].status,
+                "cancelled"
+            );
+            drop(replay_state);
+            std::fs::remove_dir_all(replay_root).ok();
+        }
+
+        seed_lost("sub-goal-rearm-lost", "goal:shared");
+        let rearmed = super::super::handle_goal_schedule_reconcile(
+            &server,
+            "master".into(),
+            "token-master".into(),
+            "shared".into(),
+            "Jenny".into(),
+            "active".into(),
+            Some(now + 120_000),
+            Some(3600),
+            None,
+            Some("goal-rearm".into()),
+        );
+        assert!(rearmed.ok, "{}", rearmed.error.unwrap_or_default());
+        {
+            let state = server.state.lock().unwrap();
+            assert_eq!(
+                state.notification_subscriptions["sub-goal-rearm-lost"].status,
+                "cancelled"
+            );
+            let active = state
+                .notification_subscriptions
+                .values()
+                .filter(|subscription| {
+                    subscription.worker_id == "master"
+                        && is_goal_deadline(subscription)
+                        && subscription.subject.as_deref() == Some("goal:shared")
+                        && subscription.status == "armed"
+                })
+                .count();
+            assert_eq!(active, 1, "rearm must leave exactly one active occurrence");
+        }
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn master_goal_due_reconciles_post_transition_and_ignores_peer_goals() {
+        let (server, root) = test_server();
+        register_master(&server);
+        register(&server, "worker");
+        let now = now_ms();
+        let set_due = |goal_due: bool, revision: u64| {
+            server.commit(&[crate::server::state::Event::MasterWakeUpdated {
+                accumulator: crate::server::state::MasterWakeAccumulator {
+                    goal_due,
+                    active_goal_revision: Some(revision),
+                    last_updated_ms: now,
+                    ..Default::default()
+                },
+            }]);
+        };
+        let seed_due_goal = |worker: &str, subject: &str| -> String {
+            let id = format!("sub-due-{worker}-{subject}");
+            let (target, method) = subscription_target(&server, worker);
+            server.commit(&[Event::NotificationSubscribed {
+                subscription: NotificationSubscription {
+                    id: id.clone(),
+                    worker_id: worker.into(),
+                    event: "deadline".into(),
+                    subject: Some(subject.into()),
+                    target,
+                    method,
+                    trigger_ms: Some(now - 1),
+                    trigger_times_ms: Vec::new(),
+                    interval_ms: None,
+                    repeat_count: 1,
+                    fired_count: 0,
+                    expires_ms: now + 86_400_000,
+                    status: "armed".into(),
+                    created_ms: now,
+                    updated_ms: now,
+                    status_reason: None,
+                },
+            }]);
+            id
+        };
+
+        set_due(true, 7);
+        let due_master = seed_due_goal("master", "goal:due-master");
+        let _due_peer = seed_due_goal("worker", "goal:due-peer");
+        let ended = super::super::handle_goal_schedule_reconcile(
+            &server,
+            "master".into(),
+            "token-master".into(),
+            "due-master".into(),
+            "Jenny".into(),
+            "ended".into(),
+            None,
+            None,
+            None,
+            Some("goal-finished".into()),
+        );
+        assert!(ended.ok, "{}", ended.error.unwrap_or_default());
+        {
+            let state = server.state.lock().unwrap();
+            assert!(
+                !state.master_wake.goal_due,
+                "ending the only due master goal must clear the latch despite a due peer goal"
+            );
+            assert!(state.master_wake.active_goal_revision.is_none());
+            assert_eq!(
+                state.notification_subscriptions[&due_master].status,
+                "cancelled"
+            );
+        }
+        tick_with_idle_at(&server, now + 1, &|_| false);
+        {
+            let state = server.state.lock().unwrap();
+            assert!(
+                !state.master_wake.goal_due,
+                "a later idle batch must not advertise the ended master goal"
+            );
+            assert!(state.master_wake.active_goal_revision.is_none());
+        }
+
+        // A second still-due master goal keeps the latch raised.
+        set_due(true, 9);
+        let _other_due = seed_due_goal("master", "goal:other-due");
+        let _second_due = seed_due_goal("master", "goal:second-due");
+        let ended = super::super::handle_goal_schedule_reconcile(
+            &server,
+            "master".into(),
+            "token-master".into(),
+            "other-due".into(),
+            "Jenny".into(),
+            "ended".into(),
+            None,
+            None,
+            None,
+            Some("goal-finished".into()),
+        );
+        assert!(ended.ok, "{}", ended.error.unwrap_or_default());
+        {
+            let state = server.state.lock().unwrap();
+            assert!(
+                state.master_wake.goal_due,
+                "another applicable master goal remains due"
+            );
+            assert_eq!(state.master_wake.active_goal_revision, Some(9));
+        }
+
+        // Replacing an already-due occurrence with a future one must clear the
+        // latch for the retired occurrence while the unrelated peer goal stays due.
+        let ended_second = super::super::handle_goal_schedule_reconcile(
+            &server,
+            "master".into(),
+            "token-master".into(),
+            "second-due".into(),
+            "Jenny".into(),
+            "ended".into(),
+            None,
+            None,
+            None,
+            Some("goal-finished".into()),
+        );
+        assert!(
+            ended_second.ok,
+            "{}",
+            ended_second.error.unwrap_or_default()
+        );
+        set_due(true, 11);
+        let due_rearm = seed_due_goal("master", "goal:rearm-due");
+        let rearmed = super::super::handle_goal_schedule_reconcile(
+            &server,
+            "master".into(),
+            "token-master".into(),
+            "rearm-due".into(),
+            "Jenny".into(),
+            "active".into(),
+            Some(now + 120_000),
+            Some(3600),
+            None,
+            Some("goal-rearm".into()),
+        );
+        assert!(rearmed.ok, "{}", rearmed.error.unwrap_or_default());
+        {
+            let state = server.state.lock().unwrap();
+            assert!(
+                !state.master_wake.goal_due,
+                "rearming the only due master goal must clear the latch despite a due peer goal"
+            );
+            assert!(state.master_wake.active_goal_revision.is_none());
+            assert_eq!(
+                state.notification_subscriptions[&due_rearm].status,
+                "cancelled"
+            );
+            let active = state
+                .notification_subscriptions
+                .values()
+                .filter(|subscription| {
+                    subscription.worker_id == "master"
+                        && is_goal_deadline(subscription)
+                        && subscription.subject.as_deref() == Some("goal:rearm-due")
+                        && subscription.status == "armed"
+                })
+                .count();
+            assert_eq!(active, 1, "rearm must leave exactly one active occurrence");
+        }
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn unknown_adjudication_does_not_rearm_cancelled_deadline_or_spend_idle_budget() {
         use crate::server::name_state::{
             AgentActivity, AgentActivityRecord, AgentPresence, NameRecoveryProgress,
@@ -736,6 +1024,7 @@ use super::*;
             "cancelled-unknown".into(),
             "Jenny".into(),
             "ended".into(),
+            None,
             None,
             None,
             Some("goal-finished".into()),

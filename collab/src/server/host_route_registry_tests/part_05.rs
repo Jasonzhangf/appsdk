@@ -226,6 +226,7 @@
                 desired: "ended".into(),
                 trigger_ms: None,
                 ttl_seconds: None,
+                goal_subject: None,
                 reason: Some("fixture cleanup".into()),
             },
         )

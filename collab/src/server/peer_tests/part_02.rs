@@ -625,6 +625,7 @@ fn goal_reconcile_does_not_close_master_idle_or_direct_reception() {
         "ended".into(),
         None,
         None,
+        None,
         Some("fixture".into()),
     );
     assert!(reconciled.ok, "{}", reconciled.error.unwrap_or_default());

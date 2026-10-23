@@ -1426,6 +1426,7 @@ fn historical_cancelled_default_lease_is_rearmed_without_reviving_goal_schedules
         "ended".into(),
         None,
         None,
+        None,
         Some("goal-finished".into()),
     );
     assert!(ended.ok, "{}", ended.error.unwrap_or_default());
@@ -1575,6 +1576,186 @@ fn pending_unattempted_direct_message_is_recovered_once_and_not_replayed() {
         .any(|event| matches!(event, Event::WakeBound { .. }))
     );
 
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn recovered_immediate_direct_message_reaches_automatic_attempt_once() {
+    let (mut server, root) = test_server();
+    let submitted = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    {
+        let submitted = Arc::clone(&submitted);
+        server.appserver_notification_sink =
+            Arc::new(move |_transport, _, _, message_id, _, _mode| {
+                submitted.lock().unwrap().push(message_id.to_string());
+                Ok(serde_json::json!({"accepted": true}))
+            });
+    }
+    let server = Arc::new(server);
+
+    assert!(register_synthetic_peer(&server, "peer", "thread-peer").ok);
+    server.commit(&[Event::NotificationSuppressed {
+        subscription_id: "sub-default-direct-message-peer".into(),
+        status: "cancelled".into(),
+        reason: "explicit-unsubscribe".into(),
+        updated_ms: now_ms(),
+    }]);
+
+    let sent = handle_send_with_task(
+        &server,
+        "sender".into(),
+        "peer".into(),
+        "notify".into(),
+        Some("report".into()),
+        "recovered report".into(),
+        None,
+        "immediate".into(),
+        false,
+        None,
+    );
+    assert!(sent.ok, "{sent:?}");
+    let message_id = sent.data["msg_id"].as_str().unwrap().to_owned();
+    {
+        let state = server.state.lock().unwrap();
+        assert_eq!(
+            state.delivery_modes.get(&message_id).map(String::as_str),
+            Some("immediate"),
+            "public sendmessage must persist delivery=immediate"
+        );
+        assert_eq!(state.msgs[&message_id].wake_attempt_count, 0);
+        assert!(state.wake_bindings.get(&message_id).is_none());
+    }
+
+    // Restore the daemon-owned default lease through the real reconciliation.
+    restore_registered_peer_default_leases(&server);
+    {
+        let state = server.state.lock().unwrap();
+        assert_eq!(
+            state.notification_subscriptions["sub-default-direct-message-peer"].status,
+            "armed"
+        );
+        assert_eq!(
+            state.wake_bindings.get(&message_id).map(String::as_str),
+            Some("sub-default-direct-message-peer")
+        );
+    }
+
+    let now = now_ms();
+    crate::server::timers::tick_with_idle_at(&server, now, &|_| true);
+    assert_eq!(
+        submitted.lock().unwrap().as_slice(),
+        [message_id.as_str()],
+        "the recovered immediate report must reach the adaptor exactly once"
+    );
+    assert_eq!(
+        server.state.lock().unwrap().msgs[&message_id].wake_attempt_count,
+        1
+    );
+    assert!(server
+        .state
+        .lock()
+        .unwrap()
+        .notification_delivery_accepted
+        .contains_key(&message_id));
+
+    // Repeated reconciliation and tick must not resubmit the accepted attempt.
+    restore_registered_peer_default_leases(&server);
+    crate::server::timers::tick_with_idle_at(&server, now + 1, &|_| true);
+    assert_eq!(submitted.lock().unwrap().len(), 1);
+    assert_eq!(
+        server.state.lock().unwrap().msgs[&message_id].wake_attempt_count,
+        1
+    );
+
+    drop(server);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn goal_reconcile_retires_retained_basename_subject_without_arbitrary_ids() {
+    let (server, root) = test_server();
+    assert!(register(&server, "peer", "%peer").ok);
+    let project_scope = GlobalState::canonical_project_scope(&server.root).unwrap();
+    server.commit(&[Event::NameResolutionCommitted {
+        project_scope: project_scope.as_str().to_owned(),
+        occupancy: crate::server::name_state::NameOccupancy {
+            name: "peer".into(),
+            worker_id: "peer".into(),
+            session_id: "session-peer".into(),
+            occupancy_revision: 1,
+            updated_ms: now_ms(),
+        },
+        assignments: Vec::new(),
+    }]);
+    let now = now_ms();
+    server.commit(&[Event::NotificationSubscribed {
+        subscription: NotificationSubscription {
+            id: "sub-legacy-goal".into(),
+            worker_id: "peer".into(),
+            event: "deadline".into(),
+            subject: Some("goal:long-task.md".into()),
+            target: "thread-peer".into(),
+            method: "tmux".into(),
+            trigger_ms: Some(now + 60_000),
+            trigger_times_ms: Vec::new(),
+            interval_ms: None,
+            repeat_count: 1,
+            fired_count: 0,
+            expires_ms: now + 86_400_000,
+            status: "armed".into(),
+            created_ms: now,
+            updated_ms: now,
+            status_reason: None,
+        },
+    }]);
+
+    let arbitrary = handle_goal_schedule_reconcile(
+        &server,
+        "peer".into(),
+        "token-peer".into(),
+        "different-id".into(),
+        "peer".into(),
+        "ended".into(),
+        None,
+        None,
+        Some("sub-legacy-goal".into()),
+        Some("fixture".into()),
+    );
+    assert!(
+        !arbitrary.ok,
+        "a subscription ID must never be accepted as a goal subject"
+    );
+
+    let ended = handle_goal_schedule_reconcile(
+        &server,
+        "peer".into(),
+        "token-peer".into(),
+        "different-id".into(),
+        "peer".into(),
+        "ended".into(),
+        None,
+        None,
+        Some("goal:long-task.md".into()),
+        Some("goal-finished".into()),
+    );
+    assert!(ended.ok, "{}", ended.error.unwrap_or_default());
+    assert_eq!(
+        ended.data["retired_subscription_ids"],
+        serde_json::json!(["sub-legacy-goal"])
+    );
+    let state = server.state.lock().unwrap();
+    assert_eq!(
+        state.notification_subscriptions["sub-legacy-goal"].status,
+        "cancelled"
+    );
+    assert!(
+        state
+            .notification_subscriptions
+            .values()
+            .all(|subscription| subscription.subject.as_deref() != Some("goal:different-id")),
+        "retained subject retirement must not create a canonical duplicate"
+    );
+    drop(state);
     std::fs::remove_dir_all(root).ok();
 }
 

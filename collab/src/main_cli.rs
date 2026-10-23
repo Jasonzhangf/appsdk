@@ -47,6 +47,10 @@ pub(crate) enum GoalCmd {
         trigger_ms: Option<i64>,
         #[arg(long = "ttl-seconds")]
         ttl_seconds: Option<u64>,
+        /// Caller-owned retained historical goal subject to retire alongside
+        /// the canonical goal identity. Exact and stable-name scoped only.
+        #[arg(long = "goal-subject")]
+        goal_subject: Option<String>,
         #[arg(long)]
         reason: Option<String>,
     },

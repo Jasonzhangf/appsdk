@@ -523,6 +523,7 @@ pub(super) fn goal_reconcile_ended(
     root: &Path,
     goal_id: &str,
     goal_owner: &str,
+    goal_subject: Option<&str>,
     reason: Option<&str>,
 ) -> Result<Value, String> {
     let mut command = Command::new("collab");
@@ -536,6 +537,9 @@ pub(super) fn goal_reconcile_ended(
         "--desired",
         "ended",
     ]);
+    if let Some(goal_subject) = goal_subject {
+        command.args(["--goal-subject", goal_subject]);
+    }
     if let Some(reason) = reason {
         command.args(["--reason", reason]);
     }

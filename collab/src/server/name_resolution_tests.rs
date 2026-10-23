@@ -391,6 +391,7 @@ fn public_handlers_move_goal_schedule_and_pending_wake_across_intermediate_name(
         "ended".into(),
         None,
         None,
+        None,
         Some("fixture".into()),
     );
     assert!(!old_denied.ok, "{old_denied:?}");
@@ -401,6 +402,7 @@ fn public_handlers_move_goal_schedule_and_pending_wake_across_intermediate_name(
         "shared-migration".into(),
         "Jenny".into(),
         "ended".into(),
+        None,
         None,
         None,
         Some("fixture".into()),

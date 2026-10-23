@@ -1356,6 +1356,222 @@ fn two_tui_appserver_receipt_flow() {
     drop(app_fixture);
 }
 
+fn native_input_has_message(input: &Value, message_id: &str) -> bool {
+    input["input"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item["text"].as_str())
+        .chain(input["toolOutput"]["output"].as_str())
+        .any(|text| {
+            text.split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+                .any(|token| token == message_id)
+        })
+}
+
+#[test]
+fn public_default_immediate_recovery_reaches_the_adaptor_exactly_once() {
+    let mut fixture = AppFixture::new();
+    let context_a = fixture.run_public(&["context"], THREAD_A);
+    let context_b = fixture.run_public(&["context"], THREAD_B);
+    let worker_b = context_b["identity"]["worker_id"]
+        .as_str()
+        .expect("daemon receipt names worker B")
+        .to_owned();
+    let default_id = fixture.run_public(&["notify", "status"], THREAD_B)["subscriptions"]
+        .as_array()
+        .expect("notify status lists subscriptions")
+        .iter()
+        .find(|subscription| {
+            subscription["event"] == "direct-message"
+                && subscription["id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("sub-default-direct-message-"))
+        })
+        .and_then(|subscription| subscription["id"].as_str())
+        .expect("registered worker has the daemon-owned default lease")
+        .to_owned();
+    assert_eq!(context_a["identity"]["transport"]["kind"], "appserver");
+
+    // Persist a real public sendmessage with delivery=immediate while native
+    // notification is disabled. The send owner must not spend the durable
+    // attempt budget before the daemon owns the current default lease.
+    let config_path = fixture.root.join("home/.appsdk/config.toml");
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    fixture.stop_daemon();
+    std::fs::write(&config_path, "[notifications]\nenabled=false\n").unwrap();
+    fixture.start_daemon();
+    let sent = fixture.command_public(
+        &[
+            "sendmessage",
+            "--to",
+            &worker_b,
+            "--subject",
+            "recovered immediate public",
+            "recovered immediate body",
+        ],
+        THREAD_A,
+    );
+    let sent_stderr = String::from_utf8_lossy(&sent.stderr);
+    let sent_body = sent_stderr
+        .rsplit_once("collab response: ")
+        .map(|(_, body)| body.trim())
+        .unwrap_or_default();
+    let sent: Value =
+        serde_json::from_str(sent_body).expect("sendmessage emits a JSON result on stderr");
+    assert!(
+        sent["durable"] == true
+            && sent["notification_error"]
+                .as_str()
+                .is_some_and(|error| error == "notifications are disabled"),
+        "the disabled-send case must retain the durable immediate report: {sent}"
+    );
+    let message_id = sent["msg_id"]
+        .as_str()
+        .or_else(|| sent["message_id"].as_str())
+        .expect("public sendmessage has a durable message id")
+        .to_owned();
+    let before = fixture.run_public(&["msg", &message_id], THREAD_A);
+    assert_eq!(before["state"], "pending");
+    assert_eq!(before["wake_attempts"], 0);
+
+    // Restore notifications and replay a historical cancellation of the
+    // default lease. The daemon reconciles the lease and binds the pending
+    // immediate report; the automatic attempt owner may submit it only once.
+    fixture.stop_daemon();
+    std::fs::write(&config_path, "[notifications]\nenabled=true\n").unwrap();
+    fixture.append_name_events(&[json!({
+        "ev": "NotificationSuppressed",
+        "subscription_id": default_id,
+        "status": "cancelled",
+        "reason": "explicit-unsubscribe",
+        "updated_ms": 1
+    })]);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let events: Vec<Value> = std::fs::read_to_string(fixture.name_journal())
+            .unwrap()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        let accepted = events.iter().any(|event| {
+            event["ev"] == "NotificationDeliveryAccepted"
+                && event["message_id"] == message_id
+                && event["evidence"].is_object()
+        });
+        let inputs = fixture.state.lock().unwrap();
+        let observed = inputs.get(THREAD_B).is_some_and(|state| {
+            state
+                .inputs
+                .iter()
+                .any(|input| native_input_has_message(input, &message_id))
+        });
+        if accepted && observed {
+            break;
+        }
+        drop(inputs);
+        assert!(
+            Instant::now() < deadline,
+            "public immediate recovery did not reach the adaptor once"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    let after = fixture.run_public(&["msg", &message_id], THREAD_A);
+    assert_eq!(after["wake_attempts"], 1);
+    let events: Vec<Value> = std::fs::read_to_string(fixture.name_journal())
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let immediate_events = events
+        .iter()
+        .filter(|event| {
+            event["ev"] == "DeliveryMode"
+                && event["msg_id"] == message_id
+                && event["mode"] == "immediate"
+        })
+        .count();
+    let accepted_events = events
+        .iter()
+        .filter(|event| {
+            event["ev"] == "NotificationDeliveryAccepted" && event["message_id"] == message_id
+        })
+        .count();
+    let attempted_events = events
+        .iter()
+        .filter(|event| {
+            event["ev"] == "WakeAttempted"
+                && event["ids"]
+                    .as_array()
+                    .is_some_and(|ids| ids.iter().any(|id| id == &message_id))
+        })
+        .count();
+    let observed_events = {
+        let inputs = fixture.state.lock().unwrap();
+        inputs.get(THREAD_B).map_or(0, |state| {
+            state
+                .inputs
+                .iter()
+                .filter(|input| native_input_has_message(input, &message_id))
+                .count()
+        })
+    };
+    assert_eq!(
+        immediate_events, 1,
+        "public sendmessage must persist immediate mode"
+    );
+    assert_eq!(
+        attempted_events, 1,
+        "the recovered report must be attempted once"
+    );
+    assert_eq!(
+        accepted_events, 1,
+        "the recovered report must be accepted once"
+    );
+    assert_eq!(
+        observed_events, 1,
+        "the recovered report must reach native input once"
+    );
+
+    // A later daemon restart and context reconciliation must not resubmit an
+    // accepted attempt or spend more of its at-most-once budget.
+    fixture.restart_daemon();
+    fixture.run_public(&["context"], THREAD_B);
+    thread::sleep(Duration::from_millis(1300));
+    let events: Vec<Value> = std::fs::read_to_string(fixture.name_journal())
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let accepted_after_replay = events
+        .iter()
+        .filter(|event| {
+            event["ev"] == "NotificationDeliveryAccepted" && event["message_id"] == message_id
+        })
+        .count();
+    let observed_after_replay = {
+        let inputs = fixture.state.lock().unwrap();
+        inputs.get(THREAD_B).map_or(0, |state| {
+            state
+                .inputs
+                .iter()
+                .filter(|input| native_input_has_message(input, &message_id))
+                .count()
+        })
+    };
+    assert_eq!(
+        accepted_after_replay, 1,
+        "reconciliation must not replay an accepted report"
+    );
+    assert_eq!(
+        observed_after_replay, 1,
+        "replay must not submit the report twice"
+    );
+    drop(fixture);
+}
+
 #[test]
 fn desktop_registration_uses_explicit_endpoint_and_codex_app_namespace() {
     let mut fixture = AppFixture::new_desktop_managed();

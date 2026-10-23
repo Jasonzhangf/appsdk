@@ -983,6 +983,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 desired,
                 trigger_ms,
                 ttl_seconds,
+                goal_subject,
                 reason,
             } = cmd;
             let value: serde_json::Value = call_project(
@@ -996,6 +997,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     desired,
                     trigger_ms,
                     ttl_seconds,
+                    goal_subject,
                     reason,
                 },
             )?;

@@ -519,7 +519,10 @@ where
                                 // would report `subscribed` while the patrol
                                 // loop stays stopped. Cancel it and fall
                                 // through to arm a fresh future trigger.
-                                due_deadline_rearm = Some(subscription_id);
+                                // Keep the exact retained subject so the
+                                // daemon retires the historical occurrence,
+                                // not only the canonical goal:<goal_id>.
+                                due_deadline_rearm = Some(matched_subject);
                             } else {
                                 let mut response = existing.clone();
                                 let retained_subject =
@@ -610,11 +613,12 @@ where
                         }
                     }
                 }
-                if due_deadline_rearm.is_some() {
+                if let Some(due_subject) = due_deadline_rearm.as_deref() {
                     if let Err(error) = goal_reconcile_ended(
                         root,
                         &goal_id,
                         &owner,
+                        Some(due_subject),
                         Some("goal-due-deadline-rearm"),
                     ) {
                         let mut recovery = (*existing).clone();
@@ -1164,8 +1168,16 @@ where
                     Some(&record),
                 );
             }
-            let cancel_result =
-                goal_reconcile_ended(root, &cancel_goal_id, &owner, Some("appsdk-goal-cancel"));
+            let cancel_subject = record["subject"]
+                .as_str()
+                .filter(|value| !value.trim().is_empty());
+            let cancel_result = goal_reconcile_ended(
+                root,
+                &cancel_goal_id,
+                &owner,
+                cancel_subject,
+                Some("appsdk-goal-cancel"),
+            );
             let cancel_receipt = match cancel_result {
                 Ok(receipt) => receipt,
                 Err(error) => {

@@ -729,6 +729,8 @@ pub enum Req {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ttl_seconds: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        goal_subject: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
     Poll {

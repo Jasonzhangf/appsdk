@@ -241,6 +241,7 @@ fn handle_goal_schedule_reconcile(
     desired: String,
     trigger_ms: Option<i64>,
     ttl_seconds: Option<u64>,
+    goal_subject: Option<String>,
     reason: Option<String>,
 ) -> Resp {
     if goal_id.trim().is_empty() {
@@ -252,6 +253,27 @@ fn handle_goal_schedule_reconcile(
     if !matches!(desired.as_str(), "active" | "ended") {
         return Resp::err("GOAL_SCHEDULE_DESIRED_INVALID: expected active or ended");
     }
+    // A retained historical subject is adopted only as an exact goal:<name>
+    // string. It is never interpreted as a subscription ID: matching below
+    // still requires the exact subject and the authenticated caller's own
+    // stable-name-scoped deadline subscription.
+    let retained_subject = match goal_subject.as_deref() {
+        None => None,
+        Some(raw) if raw.trim().is_empty() => {
+            return Resp::err("GOAL_SCHEDULE_SUBJECT_REQUIRED");
+        }
+        Some(raw) if raw != raw.trim() => {
+            return Resp::err(
+                "GOAL_SCHEDULE_SUBJECT_NOT_EXACT: subject must not carry surrounding whitespace",
+            );
+        }
+        Some(raw) if !raw.starts_with("goal:") || raw.len() <= "goal:".len() => {
+            return Resp::err(
+                "GOAL_SCHEDULE_SUBJECT_INVALID: subject must be an exact goal:<name>",
+            );
+        }
+        Some(raw) => Some(raw.to_owned()),
+    };
     let now = now_ms();
     let mut state = server.state.lock().unwrap();
     if let Err(error) = verify(&state, &worker_id, &token) {
@@ -280,7 +302,13 @@ fn handle_goal_schedule_reconcile(
     let Some(transport) = selected_transport_for_worker(&worker) else {
         return Resp::err("registered worker has no server-selected transport");
     };
-    let subject = format!("goal:{goal_id}");
+    let canonical_subject = format!("goal:{goal_id}");
+    let mut subjects = vec![canonical_subject];
+    if let Some(retained) = retained_subject.as_ref() {
+        if !subjects.contains(retained) {
+            subjects.push(retained.clone());
+        }
+    }
     let master_holder = current_master_holder(server, &state).ok().flatten();
     let caller_is_master = master_holder.as_deref() == Some(worker_id.as_str());
     let matching = state
@@ -289,7 +317,10 @@ fn handle_goal_schedule_reconcile(
         .filter(|subscription| {
             subscription.worker_id == worker_id
                 && subscription.event == "deadline"
-                && subscription.subject.as_deref() == Some(subject.as_str())
+                && subscription
+                    .subject
+                    .as_deref()
+                    .is_some_and(|subject| subjects.iter().any(|candidate| candidate == subject))
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -357,10 +388,13 @@ fn handle_goal_schedule_reconcile(
         let mut retired = Vec::new();
         let mut superseded = Vec::new();
         for subscription in matching.iter().filter(|subscription| {
-            matches!(subscription.status.as_str(), "armed" | "consumed")
+            matches!(
+                subscription.status.as_str(),
+                "armed" | "consumed" | "transport-lost"
+            )
         }) {
             retired.push(subscription.id.clone());
-            if subscription.status == "armed" {
+            if matches!(subscription.status.as_str(), "armed" | "transport-lost") {
                 events.push(Event::NotificationSuppressed {
                     subscription_id: subscription.id.clone(),
                     status: "cancelled".into(),
@@ -375,9 +409,9 @@ fn handle_goal_schedule_reconcile(
         }
         let subscription = NotificationSubscription {
             id: format!("sub-{}", gen_msg_id()),
-            worker_id,
+            worker_id: worker_id.clone(),
             event: "deadline".into(),
-            subject: Some(subject),
+            subject: Some(format!("goal:{goal_id}")),
             target: target.to_owned(),
             method: transport.kind.as_str().into(),
             trigger_ms: Some(trigger_ms),
@@ -395,7 +429,9 @@ fn handle_goal_schedule_reconcile(
             subscription: subscription.clone(),
         });
         if caller_is_master {
-            if let Some(event) = cleared_master_goal_due_event(&state, now) {
+            if let Some(event) =
+                cleared_master_goal_due_event(&state, &worker_id, &retired, now)
+            {
                 events.push(event);
             }
         }
@@ -420,8 +456,13 @@ fn handle_goal_schedule_reconcile(
     let mut retired = Vec::new();
     let mut superseded = Vec::new();
     for subscription in &matching {
-        if subscription.status == "armed" {
+        if matches!(
+            subscription.status.as_str(),
+            "armed" | "consumed" | "transport-lost"
+        ) {
             retired.push(subscription.id.clone());
+        }
+        if matches!(subscription.status.as_str(), "armed" | "transport-lost") {
             events.push(Event::NotificationSuppressed {
                 subscription_id: subscription.id.clone(),
                 status: "cancelled".into(),
@@ -439,7 +480,7 @@ fn handle_goal_schedule_reconcile(
         events.push(Event::Superseded { ids: superseded.clone() });
     }
     if caller_is_master {
-        if let Some(event) = cleared_master_goal_due_event(&state, now) {
+        if let Some(event) = cleared_master_goal_due_event(&state, &worker_id, &retired, now) {
             events.push(event);
         }
     }
@@ -475,13 +516,25 @@ fn pending_messages_for_subscription(state: &State, subscription_id: &str) -> Ve
         .collect()
 }
 
-fn cleared_master_goal_due_event(state: &State, now: i64) -> Option<Event> {
+/// Reconcile the master goal-due accumulator against the committed outcome of
+/// one lifecycle transition. `retired` names the occurrences this transition
+/// removes from the recoverable set, so an already-due occurrence being ended
+/// or replaced cannot keep the latch raised for itself. Only the master's own
+/// due goals are applicable; an unrelated peer goal must not preserve it.
+fn cleared_master_goal_due_event(
+    state: &State,
+    master_worker: &str,
+    retired: &[String],
+    now: i64,
+) -> Option<Event> {
     if !state.master_wake.goal_due {
         return None;
     }
     let other_due_goal = state.notification_subscriptions.values().any(|subscription| {
-        is_goal_deadline(subscription)
+        subscription.worker_id == master_worker
+            && is_goal_deadline(subscription)
             && subscription.status == "armed"
+            && !retired.iter().any(|retired| retired == &subscription.id)
             && subscription
                 .trigger_ms
                 .is_some_and(|trigger| trigger <= now)

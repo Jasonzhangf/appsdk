@@ -206,6 +206,7 @@ fn dispatch_with_route_context_bound(
             desired,
             trigger_ms,
             ttl_seconds,
+            goal_subject,
             reason,
         } => handle_goal_schedule_reconcile(
             server,
@@ -216,6 +217,7 @@ fn dispatch_with_route_context_bound(
             desired,
             trigger_ms,
             ttl_seconds,
+            goal_subject,
             reason,
         ),
         Req::Poll { .. } => {

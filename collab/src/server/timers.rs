@@ -347,25 +347,7 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                 }
                 (message.state == "pending"
                     && message.wake_attempt_count < MAX_WAKE_ATTEMPTS
-                    && (!super::mailbox::is_explicit_delivery_mode(&state, message)
-                        || (state
-                            .delivery_modes
-                            .get(message_id)
-                            .is_some_and(|mode| mode == "queued")
-                            && state
-                                .workers
-                                .get(&message.to)
-                                .and_then(super::selected_transport_for_worker)
-                                .is_some_and(|transport| {
-                                    transport.kind == crate::proto::TransportKind::Tmux
-                                })
-                            && !state
-                                .notification_delivery_accepted
-                                .contains_key(message_id)
-                            && state
-                                .notification_delivery_failures
-                                .get(message_id)
-                                .is_none_or(|failure| failure.retryable)))
+                    && automatic_delivery_candidate(&state, message)
                     && super::mailbox::automatic_retry_eligible(
                         message,
                         server.config.notifications.delay_ms(&subscription.event),
@@ -379,6 +361,50 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
     };
     for (message_id, subscription_id) in candidates {
         super::attempt_notification_with_at(server, &message_id, &subscription_id, now);
+    }
+}
+
+/// The automatic timer candidate domain.
+///
+/// Ordinary messages (no persisted delivery mode) keep the existing batch
+/// retry contract, and queued tmux delivery keeps its deferred path.
+/// `explicit-notification` stays with its explicit retry operator. A real
+/// public `delivery=immediate` record that was never attempted becomes
+/// eligible exactly once, so a restored daemon-owned default lease reaches the
+/// existing attempt owner. Any accepted, failed, or retried immediate outcome
+/// stays out of the timer path and cannot be replayed by a tick or replay.
+fn automatic_delivery_candidate(state: &super::state::State, message: &Message) -> bool {
+    match state.delivery_modes.get(&message.id).map(String::as_str) {
+        None => true,
+        Some("queued") => {
+            state
+                .workers
+                .get(&message.to)
+                .and_then(super::selected_transport_for_worker)
+                .is_some_and(|transport| transport.kind == crate::proto::TransportKind::Tmux)
+                && !state
+                    .notification_delivery_accepted
+                    .contains_key(&message.id)
+                && state
+                    .notification_delivery_failures
+                    .get(&message.id)
+                    .is_none_or(|failure| failure.retryable)
+        }
+        Some("immediate") => {
+            message.wake_attempt_count == 0
+                && message.last_wake_attempt_ms == 0
+                && !message.retry_attempted
+                && !state
+                    .notification_delivery_accepted
+                    .contains_key(&message.id)
+                && !state
+                    .notification_delivery_failures
+                    .contains_key(&message.id)
+        }
+        Some("explicit-notification") => false,
+        // Internal daemon markers predate the explicit delivery domain and
+        // keep their pre-existing automatic path unchanged.
+        Some(_) => true,
     }
 }
 

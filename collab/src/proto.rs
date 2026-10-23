@@ -769,7 +769,10 @@ pub enum Req {
     /// native TUI peers that do not carry a tmux pane anchor.
     RouteResolveNative {
         session_id: String,
-        native_thread_id: String,
+        /// A missing thread is a read-only session lookup and requires an
+        /// explicit project/app context. It never supplies context facts.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        native_thread_id: Option<String>,
     },
     MsgStatus {
         msg_id: String,

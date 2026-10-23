@@ -111,7 +111,7 @@ identity recovery is not authorization to discard them.
   identity-recovery steps.
 - If `collab context` reports `requires_identity_update`, read
   `required_fields`, `reason`, and `exact_error`. Supply only the requested
-  `session_id`, `thread_id`, `endpoint`, or `namespace` values once through
+  `session_id`, `thread_id`, `endpoint`, or `namespace` values for this invocation through
   `collab context --provide`. The daemon completes identity selection,
   recovery, registration, credential persistence, binding, and lease state.
   Explicit conflicts and errors preserve their original error.
@@ -132,7 +132,11 @@ identity recovery is not authorization to discard them.
 Run `collab context`. It resolves the canonical project root, observes the
 available runtime facts, and asks the daemon to establish or recover the
 identity. If the snapshot contains `requires_identity_update`, supply only the
-requested factual fields once:
+requested current factual fields in this invocation. Every native context must
+carry current session/thread/endpoint/namespace from the host environment or
+`--provide`; historical registration cannot fill missing current facts.
+MCP callers submit current facts through `provide` on each call. `--query` is
+only a retained-operation read and needs no current endpoint:
 
 ```sh
 collab context --provide '{"session_id":"...","thread_id":"...","endpoint":"...","namespace":"..."}'

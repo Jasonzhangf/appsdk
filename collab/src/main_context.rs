@@ -431,7 +431,7 @@ pub(crate) fn identity_context_response(
 }
 
 pub(crate) fn identity_context_required(snapshot: &Value) -> anyhow::Error {
-    let mut response = proto::Resp::err("IDENTITY_INFORMATION_REQUIRED: provide the missing runtime facts once through collab context --provide");
+    let mut response = proto::Resp::err("IDENTITY_INFORMATION_REQUIRED: provide this invocation's current runtime facts through collab context --provide");
     response.data = snapshot.clone();
     anyhow::Error::new(client::ServerResponseError { response })
 }

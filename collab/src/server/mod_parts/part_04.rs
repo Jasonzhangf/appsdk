@@ -65,6 +65,74 @@ impl ProjectRuntimeManager {
         self.resolve_route_by_address(session_id, native_thread_id, None)
     }
 
+    fn resolve_route_by_native_session(
+        &self,
+        context: &ProjectContext,
+        session_id: &str,
+    ) -> Result<RouteResolution, String> {
+        context.validate_registered_root(Path::new(&context.canonical_root))
+            .map_err(|error| format!("ROUTE_RESOLVE_INVALID: {error}"))?;
+        let session = crate::identity::SessionId::new(session_id.to_owned())
+            .map_err(|error| format!("ROUTE_RESOLVE_INVALID: {error}"))?;
+        let binding = {
+            let state = self.host.state.lock().unwrap();
+            let mut matches = state.global.current_thread_routes.values().filter(|binding| {
+                binding.project_scope == context.project_scope
+                    && binding.app_scope_id == context.app_scope_id
+                    && binding.session_id.as_ref() == Some(&session)
+            });
+            let binding = matches.next().cloned().ok_or_else(|| {
+                format!("ROUTE_RESOLVE_NOT_FOUND: no current route for this project/app/session; run collab context with current runtime facts")
+            })?;
+            if matches.next().is_some() {
+                return Err("ROUTE_RESOLVE_AMBIGUOUS: multiple current routes for this project/app/session; run collab context with current runtime facts".into());
+            }
+            binding
+        };
+        let (route, _) = self.current_binding_snapshot(&binding)?;
+        route.validate().map_err(|error| format!("ROUTE_RESOLVE_INVALID: {error}"))?;
+        Ok(route)
+    }
+
+    /// Pure shared readback. It never loads a runtime, verifies transport
+    /// liveness, registers an identity or repairs a publication.
+    fn current_binding_snapshot(
+        &self,
+        binding: &RuntimeBinding,
+    ) -> Result<(RouteResolution, Arc<Server>), String> {
+        let key = (
+            binding.app_scope_id.as_str().to_owned(),
+            binding.project_scope.as_str().to_owned(),
+        );
+        let (storage_root, runtime) = {
+            let routes = self.routes.lock().unwrap();
+            let route = routes.get(&key).ok_or_else(|| {
+                "ROUTE_RESOLVE_STALE_INDEX: current binding references an unknown route".to_owned()
+            })?;
+            let runtime = route.runtime.clone().ok_or_else(|| {
+                "ROUTE_RESOLVE_STALE_INDEX: current binding references an unavailable runtime".to_owned()
+            })?;
+            (route.storage_root.clone(), runtime)
+        };
+        let registered = runtime.state.lock().unwrap().global
+            .lookup_binding_for(&binding.route_scope(), &binding.binding_id).cloned()
+            .ok_or_else(|| "ROUTE_RESOLVE_STALE_INDEX: current route references a missing runtime binding".to_owned())?;
+        if &registered != binding {
+            return Err("ROUTE_RESOLVE_INVALID: current route conflicts with its runtime binding".into());
+        }
+        Ok((RouteResolution {
+            app_scope_id: binding.app_scope_id.clone(),
+            project_scope: binding.project_scope.clone(),
+            canonical_root: binding.project_scope.as_str().to_owned(),
+            storage_root: storage_root.to_string_lossy().into_owned(),
+            agent_id: binding.agent_id.clone(),
+            binding_id: binding.binding_id.clone(),
+            endpoint_generation: binding.endpoint_generation,
+            session_id: binding.session_id.clone(),
+            native_thread_id: binding.native_thread_id.clone(),
+        }, runtime))
+    }
+
     fn resolve_route_by_tmux_endpoint(
         &self,
         endpoint: &crate::proto::TmuxEndpoint,
@@ -325,24 +393,7 @@ impl ProjectRuntimeManager {
                 ));
             }
         };
-        let key = (
-            binding.app_scope_id.as_str().to_owned(),
-            binding.project_scope.as_str().to_owned(),
-        );
-        let (storage_root, runtime) = {
-            let routes = self.routes.lock().unwrap();
-            let route = routes.get(&key).ok_or_else(|| {
-                format!(
-                    "ROUTE_RESOLVE_STALE_INDEX: current route state for App Server thread {native_thread_id} references an unknown route"
-                )
-            })?;
-            let runtime = route.runtime.clone().ok_or_else(|| {
-                format!(
-                    "ROUTE_RESOLVE_STALE_INDEX: current route state for App Server thread {native_thread_id} references an unavailable runtime"
-                )
-            })?;
-            (route.storage_root.clone(), runtime)
-        };
+        let (mut route, runtime) = self.current_binding_snapshot(&binding)?;
         // A legacy record has no persisted session; keep the host-provided
         // session as the live address without writing it back to the record.
         let session_id = match binding.session_id.clone() {
@@ -355,29 +406,12 @@ impl ProjectRuntimeManager {
                 ))
             }
         };
-        let registered = runtime
-            .state
-            .lock()
-            .unwrap()
-            .global
-            .lookup_binding_for(&binding.route_scope(), &binding.binding_id)
-            .cloned()
-            .ok_or_else(|| {
-                format!(
-                    "ROUTE_RESOLVE_STALE_INDEX: current route state for App Server thread {native_thread_id} references a missing runtime binding"
-                )
-            })?;
-        if registered != binding {
-            return Err(format!(
-                "ROUTE_RESOLVE_INVALID: current route state for App Server thread {native_thread_id} conflicts with its runtime binding"
-            ));
-        }
         let canonical_root = binding.project_scope.as_str().to_owned();
         let transport = {
             let state = runtime.state.lock().unwrap();
             state
                 .workers
-                .get(registered.agent_id.as_str())
+                .get(binding.agent_id.as_str())
                 .and_then(selected_transport_for_worker)
                 .ok_or_else(|| {
                     format!(
@@ -454,17 +488,7 @@ impl ProjectRuntimeManager {
                 }
             }
         }
-        let route = RouteResolution {
-            app_scope_id: binding.app_scope_id,
-            project_scope: binding.project_scope,
-            canonical_root,
-            storage_root: storage_root.to_string_lossy().into_owned(),
-            agent_id: binding.agent_id,
-            binding_id: binding.binding_id,
-            endpoint_generation: binding.endpoint_generation,
-            session_id,
-            native_thread_id: binding.native_thread_id,
-        };
+        route.session_id = session_id;
         route
             .validate()
             .map_err(|error| format!("ROUTE_RESOLVE_INVALID: {error}"))?;

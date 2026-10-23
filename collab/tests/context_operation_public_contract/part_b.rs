@@ -702,7 +702,8 @@ fn session_recovery_explicit_target_bypasses_historical_archive_ambiguity() {
             "authorization": "user explicitly restores this peer"
         })),
         None,
-        Some(&json!({"session_id": session_id})),
+        Some(&json!({"session_id": session_id, "thread_id": thread_id,
+            "endpoint": host.endpoint(), "namespace": "codex_tui"})),
         false,
     );
     let payload = success_payload(&output);

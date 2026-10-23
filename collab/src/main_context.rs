@@ -399,6 +399,15 @@ pub(crate) fn collect_identity_facts(provide: Option<&str>) -> anyhow::Result<Id
     let supplied = provide.map(parse_identity_supplement).transpose()?;
     let mut facts = crate::client::adapters::codex_app_server::identity_facts_from_env()
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    if facts.dsh_session_id.is_some()
+        || supplied.as_ref().is_some_and(|report| report.dsh.is_some())
+    {
+        // DSH owns this invocation. Native variables may describe its launcher.
+        facts.session_id = None;
+        facts.thread_id = None;
+        facts.endpoint = None;
+        facts.namespace = None;
+    }
     let Some(supplied) = supplied else {
         return Ok(facts);
     };
@@ -418,14 +427,11 @@ pub(crate) fn collect_identity_facts(provide: Option<&str>) -> anyhow::Result<Id
             &mut facts.dsh_session_id,
             Some(candidate.session_id.clone()),
         )?;
-        // The explicit report describes the DSH caller. A surrounding Codex
-        // launcher may export its own native host metadata to child tools.
-        facts.session_id = None;
-        facts.thread_id = None;
-        facts.endpoint = None;
-        facts.namespace = None;
         facts.dsh = Some(candidate);
         return Ok(facts);
+    }
+    if facts.dsh_session_id.is_some() {
+        anyhow::bail!("IDENTITY_FACT_CONFLICT: a DSH caller must report DSH facts, not its launcher's native facts");
     }
     if supplied.desktop_bridge.is_some() {
         facts.session_id = supplied.session_id;

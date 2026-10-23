@@ -10,6 +10,11 @@ use std::time::{Duration, Instant};
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+mod native_support {
+    #![allow(dead_code)]
+    include!("support/context_operation_fixture.rs");
+}
+
 fn unique_root() -> PathBuf {
     std::env::temp_dir().join(format!(
         "dshma-{}-{}",
@@ -212,9 +217,16 @@ impl Fixture {
         while Instant::now() < deadline {
             if self.state.join("server.sock").exists() == exists {
                 if exists {
-                    let reply = self.request(json!({"op":"Ping"}));
-                    if reply["ok"] == true {
-                        return;
+                    // A bound socket path can precede listen readiness.
+                    if let Ok(mut stream) = UnixStream::connect(self.state.join("server.sock")) {
+                        stream.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+                        if writeln!(stream, "{}", json!({"op":"Ping"})).is_ok() {
+                            let mut line = String::new();
+                            if BufReader::new(stream).read_line(&mut line).is_ok()
+                                && serde_json::from_str::<Value>(&line).is_ok_and(|reply| reply["ok"] == true) {
+                                return;
+                            }
+                        }
                     }
                 } else {
                     return;
@@ -550,6 +562,97 @@ fn dsh_context_registers_from_typed_gateway_facts() {
         status["wake_transport_evidence"]["consumed"], false,
         "gateway acceptance alone is not consumption: {status}"
     );
+    fixture.finish();
+}
+
+#[test]
+fn dsh_session_recovery_ignores_a_registered_codex_launcher() {
+    let mut fixture = Fixture::new();
+    fixture.start_daemon();
+    let native =
+        native_support::TestAppServer::start(&fixture.root, "launcher-session", "launcher-thread");
+    let native_facts = json!({"session_id":"launcher-session","thread_id":"launcher-thread",
+        "endpoint":native.endpoint(),"namespace":"codex_tui"})
+    .to_string();
+    let launcher = fixture
+        .configured_command(&["context", "--provide", &native_facts])
+        .env("COLLAB_APPSERVER_NAMESPACE", "codex_tui")
+        .output()
+        .unwrap();
+    assert!(
+        launcher.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&launcher.stdout),
+        String::from_utf8_lossy(&launcher.stderr)
+    );
+    let launcher: Value = serde_json::from_slice(&launcher.stdout).unwrap();
+    let launcher_worker = &launcher["result"]["snapshot"]["identity"]["worker_id"];
+    let facts = json!({"dsh":{
+        "endpoint":fixture.gateway.endpoint(), "runtime_id":"gateway-runtime",
+        "agent_id":"agentA", "session_id":"agentA", "cwd":fixture.root
+    }})
+    .to_string();
+    let command = |args: &[&str]| {
+        fixture
+            .configured_command(args)
+            .env("DSH_SESSION_ID", "agentA")
+            .env("CODEX_SESSION_ID", "launcher-session")
+            .env("CODEX_THREAD_ID", "launcher-thread")
+            .env(
+                "CODEX_APP_SERVER_SOCKET",
+                native.endpoint().strip_prefix("unix://").unwrap(),
+            )
+            .env("COLLAB_APPSERVER_NAMESPACE", "codex_tui")
+            .output()
+            .unwrap()
+    };
+    let registered = command(&["context", "--provide", &facts]);
+    assert!(
+        registered.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&registered.stdout),
+        String::from_utf8_lossy(&registered.stderr)
+    );
+    let registered: Value = serde_json::from_slice(&registered.stdout).unwrap();
+    let dsh_binding = registered["result"]["snapshot"]["binding"].clone();
+    assert_ne!(
+        registered["result"]["snapshot"]["identity"]["worker_id"],
+        *launcher_worker
+    );
+    let count = fixture.registrations();
+    let restored = command(&["context"]);
+    assert!(
+        restored.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&restored.stdout),
+        String::from_utf8_lossy(&restored.stderr)
+    );
+    let restored: Value = serde_json::from_slice(&restored.stdout).unwrap();
+    assert_eq!(restored["result"]["snapshot"]["binding"], dsh_binding);
+    assert_eq!(fixture.registrations(), count);
+    fixture.restart_daemon();
+    let restored = fixture
+        .configured_command(&["context"])
+        .env("DSH_SESSION_ID", "agentA")
+        .env("CODEX_SESSION_ID", "launcher-session")
+        .env("CODEX_THREAD_ID", "launcher-thread")
+        .env(
+            "CODEX_APP_SERVER_SOCKET",
+            native.endpoint().strip_prefix("unix://").unwrap(),
+        )
+        .env("COLLAB_APPSERVER_NAMESPACE", "codex_tui")
+        .output()
+        .unwrap();
+    assert!(
+        restored.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&restored.stdout),
+        String::from_utf8_lossy(&restored.stderr)
+    );
+    let restored: Value = serde_json::from_slice(&restored.stdout).unwrap();
+    assert_eq!(restored["result"]["snapshot"]["binding"], dsh_binding);
+    assert_eq!(fixture.registrations(), count);
+    drop(native);
     fixture.finish();
 }
 

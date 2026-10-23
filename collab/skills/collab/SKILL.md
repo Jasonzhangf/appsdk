@@ -291,8 +291,10 @@ latest_main_candidate
 ```
 
 For ordinary peer bootstrap and identity recovery, the only entry remains
-`collab context`. Every native call must carry its current session, thread,
-endpoint and namespace, from the current host environment or this call's `--provide`.
+`collab context`. Each AppServer context call carries its current session,
+thread, endpoint and namespace from the host or this call's `--provide`.
+Desktop uses the managed MCP entry described above; it supplies current
+executor metadata and the scoped bridge, with a real agent session if needed.
 That command is not a daemon lifecycle owner. A Collab runtime
 delivery that changes server, notification, identity, route, MCP, CLI, or daemon
 behavior must cross the runtime lifecycle boundary in the same delivery unit
@@ -449,16 +451,16 @@ fields here. Supply the requested current facts from their real source in this i
 collab context --provide '{"session_id":"...","thread_id":"...","endpoint":"...","namespace":"..."}'
 ```
 
-Every native context invocation must carry the current session, thread, endpoint
-and namespace. The daemon never fills these current facts from historical
-registration. CLI facts may come from the current host environment or this
-invocation's `--provide`; MCP callers must submit current facts through `provide`
-on each call, since the MCP process's startup environment may be stale.
+Each AppServer context invocation carries the current session, thread, endpoint
+and namespace. The daemon never fills these facts from historical registration.
+AppServer CLI facts come from the current host or this invocation's `--provide`;
+AppServer MCP callers submit them on each call because startup facts may be stale.
+Desktop uses the managed MCP entry above, not this AppServer supplement.
 Missing facts preserve durable identity and work but do not complete restoration.
 `--query` only reads retained progress and needs no current endpoint.
 See [current-fact recovery](references/stable-name-recovery.md) for the contract.
 
-The supplement accepts only the missing scalar facts `session_id`, `thread_id`,
+The AppServer supplement accepts only the scalar facts `session_id`, `thread_id`,
 `endpoint`, and `namespace`. It rejects any other key. An agent never guesses,
 selects, or hunts a worker, and never supplies `worker_id`, approval, token,
 generation, binding, or project scope. Invalid or unsupported input fails

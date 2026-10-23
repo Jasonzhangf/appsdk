@@ -29,6 +29,7 @@ fn name_ownership_and_board_assignment_graphs_are_embedded_and_registered() {
                 "appsdk.collab_goal.resolve_owner",
                 "appsdk.collab_goal.select_record",
                 "appsdk.collab_goal.apply_transition",
+                "appsdk.collab_goal.reconcile_schedule",
                 "appsdk.collab_goal.emit_result",
             ],
         ),

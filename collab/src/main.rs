@@ -969,13 +969,36 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     worker_id: ident.worker_id.clone(),
                     token: ident.token.clone(),
                 },
-                NotifyCmd::Unsubscribe { subscription_id } => Req::NotificationUnsubscribe {
-                    worker_id: ident.worker_id.clone(),
-                    token: ident.token.clone(),
-                    subscription_id,
-                },
             };
             let value: serde_json::Value = call_project(&scope, &ident, &request)?;
+            out(&value);
+            Ok(())
+        }
+        Cmd::Goal { cmd } => {
+            let scope = Scope::resolve()?;
+            let ident = me(&scope)?;
+            let GoalCmd::Reconcile {
+                goal_id,
+                owner,
+                desired,
+                trigger_ms,
+                ttl_seconds,
+                reason,
+            } = cmd;
+            let value: serde_json::Value = call_project(
+                &scope,
+                &ident,
+                &Req::GoalScheduleReconcile {
+                    worker_id: ident.worker_id.clone(),
+                    token: ident.token.clone(),
+                    goal_id,
+                    goal_owner: owner,
+                    desired,
+                    trigger_ms,
+                    ttl_seconds,
+                    reason,
+                },
+            )?;
             out(&value);
             Ok(())
         }

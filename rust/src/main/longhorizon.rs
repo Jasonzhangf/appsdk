@@ -177,6 +177,7 @@ pub(super) fn goal_mark_recovery_required(record: &mut Value, error: String) {
 pub(super) fn goal_subscribe_failure_allows_no_subscription_recovery(error: &str) -> bool {
     error.starts_with("COLLAB_SUBSCRIBE_FAILED:")
         || error.starts_with("COLLAB_UNAVAILABLE:")
+        || error.starts_with("GOAL_RECONCILE_ACTIVE_FAILED:")
         || matches!(
             error,
             "GOAL_COLLAB_COMMAND_TIMEOUT" | "GOAL_COLLAB_OUTPUT_DRAIN_TIMEOUT"
@@ -442,60 +443,103 @@ pub(super) fn goal_scope_from_context(context: &Value, root: &Path) -> Result<Go
     })
 }
 
-pub(super) fn parse_goal_subscription_response(stdout: &[u8]) -> Result<(Value, String), String> {
-    let response: Value = serde_json::from_slice(stdout)
-        .map_err(|error| format!("COLLAB_SUBSCRIBE_RESPONSE_INVALID:{}", error))?;
-    let subscription_id = {
-        let subscription = response.get("subscription").unwrap_or(&response);
-        subscription
-            .get("subscription_id")
-            .and_then(Value::as_str)
-            .or_else(|| subscription.get("id").and_then(Value::as_str))
-            .filter(|id| !id.trim().is_empty())
-            .ok_or_else(|| "COLLAB_SUBSCRIBE_RESPONSE_MISSING_ID".to_string())?
-            .to_string()
-    };
-    Ok((response, subscription_id))
-}
-
-pub(super) fn parse_goal_cancel_response(
+fn parse_goal_reconcile_response(
     stdout: &[u8],
-    expected_id: &str,
+    expected_goal_id: &str,
+    expected_desired: &str,
 ) -> Result<Value, String> {
     let response: Value = serde_json::from_slice(stdout)
-        .map_err(|error| format!("GOAL_CANCEL_RESPONSE_INVALID:{}", error))?;
-    let response_id = response
-        .get("subscription_id")
-        .and_then(Value::as_str)
-        .or_else(|| {
-            response
-                .get("subscription")
-                .and_then(|subscription| subscription.get("subscription_id"))
-                .and_then(Value::as_str)
-        })
-        .or_else(|| {
-            response
-                .get("subscription")
-                .and_then(|subscription| subscription.get("id"))
-                .and_then(Value::as_str)
-        });
-    if response_id != Some(expected_id) {
-        return Err("GOAL_CANCEL_RESPONSE_ID_MISMATCH".to_string());
+        .map_err(|error| format!("GOAL_RECONCILE_RESPONSE_INVALID:{}", error))?;
+    if response.get("goal_id").and_then(Value::as_str) != Some(expected_goal_id) {
+        return Err("GOAL_RECONCILE_RESPONSE_ID_MISMATCH".to_string());
     }
-    if response.get("status").and_then(Value::as_str) != Some("cancelled") {
-        return Err("GOAL_CANCEL_RESPONSE_STATUS_INVALID".to_string());
+    if response.get("desired").and_then(Value::as_str) != Some(expected_desired) {
+        return Err("GOAL_RECONCILE_RESPONSE_DESIRED_INVALID".to_string());
     }
     Ok(response)
 }
 
-pub(super) fn goal_cancel_subscription(
+pub(super) fn goal_reconcile_active(
     root: &Path,
-    subscription_id: &str,
-) -> Result<Value, String> {
+    goal_id: &str,
+    goal_owner: &str,
+    trigger_ms: i64,
+    ttl_seconds: u64,
+) -> Result<(Value, String), String> {
     let mut command = Command::new("collab");
     command
-        .args(["notify", "unsubscribe", subscription_id])
+        .args([
+            "goal",
+            "reconcile",
+            "--goal-id",
+            goal_id,
+            "--owner",
+            goal_owner,
+            "--desired",
+            "active",
+            "--at-ms",
+            &trigger_ms.to_string(),
+            "--ttl-seconds",
+            &ttl_seconds.to_string(),
+        ])
         .current_dir(root);
+    let out = run_goal_collab_command(command, GOAL_COLLAB_WRITE_TIMEOUT).map_err(|error| {
+        if error == "GOAL_COLLAB_COMMAND_TIMEOUT" {
+            error
+        } else {
+            format!("GOAL_RECONCILE_COLLAB_FAILED:{}", error)
+        }
+    })?;
+    if !out.status.success() {
+        return Err(format!(
+            "GOAL_RECONCILE_COLLAB_FAILED:exit={}{}",
+            out.status.code().unwrap_or(1),
+            if out.stderr.is_empty() {
+                String::new()
+            } else {
+                format!(":{}", String::from_utf8_lossy(&out.stderr).trim())
+            }
+        ));
+    }
+    let response = parse_goal_reconcile_response(&out.stdout, goal_id, "active")?;
+    if response.get("status").and_then(Value::as_str) != Some("armed") {
+        return Err("GOAL_RECONCILE_ACTIVE_NOT_ARMED".to_string());
+    }
+    let subscription_id = response
+        .get("subscription")
+        .and_then(|subscription| {
+            subscription
+                .get("subscription_id")
+                .and_then(Value::as_str)
+                .or_else(|| subscription.get("id").and_then(Value::as_str))
+        })
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| "GOAL_RECONCILE_RESPONSE_MISSING_ID".to_string())?
+        .to_string();
+    Ok((response, subscription_id))
+}
+
+pub(super) fn goal_reconcile_ended(
+    root: &Path,
+    goal_id: &str,
+    goal_owner: &str,
+    reason: Option<&str>,
+) -> Result<Value, String> {
+    let mut command = Command::new("collab");
+    command.args([
+        "goal",
+        "reconcile",
+        "--goal-id",
+        goal_id,
+        "--owner",
+        goal_owner,
+        "--desired",
+        "ended",
+    ]);
+    if let Some(reason) = reason {
+        command.args(["--reason", reason]);
+    }
+    command.current_dir(root);
     let out = run_goal_collab_command(command, GOAL_COLLAB_WRITE_TIMEOUT).map_err(|error| {
         if error == "GOAL_COLLAB_COMMAND_TIMEOUT" {
             error
@@ -514,7 +558,7 @@ pub(super) fn goal_cancel_subscription(
             }
         ));
     }
-    parse_goal_cancel_response(&out.stdout, subscription_id)
+    parse_goal_reconcile_response(&out.stdout, goal_id, "ended")
 }
 
 pub(super) fn goal_subscription_status(

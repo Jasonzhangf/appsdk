@@ -28,8 +28,28 @@ pub(crate) enum NotifyCmd {
     },
     /// List the caller's notification subscriptions
     Status,
-    /// Cancel one caller-owned notification subscription
-    Unsubscribe { subscription_id: String },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum GoalCmd {
+    /// Reconcile the caller's owned finite goal schedule without touching
+    /// daemon-owned direct-message reception.
+    Reconcile {
+        #[arg(long)]
+        goal_id: String,
+        #[arg(long)]
+        owner: String,
+        /// active or ended
+        #[arg(long)]
+        desired: String,
+        /// Absolute UTC epoch milliseconds for an active one-shot occurrence
+        #[arg(long = "at-ms")]
+        trigger_ms: Option<i64>,
+        #[arg(long = "ttl-seconds")]
+        ttl_seconds: Option<u64>,
+        #[arg(long)]
+        reason: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -465,6 +485,12 @@ pub(crate) enum Cmd {
     Notify {
         #[command(subcommand)]
         cmd: NotifyCmd,
+    },
+    /// Owned goal schedule lifecycle only; never controls base notification
+    /// reception.
+    Goal {
+        #[command(subcommand)]
+        cmd: GoalCmd,
     },
     /// Block until messages arrive (long-poll)
     Recv {

@@ -1196,8 +1196,9 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
     // place where the system-owned default direct-message lease is restored.
     // An already-registered peer (RegistrationOutcome::Reused) never re-enters
     // the Register command, so without this the peer would silently degrade to
-    // mailbox-only after the lease expired or was lost. Explicit owner
-    // unsubscribe stays authoritative; only the legacy/expired shapes re-arm.
+    // mailbox-only after the lease expired or was lost. The default lease is
+    // daemon-owned; historical cancellation is repaired from the current
+    // registered transport, and only finite schedule occurrences stay terminal.
     if let Some(transport) = selected_transport_for_worker(&worker) {
         let now = now_ms();
         let mut events = retarget_owned_notification_events(&st, &worker_id, &transport, now);

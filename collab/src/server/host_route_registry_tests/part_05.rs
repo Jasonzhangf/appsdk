@@ -175,6 +175,18 @@
         assert_eq!(directory_snapshot(&mailbox_dir), before_mailbox);
 
         let runtime = runtime_for_registered(&server, &root, worker_id, app);
+        let project_scope = GlobalState::canonical_project_scope(&root).unwrap();
+        server.commit(&[Event::NameResolutionCommitted {
+            project_scope: project_scope.as_str().to_owned(),
+            occupancy: crate::server::name_state::NameOccupancy {
+                name: worker_id.into(),
+                worker_id: worker_id.into(),
+                session_id: format!("session-{worker_id}"),
+                occupancy_revision: 1,
+                updated_ms: now_ms(),
+            },
+            assignments: Vec::new(),
+        }]);
         let accepted = dispatch_wire(
             server.clone(),
             Some(context_with_runtime(&root, app, &runtime)),
@@ -203,17 +215,22 @@
             .iter()
             .any(|subscription| subscription["id"] == subscription_id));
 
-        let cancelled = dispatch_wire(
+        let reconciled = dispatch_wire(
             server.clone(),
             Some(context_with_runtime(&root, app, &runtime)),
-            Req::NotificationUnsubscribe {
+            Req::GoalScheduleReconcile {
                 worker_id: worker_id.into(),
                 token: token.into(),
-                subscription_id,
+                goal_id: "wire-goal".into(),
+                goal_owner: worker_id.into(),
+                desired: "ended".into(),
+                trigger_ms: None,
+                ttl_seconds: None,
+                reason: Some("fixture cleanup".into()),
             },
         )
         .await;
-        assert!(cancelled.ok, "{cancelled:?}");
+        assert!(reconciled.ok, "{reconciled:?}");
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -12,8 +12,20 @@ fn goal_cancel_failure_keeps_exact_subscription_record() {
         &fake_collab,
         r#"#!/bin/sh
 case "$1 $2" in
-  "notify subscribe")
-    printf '%s\n' '{"subscription":{"id":"sub-exact","status":"armed"}}'
+  "goal reconcile")
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --goal-id) goal_id="$2"; shift ;;
+        --owner) goal_owner="$2"; shift ;;
+        --desired) desired="$2"; shift ;;
+      esac
+      shift
+    done
+    if [ "$desired" = "ended" ]; then
+      printf '%s\n' 'goal reconcile failed' >&2
+      exit 44
+    fi
+    printf '%s\n' "{\"goal_id\":\"$goal_id\",\"goal_owner\":\"$goal_owner\",\"desired\":\"active\",\"status\":\"armed\",\"subscription\":{\"id\":\"sub-exact\",\"status\":\"armed\",\"event\":\"deadline\"}}"
     ;;
   "notify status")
     subject="${STATUS_SUBJECT:-goal:long-task.md}"
@@ -27,10 +39,6 @@ case "$1 $2" in
     ;;
   "context ")
     printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"tmux","endpoint":"/tmp/collab.sock","tmux_endpoint":{"socket_path":"/tmp/collab.sock","server_pid":123,"tmux_session_id":"$1","pane_id":"%1","pane_pid":456}}},"liveness":{"live":true,"presence":"present","transport_kind":"tmux","endpoint":"/tmp/collab.sock"}}'
-    ;;
-  "notify unsubscribe")
-    printf '%s\n' 'unsubscribe failed' >&2
-    exit 44
     ;;
   *)
     exit 64
@@ -116,7 +124,21 @@ case "$1 $2" in
   "status --all") printf '%s\n' '{"workers":[{"id":"master-peer","role":"master","endpoint_live":true,"identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[]}' ;;
   "master status") printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true}}' ;;
   "context ") printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"tmux","endpoint":"/tmp/collab.sock","tmux_endpoint":{"socket_path":"/tmp/collab.sock","server_pid":123,"tmux_session_id":"$1","pane_id":"%1","pane_pid":456}}},"liveness":{"live":true,"presence":"present","transport_kind":"tmux","endpoint":"/tmp/collab.sock"}}' ;;
-  "notify subscribe") printf '%s\n' '{"subscription_id":"sub-periodic"}' ;;
+  "goal reconcile")
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --goal-id) goal_id="$2"; shift ;;
+        --owner) goal_owner="$2"; shift ;;
+        --desired) desired="$2"; shift ;;
+      esac
+      shift
+    done
+    if [ "$desired" = "ended" ]; then
+      printf '%s\n' "{\"goal_id\":\"$goal_id\",\"goal_owner\":\"$goal_owner\",\"desired\":\"ended\",\"status\":\"ended\",\"subscription\":null}"
+    else
+      printf '%s\n' "{\"goal_id\":\"$goal_id\",\"goal_owner\":\"$goal_owner\",\"desired\":\"active\",\"status\":\"armed\",\"subscription\":{\"id\":\"sub-periodic\",\"status\":\"armed\",\"event\":\"deadline\"}}"
+    fi
+    ;;
   "notify status")
     if [ "${STATUS_EXPIRED:-}" = "1" ]; then
       printf '%s\n' '{"subscriptions":[{"id":"sub-periodic","status":"expired","event":"deadline","subject":"goal:sha256:legacy"}]}'
@@ -326,21 +348,30 @@ case "$1 $2" in
   "status --all") printf '%s\n' '{"workers":[{"id":"master-peer","role":"master","endpoint_live":true,"identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[]}' ;;
   "master status") printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true}}' ;;
   "context ") printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"tmux","endpoint":"/tmp/collab.sock","tmux_endpoint":{"socket_path":"/tmp/collab.sock","server_pid":123,"tmux_session_id":"$1","pane_id":"%1","pane_pid":456}}},"liveness":{"live":true,"presence":"present","transport_kind":"tmux","endpoint":"/tmp/collab.sock"}}' ;;
-  "notify subscribe")
+  "goal reconcile")
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --goal-id) goal_id="$2"; shift ;;
+        --owner) goal_owner="$2"; shift ;;
+        --desired) desired="$2"; shift ;;
+      esac
+      shift
+    done
+    if [ "$desired" = "ended" ]; then
+      printf '%s\n' 'unexpected cancel' > cancel-called
+      printf '%s\n' "{\"goal_id\":\"$goal_id\",\"goal_owner\":\"$goal_owner\",\"desired\":\"ended\",\"status\":\"ended\",\"subscription\":null}"
+    else
     count=$((`/bin/cat subscribe-count 2>/dev/null || printf '0'` + 1))
     printf '%s' "$count" > subscribe-count
     if [ "$count" = "1" ]; then
-      printf '%s\n' '{"subscription_id":"sub-consumed","status":"armed"}'
+      printf '%s\n' "{\"goal_id\":\"$goal_id\",\"goal_owner\":\"$goal_owner\",\"desired\":\"active\",\"status\":\"armed\",\"subscription\":{\"id\":\"sub-consumed\",\"status\":\"armed\",\"event\":\"deadline\"}}"
     else
-      printf '%s\n' '{"subscription_id":"sub-rearmed","status":"armed"}'
+      printf '%s\n' "{\"goal_id\":\"$goal_id\",\"goal_owner\":\"$goal_owner\",\"desired\":\"active\",\"status\":\"armed\",\"subscription\":{\"id\":\"sub-rearmed\",\"status\":\"armed\",\"event\":\"deadline\"}}"
+    fi
     fi
     ;;
   "notify status")
     printf '%s\n' '{"subscriptions":[{"id":"sub-consumed","status":"consumed","event":"deadline","subject":"goal:sha256:consumed-goal"}]}'
-    ;;
-  "notify unsubscribe")
-    printf '%s\n' 'unexpected cancel' > cancel-called
-    printf '%s\n' '{"subscription_id":"sub-consumed","status":"cancelled"}'
     ;;
   *) exit 64 ;;
 esac
@@ -494,7 +525,7 @@ fn goal_subscribe_persistence_failure_retains_reconciliation_state() {
     fs::write(
         &fake_collab,
         format!(
-            "#!/bin/sh\ncase \"$1 $2\" in\n  \"status --all\") printf '%s\\n' '{{\"workers\":[{{\"id\":\"master-peer\",\"role\":\"master\",\"endpoint_live\":true,\"identity_valid\":true,\"suspected_offline\":false}}],\"tasks\":[],\"subagents\":[]}}' ;;\n  \"master status\") printf '%s\\n' '{{\"master\":{{\"worker_id\":\"master-peer\",\"endpoint_live\":true}}}}' ;;\n  \"context \") printf '%s\\n' '{{\"identity\":{{\"worker_id\":\"master-peer\",\"kind\":\"peer\",\"transport\":{{\"kind\":\"tmux\",\"endpoint\":\"/tmp/collab.sock\",\"tmux_endpoint\":{{\"socket_path\":\"/tmp/collab.sock\",\"server_pid\":123,\"tmux_session_id\":\"$1\",\"pane_id\":\"%1\",\"pane_pid\":456}}}}}},\"liveness\":{{\"live\":true,\"presence\":\"present\",\"transport_kind\":\"tmux\",\"endpoint\":\"/tmp/collab.sock\"}}}}' ;;\n  *) touch '{}' ; printf '%s\\n' '{{\"subscription_id\":\"orphan\"}}' ;;\nesac\n",
+            "#!/bin/sh\ncase \"$1 $2\" in\n  \"status --all\") printf '%s\\n' '{{\"workers\":[{{\"id\":\"master-peer\",\"role\":\"master\",\"endpoint_live\":true,\"identity_valid\":true,\"suspected_offline\":false}}],\"tasks\":[],\"subagents\":[]}}' ;;\n  \"master status\") printf '%s\\n' '{{\"master\":{{\"worker_id\":\"master-peer\",\"endpoint_live\":true}}}}' ;;\n  \"context \") printf '%s\\n' '{{\"identity\":{{\"worker_id\":\"master-peer\",\"kind\":\"peer\",\"transport\":{{\"kind\":\"tmux\",\"endpoint\":\"/tmp/collab.sock\",\"tmux_endpoint\":{{\"socket_path\":\"/tmp/collab.sock\",\"server_pid\":123,\"tmux_session_id\":\"$1\",\"pane_id\":\"%1\",\"pane_pid\":456}}}}}},\"liveness\":{{\"live\":true,\"presence\":\"present\",\"transport_kind\":\"tmux\",\"endpoint\":\"/tmp/collab.sock\"}}}}' ;;\n  \"goal reconcile\")\n    while [ \"$#\" -gt 0 ]; do\n      case \"$1\" in\n        --goal-id) goal_id=\"$2\"; shift ;;\n        --owner) goal_owner=\"$2\"; shift ;;\n        --desired) desired=\"$2\"; shift ;;\n      esac\n      shift\n    done\n    touch '{}'\n    if [ \"$desired\" = \"ended\" ]; then\n      printf '%s\\n' \"{{\\\"goal_id\\\":\\\"$goal_id\\\",\\\"goal_owner\\\":\\\"$goal_owner\\\",\\\"desired\\\":\\\"ended\\\",\\\"status\\\":\\\"ended\\\",\\\"subscription\\\":null}}\"\n    else\n      printf '%s\\n' \"{{\\\"goal_id\\\":\\\"$goal_id\\\",\\\"goal_owner\\\":\\\"$goal_owner\\\",\\\"desired\\\":\\\"active\\\",\\\"status\\\":\\\"armed\\\",\\\"subscription\\\":{{\\\"id\\\":\\\"orphan\\\",\\\"status\\\":\\\"armed\\\"}}}}\"\n    fi\n    ;;\n  *) exit 64 ;;\nesac\n",
             marker.display()
         ),
     )
@@ -679,7 +710,7 @@ fn goal_subscribe_timeout_failure_remains_explicit() {
     fs::create_dir_all(&fake_bin).unwrap();
     fs::write(
         fake_bin.join("collab"),
-        "#!/bin/sh\ncase \"$1 $2\" in\n  \"status --all\") printf '%s\\n' '{\"workers\":[{\"id\":\"master-peer\",\"role\":\"master\",\"endpoint_live\":true,\"identity_valid\":true,\"suspected_offline\":false}],\"tasks\":[],\"subagents\":[]}' ;;\n  \"master status\") printf '%s\\n' '{\"master\":{\"worker_id\":\"master-peer\",\"endpoint_live\":true}}' ;;\n  \"context \") printf '%s\\n' '{\"identity\":{\"worker_id\":\"master-peer\",\"kind\":\"peer\",\"transport\":{\"kind\":\"tmux\",\"endpoint\":\"/tmp/collab.sock\",\"tmux_endpoint\":{\"socket_path\":\"/tmp/collab.sock\",\"server_pid\":123,\"tmux_session_id\":\"$1\",\"pane_id\":\"%1\",\"pane_pid\":456}}},\"liveness\":{\"live\":true,\"presence\":\"present\",\"transport_kind\":\"tmux\",\"endpoint\":\"/tmp/collab.sock\"}}' ;;\n  \"notify subscribe\") printf '%s\\n' 'collab request timed out' >&2; exit 124 ;;\n  *) printf '%s\\n' 'unexpected collab command' >&2; exit 64 ;;\nesac\n",
+        "#!/bin/sh\ncase \"$1 $2\" in\n  \"status --all\") printf '%s\\n' '{\"workers\":[{\"id\":\"master-peer\",\"role\":\"master\",\"endpoint_live\":true,\"identity_valid\":true,\"suspected_offline\":false}],\"tasks\":[],\"subagents\":[]}' ;;\n  \"master status\") printf '%s\\n' '{\"master\":{\"worker_id\":\"master-peer\",\"endpoint_live\":true}}' ;;\n  \"context \") printf '%s\\n' '{\"identity\":{\"worker_id\":\"master-peer\",\"kind\":\"peer\",\"transport\":{\"kind\":\"tmux\",\"endpoint\":\"/tmp/collab.sock\",\"tmux_endpoint\":{\"socket_path\":\"/tmp/collab.sock\",\"server_pid\":123,\"tmux_session_id\":\"$1\",\"pane_id\":\"%1\",\"pane_pid\":456}}},\"liveness\":{\"live\":true,\"presence\":\"present\",\"transport_kind\":\"tmux\",\"endpoint\":\"/tmp/collab.sock\"}}' ;;\n  \"goal reconcile\") printf '%s\\n' 'collab request timed out' >&2; exit 124 ;;\n  *) printf '%s\\n' 'unexpected collab command' >&2; exit 64 ;;\nesac\n",
     )
     .unwrap();
     fs::set_permissions(&fake_bin.join("collab"), fs::Permissions::from_mode(0o755)).unwrap();
@@ -703,7 +734,7 @@ fn goal_subscribe_timeout_failure_remains_explicit() {
 
     assert_eq!(result.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&result.stderr);
-    assert!(stderr.contains("COLLAB_SUBSCRIBE_FAILED"), "{stderr}");
+    assert!(stderr.contains("GOAL_RECONCILE_ACTIVE_FAILED"), "{stderr}");
     assert!(stderr.contains("exit=124"), "{stderr}");
     let payload: Value = serde_json::from_slice(&result.stdout).unwrap();
     assert_eq!(payload["active"], false);
@@ -712,7 +743,7 @@ fn goal_subscribe_timeout_failure_remains_explicit() {
     assert!(payload["error"]
         .as_str()
         .unwrap()
-        .contains("COLLAB_SUBSCRIBE_FAILED:exit=124"));
+        .contains("GOAL_RECONCILE_ACTIVE_FAILED"));
 
     fs::remove_dir_all(root).unwrap();
 }

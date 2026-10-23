@@ -564,7 +564,7 @@ fn authenticated_send_supersedes_earlier_reply() {
     std::fs::remove_dir_all(root).ok();
 }
 #[test]
-fn cancelling_master_idle_subscription_supersedes_pending_wake() {
+fn goal_reconcile_does_not_close_master_idle_or_direct_reception() {
     let (server, root) = test_server();
     register(&server, "master", "%master");
     promote_master(&server, "master", "user-approved");
@@ -610,19 +610,38 @@ fn cancelling_master_idle_subscription_supersedes_pending_wake() {
             subscription_id: "sub-master-idle".into(),
         },
     ]);
-    let cancelled = handle_notification_unsubscribe(
+    let default_before = server
+        .state
+        .lock()
+        .unwrap()
+        .notification_subscriptions["sub-default-direct-message-master"]
+        .clone();
+    let reconciled = handle_goal_schedule_reconcile(
         &server,
         "master".into(),
         "token-master".into(),
-        "sub-master-idle".into(),
+        "unrelated-goal".into(),
+        "Jenny".into(),
+        "ended".into(),
+        None,
+        None,
+        Some("fixture".into()),
     );
-    assert!(cancelled.ok, "{}", cancelled.error.unwrap_or_default());
+    assert!(reconciled.ok, "{}", reconciled.error.unwrap_or_default());
     let state = server.state.lock().unwrap();
     assert_eq!(
         state.notification_subscriptions["sub-master-idle"].status,
-        "cancelled"
+        "armed"
     );
-    assert_eq!(state.msgs["pending-idle"].state, "superseded");
+    assert_eq!(state.msgs["pending-idle"].state, "pending");
+    assert_eq!(
+        state.notification_subscriptions["sub-default-direct-message-master"].status,
+        default_before.status
+    );
+    assert_eq!(
+        state.notification_subscriptions["sub-default-direct-message-master"].target,
+        default_before.target
+    );
     drop(state);
     std::fs::remove_dir_all(root).ok();
 }

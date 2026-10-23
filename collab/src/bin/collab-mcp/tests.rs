@@ -57,6 +57,23 @@ fn scoped_cleanup_adapters_have_no_target_or_daemon_controls() {
 }
 
 #[test]
+fn notification_unsubscribe_is_not_exposed_as_an_mcp_tool() {
+    let definitions = tools();
+    let names: Vec<&str> = definitions
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    assert!(!names.contains(&"collab_notify_unsubscribe"));
+    assert!(build_argv(
+        "collab_notify_unsubscribe",
+        &json!({"subscription_id":"sub-owned"})
+    )
+    .is_err());
+}
+
+#[test]
 fn worker_name_adapter_requires_exactly_one_user_action() {
     assert_eq!(
         build_argv("collab_worker_name", &json!({"name":"Alice"})).unwrap(),

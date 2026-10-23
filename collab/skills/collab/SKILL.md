@@ -1248,12 +1248,13 @@ On a peer blocker, first ask the current master for help with the task,
 evidence, attempted actions, proposed next step, and decision needed. Do not
 delay the request while seeking a proven fix. If master is unavailable, record
 it and continue safe in-scope work. If delivery or test conditions are unclear,
-propose the missing conditions instead of guessing. Only an explicit `collab notify unsubscribe
-<subscription-id>` stops a default direct-message lease; finishing or closing
-the last task never cancels it, so a registered peer stays wakeable. There is
-no separate `collab notify close` command. Do not unsubscribe another peer's
-lease. After an explicit unsubscribe, re-arm with `collab notify subscribe
---event direct-message`.
+propose the missing conditions instead of guessing. The default direct-message
+lease is daemon-owned and stays armed while the identity is registered;
+finishing or closing the last task or a goal never cancels it, so a registered
+peer stays wakeable. There is no subscription-closing command, interface, or
+alias. When a finite goal or task patrol has no actionable work, end it through
+its owner lifecycle (`appsdk goal cancel` for a goal, task closure for a
+task-owned schedule); this never controls base direct-message reception.
 
 AGY review is not used for Collab v1 lifecycle gates. Ordinary review uses an
 independent review path when review is required; milestone review uses Codex
@@ -1285,7 +1286,7 @@ is an observation, never task or control truth.
 | Delegate master authority to another peer (current master only) | `collab master delegate <peer>` |
 | Split work to a registered peer | `collab sendmessage --to <peer> --subject <topic> "<assignment with delivery and test conditions>"` |
 | Request blocker verification from the current master | `collab sendmessage --to <master> --subject blocker "<task_id; failure evidence; attempts/results; alternatives; decision/resume condition; cause/fix if known, otherwise unknown>"` |
-| Cancel one of your own notification leases | `collab notify unsubscribe <subscription-id>` |
+| End your own finite goal schedule | `appsdk goal cancel` (task-owned schedules end with task closure) |
 
 After a transport preview, use its notification ID and abbreviated subject to weigh
 urgency against the current task. When selecting the notice, run
@@ -1330,8 +1331,8 @@ projections that used to require separate calls, so no agent flow needs to run
 | Need peer list, master state, scheduling state, or env | read them from the single `collab context` snapshot | call `collab who`, `collab status --all`, `collab master status`, or grep the environment as a separate step |
 | `requires_identity_update` is present | supply only requested real runtime facts; a user-authorized identity/name/role recovery uses the exact intent command in stable-name-recovery; context handles migration internally | guess archived workers, inspect routes/tokens, hand-edit state, invent approval or treat historical ambiguity as insufficient user authority |
 | `collab context` exits non-zero with `COLLAB_CONTEXT_UNRESOLVED` | preserve the error; failed initial registration continues independently; existing registered participants report the affected coordination without clearing owned tasks/claims | automatically retry from another cwd; edit routes/token state, copy identity, reset the project |
-| Default lease looks stopped | `collab context` re-arms it unless the owner explicitly unsubscribed | probe sockets, call a transport directly |
-| Notification arrived | `collab msg <id>`, then act; `collab recv` consumes | ACK-only, or treat submission as consumption |
+| Default lease looks stopped | `collab context` re-arms it from the registered identity | probe sockets, call a transport directly |
+| Notification arrived | run `collab recv` once to consume and read, then act | ACK-only, or treat submission as consumption |
 | Master has a pending merge | `collab context` → `pending_merges`, merge the candidate, then `collab task integrated` | rely on a remembered message, or try to close first |
 
 ### Master peer CRUD
@@ -1428,7 +1429,7 @@ snapshot:
 | 可选通信诊断 pending | 原身份与当前 route 仍可用；诊断 reply 未完成 | 该诊断不是恢复前提；若显式使用，participant 从所选 adapter 读取 challenge 并从自身环境回传；`--query` 保持只读 |
 | `COLLAB_CONTEXT_UNRESOLVED` | 无 route、无 baseline、无 git 根（非零退出） | 保留原错，不自动换 cwd 重试；首次注册失败则独立继续，已注册者报告受影响协作，保留已领任务/claim |
 | 拒绝在 playground 创建基线 | 在 worktree 内引导（非零退出） | 保留原错，不改主树或删除旧身份；首次注册失败则独立继续，已注册者保留已有职责并报告协作缺口 |
-| 默认订阅已停 | owner 显式 unsubscribe 持久生效 | 需要再收消息时用 `collab notify subscribe --event direct-message` 重订阅 |
+| 默认订阅已停 | daemon 按当前注册身份自动重武装，不存在显式退订 | 需要再收消息时运行 `collab context` 自动恢复，不由 agent 手工重订阅 |
 
 `requires_identity_update.reason` is a typed code. It is not prose and it is not
 permission to select a worker. The supplement has exactly the four scalar fields
@@ -1586,9 +1587,9 @@ claim an independent goal or infer master authority.
   root cause and solution need not be proven first. Apply Registered patrol
   duties for master verification and continued ownership. Legacy managed records grant no new task
   authority. Last owned
-  task close keeps that owner's auto-notify armed; use
-  `collab notify unsubscribe <subscription-id>` for a specific leftover
-  lease. Only an explicit unsubscribe stops it. AGY review is not a Collab v1 gate; ordinary review is independent,
+  task close keeps that owner's auto-notify armed. There is no subscription-closing
+  command; end a leftover finite goal schedule with `appsdk goal cancel` and
+  keep base direct-message reception daemon-owned. AGY review is not a Collab v1 gate; ordinary review is independent,
   and milestone review uses Codex Review (`oauth`, `gpt-6.1-sol`). Legacy
   managed records remain diagnostic compatibility facts only.
 - Each peer owns its complete task/worktree/integration/resource/cleanup

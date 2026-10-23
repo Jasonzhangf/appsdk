@@ -1479,8 +1479,11 @@ fn verified_public_create_can_be_bound_and_read_back_as_managed() {
         command
             .current_dir(&fixture.root)
             .env("COLLAB_STATE_DIR", &fixture.host_state)
+            .env("HOME", fixture.root.join("home"))
             .env("CODEX_HOME", fixture.root.join("home"))
             .env("COLLAB_BIN", &fixture.binary)
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
             .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex TUI");
         configure_runtime(&mut command);
         let mut child = command
@@ -2122,13 +2125,14 @@ fn verified_public_create_can_be_bound_and_read_back_as_managed() {
         .output()
         .expect("inspect exact child-owned notification subscription");
     let child_notify_status: Value = serde_json::from_slice(&child_notify_status.stdout).unwrap();
-    let subscription_id = child_notify_status["subscriptions"]
+    let direct_subscription = child_notify_status["subscriptions"]
         .as_array()
         .unwrap()
         .iter()
         .find(|subscription| subscription["event"] == "direct-message")
-        .and_then(|subscription| subscription["id"].as_str())
+        .cloned()
         .expect("child direct-message subscription");
+    let subscription_id = direct_subscription["id"].as_str().unwrap();
     let mut unsubscribe =
         fixture.configured_command(&["notify", "unsubscribe", subscription_id], None);
     unsubscribe
@@ -2136,51 +2140,32 @@ fn verified_public_create_can_be_bound_and_read_back_as_managed() {
         .env("CODEX_SESSION_ID", "created-session-3")
         .env("CODEX_THREAD_ID", "created-thread-3");
     let unsubscribe = unsubscribe.output().expect("unsubscribe exact child route");
-    assert!(unsubscribe.status.success());
-    let no_subscription_reply = subagent_mcp_call(json!({
-        "action":"send",
-        "id":"managed-no-subscription-peer",
-        "subject":"managed-child mailbox repair",
-        "body":"Read this durable message without a wake subscription."
-    }));
-    assert_eq!(
-        no_subscription_reply["isError"], false,
-        "{no_subscription_reply}"
+    assert!(!unsubscribe.status.success());
+    let stderr = String::from_utf8_lossy(&unsubscribe.stderr);
+    assert!(
+        stderr.contains("unsubscribe") || stderr.contains("unexpected"),
+        "removed interface must be rejected by the CLI parser: {stderr}"
     );
-    let no_subscription: Value = serde_json::from_str(
-        no_subscription_reply["content"][0]["text"]
-            .as_str()
-            .expect("mailbox-only Send MCP result"),
-    )
-    .expect("mailbox-only Send result is JSON");
-    assert_eq!(
-        no_subscription["message"]["durable"], true,
-        "{no_subscription}"
-    );
-    assert_eq!(
-        no_subscription["message"]["repair_required"], true,
-        "{no_subscription}"
-    );
-    assert_eq!(
-        no_subscription["message"]["notification"], "mailbox-only-no-subscription",
-        "{no_subscription}"
-    );
-    let no_subscription_msg_id = no_subscription["message"]["msg_id"]
-        .as_str()
-        .expect("mailbox-only durable message ID");
-    let mut mailbox_only_recv = fixture.configured_command(&["recv", "--timeout", "1"], None);
-    mailbox_only_recv
+
+    let mut child_notify_status_after = fixture.configured_command(&["notify", "status"], None);
+    child_notify_status_after
         .env("CODEX_APP_SERVER_SOCKET", &endpoint_path)
         .env("CODEX_SESSION_ID", "created-session-3")
         .env("CODEX_THREAD_ID", "created-thread-3");
-    let mailbox_only_recv = mailbox_only_recv
+    let child_notify_status_after = child_notify_status_after
         .output()
-        .expect("consume mailbox-only durable managed message");
-    assert!(mailbox_only_recv.status.success());
-    let mailbox_only_recv: Value = serde_json::from_slice(&mailbox_only_recv.stdout).unwrap();
+        .expect("inspect child subscription after rejected unsubscribe");
+    let child_notify_status_after: Value =
+        serde_json::from_slice(&child_notify_status_after.stdout).unwrap();
+    let after_subscription = child_notify_status_after["subscriptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|subscription| subscription["id"] == subscription_id)
+        .expect("base subscription survives removed interface");
     assert_eq!(
-        mailbox_only_recv["messages"][0]["id"], no_subscription_msg_id,
-        "{mailbox_only_recv}"
+        after_subscription["status"], direct_subscription["status"],
+        "{after_subscription}"
     );
 
     let mut list = fixture.configured_command(&["subagent", "list"], None);

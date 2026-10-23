@@ -408,38 +408,53 @@ fn default_direct_message_events(
     let mut events = Vec::new();
     let default_id = default_direct_message_id(worker_id);
     let mut pending_direct_message_ids = std::collections::BTreeSet::new();
-    // Only an explicit owner unsubscribe is a durable stop for the
-    // system-owned default lease. Any other `cancelled` state (for example a
-    // legacy automatic cancel, or an untyped status write) is recoverable and
-    // is re-armed below, so a retired default lease can never leave a
-    // registered peer permanently wake-less.
-    if state
-        .notification_subscriptions
-        .get(&default_id)
-        .is_some_and(|subscription| {
-            subscription.status == "cancelled"
-                && subscription.status_reason.as_deref() == Some(EXPLICIT_UNSUBSCRIBE_REASON)
-        })
-    {
-        return events;
-    }
+    // The default lease is daemon-owned. Historical cancellation is repaired
+    // from the current registered transport; only finite schedule occurrences
+    // carry agent-controlled termination.
     for message in state.msgs.values() {
         if message.to != worker_id || message.mtype != "notify" || message.state != "pending" {
             continue;
         }
-        let Some(binding_id) = state.wake_bindings.get(&message.id) else {
+        if message.subject.as_deref().is_some_and(|subject| {
+            subject.starts_with("deadline:") || subject.starts_with("master-idle:")
+        }) {
             continue;
-        };
-        let Some(binding) = state.notification_subscriptions.get(binding_id) else {
-            continue;
-        };
-        if binding.worker_id == worker_id
-            && binding.event == "direct-message"
-            && binding.status == "armed"
-            && binding.expires_ms > now
-            && binding.id != default_id
+        }
+        if message.wake_attempt_count > 0
+            || message.retry_attempted
+            || state.notification_delivery_accepted.contains_key(&message.id)
+            || state.notification_delivery_failures.contains_key(&message.id)
         {
-            pending_direct_message_ids.insert(message.id.clone());
+            continue;
+        }
+        match state.wake_bindings.get(&message.id) {
+            None => {
+                pending_direct_message_ids.insert(message.id.clone());
+            }
+            Some(binding_id) => {
+                let binding = state.notification_subscriptions.get(binding_id);
+                match binding {
+                    Some(binding)
+                        if binding.worker_id == worker_id
+                            && binding.event == "direct-message"
+                            && binding.status == "armed"
+                            && binding.expires_ms > now
+                            && binding.id == default_id => {}
+                    Some(binding)
+                        if binding.worker_id == worker_id
+                            && binding.event == "direct-message"
+                            && binding.status == "armed"
+                            && binding.expires_ms > now => {
+                        pending_direct_message_ids.insert(message.id.clone());
+                    }
+                    Some(_) => {
+                        pending_direct_message_ids.insert(message.id.clone());
+                    }
+                    None => {
+                        pending_direct_message_ids.insert(message.id.clone());
+                    }
+                }
+            }
         }
     }
     let refresh_after_ms = DEFAULT_DIRECT_MESSAGE_TTL_SECONDS as i64 * 1000 / 2;
@@ -462,8 +477,15 @@ fn default_direct_message_events(
             status: "rebound".into(),
             updated_ms: now,
         });
-        if let Some(message_id) = state.wake_bindings.get(&subscription.id) {
-            pending_direct_message_ids.insert(message_id.clone());
+        for (message_id, bound_subscription) in &state.wake_bindings {
+            if bound_subscription == &subscription.id
+                && state
+                    .msgs
+                    .get(message_id)
+                    .is_some_and(|message| message.state == "pending")
+            {
+                pending_direct_message_ids.insert(message_id.clone());
+            }
         }
     }
     if current_is_fresh {
@@ -491,6 +513,12 @@ fn default_direct_message_events(
                     updated_ms: now,
                     status_reason: None,
                 },
+            });
+        }
+        for message_id in std::mem::take(&mut pending_direct_message_ids).into_iter() {
+            events.push(Event::WakeBound {
+                message_id,
+                subscription_id: default_id.clone(),
             });
         }
         return events;

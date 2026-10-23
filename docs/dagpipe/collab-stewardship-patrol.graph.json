@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-stewardship-patrol",
-  "version": "0.1.0",
-  "description": "One authorized Collab stewardship patrol activation reads current role, task, capacity, worktree, resource, P0/P1, and issue facts; classifies actionable work and protected holds; selects a suitable peer before a master-owned independent GCM worker; executes through the public board or one-shot `codex exec --profile gcm`; verifies behavior and closure or an explicit park; re-arms a consumed one-shot wake when continued scheduling is required; and emits one result with next action. Every failure or ambiguous ownership state reaches the same result sink without becoming success.",
+  "version": "0.2.0",
+  "description": "One authorized Collab stewardship patrol activation reads current role, task, capacity, worktree, resource, P0/P1, and issue facts; classifies actionable work and protected holds; selects a suitable peer before a master-owned independent GCM worker; executes through the public board or one-shot `codex exec --profile gcm`; verifies behavior and closure or an explicit park; then makes one final scheduling decision: re-arm one consumed one-shot goal/deadline occurrence with `appsdk goal subscribe`, or reconcile the owned goal/task to ended when no actionable work remains. Every failure or ambiguous ownership state reaches the same result sink without becoming success. Direct-message reception is daemon-owned and never closed by patrol termination.",
   "inputs": [
     {
       "id": "authorized_patrol_activation",
@@ -65,6 +65,7 @@
       "operator_version": "1",
       "inputs": ["verified_patrol_outcome"],
       "output": {"id": "wake_outcome", "schema": "Object"},
+      "description": "Final owned-scheduling decision. When actionable scheduling remains, re-arm exactly one bounded one-shot goal/deadline occurrence through the existing goal owner; otherwise reconcile the owned goal/task to ended so its finite patrol stops. Neither branch controls the daemon-owned default direct-message base reception.",
       "input_selector": {"include": [], "exclude": [], "predicate": null},
       "output_selector": {"include": [], "exclude": [], "predicate": null},
       "iterator": "Whole"

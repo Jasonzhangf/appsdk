@@ -187,7 +187,7 @@
   - 裁决输出**必须列出将被继承的订阅清单**，并写入 receipt 的 `inherited_subscriptions`；
   - 提供 `--no-inherit-subscriptions`：选择不继承，则新 principal 的订阅集为空，需要重新订阅；
   - 不提供该选项时，默认继承但**必须打印清单**，不允许静默接管他人的通知链路。
-- binding generation 前进**不影响**订阅；订阅只在显式 unsubscribe、Principal tombstone、或 lease 型订阅到期时终止。
+- binding generation 前进**不影响**订阅；有限 schedule occurrence 只在 goal schedule reconcile `ended`、Principal tombstone、或 lease 型订阅到期时终止；default direct-message lease 由 daemon 按当前注册 identity 自动恢复，不由 agent 退订。
 - mailbox 只承载 payload；通知链路（订阅）与投递（consumption）是两个独立闭环，不得互相替代。
 
 ---

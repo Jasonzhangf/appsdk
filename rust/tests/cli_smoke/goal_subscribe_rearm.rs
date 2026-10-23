@@ -19,25 +19,29 @@ case "$1 $2" in
   "context ")
     printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"tmux","endpoint":"/tmp/collab.sock","tmux_endpoint":{"socket_path":"/tmp/collab.sock","server_pid":123,"tmux_session_id":"$1","pane_id":"%1","pane_pid":456}}},"liveness":{"live":true,"presence":"present","transport_kind":"tmux","endpoint":"/tmp/collab.sock"}}'
     ;;
-  "notify subscribe")
-    count=$((`/bin/cat subscribe-count 2>/dev/null || printf '0'` + 1))
-    printf '%s' "$count" > subscribe-count
+  "goal reconcile")
     while [ "$#" -gt 0 ]; do
-      if [ "$1" = "--subject" ]; then printf '%s' "$2" > goal-subject; fi
+      case "$1" in
+        --goal-id) goal_id="$2"; shift ;;
+        --owner) owner="$2"; shift ;;
+        --desired) desired="$2"; shift ;;
+      esac
       shift
     done
+    if [ "$desired" != "active" ]; then
+      printf '%s\n' "{\"goal_id\":\"$goal_id\",\"goal_owner\":\"$owner\",\"desired\":\"$desired\",\"status\":\"ended\",\"cancelled\":true}"
+      exit 0
+    fi
+    count=$((`/bin/cat subscribe-count 2>/dev/null || printf '0'` + 1))
+    printf '%s' "$count" > subscribe-count
     if [ "$count" = "1" ]; then
       printf '%s\n' 'absolute trigger times must be in the future and before expiry' >&2
       exit 45
     fi
-    printf '%s\n' '{"subscription_id":"sub-rearmed","status":"armed"}'
+    printf '%s\n' "{\"goal_id\":\"$goal_id\",\"goal_owner\":\"$owner\",\"desired\":\"$desired\",\"status\":\"armed\",\"subscription\":{\"id\":\"sub-rearmed\",\"status\":\"armed\"}}"
     ;;
   "notify status")
     printf '%s\n' '{"subscriptions":[]}'
-    ;;
-  "notify unsubscribe")
-    printf '%s\n' 'unexpected unsubscribe' > unsubscribe-called
-    exit 46
     ;;
   *)
     exit 64
@@ -72,7 +76,7 @@ esac
     assert!(failed_json["error"]
         .as_str()
         .unwrap()
-        .contains("COLLAB_SUBSCRIBE_FAILED"));
+        .contains("GOAL_RECONCILE_ACTIVE_FAILED"));
 
     let cancel = Command::new(binary())
         .args(["goal", "cancel", "--json"])
@@ -81,15 +85,15 @@ esac
         .env_remove("TMUX_PANE")
         .output()
         .unwrap();
-    assert_eq!(cancel.status.code(), Some(1));
+    assert!(
+        cancel.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cancel.stderr)
+    );
     let cancel_json: Value = serde_json::from_slice(&cancel.stdout).unwrap();
-    assert_eq!(cancel_json["desired"], "cancel_pending");
-    assert_eq!(cancel_json["observed"], "unknown");
-    assert_eq!(cancel_json["remote_state"], "no_matching_armed_subject");
-    assert!(cancel_json["error"]
-        .as_str()
-        .unwrap()
-        .contains("GOAL_CANCEL_SUBJECT_NOT_FOUND"));
+    assert_eq!(cancel_json["status"], "cancelled");
+    assert_eq!(cancel_json["record"]["desired"], "unsubscribed");
+    assert_eq!(cancel_json["record"]["observed"], "cancelled");
 
     let rearmed = Command::new(binary())
         .args([
@@ -117,20 +121,11 @@ esac
     assert_eq!(rearmed_json["observed"], "subscribed");
     assert_eq!(rearmed_json["interval"], "5m");
     assert_eq!(rearmed_json["subscription_id"], "sub-rearmed");
-    assert_eq!(
-        rearmed_json["recovery_history"][0]["previous_record"]["desired"],
-        "cancel_pending"
-    );
-    assert_eq!(
-        rearmed_json["recovery_history"][0]["previous_record"]["remote_state"],
-        "no_matching_armed_subject"
-    );
+    assert!(rearmed_json.get("recovery_history").is_none(), "{rearmed_json}");
     assert_eq!(
         fs::read_to_string(root.join("subscribe-count")).unwrap(),
         "2"
     );
-    assert!(!root.join("unsubscribe-called").exists());
-
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -155,24 +150,24 @@ case "$1 $2" in
   "context ")
     printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"tmux","endpoint":"/tmp/collab.sock","tmux_endpoint":{"socket_path":"/tmp/collab.sock","server_pid":123,"tmux_session_id":"$1","pane_id":"%1","pane_pid":456}}},"liveness":{"live":true,"presence":"present","transport_kind":"tmux","endpoint":"/tmp/collab.sock"}}'
     ;;
-  "notify subscribe")
+  "goal reconcile")
     count=$((`/bin/cat subscribe-count 2>/dev/null || printf '0'` + 1))
     printf '%s' "$count" > subscribe-count
     printf '%s' "sub-$count" > current-sub
     while [ "$#" -gt 0 ]; do
-      if [ "$1" = "--subject" ]; then printf '%s' "$2" > goal-subject; fi
+      case "$1" in
+        --goal-id) goal_id="$2"; shift ;;
+        --owner) owner="$2"; shift ;;
+        --desired) desired="$2"; shift ;;
+      esac
       shift
     done
-    printf '%s\n' "{\"subscription_id\":\"sub-$count\",\"status\":\"armed\"}"
+    printf '%s\n' "{\"goal_id\":\"$goal_id\",\"goal_owner\":\"$owner\",\"desired\":\"$desired\",\"status\":\"armed\",\"subscription\":{\"id\":\"sub-$count\",\"status\":\"armed\"}}"
     ;;
   "notify status")
     id=`/bin/cat current-sub 2>/dev/null || printf 'none'`
     subject=`/bin/cat goal-subject 2>/dev/null || printf 'goal:unknown'`
     printf '%s\n' "{\"subscriptions\":[{\"id\":\"$id\",\"status\":\"consumed\",\"event\":\"deadline\",\"subject\":\"$subject\"}]}"
-    ;;
-  "notify unsubscribe")
-    printf '%s\n' 'unexpected unsubscribe' > unsubscribe-called
-    exit 46
     ;;
   *)
     exit 64
@@ -256,7 +251,5 @@ esac
         fs::read_to_string(root.join("subscribe-count")).unwrap(),
         "7"
     );
-    assert!(!root.join("unsubscribe-called").exists());
-
     fs::remove_dir_all(root).unwrap();
 }

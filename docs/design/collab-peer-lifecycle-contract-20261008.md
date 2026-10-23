@@ -303,7 +303,7 @@ participate in the same serialized admission transaction. This includes:
   (`handle_register_with_app_scope`, `handle_register_with_app_scope_unfinalized`,
   and `GlobalCurrentThreadRouteSet` commits);
 - notification subscription create/update/cancel
-  (`handle_notification_subscribe` and `handle_notification_unsubscribe`),
+  (`handle_notification_subscribe` and `handle_goal_schedule_reconcile`),
   plus notification delivery/consumption when it creates a new obligation.
 
 Read-only status, mailbox/history reads, and consumption of already-durable

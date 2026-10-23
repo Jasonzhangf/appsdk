@@ -400,7 +400,7 @@ fn mutation_blocked_during_migration(req: &Req) -> bool {
         | Req::CrossProjectSend { .. }
         | Req::LiveClosureDaemonSend { .. }
         | Req::NotificationSubscribe { .. }
-        | Req::NotificationUnsubscribe { .. }
+        | Req::GoalScheduleReconcile { .. }
         | Req::Poll { .. }
         | Req::Ack { .. }
         | Req::TaskRegister { .. }
@@ -490,7 +490,7 @@ fn wire_mutation_principal(req: &Req) -> Option<(&str, &str)> {
         | Req::NotificationSubscribe {
             worker_id, token, ..
         }
-        | Req::NotificationUnsubscribe {
+        | Req::GoalScheduleReconcile {
             worker_id, token, ..
         }
         | Req::Poll {

@@ -372,13 +372,12 @@ fn flush_idle_batches_if_ready(server: &Server, now: i64) {
         "master-wake-batch".to_string()
     };
     let body = format!(
-        "newly_idle={} live_idle={} blocked={} pending_merges={} goal_due={}. Long-horizon orchestration: assign suitable long-horizon goals through the public board to authorized peers; if no peer is available, retain and split the goal. Prefer assigning code implementation to subagents; orchestrate scheduling, acceptance, delivery, integration, and owned-resource closure instead of implementing the mainline yourself. Dispatch one-shot execution or observation directly to independent `codex exec --profile gcm` workers regardless of whether other peers are busy. For every assignment, state goal, scope, authorized actions, resource owner, delivery/test evidence, report and stop conditions. Master finite patrol: inspect open P0/P1 work, actual peer progress, owned worktrees and runtime resources, project-canonical issue intake, and required rearm. Subscription presence does not gate identity; do not invent a polling interval. A peer-owned goal patrols goal progress, blockers, and owned resources, and asks the current master first when blocked. Remove unneeded owned worktrees after recoverable extraction; reclaim owned stale resources; close each open P0/P1 with evidence or explicitly park it with owner, cause, and unblock condition; preserve and report protected holds (dirty, active, shared, or unknown resources). Verify evidence and integrate accepted pending candidates. AppSDK/Collab and tmux lifecycles remain independent; never stop or restart a tmux server or terminate host panes during patrol or cleanup. Before ending the patrol, re-arm a consumed one-shot goal or deadline wake with `appsdk goal subscribe` when continued scheduling is required; a read, ACK, summary, or dispatch receipt is not completion. Managed subagent records and `collab subagent dispatch` are legacy compatibility for diagnosis or migration only. Cancel scheduling only when no actionable task, dependency, resolvable blocker, or authorized open issue remains, using collab notify unsubscribe {} and recording the receipt.",
+        "newly_idle={} live_idle={} blocked={} pending_merges={} goal_due={}. Long-horizon orchestration: assign suitable long-horizon goals through the public board to authorized peers; if no peer is available, retain and split the goal. Prefer assigning code implementation to subagents; orchestrate scheduling, acceptance, delivery, integration, and owned-resource closure instead of implementing the mainline yourself. Dispatch one-shot execution or observation directly to independent `codex exec --profile gcm` workers regardless of whether other peers are busy. For every assignment, state goal, scope, authorized actions, resource owner, delivery/test evidence, report and stop conditions. Master finite patrol: inspect open P0/P1 work, actual peer progress, owned worktrees and runtime resources, project-canonical issue intake, and required rearm. Subscription presence does not gate identity; do not invent a polling interval. A peer-owned goal patrols goal progress, blockers, and owned resources, and asks the current master first when blocked. Remove unneeded owned worktrees after recoverable extraction; reclaim owned stale resources; close each open P0/P1 with evidence or explicitly park it with owner, cause, and unblock condition; preserve and report protected holds (dirty, active, shared, or unknown resources). Verify evidence and integrate accepted pending candidates. AppSDK/Collab and tmux lifecycles remain independent; never stop or restart a tmux server or terminate host panes during patrol or cleanup. Before ending the patrol, re-arm a consumed one-shot goal with `appsdk goal subscribe` when continued scheduling is required; a read, ACK, summary, or dispatch receipt is not completion. Managed subagent records and `collab subagent dispatch` are legacy compatibility for diagnosis or migration only. When no actionable task, dependency, resolvable blocker, or authorized open issue remains, end the owned goal or task-owned finite schedule through its lifecycle (`appsdk goal cancel` for a goal, task closure for a task schedule) and record the receipt. Direct-message reception is daemon-owned, remains on, and is never a patrol resource to close.",
         newly_idle.join(","),
         live_idle.join(","),
         blocked.join(","),
         pending_merges.join(","),
-        state.master_wake.goal_due,
-        subscription.id
+        state.master_wake.goal_due
     );
     let alert_id = super::gen_msg_id();
     let mut events = vec![
@@ -1068,7 +1067,12 @@ mod tests {
             "{body}"
         );
         assert!(body.contains("protected holds"), "{body}");
-        assert!(body.contains("one-shot goal or deadline wake"), "{body}");
+        assert!(body.contains("appsdk goal subscribe"), "{body}");
+        assert!(
+            body.contains("Direct-message reception is daemon-owned"),
+            "{body}"
+        );
+        assert!(!body.contains("notify unsubscribe"), "{body}");
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1150,6 +1154,23 @@ mod tests {
         assert!(
             batch.body.contains("pending_merges=task-merge"),
             "{}",
+            batch.body
+        );
+        assert!(
+            !batch.body.contains("notify unsubscribe"),
+            "idle guidance must not close base reception: {}",
+            batch.body
+        );
+        assert!(
+            batch.body.contains("appsdk goal cancel"),
+            "idle guidance must name the goal lifecycle owner: {}",
+            batch.body
+        );
+        assert!(
+            batch
+                .body
+                .contains("Direct-message reception is daemon-owned"),
+            "idle guidance must keep daemon reception explicit: {}",
             batch.body
         );
         drop(state);

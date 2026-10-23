@@ -423,7 +423,7 @@ fn design_graph_ids() -> [&'static str; 21] {
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 103] {
+fn design_graph_operator_names() -> [&'static str; 104] {
     [
         "appsdk.collab.board.admit_request",
         "appsdk.collab.board.apply",
@@ -432,6 +432,7 @@ fn design_graph_operator_names() -> [&'static str; 103] {
         "appsdk.collab_goal.resolve_owner",
         "appsdk.collab_goal.select_record",
         "appsdk.collab_goal.apply_transition",
+        "appsdk.collab_goal.reconcile_schedule",
         "appsdk.collab_goal.emit_result",
         "appsdk.collab_appserver_route.fail_explicitly",
         "appsdk.collab_assignment.authorize_target",

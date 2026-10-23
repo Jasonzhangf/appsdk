@@ -182,7 +182,7 @@ tmux 或 Desktop/TUI 位置作为权限条件。
 | --- | --- | --- |
 | 无订阅 | 创建默认 direct-message 或合法显式订阅 | `armed` |
 | `armed` | 当前投递目标不可用或与当前 transport 不符 | `transport-lost` |
-| `armed` | 显式 owner unsubscribe | `cancelled` / suppressed |
+| `armed` | goal schedule reconcile `ended` | `cancelled` / suppressed |
 | `armed` | TTL 到期 | `expired` |
 | `armed` | 一次性 occurrence 已消费 | `consumed` |
 | `transport-lost` | transport 恢复，包括 method 与 target 未变化 | `armed`，保留 schedule、TTL 和 fired count |

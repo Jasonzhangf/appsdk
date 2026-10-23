@@ -69,6 +69,7 @@ fn appsdk_goal(fixture: &AppFixture, root: &std::path::Path, thread: &str, args:
         .args(args)
         .current_dir(root)
         .env("PATH", std::env::join_paths(paths).unwrap())
+        .env("HOME", fixture.root.join("home"))
         .env("COLLAB_STATE_DIR", &fixture.host_state)
         .env("COLLAB_APPSERVER_SOCKET", &fixture.app_socket)
         .env_remove("CODEX_APP_SERVER_SOCKET")
@@ -491,7 +492,11 @@ fn peer_goal_deadline_is_delivered_consumed_and_cancelled_without_master_proxy()
         .unwrap();
     assert_eq!(subscription["status"], "consumed");
     assert_eq!(subscription["fired_count"], 1);
-    fixture.run_public(&["notify", "unsubscribe", peer_sub], THREAD_B);
+    let removed_close = fixture.command_public(&["notify", "unsubscribe", peer_sub], THREAD_B);
+    assert!(
+        !removed_close.status.success(),
+        "public subscription-closing command must be removed"
+    );
     let master_status = fixture.run_public(&["notify", "status"], THREAD_A);
     assert_eq!(
         master_status["subscriptions"]

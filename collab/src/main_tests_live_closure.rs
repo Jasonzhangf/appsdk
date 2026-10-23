@@ -132,7 +132,7 @@ fn live_closure_item_correlation_accepts_multi_message_batch_entry() {
         challenge,
     )
     .unwrap();
-    let batch_input = "COLLAB_NOTIFY message-other [notification-batch] Batch wake: message_ids=message-other,message-target,message-later task_ids=none action_categories=other,appsdk-collab-live:closure-1:peer_to_peer,later. Read full durable details from collab inbox; execute the actions, do not ACK-only. older_messages=2; run collab inbox | P1 ACTION: do the in-scope action the message asks for. Details: collab msg message-other. | READ IS NOT DONE: never end your turn on an ACK, a read, or a summary. After handling, resume your current task; if you own none, run `appsdk longhorizon show` and take work.";
+    let batch_input = "COLLAB_NOTIFY message-other [notification-batch] Batch wake: message_ids=message-other,message-target,message-later task_ids=none action_categories=other,appsdk-collab-live:closure-1:peer_to_peer,later. Run `collab recv` once to consume and read this durable batch; execute the actions, do not ACK-only. older_messages=2; run collab inbox | P1 ACTION: do the in-scope action the message asks for. Details: run `collab recv` once to consume and read this durable notification. | READ IS NOT DONE: never end your turn on an ACK, a read, or a summary. After handling, resume your current task; if you own none, run `appsdk longhorizon show` and take work.";
 
     assert!(live_closure_item_matches_input(
         &json!({

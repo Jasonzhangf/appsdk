@@ -685,11 +685,16 @@ use super::*;
             },
         }]);
 
-        let cancelled = super::super::handle_notification_unsubscribe(
+        let cancelled = super::super::handle_goal_schedule_reconcile(
             &server,
             "master".into(),
             "token-master".into(),
-            subscription_id.clone(),
+            "cancelled".into(),
+            "Jenny".into(),
+            "ended".into(),
+            None,
+            None,
+            Some("goal-finished".into()),
         );
         assert!(cancelled.ok, "{}", cancelled.error.unwrap_or_default());
         tick_with_idle(&server, &|_| false);
@@ -717,11 +722,16 @@ use super::*;
         let (server, root) = test_server();
         register_master(&server);
         let deadline = periodic_deadline_subscription(&server, "master", "goal:cancelled-unknown");
-        let cancelled = super::super::handle_notification_unsubscribe(
+        let cancelled = super::super::handle_goal_schedule_reconcile(
             &server,
             "master".into(),
             "token-master".into(),
-            deadline.clone(),
+            "cancelled-unknown".into(),
+            "Jenny".into(),
+            "ended".into(),
+            None,
+            None,
+            Some("goal-finished".into()),
         );
         assert!(cancelled.ok, "{cancelled:?}");
         let idle = master_idle_subscription(&server, 15 * 60 * 1000);
@@ -844,13 +854,12 @@ use super::*;
                 (bound == &subscription_id).then_some(message_id.clone())
             })
             .expect("master idle wake");
-        let cancelled = super::super::handle_notification_unsubscribe(
-            &server,
-            "master".into(),
-            "token-master".into(),
-            subscription_id.clone(),
-        );
-        assert!(cancelled.ok, "{}", cancelled.error.unwrap_or_default());
+        server.commit(&[Event::NotificationSuppressed {
+            subscription_id: subscription_id.clone(),
+            status: "cancelled".into(),
+            reason: "historical-explicit-unsubscribe".into(),
+            updated_ms: now_ms(),
+        }]);
 
         server.commit(&[
             Event::Delivered {
@@ -934,7 +943,27 @@ use super::*;
             .find_map(|(message_id, bound)| (bound == &subscription_id).then_some(message_id))
             .unwrap();
         assert_eq!(state.msgs[message_id].to, "master");
-        assert!(state.msgs[message_id].body.contains("scheduling"));
+        assert!(state.msgs[message_id].body.contains("MASTER_IDLE_WAKE"));
+        assert!(state.msgs[message_id]
+            .body
+            .contains("Do not rearm this finite master-idle schedule"));
+        assert!(
+            !state.msgs[message_id].body.contains("notify unsubscribe"),
+            "idle timer must not ask the agent to close base reception: {}",
+            state.msgs[message_id].body
+        );
+        assert!(
+            state.msgs[message_id].body.contains("appsdk goal cancel"),
+            "idle timer must name the finite goal lifecycle owner: {}",
+            state.msgs[message_id].body
+        );
+        assert!(
+            state.msgs[message_id]
+                .body
+                .contains("Direct-message reception is daemon-owned"),
+            "idle timer must keep daemon reception explicit: {}",
+            state.msgs[message_id].body
+        );
         drop(state);
         std::fs::remove_dir_all(root).ok();
     }

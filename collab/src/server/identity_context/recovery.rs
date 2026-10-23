@@ -1032,14 +1032,6 @@ impl ProjectRuntimeManager {
         facts = self.observe_identity_facts(&context, &facts)?;
         validate_facts(&facts)?;
         let scope = Scope { root };
-        let restoring_pane = self.has_persisted_pane_route(&context, &facts);
-        if !restoring_pane && !required_fields(&facts).is_empty() {
-            self.complete_persisted_native_facts(
-                &scope,
-                &mut facts,
-                approved_identity.as_ref(),
-            )?;
-        }
         let required = required_fields(&facts);
         if !required.is_empty() {
             let descriptions = json!({
@@ -1274,9 +1266,9 @@ impl ProjectRuntimeManager {
                             && saved.session_id.as_ref().map(identity::SessionId::as_str) == facts.session_id.as_deref()
                         {
                             transport.session_id = facts.session_id.clone();
-                            transport.thread_id = facts.thread_id.clone().or(transport.thread_id);
-                            transport.endpoint = facts.endpoint.clone().or(transport.endpoint);
-                            transport.namespace = facts.namespace.clone().or(transport.namespace);
+                            transport.thread_id = facts.thread_id.clone();
+                            transport.endpoint = facts.endpoint.clone();
+                            transport.namespace = facts.namespace.clone();
                             transport.tmux_endpoint = None;
                             current = Some(self.refresh_session_transport(
                                 &runtime, saved, transport, &mut ident, &scope,
@@ -1549,71 +1541,6 @@ impl ProjectRuntimeManager {
             })),
             Some(nested),
         ))
-    }
-
-    /// A successful supplement belongs to its committed identity. A unique
-    /// current anchor may reuse that typed receipt on later partial calls;
-    /// anonymous callers and conflicting observations never inherit it.
-    fn complete_persisted_native_facts(
-        &self,
-        scope: &Scope,
-        facts: &mut IdentityFacts,
-        approved_target: Option<&identity::Identity>,
-    ) -> anyhow::Result<()> {
-        // Enrich from the approved carrier itself. Historical archives cannot
-        // veto that target or substitute another carrier's endpoint.
-        let existing = if let Some(target) = approved_target {
-            target.clone()
-        } else {
-            match identity::existing_for_daemon_at(&self.host.host_paths, scope, facts) {
-                Ok(Some(existing)) => existing,
-                Ok(None) => return Ok(()),
-                // Optional endpoint enrichment cannot choose between archives.
-                // Leave facts missing so the current caller can supply them.
-                Err(error) if error.to_string().starts_with("IDENTITY_RESTORE_AMBIGUOUS:") => {
-                    return Ok(())
-                }
-                Err(error) => return Err(error),
-            }
-        };
-        let (Some(runtime), Some(transport)) = (existing.runtime, existing.transport) else {
-            return Ok(());
-        };
-        // A dsh identity never reaches here: with no App Server endpoint observed,
-        // `required_fields` returns empty and this function is not called. Its
-        // gateway-owned address is not an App Server supplement the caller can
-        // provide; without a gateway the caller fails at `TRANSPORT_NONE`.
-        if transport.kind == TransportKind::Dsh {
-            return Ok(());
-        }
-        if transport.kind != TransportKind::AppServer
-            || facts.session_id.as_deref().is_some_and(|value| {
-                runtime.session_id.as_ref().map(identity::SessionId::as_str) != Some(value)
-            })
-        {
-            return Ok(());
-        }
-        facts.session_id = facts
-            .session_id
-            .take()
-            .or_else(|| runtime.session_id.map(|value| value.to_string()));
-        facts.thread_id = facts
-            .thread_id
-            .take()
-            .or_else(|| runtime.native_thread_id.map(|value| value.to_string()));
-        let address_matches = facts
-            .endpoint
-            .as_ref()
-            .is_none_or(|value| Some(value) == transport.endpoint.as_ref())
-            && facts
-                .namespace
-                .as_ref()
-                .is_none_or(|value| Some(value) == transport.namespace.as_ref());
-        if address_matches {
-            facts.endpoint = facts.endpoint.take().or(transport.endpoint);
-            facts.namespace = facts.namespace.take().or(transport.namespace);
-        }
-        Ok(())
     }
 
     /// A committed registration can outlive its local receipt file. Recover

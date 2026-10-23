@@ -26,8 +26,10 @@ tasks, resources and unconsumed messages and updates their execution binding.
 Consumed messages and closed-task history remain historical. Migration does not
 grant master authority without the user's explicit master restoration approval.
 
-If current endpoint facts are missing, provide only the requested factual fields
-through `collab context --provide`. If user intent is required, supply that intent
+Every new native context must carry current session/thread/endpoint/namespace
+from the calling host or this invocation's `--provide` (MCP: `provide` on each
+call). Historical registration never supplies missing current facts. Missing
+facts preserve identity and work and return `missing_facts`. If user intent is required, supply that intent
 through the context approval interface. Query an existing operation with
 `collab context --query --op <operation_id>`; a query does not perform migration.
 Pending or requested-input results are not successful recovery. Completion must

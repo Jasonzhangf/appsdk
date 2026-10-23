@@ -610,7 +610,7 @@ fn desktop_context_same_session_refreshes_native_thread_and_subscription() {
         "new-desktop-thread",
         "completed_turn",
     );
-    let restore = |operation: &str, thread: &str, host: &TestAppServer| {
+    let restore = |fixture: &Fixture, operation: &str, thread: &str, host: &TestAppServer| {
         let provide = json!({"session_id":"stable-desktop-session", "thread_id":thread,
             "endpoint":host.endpoint(), "namespace":"codex_app"})
         .to_string();
@@ -623,10 +623,10 @@ fn desktop_context_same_session_refreshes_native_thread_and_subscription() {
         assert!(output.status.success(), "{response}");
         response
     };
-    let old = restore("desktop-old", "old-desktop-thread", &old_host);
+    let old = restore(&fixture, "desktop-old", "old-desktop-thread", &old_host);
     let saved_identity = lifecycle_identity(&fixture, &old);
     assert_eq!(old["result"]["outcome"], "completed", "{old}");
-    let restored = restore("desktop-new", "new-desktop-thread", &new_host);
+    let restored = restore(&fixture, "desktop-new", "new-desktop-thread", &new_host);
     assert_eq!(restored["result"]["outcome"], "completed", "{restored}");
     let before = &old["result"]["snapshot"];
     let after = &restored["result"]["snapshot"];
@@ -664,7 +664,7 @@ fn desktop_context_same_session_refreshes_native_thread_and_subscription() {
         after["binding"]["endpoint_generation"].as_u64().unwrap()
             > before["binding"]["endpoint_generation"].as_u64().unwrap()
     );
-    let again = restore("desktop-repeat", "new-desktop-thread", &new_host);
+    let again = restore(&fixture, "desktop-repeat", "new-desktop-thread", &new_host);
     assert_eq!(again["result"]["snapshot"]["binding"], after["binding"]);
     let host_events: Vec<Value> = fs::read_to_string(fixture.project_journal())
         .unwrap()
@@ -679,22 +679,150 @@ fn desktop_context_same_session_refreshes_native_thread_and_subscription() {
         .iter()
         .any(|e| e["ev"] == "GlobalCurrentThreadRouteSet"
             && e["binding"]["native_thread_id"] == "new-desktop-thread"));
-    let before_replay = fs::read_to_string(fixture.project_journal()).unwrap();
-    fixture.restart_daemon();
-    let partial =
-        json!({"session_id":"stable-desktop-session","thread_id":"new-desktop-thread"}).to_string();
+
+    // A changed native thread without the current endpoint must fail exactly
+    // on the missing fact. History cannot publish the saved endpoint and must
+    // not retire or replace identity, binding, route or subscription state.
+    let missing_before_surfaces = fs::read_to_string(fixture.project_journal()).unwrap();
+    let missing_facts =
+        json!({"session_id":"stable-desktop-session","thread_id":"latest-desktop-thread"})
+            .to_string();
     let output = fixture
         .configured_command(
-            &["context", "--op", "desktop-replay", "--provide", &partial],
+            &[
+                "context",
+                "--op",
+                "desktop-missing-endpoint",
+                "--provide",
+                &missing_facts,
+            ],
             None,
         )
         .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop")
         .output()
         .unwrap();
-    let replay: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(output.status.success(), "{replay}");
-    assert_eq!(replay["result"]["snapshot"]["binding"], after["binding"]);
-    assert_eq!(lifecycle_identity(&fixture, &replay), current_identity);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let missing: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(missing["result"]["outcome"], "missing_facts", "{missing}");
+    assert_eq!(missing["result"]["requires"]["kind"], "identity_facts");
+    assert_eq!(
+        missing["result"]["requires"]["fields"],
+        json!(["endpoint"]),
+        "{missing}"
+    );
+    assert_eq!(
+        missing["result"]["requires"]["sources"]["endpoint"],
+        "Current native AppServer unix socket endpoint"
+    );
+    assert_eq!(
+        missing["result"]["requires"]["repair_invocation"],
+        "collab context --provide '<JSON containing required_fields>'"
+    );
+    assert_eq!(
+        lifecycle_identity(&fixture, &restored),
+        current_identity,
+        "a missing-facts call must leave the persisted identity untouched"
+    );
+    assert!(
+        !fixture
+            .host_state
+            .join("register-reply-evidence.jsonl")
+            .exists(),
+        "ordinary restoration does not challenge"
+    );
+    let unchanged = restore(&fixture, "desktop-state-check", "new-desktop-thread", &new_host);
+    assert_eq!(
+        unchanged["result"]["snapshot"]["binding"],
+        after["binding"],
+        "{unchanged}"
+    );
+    assert_eq!(
+        unchanged["result"]["snapshot"]["subscriptions"],
+        after["subscriptions"],
+        "{unchanged}"
+    );
+    let missing_after_surfaces = fs::read_to_string(fixture.project_journal()).unwrap();
+    assert_eq!(
+        missing_after_surfaces
+            .matches("GlobalCurrentThreadRouteRetired")
+            .count(),
+        missing_before_surfaces
+            .matches("GlobalCurrentThreadRouteRetired")
+            .count(),
+        "a missing-facts call must not retire a route"
+    );
+    assert_eq!(
+        missing_after_surfaces
+            .matches("GlobalCurrentThreadRouteSet")
+            .count(),
+        missing_before_surfaces
+            .matches("GlobalCurrentThreadRouteSet")
+            .count(),
+        "a missing-facts call must not publish a route"
+    );
+
+    // Complete current facts on the moved thread rebind through the same
+    // identity and endpoint, then repeat idempotently.
+    let moved = restore(&fixture, "desktop-thread-full", "latest-desktop-thread", &new_host);
+    assert_eq!(
+        moved["result"]["snapshot"]["binding"]["native_thread_id"],
+        "latest-desktop-thread",
+        "{moved}"
+    );
+    assert_eq!(
+        moved["result"]["snapshot"]["identity"]["transport"]["endpoint"],
+        new_host.endpoint(),
+        "{moved}"
+    );
+    assert!(
+        moved["result"]["snapshot"]["binding"]["endpoint_generation"]
+            .as_u64()
+            .unwrap()
+            > after["binding"]["endpoint_generation"].as_u64().unwrap(),
+        "{moved}"
+    );
+    assert!(
+        moved["result"]["snapshot"]["subscriptions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["event"] == "direct-message" && s["target"] == "latest-desktop-thread"),
+        "{moved}"
+    );
+    let moved_identity = lifecycle_identity(&fixture, &moved);
+    let moved_binding = moved["result"]["snapshot"]["binding"].clone();
+    let moved_again = restore(
+        &fixture,
+        "desktop-thread-full-repeat",
+        "latest-desktop-thread",
+        &new_host,
+    );
+    assert_eq!(
+        moved_again["result"]["snapshot"]["binding"],
+        moved_binding,
+        "{moved_again}"
+    );
+    let moved_events: Vec<Value> = fs::read_to_string(fixture.project_journal())
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(moved_events.iter().any(|e| {
+        e["ev"] == "GlobalCurrentThreadRouteRetired"
+            && e["binding"]["native_thread_id"] == "new-desktop-thread"
+    }));
+    assert!(moved_events.iter().any(|e| {
+        e["ev"] == "GlobalCurrentThreadRouteSet"
+            && e["binding"]["native_thread_id"] == "latest-desktop-thread"
+    }));
+
+    // A fixture daemon replay must still carry the complete current endpoint.
+    // Queries remain read-only and never require the latest endpoint.
+    let before_replay = fs::read_to_string(fixture.project_journal()).unwrap();
+    fixture.restart_daemon();
+    let replay = restore(&fixture, "desktop-replay", "latest-desktop-thread", &new_host);
+    assert_eq!(replay["result"]["snapshot"]["binding"], moved_binding);
+    assert_eq!(lifecycle_identity(&fixture, &replay), moved_identity);
     let replay_journal = fs::read_to_string(fixture.project_journal()).unwrap();
     assert_eq!(
         replay_journal.matches("CommandStarted").count(),
@@ -707,31 +835,20 @@ fn desktop_context_same_session_refreshes_native_thread_and_subscription() {
             .exists(),
         "ordinary restoration does not challenge"
     );
-    let moved_thread =
-        json!({"session_id":"stable-desktop-session", "thread_id":"latest-desktop-thread"})
-            .to_string();
-    let output = fixture
-        .configured_command(
-            &[
-                "context",
-                "--op",
-                "desktop-thread-only",
-                "--provide",
-                &moved_thread,
-            ],
-            None,
-        )
-        .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop")
-        .output()
-        .unwrap();
-    let moved: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(output.status.success(), "{moved}");
+    let queried = fixture.context_query("desktop-replay", None);
+    assert_eq!(queried["result"]["outcome"], "completed", "{queried}");
     assert_eq!(
-        moved["result"]["snapshot"]["binding"]["native_thread_id"],
-        "latest-desktop-thread"
+        queried["result"]["queried_operation"]["operation_id"],
+        "desktop-replay"
     );
     assert_eq!(
-        moved["result"]["snapshot"]["identity"]["transport"]["endpoint"],
-        new_host.endpoint()
+        queried["result"]["queried_operation"]["phase"],
+        "completed",
+        "{queried}"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.project_journal()).unwrap(),
+        replay_journal,
+        "a read-only query must not mutate the durable operation history"
     );
 }

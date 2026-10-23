@@ -2056,7 +2056,7 @@ fn one_full_supplement_establishes_and_then_replays_the_same_identity() {
 }
 
 #[test]
-fn one_thread_supplement_survives_continuously_missing_environment() {
+fn every_context_requires_current_thread_when_environment_omits_it() {
     let mut fixture = AppFixture::new();
     let missing = fixture.command_without_thread(&["context"], THREAD_A);
     assert!(!missing.status.success());
@@ -2077,7 +2077,18 @@ fn one_thread_supplement_survives_continuously_missing_environment() {
     let registered_response: Value = serde_json::from_slice(&registered.stdout).unwrap();
     let registered = registered_response["result"]["snapshot"].clone();
     assert_eq!(registered["registered"], true);
-    for args in [vec!["context"], vec!["task", "status"]] {
+    let missing_again = fixture.command_without_thread(&["context"], THREAD_A);
+    assert!(!missing_again.status.success());
+    let missing_again: Value = serde_json::from_slice(&missing_again.stdout).unwrap();
+    assert_eq!(missing_again["result"]["outcome"], "missing_facts");
+    assert_eq!(
+        missing_again["result"]["requires"]["fields"],
+        json!(["thread_id"])
+    );
+    for args in [
+        vec!["context", "--provide", &supplement],
+        vec!["task", "status"],
+    ] {
         let output = fixture.command_without_thread(&args, THREAD_A);
         assert!(
             output.status.success(),
@@ -2086,7 +2097,7 @@ fn one_thread_supplement_survives_continuously_missing_environment() {
             String::from_utf8_lossy(&output.stderr)
         );
         let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-        if args == ["context"] {
+        if args[0] == "context" {
             let value = value["result"]["snapshot"].clone();
             assert_eq!(value["registered"], true);
             assert_eq!(value["identity"], registered["identity"]);
@@ -2095,6 +2106,15 @@ fn one_thread_supplement_survives_continuously_missing_environment() {
             assert_eq!(value["tasks"], json!([]));
         }
     }
+    let tasks = fixture.command_tui_without_explicit_endpoint(&["task", "status"], THREAD_A);
+    assert!(
+        tasks.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&tasks.stdout),
+        String::from_utf8_lossy(&tasks.stderr)
+    );
+    let tasks: Value = serde_json::from_slice(&tasks.stdout).unwrap();
+    assert_eq!(tasks["tasks"], json!([]));
     let anonymous = fixture.command_without_native_facts(&["context"]);
     assert!(!anonymous.status.success());
     let anonymous: Value = serde_json::from_slice(&anonymous.stdout).unwrap();
@@ -2103,6 +2123,144 @@ fn one_thread_supplement_survives_continuously_missing_environment() {
         json!(["session_id", "thread_id", "endpoint", "namespace"])
     );
     drop(fixture);
+}
+
+#[test]
+fn session_only_identity_read_is_scoped_pure_and_ignores_historical_credentials() {
+    let mut fixture = AppFixture::new();
+    let registered = fixture.run_public(&["context"], THREAD_A);
+    let worker = registered["identity"]["worker_id"].as_str().unwrap();
+    let identity_path = fixture
+        .host_state
+        .join("identities")
+        .join(worker)
+        .join("identity.json");
+    let credential = std::fs::read(&identity_path).unwrap();
+    let mut historical: Value = serde_json::from_slice(&credential).unwrap();
+    historical["worker_id"] = json!("historical-reader");
+    historical["runtime"]["agent_id"] = json!("historical-reader");
+    historical["runtime"]["binding_id"] = json!("binding-historical-reader");
+    let history_path = fixture
+        .host_state
+        .join("identities/historical-reader/identity.json");
+    std::fs::create_dir_all(history_path.parent().unwrap()).unwrap();
+    std::fs::write(&history_path, serde_json::to_vec(&historical).unwrap()).unwrap();
+    let routes = std::fs::read(fixture.host_state.join("routes.jsonl")).unwrap();
+    let operations = std::fs::read_dir(fixture.host_state.join("context-operations"))
+        .unwrap()
+        .count();
+    let connections = fixture.appserver_connections.load(Ordering::SeqCst);
+    let tasks = fixture.command_without_thread(&["task", "status"], THREAD_A);
+    assert!(
+        tasks.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&tasks.stdout),
+        String::from_utf8_lossy(&tasks.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&tasks.stdout).unwrap()["tasks"],
+        json!([])
+    );
+    let with_thread = fixture.command_tui_without_explicit_endpoint(&["task", "status"], THREAD_A);
+    assert!(
+        with_thread.status.success(),
+        "{}",
+        String::from_utf8_lossy(&with_thread.stderr)
+    );
+
+    let root = std::fs::canonicalize(&fixture.project).unwrap();
+    let context =
+        json!({"app_scope_id":"appserver-cli", "canonical_root":root, "project_scope":root});
+    let daemon_socket = fixture.host_state.join("server.sock");
+    let call = |scope: Option<Value>, session: &str, thread: Option<&str>| {
+        let mut request = json!({"op":"RouteResolveNative","session_id":session});
+        if let Some(scope) = scope {
+            request["project_context"] = scope;
+        }
+        if let Some(thread) = thread {
+            request["native_thread_id"] = json!(thread);
+        }
+        let mut stream = UnixStream::connect(&daemon_socket).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        writeln!(stream, "{request}").unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(stream)
+            .read_line(&mut line)
+            .unwrap();
+        serde_json::from_str::<Value>(&line).unwrap()
+    };
+    let current = call(Some(context.clone()), THREAD_A, None);
+    assert_eq!(current["ok"], true, "{current}");
+    assert_eq!(current["agent_id"], worker);
+    let missing_scope = call(None, THREAD_A, None);
+    assert_eq!(missing_scope["ok"], false);
+    assert!(missing_scope["error"]
+        .as_str()
+        .unwrap()
+        .contains("PROJECT_CONTEXT_REQUIRED"));
+    let mut other_app = context.clone();
+    other_app["app_scope_id"] = json!("other-app");
+    let other_root = fixture.root.join("other-project");
+    std::fs::create_dir_all(&other_root).unwrap();
+    let other_root = std::fs::canonicalize(other_root).unwrap();
+    let other_project = json!({"app_scope_id":"appserver-cli","canonical_root":other_root,"project_scope":other_root});
+    for (scope, session, thread) in [
+        (other_app, THREAD_A, None),
+        (other_project, THREAD_A, None),
+        (context.clone(), "missing-session", None),
+        (context.clone(), "", None),
+        (context.clone(), THREAD_A, Some("wrong-thread")),
+        (context.clone(), THREAD_A, Some("")),
+    ] {
+        let refused = call(Some(scope), session, thread);
+        assert_eq!(refused["ok"], false, "{refused}");
+    }
+    assert_eq!(std::fs::read(&identity_path).unwrap(), credential);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(&history_path).unwrap()).unwrap(),
+        historical
+    );
+    assert_eq!(
+        std::fs::read(fixture.host_state.join("routes.jsonl")).unwrap(),
+        routes
+    );
+    assert_eq!(
+        std::fs::read_dir(fixture.host_state.join("context-operations"))
+            .unwrap()
+            .count(),
+        operations
+    );
+    // The explicit wrong-thread requests retain their old verification path;
+    // neither session-only reads nor refused addresses contact AppServer.
+    assert_eq!(
+        fixture.appserver_connections.load(Ordering::SeqCst),
+        connections
+    );
+
+    let mut duplicate: Value = std::fs::read_to_string(fixture.name_journal())
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| event["ev"] == "GlobalCurrentThreadRouteSet")
+        .last()
+        .expect("current native route event");
+    duplicate["binding"]["binding_id"] = json!("binding-conflicting-current");
+    duplicate["binding"]["agent_id"] = json!("conflicting-current");
+    duplicate["binding"]["runtime_id"] = json!("runtime-conflicting-current");
+    duplicate["binding"]["native_thread_id"] = json!("conflicting-current-thread");
+    let bound = json!({"ev":"GlobalRuntimeBound","binding":duplicate["binding"]});
+    fixture.append_name_events(&[bound, duplicate]);
+    let ambiguous = call(Some(context), THREAD_A, None);
+    assert_eq!(ambiguous["ok"], false, "{ambiguous}");
+    assert!(
+        ambiguous["error"]
+            .as_str()
+            .unwrap()
+            .contains("ROUTE_RESOLVE_AMBIGUOUS"),
+        "{ambiguous}"
+    );
 }
 
 #[test]

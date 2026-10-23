@@ -186,7 +186,6 @@ impl ProjectRuntimeManager {
         let facts = match self.preflight_identity_facts(
             &context,
             continuation_facts.unwrap_or_else(|| request.facts.clone()),
-            approved.as_ref().map(|approved| &approved.identity),
         ) {
             Ok(facts) => facts,
             Err(PreflightIdentityError::MissingFacts(data)) => {
@@ -684,9 +683,8 @@ impl ProjectRuntimeManager {
         let scope = Scope {
             root: PathBuf::from(&context.canonical_root),
         };
-        if facts.tmux.is_none() {
-            self.complete_persisted_native_facts(&scope, &mut facts, None)?;
-        }
+        // Read retained state by the caller's anchor. A readback must not
+        // manufacture current communication facts from the saved transport.
         let host_binding = self.current_anchor_binding(context, &facts)?;
         let (app_scope, binding_id) = if let Some(binding) = host_binding.as_ref() {
             if binding.project_scope != context.project_scope {
@@ -1105,7 +1103,6 @@ impl ProjectRuntimeManager {
         &self,
         context: &ProjectContext,
         mut facts: IdentityFacts,
-        approved_target: Option<&identity::Identity>,
     ) -> Result<IdentityFacts, PreflightIdentityError> {
         if context.app_scope_id.as_str() != identity::CLI_APP_SERVER_ID
             || context.runtime_context.is_some()
@@ -1126,13 +1123,9 @@ impl ProjectRuntimeManager {
         self.complete_persisted_tmux_facts(context, &mut facts)
             .map_err(PreflightIdentityError::Error)?;
         validate_facts(&facts).map_err(PreflightIdentityError::Error)?;
-        let scope = Scope { root };
-        let restoring_pane = self.has_persisted_pane_route(context, &facts);
-        if !restoring_pane && !required_fields(&facts).is_empty() {
-            self.complete_persisted_native_facts(&scope, &mut facts, approved_target)
-                .map_err(PreflightIdentityError::Error)?;
-        }
-        let required = if restoring_pane {
+        // Preserve the existing pane recovery contract. Native communication
+        // facts must come from this invocation, never the saved transport.
+        let required = if self.has_persisted_pane_route(context, &facts) {
             Vec::new()
         } else {
             required_fields(&facts)

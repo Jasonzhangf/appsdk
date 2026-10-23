@@ -283,7 +283,8 @@ latest_main_candidate
 ```
 
 For ordinary peer bootstrap and identity recovery, the only entry remains
-`collab context`, plus one factual `--provide` supplement only when required.
+`collab context`. Every native call must carry its current session, thread,
+endpoint and namespace, from the current host environment or this call's `--provide`.
 That command is not a daemon lifecycle owner. A Collab runtime
 delivery that changes server, notification, identity, route, MCP, CLI, or daemon
 behavior must cross the runtime lifecycle boundary in the same delivery unit
@@ -434,16 +435,20 @@ and it never retires the peer.
 
 When the snapshot contains `requires_identity_update`, read
 `required_fields`, `reason`, and `exact_error`. Only the AppServer path returns
-fields here. Supply only the requested facts from their real source once:
+fields here. Supply the requested current facts from their real source in this invocation:
 
 ```sh
 collab context --provide '{"session_id":"...","thread_id":"...","endpoint":"...","namespace":"..."}'
 ```
 
-After successful registration, the daemon reuses missing facts from the
-committed identity when the current observed anchor uniquely identifies it.
-Later calls need no repeated supplement. A caller with no current anchor must
-provide its own facts; it cannot inherit another caller's identity.
+Every native context invocation must carry the current session, thread, endpoint
+and namespace. The daemon never fills these current facts from historical
+registration. CLI facts may come from the current host environment or this
+invocation's `--provide`; MCP callers must submit current facts through `provide`
+on each call, since the MCP process's startup environment may be stale.
+Missing facts preserve durable identity and work but do not complete restoration.
+`--query` only reads retained progress and needs no current endpoint.
+See [current-fact recovery](references/stable-name-recovery.md) for the contract.
 
 The supplement accepts only the missing scalar facts `session_id`, `thread_id`,
 `endpoint`, and `namespace`. It rejects any other key. An agent never guesses,
@@ -1415,7 +1420,8 @@ Endpoint liveness remains separate from durable identity validity.
 Missing facts are the terminal of this invocation: `registered=false`,
 `identity=null`, and `requires_identity_update` gives exact `required_fields`,
 `reason`, `action`, and `exact_error`. The agent uses one
-`collab context --provide` only for the requested real facts. Initial
+`collab context --provide` for this invocation's requested current facts; native
+facts are required on every new context call, even after registration. Initial
 registration does not wait for challenge. Root failures and explicit
 conflicts preserve the original error and do not masquerade as a successful
 snapshot:

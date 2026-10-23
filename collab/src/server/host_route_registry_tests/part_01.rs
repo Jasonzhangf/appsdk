@@ -199,6 +199,7 @@ fn test_candidates_at(thread_id: &str, cwd: &Path) -> Option<TransportCandidates
     endpoint.codex_session_id = Some(format!("session-{thread_id}"));
     endpoint.codex_thread_id = Some(thread_id.to_owned());
     Some(TransportCandidates {
+        desktop_bridge: None,
         appserver: None,
         dsh: None,
         tmux: Some(crate::proto::TmuxCandidate {
@@ -428,6 +429,7 @@ fn test_candidates_for_registered(
         .cloned()
         .unwrap();
     Some(TransportCandidates {
+        desktop_bridge: None,
         appserver: None,
         dsh: None,
         tmux: Some(crate::proto::TmuxCandidate {
@@ -506,6 +508,7 @@ fn appserver_registration_is_rejected_without_candidate_check() {
     let error = validate_transport_candidates(
         &server,
         &TransportCandidates {
+            desktop_bridge: None,
             appserver: Some(appserver),
             dsh: None,
             tmux: None,
@@ -530,6 +533,7 @@ fn appserver_self_check_failure_is_explicit_and_has_no_fallback() {
     let error = validate_transport_candidates(
         &server,
         &TransportCandidates {
+            desktop_bridge: None,
             appserver: Some(AppServerCandidate {
                 endpoint: "unix:///tmp/collab-missing-appserver.sock".into(),
                 namespace: "codex_tui".into(),
@@ -560,6 +564,7 @@ fn registration_fails_when_no_server_verified_candidate_exists() {
     let error = validate_transport_candidates(
         &server,
         &TransportCandidates {
+            desktop_bridge: None,
             appserver: None,
             dsh: None,
             tmux: None,
@@ -651,6 +656,7 @@ fn tmux_registration_and_identity_do_not_require_a_live_probe() {
         endpoint.clone(),
     );
     let candidates = TransportCandidates {
+        desktop_bridge: None,
         appserver: None,
         dsh: None,
         tmux: Some(crate::proto::TmuxCandidate {
@@ -834,6 +840,7 @@ fn tmux_registration_rejects_a_cwd_that_is_not_the_server_project_root() {
     let error = validate_transport_candidates(
         &server,
         &TransportCandidates {
+            desktop_bridge: None,
             appserver: None,
             dsh: None,
             tmux: Some(crate::proto::TmuxCandidate {

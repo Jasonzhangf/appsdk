@@ -770,7 +770,7 @@ fn register_public(server: &Arc<Server>, id: &str, thread_id: &str) -> Resp {
     let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
     super::host_route_registry_tests::register_host_fixture(&manager, Some(context),
         Req::register(id.into(), format!("token-{id}"), server.root.display().to_string(),
-            Some(TransportCandidates { appserver: None, dsh: None,
+            Some(TransportCandidates { desktop_bridge: None, appserver: None, dsh: None,
                 tmux: Some(crate::proto::TmuxCandidate { endpoint, cwd: server.root.display().to_string() }) })),
     ).1
 }

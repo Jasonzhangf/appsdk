@@ -1,0 +1,15 @@
+{
+  "id":"appsdk-collab-desktop-bridge-delivery",
+  "version":"1.0.0",
+  "description":"设计合同：一次 daemon durable 消息投递到一次 typed transport 结果。只读收件人的当前 Desktop bridge route，真实 caller 来自正常 MCP 捕获的原始 executor 上下文，target 来自注册收件 route。bridge 仅允许其上下文绑定的收件目标和必要通知/观测操作，不开放通用 tools/call。daemon 只连接该 bridge UDS，不直连 tools pipe，不尝试 AppServer、tmux 或旧 socket。成功、明确拒绝/不可用和请求后未知全部汇入单一结果出口。transport success 不等于新 turn、消费或回复；消费仍由现有 consumption 图负责。未知不自动重发。",
+  "inputs":[{"id":"durable_delivery_request","schema":"Object"}],
+  "nodes":[
+    {"id":"读取当前收件路由","operator":"appsdk.collab_desktop_delivery.resolve","operator_version":"1","inputs":["durable_delivery_request"],"output":{"id":"recipient_route","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"核对本实例绑定与目标范围","operator":"appsdk.collab_desktop_delivery.authorize","operator_version":"1","inputs":["recipient_route"],"output":{"id":"scoped_delivery","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"调用受管桥接服务","operator":"appsdk.collab_desktop_delivery.invoke","operator_version":"1","inputs":["scoped_delivery"],"output":{"id":"native_outcome","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"分类接受拒绝或未知结果","operator":"appsdk.collab_desktop_delivery.classify","operator_version":"1","inputs":["native_outcome"],"output":{"id":"delivery_outcome","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"记录独立投递回执","operator":"appsdk.collab_desktop_delivery.commit","operator_version":"1","inputs":["delivery_outcome"],"output":{"id":"transport_receipt","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"}
+  ],
+  "edges":[{"from":"读取当前收件路由","to":"核对本实例绑定与目标范围","arc_id":"recipient_route"},{"from":"核对本实例绑定与目标范围","to":"调用受管桥接服务","arc_id":"scoped_delivery"},{"from":"调用受管桥接服务","to":"分类接受拒绝或未知结果","arc_id":"native_outcome"},{"from":"分类接受拒绝或未知结果","to":"记录独立投递回执","arc_id":"delivery_outcome"}],
+  "outputs":["transport_receipt"]
+}

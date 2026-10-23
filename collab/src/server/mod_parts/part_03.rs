@@ -43,7 +43,7 @@ fn validate_transport_candidates(
     // candidate has ambiguous intent. Resolving that silently is exactly the
     // candidate-shadowing this design forbids, so the ambiguous set is refused
     // rather than ranked.
-    if candidates.dsh.is_some() && (candidates.appserver.is_some() || candidates.tmux.is_some()) {
+    if candidates.dsh.is_some() && (candidates.desktop_bridge.is_some() || candidates.appserver.is_some() || candidates.tmux.is_some()) {
         return Err(
             "DSH_ENDPOINT_REJECTED: a dsh candidate must not be combined with an App Server or tmux candidate"
                 .into(),
@@ -51,6 +51,13 @@ fn validate_transport_candidates(
     }
     if let Some(dsh) = candidates.dsh.as_ref() {
         return admit_dsh_candidate(dsh, &candidate_root);
+    }
+    if let Some(desktop) = candidates.desktop_bridge.as_ref() {
+        let cwd = std::fs::canonicalize(&desktop.cwd).map_err(|e| format!("DESKTOP_BRIDGE_REJECTED: {e}"))?;
+        if cwd != candidate_root {
+            return Err("DESKTOP_BRIDGE_REJECTED: candidate cwd differs from project".into());
+        }
+        return crate::client::adapters::desktop_bridge::verify_candidate(desktop);
     }
     if let Some(appserver) = candidates.appserver.as_ref() {
         let app_cwd = std::fs::canonicalize(&appserver.cwd).map_err(|error| {

@@ -61,6 +61,15 @@ fn validate_facts(facts: &IdentityFacts) -> anyhow::Result<()> {
     if facts.tmux.is_some() {
         return Ok(());
     }
+    if let Some(candidate) = facts.desktop_bridge.as_ref() {
+        if facts.session_id.as_deref() != Some(candidate.session_id.as_str())
+            || facts.thread_id.as_deref() != Some(candidate.thread_id.as_str())
+        {
+            anyhow::bail!(
+                "IDENTITY_FACT_INVALID: Desktop candidate must match current session and thread"
+            );
+        }
+    }
     for (name, value) in [
         ("session_id", facts.session_id.as_deref()),
         ("thread_id", facts.thread_id.as_deref()),
@@ -266,7 +275,10 @@ fn required_fields(facts: &IdentityFacts) -> Vec<&'static str> {
     if facts.session_id.is_none() && facts.dsh_session_id.is_none() {
         required.push("session_id");
     }
-    if facts.tmux.is_some() || (facts.dsh_session_id.is_some() && facts.endpoint.is_none()) {
+    if facts.desktop_bridge.is_some()
+        || facts.tmux.is_some()
+        || (facts.dsh_session_id.is_some() && facts.endpoint.is_none())
+    {
         return required;
     }
     required.extend(

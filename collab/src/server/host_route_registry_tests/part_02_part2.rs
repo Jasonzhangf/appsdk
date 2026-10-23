@@ -25,6 +25,7 @@ async fn split_journal_context_recovery(native: bool, public_cli: bool) {
         test_candidates_at("split-pane-old", &project_root).unwrap()
     } else {
         TransportCandidates {
+            desktop_bridge: None,
             appserver: None,
             dsh: None,
             tmux: Some(crate::proto::TmuxCandidate {
@@ -771,6 +772,7 @@ async fn cross_scope_pane_claimant_takes_the_pane_without_fencing_the_project_ro
     // This guard compares prior durable host claims across projects. A live
     // initial participant adds no guarantee to the claimant/index predicate.
     let candidates = TransportCandidates {
+        desktop_bridge: None,
         appserver: None,
         dsh: None,
         tmux: Some(crate::proto::TmuxCandidate {

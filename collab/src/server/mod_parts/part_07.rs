@@ -44,11 +44,30 @@ fn tmux_identity_presence(server: &Server, state: &State, worker: &WorkerRec) ->
     }
 }
 
+fn desktop_identity_presence(server: &Server, state: &State, worker: &WorkerRec) -> IdentityPresence {
+    let Ok(project) = GlobalState::canonical_project_scope(&server.root) else {
+        return IdentityPresence::Missing;
+    };
+    if state.workers.get(&worker.id).is_some_and(|current| {
+        current.token == worker.token && current.transport == worker.transport
+    })
+        && current_worker_binding(state, &project, None, worker).is_some()
+    {
+        IdentityPresence::Present
+    } else {
+        IdentityPresence::Missing
+    }
+}
+
 fn worker_identity_presence(server: &Server, worker: &WorkerRec) -> IdentityPresence {
     let Some(transport) = selected_transport_for_worker(worker) else {
         return IdentityPresence::Missing;
     };
     match transport.kind {
+        TransportKind::DesktopBridge => {
+            let state = server.state.lock().unwrap();
+            desktop_identity_presence(server, &state, worker)
+        }
         TransportKind::Tmux => {
             let state = server.state.lock().unwrap();
             tmux_identity_presence(server, &state, worker)
@@ -242,6 +261,15 @@ fn worker_presence_in_state(
     worker: &WorkerRec,
 ) -> IdentityPresence {
     if selected_transport_for_worker(worker)
+        .is_some_and(|transport| transport.kind == TransportKind::DesktopBridge)
+    {
+        let identity = desktop_identity_presence(server, state, worker);
+        let status = worker_agent_view_in_state(server, state, worker)
+            .map(|view| view.0)
+            .unwrap_or_else(|| transport_agent_view(server, worker).0);
+        return merge_transport_presence(identity, status);
+    }
+    if selected_transport_for_worker(worker)
         .is_some_and(|transport| transport.kind == TransportKind::Tmux)
     {
         tmux_identity_presence(server, state, worker)
@@ -414,6 +442,13 @@ pub(crate) fn worker_identity_and_endpoint(
         return (false, Some(false));
     };
     match transport.kind {
+        TransportKind::DesktopBridge => {
+            let valid = worker_identity_presence(server, worker) == IdentityPresence::Present;
+            let live = transport.thread_id.as_deref().and_then(|thread| {
+                (server.appserver_thread_status)(&transport, thread).ok().map(|_| true)
+            });
+            (valid, live)
+        }
         TransportKind::Tmux => {
             let identity_valid =
                 worker_identity_presence(server, worker) == IdentityPresence::Present;
@@ -499,7 +534,7 @@ fn transport_agent_view(
             ),
         };
     }
-    if transport.kind == TransportKind::AppServer {
+    if matches!(transport.kind, TransportKind::AppServer | TransportKind::DesktopBridge) {
         let Some(thread_id) = transport.thread_id.as_deref() else {
             return (
                 IdentityPresence::Missing,
@@ -531,9 +566,9 @@ fn transport_agent_view(
                         "thread_state": thread_state.as_deref().unwrap_or("unknown"),
                         "active_flags": raw.pointer("/activeTurns").cloned().unwrap_or(serde_json::json!([])),
                         "can_accept_direct_input": raw.pointer("/thread/canAcceptDirectInput").cloned().unwrap_or(serde_json::Value::Bool(false)),
-                        "latest_turn_status": raw.pointer("/thread/latestTurnStatus").cloned().unwrap_or(serde_json::Value::Null),
+                        "latest_turn_status": raw.pointer("/thread/latestTurnStatus").or_else(|| raw.pointer("/turns/0/status")).cloned().unwrap_or(serde_json::Value::Null),
                         "latest_turn_error": raw.pointer("/thread/latestTurnError").cloned().unwrap_or(serde_json::Value::Null),
-                        "transport": "appserver",
+                        "transport": transport.kind.as_str(),
                         "observed_at_ms": chrono::Utc::now().timestamp_millis(),
                     }),
                     raw,
@@ -1734,7 +1769,7 @@ fn handle_worker_snapshot(
                 ))
             }
         },
-        crate::proto::TransportKind::AppServer | crate::proto::TransportKind::Dsh => {
+        crate::proto::TransportKind::DesktopBridge | crate::proto::TransportKind::AppServer | crate::proto::TransportKind::Dsh => {
             return Resp::err(
                 "WORKER_SNAPSHOT_UNSUPPORTED: only registered tmux peers expose transient pane buffers",
             )

@@ -1,6 +1,22 @@
 use super::*;
 
 #[test]
+fn desktop_bridge_graphs_are_embedded_and_registered() {
+    for path in [
+        "docs/dagpipe/collab-desktop-bridge-service.graph.json",
+        "docs/dagpipe/collab-desktop-bridge-delivery.graph.json",
+    ] {
+        let (_, source) = embedded_graph_paths()
+            .into_iter()
+            .find(|(p, _)| *p == path)
+            .unwrap();
+        let graph = parse_graph_json(source).unwrap();
+        ensure_single_source_single_sink(&graph).unwrap();
+        validate_graph_registry(&graph).unwrap();
+    }
+}
+
+#[test]
 fn fix_and_notification_graphs_are_single_source_single_sink() {
     for source in [FIX_LIFECYCLE_GRAPH, NOTIFICATION_LIFECYCLE_GRAPH] {
         let graph = parse_graph_json(source).unwrap();

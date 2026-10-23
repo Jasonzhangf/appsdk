@@ -26,9 +26,12 @@ tasks, resources and unconsumed messages and updates their execution binding.
 Consumed messages and closed-task history remain historical. Migration does not
 grant master authority without the user's explicit master restoration approval.
 
-Every new native context must carry current session/thread/endpoint/namespace
+Every new AppServer context must carry current session/thread/endpoint/namespace
 from the calling host or this invocation's `--provide` (MCP: `provide` on each
-call). Historical registration never supplies missing current facts. Missing
+call). Desktop bridge uses its normal MCP entry: the executor supplies real
+caller metadata and the managed bridge supplies its current scoped UDS
+capability. It does not require an AppServer endpoint or borrow the managed
+AppServer socket. Historical registration never supplies missing current facts. Missing
 facts preserve identity and work and return `missing_facts`. If user intent is required, supply that intent
 through the context approval interface. Query an existing operation with
 `collab context --query --op <operation_id>`; a query does not perform migration.
@@ -70,6 +73,15 @@ separately; installation alone does not prove live identity or communication
 recovery. If an old binary shadows the installed binary, resolve that exact
 installation or command-cache problem. Do not retain an old runtime as a
 recovery fallback.
+
+Desktop's Collab MCP entry is the installed `~/.cargo/bin/collab-desktop-mcp`.
+Configure this command through the normal Desktop MCP configuration and load
+it through the host's normal mechanism. It proxies Collab tools and publishes
+a scoped bridge on each new `collab_context` call from real executor metadata.
+Use `project_scope` for project selection; `provide` may contain the current
+agent `session_id` when needed. Do not configure a tools-pipe path or caller
+turn. An old `collab-mcp` process does not gain bridge support from a daemon
+reload. Verify MCP activation separately from daemon activation.
 
 Collab has one global user-managed daemon. Agents never start, stop, restart or
 kill it, request maintenance credentials, or create a second global runtime.

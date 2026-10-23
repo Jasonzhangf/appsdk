@@ -1,14 +1,14 @@
 {
   "id": "appsdk-collab-context",
-  "version": "0.14.0",
-  "description": "一次 context 请求到一次权威结果的 SESE 流程。cwd 与既有 worktree 映射选择项目；名字承载工作，agent sessionID 是执行载体。pane、tmux session、thread、socket 和 route 仅定位通信，不决定身份。全局持久真源为 host state root，项目标记仅作发现。现有节点负责名字续接、用户授权优先、在线接管确认、unknown 裁决和工作/未消费消息继承，不处理旧执行者。当前通信事实按 transport 区分：AppServer 接收本次 session/thread/endpoint/namespace；Desktop bridge 接收本次 agent session 与受管 MCP 捕获的真实 executor 上下文及受限本地能力，不要求 AppServer endpoint。不能从历史注册补齐当前能力。缺字段或能力不符返回明确终态，不变更持久身份、绑定、任务或订阅。query 与同 key 完成 readback 保持历史只读。普通已注册读取不进入本图，不更新通信。身份有效性与通信可达性分开，不增加跨 transport fallback，不维护 daemon/tmux 生命周期。该设计不声明源码、安装或 live 验收已经完成。",
+  "version": "0.15.0",
+  "description": "一次 context 请求到一次权威结果的 SESE 流程。cwd 选择项目，名字承载工作，agent sessionID 锚定执行身份；thread 和端点只定位通信。Desktop CLI 从本次显式能力或当前 bridge 精确 scope 声明取得候选，不要求 AppServer endpoint 或 agent 调 MCP，不从历史 route 补事实。发现失败时，仅既有 live ancestry observer 证实当前实际 tmux pane，才能让 daemon 继续原有 pane 优先 admission；环境标记不证明 pane，不启动替代 transport。无实际 pane 且缺 Desktop 能力则明确失败，保留身份和工作。query 与普通身份读取不发现能力。名字续接、任务和消息继承归原 owner，不管理 daemon/tmux 生命周期。设计图不代替 live 验收。",
   "inputs": [{"id": "context_request", "schema": "Object"}],
   "nodes": [
     {
       "id": "解析项目与控制范围",
       "operator": "appsdk.collab_context.resolve_root",
       "operator_version": "1",
-      "description": "从实际调用 cwd、既有项目范围和 baseline 读取 canonical project；pane、socket 路径和 server PID 不决定名字或项目。普通已注册命令的身份读取不进入本图。按 transport 接收本次当前能力：AppServer 保持 session/thread/endpoint/namespace gate；Desktop bridge 由正常受管 MCP 从本次 executor metadata 获取真实 caller thread/turn，并提供受限 bridge 控制引用及当前 agent session，不要求 AppServer endpoint。两者不能互相补齐或 fallback；不从历史 route、日志或业务消息重建当前能力。",
+      "description": "从当前 cwd 和既有项目映射读取 canonical project，保留 invocation cwd。显式 transport 优先；Desktop 自动读取当前 cwd/sessionID/thread 的精确能力声明，经控制文件校验放入既有 desktop_bridge 输入。声明不来自历史身份或 route，不扫描其他会话。声明读取失败时，复用既有 live ancestry observer；只有证实当前实际 tmux pane，才跳过未选用 Desktop 字段并让 daemon 继续原有 pane 优先 admission。无 pane 时返回原 Desktop 错误，不要求 AppServer endpoint，不猜 socket，不要求 agent 调 MCP。CLI 不 probe Desktop，daemon 原 adapter 验证实际 native thread/cwd。query 和普通身份读取绕过发现；首次无真实 enrollment 不编造 turn。不跨 transport fallback。",
       "inputs": ["context_request"],
       "output": {"id": "resolved_scope", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},

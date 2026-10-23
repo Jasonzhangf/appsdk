@@ -680,8 +680,8 @@ fn desktop_context_same_session_refreshes_native_thread_and_subscription() {
         .any(|e| e["ev"] == "GlobalCurrentThreadRouteSet"
             && e["binding"]["native_thread_id"] == "new-desktop-thread"));
 
-    // A changed native thread without the current endpoint must fail exactly
-    // on the missing fact. History cannot publish the saved endpoint and must
+    // A changed Desktop thread without current bridge enrollment must fail
+    // on that capability. History cannot publish the saved endpoint and must
     // not retire or replace identity, binding, route or subscription state.
     let missing_before_surfaces = fs::read_to_string(fixture.project_journal()).unwrap();
     let missing_facts =
@@ -701,23 +701,9 @@ fn desktop_context_same_session_refreshes_native_thread_and_subscription() {
         .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop")
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(2), "{output:?}");
-    let missing: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(missing["result"]["outcome"], "missing_facts", "{missing}");
-    assert_eq!(missing["result"]["requires"]["kind"], "identity_facts");
-    assert_eq!(
-        missing["result"]["requires"]["fields"],
-        json!(["endpoint"]),
-        "{missing}"
-    );
-    assert_eq!(
-        missing["result"]["requires"]["sources"]["endpoint"],
-        "Current native AppServer unix socket endpoint"
-    );
-    assert_eq!(
-        missing["result"]["requires"]["repair_invocation"],
-        "collab context --provide '<JSON containing required_fields>'"
-    );
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("DESKTOP_BRIDGE_CAPABILITY_REQUIRED"), "{output:?}");
+    assert!(output.stdout.is_empty(), "do not invent an AppServer recovery requirement");
     assert_eq!(
         lifecycle_identity(&fixture, &restored),
         current_identity,

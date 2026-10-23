@@ -174,7 +174,7 @@ Supply only those real values once with `collab context --provide '<JSON>'`.
 AppServer supplement keys are `session_id`, `thread_id`, `endpoint`, and
 `namespace`; Desktop uses the separate `desktop_bridge` capability. See
 [Desktop CLI registration](skills/collab/references/migration-daemon.md#desktop-cli-registration-and-messaging)
-for the verified command shape and automatic-discovery limitation. No worker
+for the command shape, automatic discovery and first-enrollment limit. No worker
 selector or separate migration command is needed.
 
 The context bootstrap also merges the shared `collab-mcp` server into project

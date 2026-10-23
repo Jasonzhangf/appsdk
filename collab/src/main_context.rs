@@ -615,7 +615,47 @@ pub(crate) fn context_operation_with_intent(
             operation_id,
         )?
     } else {
-        let facts = collect_identity_facts(provide)?;
+        let mut facts = collect_identity_facts(provide)?;
+        let explicit_transport = facts.endpoint.is_some()
+            || provide
+                .map(serde_json::from_str::<Value>)
+                .transpose()?
+                .is_some_and(|value| {
+                    ["desktop_bridge", "endpoint", "namespace"]
+                        .iter()
+                        .any(|key| value.get(key).is_some())
+                });
+        let origin = std::env::var("CODEX_INTERNAL_ORIGINATOR_OVERRIDE").unwrap_or_default();
+        let desktop = origin == "Codex Desktop"
+            || (origin.is_empty() && std::env::var_os("CODEX_APP_TOOLS_PIPE_PATH").is_some());
+        if desktop && !explicit_transport && facts.dsh_session_id.is_none() {
+            let candidate = crate::desktop_capability::discover(
+                host_paths.state_root(),
+                &cwd,
+                facts.session_id.as_deref(),
+                facts.thread_id.as_deref(),
+            );
+            facts.endpoint = None;
+            facts.namespace = None;
+            match candidate {
+                Ok(candidate) => facts.desktop_bridge = Some(candidate),
+                Err(error) => {
+                    // Desktop environment can be inherited by a tmux child.
+                    // Only the existing live ancestry observer can establish
+                    // that its native facts are not needed. The daemon still
+                    // performs its own authoritative admission observation.
+                    let current_pane = crate::client::adapters::tmux::observe_caller_at(
+                        host_paths.state_root(),
+                        std::process::id(),
+                        facts.pane_hint.as_deref(),
+                    )
+                    .map_err(anyhow::Error::msg)?;
+                    if current_pane.is_none() {
+                        return Err(error);
+                    }
+                }
+            }
+        }
         crate::context_operation::prepare_mutating_operation(
             &host_paths,
             &project_context,

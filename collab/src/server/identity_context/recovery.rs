@@ -1262,7 +1262,16 @@ impl ProjectRuntimeManager {
                 }
                 if facts.tmux.is_none() {
                     if let (Some(saved), Some(mut transport)) = (current.as_ref(), ident.transport.clone()) {
-                        if transport.kind == TransportKind::AppServer
+                        if facts.desktop_bridge.is_some()
+                            && saved.session_id.as_ref().map(identity::SessionId::as_str) == facts.session_id.as_deref()
+                        {
+                            let candidate = facts.desktop_bridge.as_ref().unwrap();
+                            transport = crate::client::adapters::desktop_bridge::verify_candidate(candidate)
+                                .map_err(|e| anyhow::anyhow!(e))?;
+                            current = Some(self.refresh_session_transport(
+                                &runtime, saved, transport, &mut ident, &scope,
+                            )?);
+                        } else if transport.kind == TransportKind::AppServer
                             && saved.session_id.as_ref().map(identity::SessionId::as_str) == facts.session_id.as_deref()
                         {
                             transport.session_id = facts.session_id.clone();
@@ -1437,6 +1446,7 @@ impl ProjectRuntimeManager {
             (runtime, receipt, Some((staged_runtime, transport)))
         } else {
             let candidates = TransportCandidates {
+                desktop_bridge: facts.desktop_bridge,
                 // A pane needs no native IDs. Only construct the adjacent
                 // candidate when all its facts exist; selected native paths
                 // already require these fields in preflight.

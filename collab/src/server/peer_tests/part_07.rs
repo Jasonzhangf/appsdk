@@ -1132,6 +1132,7 @@ fn migration_freeze_rejects_mutations_but_allows_rebind_and_reads() {
              "token-peer".into(),
              root.display().to_string(),
              Some(crate::proto::TransportCandidates {
+                desktop_bridge: None,
                 appserver: None,
                 dsh: None,
                 tmux: Some(crate::proto::TmuxCandidate {
@@ -1147,6 +1148,7 @@ fn migration_freeze_rejects_mutations_but_allows_rebind_and_reads() {
              "token-new-peer".into(),
              root.display().to_string(),
              Some(crate::proto::TransportCandidates {
+                desktop_bridge: None,
                 appserver: None,
                 dsh: None,
                 tmux: Some(crate::proto::TmuxCandidate {

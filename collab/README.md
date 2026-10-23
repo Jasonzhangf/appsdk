@@ -100,6 +100,14 @@ and the [Skill upgrade handoff](skills/collab/SKILL.md) before recovery or
 migration. Those documents distinguish target design, source verification and
 loaded runtime evidence; updating a Skill does not activate a daemon version.
 
+Desktop bridge uses a separate normally managed MCP transport. Its caller
+context comes from executor metadata, and its recipient comes from the current
+registered route. The daemon connects the bridge's local socket rather than
+the Desktop tools pipe or an unrelated managed AppServer. See the
+[Desktop bridge design and acceptance boundary](../docs/design/collab-desktop-bridge.md).
+Source, installed MCP/daemon loading, native acceptance, actual wake, consumption
+and reply evidence are reported separately.
+
 ## Install
 
 Build once from the reviewed current source, install those exact binaries, then

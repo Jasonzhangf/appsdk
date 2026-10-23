@@ -137,7 +137,7 @@ fn validate_registration_transport(
         anyhow::bail!("selected transport session address does not match typed binding");
     }
     match transport.kind {
-        TransportKind::AppServer => {
+        TransportKind::AppServer | TransportKind::DesktopBridge => {
             let namespace = transport
                 .namespace
                 .as_deref()

@@ -310,6 +310,8 @@ pub(crate) fn context_env_view() -> serde_json::Value {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct IdentitySupplement {
+    #[serde(default)]
+    desktop_bridge: Option<proto::AppServerCandidate>,
     #[serde(default, deserialize_with = "provided_string")]
     session_id: Option<String>,
     #[serde(default, deserialize_with = "provided_string")]
@@ -354,10 +356,12 @@ fn parse_identity_supplement(raw: &str) -> anyhow::Result<IdentityFacts> {
         && supplement.thread_id.is_none()
         && supplement.endpoint.is_none()
         && supplement.namespace.is_none()
+        && supplement.desktop_bridge.is_none()
     {
         anyhow::bail!("IDENTITY_FACT_INVALID: --provide must contain at least one identity fact");
     }
     Ok(IdentityFacts {
+        desktop_bridge: supplement.desktop_bridge,
         session_id: supplement.session_id,
         thread_id: supplement.thread_id,
         endpoint: supplement.endpoint,
@@ -394,6 +398,14 @@ pub(crate) fn collect_identity_facts(provide: Option<&str>) -> anyhow::Result<Id
     let Some(supplied) = supplied else {
         return Ok(facts);
     };
+    if supplied.desktop_bridge.is_some() {
+        facts.session_id = supplied.session_id;
+        facts.thread_id = supplied.thread_id;
+        facts.endpoint = None;
+        facts.namespace = None;
+        facts.desktop_bridge = supplied.desktop_bridge;
+        return Ok(facts);
+    }
     merge_supplied_fact("session_id", &mut facts.session_id, supplied.session_id)?;
     merge_supplied_fact("thread_id", &mut facts.thread_id, supplied.thread_id)?;
     merge_supplied_fact("endpoint", &mut facts.endpoint, supplied.endpoint)?;

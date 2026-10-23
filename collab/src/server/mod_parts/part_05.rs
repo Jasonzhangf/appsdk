@@ -670,11 +670,7 @@ fn attempt_tmux_notification_with_at(
 }
 
 fn notification_transport_method(transport: &SelectedTransport) -> &'static str {
-    match transport.kind {
-        TransportKind::Tmux => "tmux",
-        TransportKind::AppServer => "appserver",
-        TransportKind::Dsh => "dsh",
-    }
+    transport.kind.as_str()
 }
 
 /// Uppercase transport tag for wake log lines. Single owner: the wake paths
@@ -682,6 +678,7 @@ fn notification_transport_method(transport: &SelectedTransport) -> &'static str 
 /// kind ends up labelled wrong in one of them.
 fn transport_log_label(transport: &SelectedTransport) -> &'static str {
     match transport.kind {
+        TransportKind::DesktopBridge => "DESKTOP_BRIDGE",
         TransportKind::Tmux => "TMUX",
         TransportKind::AppServer => "APPSERVER",
         TransportKind::Dsh => "DSH",
@@ -1203,6 +1200,7 @@ fn notification_send_response(
         NotificationAttempt::Accepted => {
             data["durable"] = json!(true);
             data["notification"] = match notification_method {
+                "desktop_bridge" => json!("desktop-bridge-input-submitted"),
                 "appserver" => json!("appserver-input-submitted"),
                 // The gateway answered `enqueue` with a durable message id.
                 // That is queue admission, not agent execution.
@@ -1245,6 +1243,7 @@ fn notification_send_response(
 
 fn notification_rejected_label(notification_method: &str, error: &str) -> String {
     match notification_method {
+        "desktop_bridge" => format!("DESKTOP_BRIDGE_NOTIFICATION_REJECTED: {error}"),
         "appserver" => format!("APPSERVER_NOTIFICATION_REJECTED: {error}"),
         "dsh" => format!("DSH_NOTIFICATION_REJECTED: {error}"),
         _ => format!("TMUX_NOTIFICATION_REJECTED: {error}"),

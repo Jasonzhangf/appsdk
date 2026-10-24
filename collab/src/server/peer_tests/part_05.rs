@@ -62,6 +62,40 @@ fn role_contract_is_identical_across_context_workers_and_status() {
             assert!(responsibilities.contains("--in-reply-to <message-id>"));
             assert!(responsibilities.contains("resume your own unfinished work"));
             assert!(responsibilities.contains("user-facing summary is not that reply"));
+            assert!(responsibilities.contains("register your own accepted goal"));
+            assert!(responsibilities.contains("request next work or explicit idle approval"));
+            assert!(
+                responsibilities.contains("automatically update affected role workflow templates")
+            );
+            let workflow = &context.data["role_brief"]["workflow_template"];
+            assert_eq!(workflow["base_version"], serde_json::json!(1), "{workflow}");
+            assert_eq!(
+                workflow["identity"]["target"],
+                if expected_role == "master" {
+                    serde_json::json!("master")
+                } else {
+                    serde_json::json!("peer")
+                },
+                "{workflow}"
+            );
+            assert_eq!(workflow["identity"]["source"], "base", "{workflow}");
+            assert_eq!(workflow["identity"]["base_version"], 1, "{workflow}");
+            assert_eq!(workflow["identity"]["revision"], 0, "{workflow}");
+            assert_eq!(workflow["specialties"], serde_json::json!([]), "{workflow}");
+            for field in [
+                "role_task",
+                "responsibilities",
+                "next_action",
+                "completion_action",
+            ] {
+                let value = &workflow["identity"]["template"][field];
+                assert!(!value.is_null(), "{field} must be projected: {workflow}");
+            }
+        } else {
+            assert!(
+                context.data["role_brief"].get("workflow_template").is_none(),
+                "the legacy managed-subagent branch keeps its existing brief"
+            );
         }
         match expected_role {
             "master" => {
@@ -2116,4 +2150,231 @@ fn registration_adds_default_lease_when_only_short_direct_message_lease_exists()
         now + 1
     )
     .is_empty());
+}
+
+#[test]
+fn role_brief_projects_identity_and_sorted_specialty_workflow_templates() {
+    let (server, root) = test_server();
+    register_synthetic_peer(&server, "master", "%master");
+    register_synthetic_peer(&server, "worker", "%worker");
+    promote_master(&server, "master", "user approved master");
+
+    let project_scope =
+        crate::server::global_state::GlobalState::canonical_project_scope(&server.root)
+            .unwrap()
+            .as_str()
+            .to_owned();
+    let worker_name = {
+        let state = server.state.lock().unwrap();
+        state
+            .name_occupancies
+            .get(&project_scope)
+            .and_then(|names| {
+                names
+                    .values()
+                    .find(|entry| entry.worker_id == "worker")
+                    .map(|entry| entry.name.clone())
+            })
+            .expect("worker stable name")
+    };
+    let spec = |role_task: &str,
+                responsibility: &str,
+                next_action: &str,
+                completion_action: &str| crate::board::WorkflowTemplateSpec {
+        role_task: role_task.into(),
+        responsibilities: vec![responsibility.into()],
+        next_action: next_action.into(),
+        completion_action: completion_action.into(),
+    };
+    let override_event =
+        |target: &str, spec: crate::board::WorkflowTemplateSpec| Event::WorkflowTemplateUpdated {
+            project_scope: project_scope.clone(),
+            target: target.into(),
+            entry: Some(crate::board::WorkflowTemplateOverride {
+                base_version: 1,
+                revision: 1,
+                spec,
+                updated_by: "master".into(),
+                updated_ms: now_ms(),
+            }),
+        };
+    server.commit(&[
+        Event::NameWorkRolesUpdated {
+            project_scope: project_scope.clone(),
+            record: crate::board::NameWorkRoles {
+                name: worker_name,
+                work_roles: vec!["reviewer".into(), "designer".into(), "master".into()],
+            },
+        },
+        override_event(
+            "peer",
+            spec(
+                "Peer identity override task",
+                "Peer identity override responsibility",
+                "Peer identity override next action",
+                "Peer identity override completion",
+            ),
+        ),
+        override_event(
+            "role:designer",
+            spec(
+                "Designer specialty task",
+                "Designer specialty responsibility",
+                "Designer specialty next action",
+                "Designer specialty completion",
+            ),
+        ),
+        override_event(
+            "role:reviewer",
+            spec(
+                "Reviewer specialty task",
+                "Reviewer specialty responsibility",
+                "Reviewer specialty next action",
+                "Reviewer specialty completion",
+            ),
+        ),
+        override_event(
+            "role:master",
+            spec(
+                "Master-named specialty task",
+                "Master-named specialty responsibility",
+                "Master-named specialty next action",
+                "Master-named specialty completion",
+            ),
+        ),
+    ]);
+
+    let peer = handle_context(&server, "worker".into(), "token-worker".into());
+    assert!(peer.ok, "{peer:?}");
+    assert_eq!(peer.data["identity"]["role"], "worker");
+    assert_eq!(peer.data["role_brief"]["role"], "worker");
+    let workflow = &peer.data["role_brief"]["workflow_template"];
+    assert_eq!(workflow["identity"]["target"], "peer", "{workflow}");
+    assert_eq!(
+        workflow["identity"]["source"], "master_override",
+        "{workflow}"
+    );
+    assert_eq!(workflow["identity"]["revision"], 1, "{workflow}");
+    assert!(
+        workflow.get("configured_templates").is_none(),
+        "peers see only effective cards: {workflow}"
+    );
+    let targets = workflow["specialties"]
+        .as_array()
+        .expect("specialty cards")
+        .iter()
+        .filter_map(|card| card["target"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        targets,
+        vec!["role:designer", "role:master", "role:reviewer"],
+        "specialties follow the sorted work-role order: {workflow}"
+    );
+
+    let brief = &peer.data["role_brief"];
+    let role_task = brief["role_task"].as_str().expect("role task");
+    assert!(role_task.contains("Peer identity override task"), "{role_task}");
+    assert!(role_task.contains("Designer specialty task"), "{role_task}");
+    assert!(role_task.contains("Reviewer specialty task"), "{role_task}");
+    assert!(
+        role_task.contains("Master-named specialty task"),
+        "a specialty named master cannot replace identity: {role_task}"
+    );
+    assert_eq!(brief["orchestration_function"], "goal_orchestrator");
+    assert!(
+        role_task.find("role:designer:").unwrap() < role_task.find("role:reviewer:").unwrap(),
+        "specialty text follows the current role order: {role_task}"
+    );
+    let responsibilities = brief["responsibilities"].as_array().expect("responsibilities");
+    for expected in [
+        "Peer identity override responsibility",
+        "Designer specialty responsibility",
+        "Reviewer specialty responsibility",
+        "Master-named specialty responsibility",
+    ] {
+        assert!(
+            responsibilities
+                .iter()
+                .any(|entry| entry.as_str() == Some(expected)),
+            "{expected} missing from {brief}"
+        );
+    }
+    let next_action = brief["next_action"].as_str().expect("next action");
+    assert!(
+        next_action.contains("Peer identity override next action"),
+        "{next_action}"
+    );
+    assert!(
+        next_action.contains("Designer specialty next action"),
+        "{next_action}"
+    );
+    assert!(
+        next_action.contains("Reviewer specialty next action"),
+        "{next_action}"
+    );
+    assert!(
+        responsibilities.iter().any(|line| line.as_str().is_some_and(|text| text.contains("codex exec --profile gcm"))),
+        "common execution constraints remain independent of editable next_action"
+    );
+    let completion = brief["completion_action"]
+        .as_str()
+        .expect("completion action");
+    assert!(
+        completion.contains("Peer identity override completion"),
+        "{completion}"
+    );
+    assert!(completion.contains("Designer specialty completion"), "{completion}");
+    assert!(
+        completion.contains("Idle handoff:")
+            && completion.contains("request next work or explicit idle approval"),
+        "the fixed idle handoff survives a completion override: {completion}"
+    );
+
+    let operations = peer.data["operations"].as_array().expect("operations");
+    for expected in [
+        "Designer specialty responsibility",
+        "Reviewer specialty responsibility",
+    ] {
+        assert!(
+            operations
+                .iter()
+                .any(|operation| operation["kind"] == "responsibility"
+                    && operation["action"] == expected),
+            "{expected} missing from operations: {operations:?}"
+        );
+    }
+    assert!(
+        operations.iter().any(|operation| {
+            operation["kind"] == "next_action" && operation["action"].as_str() == Some(next_action)
+        }),
+        "operations must derive the selected next action: {operations:?}"
+    );
+    assert!(
+        operations.iter().any(|operation| {
+            operation["kind"] == "completion_action"
+                && operation["action"].as_str() == Some(completion)
+        }),
+        "operations must derive the selected completion action: {operations:?}"
+    );
+
+    let master = handle_context(&server, "master".into(), "token-master".into());
+    assert!(master.ok, "{master:?}");
+    let master_workflow = &master.data["role_brief"]["workflow_template"];
+    assert_eq!(master_workflow["identity"]["target"], "master");
+    let catalog = master_workflow["configured_templates"]
+        .as_object()
+        .expect("master catalog");
+    for target in ["peer", "role:designer", "role:master", "role:reviewer"] {
+        assert!(catalog.contains_key(target), "{target} missing from {catalog:?}");
+    }
+    let master_completion = master.data["role_brief"]["completion_action"]
+        .as_str()
+        .expect("master completion");
+    let master_completion_lower = master_completion.to_ascii_lowercase();
+    assert!(
+        master_completion_lower.contains("never to itself")
+            || master_completion_lower.contains("idle request to yourself"),
+        "master completion keeps the no-self-idle rule: {master_completion}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }

@@ -984,6 +984,14 @@ pub enum Req {
         name: Option<String>,
         roles: Vec<String>,
     },
+    /// Persist or reset one project-scoped workflow template. `None` resets the
+    /// target to its standard identity base when applicable.
+    WorkflowTemplateSet {
+        worker_id: String,
+        token: String,
+        target: String,
+        template: Option<crate::board::WorkflowTemplateSpec>,
+    },
     WorkerSnapshot {
         worker_id: String,
         token: String,

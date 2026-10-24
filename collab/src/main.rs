@@ -373,6 +373,66 @@ fn call_project<T: DeserializeOwned>(
     client::call_with_runtime_identity_at_root(&scope.sock_path(), request, &scope.root, runtime)
 }
 
+/// Resolve the same canonical scope the context bootstrap used for an
+/// authenticated follow-up mutation.
+fn context_mutation_scope(
+    project: Option<&std::path::Path>,
+    app_scope: Option<&str>,
+) -> anyhow::Result<Scope> {
+    if let Some(project) = project {
+        let app = crate::identity::AppServerId::new(
+            app_scope.unwrap_or(crate::identity::CLI_APP_SERVER_ID),
+        )?;
+        let context = crate::context_operation::cli_project_context_for_root(project, &app)?;
+        Ok(Scope {
+            root: context.canonical_root.into(),
+        })
+    } else {
+        Scope::resolve()
+    }
+}
+
+/// Attach one mutation receipt to both the flattened and enveloped context
+/// shapes while preserving the original bootstrap/registration receipts.
+fn attach_context_receipt(value: &mut Value, key: &str, receipt: &Value) {
+    value[key] = receipt.clone();
+    if let Some(snapshot) = value.pointer_mut("/result/snapshot") {
+        if snapshot.is_object() {
+            snapshot[key] = receipt.clone();
+        }
+    }
+}
+
+/// Replace the dynamic context projection after a mutation so the same
+/// invocation returns the effective role_brief and derived operations.
+fn refresh_context_projection(value: &mut Value, fresh: &Value) {
+    const FIELDS: [&str; 5] = [
+        "role_brief",
+        "operations",
+        "next_actions",
+        "work_roles",
+        "peers",
+    ];
+    for field in FIELDS {
+        if let Some(projected) = fresh.get(field) {
+            value[field] = projected.clone();
+        }
+    }
+    for pointer in ["/result/snapshot", "/result"] {
+        let Some(projection) = value.pointer_mut(pointer) else {
+            continue;
+        };
+        if projection.get("role_brief").is_none() && projection.get("identity").is_none() {
+            continue;
+        }
+        for field in FIELDS {
+            if let Some(projected) = fresh.get(field) {
+                projection[field] = projected.clone();
+            }
+        }
+    }
+}
+
 /// Emit one peer lifecycle `Resp` exactly as the daemon serialized it. A typed
 /// non-success result stays a payload and exits 2, matching `collab context`;
 /// a transport failure has no `result` and remains an error.
@@ -1082,6 +1142,9 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
         Cmd::Context {
             work_roles,
             for_name,
+            workflow_target,
+            workflow_template,
+            reset_workflow_template,
             operation_id,
             project,
             app_scope,
@@ -1092,6 +1155,36 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             return_challenge,
             recover_communication,
         } => {
+            // Validate and parse the workflow mutation before any bootstrap or
+            // identity write. A malformed spec or conflicting flag must leave
+            // the host untouched.
+            let workflow_request = match (
+                workflow_target.as_deref(),
+                workflow_template.as_deref(),
+                reset_workflow_template,
+            ) {
+                (None, None, false) => None,
+                (Some(_), _, _) | (_, Some(_), _) if work_roles.is_some() || for_name.is_some() => {
+                    anyhow::bail!("CONTEXT_WORKFLOW_MUTATION_INVALID: workflow template flags cannot be combined with --work-roles/--for-name");
+                }
+                (Some(target), Some(raw), false) => {
+                    let spec: crate::board::WorkflowTemplateSpec =
+                        serde_json::from_str(raw).map_err(|error| {
+                            anyhow::anyhow!("CONTEXT_WORKFLOW_TEMPLATE_INVALID: {error}")
+                        })?;
+                    Some((target.to_owned(), Some(spec)))
+                }
+                (Some(target), None, true) => Some((target.to_owned(), None)),
+                (Some(_), None, false) => anyhow::bail!(
+                    "CONTEXT_WORKFLOW_MUTATION_INVALID: --workflow-target requires exactly one of --workflow-template or --reset-workflow-template"
+                ),
+                (None, Some(_), _) | (None, None, true) => anyhow::bail!(
+                    "CONTEXT_WORKFLOW_TARGET_REQUIRED: --workflow-template/--reset-workflow-template requires --workflow-target"
+                ),
+                _ => anyhow::bail!(
+                    "CONTEXT_WORKFLOW_MUTATION_INVALID: pass exactly one of --workflow-template or --reset-workflow-template"
+                ),
+            };
             let result = if let Some(challenge) = return_challenge {
                 main_context::return_registration_challenge(&challenge)
             } else {
@@ -1112,56 +1205,51 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                         out(&value);
                         std::process::exit(2);
                     }
-                    if let Some(roles) = work_roles {
-                        let updating_self = for_name.is_none();
-                        let scope = if let Some(project) = project.as_deref() {
-                            let app = crate::identity::AppServerId::new(
-                                app_scope
-                                    .as_deref()
-                                    .unwrap_or(crate::identity::CLI_APP_SERVER_ID),
-                            )?;
-                            let context = crate::context_operation::cli_project_context_for_root(
-                                project, &app,
-                            )?;
-                            Scope {
-                                root: context.canonical_root.into(),
-                            }
-                        } else {
-                            Scope::resolve()?
-                        };
+                    let mut updated = value;
+                    if work_roles.is_some() || workflow_request.is_some() {
+                        let scope =
+                            context_mutation_scope(project.as_deref(), app_scope.as_deref())?;
                         let ident =
                             registered_project_identity_with_provide(&scope, provide.as_deref())?;
-                        let request = Req::WorkRolesSet {
-                            worker_id: ident.worker_id.clone(),
-                            token: ident.token.clone(),
-                            name: for_name,
-                            roles: if roles.is_empty() {
-                                Vec::new()
-                            } else {
-                                roles.split(',').map(str::to_owned).collect()
+                        if let Some(roles) = work_roles {
+                            let request = Req::WorkRolesSet {
+                                worker_id: ident.worker_id.clone(),
+                                token: ident.token.clone(),
+                                name: for_name,
+                                roles: if roles.is_empty() {
+                                    Vec::new()
+                                } else {
+                                    roles.split(',').map(str::to_owned).collect()
+                                },
+                            };
+                            let receipt: Value = call_project(&scope, &ident, &request)?;
+                            attach_context_receipt(&mut updated, "work_roles_update", &receipt);
+                        }
+                        if let Some((target, template)) = workflow_request {
+                            let request = Req::WorkflowTemplateSet {
+                                worker_id: ident.worker_id.clone(),
+                                token: ident.token.clone(),
+                                target,
+                                template,
+                            };
+                            let receipt: Value = call_project(&scope, &ident, &request)?;
+                            attach_context_receipt(
+                                &mut updated,
+                                "workflow_template_update",
+                                &receipt,
+                            );
+                        }
+                        let fresh: Value = call_project(
+                            &scope,
+                            &ident,
+                            &Req::Context {
+                                worker_id: ident.worker_id.clone(),
+                                token: ident.token.clone(),
                             },
-                        };
-                        let roles_result: Value = call_project(&scope, &ident, &request)?;
-                        let mut updated = value;
-                        updated["work_roles_update"] = roles_result.clone();
-                        if updating_self {
-                            updated["work_roles"] = roles_result["work_roles"].clone();
-                        }
-                        if updated
-                            .pointer("/result/snapshot")
-                            .is_some_and(Value::is_object)
-                        {
-                            updated["result"]["snapshot"]["work_roles_update"] =
-                                roles_result.clone();
-                            if updating_self {
-                                updated["result"]["snapshot"]["work_roles"] =
-                                    roles_result["work_roles"].clone();
-                            }
-                        }
-                        out(&updated);
-                    } else {
-                        out(&value);
+                        )?;
+                        refresh_context_projection(&mut updated, &fresh);
                     }
+                    out(&updated);
                 }
                 Err(error) => {
                     if let Some(server_error) = error.downcast_ref::<client::ServerResponseError>()

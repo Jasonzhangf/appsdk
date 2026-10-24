@@ -276,10 +276,12 @@ fn master_authority_tmux_unknown_holder_keeps_control_and_projection() {
     assert!(master_responsibilities.contains("long-horizon goals"));
     assert!(master_responsibilities.contains("one-shot execution or observation"));
     assert!(master_responsibilities.contains("bounded subagent tasks"));
-    assert!(master_responsibilities.contains("no new task and no actionable work"));
+    assert!(master_responsibilities.contains("no authorized next action remains"));
     assert!(
-        master_responsibilities.contains("close your owned patrol tasks and timed subscriptions")
+        master_responsibilities.contains("close unused owned patrol tasks and timed subscriptions")
     );
+    assert!(master_responsibilities.contains("keep direct-message reception"));
+    assert!(master_responsibilities.contains("never to itself"));
     assert!(master_responsibilities.contains("codex exec --profile gcm"));
     assert!(master_responsibilities.contains("no inherited master authority"));
     assert!(!master_responsibilities.contains("saturate every live present peer first"));

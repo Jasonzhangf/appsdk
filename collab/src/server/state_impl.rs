@@ -996,6 +996,29 @@ impl State {
                     .or_default()
                     .insert(record.name.clone(), record.clone());
             }
+            Event::WorkflowTemplateUpdated {
+                project_scope,
+                target,
+                entry,
+            } => {
+                if let Some(entry) = entry {
+                    self.workflow_templates
+                        .entry(project_scope.clone())
+                        .or_default()
+                        .insert(target.clone(), entry.clone());
+                } else {
+                    let empty = match self.workflow_templates.get_mut(project_scope) {
+                        Some(targets) => {
+                            targets.remove(target);
+                            targets.is_empty()
+                        }
+                        None => false,
+                    };
+                    if empty {
+                        self.workflow_templates.remove(project_scope);
+                    }
+                }
+            }
             Event::ProjectWorkPolicyUpdated { work_kind, policy } => {
                 self.project_work_policy
                     .insert(work_kind.clone(), policy.clone());
@@ -1561,6 +1584,30 @@ impl State {
                 record,
             }
         }));
+        let mut template_records: Vec<_> = self
+            .workflow_templates
+            .iter()
+            .flat_map(|(project_scope, targets)| {
+                targets
+                    .iter()
+                    .map(move |(target, entry)| {
+                        (project_scope.clone(), target.clone(), entry.clone())
+                    })
+            })
+            .collect();
+        template_records.sort_by(|(left_scope, left_target, _), (right_scope, right_target, _)| {
+            (left_scope.as_str(), left_target.as_str())
+                .cmp(&(right_scope.as_str(), right_target.as_str()))
+        });
+        events.extend(
+            template_records
+                .into_iter()
+                .map(|(project_scope, target, entry)| Event::WorkflowTemplateUpdated {
+                    project_scope,
+                    target,
+                    entry: Some(entry),
+                }),
+        );
         let mut project_policies: Vec<_> = self.project_work_policy.iter().collect();
         project_policies.sort_by(|left, right| left.0.cmp(right.0));
         events.extend(

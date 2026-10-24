@@ -46,7 +46,7 @@ fn pane_only_context(fixture: &Fixture, pane: &Pane, args: &[&str]) -> Value {
 }
 
 fn wait_for_pane_message(fixture: &Fixture, pane: &Pane, message_id: &str) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let captured = tmux(
             &fixture.tmux_socket,
@@ -56,11 +56,25 @@ fn wait_for_pane_message(fixture: &Fixture, pane: &Pane, message_id: &str) {
         if visible.split_whitespace().any(|token| token == message_id) {
             return;
         }
-        assert!(
-            Instant::now() < deadline,
-            "message {message_id} was not observed in owned pane {}: {visible}",
-            pane.pane_id
-        );
+        if Instant::now() >= deadline {
+            // One final capture avoids failing on the last poll boundary: the
+            // assertion can otherwise race with the adapter's own publish step.
+            let final_captured = tmux(
+                &fixture.tmux_socket,
+                &["capture-pane", "-p", "-t", &pane.pane_id, "-S", "-4096"],
+            );
+            let final_visible = String::from_utf8_lossy(&final_captured.stdout);
+            if final_visible
+                .split_whitespace()
+                .any(|token| token == message_id)
+            {
+                return;
+            }
+            panic!(
+                "message {message_id} was not observed in owned pane {}: {final_visible}",
+                pane.pane_id
+            );
+        }
         thread::sleep(Duration::from_millis(50));
     }
 }

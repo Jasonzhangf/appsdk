@@ -2,6 +2,10 @@
   "schema_version": 1,
   "graphs": [
     {
+      "id": "appsdk-collab-binding-lifecycle",
+      "path": "docs/dagpipe/collab-binding-lifecycle.graph.json"
+    },
+    {
       "id": "collab-work-role-registration",
       "path": "docs/dagpipe/collab-work-role-registration.graph.json"
     },

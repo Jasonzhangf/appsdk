@@ -20,6 +20,11 @@ impl ProjectRuntimeManager {
         if request.action == "cancel" {
             return self.cancel_context_operation(&context, request);
         }
+        if !request.query {
+            if let Err(error) = self.reconcile_current_dsh_session(&context, &request.facts) {
+                return (self.host.clone(), Resp::err(error.to_string()));
+            }
+        }
         let _guard = self.identity_gate.lock().unwrap();
         if request.operation_id.is_empty() {
             match name_adjudication_control(&request) {
@@ -972,6 +977,13 @@ impl ProjectRuntimeManager {
             .transport
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("COMMUNICATION_RESTORE_BINDING_REQUIRED"))?;
+        if transport.kind == TransportKind::Dsh {
+            // DSH restoration has already verified the current host facts and
+            // the exact receive-loop enrollment receipt. Restoring a binding
+            // does not ask the agent to answer a new communication challenge.
+            // This does not fabricate message delivery/consumption evidence.
+            return Ok((runtime, response, nested));
+        }
         let root = self.host.host_paths.state_root();
         let saved =
             register_reply::read(root, &request.operation_id).map_err(anyhow::Error::msg)?;

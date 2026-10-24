@@ -532,7 +532,7 @@ pub(crate) enum Cmd {
         /// Return a registration challenge received in this participant pane.
         #[arg(long, conflicts_with_all = ["query", "provide", "approve_identity", "approve_grant", "recover_communication"])]
         return_challenge: Option<String>,
-        /// Explicitly verify the restored communication path.
+        /// Restore/verify communication; DSH uses current host facts and loop enrollment.
         #[arg(long, conflicts_with_all = ["query", "approve_identity", "approve_grant"])]
         recover_communication: bool,
     },

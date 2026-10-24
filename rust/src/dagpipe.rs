@@ -300,8 +300,12 @@ fn ensure_graph_nodes_use_registered_operators(
 mod notification;
 use notification::{register_notification_operator, validate_notification_objects};
 
-fn embedded_graph_paths() -> [(&'static str, &'static str); 28] {
+fn embedded_graph_paths() -> [(&'static str, &'static str); 29] {
     [
+        (
+            "docs/dagpipe/collab-binding-lifecycle.graph.json",
+            include_str!("../../docs/dagpipe/collab-binding-lifecycle.graph.json"),
+        ),
         (
             "docs/dagpipe/collab-work-role-registration.graph.json",
             include_str!("../../docs/dagpipe/collab-work-role-registration.graph.json"),
@@ -417,8 +421,9 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 28] {
     ]
 }
 
-fn design_graph_ids() -> [&'static str; 26] {
+fn design_graph_ids() -> [&'static str; 27] {
     [
+        "appsdk-collab-binding-lifecycle",
         "collab-work-role-registration",
         "collab-role-assignment",
         "collab-required-review",
@@ -448,8 +453,13 @@ fn design_graph_ids() -> [&'static str; 26] {
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 128] {
+fn design_graph_operator_names() -> [&'static str; 133] {
     [
+        "appsdk.collab_binding.load",
+        "appsdk.collab_binding.refresh",
+        "appsdk.collab_binding.reconcile",
+        "appsdk.collab_binding.resume",
+        "appsdk.collab_binding.result",
         "collab.work_roles.resolve_identity",
         "collab.work_roles.validate_specialties",
         "collab.work_roles.persist",

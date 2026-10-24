@@ -1438,6 +1438,9 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
         operation_journal,
     )
     .map_err(|error| anyhow::anyhow!(error))?;
+    // Startup convergence is background work: a slow or unreachable gateway
+    // must not delay the listener or the first request.
+    crate::server::binding_lifecycle::kick(&runtime_manager);
     let listener = UnixListener::bind(&sock_path)?;
     let socket_metadata = std::fs::symlink_metadata(&sock_path)?;
     use std::os::unix::fs::PermissionsExt;
@@ -1494,7 +1497,10 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
     let scheduler = tokio::spawn(run_timer_scheduler(
         scheduler_stop_rx,
         scheduler_interval_ms,
-        move || sched.runtimes(),
+        move || {
+            crate::server::binding_lifecycle::kick(&sched);
+            sched.runtimes()
+        },
         |runtimes| {
             tokio::task::spawn_blocking(move || {
                 for runtime in runtimes {

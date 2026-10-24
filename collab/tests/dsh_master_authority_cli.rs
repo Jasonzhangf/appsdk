@@ -18,7 +18,7 @@ mod native_support {
 
 fn unique_root() -> PathBuf {
     std::env::temp_dir().join(format!(
-        "dshma-{}-{}",
+        "d-{}-{}",
         std::process::id(),
         SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ))
@@ -44,6 +44,7 @@ struct Gateway {
     enrolled: Arc<Mutex<HashSet<(String, String)>>>,
     register_peers: Arc<Mutex<Vec<Value>>>,
     enroll_mode: Arc<Mutex<EnrollMode>>,
+    current_runtime: Arc<Mutex<Option<String>>>,
 }
 
 impl Gateway {
@@ -70,6 +71,8 @@ impl Gateway {
         let thread_enrolled = Arc::clone(&enrolled);
         let thread_requests = Arc::clone(&register_peers);
         let thread_mode = Arc::clone(&enroll_mode);
+        let current_runtime = Arc::new(Mutex::new(None::<String>));
+        let thread_runtime = current_runtime.clone();
         let handle = thread::spawn(move || {
             while !flag.load(Ordering::SeqCst) {
                 let Ok((stream, _)) = listener.accept() else {
@@ -89,7 +92,19 @@ impl Gateway {
                 let agent_id = request["params"]["agentId"].as_str().unwrap_or_default();
                 let known = agents.iter().any(|agent| agent == agent_id);
                 let key = (runtime_id.to_owned(), agent_id.to_owned());
-                let reply = if method == "agent-facts" && known {
+                let current = thread_runtime.lock().unwrap().clone();
+                let reply = if method == "resolve-agent" && known {
+                    json!({"ok":true,"result":{
+                        "nonce":request["params"]["nonce"],
+                        "runtimeId":current.as_deref().unwrap_or("gateway-runtime"),
+                        "agentId":agent_id,"sessionId":agent_id,"cwd":root,"status":"running"
+                    }})
+                } else if current
+                    .as_deref()
+                    .is_some_and(|current| current != runtime_id)
+                {
+                    json!({"ok":false,"error":{"code":"unknown-runtime","message":"old runtime disconnected"}})
+                } else if method == "agent-facts" && known {
                     json!({"ok":true,"result":{
                         "nonce":request["params"]["nonce"],
                         "runtimeId":runtime_id,
@@ -157,6 +172,7 @@ impl Gateway {
             enrolled,
             register_peers,
             enroll_mode,
+            current_runtime,
         }
     }
 
@@ -177,6 +193,23 @@ impl Gateway {
             .lock()
             .unwrap()
             .contains(&(runtime_id.to_owned(), agent_id.to_owned()))
+    }
+
+    /// Simulate a gateway restart whose local enrollment cache is empty while
+    /// the control socket stays reachable.
+    fn clear_enrollment(&self) {
+        self.enrolled.lock().unwrap().clear();
+    }
+
+    fn wait_enrolled(&self, runtime_id: &str, agent_id: &str, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if self.is_enrolled(runtime_id, agent_id) {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        self.is_enrolled(runtime_id, agent_id)
     }
 
     fn shutdown(&mut self) -> thread::Result<()> {
@@ -972,7 +1005,7 @@ fn dsh_context_recovers_a_gateway_registered_binding_without_cli_archive() {
         "gateway-owned-worker"
     );
     let requests = fixture.gateway.register_peer_requests();
-    assert_eq!(requests.len(), 1, "recovery must enroll the loop once");
+    assert!(!requests.is_empty(), "recovery must enroll the loop");
     let params = &requests[0]["params"];
     assert_eq!(params["runtimeId"], "gateway-runtime");
     assert_eq!(params["agentId"], "agentA");
@@ -1005,11 +1038,23 @@ fn dsh_context_recovers_a_gateway_registered_binding_without_cli_archive() {
         status(&fixture, &fixture.root)["master"]["worker_id"],
         "gateway-owned-worker"
     );
-    assert_eq!(
-        fixture.gateway.register_peer_requests().len(),
-        2,
-        "repeated recovery must re-enroll idempotently"
+    // Startup and maintenance now restore loops without an agent command, so
+    // handoff count is not a registration count. Every retry must carry the
+    // exact original identity/epoch; Registered and master assertions above
+    // still prohibit a new identity or authority mutation.
+    let repeated_requests = fixture.gateway.register_peer_requests();
+    assert!(
+        repeated_requests.len() >= 2,
+        "repeated recovery must re-enroll"
     );
+    for request in repeated_requests {
+        assert_runtime_context(&request["params"], &identity["runtime"]);
+        assert_eq!(
+            request["params"]["binding"]["workerId"],
+            "gateway-owned-worker"
+        );
+        assert_eq!(request["params"]["binding"]["token"], "gateway-owned-token");
+    }
     assert_eq!(
         restored["result"]["snapshot"]["binding"], binding,
         "recovery must keep the same binding and generation"
@@ -1456,5 +1501,195 @@ fn dsh_master_authority_public_wire_and_restart_preserve_peer_state() {
         "project_context":ctx_a}));
     assert_ok(&msg_status);
     assert_eq!(msg_status["consumed_by_recv"], false, "{msg_status}");
+    fixture.finish();
+}
+
+#[test]
+fn dsh_daemon_restart_reenrolls_committed_binding_without_context() {
+    let mut fixture = Fixture::new_requiring_enrollment();
+    fixture.start_daemon();
+
+    let facts = json!({"dsh":{
+        "endpoint":fixture.gateway.endpoint(),
+        "runtime_id":"gateway-runtime", "agent_id":"agentA",
+        "session_id":"agentA", "cwd":fixture.root
+    }})
+    .to_string();
+    let enrolled = fixture.command(&["context", "--provide", &facts]);
+    let enrolled_text = rendered(&enrolled);
+    assert!(enrolled.status.success(), "{enrolled_text}");
+    let (worker, identity) = only_identity(&fixture);
+    let token = identity["token"].as_str().expect("credential").to_owned();
+    let committed_binding = identity["runtime"].clone();
+    let ctx = json!({
+        "app_scope_id": committed_binding["appserver_id"],
+        "canonical_root": fixture.root,
+        "project_scope": identity["project_scope"],
+        "runtime_context": committed_binding
+    });
+    assert!(fixture.gateway.is_enrolled("gateway-runtime", "agentA"));
+
+    let first = fixture.dsh_command(
+        &[
+            "sendmessage",
+            "--to",
+            &worker,
+            "--subject",
+            "restart-pending",
+            "pending across restart",
+        ],
+        "agentA",
+    );
+    let first_text = rendered(&first);
+    assert!(first.status.success(), "{first_text}");
+    let first: Value = serde_json::from_slice(&first.stdout).expect("sendmessage JSON");
+    assert_eq!(first["notification"], "dsh-wake-enqueued", "{first}");
+    let msg_id = first["msg_id"].as_str().expect("message id").to_owned();
+
+    let registrations_before_restart = fixture.registrations();
+    let enrollments_before_restart = fixture.gateway.register_peer_requests().len();
+
+    fixture.stop_daemon();
+    // The gateway restarts with an empty local cache while Collab keeps the
+    // committed durable bindings in its reducers.
+    fixture.gateway.clear_enrollment();
+    assert!(!fixture.gateway.is_enrolled("gateway-runtime", "agentA"));
+    fixture.start_daemon();
+
+    // No `collab context` or `Register` follows the restart. The daemon must
+    // hand its committed binding to the cache-empty gateway on its own.
+    assert!(
+        fixture
+            .gateway
+            .wait_enrolled("gateway-runtime", "agentA", Duration::from_secs(8)),
+        "daemon restart did not re-enroll the committed DSH binding"
+    );
+
+    let requests = fixture.gateway.register_peer_requests();
+    assert!(
+        requests.len() > enrollments_before_restart,
+        "restart produced no register-peer handoff: {requests:?}"
+    );
+    let replayed = requests
+        .iter()
+        .skip(enrollments_before_restart)
+        .find(|request| request["params"]["agentId"] == "agentA")
+        .expect("restart handoff for agentA");
+    assert_eq!(replayed["params"]["runtimeId"], "gateway-runtime");
+    assert_eq!(
+        replayed["params"]["binding"]["workerId"],
+        worker.as_str(),
+        "{replayed}"
+    );
+    assert_runtime_context(&replayed["params"], &committed_binding);
+    assert_eq!(fixture.registrations(), registrations_before_restart);
+
+    let after_restart = fixture.dsh_command(
+        &[
+            "sendmessage",
+            "--to",
+            &worker,
+            "--subject",
+            "restart-live",
+            "delivered after restart",
+        ],
+        "agentA",
+    );
+    let after_restart_text = rendered(&after_restart);
+    assert!(after_restart.status.success(), "{after_restart_text}");
+    let after_restart: Value =
+        serde_json::from_slice(&after_restart.stdout).expect("sendmessage after restart JSON");
+    assert_eq!(
+        after_restart["notification"], "dsh-wake-enqueued",
+        "{after_restart}"
+    );
+
+    let mailbox = fixture.request(json!({"op":"MailboxRead","all":true,"worker_id":worker,
+        "token":token,"project_context":ctx}));
+    assert_ok(&mailbox);
+    assert!(
+        mailbox.to_string().contains(&msg_id),
+        "pending message missing after restart: {mailbox}"
+    );
+    assert!(
+        mailbox.to_string().contains("pending across restart"),
+        "pending message body missing after restart: {mailbox}"
+    );
+    let msg_status = fixture.request(json!({"op":"MsgStatus","msg_id":msg_id,
+        "project_context":ctx}));
+    assert_ok(&msg_status);
+    assert_eq!(msg_status["consumed_by_recv"], false, "{msg_status}");
+
+    // The handoff reuses the committed credential; it must not echo it.
+    assert!(
+        replayed["params"]["binding"].get("token").is_some()
+            && replayed["params"]["binding"]["token"] != "",
+        "restart handoff must reuse the committed credential"
+    );
+    assert!(
+        replayed.get("result").is_none(),
+        "request log must stay a request"
+    );
+
+    fixture.finish();
+}
+
+#[test]
+fn dsh_runtime_uuid_change_rebinds_without_agent_recovery() {
+    let mut fixture = Fixture::new_requiring_enrollment();
+    fixture.start_daemon();
+    let facts = json!({"dsh":{
+        "endpoint":fixture.gateway.endpoint(),"runtime_id":"gateway-runtime",
+        "agent_id":"agentA","session_id":"agentA","cwd":fixture.root
+    }})
+    .to_string();
+    let initial = fixture.command(&["context", "--provide", &facts]);
+    assert!(initial.status.success(), "{}", rendered(&initial));
+    let (worker, identity) = only_identity(&fixture);
+    let runtime_identity = &identity["runtime"];
+    let context = json!({"app_scope_id":runtime_identity["appserver_id"],
+        "canonical_root":fixture.root,"project_scope":identity["project_scope"],
+        "runtime_context":runtime_identity});
+    assert_ok(&authority(
+        &fixture,
+        "MasterPromote",
+        &worker,
+        identity["token"].as_str().unwrap(),
+        &context,
+        json!({"approval":"isolated runtime replacement master preservation"}),
+    ));
+    fixture.stop_daemon();
+    fixture.gateway.clear_enrollment();
+    *fixture.gateway.current_runtime.lock().unwrap() = Some("gateway-new".into());
+    fixture.start_daemon();
+    assert!(
+        fixture
+            .gateway
+            .wait_enrolled("gateway-new", "agentA", Duration::from_secs(8)),
+        "same live DSH session was not rebound to new runtime UUID"
+    );
+    let (restored_worker, restored) = only_identity(&fixture);
+    assert_eq!(restored_worker, worker);
+    assert_eq!(
+        restored["runtime"]["binding_id"],
+        identity["runtime"]["binding_id"]
+    );
+    assert_eq!(
+        restored["runtime"]["runtime_id"],
+        identity["runtime"]["runtime_id"]
+    );
+    assert_eq!(
+        restored["runtime"]["endpoint_generation"].as_u64().unwrap(),
+        identity["runtime"]["endpoint_generation"].as_u64().unwrap() + 1
+    );
+    assert_eq!(restored["transport"]["namespace"], "gateway-new");
+    assert_eq!(
+        status(&fixture, &fixture.root)["master"]["worker_id"],
+        worker
+    );
+    // Manual recovery resolves current facts too; no UUID/token arguments.
+    let manual = fixture.dsh_command(&["context", "--recover-communication"], "agentA");
+    assert!(manual.status.success(), "{}", rendered(&manual));
+    assert_eq!(only_identity(&fixture).1["runtime"], restored["runtime"]);
     fixture.finish();
 }

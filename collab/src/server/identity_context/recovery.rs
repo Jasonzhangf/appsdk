@@ -68,9 +68,9 @@ impl ProjectRuntimeManager {
                 .strip_prefix("DSH_ENDPOINT_REJECTED: ")
                 .unwrap_or(&detail)
                 .to_owned();
-            anyhow::anyhow!(
+            anyhow::Error::new(error).context(format!(
                 "DSH_ENDPOINT_REJECTED: gateway receive-loop enrollment failed: {detail}"
-            )
+            ))
         })
     }
 

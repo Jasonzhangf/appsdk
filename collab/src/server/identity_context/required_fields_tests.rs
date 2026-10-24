@@ -1,8 +1,35 @@
 use super::*;
-use crate::proto::TmuxCandidate;
+use crate::proto::{DshCandidate, TmuxCandidate};
 use crate::server::operation_journal::{inject_next_append_fault, OperationJournal};
 use crate::server::peer_tests::test_server;
 use std::sync::Arc;
+
+#[test]
+fn dsh_facts_do_not_compete_with_launcher_tmux_ancestry() {
+    let (host, root) = test_server();
+    let manager = recovery_manager(Arc::new(host));
+    let context = recovery_context(&root);
+    let dsh = DshCandidate {
+        endpoint: "unix:///tmp/test-dsh.sock".into(),
+        runtime_id: "gateway-runtime".into(),
+        agent_id: "agentA".into(),
+        session_id: "agentA".into(),
+        cwd: root.display().to_string(),
+    };
+    let facts = IdentityFacts {
+        dsh: Some(dsh.clone()),
+        dsh_session_id: Some(dsh.session_id.clone()),
+        caller_pid: Some(std::process::id()),
+        ..IdentityFacts::default()
+    };
+
+    let observed = manager.observe_identity_facts(&context, &facts).unwrap();
+
+    assert_eq!(observed.dsh, Some(dsh));
+    assert!(observed.tmux.is_none());
+    assert!(observed.caller_pid.is_none());
+    std::fs::remove_dir_all(root).unwrap();
+}
 
 fn persisted_context_fixture() -> (
     Arc<Server>,

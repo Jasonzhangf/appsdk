@@ -7,6 +7,12 @@ Collab 持久身份是工作归属的真源。宿主提供当前会话与通信�
 gateway runtime UUID 是当前连接地址，不是 Collab runtime identity。
 连接地址变化须更新已有绑定，不能注销工作者后重新注册。
 
+DSH gateway 仅在 `unknown-agent` 时明确表示当前 worker 缺席。收敛 owner
+退役这条当前路由并增加无端点的绑定代际，同时保留 worker、名字、任务和
+持久消息。该调用以 `retired` 结束，后续维护不再选择这条绑定。
+`unknown-runtime`、超时、畸形回复和其他不确定结果不是缺席，保留 pending
+供下一次独立维护调用收敛。
+
 ## Collab：读取与收敛
 
 每次启动、当前事实更新或既有维护 tick 是一次收敛调用。
@@ -26,7 +32,10 @@ flowchart TD
   C -->|变化| U[沿原 owner 更新绑定与订阅代际]:::action
   C -->|未变| A[恢复当前适配器收件能力]:::action
   U --> A
-  A --> E([输出就绪、待恢复或明确错误]):::boundary
+  A --> D{收件能力结果}:::decision
+  D -->|明确 unknown-agent| X[退役当前路由并保留身份与持久消息]:::action
+  D -->|就绪、pending 或错误| E([输出就绪、待恢复、已退役或明确错误]):::boundary
+  X --> E
   classDef boundary fill:#E9EEF5,stroke:#64748B,color:#0F172A,stroke-width:1.5px
   classDef action fill:#E8F1FF,stroke:#2563EB,color:#0F172A,stroke-width:1.5px
   classDef decision fill:#FFF4CC,stroke:#D97706,color:#0F172A,stroke-width:1.5px
@@ -61,6 +70,7 @@ flowchart TD
 | gateway 重启，连接 UUID 变化 | 宿主核实当前 session，更新原绑定端点与代际，停止旧地址投递 | 不从旧 UUID 推导新 UUID，不注销身份 |
 | bridge 重启或端点变化 | 同授权 session/thread 发布并同步替代端点 | 不伪造 executor 元数据，不重启 Desktop |
 | 端点暂不可用或先后启动 | 保持原身份和消息，按既有维护机制继续收敛 | 不把不可达当成身份丢失，不阻断其他绑定 |
+| gateway 明确返回 `unknown-agent` | 退役当前路由并增加空端点代际；worker、名字、任务和持久消息保留 | 不把确定缺席当作暂时断线继续重试；不删除历史 |
 | 显式换绑 | 读取当前宿主事实，沿同一 owner 更新原绑定 | 不调用 `worker close --self` 或 `UnregisterSelf` |
 
 名字、master/peer、任务、未读消息及已消费历史在恢复中保持。

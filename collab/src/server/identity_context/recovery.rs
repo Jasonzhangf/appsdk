@@ -83,6 +83,16 @@ impl ProjectRuntimeManager {
         facts: &IdentityFacts,
     ) -> anyhow::Result<IdentityFacts> {
         let mut facts = facts.clone();
+        if facts.dsh.is_some() || facts.dsh_session_id.is_some() {
+            // DSH owns its gateway anchor. The process may still be launched
+            // from a tmux pane, but that ancestry is observation only and
+            // cannot become a competing transport candidate.
+            facts.tmux = None;
+            facts.tmux_anchor = None;
+            facts.caller_pid = None;
+            facts.pane_hint = None;
+            return Ok(facts);
+        }
         let Some(caller_pid) = facts.caller_pid else {
             return Ok(facts);
         };

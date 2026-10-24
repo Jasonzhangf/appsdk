@@ -78,6 +78,7 @@ pub(crate) fn build_obligation(
     ReplyObligation {
         message_id,
         project,
+        from_project: None,
         from_worker_id,
         from_name,
         recipient_worker_id,

@@ -84,6 +84,10 @@ mod scheduler_admission_tests;
 mod dsh_channel_tests;
 
 #[cfg(test)]
+#[path = "ceo_state_tests.rs"]
+mod ceo_state_tests;
+
+#[cfg(test)]
 pub(crate) mod peer_tests;
 include!("mod_parts/part_01.rs");
 include!("mod_parts/part_02.rs");
@@ -103,6 +107,8 @@ include!("board_handlers.rs");
 include!("names.rs");
 include!("work_roles.rs");
 include!("workflow_templates.rs");
+include!("ceo.rs");
+include!("ceo_bootstrap.rs");
 include!("work_assignment.rs");
 include!("required_review.rs");
 include!("board_invites.rs");

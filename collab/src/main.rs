@@ -1,4 +1,5 @@
 mod board;
+mod ceo;
 mod client;
 mod config;
 mod context_operation;
@@ -22,6 +23,8 @@ use serde_json::{json, Value};
 
 mod main_live_closure;
 use main_live_closure::*;
+
+mod main_ceo;
 
 pub mod main_cli;
 use main_cli::*;
@@ -811,6 +814,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             out(&v);
             Ok(())
         }
+        Cmd::Ceo { command } => main_ceo::run(command),
         Cmd::Snapshot { target_id, lines } => {
             let scope = Scope::resolve()?;
             let ident = me(&scope)?;

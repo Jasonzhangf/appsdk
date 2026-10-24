@@ -529,7 +529,25 @@ impl ProjectRuntimeManager {
         req: Req,
         outer_binding: Option<&RegisterOuterBinding>,
     ) -> (Arc<Server>, Resp) {
+        let decorate=matches!(&req,Req::Context {..}|Req::IdentityContext {..});
+        let context=project_context.clone();
+        let (runtime,mut response)=self.dispatch_sync_with_register_binding_inner(project_context,req,outer_binding);
+        if decorate && response.ok {
+            self.decorate_ceo_context(context.as_ref(),&mut response.data);
+        }
+        (runtime,response)
+    }
+
+    fn dispatch_sync_with_register_binding_inner(
+        &self,
+        project_context: Option<ProjectContext>,
+        req: Req,
+        outer_binding: Option<&RegisterOuterBinding>,
+    ) -> (Arc<Server>, Resp) {
         let Some(mut context) = project_context else {
+            if let Req::Ceo { worker_id, token, command } = req {
+                return self.dispatch_ceo(None, worker_id, token, command);
+            }
             if matches!(req, Req::Ping) {
                 let response = dispatch_with_route_context(&self.host, req, None);
                 return (self.host.clone(), response);
@@ -546,6 +564,9 @@ impl ProjectRuntimeManager {
                 self.host.clone(),
                 Resp::err(format!("PROJECT_CONTEXT_INVALID: {error}")),
             );
+        }
+        if let Req::Ceo {worker_id,token,command} = req {
+            return self.dispatch_ceo(Some(context),worker_id,token,command);
         }
         if let Req::UnregisterSelf { worker_id, token } = &req {
             let runtime = self

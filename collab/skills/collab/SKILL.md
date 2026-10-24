@@ -1212,6 +1212,86 @@ Codex thread history is read only from the owning AppServer when supported and
 is never fabricated. A tmux pane locates delivery and observation only; it is
 not an identity anchor, task owner, or snapshot receipt.
 
+## 全局 CEO 与项目 master
+
+CEO 是宿主全局唯一的跨项目协调者。各项目 master 继续负责本项目目标、peer 分工、
+验收和交付，旧项目合同保持原义。工作角色 `ceo` 不授予全局权限；只有 daemon 的
+typed CEO grant 才有效。全部规则仍在本 Skill，不新建 CEO、master 或角色 Skill。
+
+先在用户选定的 workspace 注册真实身份，再按用户明确批准授予 CEO。已有 workspace
+直接复用，不迁移或覆盖；没有既有配置时使用 `~/.collab/workspace`。目录存在不是
+CEO 已授权的证据。`collab ceo status` 只读查看当前 grant 和默认 workspace，不注册。
+
+```sh
+collab ceo status
+collab ceo promote --approval '<用户明确批准原文>' --workspace '<当前已注册workspace>'
+collab ceo clear --approval '<用户明确撤销原文>'
+collab ceo progress
+collab ceo progress --project '<目标项目根目录>'
+```
+
+context 返回当前全局 CEO 联系方式。只有当前 grant 持有者才获 CEO 操作与职责；
+`identity.role` 和项目 `authority` 保持原义。正常会话续接沿现有稳定名字 owner 规则，
+不能凭旧 session、消息正文或角色字符串重建权限。没有 CEO 投影或入口不受支持时，
+报告安装/运行差异，不声称已启用、不手工改状态、不管理全局 daemon 生命周期。
+
+CEO 在自己的 workspace 调用下列入口。目标由 daemon 解析为该项目当前 master，
+新请求不取消 master 原有任务，不改已有 owner、scope、固定执行者或必需 reviewer。
+
+```sh
+collab ceo send --project '<目标项目根目录>' --subject '<主题>' --reply-required '<需要实际执行或回答的正文>'
+collab ceo send --project '<目标项目根目录>' --subject '<主题>' --reply-on-completion '<完成后交回的要求>'
+collab ceo append-task --project '<目标项目根目录>' --id '<任务ID>' --title '<标题>' --description '<范围与授权>' --delivery-condition '<交付条件>' --test-condition '<验收条件>'
+```
+
+append-task 追加到目标项目现有 board，由当前 master 负责，并默认要求完成后回复。
+不要另建 CEO 业务任务表，也不要把发送消息当作任务板已写入。回执只证明其实际字段：
+持久入队、通知提交、master 已安排、交付和回报各自分开。
+
+项目 master 收到 CEO 请求后，落实授权 action，安排 ready 工作，并向 CEO 交回实际
+结果、进度或具体阻塞。使用自己的项目身份，不切到 CEO 的目录冒充其身份：
+
+```sh
+collab ceo reply --subject '<主题>' '<普通进度或具体阻塞>'
+collab ceo reply --subject '<完成主题>' --in-reply-to '<原请求ID>' '<实际交付与证据>'
+```
+
+普通进度不带原请求引用，保留完成后回复义务。真正完成后才以原请求 ID 回复；daemon
+在正确 master 的回信持久送达后清除精确原标记。收到 pending-reply idle 提醒时处理
+原请求，不回复提醒本身。回交后继续自己的任务；无可执行工作时按既有流程交回/申请
+idle。项目 master 不因全局 CEO 存在而放弃本项目交付责任。
+
+### 目标项目没有 master
+
+未知、不可达或发送失败不等于没有 master。只有当前控制真源明确无 master，才向用户
+说明目标路径、profile（默认 gcm）、现有 tmux socket/session 与新会话用途，并取得
+本次明确启动批准。不要把“实施 CEO 功能”的开发授权当作生产新建 agent 的批准。
+
+```sh
+collab ceo bootstrap-master --project '<目标项目根目录>' --approval '<本次用户启动批准原文>' --profile gcm --tmux-socket '<已有socket>' --tmux-session '<已有session>' --op '<本次operation>'
+```
+
+该入口只在现有 tmux server 的指定 session 创建自有窗口，启动 Codex YOLO；用户可
+指定其他 profile。不能注入假 Codex session ID，不能直接伪造身份、授权或收信。若无
+现有端点，报告具体缺口；不启动、重启或终止 tmux server，不关闭用户已有窗口。
+
+新 master 的初始提示要求它在真实会话内依次完成：`collab context`；按批准原文执行
+`collab master promote --approval '<原文>'`；再给 CEO 发真实就绪握手：
+
+```sh
+collab ceo bootstrap-ready --op '<本次operation>' --subject '<就绪主题>' '<真实注册、master授权与可收信结果>'
+```
+
+仅窗口已创建时状态是 launched/pending。daemon 认证目标项目当前 master 并将握手
+持久送达 CEO 后才是 ready。同一 operation 不重复建窗口；结果未知保留现场，不盲目
+重试或自动删除。CEO 收到握手后，继续执行尚待派发的 send/append-task，不能到“创建
+成功”就停下。进度用 `collab ceo progress --project '<目标项目根目录>'` 查看。
+
+CEO 下一步提示词：先执行 `collab context` 和 `collab ceo progress`，读取当前授权、
+项目 master 与任务回报。在已有授权内追加目标、要求实际进度并处理回信；项目没有
+master 时先取得本次启动批准。收到真实就绪握手后继续派发待办。保留项目 owner 和
+用户指定的执行/review 约束，向用户报告实际安排、交付与尚待决定项，然后继续推进。
+
 ## Cross-project master communication
 
 ### 权限、目标解析与下一步动作
@@ -1219,7 +1299,7 @@ not an identity anchor, task owner, or snapshot receipt.
 这是一条已存在的项目 master 到项目 master 通道。工作角色（designer、reviewer）
 不授予此权限。普通 peer 把跨项目请求交给本项目当前 master；不得换 cwd 冒充目标
 项目的 agent，不得直接写 mailbox、猜 session ID，或通过另一个宿主通道绕过拒绝。
-全局 CEO 是另一个跨项目协调层；在 CEO 的控制入口实现前，不把 CEO 称呼当作授权。
+全局 CEO 走上一节的独立授权通道，不把 CEO 称呼当作项目 master 授权。
 
 发送者在自己的项目执行 `collab context`，使用返回的当前身份和 master 授权。
 用户提供目标项目绝对路径后，可以只读查询目标当前 master；这个查询不注册身份：
@@ -1236,7 +1316,7 @@ not an identity anchor, task owner, or snapshot receipt.
 
 从发送者自己的项目目录执行下列命令；`--project` 只指定接收项目，不改变发送者身份：
 
-Collab communication across projects is master-only and explicit. Only the
+This existing master-to-master channel is master-only and explicit. Only the
 current master grant holder may send to the current master grant holder of
 another initialized project; non-master peers and managed subagents are
 rejected before any message is persisted:

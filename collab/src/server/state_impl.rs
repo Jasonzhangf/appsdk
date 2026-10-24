@@ -269,6 +269,7 @@ impl State {
             // Reset the idle reminder only on a real carrier change; an
             // unchanged name resolution must not recreate a reminder window.
             if obligation.from_name.as_deref() == Some(name)
+                && obligation.from_project.as_deref().is_none_or(|source|source==project_scope)
                 && obligation.from_worker_id != worker_id
             {
                 obligation.from_worker_id = worker_id.to_owned();
@@ -310,6 +311,7 @@ impl State {
                     "message_id": obligation.message_id,
                     "from": obligation.from_worker_id,
                     "from_name": obligation.from_name,
+                    "from_project": obligation.from_project,
                     "project": obligation.project,
                     "policy": obligation.policy.as_str(),
                     "created_ms": obligation.created_ms,
@@ -1071,6 +1073,13 @@ impl State {
             Event::MigrationUpdated { migration } => {
                 self.migration = Some(migration.clone());
             }
+            Event::CeoGrantSet { grant } => {
+                self.ceo_grant = grant.clone();
+            }
+            Event::CeoBootstrapSet { record } => {
+                self.ceo_bootstraps
+                    .insert(record.operation_id.clone(), record.clone());
+            }
             Event::ReducerCheckpoint { .. } => {}
             Event::CommandStarted { .. } => {}
             Event::CommandRecorded {
@@ -1773,6 +1782,18 @@ impl State {
         if let Some(migration) = self.migration.clone() {
             events.push(Event::MigrationUpdated { migration });
         }
+        if let Some(grant) = self.ceo_grant.clone() {
+            events.push(Event::CeoGrantSet {
+                grant: Some(grant),
+            });
+        }
+        let mut bootstraps: Vec<_> = self.ceo_bootstraps.values().cloned().collect();
+        bootstraps.sort_by(|a, b| a.operation_id.cmp(&b.operation_id));
+        events.extend(
+            bootstraps
+                .into_iter()
+                .map(|record| Event::CeoBootstrapSet { record }),
+        );
         let mut command_receipts: Vec<_> = self.command_receipts.iter().collect();
         command_receipts.sort_by(|a, b| a.0.cmp(b.0));
         for (command_id, receipt) in command_receipts {
@@ -1997,4 +2018,25 @@ fn master_wake_snapshot_required(
 ) -> bool {
     accumulator.generation > 0
         || (!accumulator.delivery_state.is_empty() && accumulator.delivery_state != "clean")
+}
+
+#[cfg(test)]
+mod ceo_reply_scope_tests {
+    use super::*;
+
+    #[test]
+    fn cross_project_name_handoff_does_not_rebind_foreign_sender() {
+        let mut state=State::default();
+        state.reply_obligations.insert("request".into(), crate::server::state::ReplyObligation {
+            message_id:"request".into(),project:"/target".into(),from_project:Some("/ceo".into()),
+            from_worker_id:"ceo-worker".into(),from_name:Some("SameName".into()),
+            recipient_worker_id:"old-master".into(),recipient_name:Some("SameName".into()),
+            policy:crate::proto::ReplyPolicy::Required,created_ms:1,reminded_idle_episode:true,
+        });
+        state.rebind_reply_obligations_for_name("/target","SameName","new-master");
+        let obligation=&state.reply_obligations["request"];
+        assert_eq!(obligation.from_worker_id,"ceo-worker","a recipient-project name cannot own the foreign sender");
+        assert_eq!(obligation.recipient_worker_id,"new-master");
+        assert!(!obligation.reminded_idle_episode);
+    }
 }

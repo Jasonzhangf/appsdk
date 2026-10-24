@@ -1,5 +1,15 @@
 # Collab v1 verification map
 
+Global CEO coordination is specified by `design/ceo-coordination.md` and the
+two `docs/dagpipe/collab-ceo-*.graph.json` SESE graphs. Implementation acceptance
+uses the public `ceo_public_contract` consumer plus host-manager CEO unit tests:
+explicit global authorization, registered source authentication, target master
+ownership, board/message/reply-marker atomicity, precise cross-project replies,
+replay and same-name continuation, approved bootstrap on an existing tmux
+endpoint, and a real registered-master handshake before ready. These entries
+describe the affected gates; passing evidence and installation/live state are
+recorded separately in the task run, not inferred from graph validity.
+
 Native immediate delivery: `notification_batch_tests::native_notifications_do_not_wait*`
 covers DSH/Desktop default notifications without the aggregation window and new
 messages while prior deliveries remain unconsumed. `desktop_bridge_public_contract`

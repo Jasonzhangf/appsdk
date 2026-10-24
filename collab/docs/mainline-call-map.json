@@ -2,6 +2,10 @@
   "lifecycle_id": "collab-v1-peer-low-intervention",
   "status": "active",
   "edges": [
+    {"from":"global-ceo-command","to":"host-ceo-authority","caller":"dispatch_ceo","callee":"execute_ceo","path":"src/server/ceo.rs"},
+    {"from":"ceo-task-or-message","to":"project-board-and-mailbox","caller":"execute_ceo","callee":"ceo_deliver","path":"src/server/ceo.rs"},
+    {"from":"registered-context","to":"ceo-workflow-projection","caller":"dispatch_sync_with_register_binding","callee":"decorate_ceo_context","path":"src/server/ceo.rs"},
+    {"from":"approved-master-bootstrap","to":"durable-launch-and-handshake","caller":"execute_ceo","callee":"ceo_bootstrap_prepare","path":"src/server/ceo_bootstrap.rs"},
     {"from":"workflow-template-command","to":"project-workflow-template","caller":"dispatch_with_route_context_bound","callee":"handle_workflow_template_set","path":"src/server/workflow_templates.rs"},
     {"from":"current-role-and-work-specialties","to":"effective-workflow-template","caller":"role_brief","callee":"workflow_template_projection","path":"src/server/workflow_templates.rs"},
     {"from":"work-role-command","to":"stable-name-specialties","caller":"dispatch_with_route_context_bound","callee":"handle_work_roles","path":"src/server/work_roles.rs"},

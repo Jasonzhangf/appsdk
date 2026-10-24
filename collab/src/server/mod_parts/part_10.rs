@@ -400,6 +400,7 @@ fn worker_status_summary_with_maps(
 
 fn mutation_blocked_during_migration(req: &Req) -> bool {
     match req {
+        Req::Ceo { command, .. } => !matches!(command, crate::ceo::CeoCommand::Status | crate::ceo::CeoCommand::Progress { .. }),
         Req::UnregisterSelf { .. } | Req::ProjectReset { .. } => false,
         Req::PeerLifecycle { request } => matches!(request, crate::proto::PeerLifecycleRequest::Update { .. } | crate::proto::PeerLifecycleRequest::Close { .. }),
         Req::BoardShow => false,

@@ -349,6 +349,8 @@ fn reply_obligation_retains_original_until_correlated_reply_clears_it() {
             obligation: state::ReplyObligation {
                 message_id: "retained-reply-request".into(),
                 project: root.display().to_string(),
+                from_project: None,
+                from_ceo: false,
                 from_worker_id: "sender".into(),
                 from_name: None,
                 recipient_worker_id: "recipient".into(),

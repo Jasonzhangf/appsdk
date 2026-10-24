@@ -1,5 +1,15 @@
 # Collab v1 verification map
 
+Global CEO coordination is specified by `design/ceo-coordination.md` and the
+two `docs/dagpipe/collab-ceo-*.graph.json` SESE graphs. Implementation acceptance
+uses the public `ceo_public_contract` consumer plus CEO state and idle-reminder tests:
+explicit global authorization, registered source authentication, target master
+ownership, board/message/reply-marker atomicity, precise cross-project replies,
+replay and same-name continuation, approved bootstrap on an existing tmux
+endpoint, and a real registered-master handshake before ready. These entries
+describe the affected gates; passing evidence and installation/live state are
+recorded separately in the task run, not inferred from graph validity.
+
 Open board projection: `board_cli::closed_invitation_cannot_transfer_and_master_withdraw_only_clears_metadata`
 requires closed/cancelled rows to disappear while task history and operation receipts remain.
 `master_authority_dashboard_get_agrees_with_status_context_and_board` covers the same

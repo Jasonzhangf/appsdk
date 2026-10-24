@@ -393,7 +393,7 @@ pub(crate) fn tick_at(server: &Server, now: i64) {
 
 fn reply_reminder_body(obligations: &[serde_json::Value]) -> String {
     let mut body = String::from(
-        "Reply pending. Read the original message with `collab msg <message_id>` and answer it through `collab sendmessage --to '<from>' --subject '<subject>' --in-reply-to '<message_id>' '<your answer>'`.\n",
+        "Reply pending. Read the original message with `collab msg <message_id>` and use its reply entry below. For on_completion, keep this marker until actual completion; ordinary progress must omit --in-reply-to. Do not reply to this reminder.\n",
     );
     for obligation in obligations {
         body.push_str(&format!(
@@ -402,6 +402,11 @@ fn reply_reminder_body(obligations: &[serde_json::Value]) -> String {
             obligation["from"].as_str().unwrap_or(""),
             obligation["policy"].as_str().unwrap_or(""),
         ));
+        if obligation["from_ceo"].as_bool() == Some(true) {
+            body.push_str("  Reply through `collab ceo reply --subject '<subject>' --in-reply-to '<message_id>' '<actual completed result>'`.\n");
+        } else {
+            body.push_str("  Reply through `collab sendmessage --to '<from>' --subject '<subject>' --in-reply-to '<message_id>' '<your answer>'`.\n");
+        }
     }
     body
 }

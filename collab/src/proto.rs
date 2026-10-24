@@ -657,6 +657,11 @@ impl ReplyPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op")]
 pub enum Req {
+    Ceo {
+        worker_id: String,
+        token: String,
+        command: crate::ceo::CeoCommand,
+    },
     RegisterReply {
         reply: RegisterParticipantReply,
     },

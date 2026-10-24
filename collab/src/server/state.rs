@@ -302,6 +302,14 @@ pub struct Message {
 pub struct ReplyObligation {
     pub message_id: String,
     pub project: String,
+    /// Set only for a cross-project reply. Old journals decode without it and
+    /// the absent field is omitted from serialized output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_project: Option<String>,
+    /// Authenticated global-role provenance. Only the CEO delivery owner sets
+    /// this; current CEO succession must not depend on message prose or names.
+    #[serde(default)]
+    pub from_ceo: bool,
     pub from_worker_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_name: Option<String>,
@@ -775,6 +783,9 @@ fn responsibility_effect<'a>(state: &'a State, event: &'a Event) -> Responsibili
             Some(_) | None => ResponsibilityEffect::Safe,
         },
         Event::Acked { .. } | Event::ReceiveCommitted { .. } => ResponsibilityEffect::Safe,
+        // CEO coordination records are control-plane state; they never add or
+        // change business task responsibility.
+        Event::CeoGrantSet { .. } | Event::CeoBootstrapSet { .. } => ResponsibilityEffect::Safe,
         // Any `Sent` to the target adds an unread message, and
         // `responsibility_snapshot` counts unread messages as responsibility.
         // Replies, acks, and system notifications still land in the target's
@@ -1574,6 +1585,15 @@ pub enum Event {
     },
     MigrationUpdated {
         migration: MigrationRecord,
+    },
+    /// Durable CEO grant/revoke. `None` clears the grant; bootstrap history is
+    /// retained in `ceo_bootstraps`.
+    CeoGrantSet {
+        grant: Option<crate::ceo::CeoGrant>,
+    },
+    /// Durable master-bootstrap launch intent/progress keyed by operation id.
+    CeoBootstrapSet {
+        record: crate::ceo::CeoBootstrapRecord,
     },
     ReducerCheckpoint {
         sequence: u64,

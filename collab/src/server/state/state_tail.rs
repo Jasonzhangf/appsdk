@@ -61,6 +61,11 @@ pub struct State {
     pub notification_subscriptions: HashMap<String, NotificationSubscription>,
     pub wake_bindings: HashMap<String, String>,
     pub migration: Option<MigrationRecord>,
+    /// Project-mirrored global CEO grant. `CeoGrantSet` is the only writer;
+    /// `None` revokes the grant and never touches bootstrap history.
+    pub ceo_grant: Option<crate::ceo::CeoGrant>,
+    /// Durable master-bootstrap launch intents keyed by operation id.
+    pub ceo_bootstraps: HashMap<String, crate::ceo::CeoBootstrapRecord>,
     /// Legacy journal projection kept for wire/replay compatibility.  Typed
     /// command idempotency is owned by `global.command_receipts`; this map is
     /// updated from the same committed event and is never consulted first.

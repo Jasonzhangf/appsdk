@@ -169,7 +169,7 @@ fn dispatch_with_route_context_bound(
             body,
             restart_replay_pending,
         ),
-        Req::CrossProjectSend { .. } => Resp::err(
+        Req::Ceo { .. } | Req::CrossProjectSend { .. } => Resp::err(
             "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: cross-project wire requests require independently verified source and target route owners",
         ),
         Req::NotificationMethods => Resp::data(json!({
@@ -846,7 +846,8 @@ enum WireRoutePrincipal<'a> {
 fn wire_route_principals(req: &Req) -> Result<Vec<WireRoutePrincipal<'_>>, String> {
     match req {
         Req::PeerLifecycle { request: crate::proto::PeerLifecycleRequest::Read { worker_id, .. } | crate::proto::PeerLifecycleRequest::Update { worker_id, .. } | crate::proto::PeerLifecycleRequest::Close { worker_id, .. } } => Ok(vec![WireRoutePrincipal::Authenticated { worker_id }]),
-        Req::Board { worker_id, .. }
+        Req::Ceo { worker_id, .. }
+        | Req::Board { worker_id, .. }
         | Req::WorkerName { worker_id, .. }
         | Req::WorkRolesSet { worker_id, .. }
         | Req::WorkflowTemplateSet { worker_id, .. }

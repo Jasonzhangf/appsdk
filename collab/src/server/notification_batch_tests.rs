@@ -134,6 +134,82 @@ fn queue_message(
 }
 
 #[test]
+fn native_notifications_do_not_wait_for_batch_window() {
+    for kind in [TransportKind::Dsh, TransportKind::DesktopBridge] {
+        let (server, root) = test_server();
+        let subscription = register_and_subscribe(&server, "recipient");
+        {
+            let mut state = server.state.lock().unwrap();
+            state
+                .workers
+                .get_mut("recipient")
+                .unwrap()
+                .transport
+                .as_mut()
+                .unwrap()
+                .kind = kind.clone();
+            state
+                .notification_subscriptions
+                .get_mut(&subscription)
+                .unwrap()
+                .method = kind.as_str().into();
+        }
+        let now = now_ms();
+        queue_message(&server, "recipient", &subscription, "new-native", now);
+        let attempt =
+            attempt_notification_detailed_with_at(&server, "new-native", &subscription, now);
+        assert!(attempt.accepted(), "{kind:?}: {attempt:?}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn native_notifications_do_not_wait_for_previous_consumption() {
+    for kind in [TransportKind::Dsh, TransportKind::DesktopBridge] {
+        let (server, root) = test_server();
+        let subscription = register_and_subscribe(&server, "recipient");
+        {
+            let mut state = server.state.lock().unwrap();
+            state
+                .workers
+                .get_mut("recipient")
+                .unwrap()
+                .transport
+                .as_mut()
+                .unwrap()
+                .kind = kind.clone();
+            state
+                .notification_subscriptions
+                .get_mut(&subscription)
+                .unwrap()
+                .method = kind.as_str().into();
+        }
+        let now = now_ms();
+        for index in 0..server.config.notifications.max_unacked {
+            let id = format!("unconsumed-{index}");
+            queue_message(&server, "recipient", &subscription, &id, now - 1);
+            server.commit(&[Event::Delivered { ids: vec![id] }]);
+        }
+        queue_message(&server, "recipient", &subscription, "next-native", now);
+        server.commit(&[Event::DeliveryMode {
+            msg_id: "next-native".into(),
+            mode: "immediate".into(),
+            source_thread_id: None,
+        }]);
+        let attempt =
+            attempt_notification_detailed_with_at(&server, "next-native", &subscription, now);
+        assert!(attempt.accepted(), "{kind:?}: {attempt:?}");
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.msgs["unconsumed-0"].state, "delivered");
+        assert!(state
+            .notification_delivery_accepted
+            .contains_key("next-native"));
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
 fn accepted_batch_is_not_overwritten_by_a_later_empty_batch_skip() {
     let (server, root) = test_server();
     let subscription = register_and_subscribe(&server, "recipient");

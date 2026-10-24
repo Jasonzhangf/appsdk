@@ -59,7 +59,7 @@ pub struct WorkerRec {
     pub transport: Option<SelectedTransport>,
 }
 
-pub use crate::board::{NameWorkRoles, WorkPolicy};
+pub use crate::board::{NameWorkRoles, WorkPolicy, WorkflowTemplateOverride};
 
 impl WorkerRec {
     pub fn transport_kind(&self) -> Option<TransportKind> {
@@ -1521,6 +1521,13 @@ pub enum Event {
     NameWorkRolesUpdated {
         project_scope: String,
         record: NameWorkRoles,
+    },
+    /// Master-configured workflow template for one project and target. A
+    /// `None` entry removes the override and restores the standard base.
+    WorkflowTemplateUpdated {
+        project_scope: String,
+        target: String,
+        entry: Option<WorkflowTemplateOverride>,
     },
     /// Project-level default policy for one exact `work_kind`.
     ProjectWorkPolicyUpdated {

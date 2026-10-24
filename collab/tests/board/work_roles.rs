@@ -244,9 +244,9 @@ fn context_role_guidance_reaches_master_and_peer_with_latest_dynamic_roles() {
         for expected in [
             "role label is not authorization",
             "existing claim or invite acceptance flow",
-            "require the specified reviewer",
+            "and the specified reviewer",
             "dynamic role change does not rewrite existing tasks",
-            "explicit confirmation",
+            "seek user confirmation only for missing critical facts",
         ] {
             assert!(
                 next_action.contains(expected),
@@ -438,11 +438,14 @@ fn pinned_executor_and_reviewer_complete_a_read_only_task_through_public_cli() {
     assert_eq!(reviewed["disposition"], "no_merge_required");
     fixture.run_public(&["task", "close", "role-delivery"], THREAD_B);
     let board = fixture.run_public(&["board", "show"], THREAD_A);
-    assert_eq!(task(&board, "role-delivery")["status"], "closed");
-    assert_eq!(
-        task(&board, "role-delivery")["completion_delivery_complete"],
-        true
-    );
+    assert!(!board["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["id"] == "role-delivery"));
+    let history = fixture.run_public(&["task", "status", "role-delivery"], THREAD_A);
+    assert_eq!(history["status"], "closed");
+    assert_eq!(history["delivery_complete"], true);
 }
 
 #[test]
@@ -695,8 +698,11 @@ fn rework_contract_changes_and_manual_cleanup_do_not_reuse_review_acceptance() {
     let repeated = fixture.run_public(&["task", "finalize-cleanup", "review-changes"], THREAD_A);
     assert_eq!(repeated["delivery_complete"], false);
     let board = fixture.run_public(&["board", "show"], THREAD_A);
-    assert_eq!(
-        task(&board, "review-changes")["completion_delivery_complete"],
-        false
-    );
+    assert!(!board["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["id"] == "review-changes"));
+    let history = fixture.run_public(&["task", "status", "review-changes"], THREAD_A);
+    assert_eq!(history["delivery_complete"], false);
 }

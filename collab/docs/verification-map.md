@@ -1,11 +1,23 @@
 # Collab v1 verification map
 
+Open board projection: `board_cli::closed_invitation_cannot_transfer_and_master_withdraw_only_clears_metadata`
+requires closed/cancelled rows to disappear while task history and operation receipts remain.
+`master_authority_dashboard_get_agrees_with_status_context_and_board` covers the same
+projection through the live HTTP observer before and after a public cancellation.
+
+Native immediate delivery: `notification_batch_tests::native_notifications_do_not_wait*`
+covers DSH/Desktop default notifications without the aggregation window and new
+messages while prior deliveries remain unconsumed. `desktop_bridge_public_contract`
+covers consecutive public CLI sends through the real daemon and bridge protocol.
+Native acceptance remains separate from consumption; transport failures remain explicit.
+
 The name/session, activity and mailbox contracts below have dedicated source and
 public-consumer gates. Installed binary and global-daemon activation require
 separate evidence. Existing display-label tests remain label tests only.
 
 | feature_id | positive gate | negative gate |
 |---|---|---|
+| orchestration.workflow-templates | `workflow_templates` public CLI cases cover standard master/peer base_version, master role-template update, refreshed context and matching execution instructions; workflow selector/state tests cover current-role selection, persistence and reset. `install_skills` embeds the single Skill's baseline JSON. | Non-master template writes, malformed fields and incompatible query/mutation flags reject without workflow mutation; role/template changes preserve active task ownership and pinned constraints; unconfigured roles use the standard identity flow. No global daemon activation or automatic policy-inference claim. |
 | communication.master-cross-project | `cross_project_stale_identity_cli::public_master_commands_discover_send_consume_and_reply_across_projects` uses public master status/send/recv for both directions and checks real message IDs and bodies. | Clearing source authority rejects the next send without enqueuing its body; existing host registry tests reject forged source-grant evidence and non-master targets. No global CEO or installed-runtime claim. |
 | communication.reply-obligation | `reply_obligations_cli` covers required/on-completion visibility and correlated clearing through public CLI; reducer tests cover replay, compaction, name continuation and scoped reset. `reply_idle_tests` covers idle notification and episode dedup. | Read/ACK preserve requirements; wrong sender/target and empty answer reject clearing. Busy/unknown/no obligation stay quiet. Pending originals survive retention until cleared. Reminders create no reciprocal obligation. |
 | identity.binding-lifecycle | `dsh_daemon_restart_reenrolls_committed_binding_without_context` and `dsh_runtime_uuid_change_rebinds_without_agent_recovery` cover daemon-owned restoration, new gateway UUID, original master/binding preservation and explicit UUID-free recovery. `dsh_absent_binding_retires_once_without_repeated_maintenance_retry` uses the public daemon and gateway boundary to require one terminal `unknown-agent` attempt while preserving the worker record. Gateway `collab-transparent-lifecycle-e2e.test.ts` uses a real Collab binary, both startup orders, cache loss, independent slow peer, canonical mail/reply/consumption and changed UUID with no agent context/Register after the boundary. `desktop_endpoint_replacement_converges_without_agent_context` covers background native endpoint synchronization; Node bridge process restart recovers genuine same-host enrollment without context. | Original versions fail the new no-agent cases. Scoped `resolve-agent` rejects ambiguous sessions, wrong cwd, absent/unverifiable hosts and unsafe private enrollment. Explicit `unknown-agent` retires the current route; `unknown-runtime`, timeouts and malformed replies remain pending with the original binding. Delayed old gateway adoption cannot undo a newer generation. Unchanged restart keeps Registered count; endpoint changes update the existing worker and generation. Installed/live activation remains separate from these isolated results. |

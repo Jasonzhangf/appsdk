@@ -52,6 +52,12 @@ fn dispatch_with_route_context_bound(
         Req::BoardShow => handle_board_show(server, None),
         Req::WorkerName { worker_id, token, name } => handle_worker_name(server, worker_id, token, name),
         Req::WorkRolesSet { worker_id, token, name, roles } => handle_work_roles(server, worker_id, token, name, roles),
+        Req::WorkflowTemplateSet {
+            worker_id,
+            token,
+            target,
+            template,
+        } => handle_workflow_template_set(server, worker_id, token, target, template),
         Req::Board { worker_id, token, command } => handle_board_command(server, worker_id, token, command),
         Req::SubagentObserve { id, snapshot_lines } => {
             match crate::subagent::observe(server, id.as_deref(), snapshot_lines) {
@@ -843,6 +849,7 @@ fn wire_route_principals(req: &Req) -> Result<Vec<WireRoutePrincipal<'_>>, Strin
         Req::Board { worker_id, .. }
         | Req::WorkerName { worker_id, .. }
         | Req::WorkRolesSet { worker_id, .. }
+        | Req::WorkflowTemplateSet { worker_id, .. }
         | Req::Subagent { worker_id, .. }
         | Req::Register { worker_id, .. }
         | Req::LiveClosureDaemonSend { worker_id, .. }

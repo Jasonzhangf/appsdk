@@ -197,7 +197,9 @@ fn handle_board_show(server: &Server, viewer: Option<&str>) -> Resp {
         .get("worker_id")
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned);
-    let mut tasks: Vec<_> = state.tasks.values().filter_map(|task| board_task_view_with_master(&state, task, viewer, master.as_deref(), route.as_ref())).collect();
+    let mut tasks: Vec<_> = state.tasks.values()
+        .filter(|task| !matches!(task.status.as_str(), "closed" | "cancelled"))
+        .filter_map(|task| board_task_view_with_master(&state, task, viewer, master.as_deref(), route.as_ref())).collect();
     tasks.sort_by(|left, right| left.id.cmp(&right.id));
     let mut workers: Vec<_> = state.workers.values().filter(|worker| !is_managed_subagent(&state, &worker.id)).map(|worker| {
         BoardMemberView {

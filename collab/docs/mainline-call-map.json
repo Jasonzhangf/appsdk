@@ -2,6 +2,8 @@
   "lifecycle_id": "collab-v1-peer-low-intervention",
   "status": "active",
   "edges": [
+    {"from":"workflow-template-command","to":"project-workflow-template","caller":"dispatch_with_route_context_bound","callee":"handle_workflow_template_set","path":"src/server/workflow_templates.rs"},
+    {"from":"current-role-and-work-specialties","to":"effective-workflow-template","caller":"role_brief","callee":"workflow_template_projection","path":"src/server/workflow_templates.rs"},
     {"from":"work-role-command","to":"stable-name-specialties","caller":"dispatch_with_route_context_bound","callee":"handle_work_roles","path":"src/server/work_roles.rs"},
     {"from":"work-policy-command","to":"resolved-task-policy","caller":"handle_board_command","callee":"board_work_policy","path":"src/server/work_assignment.rs"},
     {"from":"resolved-task-policy","to":"task-assignment","caller":"board_dispatch_work","callee":"board_invite_with_selection","path":"src/server/work_assignment.rs"},

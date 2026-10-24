@@ -5,12 +5,53 @@ description: "仅约束已成功注册 Collab 的 peer；master 权限需另行�
 
 # Collab
 
+## 唯一 Skill 与当前工作流程
+
+Collab 只有一个 Skill。master、peer、designer、reviewer 等不建立独立 Skill。
+源码 `collab/skills/collab/` 和安装目录 `~/.agents/skills/collab/` 是同一 Skill 的源码与
+安装产物；宿主入口链接到该安装目录。流程模板属于本 Skill 的资源，不是另一个 Skill。
+
+标准流程唯一资源为 [workflow-templates.json](references/workflow-templates.json)，
+基础版本为 1，只有 `master`、`peer` 两种身份模板。各自管理自己的目标、任务和执行
+流程，优先将有界执行交给独立 worker。peer 完工或停止前向现有 master 交回结果并申请
+下一步或 idle；reviewer/设计师同样适用。无 master 时不虚构审批者；master 不向自己申请。
+
+执行以本次 `collab context` 的 `role_brief.workflow_template` 为准：读取基础版本、
+identity 及 specialties 的来源、revision 和完整 template。未更新时使用标准身份流程。
+项目 master 可覆盖身份流程，或配置 `role:<工作角色>` 流程；多个匹配专长全部有序返回，
+不以第一项静默覆盖其他项。角色被移除后，不再派发该专长模板。模板不是权限授予，
+也不自动改写已发布任务的 owner、scope、指定执行者或必需 reviewer。
+
+每次获知新 peer 或角色关系变化，master 在已有授权内更新受影响模板、任务分工和
+交付接力，实际安排 ready 工作，再向用户报告生效规则并继续；用户可随时修改。
+报告采用：变化；当前分工与 scope；交付/review/后续安排/idle 负责人；本次已派任务
+或无可派原因；当前生效及可修改说明。只有超出授权、改变用户显式硬约束或关键事实
+不清时才确认受影响部分。更新正在执行的任务时，必须显式落实交接。
+
+模板更新沿用 `context`，仅当前项目 master 可执行，正文为四字段 JSON：
+
+```sh
+collab context --workflow-target 'role:designer' --workflow-template '{"role_task":"负责已授权设计工作","responsibilities":["核对当前任务范围与交付接收者"],"next_action":"推进当前设计任务并交给指定 reviewer","completion_action":"交回设计证据，向当前 master 申请后续安排或 idle"}'
+collab context --workflow-target 'role:designer' --reset-workflow-template
+```
+
+`--workflow-target master` 或 `peer` 更新本项目的身份流程。`role:` 后为已规范化的
+工作角色名，不是 agent 名。模板写入和角色设置分开执行；写入不会替别人注册或分配角色。
+修改后同次回执及后续 context 均返回当前投影，`operations` 使用同一有效流程。
+模板内容由 daemon journal 持久保存，换会话不丢失；重置模板后回到标准身份流程。
+若实际 context 没有该模板字段，说明当前运行版本尚未提供模板派发；保留原回执并报告
+安装/运行差异，不手工改控制状态、不虚构模板已生效，也不自行管理 daemon 生命周期。
+已运行的 peer 需要立即处理变化时，master 通过已有消息/派单通道通知其读取 context，
+不新建定时轮询。context 派发流程不等于 daemon 自动生成任务或替 agent 执行。
+
 ## 通信入口与项目目录
 
 普通消息默认走公开 CLI。使用成功注册时的项目根目录；业务代码可以在独占
 worktree 中修改，但不要为查身份或发消息切到 `~`、临时目录或收件人的项目。
 已关联的同项目 worktree 可由 Collab 解析；目录不确定时，回到已知注册项目根目录。
 已有身份和收件人时直接发送，不先重跑 context、收件或通信恢复。
+发送不等待对方空闲、上一条消息消费或回复；不要先轮询消息状态再发送下一条。
+daemon、DSH gateway 和 Desktop bridge 立即提交新消息，接受、消费与回复分别记录。
 `collab context`、`collab inbox` 和 `collab sendmessage` 都是公开 CLI，
 不是私有命令。内部控制协议与公开 CLI 的边界不同，不要把 shell 调用本身视为违规。
 同项目的 Alice、Jenny 等已注册名字就是收件地址，不需要额外的聊天、thread、
@@ -67,7 +108,8 @@ collab sendmessage --to '<原消息from>' --subject '<结果>' --in-reply-to '<�
 这些参数属于项目内 `sendmessage`；跨项目 `master send` 尚未接入回复标记。
 
 交回协作结果后，立即接续自己原来的未完任务。先核对待回复要求、协作请求和本人任务，
-落实当前可执行动作；确无可继续工作时才 idle。完成后回复尚待外部条件时保留标记并说明
+落实当前可执行动作；确无可继续工作时，按当前流程交回并申请下一步或 idle。
+完成后回复尚待外部条件时保留标记并说明
 等待条件，不能伪造完成答复；也不能因为一个协作请求已交回就结束自己的工作。
 收到 daemon 待回复提醒时，读取其引用的原消息，按原回复要求处理，不把提醒再当新任务，
 不对提醒本身回“收到”。daemon 仅追踪待回复标记，不替 agent 生成业务答复或判定任务完成。
@@ -86,29 +128,28 @@ peer 默认向请求方、委托者或所属 master 回报，不向用户输出�
 除非同时明确了任务或某类工作的默认分工，不创建 board 任务，不写 `board policy`。
 设置自己的角色不要求 master 代办，也不以任务 ID、board 可用或已有执行者为前提。
 
-### 指派前确认并保存
+### 指派前分析并保存
 
-master 或负责子目标的 peer 在指派前先分析需求，向用户列明 scope（目标、允许修改的
-范围、非目标、交付与验收条件）和角色要求（工作类别、角色偏好、指定执行者、指定
-reviewer）。用户确认后才保存分工并发出协作请求。用户已经明确指定或确认的条目
-直接复用，只确认缺失或有歧义的部分；未确认前可做只读分析，不派发受影响的执行。
+master 或负责子目标的 peer 在指派前先分析 scope、交付与验收及角色要求。master 在
+上述自动安排授权内保存分工、派发并报告，不逐轮等待用户批准。复用用户已明确要求；
+只有超出授权、改变用户显式硬约束或关键事实不清时，才确认受影响部分，其余工作继续。
 未指定固定执行者或 reviewer 是允许的，不将可选字段为空当作必须补问的缺口。
 
 角色用 `collab context --work-roles` 按项目和稳定名字持久保存；分工用 `collab board policy` 与
 任务明确字段保存。scope、交付与测试条件写入已有 board 任务的 description、
-delivery-condition、test-condition，用户确认原文或所在对话位置记入该任务描述。
+delivery-condition、test-condition，适用授权原文或所在对话位置及安排依据记入任务描述。
 角色及执行者约束以正式控制字段为准，不能只留在聊天、消息正文或 agent 临时记忆。
 不新增第二份角色表或审批状态。保存后读取任务回执，确认范围和有效分工符合用户要求。
 
-同一已确认 scope 内的后续请求直接沿用这些要求，不逐次请用户重复确认。改变 scope、
-指定执行者、reviewer 或角色要求时，先向用户说明差异并确认，再更新受影响任务与分工。
+同一已授权 scope 内的后续请求沿用这些要求；master 自动更新默认分工并报告。
+超出授权或改变用户显式指定的 scope、执行者、reviewer 时，再确认受影响部分。
 普通进度更新、重新唤醒、换会话不构成重新确认的理由。
 
 工作角色可动态新增、修改或撤销。用户明确提出的角色变更就是该次确认，不重复请示。
 `context --work-roles` 设置完整角色集合：新增时保留仍需要的旧角色，删除时省去对应
 角色，全部撤销时传空字符串。修改后读取回执，后续分派和每次接单读取最新持久角色，
 不缓存注册时的旧角色。角色更新不自动改写已有任务的 scope、指定执行者或 reviewer；
-需要同步变更任务时，按用户确认更新对应任务约束。不能凭角色变化自行接管或放弃任务。
+需要同步变更任务时，按适用授权显式更新对应约束并落实交接。不能凭角色变化自行接管或放弃任务。
 
 ### 每次接收协作请求
 
@@ -135,7 +176,7 @@ master 与 peer 收到具体执行请求，在接受邀请或开始执行前，�
 | 设置或修改自己的工作角色 | `collab context --work-roles '<完整角色集合，逗号分隔>'` | 检查 work_roles_update 回执；保留仍需的原角色。成功即完成角色设置，不继续创建任务或设置执行者。 |
 | 撤销自己的全部工作角色 | `collab context --work-roles ''` | 仅在用户明确要求清空时执行，不用作排障试探。 |
 | 当前 master 按用户指令给别人设置角色 | `collab context --for-name '<稳定名字>' --work-roles '<完整角色集合>'` | `--for-name` 是设置目标名字的专长，不是切换调用者身份。 |
-| 当前 master 保存用户明确要求的某类工作默认分工 | `collab board policy --scope project --work-kind '<类别>' --prefer-role '<角色>'` | 只有明确要求默认分工才使用；指定人时用 `--executor '<名字>'`，指定审查者时加 `--reviewer '<名字>'`，不补造用户未要求的人员或 reviewer。 |
+| 当前 master 保存用户要求或自动安排授权内的某类工作默认分工 | `collab board policy --scope project --work-kind '<类别>' --prefer-role '<角色>'` | 指定执行者时用 `--executor '<名字>'`，指定审查者时加 `--reviewer '<名字>'`；自动选择依据当前角色与任务，保留用户显式硬约束，并报告生效分工。 |
 | 查具体任务的当前条件、邀请或 revision | `collab board show` | 从当前回执读取任务 ID、scope、有效分工和 revision；不能把消息中的旧 revision 当当前值。 |
 | 发布已确认的具体任务 | `collab board publish '<任务ID>' --title '<标题>' --description '<scope与确认来源>' --delivery-condition '<交付条件>' --test-condition '<验收条件>'` | 仅按已确认要求附加 `--work-kind`、`--prefer-role`、`--executor`、`--reviewer`；不因发布任务而强制创建项目默认。 |
 | 指派者按任务有效分工发邀请 | `collab board dispatch '<任务ID>' --expected-revision <当前revision>` | 使用 publish 或 board show 的真实回执；不写死为 1。邀请不等于接受。 |
@@ -1238,7 +1279,7 @@ at `assigned`, `working`, `blocked`, `waiting`, `delivered`, or
 After delivery or merge, perform the real cleanup and close the task; a
 reminder does not create a second task or a duplicate dispatch. After closing
 or recording a blocker, inspect the board and continue the next eligible task.
-Enter idle only after the remaining-work and blocker checks above.
+Enter idle only after the remaining-work and blocker checks above and the current workflow's completion handoff/idle-request procedure.
 
 Escalation routing is explicit:
 

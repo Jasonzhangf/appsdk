@@ -1282,7 +1282,7 @@ fn closed_invitation_cannot_transfer_and_master_withdraw_only_clears_metadata() 
         );
         assert!(!forbidden.status.success());
         assert!(String::from_utf8_lossy(&forbidden.stderr).contains("BOARD_MASTER_REQUIRED"));
-        fixture.run_public(
+        let invited = fixture.run_public(
             &[
                 "board",
                 "invite",
@@ -1304,13 +1304,19 @@ fn closed_invitation_cannot_transfer_and_master_withdraw_only_clears_metadata() 
             }})],
         );
         let board = fixture.run_public(&["board", "show"], THREAD_A);
-        let task = board["tasks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|task| task["id"] == "closed-offer")
-            .unwrap();
-        let revision = task["revision"].as_u64().unwrap().to_string();
+        assert!(
+            !board["tasks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|task| task["id"] == "closed-offer"),
+            "closed work must leave the board: {board}"
+        );
+        let historical = fixture.run_public(&["task", "status", "closed-offer"], THREAD_A);
+        assert_eq!(historical["status"], status);
+        assert_eq!(historical["owner"], master);
+        // The isolated TaskUpdated event above advances the invitation's revision once.
+        let revision = (invited["task"]["revision"].as_u64().unwrap() + 1).to_string();
         let response = fixture.command_public(
             &[
                 "board",

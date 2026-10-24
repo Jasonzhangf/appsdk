@@ -176,6 +176,7 @@ pub(super) fn clear_project(
     state.name_occupancies.remove(scope);
     state.name_occupancy_revisions.remove(scope);
     state.name_work_roles.remove(scope);
+    state.workflow_templates.remove(scope);
     state
         .name_recoveries
         .retain(|_, recovery| recovery.project_scope != scope);

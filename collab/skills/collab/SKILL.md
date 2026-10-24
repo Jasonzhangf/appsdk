@@ -11,6 +11,8 @@ description: "仅约束已成功注册 Collab 的 peer；master 权限需另行�
 worktree 中修改，但不要为查身份或发消息切到 `~`、临时目录或收件人的项目。
 已关联的同项目 worktree 可由 Collab 解析；目录不确定时，回到已知注册项目根目录。
 已有身份和收件人时直接发送，不先重跑 context、收件或通信恢复。
+发送不等待对方空闲、上一条消息消费或回复；不要先轮询消息状态再发送下一条。
+daemon、DSH gateway 和 Desktop bridge 立即提交新消息，接受、消费与回复分别记录。
 `collab context`、`collab inbox` 和 `collab sendmessage` 都是公开 CLI，
 不是私有命令。内部控制协议与公开 CLI 的边界不同，不要把 shell 调用本身视为违规。
 同项目的 Alice、Jenny 等已注册名字就是收件地址，不需要额外的聊天、thread、

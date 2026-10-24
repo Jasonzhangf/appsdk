@@ -284,21 +284,19 @@ fn communication_recovery_brief() -> serde_json::Value {
     })
 }
 
-fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Value {
+fn base_role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Value {
     let active_progress_rule = "Patrol is a safety-net wake, never an execution dependency. After registering or rearming it, immediately continue ready authorized work: investigate, dispatch, verify, integrate and clean up. Never wait for the next wake while a next action exists; a future deadline or unavailable patrol service is not a blocker. Wait only for evidenced external dependencies or uncovered approvals, and continue independent work.";
     let own_goal_rule = "Master and peer are goal orchestrators at different levels, not execution workers. Restore or register your own accepted goal with `appsdk goal subscribe --goal <existing-goal.md> --interval <agreed-period>`; verify your own `appsdk goal status --json` receipt before dispatch. Read, update, rearm and cancel only your own goal. Never ask master to proxy-register a peer goal, and never register or hold another peer's goal as master. A task, board assignment, note or timer alone is not goal registration. Stable name owns the goal; sessionID is the current carrier, independent of Desktop/TUI or tmux placement. Use the current installed Collab Skill and this current role brief; an older worktree's skill-source copy is not another operating contract. Retire master-only goal, peer-as-executor and all-peers-busy-before-GCM instructions.";
-    let idle_patrol_rule = "When a task completes, or there is no new task and no actionable work, actively close your owned patrol tasks and timed subscriptions. Do not renew or recreate idle patrol loops. Keep the direct-message receive subscription for new assignments; evaluate a new assignment before starting a new scoped patrol.";
-    let collaboration_reply_rule = "On a collaboration request, read the full original message and carry out its authorized action. Return the actual answer, result or evidenced blocker to the original requester with `collab sendmessage --to <from> --subject <topic> --in-reply-to <message-id> <result>`; an ACK, consumption receipt, task update or user-facing summary is not that reply. Follow reply timing: on_completion asks for actual completion results, not a received/working acknowledgment. Do not answer system reminders or results automatically, and do not create reply loops. After returning the result, resume your own unfinished work. Check pending reply requirements and other ready work before idle; only enter idle when no authorized next action remains. A daemon reminder asks you to inspect the original pending reply requirement; it neither executes nor answers for you.";
-    let work_role_assignment_rule = "Analyze the requirement before assigning work. Reuse items the user already specified or confirmed; ask only about missing or ambiguous scope (goal, allowed changes, exclusions, delivery and tests) and role requirements (work kind, preferred role, executor and reviewer). Before affected execution, persist confirmed specialties with `collab context --work-roles` and assignments with `collab board policy`; record scope, delivery/test conditions and the user's confirmation source in the existing board task, then check the receipt. Work roles are specialties of a stable name, not master authority. Set the complete role list to change it; omit the option to preserve it and pass an empty string to clear it. A dynamic role change does not rewrite existing task scope, executor or reviewer, or authorize taking over or abandoning work. For changes, state the difference and obtain explicit user confirmation; an explicit user update already supplies that confirmation. Continue under the confirmed requirements without asking again.";
-    let work_role_execution_rule = "For collaboration requests that accept or execute a concrete task, deliver work or perform a required review, use the latest `collab context` snapshot and current board task to check the task ID, confirmed scope, current work_roles, effective assignment, executor, reviewer and delivery/test conditions. Identity recovery, work-role settings, discussion and status questions do not require creating a board task. This snapshot already supplies work_roles, work_policies and owned tasks; read the board only when a specific task or detail is missing. Do not cache registration-time roles or infer task authority from message prose. Role preference is a selection hint, not execution authorization; use the existing board claim or invite acceptance flow. A specified executor is a hard constraint: wait if unavailable rather than substitute another name. A reviewer specialty grants no review authority by itself. Submit delivery to the specified reviewer via `collab task review`; the author and master cannot substitute. Report missing conditions, conflicts or out-of-scope changes to the sender, pause only affected execution until the task is confirmed and updated, and pass the same task ID and requirements to downstream workers.";
-    let work_role_next_action = "Check current roles and task constraints: a role label is not authorization. Use the existing claim or invite acceptance flow, require the specified reviewer, and seek explicit confirmation only for missing or changed requirements. A dynamic role change does not rewrite existing tasks.";
+    let idle_patrol_rule = workflow_template_rule("idle_patrol_rule");
+    let collaboration_reply_rule = workflow_template_rule("collaboration_reply_rule");
+    let work_role_assignment_rule = workflow_template_rule("work_role_assignment_rule");
+    let work_role_execution_rule = workflow_template_rule("work_role_execution_rule");
     let route_scope = server_route_scope(server, state).ok().flatten();
     if current_master_worker_id(state, route_scope.as_ref()).as_deref() == Some(worker_id) {
         return json!({
             "role": "master",
             "orchestration_function": "goal_orchestrator",
             "goal_level": "project",
-            "role_task": "Act as the project's long-horizon orchestrator. Prefer assigning code implementation to subagents; orchestrate scheduling, acceptance, delivery, integration, and owned-resource closure instead of implementing the mainline yourself. Patrol only your own project and own its audit. Route suitable long-horizon goals to authorized peers when available; if none is available, retain the goal and split it into bounded subagent work. Dispatch one-shot execution or observation directly to independent `codex exec --profile gcm` workers regardless of whether other peers are busy; ordinary implementation remains with its delivery owner.",
             "responsibilities": [
                 own_goal_rule,
                 work_role_assignment_rule,
@@ -335,8 +333,6 @@ fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Va
                 "parent": null
             },
             "blocked_boundary": "Investigate and unblock first; only pause for a true external approval or dependency gate.",
-            "completion_action": "Drive the project to verified merge, cleanup, task closure, and final acceptance.",
-            "next_action": format!("Run `appsdk longhorizon show`, audit only this project, and prefer assigning code implementation to subagents. Route suitable long-horizon goals to authorized peers, or retain and split the goal when none is available. Dispatch one-shot execution or observation directly to independent `codex exec --profile gcm` workers regardless of whether other peers are busy, then orchestrate scheduling, acceptance, delivery, and owned-resource closure. Apply Close-Before-Open/SESE, converge owned worktrees and stale resources, close or park each P0/P1 with evidence, deduplicate new production issues through project-canonical intake with evidence per the owning project contract, report protected holds (PROTECTED_HOLDs), verify delivery, coordinate dependencies, integrate, close, and re-arm a consumed one-shot wake before ending when scheduling must continue. {work_role_next_action}"),
             "notification_rule": "A notification is an interrupt, not completion. Do its P0/P1/P2 action, then resume scheduling; never stop on ACK/read/summary."
         });
     }
@@ -375,7 +371,6 @@ fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Va
         "role": "worker",
         "orchestration_function": "goal_orchestrator",
         "goal_level": "delegated_goal",
-        "role_task": "The wire role remains `worker` with derivation kind `peer` for compatibility; operationally you are the accepted goal's long-horizon orchestrator. Prefer assigning code implementation to subagents; orchestrate scheduling, acceptance, delivery, and owned-resource closure instead of implementing the mainline yourself. Dispatch one-shot execution or observation directly to independent `codex exec --profile gcm` workers regardless of whether other peers are busy.",
         "responsibilities": [
             own_goal_rule,
             work_role_assignment_rule,
@@ -412,8 +407,116 @@ fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Va
             "parent": null
         },
         "blocked_boundary": "A suspected blocker is not an approved stop. Request current master verification with exact failure evidence, attempted remedies, exhausted authorized alternatives and the decision/resume condition. Pause only truly dependent or unsafe actions, continue independent work, and retain delivery ownership unless explicitly reassigned. Never wait merely for a scheduled wake.",
-        "completion_action": "Own the accepted goal through planning, dispatch, verification, integration, delivery evidence, and owned-resource closure.",
-        "next_action": format!("Act as the accepted goal's long-horizon orchestrator: prefer assigning code implementation to subagents, orchestrate scheduling, acceptance, delivery, and owned-resource closure, and dispatch one-shot execution or observation directly to independent `codex exec --profile gcm` workers regardless of whether other peers are busy. Update task-scope patrol, partition non-overlapping bounded scopes, verify and integrate assigned work, ask the current master first with evidence when blocked, clean owned resources with Close-Before-Open/SESE, keep evidence per the owning project contract, report PROTECTED_HOLDs, and re-arm a consumed one-shot wake before ending when scheduling must continue. {work_role_next_action}"),
         "notification_rule": "P0 preempts P1, P1 preempts P2. Higher priority interrupts but does not cancel your owned task."
     })
+}
+
+/// Project the effective workflow template onto the base identity brief.
+///
+/// `base_role_brief` remains the owner of identity, authority and mandatory
+/// runtime constraints. The selected identity template adds its workflow text,
+/// then configured specialty cards are appended in the current work-role order.
+fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Value {
+    let mut brief = base_role_brief(server, state, worker_id);
+    let base_role = match brief.get("role").and_then(serde_json::Value::as_str) {
+        Some("master") => "master",
+        Some("worker") => "peer",
+        _ => return brief,
+    };
+    let route_scope = server_route_scope(server, state).ok().flatten();
+    let project_scope = route_scope
+        .as_ref()
+        .map(|route| route.project_scope_id.as_str().to_owned())
+        .or_else(|| {
+            GlobalState::canonical_project_scope(&server.root)
+                .ok()
+                .map(|scope| scope.as_str().to_owned())
+        })
+        .unwrap_or_default();
+    let roles = worker_work_roles(state, &project_scope, worker_id);
+    let projection = workflow_template_projection(state, &project_scope, base_role, &roles);
+    apply_workflow_template(&mut brief, &projection);
+    brief
+}
+
+fn apply_workflow_template(brief: &mut serde_json::Value, projection: &serde_json::Value) {
+    let identity = &projection["identity"]["template"];
+    brief["role_task"] = identity["role_task"].clone();
+    append_workflow_responsibilities(brief, identity["responsibilities"].as_array());
+    brief["next_action"] = identity["next_action"].clone();
+    brief["completion_action"] = identity["completion_action"].clone();
+    if let Some(specialties) = projection["specialties"].as_array() {
+        for card in specialties {
+            let label = card["target"].as_str().unwrap_or("specialty");
+            let template = &card["template"];
+            append_workflow_text(brief, "role_task", template["role_task"].as_str(), label);
+            append_workflow_responsibilities(brief, template["responsibilities"].as_array());
+            append_workflow_text(brief, "next_action", template["next_action"].as_str(), label);
+            append_workflow_text(
+                brief,
+                "completion_action",
+                template["completion_action"].as_str(),
+                label,
+            );
+        }
+    }
+    // The selected identity or specialty text may omit the fixed idle handoff.
+    // Keep it in completion so a peer cannot silently skip its master request.
+    append_workflow_text(
+        brief,
+        "completion_action",
+        Some(workflow_template_rule("idle_patrol_rule")),
+        "Idle handoff",
+    );
+    append_workflow_text(
+        brief,
+        "next_action",
+        Some(workflow_template_rule("work_role_next_action")),
+        "Task constraints",
+    );
+    brief["workflow_template"] = projection.clone();
+}
+
+fn append_workflow_text(
+    brief: &mut serde_json::Value,
+    field: &str,
+    text: Option<&str>,
+    label: &str,
+) {
+    let Some(text) = text.map(str::trim).filter(|text| !text.is_empty()) else {
+        return;
+    };
+    let addition = if label.is_empty() {
+        text.to_owned()
+    } else {
+        format!("{label}: {text}")
+    };
+    let current = brief[field].as_str().unwrap_or_default();
+    brief[field] = serde_json::Value::String(if current.is_empty() {
+        addition
+    } else {
+        format!("{current}\n{addition}")
+    });
+}
+
+fn append_workflow_responsibilities(
+    brief: &mut serde_json::Value,
+    responsibilities: Option<&Vec<serde_json::Value>>,
+) {
+    let Some(responsibilities) = responsibilities else {
+        return;
+    };
+    let Some(current) = brief["responsibilities"].as_array_mut() else {
+        return;
+    };
+    for responsibility in responsibilities {
+        let Some(text) = responsibility
+            .as_str()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        else {
+            continue;
+        };
+        current.push(serde_json::Value::String(text.to_owned()));
+    }
 }

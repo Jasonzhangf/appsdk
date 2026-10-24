@@ -10,6 +10,65 @@ pub struct NameWorkRoles {
     pub work_roles: Vec<String>,
 }
 
+/// User-editable workflow text for one target. The target is either a standard
+/// identity (`master`/`peer`) or a `role:<specialty>` projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowTemplateSpec {
+    pub role_task: String,
+    pub responsibilities: Vec<String>,
+    pub next_action: String,
+    pub completion_action: String,
+}
+
+impl WorkflowTemplateSpec {
+    /// Trim the editable text and reject empty required fields. There is
+    /// deliberately no length or item cap: the request contract only requires
+    /// nonempty content.
+    pub fn normalized(self) -> Result<Self, &'static str> {
+        let role_task = self.role_task.trim().to_owned();
+        if role_task.is_empty() {
+            return Err("role_task must not be empty");
+        }
+        let next_action = self.next_action.trim().to_owned();
+        if next_action.is_empty() {
+            return Err("next_action must not be empty");
+        }
+        let completion_action = self.completion_action.trim().to_owned();
+        if completion_action.is_empty() {
+            return Err("completion_action must not be empty");
+        }
+        let mut responsibilities = Vec::with_capacity(self.responsibilities.len());
+        for responsibility in self.responsibilities {
+            let responsibility = responsibility.trim().to_owned();
+            if responsibility.is_empty() {
+                return Err("responsibilities must contain only nonempty values");
+            }
+            responsibilities.push(responsibility);
+        }
+        if responsibilities.is_empty() {
+            return Err("responsibilities must not be empty");
+        }
+        Ok(Self {
+            role_task,
+            responsibilities,
+            next_action,
+            completion_action,
+        })
+    }
+}
+
+/// One durable project-scoped workflow override. `revision` counts writes for
+/// this exact target while the override exists; a reset removes the record and
+/// restores the base source at revision 0.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowTemplateOverride {
+    pub base_version: u32,
+    pub revision: u64,
+    pub spec: WorkflowTemplateSpec,
+    pub updated_by: String,
+    pub updated_ms: i64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkPolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]

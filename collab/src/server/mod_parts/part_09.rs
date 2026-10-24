@@ -1479,13 +1479,8 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
         })
         .collect();
     if next_actions.is_empty() {
-        if master["worker_id"].as_str() == Some(worker_id.as_str()) {
-            if let Some(action) = current_role_brief["next_action"].as_str() {
-                next_actions.push(action.into());
-            }
-        } else {
-            next_actions
-                .push("no assigned task action; remain available for an explicit dispatch".into());
+        if let Some(action) = current_role_brief["next_action"].as_str() {
+            next_actions.push(action.into());
         }
     }
     let operations: Vec<serde_json::Value> = {

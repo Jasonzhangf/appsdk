@@ -10,6 +10,10 @@ pub const SKILL_ROOT: &str = "skills/collab";
 pub const SKILL_FILES: &[(&str, &str)] = &[
     ("SKILL.md", include_str!("../skills/collab/SKILL.md")),
     (
+        "references/workflow-templates.json",
+        include_str!("../skills/collab/references/workflow-templates.json"),
+    ),
+    (
         "references/migration-daemon.md",
         include_str!("../skills/collab/references/migration-daemon.md"),
     ),
@@ -123,6 +127,16 @@ mod tests {
             assert_eq!(outcome, &InstallOutcome::Written, "expected written: {rel}");
             assert!(target.join(rel).is_file(), "missing: {rel}");
         }
+        // A manifest that accidentally omits the new asset would otherwise
+        // satisfy the self-enumerating checks above while shipping no workflow.
+        let workflow: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(target.join("references/workflow-templates.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(workflow["base_version"], 1);
+        let identities = workflow["identity_templates"].as_object().unwrap();
+        assert_eq!(identities.len(), 2);
+        assert!(identities.contains_key("master") && identities.contains_key("peer"));
         std::fs::remove_dir_all(target).ok();
     }
 

@@ -521,6 +521,29 @@ pub(crate) enum Cmd {
         /// Current master may set another stable name's work specialties.
         #[arg(long, requires = "work_roles", conflicts_with_all = ["query", "return_challenge"])]
         for_name: Option<String>,
+        /// Master-only workflow template target: `master`, `peer`, or
+        /// `role:<normalized specialty>`.
+        #[arg(
+            long = "workflow-target",
+            conflicts_with_all = ["query", "return_challenge"]
+        )]
+        workflow_target: Option<String>,
+        /// JSON workflow template for --workflow-target; exactly one of this
+        /// flag or --reset-workflow-template is required.
+        #[arg(
+            long = "workflow-template",
+            requires = "workflow_target",
+            conflicts_with = "reset_workflow_template"
+        )]
+        workflow_template: Option<String>,
+        /// Remove the master override at --workflow-target and restore the
+        /// standard identity template.
+        #[arg(
+            long = "reset-workflow-template",
+            requires = "workflow_target",
+            conflicts_with = "workflow_template"
+        )]
+        reset_workflow_template: bool,
         #[arg(long = "op")]
         operation_id: Option<String>,
         #[arg(long)]

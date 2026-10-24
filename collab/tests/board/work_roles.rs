@@ -244,9 +244,9 @@ fn context_role_guidance_reaches_master_and_peer_with_latest_dynamic_roles() {
         for expected in [
             "role label is not authorization",
             "existing claim or invite acceptance flow",
-            "require the specified reviewer",
+            "and the specified reviewer",
             "dynamic role change does not rewrite existing tasks",
-            "explicit confirmation",
+            "seek user confirmation only for missing critical facts",
         ] {
             assert!(
                 next_action.contains(expected),

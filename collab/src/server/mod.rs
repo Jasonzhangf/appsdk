@@ -102,6 +102,7 @@ include!("mod_parts/part_13.rs");
 include!("board_handlers.rs");
 include!("names.rs");
 include!("work_roles.rs");
+include!("workflow_templates.rs");
 include!("work_assignment.rs");
 include!("required_review.rs");
 include!("board_invites.rs");

@@ -27,6 +27,8 @@ mod patrol_subscriptions;
 mod reply_obligations_cli;
 #[path = "board/work_roles.rs"]
 mod work_roles_cli;
+#[path = "board/workflow_templates.rs"]
+mod workflow_templates;
 
 const THREAD_A: &str = "01a0d637-75e2-71b2-8634-2be0c08a9adc";
 const THREAD_B: &str = "01a0d639-dafc-7571-a0aa-bbc2bbbc04ce";

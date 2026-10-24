@@ -68,6 +68,18 @@ impl ProjectRuntimeManager {
             if project_reset::route_is_deinitialized(Path::new(&record.canonical_root))? {
                 project_reset::retire_stale_project_routes(&host, &record.project_scope)?;
                 project_reset::delete_route(&route_journal, &record)?;
+            } else {
+                // Keep the already-open resident owner and its app aliases.
+                // Production startup selects its central storage before this
+                // manager exists; do not reselect an active reducer here.
+                let active_resident = storage_roots_equal(Path::new(&record.canonical_root), &host.root)?
+                    && storage_roots_equal(Path::new(&record.storage_root), &host.storage_root)?;
+                if !active_resident {
+                    select_central_runtime_storage(
+                        host_paths, &route_journal,
+                        &(record.app_scope_id.clone(), record.project_scope.clone()), None,
+                    )?;
+                }
             }
         }
         let mut routes = std::collections::BTreeMap::new();

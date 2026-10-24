@@ -44,8 +44,16 @@ flowchart TD
 
 ## 宿主适配器：重连与收件
 
+当前运行态只打开 host state root 下的 central project/app 数据空间。
+旧项目本地 `.agent-collab/server` 数据按存储版本隔离，保留文件但不导入或重放。
+旧 route 的存储位置只更新为 current central owner，不复制旧数据。
+当前中央空间的身份、消息和任务保持；中央 journal 损坏仍明确失败。
+
 DSH gateway 接受 Collab 已提交的精确身份，恢复唯一 canonical Poll 循环。
-Desktop bridge 使用宿主授权的当前 session/thread 声明。
+Desktop bridge 按宿主 runtime 共享。公开 CLI 自动登记当前 session/thread，
+bridge 经 native read_thread 核对真实 thread 与 canonical cwd 后发布 scoped 声明。
+新聊天不需要先调用 MCP。服务调用使用明确关联 ID，不冒充 agent 执行 turn。
+MCP wrapper 退出不停止共享服务；服务生命周期跟随 Desktop host pipe。
 恢复不要求 agent 再执行 context，不把持久消息的 preview 当作正文投递。
 
 ```mermaid
@@ -68,7 +76,7 @@ flowchart TD
 | Collab 重启 | gateway Poll 自动重连；Collab 恢复持久绑定和订阅 | 不重启 gateway、bridge、DSH、Desktop 或 tmux |
 | gateway 重启，连接 UUID 未变 | 从本地缓存及 Collab 真源恢复接收循环 | 不重新 Register，不要求 agent 恢复 |
 | gateway 重启，连接 UUID 变化 | 宿主核实当前 session，更新原绑定端点与代际，停止旧地址投递 | 不从旧 UUID 推导新 UUID，不注销身份 |
-| bridge 重启或端点变化 | 同授权 session/thread 发布并同步替代端点 | 不伪造 executor 元数据，不重启 Desktop |
+| bridge 重启或端点变化 | 共享服务恢复持久 session/thread 绑定，经 native 核实后发布并同步入口 | 不要求 agent 调 MCP 或重注册，不重启 Desktop |
 | 端点暂不可用或先后启动 | 保持原身份和消息，按既有维护机制继续收敛 | 不把不可达当成身份丢失，不阻断其他绑定 |
 | gateway 明确返回 `unknown-agent` | 退役当前路由并增加空端点代际；worker、名字、任务和持久消息保留 | 不把确定缺席当作暂时断线继续重试；不删除历史 |
 | 显式换绑 | 读取当前宿主事实，沿同一 owner 更新原绑定 | 不调用 `worker close --self` 或 `UnregisterSelf` |

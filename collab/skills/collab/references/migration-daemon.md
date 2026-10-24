@@ -49,9 +49,11 @@ I/O and current endpoint errors remain explicit.
 
 The installed binary resolves host-wide Collab state under `$HOME/.collab`;
 `COLLAB_STATE_DIR` is for isolated tests. This owner includes identity, routes,
-mailboxes and daemon runtime state. Project-local `.agent-collab/` may be a
-discovery or legacy input. Context and the server own its compatibility; it is
-not a second independent host truth. AppSDK `.appsdk/` and `.appsdk-control/`
+mailboxes and daemon runtime state. Project-local `.agent-collab/` may provide
+project discovery. Its retired server journals and mailbox files are not imported
+or replayed into the current runtime and remain on disk. Historical identity
+compatibility within the current central store remains context-owned;
+project-local state is not a second host truth. AppSDK `.appsdk/` and `.appsdk-control/`
 belong to AppSDK and are outside Collab recovery.
 
 Never manually delete journals, mailbox files, identity tokens or route state.
@@ -77,8 +79,9 @@ recovery fallback.
 
 One supported Desktop bridge service entry is the installed `~/.cargo/bin/collab-desktop-mcp`.
 Configure this command through the normal Desktop MCP configuration and load
-it through the host's normal mechanism. It proxies Collab tools and publishes
-a scoped bridge on each new `collab_context` call from real executor metadata.
+it through the host's normal mechanism. It proxies Collab tools and ensures
+the shared runtime bridge. Public CLI registration can ensure the same service
+and enroll a new chat without an MCP tool call.
 The MCP config must pass through `CODEX_APP_TOOLS_PIPE_PATH`,
 `CODEX_MCP_NODE_PATH`, `CODEX_SESSION_ID` and `CODEX_INTERNAL_ORIGINATOR_OVERRIDE`
 via `env_vars`; do not replace host-provided values with copied paths or IDs.
@@ -109,9 +112,12 @@ collab sendmessage --to <registered-recipient> --subject <topic> "<message>"
 collab recv
 ```
 
-Registration/recovery uses the live bridge's scoped current capability. With
-a genuinely enrolled bridge, ordinary `collab context` reads its exact current
-declaration automatically. No manual endpoint or agent-side MCP call is needed.
+Registration/recovery uses one shared bridge service per Desktop runtime.
+`collab context` automatically connects to that service and enrolls the current
+session and native thread. The service verifies the thread and project with
+Desktop before publishing the scoped capability. A new chat needs no earlier
+MCP invocation, manual endpoint or bridge setup. Closing an MCP wrapper does
+not stop the runtime service. The service exits when its Desktop host pipe closes.
 An explicitly supplied AppServer endpoint, including the calling host's
 endpoint environment, retains its direct AppServer path and skips discovery.
 The daemon verifies the declared candidate through its existing adapter.
@@ -125,9 +131,12 @@ the shape below. Use only actual current values; never copy historical paths:
 collab context --provide '{"session_id":"<current agent sessionID>","thread_id":"<current native thread ID>","desktop_bridge":{"endpoint":"<current bridge unix:// endpoint>","namespace":"codex_app","session_id":"<current agent sessionID>","thread_id":"<current native thread ID>","cwd":"<canonical project cwd>"}}'
 ```
 
-The bridge retains its real native caller context. CLI parameters do not
-invent a turn ID, authorize an arbitrary target or connect the daemon directly
-to the Desktop tools pipe. `desktop_bridge.endpoint` is the bridge UDS;
+The bridge uses a clearly labelled service correlation ID for native calls.
+That ID does not claim that an agent execution turn occurred and is not an
+authorization credential. Desktop still verifies the native thread; enrollment
+must match its canonical project. CLI parameters do not authorize an arbitrary
+target or connect the daemon directly to the Desktop tools pipe.
+`desktop_bridge.endpoint` is the bridge UDS;
 top-level `endpoint` is the separate AppServer field and is not its replacement.
 Normal restoration preserves the name and role and lets context update routes,
 valid reception subscriptions and open-task session bindings.
@@ -135,19 +144,18 @@ valid reception subscriptions and open-task session bindings.
 The declaration is current bridge-owned control, not a persisted identity
 record. Discovery matches canonical invocation cwd, current agent sessionID
 and current native thread ID. It does not search sockets, reuse old routes,
-infer caller turns, or alter names. Explicit transport input keeps its own
+infer execution turns, or alter names. Explicit transport input keeps its own
 path; queries and ordinary identity reads do not discover or update transport.
 An exited bridge can leave inactive `current.json` metadata. The daemon still
 verifies actual native capability; a genuine replacement publishes over it
 without an identity takeover or stale-lock cleanup by the agent.
 
-If no bridge has genuine executor enrollment, no current capability can be
-published. Return the precise Desktop capability error. Do not ask for an
-AppServer endpoint, require an MCP tool invocation, guess a socket, edit
-identity state or restart a service. Discovery of an enrolled bridge does not
-prove unattended first bootstrap of a new chat. A task-owned foreground bridge
-experiment proves only that experiment's lifetime. Report source, installed
-publisher/CLI loading and actual Desktop delivery separately.
+If the runtime service cannot connect or Desktop refuses the thread/project,
+return that precise error and retain identity and messages. Do not ask the agent
+for an AppServer endpoint or an MCP invocation, guess a socket, delete a journal,
+or edit identity state. Report source, global installation and actual Desktop
+delivery separately. Service restart restores persisted bindings after native
+verification; agents do not repeat registration to repair a bridge process.
 
 `sendmessage` returns a durable message ID; native adapter acceptance is a
 separate fact. Confirm actual arrival in the target chat. Run `collab recv`

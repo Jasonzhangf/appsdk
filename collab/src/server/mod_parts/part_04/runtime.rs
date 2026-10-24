@@ -70,10 +70,13 @@ impl ProjectRuntimeManager {
     fn reserve_external_route(
         &self,
         context: &ProjectContext,
-        central_storage_root: &Path,
+        _central_storage_root: &Path,
     ) -> Result<(), String> {
         let key = Self::route_key(context);
         let project_root = Path::new(&context.canonical_root);
+        let reservation = select_central_runtime_storage(
+            &self.host.host_paths, &self.route_journal, &key, Some(&self.register_gate),
+        ).map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))?;
         let pending = self
             .routes
             .lock()
@@ -81,16 +84,9 @@ impl ProjectRuntimeManager {
             .get(&key)
             .map(|route| (route.root.clone(), route.storage_root.clone()));
         if pending.is_some() {
+            self.routes.lock().unwrap().entry(key).and_modify(|route| route.storage_root = reservation);
             return Ok(());
         }
-        let reservation = legacy_runtime_storage_source(
-            &self.host.host_paths,
-            &self.route_journal,
-            &key,
-            central_storage_root,
-        )
-        .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))?
-        .unwrap_or_else(|| central_storage_root.to_path_buf());
         self.append_route_record(context, &reservation)?;
         self.install_pending_route(&key, project_root, &reservation);
         Ok(())

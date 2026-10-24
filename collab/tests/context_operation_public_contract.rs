@@ -584,7 +584,10 @@ fn lifecycle_read(fixture: &Fixture, identity: &Value, target: Option<&str>) -> 
     )
 }
 
-fn lifecycle_surfaces(fixture: &Fixture, identity: &Value) -> (Vec<u8>, Vec<u8>, Vec<u8>, Value) {
+fn lifecycle_surfaces(
+    fixture: &Fixture,
+    identity: &Value,
+) -> (Vec<u8>, Vec<Value>, Vec<u8>, Value) {
     let leases = lifecycle_wire(
         fixture,
         identity,
@@ -592,7 +595,7 @@ fn lifecycle_surfaces(fixture: &Fixture, identity: &Value) -> (Vec<u8>, Vec<u8>,
     );
     (
         fs::read(fixture.host_journal()).unwrap_or_default(),
-        fs::read(fixture.project_journal()).unwrap(),
+        without_ledger_scans(&fs::read(fixture.project_journal()).unwrap()),
         fs::read(fixture.host_routes()).unwrap(),
         leases,
     )

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
 import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
@@ -44,10 +45,12 @@ async function fixture(t,{host=true,legacy=false,launcher=false,origin='Codex De
   function rpc(method,params){const id=String(++seq);return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{pending.delete(id);reject(Error(`MCP timeout host=${host} origin=${origin} method=${method} tool=${params?.name}: ${stderr}`));},15000);pending.set(id,{resolve,reject,timer});child.stdin.write(JSON.stringify({jsonrpc:'2.0',id,method,params})+'\n');});}
   t.after(async()=>{child.stdin.end();if(child.exitCode===null&&child.signalCode===null)child.kill('SIGTERM');for(const stream of connections)stream.destroy();await new Promise(resolve=>server.close(resolve));await fs.rm(root,{recursive:true,force:true});});
   await rpc('initialize',{protocolVersion:'2024-11-05',capabilities:{},clientInfo:{name:'consumer',version:'1'}});
-  const context=(extra={},meta=true)=>rpc('tools/call',{name:'collab_context',arguments:{provide:JSON.stringify({session_id:'agent-session',...extra})},...(meta?{_meta:{'x-codex-turn-metadata':{thread_id:'real-thread',turn_id:'real-origin-turn'}}}:{})});
+  const context=(extra={},meta=true)=>rpc('tools/call',{name:'collab_context',arguments:{project_scope:nativeCwd??root,provide:JSON.stringify({session_id:'agent-session',...extra})},...(meta?{_meta:{'x-codex-turn-metadata':{thread_id:'real-thread',turn_id:'real-origin-turn'}}}:{})});
   async function facts(){return JSON.parse(await fs.readFile(path.join(root,'facts.json'),'utf8'));}
   async function request(candidate,value){const stream=net.createConnection(candidate.endpoint.slice('unix://'.length));return await new Promise((resolve,reject)=>{const timer=setTimeout(()=>{stream.destroy();reject(Error('UDS timeout'));},5000);stream.on('error',error=>{clearTimeout(timer);reject(error);});stream.on('close',()=>{clearTimeout(timer);reject(Error('UDS closed before response'));});decode(stream,response=>{clearTimeout(timer);stream.end();resolve(response);});stream.on('connect',()=>stream.write(encode(value)));});}
-  return {root,child,calls,context,facts,request,rpc,stderr:()=>stderr};
+  async function stopService(candidate){const service=await request(candidate,{id:'owned-service',op:'ping'});assert.ok(Number.isInteger(service.pid)&&service.pid>1);process.kill(service.pid,'SIGTERM');const deadline=Date.now()+5000;while(Date.now()<deadline){try{await fs.stat(candidate.endpoint.slice(7));}catch(e){if(e.code==='ENOENT')return;throw e;}await new Promise(r=>setTimeout(r,20));}throw Error('owned runtime service did not stop');}
+  const serviceLogs=()=>{try{const dir=path.join(env.COLLAB_STATE_DIR,'runtime','desktop');return fsSync.readdirSync(dir).filter(n=>n.endsWith('.log')).map(n=>fsSync.readFileSync(path.join(dir,n),'utf8')).join('\n');}catch{return '';}};
+  return {root,child,calls,context,facts,request,rpc,stopService,stderr:()=>stderr+serviceLogs()};
 }
 
 test('bridge restart rejects unsafe private enrollment without publishing or stopping other MCP tools',async t=>{
@@ -57,10 +60,12 @@ test('bridge restart rejects unsafe private enrollment without publishing or sto
   const [record]=await fs.readdir(directory);
   const privateFile=path.join(directory,record);
   assert.equal((await fs.stat(privateFile)).mode&0o077,0);
-  assert.equal(JSON.parse(await fs.readFile(privateFile,'utf8')).binding.callerTurn,'real-origin-turn');
+  assert.equal(JSON.parse(await fs.readFile(privateFile,'utf8')).schema,'collab-desktop-enrollment/v2');
+  assert.equal(JSON.parse(await fs.readFile(privateFile,'utf8')).binding.callerTurn,undefined);
   const current=capabilityPath(state,await fs.realpath(a.root));
   const prior=await fs.readFile(current,'utf8');
   await fs.chmod(privateFile,0o644);
+  await a.stopService((await a.facts()).desktop_bridge);
   const stopped=new Promise(resolve=>a.child.once('exit',resolve));a.child.stdin.end();await stopped;
   const b=await fixture(t,{stateRoot:state,hostPipe:pipe});
   const deadline=Date.now()+5000;
@@ -75,22 +80,23 @@ test('same host restores enrolled bridge targets after process restart without a
   const cwd=await fs.realpath(a.root),state=path.join(a.root,'state');
   const current=capabilityPath(state,cwd);
   const first=JSON.parse(await fs.readFile(current,'utf8')).desktop_bridge;
+  await a.stopService(first);
   const stopped=new Promise(resolve=>a.child.once('exit',resolve));a.child.stdin.end();await stopped;
   const b=await fixture(t,{stateRoot:state,nativeCwd:cwd,hostPipe:path.join(a.root,'host.sock')});
   let replacement;
   const deadline=Date.now()+7000;
   while(Date.now()<deadline){
     replacement=JSON.parse(await fs.readFile(current,'utf8')).desktop_bridge;
-    if(replacement.endpoint!==first.endpoint)break;
+    if(b.calls.some(c=>c.method==='tools/call')||a.calls.filter(c=>c.params?.tool==='read_thread').length>=2)break;
     await new Promise(resolve=>setTimeout(resolve,20));
   }
-  assert.notEqual(replacement.endpoint,first.endpoint,'bridge must republish without agent context');
+  assert.equal(replacement.endpoint,first.endpoint,'runtime endpoint remains stable across service restart');
   await assert.rejects(fs.readFile(path.join(b.root,'facts.json')),'no forwarded context command');
   const result=await b.request(replacement,{id:'restored',op:'send',session_id:'agent-session',thread_id:'real-thread',text:'after restart'});
   assert.equal(result.ok,true);
   const call=a.calls.findLast(c=>c.params?.arguments?.prompt==='after restart');
   assert.equal(call.params.threadId,'real-thread');
-  assert.equal(call.params.turnId,'real-origin-turn','reuse genuine enrolled caller metadata, never invent a turn');
+  assert.match(call.params.turnId,/^collab-service-correlate-/,'service correlation does not claim an agent turn');
 });
 
 test('genuine enrollment publishes one current native scope and retirement leaves only inactive current metadata',async t=>{
@@ -111,6 +117,8 @@ test('genuine enrollment publishes one current native scope and retirement leave
   const endpoint=record.desktop_bridge.endpoint;
   const exit=new Promise(resolve=>f.child.once('exit',resolve));
   f.child.stdin.end();await exit;
+  assert.equal((await f.request(record.desktop_bridge,{id:'after-wrapper',op:'probe',session_id:'agent-session',thread_id:'real-thread'})).ok,true);
+  await f.stopService(record.desktop_bridge);
   await assert.rejects(fs.stat(endpoint.slice(7)));
   assert.equal(JSON.parse(await fs.readFile(current,'utf8')).desktop_bridge.endpoint,endpoint);
   assert.deepEqual((await fs.readdir(path.dirname(current))).filter(n=>n!=='current.json'),[]);
@@ -146,7 +154,7 @@ test('publication failure preserves the prior complete current capability',async
   assert.equal((await fs.readdir(directory)).length,2);
 });
 
-test('executor metadata enrolls an independent agent session; scoped native calls retain the real caller',async t=>{
+test('executor thread enrolls an independent agent session; scoped calls use explicit service correlation',async t=>{
   const f=await fixture(t,{legacy:process.env.DESKTOP_BRIDGE_LEGACY==='1'});
   await f.context({thread_id:'spoofed-thread',endpoint:'unix:///old-appserver.sock'});
   const facts=await f.facts();
@@ -160,7 +168,7 @@ test('executor metadata enrolls an independent agent session; scoped native call
   const sent=await f.request(c,{id:'send',op:'send',session_id:'agent-session',thread_id:'real-thread',text:'ACCEPT'});
   assert.equal(sent.ok,true);assert.equal(sent.native.success,true);
   const call=f.calls.find(r=>r.params?.tool==='send_message_to_thread');
-  assert.equal(call.params.threadId,'real-thread');assert.equal(call.params.turnId,'real-origin-turn');
+  assert.equal(call.params.threadId,'real-thread');assert.match(call.params.turnId,/^collab-service-correlate-/);
   assert.equal(call.params.arguments.threadId,'real-thread');
   assert.equal(call.params.namespace,'codex_app');
   const before=f.calls.length;
@@ -186,21 +194,22 @@ test('missing executor metadata cannot enroll a target; absent host remains a pl
 
 test('host disconnect after a send never becomes success and ends the owned service',async t=>{
   const f=await fixture(t);await f.context();const c=(await f.facts()).desktop_bridge;
-  const exited=new Promise(resolve=>f.child.once('exit',resolve));
   await assert.rejects(f.request(c,{id:'unknown',op:'send',session_id:'agent-session',thread_id:'real-thread',text:'DISCONNECT'}),/closed|ECONNRESET/);
-  await exited;
+  const deadline=Date.now()+3000;while(Date.now()<deadline){try{await fs.stat(c.endpoint.slice(7));}catch{break;}await new Promise(r=>setTimeout(r,20));}
+  assert.ok((await f.rpc('tools/list',{})).result.tools.length>0,'host failure does not stop unrelated MCP tools');
   assert.equal(f.calls.filter(r=>r.params?.tool==='send_message_to_thread').length,1,'there is no automatic retry');
   await assert.rejects(fs.stat(c.endpoint.slice('unix://'.length)));
 });
 
-test('normal stdin close and SIGTERM remove only the owned socket and stop the MCP child',async t=>{
+test('normal wrapper stdin close and SIGTERM preserve the runtime-shared service',async t=>{
   for(const signal of [null,'SIGTERM']){
     const f=await fixture(t);await f.context();const c=(await f.facts()).desktop_bridge;
     const socket=c.endpoint.slice('unix://'.length);await fs.stat(socket);
     const exited=new Promise(resolve=>f.child.once('exit',resolve));
     if(signal)f.child.kill(signal);else f.child.stdin.end();
     await Promise.race([exited,new Promise((_,reject)=>setTimeout(()=>reject(Error('wrapper did not stop')),3000))]);
-    await assert.rejects(fs.stat(socket));
+    await fs.stat(socket);
+    assert.equal((await f.request(c,{id:'still-running',op:'probe',session_id:'agent-session',thread_id:'real-thread'})).ok,true);
   }
 });
 

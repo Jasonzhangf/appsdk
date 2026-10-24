@@ -1,7 +1,7 @@
 {
   "id":"appsdk-collab-desktop-bridge-delivery",
   "version":"1.0.0",
-  "description":"设计合同：一次 daemon durable 消息投递到一次 typed transport 结果。只读收件人的当前 Desktop bridge route，真实 caller 来自正常 MCP 捕获的原始 executor 上下文，target 来自注册收件 route。bridge 仅允许其上下文绑定的收件目标和必要通知/观测操作，不开放通用 tools/call。daemon 只连接该 bridge UDS，不直连 tools pipe，不尝试 AppServer、tmux 或旧 socket。成功、明确拒绝/不可用和请求后未知全部汇入单一结果出口。transport success 不等于新 turn、消费或回复；消费仍由现有 consumption 图负责。未知不自动重发。",
+  "description":"设计合同：一次 daemon durable 消息投递到一次 typed transport 结果。只读收件人的当前 Desktop bridge route，target 来自已登记并由 native host 核实的 session/thread/cwd 绑定。runtime 共享 bridge 使用明确标识的服务关联 ID 调用 native tools，不借用其他 agent 的执行 turn。仅允许已登记收件目标的 send/probe，不开放通用 tools/call。daemon 只连接 bridge UDS，不直连 tools pipe，不尝试 AppServer、tmux 或旧 socket。成功、明确拒绝/不可用和请求后未知全部汇入单一结果出口。transport success 不等于新 turn、消费或回复；消费仍由现有 consumption 图负责。未知不自动重发。",
   "inputs":[{"id":"durable_delivery_request","schema":"Object"}],
   "nodes":[
     {"id":"读取当前收件路由","operator":"appsdk.collab_desktop_delivery.resolve","operator_version":"1","inputs":["durable_delivery_request"],"output":{"id":"recipient_route","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},

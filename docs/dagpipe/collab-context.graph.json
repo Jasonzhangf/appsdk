@@ -8,7 +8,7 @@
       "id": "解析项目与控制范围",
       "operator": "appsdk.collab_context.resolve_root",
       "operator_version": "1",
-      "description": "从当前 cwd 和既有项目映射读取 canonical project，保留 invocation cwd。显式 transport 优先；Desktop 自动读取当前 cwd/sessionID/thread 的精确能力声明，经控制文件校验放入既有 desktop_bridge 输入。声明不来自历史身份或 route，不扫描其他会话。声明读取失败时，复用既有 live ancestry observer；只有证实当前实际 tmux pane，才跳过未选用 Desktop 字段并让 daemon 继续原有 pane 优先 admission。无 pane 时返回原 Desktop 错误，不要求 AppServer endpoint，不猜 socket，不要求 agent 调 MCP。CLI 不 probe Desktop，daemon 原 adapter 验证实际 native thread/cwd。query 和普通身份读取绕过发现；首次无真实 enrollment 不编造 turn。不跨 transport fallback。",
+      "description": "从当前 cwd 和既有项目映射读取 canonical project，保留 invocation cwd。显式 transport 优先；Desktop 通过 runtime 共享 bridge 自动登记当前 cwd/sessionID/thread，native 核实 scope 后取得精确能力声明并放入 desktop_bridge 输入。CLI 使用正式已安装 bridge 入口，不要求 agent 调 MCP、指定 endpoint 或处理服务生命周期。服务关联 ID 不冒充执行回合。无 host 环境时可读取已发布的精确声明，不扫描其他会话或历史 route。发现失败时只有既有 live ancestry observer 证实实际 tmux pane，才能继续原有 pane admission；无 pane 返回真实 Desktop 错误。query 和普通身份读取绕过发现，不跨 transport fallback。",
       "inputs": ["context_request"],
       "output": {"id": "resolved_scope", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},

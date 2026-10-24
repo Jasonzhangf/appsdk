@@ -1049,10 +1049,16 @@ pub(crate) fn acquire_legacy_writer_fence(
 }
 
 fn acquire_daemon_legacy_writer_fence(
-    scope: &Scope,
+    _scope: &Scope,
     host_paths: &HostPaths,
 ) -> anyhow::Result<LegacyWriterFence> {
-    acquire_legacy_writer_fence_mode(scope, host_paths, false)
+    // The operation journal still shares the host writer fence. Retired
+    // project-local journals have separate ownership and are never opened.
+    let legacy_host_lock = legacy_host_daemon_lock_path(host_paths);
+    let host_lock = if legacy_host_lock != host_paths.lock_path() {
+        Some(acquire_legacy_writer_lock(&legacy_host_lock, "host daemon")?)
+    } else { None };
+    Ok(LegacyWriterFence { _host_lock: host_lock, _project_lock: None, project_error: None })
 }
 
 fn acquire_legacy_writer_fence_mode(
@@ -1223,7 +1229,7 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
     // the compatibility fixture uses the legacy path as its host path, the
     // normal duplicate-daemon error remains authoritative; a real host-path
     // migration reaches this persistent fence because its locks are distinct.
-    let legacy_writer_fence = acquire_daemon_legacy_writer_fence(&scope, &host_paths)?;
+    let _legacy_writer_fence = acquire_daemon_legacy_writer_fence(&scope, &host_paths)?;
     let project_scope = GlobalState::canonical_project_scope(&scope.root)
         .map_err(|error| anyhow::anyhow!("PROJECT_SCOPE_UNKNOWN: {error}"))?;
     let resident_key = (
@@ -1231,75 +1237,8 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
         project_scope.as_str().to_owned(),
     );
     let route_journal = host_paths.state_root().join("routes.jsonl");
-    let resident_source = legacy_runtime_storage_source(
-        &host_paths,
-        &route_journal,
-        &resident_key,
-        &runtime_storage_root,
-    )
-    .map_err(anyhow::Error::msg)?;
-    let central_is_authoritative = resident_source.is_none()
-        && project_server_dir.join("journal.jsonl").exists();
-    let mut resident_migration_failure = if central_is_authoritative {
-        None
-    } else {
-        legacy_writer_fence.project_error.clone()
-    };
-    if let Some(error) = resident_migration_failure.as_deref() {
-        append_log(
-            &host_paths.log_path(),
-            &format!(
-                "PROJECT_STORAGE_MIGRATION_UNAVAILABLE: project {}: {error}",
-                scope.root.display()
-            ),
-        );
-    }
-    if legacy_writer_fence.project_error.is_none() {
-        if let Some(source_root) = resident_source {
-            let source_is_fenced = storage_roots_equal(&source_root, &scope.root)
-                .map_err(|error| anyhow::anyhow!("CENTRAL_STORAGE_MIGRATION_FAILED: {error}"))?;
-            let _source_lock = if source_is_fenced {
-                None
-            } else {
-                Some(acquire_legacy_writer_lock(
-                    &source_root.join(".agent-collab/server/daemon.lock"),
-                    "project daemon",
-                )?)
-            };
-            match migrate_legacy_runtime_storage(
-                &host_paths,
-                &route_journal,
-                &scope.root,
-                &resident_key,
-                &source_root,
-                &runtime_storage_root,
-            ) {
-                Ok(true) => append_log(
-                    &host_paths.log_path(),
-                    &format!(
-                        "CENTRAL_STORAGE_MIGRATED: project {} moved from {} to {}",
-                        project_scope.as_str(),
-                        source_root.display(),
-                        runtime_storage_root.display()
-                    ),
-                ),
-                Ok(false) => {}
-                Err(error) => {
-                    append_log(
-                        &host_paths.log_path(),
-                        &format!(
-                            "PROJECT_STORAGE_MIGRATION_FAILED: project {} from {}: {error}",
-                            project_scope.as_str(), source_root.display()
-                        ),
-                    );
-                    // This legacy journal also owns the resident host index.
-                    // Do not turn its failed transfer into a fresh identity
-                    // store or activate a conflicting destination.
-                    resident_migration_failure = Some(error);
-                }
-            }
-        }
-    }
+    select_central_runtime_storage(&host_paths, &route_journal, &resident_key, None)
+        .map_err(anyhow::Error::msg)?;
 
     prepare_socket_path(&sock_path)?;
 
@@ -1308,10 +1247,7 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
             .map_err(|error| anyhow::anyhow!("OPERATION_JOURNAL_REPLAY_FAILED: {error}"))?,
     );
     let journal_path = project_server_dir.join("journal.jsonl");
-    let replayed = match resident_migration_failure {
-        Some(error) => Err(anyhow::anyhow!(error)),
-        None => replay_from_journal(&scope.root, &journal_path),
-    };
+    let replayed = replay_from_journal(&scope.root, &journal_path);
     let state = match replayed {
         Ok(state) => state,
         Err(error) => {

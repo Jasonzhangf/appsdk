@@ -297,7 +297,7 @@ jobs:
           PY
       - run: cargo test --manifest-path collab/Cargo.toml --locked --features context-cancel-test-hooks -- --test-threads=1
       - name: Desktop bridge MCP consumer
-        run: node --test collab/scripts/tests/desktop-bridge.test.mjs
+        run: node --test collab/scripts/tests/desktop-bridge.test.mjs collab/scripts/tests/desktop-runtime.test.mjs
 
   installer:
     name: Installer

@@ -779,7 +779,7 @@ impl ProjectRuntimeManager {
         &self,
         key: &RouteKey,
         requested_root: &Path,
-        requested_storage_root: &Path,
+        _requested_storage_root: &Path,
     ) -> Result<Arc<Server>, String> {
         if self
             .host
@@ -805,61 +805,18 @@ impl ProjectRuntimeManager {
         {
             return Ok(runtime);
         }
-        let (root, storage_root) = self
+        let root = self
             .routes
             .lock()
             .unwrap()
             .get(key)
-            .map(|route| (route.root.clone(), route.storage_root.clone()))
-            .unwrap_or_else(|| {
-                (
-                    requested_root.to_path_buf(),
-                    requested_storage_root.to_path_buf(),
-                )
-            });
-        let source_root = legacy_runtime_storage_source(
-            &self.host.host_paths,
-            &self.route_journal,
-            key,
-            &storage_root,
+            .map(|route| route.root.clone())
+            .unwrap_or_else(|| requested_root.to_path_buf());
+        let storage_root = select_central_runtime_storage(
+            &self.host.host_paths, &self.route_journal, key, Some(&self.register_gate),
         )?;
-        let storage_root = if let Some(source_root) = source_root {
-            let project_lock_held = self.project_locks.lock().unwrap().contains_key(&root);
-            if !project_lock_held {
-                let lock = acquire_legacy_writer_lock(
-                    &source_root.join(".agent-collab/server/daemon.lock"),
-                    "project daemon",
-                )
-                .map_err(|error| {
-                    format!(
-                        "CENTRAL_STORAGE_MIGRATION_FAILED: project {}: {error}",
-                        key.1
-                    )
-                })?;
-                self.project_locks
-                    .lock()
-                    .unwrap()
-                    .insert(root.clone(), lock);
-            }
-            let destination = central_runtime_storage_root(&self.host.host_paths, &key.1, &key.0);
-            migrate_legacy_runtime_storage_with_publication(
-                &self.host.host_paths,
-                &self.route_journal,
-                &root,
-                key,
-                &source_root,
-                &destination,
-                Some(&self.register_gate),
-            )?;
-            self.routes
-                .lock()
-                .unwrap()
-                .entry(key.clone())
-                .and_modify(|route| route.storage_root = destination.clone());
-            destination
-        } else {
-            storage_root
-        };
+        self.routes.lock().unwrap().entry(key.clone())
+            .and_modify(|route| route.storage_root = storage_root.clone());
         // The per-route gate above deduplicates one key. Admission of the
         // external-runtime budget must also be one decision across different
         // keys: two concurrent materializations must not both observe the

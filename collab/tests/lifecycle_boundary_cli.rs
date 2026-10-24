@@ -786,10 +786,31 @@ fn available_context_restores_identity_without_register_or_pid_change() {
         before_pid
     );
     assert_eq!(
-        std::fs::read(&journal).unwrap_or_default(),
-        before_journal,
+        registration_events(&std::fs::read(&journal).unwrap_or_default()),
+        registration_events(&before_journal),
         "ordinary restore must not write a Register event"
     );
+}
+
+// Presence and ledger timers may append observations while context is read.
+// Compare the registration owner events that this test promises not to repeat.
+fn registration_events(bytes: &[u8]) -> Vec<Value> {
+    std::str::from_utf8(bytes)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|event| {
+            !matches!(
+                event["ev"].as_str(),
+                Some(
+                    "AgentPresenceObserved"
+                        | "AgentActivityObserved"
+                        | "GlobalRuntimeBindingLedgerClassified"
+                        | "GlobalLedgerScanReceiptRecorded"
+                )
+            )
+        })
+        .collect()
 }
 
 #[test]

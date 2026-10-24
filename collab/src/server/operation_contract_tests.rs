@@ -508,7 +508,13 @@ async fn degraded_startup_serves_only_authorized_query_and_keeps_project_journal
     journal.append(operation).unwrap();
     drop(journal);
 
-    let project_journal = root.join(".agent-collab/server/journal.jsonl");
+    let project_journal = host_paths
+        .app_storage_root(
+            context.project_scope.as_str(),
+            crate::identity::CLI_APP_SERVER_ID,
+        )
+        .join(".agent-collab/server/journal.jsonl");
+    std::fs::create_dir_all(project_journal.parent().unwrap()).unwrap();
     std::fs::write(&project_journal, b"{\"broken\":\"project-record\"}\n").unwrap();
     let project_before = std::fs::read(&project_journal).unwrap();
     let host_before = std::fs::read(host_paths.journal_path()).unwrap();

@@ -513,3 +513,23 @@ Gemini4 medium 独立整体审查无 finding。
 本条仅记录源码 milestone；远端、正式安装和真实会话加载结果分别写入
 `/Users/fanzhang/.collab/runs/transparent-lifecycle-20261023/note.md`。全局 daemon/gateway
 由用户管理；本轮没有执行其重启、真实身份注销或任何 tmux server 生命周期操作。
+
+## 2026-10-24 Desktop 新会话注册与旧存储隔离
+
+Desktop bridge 改为每个原生 host pipe 共用一个服务。MCP wrapper 退出不关闭该服务。
+新会话的公开 `collab context` 自动核实原生 thread/cwd 并建立独立会话绑定；已有服务
+可直接接纳会话，不要求每个会话提供 Node 环境或先调用 MCP。原生拒绝、未知发送结果
+和精确 JSON-RPC ID 保持，不自动重放发送。
+
+按用户明确要求“版本隔离，旧数据不载入新运行态”，删除旧项目本地 journal 的自动
+导入链。当前中央存储继续保留身份和消息；旧文件不读取、不迁移、不删除。当前中央
+journal 自身无效时仍显式失败，不放宽 reducer。
+
+正式 installer 已安装 collab 0.2.0358。用户重启 daemon 后，原失败 humanagent 会话
+通过实际公开 CLI 注册为 Alice，原生 session/thread 与中央存储均正确。安装版14项
+Desktop消费者测试、合流后3项消费者测试通过；context73、生命周期13、AppServer75、
+unit1205、MCP32项通过。原生消息测试使用模拟宿主，不声明真实聊天收发已验收。
+候选已组合同期 main 的 CEO 功能，其8项公开用例通过。
+
+原始红测、安装、真实注册、独立审查及远端/资源收口回执由本轮唯一笔记保存：
+`/Users/fanzhang/.collab/runs/desktop-runtime-bridge-20261024/note.md`。

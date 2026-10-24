@@ -14,7 +14,7 @@ fn test_root(name: &str) -> PathBuf {
     root
 }
 
-async fn assert_query_only_server(socket: &std::path::Path) {
+async fn assert_active_isolated_server(socket: &std::path::Path) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while !crate::client::alive(socket) && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -35,8 +35,12 @@ async fn assert_query_only_server(socket: &std::path::Path) {
         .unwrap();
     let ping: serde_json::Value = serde_json::from_str(&line).unwrap();
     assert_eq!(
+        ping["ok"], true,
+        "current runtime must be available: {ping}"
+    );
+    assert_ne!(
         ping["degraded"], true,
-        "an unavailable legacy source must not activate a blank reducer: {ping}"
+        "retired local storage is isolated: {ping}"
     );
     writer
         .write_all(b"{\"op\":\"MasterStatus\"}\n")
@@ -47,7 +51,7 @@ async fn assert_query_only_server(socket: &std::path::Path) {
         .await
         .unwrap()
         .unwrap();
-    assert!(line.contains("PROJECT_RUNTIME_UNAVAILABLE"), "{line}");
+    assert!(!line.contains("PROJECT_RUNTIME_UNAVAILABLE"), "{line}");
 }
 
 #[test]
@@ -185,7 +189,7 @@ async fn pid_publication_failure_removes_the_owned_socket() {
 }
 
 #[tokio::test]
-async fn reachable_legacy_project_daemon_keeps_new_host_query_only() {
+async fn reachable_legacy_project_daemon_does_not_block_current_central_runtime() {
     let _startup_test_lock = startup_test_lock();
     let root = test_root("legacy-socket");
     let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
@@ -197,13 +201,13 @@ async fn reachable_legacy_project_daemon_keeps_new_host_query_only() {
         Scope { root: root.clone() },
         host_paths.clone(),
     ));
-    assert_query_only_server(&host_paths.socket_path()).await;
+    assert_active_isolated_server(&host_paths.socket_path()).await;
     assert!(legacy_socket.exists());
     let central = host_paths.app_storage_root(
         std::fs::canonicalize(&root).unwrap().to_str().unwrap(),
         crate::identity::CLI_APP_SERVER_ID,
     );
-    assert!(!central.join(".agent-collab/server/journal.jsonl").exists());
+    assert!(central.join(".agent-collab/server/journal.jsonl").exists());
     running.abort();
     let _ = running.await;
 
@@ -212,7 +216,7 @@ async fn reachable_legacy_project_daemon_keeps_new_host_query_only() {
 }
 
 #[tokio::test]
-async fn held_legacy_project_lock_serves_only_host_queries_without_a_fresh_reducer() {
+async fn held_legacy_project_lock_does_not_block_isolated_central_runtime() {
     let _startup_test_lock = startup_test_lock();
     let root = test_root("legacy-lock");
     let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
@@ -234,13 +238,13 @@ async fn held_legacy_project_lock_serves_only_host_queries_without_a_fresh_reduc
         Scope { root: root.clone() },
         host_paths.clone(),
     ));
-    assert_query_only_server(&host_paths.socket_path()).await;
+    assert_active_isolated_server(&host_paths.socket_path()).await;
     assert_eq!(std::fs::read(&journal).unwrap(), b"");
     let central = host_paths.app_storage_root(
         std::fs::canonicalize(&root).unwrap().to_str().unwrap(),
         crate::identity::CLI_APP_SERVER_ID,
     );
-    assert!(!central.join(".agent-collab/server/journal.jsonl").exists());
+    assert!(central.join(".agent-collab/server/journal.jsonl").exists());
     running.abort();
     let _ = running.await;
 
@@ -313,7 +317,7 @@ async fn established_central_store_is_not_blocked_by_a_retired_legacy_lock() {
 }
 
 #[tokio::test]
-async fn running_host_daemon_holds_legacy_writer_fence() {
+async fn running_host_daemon_fences_host_writer_but_does_not_own_retired_project_storage() {
     let _startup_test_lock = startup_test_lock();
     let root = test_root("legacy-fence");
     let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
@@ -349,14 +353,13 @@ async fn running_host_daemon_holds_legacy_writer_fence() {
         .to_string()
         .contains("server already running"));
     let old_project_attempt = acquire_daemon_lock(&legacy_project_lock, &legacy_socket);
-    assert!(old_project_attempt
-        .expect_err("old writer must not reacquire its project lock")
-        .to_string()
-        .contains("server already running"));
+    let old_project_guard =
+        old_project_attempt.expect("retired project storage remains independently owned");
     assert_eq!(journal_before, std::fs::read(&journal).unwrap());
 
     running.abort();
     let _ = running.await;
+    drop(old_project_guard);
     std::fs::remove_dir_all(root).expect("remove startup test root");
 }
 

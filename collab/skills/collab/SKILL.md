@@ -1621,7 +1621,7 @@ action=restore_master），或由已授权 master 委托。注册前先确认自
 
 | 宿主 | 身份锚点 | 注册时报告的事实 | 不许做的事 |
 | --- | --- | --- | --- |
-| DSH | gateway session（`DSH_SESSION_ID`）+ communication API（gateway 控制 socket 与 runtime id） | `{"dsh":{"endpoint":"unix:///…/control.sock","runtime_id":"…","agent_id":"…","session_id":"…","cwd":"…"}}`，来自当前 gateway 的真实能力 | 不填 Codex thread/namespace；不与 appserver/tmux 候选混报；不用 tmux pane 当锚点 |
+| DSH | gateway session（`DSH_SESSION_ID`）+ communication API（gateway 控制 socket 与 runtime id） | 普通 `collab context` 由 CLI 读取 gateway 发布的控制能力并查询该真实 session 的当前事实；已有注册沿已提交 route 恢复。`--provide` 仅用于显式提供真实 DSH 能力 | 不手工猜测或从日志、plist 找 ids；不填 Codex thread/namespace；不与 appserver/tmux 候选混报；不用 tmux pane 当锚点 |
 | Codex TUI / CLI | AppServer session + thread，或当前 tmux pane | `session_id`、`thread_id`、`endpoint`、`namespace`；CLI 自动读 `CODEX_SESSION_ID`、`CODEX_THREAD_ID`、`TMUX_PANE` | 不假设自己一定有 tmux pane；不填 pane 冒充 Codex 会话；不借用其他进程的 AppServer endpoint |
 | Codex Desktop | AppServer session + thread，经受管 MCP bridge | 同 TUI 字段；bridge 的 executor metadata 提供真实 caller thread/turn，daemon 只连该 bridge 的 UDS | 不连 tools pipe，不猜测不存在的 AppServer endpoint，不把 recipient target 当 caller |
 
@@ -1631,9 +1631,9 @@ action=restore_master），或由已授权 master 委托。注册前先确认自
 不要求通信可达；只有显式 `--recover-communication` 才做通信回环验证，那是
 通信诊断、不是恢复前提。同一 session 出现在多个 API 上时，daemon 用 session
 加 communication API 联合判定；仅 session 相同会显式冲突失败，不会静默覆盖
-已有身份、角色或工作。DSH 会话缺 gateway 能力事实时，先确认当前 gateway 的
-真实 endpoint 与 ids（从 gateway 自身接口读），再报告；缺事实时 context 返回
-`requires_identity_update`，此时不要伪造一个值。详见下文 AppServer runtime
+已有身份、角色或工作。DSH 首次注册只需普通 `collab context`，CLI 自动查询真实
+gateway 能力。缺控制声明属于 gateway 集成缺口，应保留明确错误，不让 agent
+查文件、猜 ids 或手工补值；显式 `--provide` 仍须来自真实能力。详见 AppServer runtime
 registration 与 DSH 段的验证规则。
 
 ## AppServer runtime registration

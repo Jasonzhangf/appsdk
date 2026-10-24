@@ -5,6 +5,44 @@ description: "仅约束已成功注册 Collab 的 peer；master 权限需另行�
 
 # Collab
 
+## 协作请求的执行、回复与接续
+
+收到通知后读取完整原消息，区分请求中的 action、回复要求和普通信息。有已授权 action
+就实际落实并向原请求方回复结果、证据或具体阻塞；不要只读通知、ACK，或只向用户总结。
+无 action 但要求答复时，直接回答原问题；仅普通信息且未要求回复时，不自动回“收到”。
+“完成后回复”要求在交回实际结果时答复，不能用“已收到、正在做”代替完成结果。
+
+先区分项目内与跨项目消息。下面的 `sendmessage` 回复命令仅用于项目内消息。
+跨项目消息的 `from` 是 `<worker-id>@<source-project>`；必须按下文
+“Cross-project master communication”走 `master send`，不能把整个跨项目地址传给 `sendmessage`。
+项目内回复使用原消息的真实 from 和 id，不猜名字或任务 ID：
+`collab sendmessage --to '<原消息from>' --subject '<主题>' --in-reply-to '<原消息ID>' '<实际结果、答复或阻塞证据>'`。
+向用户报告、消费通知、ACK 或写任务进度都不等于已回复请求方。回复不自动要求对方再回，
+只有新的 action 或明确追问才开启新一轮请求，避免无意义互答。
+系统提醒本身不是请求方；它引用原消息时回复该原消息的发送者，不向 `collab-server` 代答。
+
+项目内普通投递使用以下参数；两个回复选项互斥，不带选项默认不建立 daemon 回复标记：
+
+```sh
+collab sendmessage --to '<接收者>' --subject '<问题>' --reply-required '<需要答复的问题或action>'
+collab sendmessage --to '<接收者>' --subject '<任务>' --reply-on-completion '<已确认范围与交付要求>'
+collab sendmessage --to '<原消息from>' --subject '<结果>' --in-reply-to '<原消息ID>' '<实际答复>'
+```
+
+选项放在位置正文之前。结果回复不附加回复要求；消费、ACK 或对用户汇报不清标记，
+真正关联回复的成功入队才清标记。若只报中间进度且仍需完成后答复，发送不带
+`--in-reply-to` 的普通进度消息，不提前消除原回复要求。daemon 不判断正文是否真的完成。
+这些参数属于项目内 `sendmessage`；跨项目 `master send` 尚未接入回复标记。
+
+交回协作结果后，立即接续自己原来的未完任务。先核对待回复要求、协作请求和本人任务，
+落实当前可执行动作；确无可继续工作时才 idle。完成后回复尚待外部条件时保留标记并说明
+等待条件，不能伪造完成答复；也不能因为一个协作请求已交回就结束自己的工作。
+收到 daemon 待回复提醒时，读取其引用的原消息，按原回复要求处理，不把提醒再当新任务，
+不对提醒本身回“收到”。daemon 仅追踪待回复标记，不替 agent 生成业务答复或判定任务完成。
+
+peer 默认向请求方、委托者或所属 master 回报，不向用户输出例行进度或结案报告。
+用户直接提问、明确要求报告、必须由用户决定或影响用户的重大异常时，才向用户说明。
+
 ## 工作角色与用户指定分工
 
 工作角色是稳定名字的专长，例如 `designer`、`reviewer`。同一 peer 可有多个专长。
@@ -1076,7 +1114,9 @@ status via the `collab context` snapshot. The human diagnostic
 operator audits them; neither is part of the default agent flow.
 
 Worker wake model: only master has long-horizon wake; workers are not
-long-horizon wake targets and are not automatically woken from idle. A worker
+long-horizon wake targets and receive no automatic periodic task-continuation wake.
+An explicit outstanding reply marker permits one reminder per observed idle episode;
+it only asks the recipient to read the original reply requirement. A worker
 acts on an explicit dispatch, a bounded direct-message lease, or its own open
 task state;
 it does not need periodic activation to make progress. Unknown/absent produces
@@ -1101,6 +1141,28 @@ not an identity anchor, task owner, or snapshot receipt.
 
 ## Cross-project master communication
 
+### 权限、目标解析与下一步动作
+
+这是一条已存在的项目 master 到项目 master 通道。工作角色（designer、reviewer）
+不授予此权限。普通 peer 把跨项目请求交给本项目当前 master；不得换 cwd 冒充目标
+项目的 agent，不得直接写 mailbox、猜 session ID，或通过另一个宿主通道绕过拒绝。
+全局 CEO 是另一个跨项目协调层；在 CEO 的控制入口实现前，不把 CEO 称呼当作授权。
+
+发送者在自己的项目执行 `collab context`，使用返回的当前身份和 master 授权。
+用户提供目标项目绝对路径后，可以只读查询目标当前 master；这个查询不注册身份：
+
+```sh
+(cd '/目标项目绝对路径' && collab master status)
+```
+
+读取回执的 `master.worker_id` 作为 `--to`，不要按 Jenny 等显示名搜索历史 session。
+查询失败不代表没有 master。已有 master 但未知、不可达或投递失败时，保留原错，
+不创建替代 master。只有真源明确无 master，才向用户说明项目路径、profile 和启动方式，
+经确认后创建新的具名 tmux Codex session 并授权 master。默认 profile 为 `gcm`，
+使用用户已确认的 YOLO 模式；不得关闭现有 tmux server 或 pane。
+
+从发送者自己的项目目录执行下列命令；`--project` 只指定接收项目，不改变发送者身份：
+
 Collab communication across projects is master-only and explicit. Only the
 current master grant holder may send to the current master grant holder of
 another initialized project; non-master peers and managed subagents are
@@ -1115,6 +1177,22 @@ collab master send --project /abs/path/to/target --to <target-master> \
 `--to` must be that project's current master grant holder, whose target binding
 and address must be available. The target daemon also verifies the sender's
 current typed grant (holder, scope, approval) before accepting the message.
+
+接收 master 读取完整原消息并执行已授权动作。非 DSH 宿主用 `collab recv`；
+DSH 直接处理 gateway 已投递的正文，不再 Poll/ACK。回信仍在自己的项目执行
+`collab master send`，将原消息 `from` 中的源项目用作 `--project`、源 worker ID
+用作 `--to`；当前 CLI 的这条命令尚不支持 `--in-reply-to`，在正文中写明原消息 ID。
+这只提供可读关联，不宣称已清除 daemon 回复标记。持久入队、宿主投递、接收消费和
+实际回信分别核实，发送成功不能证明对方已经执行。
+
+可直接给 agent 的下一步提示词：
+
+> 先在自己的项目执行 collab context，核对你是当前 master。对用户给定的目标项目
+> 用 `(cd '<目标项目>' && collab master status)` 只读获取 master.worker_id。
+> 回到自己的项目，用 `collab master send --project '<目标项目>' --to '<worker_id>'
+> --subject '<主题>' '<具体action、范围、验收和回信要求>'` 发送。不要搜索历史 Jenny
+> session，不要用 sendmessage 跨项目投递。保存 msg_id，分别报告已入队、已消费和
+> 已收到实际回信的证据；只获得哪一步就报告哪一步。拒绝或未知状态保留原错。
 
 Task liveness is an obligation, not an ACK ceremony. A worker owns its assigned
 tasks and drives them to verified cleanup/close during its working cycle. This
@@ -1771,8 +1849,9 @@ claim an independent goal or infer master authority.
   managed records remain diagnostic compatibility facts only.
 - Each peer owns its complete task/worktree/integration/resource/cleanup
   lifecycle. Never mutate or close another peer's work.
-- Send only explicit notices, shared-resource coordination, or subscribed async
-  results—not routine progress, heartbeat, ACK, review, or completion reports.
+- Send requested replies, authorized action results, explicit notices,
+  shared-resource coordination, or subscribed async results. Do not send
+  unsolicited routine progress, heartbeat or ACK messages.
 - A wake is only a signal. It cannot change task/resource truth, fabricate
   success, authorize external actions, or create an ACK loop.
 - `absent` or `unknown` liveness for the selected binding produces no transport

@@ -1071,6 +1071,7 @@ fn migration_freeze_rejects_mutations_but_allows_rebind_and_reads() {
             subject: Some("release".into()),
             body: "RESOURCE_RELEASED feature".into(),
             in_reply_to: None,
+            reply_policy: None,
             delivery: "immediate".into(),
         },
         Req::Poll {

@@ -1,5 +1,162 @@
 include!("support/context_operation_fixture.rs");
 
+#[test]
+fn public_master_commands_discover_send_consume_and_reply_across_projects() {
+    let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (fixture, source_pane) =
+        Fixture::isolated_with_pane_command("master-cli-roundtrip", "sleep 600");
+    let source_root = fixture.root.canonicalize().unwrap();
+    let target_root = create_external_project(&fixture, "roundtrip-target");
+    let target_pane = create_session(&fixture, "roundtrip-target");
+    let source = register_context(&fixture, &source_root, &source_pane, "source", false);
+    let target = register_context(&fixture, &target_root, &target_pane, "target", false);
+    let (source_id, _) = identity(&source);
+    let (target_id, _) = identity(&target);
+    for (root, pane) in [(&source_root, &source_pane), (&target_root, &target_pane)] {
+        run_ok_at(
+            &fixture,
+            root,
+            pane,
+            &[
+                "master",
+                "promote",
+                "--approval",
+                "user approved isolated roundtrip master",
+            ],
+            false,
+        );
+    }
+    let status = run_ok_at(
+        &fixture,
+        &target_root,
+        &source_pane,
+        &["master", "status"],
+        false,
+    );
+    assert_eq!(status["master"]["worker_id"], target_id, "{status}");
+    let sent = run_ok_at(
+        &fixture,
+        &source_root,
+        &source_pane,
+        &[
+            "master",
+            "send",
+            "--project",
+            target_root.to_str().unwrap(),
+            "--to",
+            &target_id,
+            "--subject",
+            "action",
+            "return the result",
+        ],
+        false,
+    );
+    assert_eq!(sent["durable"], true, "{sent}");
+    let received = run_ok_at(
+        &fixture,
+        &target_root,
+        &target_pane,
+        &["recv", "--timeout", "0"],
+        false,
+    );
+    let request = received["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["id"] == sent["msg_id"])
+        .expect("request consumed");
+    assert_eq!(request["id"], sent["msg_id"], "{received}");
+    assert_eq!(
+        request["from"],
+        format!("{source_id}@{}", source_root.display())
+    );
+    let reply = run_ok_at(
+        &fixture,
+        &target_root,
+        &target_pane,
+        &[
+            "master",
+            "send",
+            "--project",
+            source_root.to_str().unwrap(),
+            "--to",
+            &source_id,
+            "--subject",
+            "result",
+            "verified result",
+        ],
+        false,
+    );
+    let returned = run_ok_at(
+        &fixture,
+        &source_root,
+        &source_pane,
+        &["recv", "--timeout", "0"],
+        false,
+    );
+    let result = returned["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["id"] == reply["msg_id"])
+        .expect("reply consumed");
+    assert_eq!(result["body"], "verified result");
+    assert_eq!(
+        result["from"],
+        format!("{target_id}@{}", target_root.display())
+    );
+    run_ok_at(
+        &fixture,
+        &source_root,
+        &source_pane,
+        &[
+            "master",
+            "clear",
+            "--approval",
+            "user approved isolated source clear",
+        ],
+        false,
+    );
+    let rejected = command_at(
+        &fixture,
+        &source_root,
+        &source_pane,
+        &[
+            "master",
+            "send",
+            "--project",
+            target_root.to_str().unwrap(),
+            "--to",
+            &target_id,
+            "--subject",
+            "unauthorized",
+            "must not enqueue",
+        ],
+        false,
+    )
+    .output()
+    .unwrap();
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("project master"));
+    let empty = run_ok_at(
+        &fixture,
+        &target_root,
+        &target_pane,
+        &["recv", "--timeout", "0"],
+        false,
+    );
+    assert!(
+        empty["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|message| message["subject"] != "unauthorized"),
+        "rejected sender must not enqueue its message: {empty}"
+    );
+    drop(fixture);
+    std::fs::remove_dir_all(target_root).unwrap();
+}
+
 fn parse_json(bytes: &[u8]) -> Value {
     serde_json::from_slice(bytes).expect("collab CLI emits JSON")
 }

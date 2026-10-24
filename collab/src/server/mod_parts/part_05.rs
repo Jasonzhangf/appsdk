@@ -176,7 +176,7 @@ pub(crate) fn purge_expired_storage(server: &Server, now: i64) -> usize {
     let expired: Vec<String> = st
         .msgs
         .values()
-        .filter(|message| message.created_ms <= cutoff)
+        .filter(|message| message.created_ms <= cutoff && !st.reply_obligations.contains_key(&message.id))
         .map(|message| message.id.clone())
         .collect();
     mailbox::purge_message_snapshot_files(&server.storage_root, &expired, &st);

@@ -424,7 +424,7 @@ async fn split_journal_context_recovery(native: bool, public_cli: bool) {
                 token: Some(mutation_token), command: Some(mutation_command), to: mutation_worker,
                 mtype: "notify".into(), subject: Some("current-context-readback".into()),
                 body: "A message committed after the original context completed.".into(),
-                in_reply_to: None, delivery: "queued".into(),
+                in_reply_to: None, reply_policy: None, delivery: "queued".into(),
             });
             assert!(sent.ok, "{sent:?}");
             assert_eq!(sent.data["durable"], true);

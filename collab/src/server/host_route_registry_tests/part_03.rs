@@ -220,6 +220,7 @@
                     subject: Some(format!("isolated message {suffix}")),
                     body: format!("body for {suffix}"),
                     in_reply_to: None,
+                    reply_policy: None,
                     delivery: "immediate".into(),
                 },
             );
@@ -247,6 +248,7 @@
                 subject: Some("must stay isolated".into()),
                 body: "cross-route delivery must fail closed".into(),
                 in_reply_to: None,
+                reply_policy: None,
                 delivery: "immediate".into(),
             },
         );
@@ -710,6 +712,7 @@
                 subject: Some("full replay before".into()),
                 body: "message retained across runtime replay".into(),
                 in_reply_to: None,
+                reply_policy: None,
                 delivery: "immediate".into(),
             },
         );
@@ -783,6 +786,7 @@
                 subject: Some("full replay after".into()),
                 body: "message sent by the replayed runtime".into(),
                 in_reply_to: None,
+                reply_policy: None,
                 delivery: "immediate".into(),
             },
         );

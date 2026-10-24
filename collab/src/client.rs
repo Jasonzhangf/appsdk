@@ -1450,6 +1450,7 @@ mod tests {
             subject: Some("subject".into()),
             body: "authoritative mutation".into(),
             in_reply_to: None,
+            reply_policy: None,
             delivery: "immediate".into(),
         };
 

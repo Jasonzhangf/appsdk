@@ -58,6 +58,11 @@ fn role_contract_is_identical_across_context_workers_and_status() {
             .collect::<Vec<_>>()
             .join(" ")
             .to_lowercase();
+        if expected_role != "managed-subagent" {
+            assert!(responsibilities.contains("--in-reply-to <message-id>"));
+            assert!(responsibilities.contains("resume your own unfinished work"));
+            assert!(responsibilities.contains("user-facing summary is not that reply"));
+        }
         match expected_role {
             "master" => {
                 assert!(role_task.contains("long-horizon"));
@@ -78,6 +83,7 @@ fn role_contract_is_identical_across_context_workers_and_status() {
                 assert!(!responsibilities.contains("saturate every live present peer first"));
             }
             "worker" => {
+                assert!(responsibilities.contains("not routinely to the user"));
                 assert!(role_task.contains("long-horizon"));
                 assert!(role_task.contains("orchestrator"));
                 assert!(responsibilities.contains("codex exec --profile gcm"));

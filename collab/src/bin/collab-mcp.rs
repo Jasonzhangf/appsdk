@@ -67,8 +67,8 @@ fn tools() -> Value {
         ),
         tool(
             "collab_sendmessage",
-            "Persist an explicit peer notification with a required short subject and original body preview; the recipient is woken only through its own active direct-message subscription.",
-            json!({"to":{"type":"string"},"subject":{"type":"string"},"body":{"type":"string"},"delivery":{"type":"string","enum":["immediate","queued"],"default":"immediate"}}),
+            "Persist an explicit peer notification with a required short subject and original body preview; the recipient is woken only through its own active direct-message subscription. reply_required asks for an answer to this message; reply_on_completion asks for the completed result. in_reply_to links a real answer to the original message ID and clears its reply obligation. The two reply flags are mutually exclusive and default to no obligation.",
+            json!({"to":{"type":"string"},"subject":{"type":"string"},"body":{"type":"string"},"delivery":{"type":"string","enum":["immediate","queued"],"default":"immediate"},"in_reply_to":{"type":"string"},"reply_required":{"type":"boolean"},"reply_on_completion":{"type":"boolean"}}),
             &["to", "subject", "body"]
         ),
         tool(
@@ -491,11 +491,25 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
                 required(args, "to")?,
                 "--subject".into(),
                 required(args, "subject")?,
-                required(args, "body")?,
             ]);
+            // `body` is a trailing positional: every flag must be appended
+            // before it, otherwise clap folds the flag into the body words.
             if let Some(delivery) = args.get("delivery").and_then(Value::as_str) {
                 argv.extend(["--delivery".into(), delivery.to_string()]);
             }
+            optional_flag(&mut argv, args, "in_reply_to", "--in-reply-to")?;
+            let reply_required =
+                optional_boolean_flag(&mut argv, args, "reply_required", "--reply-required")?;
+            let reply_on_completion = optional_boolean_flag(
+                &mut argv,
+                args,
+                "reply_on_completion",
+                "--reply-on-completion",
+            )?;
+            if reply_required && reply_on_completion {
+                return Err("reply_required and reply_on_completion are mutually exclusive".into());
+            }
+            argv.push(required(args, "body")?);
         }
         "collab_notify_methods" => argv.extend(["notify".into(), "methods".into()]),
         "collab_notify_subscribe" => {
@@ -848,6 +862,23 @@ fn optional_flag(
         ]);
     }
     Ok(())
+}
+
+fn optional_boolean_flag(
+    argv: &mut Vec<String>,
+    args: &Value,
+    key: &str,
+    flag: &str,
+) -> Result<bool, String> {
+    match args.get(key) {
+        None => Ok(false),
+        Some(Value::Bool(true)) => {
+            argv.push(flag.into());
+            Ok(true)
+        }
+        Some(Value::Bool(false)) => Ok(false),
+        Some(_) => Err(format!("{key} must be a boolean")),
+    }
 }
 
 fn optional_integer_flag(

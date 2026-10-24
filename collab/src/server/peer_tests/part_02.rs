@@ -331,6 +331,7 @@ fn authenticated_send_rejects_missing_binding() {
             subject: Some("test".into()),
             body: "body".into(),
             in_reply_to: None,
+            reply_policy: None,
             delivery: "immediate".into(),
         },
     );
@@ -378,6 +379,7 @@ fn authenticated_send_rejects_ambiguous_binding() {
             subject: Some("test".into()),
             body: "body".into(),
             in_reply_to: None,
+            reply_policy: None,
             delivery: "immediate".into(),
         },
     );
@@ -408,6 +410,7 @@ fn authenticated_send_rejects_another_workers_binding() {
             subject: Some("test".into()),
             body: "body".into(),
             in_reply_to: None,
+            reply_policy: None,
             delivery: "immediate".into(),
         },
     );
@@ -440,6 +443,7 @@ fn authenticated_send_rejects_stale_generation() {
             subject: Some("test".into()),
             body: "body".into(),
             in_reply_to: None,
+            reply_policy: None,
             delivery: "immediate".into(),
         },
     );
@@ -471,6 +475,7 @@ fn authenticated_send_enforces_request_cooldown() {
             subject: Some("cooldown".into()),
             body: "first".into(),
             in_reply_to: None,
+            reply_policy: None,
             delivery: "immediate".into(),
         },
     );
@@ -487,6 +492,7 @@ fn authenticated_send_enforces_request_cooldown() {
             subject: Some("cooldown".into()),
             body: "second".into(),
             in_reply_to: None,
+            reply_policy: None,
             delivery: "immediate".into(),
         },
     );
@@ -519,6 +525,7 @@ fn authenticated_send_supersedes_earlier_reply() {
             subject: Some("supersede".into()),
             body: "ask".into(),
             in_reply_to: None,
+            reply_policy: None,
             delivery: "immediate".into(),
         },
     );
@@ -536,6 +543,7 @@ fn authenticated_send_supersedes_earlier_reply() {
             subject: Some("supersede".into()),
             body: "first".into(),
             in_reply_to: Some(request_id.clone()),
+            reply_policy: None,
             delivery: "immediate".into(),
         },
     );
@@ -553,6 +561,7 @@ fn authenticated_send_supersedes_earlier_reply() {
             subject: Some("supersede".into()),
             body: "second".into(),
             in_reply_to: Some(request_id.clone()),
+            reply_policy: None,
             delivery: "immediate".into(),
         },
     );

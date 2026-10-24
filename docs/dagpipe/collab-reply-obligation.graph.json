@@ -1,0 +1,20 @@
+{
+  "id": "collab-reply-obligation",
+  "version": "1",
+  "description": "候选设计：一次发送、关联回复或idle观察请求对应一次回复标记转换。daemon仅保存原消息的回复要求和待回复标记，不创建任务状态机、不代答、不从正文判断完成。普通发送默认无要求，可要求回复或完成后回复；实际收件人向原发件人持久提交in_reply_to回复后清标记，recv/ACK不清标记。真实idle且仍欠回复时，通过现有通知路径提醒查看原要求；忙或unknown不提醒，同一idle episode去重，提醒本身不要求回复。各阶段传播明确失败、跳过或完成结果并汇入唯一出口；后续idle观察是新请求，无图内回边。",
+  "inputs": [{"id": "回复标记操作请求", "schema": "Object"}],
+  "nodes": [
+    {"id": "读取原消息与当前回复要求", "operator": "collab.reply.read", "operator_version": "1", "inputs": ["回复标记操作请求"], "output": {"id": "回复上下文", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "判定发送关联回复或空闲提醒", "operator": "collab.reply.classify", "operator_version": "1", "inputs": ["回复上下文"], "output": {"id": "回复标记转换", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "持久提交消息与回复标记", "operator": "collab.reply.commit", "operator_version": "1", "inputs": ["回复标记转换"], "output": {"id": "回复提交结果", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "投递消息或待回复提醒", "operator": "collab.reply.notify", "operator_version": "1", "inputs": ["回复提交结果"], "output": {"id": "回复投递结果", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "返回结果与接续工作要求", "operator": "collab.reply.emit", "operator_version": "1", "inputs": ["回复投递结果"], "output": {"id": "回复标记操作结果", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"}
+  ],
+  "edges": [
+    {"from": "读取原消息与当前回复要求", "to": "判定发送关联回复或空闲提醒", "arc_id": "回复上下文"},
+    {"from": "判定发送关联回复或空闲提醒", "to": "持久提交消息与回复标记", "arc_id": "回复标记转换"},
+    {"from": "持久提交消息与回复标记", "to": "投递消息或待回复提醒", "arc_id": "回复提交结果"},
+    {"from": "投递消息或待回复提醒", "to": "返回结果与接续工作要求", "arc_id": "回复投递结果"}
+  ],
+  "outputs": ["回复标记操作结果"]
+}

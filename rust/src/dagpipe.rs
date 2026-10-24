@@ -300,8 +300,12 @@ fn ensure_graph_nodes_use_registered_operators(
 mod notification;
 use notification::{register_notification_operator, validate_notification_objects};
 
-fn embedded_graph_paths() -> [(&'static str, &'static str); 29] {
+fn embedded_graph_paths() -> [(&'static str, &'static str); 30] {
     [
+        (
+            "docs/dagpipe/collab-reply-obligation.graph.json",
+            include_str!("../../docs/dagpipe/collab-reply-obligation.graph.json"),
+        ),
         (
             "docs/dagpipe/collab-binding-lifecycle.graph.json",
             include_str!("../../docs/dagpipe/collab-binding-lifecycle.graph.json"),
@@ -421,8 +425,9 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 29] {
     ]
 }
 
-fn design_graph_ids() -> [&'static str; 27] {
+fn design_graph_ids() -> [&'static str; 28] {
     [
+        "collab-reply-obligation",
         "appsdk-collab-binding-lifecycle",
         "collab-work-role-registration",
         "collab-role-assignment",
@@ -453,8 +458,13 @@ fn design_graph_ids() -> [&'static str; 27] {
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 133] {
+fn design_graph_operator_names() -> [&'static str; 138] {
     [
+        "collab.reply.read",
+        "collab.reply.classify",
+        "collab.reply.commit",
+        "collab.reply.notify",
+        "collab.reply.emit",
         "appsdk.collab_binding.load",
         "appsdk.collab_binding.refresh",
         "appsdk.collab_binding.reconcile",

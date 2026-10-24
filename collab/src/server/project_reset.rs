@@ -124,9 +124,15 @@ pub(super) fn clear_project(
         )
         .map(|m| m.id.clone())
         .collect();
+    let dropped_messages: HashSet<String> = messages.iter().cloned().collect();
     for id in messages {
         state.drop_message(&id);
     }
+    // Obligations are project-owned control state. A reset removes only this
+    // scope's markers, plus any whose original message was just dropped.
+    state.reply_obligations.retain(|message_id, obligation| {
+        obligation.project != scope && !dropped_messages.contains(message_id)
+    });
     state.tasks.retain(|id, _| !tasks.contains(id));
     state.board_details.retain(|id, _| !tasks.contains(id));
     state.task_lifecycle.retain(|id, _| !tasks.contains(id));

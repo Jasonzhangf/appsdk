@@ -4,7 +4,8 @@ use std::collections::{HashMap, HashSet};
 use super::global_state::{GlobalState, ProjectRegistration, RuntimeBinding, StateError};
 use crate::proto::{
     CommandEnvelope, PeerLifecycleAction, PeerLifecycleClose, PeerLifecycleCreate,
-    PeerLifecyclePhase, PeerLifecycleTarget, PeerLifecycleUpdate, SelectedTransport, TransportKind,
+    PeerLifecyclePhase, PeerLifecycleTarget, PeerLifecycleUpdate, ReplyPolicy, SelectedTransport,
+    TransportKind,
 };
 
 pub fn now_ms() -> i64 {
@@ -291,6 +292,26 @@ pub struct Message {
     /// this marker makes that budget durable and replayable.
     #[serde(default)]
     pub retry_attempted: bool,
+}
+
+/// One durable reply obligation owned by the daemon. It is keyed by the
+/// original message id and is never mirrored onto [`Message`]. The stable names
+/// let a reply clear the obligation after the same name moves to a new
+/// session; the current worker ids are rebound on that handoff.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplyObligation {
+    pub message_id: String,
+    pub project: String,
+    pub from_worker_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_name: Option<String>,
+    pub recipient_worker_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient_name: Option<String>,
+    pub policy: ReplyPolicy,
+    pub created_ms: i64,
+    #[serde(default)]
+    pub reminded_idle_episode: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1359,6 +1380,23 @@ pub enum Event {
     },
     Sent {
         msg: Message,
+    },
+    /// Durable creation of one reply obligation. Written in the same committed
+    /// batch as the originating `Sent`, so a message never exists without the
+    /// obligation it declared.
+    ReplyObligationSet {
+        obligation: ReplyObligation,
+    },
+    /// Durable removal of an obligation. Only an accepted linked reply emits
+    /// this; consuming or acknowledging the original message never does.
+    ReplyObligationCleared {
+        message_id: String,
+    },
+    /// Idle-reminder bookkeeping: `reminded` is true after a reminder for the
+    /// current idle episode and false again when the worker becomes busy.
+    ReplyObligationReminded {
+        message_id: String,
+        reminded: bool,
     },
     MailboxNameAddressed {
         message_id: String,

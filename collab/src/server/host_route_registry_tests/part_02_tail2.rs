@@ -558,6 +558,7 @@ async fn manager_routes_project_queries_mutations_and_poll_to_one_runtime() {
             subject: Some("route-aware message".into()),
             body: "message must stay in the selected runtime".into(),
             in_reply_to: None,
+            reply_policy: None,
             delivery: "immediate".into(),
         },
     );

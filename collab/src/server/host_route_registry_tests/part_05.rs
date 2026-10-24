@@ -514,6 +514,7 @@
                 subject: Some("scope".into()),
                 body: "body".into(),
                 in_reply_to: None,
+                reply_policy: None,
                 delivery: "immediate".into(),
             },
         )
@@ -534,6 +535,7 @@
                 subject: Some("scope".into()),
                 body: "body".into(),
                 in_reply_to: None,
+                reply_policy: None,
                 delivery: "immediate".into(),
             },
         )

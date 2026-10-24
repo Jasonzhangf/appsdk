@@ -842,6 +842,7 @@ fn authenticated_send(root: &Path, from: &str, to: &str, subject: &str) -> Req {
         subject: Some(subject.into()),
         body: "body".into(),
         in_reply_to: None,
+        reply_policy: None,
         delivery: "immediate".into(),
     }
 }

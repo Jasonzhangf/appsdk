@@ -651,6 +651,37 @@ pub(crate) fn context_operation_with_intent(
         )?
     } else {
         let mut facts = collect_identity_facts(provide)?;
+        if let Some(session) = facts
+            .dsh_session_id
+            .as_deref()
+            .filter(|_| facts.dsh.is_none())
+        {
+            // Bootstrap is separate from recovery. Only the daemon's current
+            // scoped route can establish an existing owner; an archive cannot.
+            match client::resolve_native_session_route(
+                &scope.sock_path(),
+                session,
+                project_context.clone(),
+            ) {
+                Ok(_) => {}
+                Err(error)
+                    if error
+                        .downcast_ref::<client::ServerResponseError>()
+                        .is_some_and(|error| {
+                            error.response.error.as_deref().is_some_and(|message| {
+                                message.starts_with("ROUTE_RESOLVE_NOT_FOUND:")
+                            })
+                        }) =>
+                {
+                    facts.dsh = crate::client::adapters::dsh::discover_bootstrap_candidate(
+                        host_paths.state_root(),
+                        session,
+                        &scope.root,
+                    )?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
         let explicit_transport = facts.endpoint.is_some()
             || provide
                 .map(serde_json::from_str::<Value>)

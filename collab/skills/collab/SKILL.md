@@ -550,7 +550,15 @@ current pane facts. A unique saved DSH identity restores from its current
 session in the same scope without Register or a communication challenge.
 Gateway unreachability does not revoke that identity or its work.
 
-For a new DSH identity, report the actual gateway capability through
+For a new DSH identity, run ordinary `collab context`. With `DSH_SESSION_ID`,
+the CLI reads the gateway-published control capability and resolves that exact
+session in the current project. The gateway supplies current runtime facts;
+the agent does not inspect logs, plists or runtime state files. Existing
+registered sessions recover through their committed route and do not depend
+on this bootstrap declaration. A missing declaration is a gateway integration
+gap; an unreachable or rejected declared endpoint stays an explicit error.
+
+For an explicit caller-provided DSH capability, report actual facts through
 `collab context --provide '{"dsh":{"endpoint":"unix:///actual/control.sock","runtime_id":"actual-runtime","agent_id":"actual-agent","session_id":"actual-session","cwd":"/actual/project"}}'`.
 MCP `collab_context` accepts the same object in `provide`. Obtain these facts
 from the current DSH gateway API; do not guess them or reuse stale logs.

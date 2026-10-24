@@ -11,7 +11,7 @@
   "nodes": [
     {
       "id": "build_dsh_candidate",
-      "description": "解析公开 context 的 DSH endpoint/runtime/agent/session/cwd 事实。DSH 不借用 AppServer namespace，不要求 Codex thread。缺事实或相互矛盾返回明确结果。",
+      "description": "公开 context 优先保留显式 DSH 事实。无显式报告且当前 project/app/session 无已提交 route 时，CLI 从 gateway 发布的 runtime/dsh/gateway-control.json 读取控制入口，经 resolve-agent 核实真实 session/cwd 并取得当前 runtime。已有 route 不读取该声明，继续由 daemon 按持久绑定恢复。缺声明、拒绝或矛盾返回明确结果，不借用 AppServer namespace。",
       "operator": "appsdk.collab_dsh_channel.build_dsh_candidate",
       "operator_version": "1",
       "inputs": ["dsh_registration_intent"],

@@ -5,6 +5,38 @@ use crate::server::global_state::RuntimeBinding;
 use std::sync::Arc;
 
 impl ProjectRuntimeManager {
+    /// Only an exact currently published Desktop binding makes AppServer
+    /// registration fields inapplicable. No archive or endpoint probe selects
+    /// identity, and other transport kinds retain their own requirements.
+    fn has_current_desktop_binding(
+        &self,
+        context: &ProjectContext,
+        facts: &IdentityFacts,
+    ) -> anyhow::Result<bool> {
+        if facts.tmux.is_some() || facts.dsh_session_id.is_some() || facts.dsh.is_some()
+            || facts.desktop_bridge.is_some() || facts.endpoint.is_some()
+        {
+            return Ok(false);
+        }
+        let (Some(session), Some(thread)) = (facts.session_id.as_deref(), facts.thread_id.as_deref()) else {
+            return Ok(false);
+        };
+        let Some(ident) = self.current_session_identity(context, facts)? else { return Ok(false) };
+        if !ident.transport.as_ref().is_some_and(|transport|
+            transport.kind == TransportKind::DesktopBridge
+                && transport.session_id.as_deref() == Some(session)
+                && transport.thread_id.as_deref() == Some(thread)) {
+            return Ok(false);
+        }
+        let host = self.host.state.lock().unwrap();
+        Ok(host.global.current_thread_routes.values().any(|binding|
+            binding.project_scope == context.project_scope && binding.app_scope_id == context.app_scope_id
+                && binding.agent_id.as_str() == ident.worker_id
+                && binding.session_id.as_ref().map(identity::SessionId::as_str) == Some(session)
+                && binding.native_thread_id.as_ref().map(identity::NativeThreadId::as_str) == Some(thread)
+                && ident.runtime.as_ref().is_some_and(|runtime|
+                    runtime.binding_id == binding.binding_id && runtime.endpoint_generation == binding.endpoint_generation)))
+    }
     /// Reconcile one Desktop bridge binding to its real, host-verified
     /// published endpoint. Discovery is scoped to the committed project scope
     /// and session/thread; the adapter re-verifies the live thread before any
@@ -62,12 +94,23 @@ impl ProjectRuntimeManager {
             Some(thread.as_str()),
         ) {
             Ok(candidate) => candidate,
-            Err(error)
-                if error
-                    .downcast_ref::<std::io::Error>()
-                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            Err(error) if error.is::<crate::desktop_capability::DeclarationMissing>() =>
             {
-                return Ok(())
+                if !transport.capabilities.iter().any(|capability| capability == "read_thread") {
+                    anyhow::bail!("DESKTOP_BRIDGE_CAPABILITY_UNVERIFIED: current Desktop binding has no verified read_thread capability; no peer update inferred");
+                }
+                // Read-only readiness of this exact committed channel. This
+                // is not a registration challenge or a message replay.
+                let committed = crate::proto::AppServerCandidate {
+                    endpoint: transport.endpoint.clone().ok_or_else(|| anyhow::anyhow!("DESKTOP_ENDPOINT_MISSING"))?,
+                    namespace: transport.namespace.clone().ok_or_else(|| anyhow::anyhow!("DESKTOP_NAMESPACE_MISSING"))?,
+                    session_id: session.as_str().to_owned(),
+                    thread_id: thread.as_str().to_owned(),
+                    cwd: cwd.to_string_lossy().into_owned(),
+                };
+                return crate::client::adapters::desktop_bridge::verify_candidate(&committed)
+                    .map(|_| ())
+                    .map_err(|failure| anyhow::anyhow!("DESKTOP_BRIDGE_CAPABILITY_LOST: verified Desktop read_thread is unavailable and its publication is missing; ask this Desktop peer to refresh its bridge declaration: {failure}"));
             }
             Err(error) => return Err(error),
         };

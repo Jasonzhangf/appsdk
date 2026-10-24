@@ -1,6 +1,6 @@
 {
   "id":"appsdk-collab-binding-lifecycle","version":"1.0.0",
-  "description":"一次绑定生命周期收敛。输入为初次绑定、重新绑定、信息变化、daemon 启动或既有维护 tick。重试是下一次独立调用，不构造图回边。身份持久化和传输就绪分别判断；失败止于所属绑定的 pending/error，不回滚身份、不阻塞其他绑定、不启动宿主或 tmux。",
+  "description":"一次绑定生命周期收敛。只判断当前已提交渠道适用的能力，其他渠道不要求。Desktop 声明缺失与能力丢失分别判断：已验证的原端点仍可用则不误报；已知能力确实丢失才提示该 peer 更新，未知不冒充丢失。身份恢复独立于通信就绪。重试是下一次独立调用，不构造图回边；失败止于所属绑定，不回滚身份、不阻塞其他绑定、不启动宿主或 tmux。",
   "inputs":[{"id":"lifecycle_event","schema":"Object"}],
   "nodes":[
     {"id":"读取当前权威绑定","operator":"appsdk.collab_binding.load","operator_version":"1","description":"Collab 从当前 reducer 读取已提交身份、角色、会话、绑定代际和传输；首次注册沿 context 图提交后再进入本图。恢复不重新 Register。","inputs":["lifecycle_event"],"output":{"id":"current_binding","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},

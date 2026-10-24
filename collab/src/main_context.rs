@@ -717,7 +717,39 @@ pub(crate) fn context_operation_with_intent(
                     )
                     .map_err(anyhow::Error::msg)?;
                     if current_pane.is_none() {
-                        return Err(error);
+                        if !error.is::<crate::desktop_capability::DeclarationMissing>() {
+                            return Err(error);
+                        }
+                        let (Some(session), Some(thread)) =
+                            (facts.session_id.as_deref(), facts.thread_id.as_deref())
+                        else {
+                            return Err(error);
+                        };
+                        match client::resolve_native_session_route(
+                            &scope.sock_path(),
+                            session,
+                            project_context.clone(),
+                        ) {
+                            Ok(route)
+                                if route
+                                    .native_thread_id
+                                    .as_ref()
+                                    .map(identity::NativeThreadId::as_str)
+                                    == Some(thread) => {}
+                            Ok(_) => return Err(error),
+                            Err(route_error)
+                                if route_error
+                                    .downcast_ref::<client::ServerResponseError>()
+                                    .is_some_and(|error| {
+                                        error.response.error.as_deref().is_some_and(|message| {
+                                            message.starts_with("ROUTE_RESOLVE_NOT_FOUND:")
+                                        })
+                                    }) =>
+                            {
+                                return Err(error)
+                            }
+                            Err(route_error) => return Err(route_error),
+                        }
                     }
                 }
             }

@@ -11,6 +11,10 @@ description: "仅约束已成功注册 Collab 的 peer；master 权限需另行�
 worktree 中修改，但不要为查身份或发消息切到 `~`、临时目录或收件人的项目。
 已关联的同项目 worktree 可由 Collab 解析；目录不确定时，回到已知注册项目根目录。
 已有身份和收件人时直接发送，不先重跑 context、收件或通信恢复。
+`collab context`、`collab inbox` 和 `collab sendmessage` 都是公开 CLI，
+不是私有命令。内部控制协议与公开 CLI 的边界不同，不要把 shell 调用本身视为违规。
+同项目的 Alice、Jenny 等已注册名字就是收件地址，不需要额外的聊天、thread、
+teammate 或 worker 标识；不知道这些内部标识不构成转请 master 代发的理由。
 
 | 操作 | 使用入口 |
 | --- | --- |

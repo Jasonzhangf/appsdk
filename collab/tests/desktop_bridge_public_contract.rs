@@ -142,6 +142,109 @@ fn publish_capability(fixture: &Fixture, bridge: &DesktopBridgeFixture) -> PathB
 }
 
 #[test]
+fn missing_desktop_publication_preserves_live_capability_and_identity() {
+    let fixture = Fixture::without_tmux("desktop-missing-live");
+    let runtime = fixture.host_state.join("runtime/desktop");
+    let bridge = DesktopBridgeFixture::start_at(&fixture.root, &runtime);
+    let declaration = publish_capability(&fixture, &bridge);
+    let initial = desktop_command(&fixture, &["context"]);
+    assert!(initial.status.success());
+    let initial: Value = serde_json::from_slice(&initial.stdout).unwrap();
+    std::fs::remove_file(&declaration).unwrap();
+    let restored = desktop_command(&fixture, &["context"]);
+    assert!(
+        restored.status.success(),
+        "{}",
+        String::from_utf8_lossy(&restored.stderr)
+    );
+    let restored: Value = serde_json::from_slice(&restored.stdout).unwrap();
+    assert_eq!(
+        restored["result"]["snapshot"]["binding"],
+        initial["result"]["snapshot"]["binding"]
+    );
+    std::thread::sleep(Duration::from_millis(2200));
+    let log = std::fs::read_to_string(fixture.host_state.join("log.txt")).unwrap_or_default();
+    assert!(!log.contains("DESKTOP_BRIDGE_CAPABILITY_REQUIRED"), "{log}");
+    assert!(!log.contains("DESKTOP_BRIDGE_CAPABILITY_LOST"), "{log}");
+    // An unsafe declaration is a real control error, not publication absence.
+    let declaration = publish_capability(&fixture, &bridge);
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(declaration, std::fs::Permissions::from_mode(0o666)).unwrap();
+    let unsafe_control = desktop_command(&fixture, &["context"]);
+    assert!(!unsafe_control.status.success());
+    assert!(String::from_utf8_lossy(&unsafe_control.stderr)
+        .contains("DESKTOP_BRIDGE_DECLARATION_UNSAFE"));
+}
+
+#[test]
+fn missing_desktop_publication_with_lost_known_capability_requests_only_its_peer_update() {
+    let fixture = Fixture::without_tmux("desktop-missing-dead");
+    let runtime = fixture.host_state.join("runtime/desktop");
+    let bridge = DesktopBridgeFixture::start_at(&fixture.root, &runtime);
+    let declaration = publish_capability(&fixture, &bridge);
+    let initial = desktop_command(&fixture, &["context"]);
+    assert!(initial.status.success());
+    let initial: Value = serde_json::from_slice(&initial.stdout).unwrap();
+    std::fs::remove_file(&declaration).unwrap();
+    drop(bridge);
+    assert!(
+        wait_until(Duration::from_secs(8), || std::fs::read_to_string(
+            fixture.host_state.join("log.txt")
+        )
+        .unwrap_or_default()
+        .contains("DESKTOP_BRIDGE_CAPABILITY_LOST")),
+        "known lost capability was not classified"
+    );
+    let restored = desktop_command(&fixture, &["context"]);
+    assert!(
+        restored.status.success(),
+        "identity must survive: {}",
+        String::from_utf8_lossy(&restored.stderr)
+    );
+    let restored: Value = serde_json::from_slice(&restored.stdout).unwrap();
+    assert_eq!(
+        restored["result"]["snapshot"]["binding"],
+        initial["result"]["snapshot"]["binding"]
+    );
+}
+
+#[test]
+fn unverified_legacy_desktop_capability_does_not_request_peer_update() {
+    let mut fixture = Fixture::without_tmux("desktop-unverified");
+    let runtime = fixture.host_state.join("runtime/desktop");
+    let bridge = DesktopBridgeFixture::start_at(&fixture.root, &runtime);
+    let declaration = publish_capability(&fixture, &bridge);
+    assert!(desktop_command(&fixture, &["context"]).status.success());
+    fixture.stop_daemon();
+    // Reproduce a supported persisted legacy shape with no capability proof.
+    // This isolated journal is the daemon's public persistence input.
+    let journal = fixture.project_journal();
+    let mut registered = std::fs::read_to_string(&journal)
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| event["ev"] == "Registered")
+        .last()
+        .unwrap();
+    registered["worker"]["transport"]["capabilities"] = json!([]);
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(journal)
+        .unwrap();
+    writeln!(file, "{registered}").unwrap();
+    std::fs::remove_file(declaration).unwrap();
+    drop(bridge);
+    fixture.restart_daemon();
+    assert!(wait_until(Duration::from_secs(8), || {
+        std::fs::read_to_string(fixture.host_state.join("log.txt"))
+            .unwrap_or_default()
+            .contains("DESKTOP_BRIDGE_CAPABILITY_UNVERIFIED")
+    }));
+    let log = std::fs::read_to_string(fixture.host_state.join("log.txt")).unwrap();
+    assert!(!log.contains("DESKTOP_BRIDGE_CAPABILITY_LOST"), "{log}");
+}
+
+#[test]
 fn desktop_endpoint_replacement_converges_without_agent_context() {
     let fixture = Fixture::without_tmux("desktop-background");
     let runtime = fixture.host_state.join("runtime/desktop");

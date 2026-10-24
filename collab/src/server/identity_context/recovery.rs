@@ -23,6 +23,57 @@ impl ProjectRuntimeManager {
         })
     }
 
+    /// Enroll or restore the selected gateway's canonical Poll loop for a
+    /// DSH transport. Other transports are untouched. The binding handed over
+    /// is the already-committed one; this call never registers the identity
+    /// again and never echoes the credential outside the control socket.
+    fn enroll_dsh_receive_loop(
+        &self,
+        transport: &crate::proto::SelectedTransport,
+        worker_id: &str,
+        token: &str,
+        project_scope: &str,
+        runtime_context: crate::client::adapters::dsh::DshRuntimeContext<'_>,
+    ) -> anyhow::Result<()> {
+        if transport.kind != crate::proto::TransportKind::Dsh {
+            return Ok(());
+        }
+        let agent_id = runtime_context.native_thread_id.ok_or_else(|| {
+            anyhow::anyhow!(
+                "DSH_ENDPOINT_REJECTED: committed dsh binding has no gateway agent id"
+            )
+        })?;
+        let endpoint = transport.endpoint.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("DSH_ENDPOINT_REJECTED: selected dsh transport has no gateway endpoint")
+        })?;
+        let runtime_id = transport.namespace.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "DSH_ENDPOINT_REJECTED: selected dsh transport has no gateway runtime id"
+            )
+        })?;
+        crate::client::adapters::dsh::enroll_receive_loop(
+            endpoint,
+            &crate::client::adapters::dsh::DshLoopEnrollment {
+                runtime_id,
+                agent_id,
+                worker_id,
+                token,
+                project_scope,
+                runtime_context,
+            },
+        )
+        .map_err(|error| {
+            let detail = error.to_string();
+            let detail = detail
+                .strip_prefix("DSH_ENDPOINT_REJECTED: ")
+                .unwrap_or(&detail)
+                .to_owned();
+            anyhow::anyhow!(
+                "DSH_ENDPOINT_REJECTED: gateway receive-loop enrollment failed: {detail}"
+            )
+        })
+    }
+
     /// Resolve the caller's current delivery placement from live, host-owned
     /// tmux endpoints. This is a read-only observation and runs only on the
     /// mutating admission/reconcile path.
@@ -1378,6 +1429,29 @@ impl ProjectRuntimeManager {
                             transport,
                         )?;
                     }
+                    if let (Some(saved), Some(transport)) =
+                        (current.as_ref(), ident.transport.as_ref())
+                    {
+                        self.enroll_dsh_receive_loop(
+                            transport,
+                            ident.worker_id.as_str(),
+                            ident.token.as_str(),
+                            saved.project_scope.as_str(),
+                            crate::client::adapters::dsh::DshRuntimeContext {
+                                agent_id: saved.agent_id.as_str(),
+                                runtime_id: saved.runtime_id.as_str(),
+                                appserver_id: saved.app_scope_id.as_str(),
+                                binding_id: saved.binding_id.as_str(),
+                                endpoint_generation: saved.endpoint_generation,
+                                session_id: saved.session_id.as_ref().map(|id| id.as_str()),
+                                native_thread_id: saved
+                                    .native_thread_id
+                                    .as_ref()
+                                    .map(|id| id.as_str()),
+                            },
+                        )
+                        .map_err(ReconcileError::from)?;
+                    }
                     return Ok((
                         runtime,
                         Resp::data(json!({"snapshot":snapshot.data,"identity_receipt":ident})),
@@ -1541,16 +1615,32 @@ impl ProjectRuntimeManager {
                     .map_err(post_register)?
             }
         };
+        let registered_context =
+            ProjectContext::for_registered_route(&scope.root, &binding).map_err(post_register)?;
         identity::persist_registration_at(
             &self.host.host_paths,
             &scope,
             &mut ident,
             binding.clone(),
-            transport,
+            transport.clone(),
         )
         .map_err(post_register)?;
-        let registered_context =
-            ProjectContext::for_registered_route(&scope.root, &binding).map_err(post_register)?;
+        self.enroll_dsh_receive_loop(
+            &transport,
+            ident.worker_id.as_str(),
+            ident.token.as_str(),
+            registered_context.project_scope.as_str(),
+            crate::client::adapters::dsh::DshRuntimeContext {
+                agent_id: binding.agent_id.as_str(),
+                runtime_id: binding.runtime_id.as_str(),
+                appserver_id: binding.appserver_id.as_str(),
+                binding_id: binding.binding_id.as_str(),
+                endpoint_generation: binding.endpoint_generation,
+                session_id: binding.session_id.as_ref().map(|id| id.as_str()),
+                native_thread_id: binding.native_thread_id.as_ref().map(|id| id.as_str()),
+            },
+        )
+        .map_err(post_register)?;
         let (runtime, mut snapshot) = self.dispatch_sync(
             Some(registered_context),
             Req::Context {

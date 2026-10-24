@@ -1,10 +1,11 @@
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -29,17 +30,46 @@ fn collab_binary() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_collab")))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EnrollMode {
+    Accept,
+    Reject,
+    MismatchBinding,
+}
+
 struct Gateway {
     socket: PathBuf,
     stop: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
+    enrolled: Arc<Mutex<HashSet<(String, String)>>>,
+    register_peers: Arc<Mutex<Vec<Value>>>,
+    enroll_mode: Arc<Mutex<EnrollMode>>,
 }
 
 impl Gateway {
     fn start(socket: PathBuf, root: PathBuf, agents: Vec<String>) -> Self {
+        Self::start_with_enrollment_gate(socket, root, agents, false)
+    }
+
+    fn start_requiring_enrollment(socket: PathBuf, root: PathBuf, agents: Vec<String>) -> Self {
+        Self::start_with_enrollment_gate(socket, root, agents, true)
+    }
+
+    fn start_with_enrollment_gate(
+        socket: PathBuf,
+        root: PathBuf,
+        agents: Vec<String>,
+        require_enrollment: bool,
+    ) -> Self {
         let listener = UnixListener::bind(&socket).expect("bind gateway socket");
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
+        let enrolled = Arc::new(Mutex::new(HashSet::new()));
+        let register_peers = Arc::new(Mutex::new(Vec::new()));
+        let enroll_mode = Arc::new(Mutex::new(EnrollMode::Accept));
+        let thread_enrolled = Arc::clone(&enrolled);
+        let thread_requests = Arc::clone(&register_peers);
+        let thread_mode = Arc::clone(&enroll_mode);
         let handle = thread::spawn(move || {
             while !flag.load(Ordering::SeqCst) {
                 let Ok((stream, _)) = listener.accept() else {
@@ -58,6 +88,7 @@ impl Gateway {
                 let runtime_id = request["params"]["runtimeId"].as_str().unwrap_or_default();
                 let agent_id = request["params"]["agentId"].as_str().unwrap_or_default();
                 let known = agents.iter().any(|agent| agent == agent_id);
+                let key = (runtime_id.to_owned(), agent_id.to_owned());
                 let reply = if method == "agent-facts" && known {
                     json!({"ok":true,"result":{
                         "nonce":request["params"]["nonce"],
@@ -67,12 +98,50 @@ impl Gateway {
                         "cwd":root,
                         "status":"running"
                     }})
+                } else if method == "register-peer" && known {
+                    thread_requests.lock().unwrap().push(request.clone());
+                    let mode = *thread_mode.lock().unwrap();
+                    let binding = &request["params"]["binding"];
+                    let runtime_context = &binding["runtimeContext"];
+                    if !binding.is_object() || !runtime_context.is_object() {
+                        json!({"ok":false,"error":{
+                            "code":"invalid-params",
+                            "message":"register-peer requires adopted runtimeContext"
+                        }})
+                    } else if mode == EnrollMode::Reject {
+                        json!({"ok":false,"error":{
+                            "code":"enrollment-rejected",
+                            "message":"fixture rejected receive-loop enrollment"
+                        }})
+                    } else {
+                        let binding_id = if mode == EnrollMode::MismatchBinding {
+                            json!("mismatched-binding-id")
+                        } else {
+                            thread_enrolled.lock().unwrap().insert(key.clone());
+                            runtime_context["binding_id"].clone()
+                        };
+                        json!({"ok":true,"result":{
+                            "runtimeId":request["params"]["runtimeId"],
+                            "agentId":request["params"]["agentId"],
+                            "workerId":binding["workerId"],
+                            "projectScope":binding["projectScope"],
+                            "bindingId":binding_id,
+                            "endpointGeneration":runtime_context["endpoint_generation"]
+                        }})
+                    }
                 } else if method == "enqueue" && known {
-                    json!({"ok":true,"result":{
-                        "messageId":request["params"]["messageId"],
-                        "runtimeId":runtime_id,
-                        "agentId":agent_id
-                    }})
+                    if require_enrollment && !thread_enrolled.lock().unwrap().contains(&key) {
+                        json!({"ok":false,"error":{
+                            "code":"collab-not-registered",
+                            "message":"fixture has no canonical receive loop for agent"
+                        }})
+                    } else {
+                        json!({"ok":true,"result":{
+                            "messageId":request["params"]["messageId"],
+                            "runtimeId":runtime_id,
+                            "agentId":agent_id
+                        }})
+                    }
                 } else {
                     json!({"ok":false,"error":{"code":"unknown-agent","message":"fixture unknown agent"}})
                 };
@@ -85,11 +154,29 @@ impl Gateway {
             socket,
             stop,
             handle: Some(handle),
+            enrolled,
+            register_peers,
+            enroll_mode,
         }
     }
 
     fn endpoint(&self) -> String {
         format!("unix://{}", self.socket.display())
+    }
+
+    fn register_peer_requests(&self) -> Vec<Value> {
+        self.register_peers.lock().unwrap().clone()
+    }
+
+    fn set_enroll_mode(&self, mode: EnrollMode) {
+        *self.enroll_mode.lock().unwrap() = mode;
+    }
+
+    fn is_enrolled(&self, runtime_id: &str, agent_id: &str) -> bool {
+        self.enrolled
+            .lock()
+            .unwrap()
+            .contains(&(runtime_id.to_owned(), agent_id.to_owned()))
     }
 
     fn shutdown(&mut self) -> thread::Result<()> {
@@ -122,6 +209,14 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::new_with_enrollment_gate(false)
+    }
+
+    fn new_requiring_enrollment() -> Self {
+        Self::new_with_enrollment_gate(true)
+    }
+
+    fn new_with_enrollment_gate(require_enrollment: bool) -> Self {
         let root = unique_root();
         std::fs::create_dir_all(root.join("h")).expect("create host state");
         std::fs::create_dir_all(root.join(".agent-collab")).expect("create baseline marker");
@@ -129,11 +224,13 @@ impl Fixture {
         let root = root.canonicalize().expect("canonical project root");
         let gateway_dir = root.join("gateway");
         std::fs::create_dir_all(&gateway_dir).expect("create gateway directory");
-        let gateway = Gateway::start(
-            gateway_dir.join("control.sock"),
-            root.clone(),
-            vec!["agentA".into(), "agentB".into()],
-        );
+        let socket = gateway_dir.join("control.sock");
+        let agents = vec!["agentA".into(), "agentB".into()];
+        let gateway = if require_enrollment {
+            Gateway::start_requiring_enrollment(socket, root.clone(), agents)
+        } else {
+            Gateway::start(socket, root.clone(), agents)
+        };
         Self {
             state: root.join("h"),
             root,
@@ -356,6 +453,65 @@ fn assert_ok(reply: &Value) {
     assert_eq!(reply["ok"], true, "unexpected daemon refusal: {reply}");
 }
 
+fn rendered(output: &Output) -> String {
+    format!(
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+fn only_identity(fixture: &Fixture) -> (String, Value) {
+    let identities = fixture.state.join("identities");
+    let entries = std::fs::read_dir(&identities)
+        .unwrap_or_else(|error| panic!("read {}: {error}", identities.display()))
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect persisted identities");
+    assert_eq!(entries.len(), 1, "expected one identity: {entries:?}");
+    let worker = entries[0].file_name().to_string_lossy().into_owned();
+    let path = entries[0].path().join("identity.json");
+    let identity: Value = serde_json::from_slice(&std::fs::read(&path).expect("read identity"))
+        .expect("identity JSON");
+    (worker, identity)
+}
+
+fn assert_runtime_context(params: &Value, runtime_binding: &Value) {
+    let context = &params["binding"]["runtimeContext"];
+    assert!(
+        context.is_object(),
+        "register-peer binding must carry authoritative runtimeContext: {params}"
+    );
+    assert_eq!(context["agent_id"], runtime_binding["agent_id"]);
+    assert_eq!(context["runtime_id"], runtime_binding["runtime_id"]);
+    assert_eq!(context["appserver_id"], runtime_binding["appserver_id"]);
+    assert_eq!(context["binding_id"], runtime_binding["binding_id"]);
+    assert_eq!(
+        context["endpoint_generation"],
+        runtime_binding["endpoint_generation"]
+    );
+    assert_eq!(context["session_id"], runtime_binding["session_id"]);
+    assert_eq!(
+        context["native_thread_id"],
+        runtime_binding["native_thread_id"]
+    );
+    assert_eq!(
+        context["agent_id"], params["binding"]["workerId"],
+        "runtimeContext agent_id is the committed collab worker id"
+    );
+    assert_ne!(
+        context["runtime_id"], params["runtimeId"],
+        "collab runtime id must stay distinct from the gateway runtime id"
+    );
+    assert_ne!(
+        context["agent_id"], params["agentId"],
+        "collab agent id must stay distinct from the gateway agent id"
+    );
+    assert_eq!(
+        context["native_thread_id"], params["agentId"],
+        "gateway agent addressing comes from native_thread_id"
+    );
+}
+
 fn assert_scope(reply: &Value, root: &Path) {
     assert_eq!(
         reply["scope"]["project_scope"],
@@ -570,8 +726,203 @@ fn dsh_context_registers_from_typed_gateway_facts() {
 }
 
 #[test]
+fn dsh_context_first_registration_enrolls_gateway_receive_loop() {
+    let mut fixture = Fixture::new_requiring_enrollment();
+    fixture.start_daemon();
+    let facts = json!({"dsh":{
+        "endpoint":fixture.gateway.endpoint(),
+        "runtime_id":"gateway-runtime", "agent_id":"agentA",
+        "session_id":"agentA", "cwd":fixture.root
+    }})
+    .to_string();
+    let output = fixture.command(&["context", "--provide", &facts]);
+    let output_text = rendered(&output);
+    assert!(output.status.success(), "{output_text}");
+    assert!(
+        !output_text.contains("\"token\""),
+        "context must not echo credentials: {output_text}"
+    );
+    let response: Value = serde_json::from_slice(&output.stdout).expect("context JSON");
+    assert_eq!(response["result"]["outcome"], "completed", "{response}");
+    let worker = response["result"]["snapshot"]["identity"]["worker_id"]
+        .as_str()
+        .expect("worker id")
+        .to_owned();
+    let (persisted_worker, identity) = only_identity(&fixture);
+    assert_eq!(persisted_worker, worker);
+    let runtime_binding = identity["runtime"].clone();
+    let requests = fixture.gateway.register_peer_requests();
+    assert_eq!(requests.len(), 1, "expected one enrollment");
+    let params = &requests[0]["params"];
+    assert_eq!(params["runtimeId"], "gateway-runtime");
+    assert_eq!(params["agentId"], "agentA");
+    assert_eq!(
+        params["binding"]["workerId"].as_str(),
+        Some(worker.as_str())
+    );
+    assert_eq!(
+        params["binding"]["projectScope"],
+        fixture.root.to_string_lossy().as_ref()
+    );
+    assert_runtime_context(params, &runtime_binding);
+    assert!(
+        params["binding"]["token"]
+            .as_str()
+            .is_some_and(|token| !token.is_empty()),
+        "the selected gateway socket must receive the committed credential"
+    );
+    assert!(
+        fixture.gateway.is_enrolled("gateway-runtime", "agentA"),
+        "first registration must start the canonical receive loop"
+    );
+    let sent = fixture.dsh_command(
+        &[
+            "sendmessage",
+            "--to",
+            &worker,
+            "--subject",
+            "enrolled-loop",
+            "message for the canonical receive loop",
+        ],
+        "agentA",
+    );
+    let sent_text = rendered(&sent);
+    assert!(sent.status.success(), "{sent_text}");
+    let sent: Value = serde_json::from_slice(&sent.stdout).expect("sendmessage JSON");
+    assert_eq!(sent["notification"], "dsh-wake-enqueued", "{sent}");
+    fixture.finish();
+}
+
+#[test]
+fn dsh_context_enrollment_rejection_preserves_identity_and_retry_recovers() {
+    let mut fixture = Fixture::new_requiring_enrollment();
+    fixture.start_daemon();
+    fixture.gateway.set_enroll_mode(EnrollMode::Reject);
+    let facts = json!({"dsh":{
+        "endpoint":fixture.gateway.endpoint(),
+        "runtime_id":"gateway-runtime", "agent_id":"agentA",
+        "session_id":"agentA", "cwd":fixture.root
+    }})
+    .to_string();
+    let failed = fixture.command(&["context", "--provide", &facts]);
+    let failed_text = rendered(&failed);
+    assert!(
+        !failed.status.success(),
+        "a rejected receive-loop enrollment must not report completion: {failed_text}"
+    );
+    assert!(
+        failed_text.contains("DSH_ENDPOINT_REJECTED"),
+        "the enrollment failure must be explicit: {failed_text}"
+    );
+    assert_eq!(
+        fixture.registrations(),
+        1,
+        "the committed registration must stay durable"
+    );
+    let (worker, before) = only_identity(&fixture);
+    let token = before["token"].as_str().expect("credential").to_owned();
+    assert!(
+        !failed_text.contains(&token),
+        "credentials must never appear in context output: {failed_text}"
+    );
+    let binding_id = before["runtime"]["binding_id"]
+        .as_str()
+        .expect("binding id")
+        .to_owned();
+    let generation = before["runtime"]["endpoint_generation"]
+        .as_u64()
+        .expect("generation");
+    assert_eq!(fixture.gateway.register_peer_requests().len(), 1);
+    assert!(!fixture.gateway.is_enrolled("gateway-runtime", "agentA"));
+
+    fixture.gateway.set_enroll_mode(EnrollMode::Accept);
+    let retry = fixture.dsh_command(&["context"], "agentA");
+    let retry_text = rendered(&retry);
+    assert!(retry.status.success(), "{retry_text}");
+    let retry: Value = serde_json::from_slice(&retry.stdout).expect("retry JSON");
+    assert_eq!(retry["result"]["outcome"], "completed", "{retry}");
+    assert_eq!(
+        retry["result"]["snapshot"]["identity"]["worker_id"],
+        worker.as_str(),
+        "{retry}"
+    );
+    assert_eq!(
+        retry["result"]["snapshot"]["binding"]["binding_id"],
+        binding_id.as_str(),
+        "{retry}"
+    );
+    assert_eq!(
+        retry["result"]["snapshot"]["binding"]["endpoint_generation"], generation,
+        "{retry}"
+    );
+    assert_eq!(
+        fixture.registrations(),
+        1,
+        "retrying enrollment must not Register again"
+    );
+    assert_eq!(fixture.gateway.register_peer_requests().len(), 2);
+    assert!(
+        fixture.gateway.is_enrolled("gateway-runtime", "agentA"),
+        "retry must start the canonical receive loop"
+    );
+    let (_, after) = only_identity(&fixture);
+    assert_eq!(after["token"], token.as_str(), "credential changed");
+    assert_eq!(after["runtime"]["binding_id"], binding_id.as_str());
+    assert_eq!(
+        after["runtime"]["endpoint_generation"], generation,
+        "generation changed"
+    );
+    fixture.finish();
+}
+
+#[test]
+fn dsh_context_enrollment_receipt_mismatch_is_explicit_and_retry_recovers() {
+    let mut fixture = Fixture::new_requiring_enrollment();
+    fixture.start_daemon();
+    fixture.gateway.set_enroll_mode(EnrollMode::MismatchBinding);
+    let facts = json!({"dsh":{
+        "endpoint":fixture.gateway.endpoint(),
+        "runtime_id":"gateway-runtime", "agent_id":"agentA",
+        "session_id":"agentA", "cwd":fixture.root
+    }})
+    .to_string();
+    let failed = fixture.command(&["context", "--provide", &facts]);
+    let failed_text = rendered(&failed);
+    assert!(
+        !failed.status.success(),
+        "a mismatched enrollment receipt must not report completion: {failed_text}"
+    );
+    assert!(
+        failed_text.contains("DSH_ENDPOINT_REJECTED"),
+        "the receipt mismatch must be explicit: {failed_text}"
+    );
+    assert_eq!(fixture.registrations(), 1);
+    let (_, before) = only_identity(&fixture);
+    assert!(!fixture.gateway.is_enrolled("gateway-runtime", "agentA"));
+
+    fixture.gateway.set_enroll_mode(EnrollMode::Accept);
+    let retry = fixture.dsh_command(&["context"], "agentA");
+    let retry_text = rendered(&retry);
+    assert!(retry.status.success(), "{retry_text}");
+    assert_eq!(
+        fixture.registrations(),
+        1,
+        "retrying enrollment must not Register again"
+    );
+    assert_eq!(fixture.gateway.register_peer_requests().len(), 2);
+    assert!(
+        fixture.gateway.is_enrolled("gateway-runtime", "agentA"),
+        "retry must start the canonical receive loop"
+    );
+    let (_, after) = only_identity(&fixture);
+    assert_eq!(after["token"], before["token"]);
+    assert_eq!(after["runtime"], before["runtime"]);
+    fixture.finish();
+}
+
+#[test]
 fn dsh_context_recovers_a_gateway_registered_binding_without_cli_archive() {
-    let mut fixture = Fixture::new();
+    let mut fixture = Fixture::new_requiring_enrollment();
     fixture.start_daemon();
     let registered = register(
         &fixture,
@@ -593,7 +944,12 @@ fn dsh_context_recovers_a_gateway_registered_binding_without_cli_archive() {
         .state
         .join("identities/gateway-owned-worker/identity.json")
         .exists());
+    assert!(
+        fixture.gateway.register_peer_requests().is_empty(),
+        "the raw Register operation is not the enrollment path"
+    );
     let count = fixture.registrations();
+    let binding = registered["command"]["binding"].clone();
     let restored = fixture.dsh_command(&["context"], "agentA");
     assert!(
         restored.status.success(),
@@ -608,12 +964,32 @@ fn dsh_context_recovers_a_gateway_registered_binding_without_cli_archive() {
     );
     assert_eq!(
         restored["result"]["snapshot"]["binding"]["binding_id"],
-        registered["command"]["binding"]["binding_id"]
+        binding["binding_id"]
     );
     assert_eq!(fixture.registrations(), count);
     assert_eq!(
         status(&fixture, &fixture.root)["master"]["worker_id"],
         "gateway-owned-worker"
+    );
+    let requests = fixture.gateway.register_peer_requests();
+    assert_eq!(requests.len(), 1, "recovery must enroll the loop once");
+    let params = &requests[0]["params"];
+    assert_eq!(params["runtimeId"], "gateway-runtime");
+    assert_eq!(params["agentId"], "agentA");
+    assert_eq!(params["binding"]["workerId"], "gateway-owned-worker");
+    assert_eq!(
+        params["binding"]["projectScope"],
+        fixture.root.to_string_lossy().as_ref()
+    );
+    let (_, identity) = only_identity(&fixture);
+    assert_runtime_context(params, &identity["runtime"]);
+    assert_eq!(
+        params["binding"]["token"], "gateway-owned-token",
+        "the committed credential must be the one handed to the gateway"
+    );
+    assert!(
+        fixture.gateway.is_enrolled("gateway-runtime", "agentA"),
+        "recovery must start the canonical receive loop"
     );
     fixture.restart_daemon();
     let restored = fixture.dsh_command(&["context"], "agentA");
@@ -623,10 +999,20 @@ fn dsh_context_recovers_a_gateway_registered_binding_without_cli_archive() {
         String::from_utf8_lossy(&restored.stdout),
         String::from_utf8_lossy(&restored.stderr)
     );
+    let restored: Value = serde_json::from_slice(&restored.stdout).expect("recovery JSON");
     assert_eq!(fixture.registrations(), count);
     assert_eq!(
         status(&fixture, &fixture.root)["master"]["worker_id"],
         "gateway-owned-worker"
+    );
+    assert_eq!(
+        fixture.gateway.register_peer_requests().len(),
+        2,
+        "repeated recovery must re-enroll idempotently"
+    );
+    assert_eq!(
+        restored["result"]["snapshot"]["binding"], binding,
+        "recovery must keep the same binding and generation"
     );
     fixture.finish();
 }
@@ -773,7 +1159,7 @@ fn dsh_context_rejects_missing_invalid_and_conflicting_facts_without_registratio
 
 #[test]
 fn dsh_mcp_registers_from_typed_gateway_facts() {
-    let mut fixture = Fixture::new();
+    let mut fixture = Fixture::new_requiring_enrollment();
     fixture.start_daemon();
     let binary = std::env::var_os("COLLAB_TEST_MCP_BINARY")
         .map(PathBuf::from)
@@ -832,6 +1218,15 @@ fn dsh_mcp_registers_from_typed_gateway_facts() {
         "dsh"
     );
     assert!(fixture.registrations() > 0);
+    assert_eq!(
+        fixture.gateway.register_peer_requests().len(),
+        1,
+        "MCP first registration must enroll the canonical receive loop"
+    );
+    assert!(
+        fixture.gateway.is_enrolled("gateway-runtime", "agentB"),
+        "MCP registration must start the canonical receive loop"
+    );
     assert!(
         !text.contains("\"token\""),
         "MCP must not expose stored credentials"

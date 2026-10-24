@@ -2,11 +2,15 @@
 //!
 //! Collab speaks to the dsh-gateway control plane over its NDJSON UNIX socket.
 //! Per the frozen interface (`docs/COLLAB-DSH-CHANNEL-DESIGN.md` section 3.7)
-//! only two methods are ever issued from here:
+//! three methods are ever issued from here:
 //!
 //! - `agent-facts`: the read-only single-response challenge that admits a
 //!   `DshCandidate`, and re-verifies it when a route is resolved.
 //! - `enqueue`: delivers one wake to one agent.
+//! - `register-peer`: hands the already-committed collab identity and binding
+//!   to the selected gateway so it can start or restore the canonical Poll
+//!   receive loop. It is not a second registration owner: the gateway adopts
+//!   the binding instead of calling `Register` back.
 //!
 //! The same control plane also exposes `runtimes`, `agents`, `agent-get`,
 //! `queue`, `hold-ack`, `release-ack`, `interrupt` and `shutdown`. Those are
@@ -38,6 +42,54 @@ pub struct AgentFacts {
     pub session_id: String,
     pub cwd: String,
     pub status: String,
+}
+
+/// The `runtime_context` is the authoritative Collab runtime identity carried
+/// verbatim from the committed `RuntimeBinding`. Its field names match
+/// `ProjectContext.runtime_context`, so the gateway presents exactly what Collab
+/// issued on `Poll`, `Ack`, and `Send`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DshRuntimeContext<'a> {
+    pub agent_id: &'a str,
+    pub runtime_id: &'a str,
+    pub appserver_id: &'a str,
+    pub binding_id: &'a str,
+    pub endpoint_generation: u64,
+    pub session_id: Option<&'a str>,
+    pub native_thread_id: Option<&'a str>,
+}
+
+impl<'a> DshRuntimeContext<'a> {
+    /// Serialize only the canonical Collab runtime-context fields. Gateway
+    /// transport addressing (`runtimeId`/`agentId`) stays outside this object.
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "agent_id": self.agent_id,
+            "runtime_id": self.runtime_id,
+            "appserver_id": self.appserver_id,
+            "binding_id": self.binding_id,
+            "endpoint_generation": self.endpoint_generation,
+            "session_id": self.session_id,
+            "native_thread_id": self.native_thread_id,
+        })
+    }
+}
+
+/// The committed identity and binding collab hands to the selected gateway.
+///
+/// `worker_id`/`token` are the gateway's poll credentials, so this struct is
+/// only ever serialized into the same-user control socket request. It is not a
+/// log, receipt, or business-payload shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DshLoopEnrollment<'a> {
+    /// DSH gateway WebSocket runtime address (`SelectedTransport.namespace`).
+    pub runtime_id: &'a str,
+    /// DSH gateway agent address (`RuntimeBinding.native_thread_id`).
+    pub agent_id: &'a str,
+    pub worker_id: &'a str,
+    pub token: &'a str,
+    pub project_scope: &'a str,
+    pub runtime_context: DshRuntimeContext<'a>,
 }
 
 /// Why a control-plane exchange did not produce a usable answer.
@@ -236,6 +288,13 @@ fn rejected(detail: String) -> ControlError {
     }
 }
 
+fn receipt_mismatch(detail: String) -> ControlError {
+    ControlError::Rejected {
+        code: "receipt-mismatch".into(),
+        detail,
+    }
+}
+
 /// Runs one single-use challenge against the gateway and returns the facts it
 /// reported. The nonce is minted here, echoed by the gateway and checked here,
 /// so the reply is bound to this one challenge.
@@ -274,6 +333,77 @@ pub fn facts(endpoint: &str, runtime_id: &str, agent_id: &str) -> Result<AgentFa
         cwd: field("cwd")?,
         status: field("status")?,
     })
+}
+
+/// Hands the committed collab binding to the selected gateway.
+///
+/// The gateway is the only owner of the canonical Poll receive loop. Collab
+/// remains the only `Register` owner: this call adopts the already-committed
+/// identity instead of minting one. Repeating it is the ordinary recovery
+/// path, so the gateway must answer idempotently.
+pub fn enroll_receive_loop(
+    endpoint: &str,
+    enrollment: &DshLoopEnrollment<'_>,
+) -> Result<(), ControlError> {
+    let result = round_trip(
+        &control_socket(endpoint)?,
+        "register-peer",
+        serde_json::json!({
+            "runtimeId": enrollment.runtime_id,
+            "agentId": enrollment.agent_id,
+            "binding": {
+                "workerId": enrollment.worker_id,
+                "token": enrollment.token,
+                "projectScope": enrollment.project_scope,
+                "runtimeContext": enrollment.runtime_context.to_json(),
+            }
+        }),
+    )?;
+    validate_enrollment_receipt(&result, enrollment)
+}
+
+fn validate_enrollment_receipt(
+    result: &serde_json::Value,
+    enrollment: &DshLoopEnrollment<'_>,
+) -> Result<(), ControlError> {
+    let string_field = |name: &str| -> Result<&str, ControlError> {
+        result
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| receipt_mismatch(format!("register-peer receipt is missing {name}")))
+    };
+    for (name, expected) in [
+        ("runtimeId", enrollment.runtime_id),
+        ("agentId", enrollment.agent_id),
+        ("workerId", enrollment.worker_id),
+        ("projectScope", enrollment.project_scope),
+        ("bindingId", enrollment.runtime_context.binding_id),
+    ] {
+        let actual = string_field(name)?;
+        if actual != expected {
+            return Err(receipt_mismatch(format!(
+                "register-peer receipt {name} {actual} does not match committed {expected}"
+            )));
+        }
+    }
+    let generation = result
+        .get("endpointGeneration")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| {
+            receipt_mismatch("register-peer receipt is missing endpointGeneration".into())
+        })?;
+    if generation != enrollment.runtime_context.endpoint_generation {
+        return Err(receipt_mismatch(format!(
+            "register-peer receipt endpointGeneration {generation} does not match committed {}",
+            enrollment.runtime_context.endpoint_generation
+        )));
+    }
+    if result.get("token").is_some() {
+        return Err(receipt_mismatch(
+            "register-peer receipt must not echo the credential".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Classifies one peer's liveness. `Absent` requires the gateway to say so
@@ -450,4 +580,94 @@ pub fn notify_with_message_id(
         "queued": true,
         "consumed": false
     }))
+}
+
+#[cfg(test)]
+mod enrollment_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn committed() -> DshLoopEnrollment<'static> {
+        DshLoopEnrollment {
+            runtime_id: "rt-gateway",
+            agent_id: "native-thread-A",
+            worker_id: "workerA",
+            token: "tokenA",
+            project_scope: "/project",
+            runtime_context: DshRuntimeContext {
+                agent_id: "workerA",
+                runtime_id: "runtime-collab-A",
+                appserver_id: "appserver-A",
+                binding_id: "binding-1",
+                endpoint_generation: 2,
+                session_id: Some("session-A"),
+                native_thread_id: Some("native-thread-A"),
+            },
+        }
+    }
+
+    fn receipt() -> serde_json::Value {
+        json!({
+            "runtimeId": "rt-gateway",
+            "agentId": "native-thread-A",
+            "workerId": "workerA",
+            "projectScope": "/project",
+            "bindingId": "binding-1",
+            "endpointGeneration": 2
+        })
+    }
+
+    fn is_receipt_mismatch(result: Result<(), ControlError>) -> bool {
+        matches!(
+            result,
+            Err(ControlError::Rejected { code, .. }) if code == "receipt-mismatch"
+        )
+    }
+
+    #[test]
+    fn enrollment_receipt_must_match_the_committed_binding() {
+        let committed = committed();
+        assert!(validate_enrollment_receipt(&receipt(), &committed).is_ok());
+        for (pointer, drifted) in [
+            ("/runtimeId", json!("rt-2")),
+            ("/agentId", json!("agentB")),
+            ("/workerId", json!("workerB")),
+            ("/projectScope", json!("/other")),
+            ("/bindingId", json!("binding-2")),
+            ("/endpointGeneration", json!(3)),
+        ] {
+            let mut result = receipt();
+            *result.pointer_mut(pointer).expect("receipt field") = drifted;
+            assert!(
+                is_receipt_mismatch(validate_enrollment_receipt(&result, &committed)),
+                "{pointer} drift must be rejected"
+            );
+        }
+        let mut missing = receipt();
+        missing.as_object_mut().unwrap().remove("runtimeId");
+        assert!(is_receipt_mismatch(validate_enrollment_receipt(
+            &missing, &committed
+        )));
+        let mut echoed = receipt();
+        echoed["token"] = json!("tokenA");
+        assert!(is_receipt_mismatch(validate_enrollment_receipt(
+            &echoed, &committed
+        )));
+    }
+
+    #[test]
+    fn runtime_context_is_authoritative_and_separate_from_gateway_addressing() {
+        let committed = committed();
+        let context = committed.runtime_context.to_json();
+        assert_eq!(context["agent_id"], "workerA");
+        assert_eq!(context["runtime_id"], "runtime-collab-A");
+        assert_eq!(context["appserver_id"], "appserver-A");
+        assert_eq!(context["binding_id"], "binding-1");
+        assert_eq!(context["endpoint_generation"], 2);
+        assert_eq!(context["session_id"], "session-A");
+        assert_eq!(context["native_thread_id"], "native-thread-A");
+        assert_ne!(context["runtime_id"], committed.runtime_id);
+        assert_ne!(context["agent_id"], committed.agent_id);
+        assert_eq!(context["agent_id"], committed.worker_id);
+    }
 }

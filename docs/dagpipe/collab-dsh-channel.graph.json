@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-dsh-channel",
-  "version": "0.2.0",
-  "description": "DSH 注册后通信的单入口单出口对象流。公开 CLI/MCP context 报告 typed DSH 能力，daemon 将其接入既有 Register。复用已经验证的 gateway 基础通信，不增加首次注册消息挑战。普通身份恢复属于 collab-context 图，直接读取持久身份和绑定，不进入本图的新注册分支。缺事实、拒绝或未知结果作为当前阶段的明确结果向后传递，不产生后续副作用；仅已提交注册进入实际消息收发。成功终点区分入队、adaptor 接受、接收、回复和消费。相同 session 的显式 API 冲突不覆盖旧身份、角色或工作。全局 daemon 与 tmux 生命周期不属于本图。",
+  "version": "0.3.0",
+  "description": "DSH 注册后通信的单入口单出口对象流。公开 CLI/MCP context 报告 typed DSH 能力，daemon 将其接入既有 Register。复用已经验证的 gateway 基础通信，不增加首次注册消息挑战。普通身份恢复属于 collab-context 图，直接读取持久身份和绑定，不重新 Register；本图仍在其已提交 identity/binding 上恢复 gateway canonical 接收循环。缺事实、拒绝或未知结果作为当前阶段的明确结果向后传递，不产生后续副作用；仅已提交注册进入实际消息收发。成功终点区分入队、adaptor 接受、接收、回复和消费。相同 session 的显式 API 冲突不覆盖旧身份、角色或工作。全局 daemon 与 tmux 生命周期不属于本图。",
   "inputs": [
     {
       "id": "dsh_registration_intent",
@@ -65,11 +65,22 @@
       "iterator": "Whole"
     },
     {
+      "id": "enroll_receive_loop",
+      "description": "持久 binding 提交后，经所选可信同用户 gateway control socket 的 register-peer 把已提交身份与 binding 交给 gateway，由 gateway 建立或恢复唯一 canonical Poll 接收循环。普通恢复重复调用幂等，不产生新的 Register，不要求通信挑战。拒绝、超时、协议错误或回执不匹配保留已提交身份、角色与 route，并显式失败；token 只交给该 socket，不写入回执、日志或业务元数据。",
+      "operator": "appsdk.collab_dsh_channel.enroll_receive_loop",
+      "operator_version": "1",
+      "inputs": ["subscription_state"],
+      "output": {"id": "enrolled_loop_state", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
       "id": "project_presence",
       "description": "context 返回当前身份与项目状态，身份有效性与通信可达性分别投影。",
       "operator": "appsdk.collab_dsh_channel.project_presence",
       "operator_version": "1",
-      "inputs": ["subscription_state"],
+      "inputs": ["enrolled_loop_state"],
       "output": {"id": "presence_projection", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
       "output_selector": {"include": [], "exclude": [], "predicate": null},
@@ -77,7 +88,7 @@
     },
     {
       "id": "deliver_wake",
-      "description": "注册后的真实消息经 daemon 持久 mailbox 与 gateway enqueue 唤醒；接受回执不冒充接收或消费。",
+      "description": "注册后的真实消息经 daemon 持久 mailbox 与 gateway enqueue 唤醒已登记的 canonical Poll 循环；signalReceive 只提示该循环，消息正文由 Poll 取得并经 agent/notify 交付、ReceiveCommitted 消费。enqueue 接受回执不冒充接收或消费。",
       "operator": "appsdk.collab_dsh_channel.deliver_wake",
       "operator_version": "1",
       "inputs": ["presence_projection"],
@@ -103,7 +114,8 @@
     {"from": "admit_dsh_transport", "to": "bind_and_receipt", "arc_id": "admitted_transport"},
     {"from": "bind_and_receipt", "to": "publish_route", "arc_id": "registration_receipt"},
     {"from": "publish_route", "to": "arm_default_lease", "arc_id": "route_address"},
-    {"from": "arm_default_lease", "to": "project_presence", "arc_id": "subscription_state"},
+    {"from": "arm_default_lease", "to": "enroll_receive_loop", "arc_id": "subscription_state"},
+    {"from": "enroll_receive_loop", "to": "project_presence", "arc_id": "enrolled_loop_state"},
     {"from": "project_presence", "to": "deliver_wake", "arc_id": "presence_projection"},
     {"from": "deliver_wake", "to": "send_to_peer", "arc_id": "wake_evidence"}
   ],

@@ -574,6 +574,121 @@ fn must_refuse(reply: &Value) {
 }
 
 #[test]
+fn dsh_context_discovers_first_registration_and_preserves_current_route_recovery() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut fixture = Fixture::new_requiring_enrollment();
+    fixture.start_daemon();
+    let capability = fixture.state.join("runtime/dsh/gateway-control.json");
+    std::fs::create_dir_all(capability.parent().unwrap()).unwrap();
+    std::fs::write(
+        &capability,
+        json!({"version":1,
+        "control_socket":fixture.gateway.socket,"pid":std::process::id()})
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::set_permissions(&capability, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let output = fixture.dsh_command(&["context"], "agentA");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["result"]["outcome"], "completed", "{response}");
+    assert_eq!(
+        response["result"]["snapshot"]["identity"]["transport"]["kind"],
+        "dsh"
+    );
+    assert_eq!(fixture.registrations(), 1);
+    assert!(!fixture.gateway.register_peers.lock().unwrap().is_empty());
+    let initial = only_identity(&fixture);
+    let repeated = fixture.dsh_command(&["context"], "agentA");
+    assert!(repeated.status.success());
+    assert_eq!(fixture.registrations(), 1);
+    // A current route, not a local archive, controls recovery. Even a broken
+    // bootstrap declaration must not replace its committed gateway endpoint.
+    std::fs::write(&capability, "invalid bootstrap declaration").unwrap();
+    *fixture.gateway.current_runtime.lock().unwrap() = Some("new-runtime".into());
+    let recovered = fixture.dsh_command(&["context"], "agentA");
+    assert!(
+        recovered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recovered.stderr)
+    );
+    let response: Value = serde_json::from_slice(&recovered.stdout).unwrap();
+    assert_eq!(response["result"]["outcome"], "completed", "{response}");
+    let restored = only_identity(&fixture);
+    assert_eq!(restored.0, initial.0);
+    assert_eq!(restored.1["token"], initial.1["token"]);
+    assert_eq!(
+        restored.1["runtime"]["binding_id"],
+        initial.1["runtime"]["binding_id"]
+    );
+    assert_eq!(restored.1["transport"]["namespace"], "new-runtime");
+    assert_eq!(
+        restored.1["runtime"]["endpoint_generation"]
+            .as_u64()
+            .unwrap(),
+        initial.1["runtime"]["endpoint_generation"]
+            .as_u64()
+            .unwrap()
+            + 1
+    );
+    fixture.finish();
+}
+
+#[test]
+fn dsh_bootstrap_discovery_rejects_invalid_capabilities_without_registration() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut fixture = Fixture::new();
+    fixture.start_daemon();
+    let capability = fixture.state.join("runtime/dsh/gateway-control.json");
+    std::fs::create_dir_all(capability.parent().unwrap()).unwrap();
+    std::fs::write(
+        &capability,
+        json!({"version":1,
+        "control_socket":fixture.gateway.socket,"pid":std::process::id()})
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::set_permissions(&capability, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let unsafe_file = fixture.dsh_command(&["context"], "agentA");
+    assert!(
+        !unsafe_file.status.success(),
+        "unsafe declaration must fail explicitly"
+    );
+    assert!(String::from_utf8_lossy(&unsafe_file.stderr).contains("DSH_CONTROL_CAPABILITY"));
+    std::fs::set_permissions(&capability, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let unknown = fixture.dsh_command(&["context"], "unknown-agent");
+    assert!(!unknown.status.success());
+    let mut other = Fixture::new();
+    std::fs::write(
+        &capability,
+        json!({"version":1,"control_socket":other.gateway.socket,"pid":std::process::id()})
+            .to_string(),
+    )
+    .unwrap();
+    let wrong_project = fixture.dsh_command(&["context"], "agentA");
+    assert!(!wrong_project.status.success());
+    assert!(String::from_utf8_lossy(&wrong_project.stderr).contains("project mismatch"));
+    assert!(other.gateway.register_peers.lock().unwrap().is_empty());
+    other.finish();
+    std::fs::write(
+        &capability,
+        json!({"version":1,
+        "control_socket":fixture.root.join("missing.sock"),"pid":std::process::id()})
+        .to_string(),
+    )
+    .unwrap();
+    let dead = fixture.dsh_command(&["context"], "agentA");
+    assert!(!dead.status.success());
+    assert_eq!(fixture.registrations(), 0);
+    assert!(fixture.gateway.register_peers.lock().unwrap().is_empty());
+    fixture.finish();
+}
+
+#[test]
 fn dsh_context_registers_from_typed_gateway_facts() {
     let mut fixture = Fixture::new();
     fixture.start_daemon();
@@ -1270,8 +1385,19 @@ fn dsh_context_rejects_missing_invalid_and_conflicting_facts_without_registratio
 
 #[test]
 fn dsh_mcp_registers_from_typed_gateway_facts() {
+    use std::os::unix::fs::PermissionsExt;
     let mut fixture = Fixture::new_requiring_enrollment();
     fixture.start_daemon();
+    let capability = fixture.state.join("runtime/dsh/gateway-control.json");
+    std::fs::create_dir_all(capability.parent().unwrap()).unwrap();
+    std::fs::write(
+        &capability,
+        json!({"version":1,
+        "control_socket":fixture.gateway.socket,"pid":std::process::id()})
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::set_permissions(&capability, std::fs::Permissions::from_mode(0o600)).unwrap();
     let binary = std::env::var_os("COLLAB_TEST_MCP_BINARY")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_collab-mcp")));
@@ -1295,10 +1421,7 @@ fn dsh_mcp_registers_from_typed_gateway_facts() {
         input,
         "{}",
         json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
-            "name":"collab_context","arguments":{"provide":{"dsh":{
-                "endpoint":fixture.gateway.endpoint(), "runtime_id":"gateway-runtime",
-                "agent_id":"agentB", "session_id":"agentB", "cwd":fixture.root
-            }}}
+            "name":"collab_context","arguments":{}
         }})
     )
     .unwrap();

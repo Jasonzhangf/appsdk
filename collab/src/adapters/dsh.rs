@@ -35,6 +35,61 @@ use std::time::Duration;
 /// from its in-memory registry, so two seconds is already generous.
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Gateway placement only. Identity and runtime facts still come from the
+/// live scoped resolve-agent response, never this declaration.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ControlCapability {
+    version: u32,
+    control_socket: String,
+    pid: u32,
+}
+
+pub fn discover_bootstrap_candidate(
+    state_root: &Path,
+    session: &str,
+    cwd: &Path,
+) -> anyhow::Result<Option<crate::proto::DshCandidate>> {
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let path = state_root.join("runtime/dsh/gateway-control.json");
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => anyhow::bail!("DSH_CONTROL_CAPABILITY_UNAVAILABLE: {error}"),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o077 != 0
+    {
+        anyhow::bail!("DSH_CONTROL_CAPABILITY_UNSAFE: expected a private user-owned file");
+    }
+    let mut bytes = Vec::new();
+    file.take(4097).read_to_end(&mut bytes)?;
+    if bytes.len() > 4096 {
+        anyhow::bail!("DSH_CONTROL_CAPABILITY_INVALID: declaration exceeds 4 KiB");
+    }
+    let capability: ControlCapability = serde_json::from_slice(&bytes)
+        .map_err(|error| anyhow::anyhow!("DSH_CONTROL_CAPABILITY_INVALID: {error}"))?;
+    if capability.version != 1 || capability.pid == 0 {
+        anyhow::bail!("DSH_CONTROL_CAPABILITY_INVALID: invalid version or publisher");
+    }
+    let endpoint = format!("unix://{}", capability.control_socket);
+    let facts = resolve_agent(&endpoint, session, session, cwd)?;
+    Ok(Some(crate::proto::DshCandidate {
+        endpoint,
+        runtime_id: facts.runtime_id,
+        agent_id: facts.agent_id,
+        session_id: facts.session_id,
+        cwd: facts.cwd,
+    }))
+}
+
 /// The facts one `agent-facts` response carries. All five fields arrive in the
 /// same response, which is what keeps them a single evidence group (design D3).
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -448,7 +448,7 @@ fn design_graph_ids() -> [&'static str; 26] {
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 127] {
+fn design_graph_operator_names() -> [&'static str; 128] {
     [
         "collab.work_roles.resolve_identity",
         "collab.work_roles.validate_specialties",
@@ -506,6 +506,7 @@ fn design_graph_operator_names() -> [&'static str; 127] {
         "appsdk.collab_dsh_channel.bind_and_receipt",
         "appsdk.collab_dsh_channel.build_dsh_candidate",
         "appsdk.collab_dsh_channel.deliver_wake",
+        "appsdk.collab_dsh_channel.enroll_receive_loop",
         "appsdk.collab_dsh_channel.project_presence",
         "appsdk.collab_dsh_channel.publish_route",
         "appsdk.collab_dsh_channel.send_to_peer",

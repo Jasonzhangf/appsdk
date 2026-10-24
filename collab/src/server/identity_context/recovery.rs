@@ -1099,7 +1099,11 @@ impl ProjectRuntimeManager {
         facts = self.observe_identity_facts(&context, &facts)?;
         validate_facts(&facts)?;
         let scope = Scope { root };
-        let required = required_fields(&facts);
+        let required = if self.has_current_desktop_binding(&context, &facts)? {
+            Vec::new()
+        } else {
+            required_fields(&facts)
+        };
         if !required.is_empty() {
             let descriptions = json!({
                 "session_id": "Current runtime session identifier",

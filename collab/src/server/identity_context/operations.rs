@@ -1137,7 +1137,8 @@ impl ProjectRuntimeManager {
         validate_facts(&facts).map_err(PreflightIdentityError::Error)?;
         // Preserve the existing pane recovery contract. Native communication
         // facts must come from this invocation, never the saved transport.
-        let mut required = if self.has_persisted_pane_route(context, &facts) {
+        let mut required = if self.has_persisted_pane_route(context, &facts)
+            || self.has_current_desktop_binding(context, &facts).map_err(PreflightIdentityError::Error)? {
             Vec::new()
         } else {
             required_fields(&facts)

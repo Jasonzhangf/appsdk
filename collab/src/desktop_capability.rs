@@ -15,6 +15,19 @@ struct Declaration {
     desktop_bridge: AppServerCandidate,
 }
 
+/// Publication absence is not evidence that a registered native capability
+/// disappeared. Keep this typed so lifecycle callers never classify logs.
+#[derive(Debug)]
+pub struct DeclarationMissing;
+
+impl std::fmt::Display for DeclarationMissing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DESKTOP_BRIDGE_CAPABILITY_REQUIRED: no current enrolled bridge declaration")
+    }
+}
+
+impl std::error::Error for DeclarationMissing {}
+
 fn owned(file: &File, directory: bool) -> anyhow::Result<()> {
     let metadata = file.metadata()?;
     if metadata.uid() != unsafe { libc::geteuid() }
@@ -41,9 +54,7 @@ fn open_child(parent: &File, name: &std::ffi::OsStr, directory: bool) -> anyhow:
     if descriptor < 0 {
         let error = std::io::Error::last_os_error();
         if error.kind() == std::io::ErrorKind::NotFound {
-            anyhow::bail!(
-                "DESKTOP_BRIDGE_CAPABILITY_REQUIRED: no current enrolled bridge declaration"
-            );
+            return Err(DeclarationMissing.into());
         }
         anyhow::bail!("DESKTOP_BRIDGE_DECLARATION_UNAVAILABLE: {error}");
     }

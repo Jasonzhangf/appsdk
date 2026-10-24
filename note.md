@@ -472,3 +472,20 @@ CI 和本地单例通过，失败 job 按原断言重跑后通过。原错和各
 结案规则审计无需新增全局规则或修改受管记忆。详细计划、原错、验证、Review 和资源
 核销记录在 `/Volumes/Intel/playground/appsdk/plan-runs/collab-work-roles-20261023/`。
 本轮没有执行全局安装或 daemon 重启；用户当前运行进程是否加载新功能未验证。
+
+## 2026-10-23 DSH 注册与 canonical 接收循环接入
+
+NNAnything 的 Bob、Carol 已在 Collab 注册，但 gateway 未持有接收绑定，原消息被
+`collab-not-registered: no canonical receive loop` 拒绝。本轮让 context 在已提交绑定上
+建立 gateway 接收循环；首次注册与恢复都交接完整 typed runtime context，不增加第二次
+Register。enrollment 失败保留身份、角色、route 和任务，允许 context 重试。
+
+配套 gateway 修复持久绑定接管、同 runtime 重启恢复及并发循环启动。两侧 runtime ID
+分别保存；legacy 地址从当前权威 transport 读取。公开 DSH 消费者9例、enrollment单测
+2例、gateway canonical48例通过。完整 daemon161通过、11项需外部服务的测试跳过；
+新增真实 Collab CLI + gateway 组合黑盒覆盖注册、canonical消费、关联回复、恢复及
+gateway重启，Register总数保持2。Gemini4 medium独立整体Review无finding。
+
+本条记录的是源码候选验收。正式安装、用户管理服务加载及 NNAnything 实际会话验收
+分别记录在 `/Users/fanzhang/.collab/runs/dsh-full-channel-20261023/note.md`，不以本条
+记录代替运行证据。无全局daemon或tmux生命周期操作。

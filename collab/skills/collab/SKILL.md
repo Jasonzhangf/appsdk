@@ -5,6 +5,38 @@ description: "仅约束已成功注册 Collab 的 peer；master 权限需另行�
 
 # Collab
 
+## 通信入口与项目目录
+
+普通消息默认走公开 CLI。使用成功注册时的项目根目录；业务代码可以在独占
+worktree 中修改，但不要为查身份或发消息切到 `~`、临时目录或收件人的项目。
+已关联的同项目 worktree 可由 Collab 解析；目录不确定时，回到已知注册项目根目录。
+已有身份和收件人时直接发送，不先重跑 context、收件或通信恢复。
+`collab context`、`collab inbox` 和 `collab sendmessage` 都是公开 CLI，
+不是私有命令。内部控制协议与公开 CLI 的边界不同，不要把 shell 调用本身视为违规。
+同项目的 Alice、Jenny 等已注册名字就是收件地址，不需要额外的聊天、thread、
+teammate 或 worker 标识；不知道这些内部标识不构成转请 master 代发的理由。
+
+| 操作 | 使用入口 |
+| --- | --- |
+| 首次注册或明确恢复身份 | 在自己的项目运行 `collab context` |
+| 同项目发送或通知 reviewer | `collab sendmessage --to '<稳定名字或真实from>' --subject '<主题>' '<正文>'`；例如同项目 Alice 可直接用 `--to Alice`，不需要先找内部 worker ID 或让 master 转发 |
+| 回复原请求 | 同一发送命令，原消息确有 ID 时加 `--in-reply-to '<原消息ID>'`；没有 ID 不猜、不查内部信箱找值 |
+| DSH 收件 | gateway 将完整正文送入原生回合；直接处理和回信，不运行 `recv/ack` |
+| 非 DSH 收件 | 按本 Skill 的 `collab recv` 流程消费 |
+| 确实跨项目 | 沿下文 master-to-master 通道；普通 peer 交给自己的 master |
+
+需要显式固定目录时，整条命令是：
+`(cd '<已注册项目根目录>' && collab sendmessage --to 'Alice' --subject '<主题>' '<正文>')`。
+CLI 正文是位置参数，不是 `--body`。DSH 若暴露 `collab_send`，它也是公开的宿主
+发送工具，JSON `body` 属于该工具参数；不要与 CLI 参数或内部控制协议混用。
+不要因一次错误在 CLI、MCP、宿主工具和内部 socket 之间试探切换。
+
+`context` 和 `inbox` 中的身份拒绝首先涉及当前发件人及其项目，不能据此认定
+Alice 等收件人不存在。若 `resolve-agent` 错误列出自己的 session 和错误目录
+（例如 `/Users/…`），先回已注册项目目录，使用同一公开入口；不要重新注册、
+查 journal/route/token，或调用 `register-peer`、`resolve-agent`、`Poll/Ack` 修身份。
+在正确项目仍失败时，保留原命令、项目、错误和已有消息 ID，报告具体失败边界。
+
 ## 协作请求的执行、回复与接续
 
 收到通知后读取完整原消息，区分请求中的 action、回复要求和普通信息。有已授权 action

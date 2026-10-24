@@ -439,6 +439,7 @@ fn mutation_blocked_during_migration(req: &Req) -> bool {
         | Req::WorkerClose { .. }
         | Req::WorkerName { .. }
         | Req::WorkRolesSet { .. }
+        | Req::WorkflowTemplateSet { .. }
         | Req::ResetBindings { .. } => true,
         Req::Register { .. }
         | Req::IdentityContext { .. }
@@ -491,6 +492,9 @@ fn wire_mutation_principal(req: &Req) -> Option<(&str, &str)> {
         Req::Board { worker_id, token, .. }
         | Req::WorkerName { worker_id, token, .. }
         | Req::WorkRolesSet { worker_id, token, .. }
+        | Req::WorkflowTemplateSet {
+            worker_id, token, ..
+        }
         | Req::Register {
             worker_id, token, ..
         }

@@ -49,9 +49,11 @@ I/O and current endpoint errors remain explicit.
 
 The installed binary resolves host-wide Collab state under `$HOME/.collab`;
 `COLLAB_STATE_DIR` is for isolated tests. This owner includes identity, routes,
-mailboxes and daemon runtime state. Project-local `.agent-collab/` may be a
-discovery or legacy input. Context and the server own its compatibility; it is
-not a second independent host truth. AppSDK `.appsdk/` and `.appsdk-control/`
+mailboxes and daemon runtime state. Project-local `.agent-collab/` may provide
+project discovery. Its retired server journals and mailbox files are not imported
+or replayed into the current runtime and remain on disk. Historical identity
+compatibility within the current central store remains context-owned;
+project-local state is not a second host truth. AppSDK `.appsdk/` and `.appsdk-control/`
 belong to AppSDK and are outside Collab recovery.
 
 Never manually delete journals, mailbox files, identity tokens or route state.

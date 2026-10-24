@@ -1,5 +1,11 @@
 # Collab v1 verification map
 
+Native immediate delivery: `notification_batch_tests::native_notifications_do_not_wait*`
+covers DSH/Desktop default notifications without the aggregation window and new
+messages while prior deliveries remain unconsumed. `desktop_bridge_public_contract`
+covers consecutive public CLI sends through the real daemon and bridge protocol.
+Native acceptance remains separate from consumption; transport failures remain explicit.
+
 The name/session, activity and mailbox contracts below have dedicated source and
 public-consumer gates. Installed binary and global-daemon activation require
 separate evidence. Existing display-label tests remain label tests only.

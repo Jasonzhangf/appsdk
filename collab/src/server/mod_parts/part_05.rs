@@ -766,7 +766,11 @@ fn attempt_tmux_notification_with_retry(
                 && !state.handoff_wake_pending(message)
         })
         .count();
-    if unacked_notifications >= server.config.notifications.max_unacked as usize {
+    // Native hosts accept input while their agent is busy. Consumption of an
+    // earlier message must not hold a new message outside that input boundary.
+    if !matches!(transport.kind, TransportKind::Dsh | TransportKind::DesktopBridge)
+        && unacked_notifications >= server.config.notifications.max_unacked as usize
+    {
         return NotificationAttempt::NotAttempted(
             "recipient has too many unacked notifications".into(),
         );
@@ -1157,6 +1161,19 @@ fn notification_delivery_delay_ms(
     event: &str,
     config: &crate::config::Notifications,
 ) -> i64 {
+    // These native channels own scheduling after acceptance; the daemon must
+    // not add a notification aggregation window before it submits their input.
+    if state
+        .msgs
+        .get(message_id)
+        .and_then(|message| state.workers.get(&message.to))
+        .and_then(selected_transport_for_worker)
+        .is_some_and(|transport| {
+            matches!(transport.kind, TransportKind::Dsh | TransportKind::DesktopBridge)
+        })
+    {
+        return 0;
+    }
     if state
         .delivery_modes
         .get(message_id)

@@ -142,6 +142,67 @@ fn publish_capability(fixture: &Fixture, bridge: &DesktopBridgeFixture) -> PathB
 }
 
 #[test]
+fn consecutive_desktop_sends_do_not_wait_for_recipient_consumption() {
+    let fixture = Fixture::without_tmux("desktop-immediate-burst");
+    let runtime = fixture.host_state.join("runtime/desktop");
+    let bridge = DesktopBridgeFixture::start_at(&fixture.root, &runtime);
+    publish_capability(&fixture, &bridge);
+    let enrolled = desktop_command(&fixture, &["context"]);
+    assert!(enrolled.status.success());
+    let enrolled: Value = serde_json::from_slice(&enrolled.stdout).unwrap();
+    let worker = enrolled["result"]["snapshot"]["identity"]["worker_id"]
+        .as_str()
+        .unwrap();
+    for index in 0..5 {
+        let subject = format!("immediate-burst-{index}");
+        let sent = desktop_command(
+            &fixture,
+            &[
+                "sendmessage",
+                "--to",
+                worker,
+                "--subject",
+                &subject,
+                "deliver without waiting for prior consumption",
+            ],
+        );
+        assert!(
+            sent.status.success(),
+            "{}",
+            String::from_utf8_lossy(&sent.stderr)
+        );
+        assert!(
+            bridge
+                .sends
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|text| text.contains(&subject)),
+            "native send must happen before the public command returns"
+        );
+    }
+    let received = desktop_command(
+        &fixture,
+        &[
+            "recv",
+            "--timeout",
+            "0",
+            "--receive-id",
+            "immediate-burst-consumption",
+        ],
+    );
+    assert!(
+        received.status.success(),
+        "{}",
+        String::from_utf8_lossy(&received.stderr)
+    );
+    let received = String::from_utf8_lossy(&received.stdout);
+    for index in 0..5 {
+        assert!(received.contains(&format!("immediate-burst-{index}")));
+    }
+}
+
+#[test]
 fn missing_desktop_publication_preserves_live_capability_and_identity() {
     let fixture = Fixture::without_tmux("desktop-missing-live");
     let runtime = fixture.host_state.join("runtime/desktop");
@@ -459,7 +520,9 @@ printf '%s' "$?" >"$PROJECT_ROOT/desktop-marker.exit"
 "#,
     );
     assert!(
-        wait_until(Duration::from_secs(15), || exit.exists()),
+        wait_until(Duration::from_secs(15), || {
+            std::fs::read_to_string(&exit).is_ok_and(|code| !code.is_empty())
+        }),
         "{}",
         consumer.output()
     );

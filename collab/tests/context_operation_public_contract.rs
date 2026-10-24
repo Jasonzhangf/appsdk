@@ -584,7 +584,10 @@ fn lifecycle_read(fixture: &Fixture, identity: &Value, target: Option<&str>) -> 
     )
 }
 
-fn lifecycle_surfaces(fixture: &Fixture, identity: &Value) -> (Vec<u8>, Vec<Value>, Vec<u8>, Value) {
+fn lifecycle_surfaces(
+    fixture: &Fixture,
+    identity: &Value,
+) -> (Vec<u8>, Vec<Value>, Vec<u8>, Value) {
     let leases = lifecycle_wire(
         fixture,
         identity,

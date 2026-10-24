@@ -795,11 +795,21 @@ fn available_context_restores_identity_without_register_or_pid_change() {
 // Presence and ledger timers may append observations while context is read.
 // Compare the registration owner events that this test promises not to repeat.
 fn registration_events(bytes: &[u8]) -> Vec<Value> {
-    std::str::from_utf8(bytes).unwrap().lines()
+    std::str::from_utf8(bytes)
+        .unwrap()
+        .lines()
         .map(|line| serde_json::from_str::<Value>(line).unwrap())
-        .filter(|event| !matches!(event["ev"].as_str(),
-            Some("AgentPresenceObserved" | "AgentActivityObserved"
-                | "GlobalRuntimeBindingLedgerClassified" | "GlobalLedgerScanReceiptRecorded")))
+        .filter(|event| {
+            !matches!(
+                event["ev"].as_str(),
+                Some(
+                    "AgentPresenceObserved"
+                        | "AgentActivityObserved"
+                        | "GlobalRuntimeBindingLedgerClassified"
+                        | "GlobalLedgerScanReceiptRecorded"
+                )
+            )
+        })
         .collect()
 }
 

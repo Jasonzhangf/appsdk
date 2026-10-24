@@ -309,6 +309,7 @@ fn project_journal_for_root(fixture: &Fixture, root: &std::path::Path) -> std::p
 }
 
 fn project_journal_excluding(fixture: &Fixture, excluded: &std::path::Path) -> std::path::PathBuf {
+    let excluded = std::fs::canonicalize(excluded).expect("canonical excluded project journal");
     fn visit(
         path: &std::path::Path,
         excluded: &std::path::Path,
@@ -329,7 +330,7 @@ fn project_journal_excluding(fixture: &Fixture, excluded: &std::path::Path) -> s
     let mut journals = Vec::new();
     visit(
         &fixture.host_state.join("projects"),
-        excluded,
+        &excluded,
         &mut journals,
     );
     assert_eq!(

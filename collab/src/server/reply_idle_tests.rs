@@ -72,6 +72,8 @@ fn seed_obligation(server: &Server, message_id: &str, from: &str, policy: ReplyP
         obligation: ReplyObligation {
             message_id: message_id.into(),
             project,
+            from_project: None,
+            from_ceo: false,
             from_worker_id: from.into(),
             from_name: Some(from.into()),
             recipient_worker_id: "worker".into(),
@@ -121,6 +123,44 @@ fn idle_episode(server: &Server, now: i64) {
     tick_at(server, now);
     observe(server, "worker", AgentActivity::Idle, "current");
     tick_at(server, now + 1);
+}
+
+#[test]
+fn cross_project_idle_reminder_uses_ceo_reply_entry() {
+    let (server, root) = setup();
+    seed_obligation(
+        &server,
+        "ceo-request",
+        "global-ceo",
+        ReplyPolicy::OnCompletion,
+    );
+    let mut obligation = server.state.lock().unwrap().reply_obligations["ceo-request"].clone();
+    obligation.from_project = Some("/workspace".into());
+    obligation.from_ceo = true;
+    server.commit(&[Event::ReplyObligationSet { obligation }]);
+    idle_episode(&server, now_ms());
+    let notices = reminders(&server);
+    assert_eq!(notices.len(), 1);
+    let body = &notices[0].body;
+    assert!(
+        body.contains("collab ceo reply"),
+        "cross-project reminder used a local reply address: {body}"
+    );
+    assert!(!body.contains("collab sendmessage"), "{body}");
+    assert!(
+        body.contains("ceo-request") && body.contains("on_completion"),
+        "{body}"
+    );
+    assert!(
+        server
+            .state
+            .lock()
+            .unwrap()
+            .reply_obligations
+            .contains_key("ceo-request"),
+        "a reminder must not clear the obligation"
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

@@ -1,0 +1,15 @@
+{
+  "id": "collab-ceo-coordination",
+  "version": "1",
+  "description": "全局CEO请求单入口单出口：认证当前来源与全局授权，解析已注册项目当前master，提交所属owner的授权/任务/消息/回复标记，提交即时通知并返回真实回执。Status只读授权状态，Progress只读既有任务板；拒绝、部分提交或未就绪均携明确结果到出口，不执行后续副作用。CEO授权唯一存host state，不改变项目master合同；任务仅存目标board，原消息回复标记只在正确master的持久回信后清除。对应设计collab/docs/design/ceo-coordination.md，源码映射server/ceo.rs、part_04/runtime.rs、state reducer、公开CLI main_ceo.rs。",
+  "inputs": [{"id":"ceo_request","schema":"Object"}],
+  "nodes": [
+    {"id":"authenticate_source","operator":"collab.ceo.authenticate","operator_version":"1","inputs":["ceo_request"],"output":{"id":"authenticated_request","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"resolve_project_master","operator":"collab.ceo.resolve","operator_version":"1","inputs":["authenticated_request"],"output":{"id":"resolved_request","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"commit_owned_effect","operator":"collab.ceo.commit","operator_version":"1","inputs":["resolved_request"],"output":{"id":"durable_outcome","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"submit_notification","operator":"collab.ceo.notify","operator_version":"1","inputs":["durable_outcome"],"output":{"id":"observed_outcome","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"return_receipt","operator":"collab.ceo.receipt","operator_version":"1","inputs":["observed_outcome"],"output":{"id":"ceo_receipt","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"}
+  ],
+  "edges":[{"from":"authenticate_source","to":"resolve_project_master","arc_id":"authenticated_request"},{"from":"resolve_project_master","to":"commit_owned_effect","arc_id":"resolved_request"},{"from":"commit_owned_effect","to":"submit_notification","arc_id":"durable_outcome"},{"from":"submit_notification","to":"return_receipt","arc_id":"observed_outcome"}],
+  "outputs":["ceo_receipt"]
+}

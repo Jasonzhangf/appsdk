@@ -13,6 +13,8 @@ fn obligation(
     ReplyObligation {
         message_id: message_id.into(),
         project: project.into(),
+        from_project: None,
+        from_ceo: false,
         from_worker_id: from.into(),
         from_name: None,
         recipient_worker_id: recipient.into(),

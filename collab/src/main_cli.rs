@@ -234,6 +234,122 @@ pub(crate) enum MasterCmd {
 }
 
 #[derive(Subcommand)]
+pub(crate) enum CeoCmd {
+    /// Read the host-wide CEO grant and suggested default workspace
+    Status,
+    /// Promote the current registered agent to the host-wide CEO
+    Promote {
+        /// The user's exact approval text
+        #[arg(long)]
+        approval: String,
+        /// Existing registered workspace; defaults to the current source root
+        #[arg(long)]
+        workspace: Option<std::path::PathBuf>,
+    },
+    /// Clear the host-wide CEO grant
+    Clear {
+        /// The user's exact approval text
+        #[arg(long)]
+        approval: String,
+    },
+    /// Send a durable request to the current master of another project
+    Send {
+        #[arg(long)]
+        project: std::path::PathBuf,
+        /// Stable recipient name; defaults to the target project's current master
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long)]
+        subject: String,
+        #[arg(long = "in-reply-to")]
+        in_reply_to: Option<String>,
+        /// Track an obligation: the recipient must reply to this message.
+        #[arg(long, conflicts_with = "reply_on_completion")]
+        reply_required: bool,
+        /// Track an obligation: reply once the delegated work is complete.
+        #[arg(long, conflicts_with = "reply_required")]
+        reply_on_completion: bool,
+        #[arg(required = true, trailing_var_arg = true)]
+        body: Vec<String>,
+    },
+    /// Create a board task owned by the target project's current master
+    AppendTask {
+        #[arg(long)]
+        project: std::path::PathBuf,
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        description: String,
+        #[arg(long = "delivery-condition")]
+        delivery_condition: String,
+        #[arg(long = "test-condition")]
+        test_condition: String,
+        /// Owner-local priority: p0 (highest) through p4
+        #[arg(long, default_value = "p1")]
+        priority: String,
+        /// Track an obligation: the recipient must reply to this request.
+        #[arg(long, conflicts_with = "reply_on_completion")]
+        reply_required: bool,
+        /// Track an obligation: reply once the delegated work is complete.
+        #[arg(long, conflicts_with = "reply_required")]
+        reply_on_completion: bool,
+    },
+    /// Reply as the current project master to the current host-wide CEO
+    Reply {
+        #[arg(long)]
+        subject: String,
+        #[arg(long = "in-reply-to")]
+        in_reply_to: Option<String>,
+        #[arg(required = true, trailing_var_arg = true)]
+        body: Vec<String>,
+    },
+    /// Read the CEO grant, target masters, boards and pending reply markers
+    Progress {
+        /// Limit progress to one registered project
+        #[arg(long)]
+        project: Option<std::path::PathBuf>,
+    },
+    /// Prepare and launch one real Codex master in an existing tmux endpoint
+    BootstrapMaster {
+        #[arg(long)]
+        project: std::path::PathBuf,
+        /// The user's exact approval text for the new master
+        #[arg(long)]
+        approval: String,
+        /// Codex profile for the new agent
+        #[arg(long, default_value = "gcm")]
+        profile: String,
+        /// Existing tmux socket; this command never starts a server
+        #[arg(long = "tmux-socket")]
+        tmux_socket: std::path::PathBuf,
+        /// Existing tmux session name
+        #[arg(long = "tmux-session")]
+        tmux_session: String,
+        /// Retained operation ID for an idempotent retry
+        #[arg(long = "op")]
+        operation_id: Option<String>,
+    },
+    /// Cancel one retained bootstrap intent after explicit user confirmation; no process is stopped
+    BootstrapCancel {
+        #[arg(long = "op")]
+        operation_id: String,
+        #[arg(long)]
+        approval: String,
+    },
+    /// Record one real target master's CEO handshake
+    BootstrapReady {
+        #[arg(long = "op")]
+        operation_id: String,
+        #[arg(long)]
+        subject: String,
+        #[arg(required = true, trailing_var_arg = true)]
+        body: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
 pub(crate) enum RouteCmd {
     /// Resolve the route bound to the current tmux session and pane
     Resolve {
@@ -417,6 +533,11 @@ pub(crate) enum Cmd {
     Master {
         #[command(subcommand)]
         command: MasterCmd,
+    },
+    /// Host-wide CEO coordination across registered project masters
+    Ceo {
+        #[command(subcommand)]
+        command: CeoCmd,
     },
     /// Resolve the daemon-owned route for a tmux session and pane
     Route {

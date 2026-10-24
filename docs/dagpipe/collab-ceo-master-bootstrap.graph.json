@@ -1,0 +1,15 @@
+{
+  "id":"collab-ceo-master-bootstrap","version":"1",
+  "description":"经用户批准的新master启动请求。确认CEO授权及目标无master，核实现有tmux端点，持久启动意图后创建自有窗口，记录真实启动回执；真实Codex随后在独立调用中注册、获批准master并从本次实际pane/socket/server/session回CEO握手，状态仅此时ready。一次调用到一次真实结果为SESE，后续请求属于外层状态机，不在图中回边。未知启动结果不得重放；用户明确批准后可取消本次协调意图，记录cancelled且process_stopped=false，不停止进程或撤销master；确认旧尝试不会继续后，新启动必须另获批准并使用新operation。不注入假sessionID，不管理tmux server生命周期。",
+  "inputs":[{"id":"bootstrap_request","schema":"Object"}],
+  "nodes":[
+    {"id":"check_user_approval","operator":"collab.ceo.bootstrap.authorize","operator_version":"1","inputs":["bootstrap_request"],"output":{"id":"approved_bootstrap","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"verify_existing_endpoint","operator":"collab.ceo.bootstrap.endpoint","operator_version":"1","inputs":["approved_bootstrap"],"output":{"id":"endpoint_plan","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"persist_start_intent","operator":"collab.ceo.bootstrap.prepare","operator_version":"1","inputs":["endpoint_plan"],"output":{"id":"launch_intent","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"start_real_codex","operator":"collab.ceo.bootstrap.launch","operator_version":"1","inputs":["launch_intent"],"output":{"id":"launch_outcome","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"record_true_phase","operator":"collab.ceo.bootstrap.record","operator_version":"1","inputs":["launch_outcome"],"output":{"id":"bootstrap_phase","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"return_bootstrap_receipt","operator":"collab.ceo.bootstrap.receipt","operator_version":"1","inputs":["bootstrap_phase"],"output":{"id":"bootstrap_receipt","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"}
+  ],
+  "edges":[{"from":"check_user_approval","to":"verify_existing_endpoint","arc_id":"approved_bootstrap"},{"from":"verify_existing_endpoint","to":"persist_start_intent","arc_id":"endpoint_plan"},{"from":"persist_start_intent","to":"start_real_codex","arc_id":"launch_intent"},{"from":"start_real_codex","to":"record_true_phase","arc_id":"launch_outcome"},{"from":"record_true_phase","to":"return_bootstrap_receipt","arc_id":"bootstrap_phase"}],
+  "outputs":["bootstrap_receipt"]
+}

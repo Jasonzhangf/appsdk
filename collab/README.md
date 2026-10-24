@@ -11,6 +11,25 @@ the append-only journal, durable mailbox, task/resource state, and migration
 transaction. The server selects the App Server transport. Each subscribed
 wake is a bounded preview; the durable mailbox remains authoritative.
 
+## Global CEO coordination
+
+One explicitly authorized CEO can coordinate the registered projects through
+their current masters. `collab ceo status` reads the global grant without
+registration. From a registered workspace, `ceo promote --approval ...` grants
+this separate global role; it does not grant project master authority.
+`ceo send`, `ceo append-task`, `ceo progress`, and the master's `ceo reply` reuse
+the project board, durable mailbox and daemon-owned reply obligations.
+
+Reuse an existing CEO workspace explicitly; the unconfigured default is
+`~/.collab/workspace`. No workspace is migrated implicitly. A project with no
+master requires a separate user-approved `ceo bootstrap-master` operation on
+an existing tmux endpoint. A launch receipt is not readiness: the real Codex
+session must register, obtain its approved master role and complete its own
+`ceo bootstrap-ready` handshake from the launched pane. See the
+[design and command examples](docs/design/ceo-coordination.md). The same Collab
+Skill contains CEO and project coordination instructions. Source availability,
+Skill installation and activation in a running global daemon are separate.
+
 ## Binding and restart recovery
 
 The daemon restores committed bindings and receive loops at startup and on its

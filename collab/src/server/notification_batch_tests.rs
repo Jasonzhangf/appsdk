@@ -134,6 +134,66 @@ fn queue_message(
 }
 
 #[test]
+fn desktop_connect_failure_preserves_retry_proof_for_the_entire_batch() {
+    let (mut server, root) = test_server();
+    let subscription = register_and_subscribe(&server, "recipient");
+    server
+        .state
+        .lock()
+        .unwrap()
+        .workers
+        .get_mut("recipient")
+        .unwrap()
+        .transport
+        .as_mut()
+        .unwrap()
+        .kind = TransportKind::DesktopBridge;
+    server
+        .state
+        .lock()
+        .unwrap()
+        .notification_subscriptions
+        .get_mut(&subscription)
+        .unwrap()
+        .method = "desktop_bridge".into();
+    Arc::get_mut(&mut server)
+        .unwrap()
+        .appserver_notification_sink =
+        Arc::new(|_, _, _, _, _, _| Err("DESKTOP_BRIDGE_NOT_SUBMITTED: connection refused".into()));
+    let now = now_ms();
+    for id in ["batch-a", "batch-b"] {
+        queue_message(&server, "recipient", &subscription, id, now);
+    }
+    assert!(
+        !attempt_notification_detailed_with_at(&server, "batch-a", &subscription, now).accepted()
+    );
+    {
+        let state = server.state.lock().unwrap();
+        for id in ["batch-a", "batch-b"] {
+            assert_eq!(state.msgs[id].wake_attempt_count, 1);
+            assert!(desktop_connect_retry(&state, &state.msgs[id]));
+        }
+    }
+    Arc::get_mut(&mut server)
+        .unwrap()
+        .appserver_notification_sink =
+        Arc::new(|_, _, _, _, _, _| Ok(serde_json::json!({"accepted": true})));
+    for id in ["batch-a", "batch-b"] {
+        assert!(
+            attempt_notification_detailed_with_at(&server, id, &subscription, now + 1).accepted()
+        );
+    }
+    let state = server.state.lock().unwrap();
+    for id in ["batch-a", "batch-b"] {
+        assert_eq!(state.msgs[id].wake_attempt_count, 2);
+        assert!(!desktop_connect_retry(&state, &state.msgs[id]));
+        assert!(state.notification_delivery_accepted.contains_key(id));
+    }
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn native_notifications_do_not_wait_for_batch_window() {
     for kind in [TransportKind::Dsh, TransportKind::DesktopBridge] {
         let (server, root) = test_server();

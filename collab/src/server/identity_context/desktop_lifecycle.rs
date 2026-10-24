@@ -114,8 +114,12 @@ impl ProjectRuntimeManager {
             }
             Err(error) => return Err(error),
         };
-        if transport.endpoint.as_deref() == Some(candidate.endpoint.as_str()) {
-            // Same owned socket: nothing to converge, no generation churn.
+        if transport.endpoint.as_deref() == Some(candidate.endpoint.as_str())
+            && crate::desktop_capability::ping_candidate(&candidate).is_ok()
+        {
+            // Same owned socket and a live publisher: nothing to converge and
+            // no generation churn. A matching endpoint string alone must not
+            // hide a dead publisher.
             return Ok(());
         }
         // Re-verify the candidate against the live native thread before

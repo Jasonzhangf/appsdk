@@ -533,3 +533,22 @@ unit1205、MCP32项通过。原生消息测试使用模拟宿主，不声明真�
 
 原始红测、安装、真实注册、独立审查及远端/资源收口回执由本轮唯一笔记保存：
 `/Users/fanzhang/.collab/runs/desktop-runtime-bridge-20261024/note.md`。
+
+## 2026-10-24 原生投递稳定性修复
+
+Collab 0.2.0361 已正式全局安装，用户已重启 daemon。Desktop 共享 enrollment 在
+宿主入口变化后由原生 thread/cwd 核实恢复；daemon 可向当前发布者恢复旧 scope。
+只有 socket connect 明确零字节未提交的通知自动补派，写出后未知、已接受或已消费
+不重放。换绑先保存凭据再公布路由；显式 context 可恢复原 DSH 已退役会话，后台
+仍不复活确定缺席的绑定。
+
+gateway 的空 runtime 窗口不再误判 agent 缺席；单条永久失败不再卡住整个 peer。
+David、Bob、Carol 的三条原验收消息未重发，均进入原生会话，产生关联回复并由
+Alice 消费。Carol 原有用户问答需先解除；不把该等待称为投递失败。
+
+安装版 Desktop 20 项、gateway/Collab 生命周期 6 项、Desktop 公开入口 12 项、
+DSH 公开入口 15 项及通知批次 18 项通过。两仓库整体独立审查未发现阻断问题。
+DSH Electron 安装器仍有 pnpm store 版本冲突，新原生插件替换未完成；当前真实
+验收使用新版 daemon 对现有插件的兼容修复，不声明完整插件 rollout 成功。
+任务证据及后续安装边界：
+`/Users/fanzhang/.collab/runs/zcam-delivery-stability-20261024/note.md`。

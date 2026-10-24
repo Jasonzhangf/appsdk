@@ -380,24 +380,27 @@ impl ProjectRuntimeManager {
         worker.transport = Some(transport.clone());
         let grant = current_master_grant(&state, Some(&saved.route_scope()))
             .filter(|grant| grant.binding_id == saved.binding_id);
+        let has_route_address = saved.tmux_endpoint.is_some()
+            || (saved.session_id.is_some() && saved.native_thread_id.is_some());
         let mut events = vec![
-            Event::GlobalCurrentThreadRouteRetired {
-                binding: saved.clone(),
-            },
             Event::GlobalRuntimeBound {
                 binding: next.clone(),
             },
             Event::Registered { worker },
         ];
+        if has_route_address {
+            events.insert(0, Event::GlobalCurrentThreadRouteRetired { binding: saved.clone() });
+        }
         if let Some(mut grant) = grant {
             grant.endpoint_generation = next.endpoint_generation;
             events.push(Event::GlobalMasterGranted { grant });
         }
         runtime.commit_locked(&mut state, &events)?;
         drop(state);
-        let mut publications = vec![Event::GlobalCurrentThreadRouteRetired {
-            binding: saved.clone(),
-        }];
+        let mut publications = Vec::new();
+        if has_route_address {
+            publications.push(Event::GlobalCurrentThreadRouteRetired { binding: saved.clone() });
+        }
         {
             let state = self.host.state.lock().unwrap();
             if let Some(previous) = transport.tmux_endpoint.as_ref()
@@ -415,7 +418,6 @@ impl ProjectRuntimeManager {
         publications.push(Event::GlobalCurrentThreadRouteSet {
             binding: next.clone(),
         });
-        self.host.commit_checked(&publications)?;
         let mut binding = ident
             .runtime
             .clone()
@@ -424,6 +426,9 @@ impl ProjectRuntimeManager {
         binding.session_id = next.session_id.clone();
         binding.native_thread_id = next.native_thread_id.clone();
         identity::persist_registration_at(&self.host.host_paths, scope, ident, binding, transport)?;
+        // Publish the new route only after its credential is readable. Native
+        // route readers share identity_gate with this convergence transaction.
+        self.host.commit_checked(&publications)?;
         Ok(next)
     }
     fn current_anchor_binding(

@@ -688,6 +688,10 @@ fn attempt_tmux_notification_with_at(
         &str,
     ) -> Result<serde_json::Value, String>,
 ) -> NotificationAttempt {
+    let allow_retry = {
+        let state = server.state.lock().unwrap();
+        state.msgs.get(message_id).is_some_and(|message| desktop_connect_retry(&state, message))
+    };
     attempt_tmux_notification_with_retry(
         server,
         message_id,
@@ -698,7 +702,7 @@ fn attempt_tmux_notification_with_at(
         delay,
         explicit,
         now,
-        false,
+        allow_retry,
         explicit_retry,
         deliver,
     )
@@ -718,6 +722,17 @@ fn transport_log_label(transport: &SelectedTransport) -> &'static str {
         TransportKind::AppServer => "APPSERVER",
         TransportKind::Dsh => "DSH",
     }
+}
+
+/// Only a failed Desktop connect proves that no request byte was submitted.
+/// A prior acceptance or any later write/read uncertainty is never replayable.
+fn desktop_connect_retry(state: &State, message: &crate::server::state::Message) -> bool {
+    message.state == "pending"
+        && !state.notification_delivery_accepted.contains_key(&message.id)
+        && state.workers.get(&message.to).and_then(selected_transport_for_worker)
+            .is_some_and(|transport| transport.kind == TransportKind::DesktopBridge)
+        && state.notification_delivery_failures.get(&message.id).is_some_and(|failure|
+            failure.retryable && failure.error.starts_with(crate::client::adapters::desktop_bridge::NOT_SUBMITTED_PREFIX))
 }
 
 fn notification_method_for_worker(state: &State, worker_id: &str) -> &'static str {
@@ -820,7 +835,7 @@ fn attempt_tmux_notification_with_retry(
                 && (if retry {
                     message.id == seed_id
                 } else {
-                    allow_retry
+                    (allow_retry && message.id == seed_id)
                         || state.handoff_wake_pending(message)
                         || message.wake_attempt_count < MAX_WAKE_ATTEMPTS
                 })
@@ -952,10 +967,19 @@ fn attempt_tmux_notification_with_retry(
                 ),
             );
             let mut state = server.state.lock().unwrap();
+            // A failed connect wrote none of the batch. Preserve that proof
+            // for each member so recovery can resume every pending message.
+            let failed_ids = if error.starts_with(
+                crate::client::adapters::desktop_bridge::NOT_SUBMITTED_PREFIX,
+            ) {
+                batch.iter().map(|message| message.1.clone()).collect::<Vec<_>>()
+            } else {
+                vec![seed_id]
+            };
             server.commit_locked_reporting(
                 &mut state,
-                &[Event::NotificationDeliveryFailed {
-                    message_id: seed_id,
+                &failed_ids.into_iter().map(|message_id| Event::NotificationDeliveryFailed {
+                    message_id,
                     operation: if explicit {
                         "notification.emitted".into()
                     } else {
@@ -969,7 +993,7 @@ fn attempt_tmux_notification_with_retry(
                         ),
                         crate::client::adapters::NotificationDeliveryClass::KnownNotDelivered
                     ),
-                }],
+                }).collect::<Vec<_>>(),
             );
             NotificationAttempt::Rejected(error)
         }

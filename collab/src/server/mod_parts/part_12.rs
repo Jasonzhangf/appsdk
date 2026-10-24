@@ -160,6 +160,7 @@ async fn dispatch_wire_routed(
             session_id,
             native_thread_id,
         } => {
+            let _guard = manager.identity_gate.lock().unwrap();
             let resolved = match native_thread_id.as_deref() {
                 Some(thread) => manager.resolve_route_by_native_thread(&session_id, thread),
                 None => project_context.as_ref()

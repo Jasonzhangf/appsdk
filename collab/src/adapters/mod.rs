@@ -207,7 +207,8 @@ mod legacy {
         }
     }
 
-    const KNOWN_NOT_DELIVERED_PREFIXES: [&str; 9] = [
+    const KNOWN_NOT_DELIVERED_PREFIXES: [&str; 10] = [
+        super::desktop_bridge::NOT_SUBMITTED_PREFIX,
         "ADAPTER_ROUTE_UNAVAILABLE:",
         "ADAPTER_ENDPOINT_UNAVAILABLE:",
         "ADAPTER_UNKNOWN_ENDPOINT:",

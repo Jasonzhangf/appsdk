@@ -56,7 +56,7 @@ async function fixture(t,{host=true,legacy=false,launcher=false,origin='Codex De
 test('bridge restart rejects unsafe private enrollment without publishing or stopping other MCP tools',async t=>{
   const a=await fixture(t);await a.context();
   const state=path.join(a.root,'state'),pipe=path.join(a.root,'host.sock');
-  const directory=path.join(state,'runtime','desktop','enrollments',Buffer.from(pipe).toString('base64url'));
+  const directory=path.join(state,'runtime','desktop','enrollments');
   const [record]=await fs.readdir(directory);
   const privateFile=path.join(directory,record);
   assert.equal((await fs.stat(privateFile)).mode&0o077,0);
@@ -99,6 +99,54 @@ test('same host restores enrolled bridge targets after process restart without a
   assert.match(call.params.turnId,/^collab-service-correlate-/,'service correlation does not claim an agent turn');
 });
 
+test('host pipe replacement restores a verified enrollment without a context call',async t=>{
+  const a=await fixture(t);await a.context();
+  const cwd=await fs.realpath(a.root),state=path.join(a.root,'state'),current=capabilityPath(state,cwd);
+  const first=JSON.parse(await fs.readFile(current,'utf8')).desktop_bridge;
+  await a.stopService(first);
+  const stopped=new Promise(resolve=>a.child.once('exit',resolve));a.child.stdin.end();await stopped;
+  // A new host pipe must re-verify and republish the same persisted scope.
+  const b=await fixture(t,{stateRoot:state,nativeCwd:cwd});
+  let replacement;
+  const deadline=Date.now()+7000;
+  while(Date.now()<deadline){
+    replacement=JSON.parse(await fs.readFile(current,'utf8')).desktop_bridge;
+    if(replacement.endpoint!==first.endpoint)break;
+    await new Promise(resolve=>setTimeout(resolve,20));
+  }
+  assert.notEqual(replacement.endpoint,first.endpoint);
+  await assert.rejects(fs.readFile(path.join(b.root,'facts.json')),'no forwarded context command');
+  assert.ok(b.calls.some(c=>c.params?.tool==='read_thread'&&c.params?.threadId==='real-thread'),'restore re-verifies the native thread');
+  const sent=await b.request(replacement,{id:'pipe2',op:'send',session_id:'agent-session',thread_id:'real-thread',text:'after pipe switch'});
+  assert.equal(sent.ok,true);
+});
+
+test('host pipe replacement refuses an enrollment whose native project differs',async t=>{
+  const a=await fixture(t);await a.context();
+  const cwd=await fs.realpath(a.root),state=path.join(a.root,'state'),current=capabilityPath(state,cwd);
+  const first=JSON.parse(await fs.readFile(current,'utf8')).desktop_bridge;
+  await a.stopService(first);
+  const stopped=new Promise(resolve=>a.child.once('exit',resolve));a.child.stdin.end();await stopped;
+  const b=await fixture(t,{stateRoot:state,nativeCwd:state});
+  const deadline=Date.now()+5000;
+  while(!b.stderr().includes('SCOPE_MISMATCH')&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,20));
+  assert.match(b.stderr(),/SCOPE_MISMATCH/);
+  assert.equal(JSON.parse(await fs.readFile(current,'utf8')).desktop_bridge.endpoint,first.endpoint);
+  assert.ok((await b.rpc('tools/list',{})).result.tools.length>0,'rejected restore does not stop unrelated MCP tools');
+});
+
+test('a live competing publisher makes automatic restore explicitly ambiguous',async t=>{
+  const a=await fixture(t);await a.context();
+  const cwd=await fs.realpath(a.root),state=path.join(a.root,'state'),current=capabilityPath(state,cwd);
+  const first=JSON.parse(await fs.readFile(current,'utf8')).desktop_bridge;
+  const b=await fixture(t,{stateRoot:state,nativeCwd:cwd});
+  const deadline=Date.now()+5000;
+  while(!b.stderr().includes('SCOPE_AMBIGUOUS')&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,20));
+  assert.match(b.stderr(),/SCOPE_AMBIGUOUS/);
+  assert.equal(JSON.parse(await fs.readFile(current,'utf8')).desktop_bridge.endpoint,first.endpoint);
+  assert.ok((await b.rpc('tools/list',{})).result.tools.length>0,'ambiguity does not stop unrelated MCP tools');
+});
+
 test('genuine enrollment publishes one current native scope and retirement leaves only inactive current metadata',async t=>{
   const f=await fixture(t);
   const cwd=await fs.realpath(f.root);
@@ -127,11 +175,16 @@ test('genuine enrollment publishes one current native scope and retirement leave
 test('old publisher retirement cannot delete its replacement and inactive metadata cannot block a new publisher',async t=>{
   const a=await fixture(t);await a.context();
   const cwd=await fs.realpath(a.root),state=path.join(a.root,'state'),current=capabilityPath(state,cwd);
+  const first=(await a.facts()).desktop_bridge,services=path.join(state,'runtime','desktop','services');
   const b=await fixture(t,{stateRoot:state,nativeCwd:cwd});await b.context();
   const replacement=JSON.parse(await fs.readFile(current,'utf8')).desktop_bridge;
-  assert.notEqual(replacement.endpoint,(await a.facts()).desktop_bridge.endpoint);
+  assert.notEqual(replacement.endpoint,first.endpoint);
+  const descriptors=async()=>Promise.all((await fs.readdir(services)).filter(n=>n.endsWith('.json')).map(async n=>JSON.parse(await fs.readFile(path.join(services,n),'utf8')).endpoint));
+  assert.deepEqual((await descriptors()).sort(),[first.endpoint,replacement.endpoint].sort());
+  await a.stopService(first);
   const exitA=new Promise(resolve=>a.child.once('exit',resolve));a.child.stdin.end();await exitA;
   assert.deepEqual(JSON.parse(await fs.readFile(current,'utf8')).desktop_bridge,replacement);
+  assert.deepEqual(await descriptors(),[replacement.endpoint],'old publisher cleanup leaves the successor descriptor');
   assert.equal((await b.request(replacement,{id:'replacement',op:'probe',session_id:'agent-session',thread_id:'real-thread'})).ok,true);
   const exitB=new Promise(resolve=>b.child.once('exit',resolve));b.child.stdin.end();await exitB;
   const c=await fixture(t,{stateRoot:state,nativeCwd:cwd});await c.context();

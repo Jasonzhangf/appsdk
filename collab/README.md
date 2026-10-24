@@ -65,6 +65,12 @@ Omitting the option preserves them; an empty value clears them. The current
 master can apply a user's assignment to another name with
 `collab context --for-name Alice --work-roles designer`.
 
+`collab context` also returns master/peer instructions in `role_brief` and
+`operations`: confirm missing scope and role requirements before dispatch,
+persist the agreed assignment, and check current roles and task constraints
+on each request. Explicit user decisions are reused. Role changes apply to
+later selection; they do not rewrite existing task assignments or reviews.
+
 The master saves category defaults through `collab board policy --scope project
 --work-kind frontend --executor Alice --reviewer Bob`. Publish a task with
 `--work-kind frontend`, then use `collab board dispatch <id> --expected-revision <n>`

@@ -1,6 +1,6 @@
 # 协作请求回复与 idle 提醒
 
-状态：候选设计。图已校验，不代表代码或运行时已交付。
+状态：源码与隔离公开入口已验证，独立整体审查无 finding。正式安装和运行时激活另验。
 
 执行顺序：先验收既有跨项目 master 通信，再补角色/回复提醒，最后核对 Skill。
 跨项目基础设施保留既有合同；公开 CLI 用例覆盖目标 master 查询、双向发送与消费、
@@ -18,7 +18,8 @@
 `(cd '<target>' && collab master status)` 只读取得 `master.worker_id`，再在自己的
 cwd 执行 `collab master send --project '<target>' --to '<worker-id>' --subject '<topic>' '<body>'`。
 daemon 校验源项目当前 grant 和目标项目当前 master，持久保存后按既有 adaptor 投递。
-拒绝在持久化前结束；投递失败不伪造消费。目标通过 `recv` 消费，完成 action 后以
+拒绝在持久化前结束；投递失败不伪造消费。目标通过非 DSH 的 `recv` 或 DSH gateway
+独占接收流消费，完成 action 后以
 同一跨项目命令向原 `from` 的源项目和 worker 回信。每次发送有一个结果出口，回信是
 新操作，不在原操作图制造回边。当前 CLI 尚无跨项目关联回复参数或回复标记。
 

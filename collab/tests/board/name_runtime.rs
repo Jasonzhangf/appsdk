@@ -128,8 +128,6 @@ fn multiple_open_tasks_follow_current_session_and_preserve_closed_history() {
         .iter()
         .enumerate()
     {
-        let old = task(&before_board, id);
-        let current = task(&board, id);
         let durable = fixture.run_public(&["task", "status", id], THREAD_A);
         for key in [
             "id",
@@ -144,6 +142,22 @@ fn multiple_open_tasks_follow_current_session_and_preserve_closed_history() {
         ] {
             assert_eq!(durable[key], before[index][key], "{id}: durable {key}");
         }
+        if *id == "t8-closed" {
+            for view in [&before_board, &board] {
+                assert!(!view["tasks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|row| row["id"] == *id));
+            }
+            assert_eq!(
+                durable, before[index],
+                "closed durable history must remain unchanged"
+            );
+            continue;
+        }
+        let old = task(&before_board, id);
+        let current = task(&board, id);
         for key in [
             "id",
             "owner",
@@ -157,17 +171,9 @@ fn multiple_open_tasks_follow_current_session_and_preserve_closed_history() {
             assert_eq!(current[key], old[key], "{id}: board {key}");
         }
         assert_eq!(current["cleanup_status"], "pending");
-        if *id == "t8-closed" {
-            assert_eq!(current, old, "closed board history must remain unchanged");
-            assert_eq!(
-                durable, before[index],
-                "closed durable history must remain unchanged"
-            );
-        } else {
-            assert_eq!(current["owner_session_id"], NEXT_SESSION);
-            assert_eq!(current["needs_reassignment"], false);
-            assert_eq!(durable["merge"]["pending"], true);
-        }
+        assert_eq!(current["owner_session_id"], NEXT_SESSION);
+        assert_eq!(current["needs_reassignment"], false);
+        assert_eq!(durable["merge"]["pending"], true);
     }
     let journal = std::fs::read_to_string(fixture.name_journal()).unwrap();
     let committed: Value = journal

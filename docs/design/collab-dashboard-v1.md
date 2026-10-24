@@ -12,6 +12,7 @@ Subworker 日常沿 parent/master 派发，board claim 保留为可选能力。
 
 ## 用户已确认的契约
 
+- 任务板只显示未关闭任务；`closed`、`cancelled` 后从列表移除，不删除任务历史。`merged` 在关闭前继续显示。
 - 独立 AppSDK Web 任务板，不依赖 DSH GUI。
 - master、普通 peer 和已绑定 managed child 都可发布待领取工作；普通 peer 可领取自己或他人发布的公开工作。
 - master 仍可邀请 idle ordinary peer；邀请、接受、拒绝和撤回保留原事务语义。managed child 不进入邀请目标集合。
@@ -31,7 +32,7 @@ Collab daemon 继续持有任务、身份、角色、邮箱和消费回执的唯
 
 ## 最小增量
 
-1. `collab board show`：认证读取。公共任务对 master/ordinary peer 可见；发布者是 managed child 的任务保持私有，只对 child 自身及其所属 parent 可见。历史公共任务继续保留。公开投影不输出 managed 成员或 child ID，公开任务的实际 child owner 投影为 parent。暴露 status、外部 owner、publisher、priority、next_step、更新时间、交付/review/integration/cleanup证据；输出不得泄漏 token、host credential、transport endpoint。
+1. `collab board show`：认证读取。未关闭公共任务对 master/ordinary peer 可见；发布者是 managed child 的未关闭任务保持私有，只对 child 自身及其所属 parent 可见。关闭与取消任务不再列出，历史仍可通过 `collab task status <id>` 查询。公开投影不输出 managed 成员或 child ID，公开任务的实际 child owner 投影为 parent。暴露 status、外部 owner、publisher、priority、next_step、更新时间、交付/review/integration/cleanup证据；输出不得泄漏 token、host credential、transport endpoint。
 2. `collab board publish <id>`：任意已注册 master、ordinary peer 或 managed child；必须提交标题、描述、交付条件和测试条件。TaskRec 在 pending，owner/created_by 暂为发布者；pending 不占执行产能、不订阅执行 keepalive。普通 actor 发布为 public，managed child 发布为 private。
 3. `collab board invite <id> --to <peer> --expected-revision <n>`：仅 live master，任务仍待安排。只能 ordinary peer。外部 presence 读证明 live/idle，锁内再次检查身份 binding 未变、无 active task、无其他有效邀请。邀请不转移 owner，不意味着开始执行。
 4. `collab board respond <id> --accept|--decline --expected-revision <n>`：仅当前被邀请 peer。accept 再检查任务占用，原子转移 TaskRec.owner 并进入 working；decline 清除邀请，回待安排，保留原因和审计事件。拒绝不可取消原有任务。

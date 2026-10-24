@@ -1,5 +1,10 @@
 # Collab v1 verification map
 
+Open board projection: `board_cli::closed_invitation_cannot_transfer_and_master_withdraw_only_clears_metadata`
+requires closed/cancelled rows to disappear while task history and operation receipts remain.
+`master_authority_dashboard_get_agrees_with_status_context_and_board` covers the same
+projection through the live HTTP observer before and after a public cancellation.
+
 Native immediate delivery: `notification_batch_tests::native_notifications_do_not_wait*`
 covers DSH/Desktop default notifications without the aggregation window and new
 messages while prior deliveries remain unconsumed. `desktop_bridge_public_contract`

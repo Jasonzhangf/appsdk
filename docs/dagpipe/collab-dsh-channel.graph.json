@@ -99,7 +99,7 @@
     },
     {
       "id": "send_to_peer",
-      "description": "经公开 recv/send/ack 验证接收、回复和消费，形成可关联通信证据或明确失败结果。",
+      "description": "DSH gateway 独占 canonical Poll/Ack，将原文送入原生会话并记录真实消费；DSH CLI recv/ack 返回 DSH_NATIVE_DELIVERY_OWNED，避免争抢 mailbox。agent 直接处理原文并经公开 send 回复，msg/inbox 仅只读诊断；形成关联接收、回复和消费证据或明确失败结果。",
       "operator": "appsdk.collab_dsh_channel.send_to_peer",
       "operator_version": "1",
       "inputs": ["wake_evidence"],

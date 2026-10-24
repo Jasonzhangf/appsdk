@@ -692,11 +692,37 @@ fn dsh_context_registers_from_typed_gateway_facts() {
         "agentA",
     );
     assert!(
-        received.status.success(),
-        "{}",
-        String::from_utf8_lossy(&received.stderr)
+        !received.status.success(),
+        "DSH CLI must not race gateway Poll"
     );
-    let received: Value = serde_json::from_slice(&received.stdout).unwrap();
+    assert!(String::from_utf8_lossy(&received.stderr).contains("DSH_NATIVE_DELIVERY_OWNED"));
+    assert!(!String::from_utf8_lossy(&received.stderr).contains("recv receive_id="));
+    let message_id = sent["msg_id"].as_str().unwrap();
+    let refused_ack = fixture.dsh_command(&["ack", "--all"], "agentA");
+    assert!(
+        !refused_ack.status.success(),
+        "DSH CLI Ack must not hide unread native mail"
+    );
+    assert!(String::from_utf8_lossy(&refused_ack.stderr).contains("DSH_NATIVE_DELIVERY_OWNED"));
+    let unchanged = fixture.dsh_command(&["msg", message_id], "agentA");
+    assert!(unchanged.status.success(), "{}", rendered(&unchanged));
+    let unchanged: Value = serde_json::from_slice(&unchanged.stdout).unwrap();
+    assert_eq!(unchanged["consumed_by_recv"], false);
+    assert_ne!(unchanged["state"], "read");
+    let inbox = fixture.dsh_command(&["inbox"], "agentA");
+    assert!(inbox.status.success(), "{}", rendered(&inbox));
+    let inbox: Value = serde_json::from_slice(&inbox.stdout).unwrap();
+    assert_eq!(inbox["unread"], 1);
+    // Use the actual enrolled gateway credential at the public daemon wire.
+    // The gateway remains able to consume after the competing CLI is refused.
+    let enrolled =
+        fixture.gateway.register_peer_requests().last().unwrap()["params"]["binding"].clone();
+    let gateway_context = json!({"app_scope_id":"appserver-cli", "canonical_root":fixture.root,
+        "project_scope":fixture.root, "runtime_context":enrolled["runtimeContext"]});
+    let received = fixture.request(json!({"op":"Poll", "worker_id":enrolled["workerId"],
+        "token":enrolled["token"], "timeout_ms":0, "receive_id":"gateway-canonical-consumer",
+        "project_context":gateway_context}));
+    assert_ok(&received);
     assert!(
         received["messages"]
             .as_array()
@@ -731,12 +757,9 @@ fn dsh_context_registers_from_typed_gateway_facts() {
         "{}",
         String::from_utf8_lossy(&reply.stderr)
     );
-    let ack = fixture.dsh_command(&["ack", message_id], "agentA");
-    assert!(
-        ack.status.success(),
-        "{}",
-        String::from_utf8_lossy(&ack.stderr)
-    );
+    let ack = fixture.request(json!({"op":"Ack", "worker_id":enrolled["workerId"],
+        "token":enrolled["token"], "ids":[message_id], "project_context":gateway_context}));
+    assert_ok(&ack);
     let status = fixture.dsh_command(&["msg", message_id], "agentA");
     assert!(
         status.status.success(),
@@ -755,6 +778,49 @@ fn dsh_context_registers_from_typed_gateway_facts() {
         status["wake_transport_evidence"]["consumed"], false,
         "gateway acceptance alone is not consumption: {status}"
     );
+    fixture.finish();
+}
+
+#[test]
+fn dsh_work_roles_use_the_current_session_from_environment_and_provided_facts() {
+    let mut fixture = Fixture::new();
+    fixture.start_daemon();
+    let facts = json!({"dsh": {"endpoint":fixture.gateway.endpoint(),
+        "runtime_id":"gateway-runtime", "agent_id":"agentA", "session_id":"agentA", "cwd":fixture.root}}).to_string();
+    let registered = fixture.dsh_command(&["context", "--provide", &facts], "agentA");
+    assert!(registered.status.success(), "{}", rendered(&registered));
+    let registrations = fixture.registrations();
+    let changed = fixture.dsh_command(
+        &["context", "--work-roles", "android-ui,reviewer"],
+        "agentA",
+    );
+    assert!(changed.status.success(), "{}", rendered(&changed));
+    let changed: Value = serde_json::from_slice(&changed.stdout).unwrap();
+    assert_eq!(changed["work_roles"], json!(["android-ui", "reviewer"]));
+    // The verified explicit DSH facts must work without a launcher env alias.
+    let provided = fixture.command(&["context", "--provide", &facts, "--work-roles", "android-ui"]);
+    assert!(provided.status.success(), "{}", rendered(&provided));
+    let provided: Value = serde_json::from_slice(&provided.stdout).unwrap();
+    assert_eq!(provided["work_roles"], json!(["android-ui"]));
+    assert_eq!(
+        fixture.registrations(),
+        registrations,
+        "role changes do not Register again"
+    );
+    let unknown = fixture.dsh_command(
+        &["context", "--work-roles", "forged"],
+        "unregistered-session",
+    );
+    assert!(!unknown.status.success());
+    let who = fixture.command(&["who"]);
+    let who: Value = serde_json::from_slice(&who.stdout).unwrap();
+    let worker = who["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|worker| worker["transport"]["session_id"] == "agentA")
+        .unwrap();
+    assert_eq!(worker["work_roles"], json!(["android-ui"]));
     fixture.finish();
 }
 
@@ -1212,6 +1278,7 @@ fn dsh_mcp_registers_from_typed_gateway_facts() {
     let mut child = fixture
         .configured_program(&binary, &[])
         .env("COLLAB_BIN", &fixture.binary)
+        .env("DSH_SESSION_ID", "agentB")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -1235,6 +1302,26 @@ fn dsh_mcp_registers_from_typed_gateway_facts() {
         }})
     )
     .unwrap();
+    for (id, name, arguments) in [
+        (
+            3,
+            "collab_recv",
+            json!({"timeout":0,"receive_id":"mcp-dsh-native-owned"}),
+        ),
+        (
+            4,
+            "collab_ack",
+            json!({"ids":["native-message-owned-by-gateway"]}),
+        ),
+    ] {
+        writeln!(
+            input,
+            "{}",
+            json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
+            "params":{"name":name,"arguments":arguments}})
+        )
+        .unwrap();
+    }
     drop(input);
     let output = child.wait_with_output().unwrap();
     assert!(
@@ -1262,12 +1349,28 @@ fn dsh_mcp_registers_from_typed_gateway_facts() {
         response["result"]["snapshot"]["identity"]["transport"]["kind"],
         "dsh"
     );
-    assert!(fixture.registrations() > 0);
     assert_eq!(
-        fixture.gateway.register_peer_requests().len(),
+        fixture.registrations(),
         1,
-        "MCP first registration must enroll the canonical receive loop"
+        "MCP commands must not create duplicate identities"
     );
+    let enrollments = fixture.gateway.register_peer_requests();
+    assert!(
+        !enrollments.is_empty(),
+        "MCP registration must enroll the receive loop"
+    );
+    assert!(enrollments
+        .iter()
+        .all(|enrollment| enrollment["params"]["binding"]["workerId"]
+            == response["result"]["snapshot"]["identity"]["worker_id"]));
+    for id in [3, 4] {
+        let refused = replies.iter().find(|reply| reply["id"] == id).unwrap();
+        assert_eq!(refused["result"]["isError"], true, "{refused}");
+        assert!(
+            refused.to_string().contains("DSH_NATIVE_DELIVERY_OWNED"),
+            "{refused}"
+        );
+    }
     assert!(
         fixture.gateway.is_enrolled("gateway-runtime", "agentB"),
         "MCP registration must start the canonical receive loop"

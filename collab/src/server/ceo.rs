@@ -3,6 +3,25 @@
 use crate::ceo::{CeoBootstrapRecord, CeoCommand, CeoGrant};
 
 impl ProjectRuntimeManager {
+    fn reconcile_ceo_workspace_reset(&self, context: Option<&ProjectContext>) -> Result<(), Resp> {
+        let grant = self.host.state.lock().unwrap().ceo_grant.clone();
+        let (Some(grant), Some(context)) = (grant, context) else {
+            return Ok(());
+        };
+        if grant.workspace != context.canonical_root
+            || grant.app_scope_id != context.app_scope_id.as_str()
+        {
+            return Ok(());
+        }
+        let mut state = self.host.state.lock().unwrap();
+        if state.ceo_grant.as_ref() == Some(&grant) {
+            self.host
+                .commit_locked_checked(&mut state, &[Event::CeoGrantSet { grant: None }])
+                .map_err(|e| Resp::err(e.to_string()))?;
+        }
+        Ok(())
+    }
+
     fn decorate_ceo_context(&self, context: Option<&ProjectContext>, data: &mut serde_json::Value) {
         if data.get("identity").is_some() {
             self.decorate_ceo_snapshot(context, data);
@@ -134,10 +153,13 @@ impl ProjectRuntimeManager {
     }
 
     fn ceo_grant(&self) -> Result<CeoGrant, Resp> {
-        self.host
-            .state
-            .lock()
-            .unwrap()
+        let state = self.host.state.lock().unwrap();
+        if let Some(error) = &state.journal_poison {
+            return Err(Resp::err(format!(
+                "CEO_AUTHORITY_STORE_UNAVAILABLE: {error}"
+            )));
+        }
+        state
             .ceo_grant
             .clone()
             .ok_or_else(|| Resp::err("CEO_NOT_CONFIGURED"))
@@ -193,19 +215,24 @@ impl ProjectRuntimeManager {
     }
 
     fn ceo_status(&self, context: Option<&ProjectContext>, actor: &str) -> Resp {
-        let grant = self.host.state.lock().unwrap().ceo_grant.clone();
+        let (grant, authority_error) = {
+            let state = self.host.state.lock().unwrap();
+            (state.ceo_grant.clone(), state.journal_poison.clone())
+        };
         let holder = grant
             .as_ref()
             .and_then(|grant| self.ceo_holder(grant).ok())
             .map(|(_, id)| id);
-        let is_current = grant.as_ref().is_some_and(|g| {
-            context.is_some_and(|c| {
-                c.canonical_root == g.workspace && c.app_scope_id.as_str() == g.app_scope_id
+        let is_current = authority_error.is_none()
+            && grant.as_ref().is_some_and(|g| {
+                context.is_some_and(|c| {
+                    c.canonical_root == g.workspace && c.app_scope_id.as_str() == g.app_scope_id
+                })
             })
-        }) && holder.as_deref() == Some(actor)
+            && holder.as_deref() == Some(actor)
             && !actor.is_empty();
         Resp::data(
-            json!({"ceo":grant,"worker_id":holder,"is_current":is_current,"default_workspace":self.host.host_paths.state_root().join("workspace")}),
+            json!({"ceo":grant,"worker_id":holder,"is_current":is_current,"authority_error":authority_error,"default_workspace":self.host.host_paths.state_root().join("workspace")}),
         )
     }
 
@@ -320,7 +347,7 @@ impl ProjectRuntimeManager {
                 body,
             } => self.ceo_bootstrap_ready(&source, &actor, &name, operation_id, subject, body),
             command => {
-                self.require_ceo(context, &name)?;
+                let ceo_grant = self.require_ceo(context, &name)?;
                 match command {
                     CeoCommand::Send {
                         project,
@@ -426,7 +453,7 @@ impl ProjectRuntimeManager {
                         tmux_session,
                         operation_id,
                     } => self.ceo_bootstrap_prepare(
-                        &name,
+                        &ceo_grant,
                         project,
                         approval,
                         profile,
@@ -439,7 +466,13 @@ impl ProjectRuntimeManager {
                         pane_id,
                         outcome,
                         error,
-                    } => self.ceo_bootstrap_record(&name, operation_id, pane_id, outcome, error),
+                    } => {
+                        self.ceo_bootstrap_record(&ceo_grant, operation_id, pane_id, outcome, error)
+                    }
+                    CeoCommand::BootstrapCancel {
+                        operation_id,
+                        approval,
+                    } => self.ceo_bootstrap_cancel(operation_id, approval),
                     _ => Err(Resp::err("CEO_COMMAND_INVALID")),
                 }
             }
@@ -476,7 +509,23 @@ impl ProjectRuntimeManager {
                 .cloned()
                 .ok_or_else(|| Resp::err("CEO_TARGET_NAME_REQUIRED"))?
         };
+        let from = format!("{}@{}", name, source_project);
         if let Some(id) = in_reply_to.as_deref() {
+            // Resolve global authority before taking either project-state lock.
+            let destination_is_ceo = self.ceo_grant().is_ok_and(|grant| {
+                self.ceo_holder(&grant)
+                    .is_ok_and(|(holder, id)| Arc::ptr_eq(&holder, target) && id == to)
+            });
+            let identical_reply_exists = {
+                let state = target.state.lock().unwrap();
+                state.msgs.values().any(|message| {
+                    message.in_reply_to.as_deref() == Some(id)
+                        && message.from == from
+                        && message.to == to
+                        && message.subject.as_deref() == Some(subject.as_str())
+                        && message.body == body
+                })
+            };
             let state = source.state.lock().unwrap();
             let original = state
                 .msgs
@@ -488,11 +537,16 @@ impl ProjectRuntimeManager {
                     .get(id)
                     .is_some_and(|o| o.recipient_name.as_deref() == Some(name));
             let expected_from = format!("{}@{}", target_name, target_project);
-            if !recipient || original.from != expected_from {
+            let from_ceo = state.reply_obligations.get(id).is_some_and(|o| o.from_ceo);
+            let sender_matches = if from_ceo {
+                destination_is_ceo
+            } else {
+                original.from == expected_from
+            };
+            if !recipient || (!sender_matches && !identical_reply_exists) {
                 return Err(Resp::err("CEO_REPLY_SCOPE_OR_RECIPIENT_REJECTED"));
             }
         }
-        let from = format!("{}@{}", name, source_project);
         let correlation = in_reply_to.as_ref().or(handshake_id.as_ref());
         let source_thread = {
             let state = source.state.lock().unwrap();
@@ -606,6 +660,7 @@ impl ProjectRuntimeManager {
                     );
                     obligation.from_name = Some(name.into());
                     obligation.from_project = Some(source_project.clone());
+                    obligation.from_ceo = true;
                     events.push(Event::ReplyObligationSet { obligation });
                 }
                 events.push(Event::DeliveryMode {
@@ -712,7 +767,7 @@ impl ProjectRuntimeManager {
                 let pending = state
                     .reply_obligations
                     .values()
-                    .filter(|o| o.from_project.is_some())
+                    .filter(|o| o.from_ceo)
                     .cloned()
                     .collect::<Vec<_>>();
                 projects.push(json!({"project":root,"app_scope_id":scope.as_ref().map(|s|s.app_scope_id.as_str()),"registered":true,"master":master,"tasks":tasks,"task_counts":counts,"pending_replies":pending}));

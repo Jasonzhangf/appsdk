@@ -306,6 +306,10 @@ pub struct ReplyObligation {
     /// the absent field is omitted from serialized output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_project: Option<String>,
+    /// Authenticated global-role provenance. Only the CEO delivery owner sets
+    /// this; current CEO succession must not depend on message prose or names.
+    #[serde(default)]
+    pub from_ceo: bool,
     pub from_worker_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_name: Option<String>,

@@ -153,12 +153,34 @@ fn context_adjudication_uses_current_session_and_inherits_open_tasks_after_repla
         assert_ne!(task["owner"], worker, "{task}");
         assert_eq!(task["owner_session_id"], session, "{task}");
     }
-    let closed = board["tasks"]
+    assert!(!board["tasks"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|task| task["id"] == "retain-closed")
-        .unwrap();
+        .any(|task| task["id"] == "retain-closed"));
+    let closed = fixture.run_public(&["task", "status", "retain-closed"], THREAD_B);
     assert_eq!(closed["owner"], worker);
-    assert_eq!(closed["owner_session_id"], THREAD_A);
+    assert_eq!(closed["status"], "closed");
+    let journal = std::fs::read_to_string(fixture.name_journal()).unwrap();
+    let assignment: Value = journal
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| {
+            event["ev"] == "TaskAssignmentUpdated"
+                && event["assignment"]["task_id"] == "retain-closed"
+        })
+        .last()
+        .unwrap();
+    assert_eq!(assignment["assignment"]["session_id"], THREAD_A);
+    let inherited: Value = journal
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| event["ev"] == "NameResolutionCommitted")
+        .last()
+        .unwrap();
+    assert!(!inherited["assignments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|assignment| assignment["task_id"] == "retain-closed"));
 }

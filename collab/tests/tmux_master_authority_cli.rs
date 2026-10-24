@@ -597,6 +597,32 @@ fn master_authority_dashboard_get_agrees_with_status_context_and_board() {
         Some(&pane),
     );
 
+    for id in ["dashboard-open", "dashboard-terminal"] {
+        let published = fixture.run_ok(
+            &[
+                "board",
+                "publish",
+                id,
+                "--title",
+                id,
+                "--description",
+                "observer projection",
+                "--delivery-condition",
+                "public view reflects closure",
+                "--test-condition",
+                "HTTP and CLI agree",
+            ],
+            Some(&pane),
+        );
+        if id == "dashboard-terminal" {
+            let revision = published["task"]["revision"].as_u64().unwrap().to_string();
+            fixture.run_ok(
+                &["board", "claim", id, "--expected-revision", &revision],
+                Some(&pane),
+            );
+        }
+    }
+
     let status = fixture.run_ok(&["master", "status"], Some(&pane));
     let context = fixture.run_context(&["context"], Some(&pane));
     let board = fixture.run_ok(&["board", "show"], Some(&pane));
@@ -622,7 +648,9 @@ fn master_authority_dashboard_get_agrees_with_status_context_and_board() {
     // the capability fragment. Parse that line, then drive the real HTTP GET
     // with the exact bearer capability the page would use.
     let mut child = fixture
-        .configured_command(&["dashboard", "--port", "0"], Some(&pane), "Codex TUI")
+        .configured_command(&["dashboard", "--port", "0"], None, "Codex TUI")
+        .env("CODEX_SESSION_ID", &pane.session_anchor)
+        .env("CODEX_THREAD_ID", &pane.thread_anchor)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -670,6 +698,41 @@ fn master_authority_dashboard_get_agrees_with_status_context_and_board() {
         panel_master[0]["status"], "online",
         "the panel must keep the agent observation separate from authority: {served}"
     );
+
+    assert_eq!(served["tasks"].as_array().unwrap().len(), 2);
+    let revision = served["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "dashboard-terminal")
+        .unwrap()["revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let cancelled = fixture.run_ok(
+        &[
+            "board",
+            "update",
+            "dashboard-terminal",
+            "--expected-revision",
+            &revision,
+            "--status",
+            "cancelled",
+        ],
+        Some(&pane),
+    );
+    assert_eq!(cancelled["task"]["status"], "cancelled");
+    let refreshed = dashboard_get(&authority, &capability, None);
+    assert!(refreshed.starts_with("HTTP/1.1 200"));
+    let refreshed: Value = serde_json::from_str(&dashboard_body(&refreshed)).unwrap();
+    let cli = fixture.run_ok(&["board", "show"], Some(&pane));
+    for view in [&refreshed, &cli] {
+        let tasks = view["tasks"].as_array().unwrap();
+        assert_eq!(tasks.len(), 1, "{view}");
+        assert_eq!(tasks[0]["id"], "dashboard-open");
+    }
+    let history = fixture.run_ok(&["task", "status", "dashboard-terminal"], Some(&pane));
+    assert_eq!(history["status"], "cancelled");
 
     // No dashboard route writes authority: the observation is GET-only and a
     // write method on the same path is refused rather than applied.

@@ -73,6 +73,7 @@ fn seed_obligation(server: &Server, message_id: &str, from: &str, policy: ReplyP
             message_id: message_id.into(),
             project,
             from_project: None,
+            from_ceo: false,
             from_worker_id: from.into(),
             from_name: Some(from.into()),
             recipient_worker_id: "worker".into(),
@@ -135,6 +136,7 @@ fn cross_project_idle_reminder_uses_ceo_reply_entry() {
     );
     let mut obligation = server.state.lock().unwrap().reply_obligations["ceo-request"].clone();
     obligation.from_project = Some("/workspace".into());
+    obligation.from_ceo = true;
     server.commit(&[Event::ReplyObligationSet { obligation }]);
     idle_episode(&server, now_ms());
     let notices = reminders(&server);

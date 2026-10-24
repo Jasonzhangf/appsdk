@@ -43,6 +43,8 @@ struct Gateway {
     handle: Option<thread::JoinHandle<()>>,
     enrolled: Arc<Mutex<HashSet<(String, String)>>>,
     register_peers: Arc<Mutex<Vec<Value>>>,
+    register_attempts: Arc<AtomicU64>,
+    forgotten_agents: Arc<Mutex<HashSet<String>>>,
     enroll_mode: Arc<Mutex<EnrollMode>>,
     current_runtime: Arc<Mutex<Option<String>>>,
 }
@@ -67,9 +69,13 @@ impl Gateway {
         let flag = Arc::clone(&stop);
         let enrolled = Arc::new(Mutex::new(HashSet::new()));
         let register_peers = Arc::new(Mutex::new(Vec::new()));
+        let register_attempts = Arc::new(AtomicU64::new(0));
+        let forgotten_agents = Arc::new(Mutex::new(HashSet::new()));
         let enroll_mode = Arc::new(Mutex::new(EnrollMode::Accept));
         let thread_enrolled = Arc::clone(&enrolled);
         let thread_requests = Arc::clone(&register_peers);
+        let thread_attempts = Arc::clone(&register_attempts);
+        let thread_forgotten = Arc::clone(&forgotten_agents);
         let thread_mode = Arc::clone(&enroll_mode);
         let current_runtime = Arc::new(Mutex::new(None::<String>));
         let thread_runtime = current_runtime.clone();
@@ -90,7 +96,11 @@ impl Gateway {
                 let method = request["method"].as_str().unwrap_or_default();
                 let runtime_id = request["params"]["runtimeId"].as_str().unwrap_or_default();
                 let agent_id = request["params"]["agentId"].as_str().unwrap_or_default();
-                let known = agents.iter().any(|agent| agent == agent_id);
+                if method == "register-peer" {
+                    thread_attempts.fetch_add(1, Ordering::SeqCst);
+                }
+                let known = agents.iter().any(|agent| agent == agent_id)
+                    && !thread_forgotten.lock().unwrap().contains(agent_id);
                 let key = (runtime_id.to_owned(), agent_id.to_owned());
                 let current = thread_runtime.lock().unwrap().clone();
                 let reply = if method == "resolve-agent" && known {
@@ -171,6 +181,8 @@ impl Gateway {
             handle: Some(handle),
             enrolled,
             register_peers,
+            register_attempts,
+            forgotten_agents,
             enroll_mode,
             current_runtime,
         }
@@ -182,6 +194,17 @@ impl Gateway {
 
     fn register_peer_requests(&self) -> Vec<Value> {
         self.register_peers.lock().unwrap().clone()
+    }
+
+    fn register_attempts(&self) -> u64 {
+        self.register_attempts.load(Ordering::SeqCst)
+    }
+
+    fn forget_agent(&self, agent_id: &str) {
+        self.forgotten_agents
+            .lock()
+            .unwrap()
+            .insert(agent_id.to_owned());
     }
 
     fn set_enroll_mode(&self, mode: EnrollMode) {
@@ -1917,5 +1940,51 @@ fn dsh_runtime_uuid_change_rebinds_without_agent_recovery() {
     let manual = fixture.dsh_command(&["context", "--recover-communication"], "agentA");
     assert!(manual.status.success(), "{}", rendered(&manual));
     assert_eq!(only_identity(&fixture).1["runtime"], restored["runtime"]);
+    fixture.finish();
+}
+
+#[test]
+fn dsh_absent_binding_retires_once_without_repeated_maintenance_retry() {
+    let mut fixture = Fixture::new_requiring_enrollment();
+    fixture.start_daemon();
+    let facts = json!({"dsh":{
+        "endpoint":fixture.gateway.endpoint(),"runtime_id":"gateway-runtime",
+        "agent_id":"agentA","session_id":"agentA","cwd":fixture.root
+    }})
+    .to_string();
+    let registered = fixture.dsh_command(&["context", "--provide", &facts], "agentA");
+    assert!(registered.status.success(), "{}", rendered(&registered));
+    let (worker, identity) = only_identity(&fixture);
+    let registrations = fixture.registrations();
+    assert!(fixture.gateway.is_enrolled("gateway-runtime", "agentA"));
+
+    let attempts_before = fixture.gateway.register_attempts();
+    fixture.gateway.forget_agent("agentA");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while fixture.gateway.register_attempts() == attempts_before && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        fixture.gateway.register_attempts() > attempts_before,
+        "maintenance did not observe the explicit absent binding"
+    );
+    let attempts_after_retirement = fixture.gateway.register_attempts();
+
+    // More than two default one-second maintenance ticks must not select the
+    // retired route again. A pending retry would add another attempt each tick.
+    thread::sleep(Duration::from_millis(2500));
+    assert_eq!(
+        fixture.gateway.register_attempts(),
+        attempts_after_retirement,
+        "an explicit unknown-agent must retire the route instead of retrying it"
+    );
+    let log = std::fs::read_to_string(fixture.root.join("test-daemon.log")).unwrap_or_default();
+    assert!(
+        !log.contains("BINDING_PENDING"),
+        "a definite absence must be terminal, not logged as a pending binding: {log}"
+    );
+
+    assert_eq!(fixture.registrations(), registrations);
+    assert_eq!(only_identity(&fixture).1, identity);
     fixture.finish();
 }

@@ -530,8 +530,15 @@ impl ProjectRuntimeManager {
         outer_binding: Option<&RegisterOuterBinding>,
     ) -> (Arc<Server>, Resp) {
         let decorate=matches!(&req,Req::Context {..}|Req::IdentityContext {..});
+        let workspace_reset=matches!(&req,Req::ProjectReset{..});
         let context=project_context.clone();
         let (runtime,mut response)=self.dispatch_sync_with_register_binding_inner(project_context,req,outer_binding);
+        if workspace_reset && response.ok {
+            if let Err(error)=self.reconcile_ceo_workspace_reset(context.as_ref()) {
+                response.ok=false;
+                response.error=Some(format!("{}CEO_AUTHORITY_CLEANUP_FAILED: the project effect may already be committed; do not replay it: {}",response.error.as_ref().map(|e|format!("{e}; ")).unwrap_or_default(),error.error.unwrap_or_default()));
+            }
+        }
         if decorate && response.ok {
             self.decorate_ceo_context(context.as_ref(),&mut response.data);
         }

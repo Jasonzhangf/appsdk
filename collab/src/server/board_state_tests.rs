@@ -62,6 +62,51 @@ fn task(id: &str, owner: &str) -> TaskRec {
 }
 
 #[test]
+fn board_lists_only_open_tasks_without_deleting_history() {
+    let (server, root) = test_server();
+    let statuses = [
+        "pending",
+        "working",
+        "blocked",
+        "merged",
+        "closed",
+        "cancelled",
+    ];
+    {
+        let mut state = server.state.lock().unwrap();
+        register_worker(&mut state, "peer");
+        for status in statuses {
+            let mut record = task(status, "peer");
+            record.status = status.into();
+            state
+                .apply_checked(&Event::TaskCreated { task: record })
+                .unwrap();
+        }
+    }
+    for viewer in [None, Some("peer")] {
+        let response = handle_board_show(&server, viewer);
+        assert!(response.ok, "{response:?}");
+        let ids: Vec<_> = response.data["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|task| task["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["blocked", "merged", "pending", "working"]);
+    }
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.tasks.len(), statuses.len());
+    assert_eq!(
+        board_task_view(&state, &state.tasks["closed"])
+            .unwrap()
+            .status,
+        "closed"
+    );
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn compact_snapshot_preserves_public_history_and_exact_revision() {
     let (server, root) = test_server();
     let mut state = server.state.lock().unwrap();

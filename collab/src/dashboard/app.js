@@ -7,7 +7,7 @@ const groups = [
   ["待安排", ["pending"]], ["等待接单", ["invited", "assigned"]],
   ["执行中", ["working", "blocked", "waiting", "rework"]],
   ["验证 / 交付", ["verifying", "reviewed", "delivered", "accepted"]],
-  ["已集成", ["merged"]], ["已关闭", ["closed", "cancelled"]],
+  ["已集成", ["merged"]],
 ];
 const labels = { pending: "待安排", invited: "已邀请", assigned: "历史派单", working: "执行中", blocked: "阻塞", waiting: "等待依赖", rework: "返工", verifying: "验证中", reviewed: "已审查", delivered: "已交付", accepted: "待集成", merged: "已集成", closed: "已关闭", cancelled: "已取消" };
 let snapshot = null;

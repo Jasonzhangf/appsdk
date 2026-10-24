@@ -28,6 +28,13 @@ identity 及 specialties 的来源、revision 和完整 template。未更新时�
 或无可派原因；当前生效及可修改说明。只有超出授权、改变用户显式硬约束或关键事实
 不清时才确认受影响部分。更新正在执行的任务时，必须显式落实交接。
 
+manager（全局 CEO 或项目 master）为任何承担计划、编排或任务派发的角色创建或更新
+流程模板时，必须在该角色的 `responsibilities` 中写明：计划与派单要明确目标、范围、
+非目标、权限、依赖、验收条件和交接负责人；执行者须在约定边界内投入完成任务所需
+的资源，不得为省预算删减必要工作或验证，不得越界，也不得假定别人会救火。
+资源不足或确需改变边界时，向派单 owner 提交证据并请求调整，只暂停受影响工作。
+这一职责随下游规划、编排和派发继续传递；不授予无限预算或范围外权限。
+
 模板更新沿用 `context`，仅当前项目 master 可执行，正文为四字段 JSON：
 
 ```sh
@@ -1256,7 +1263,9 @@ collab ceo reply --subject '<主题>' '<普通进度或具体阻塞>'
 collab ceo reply --subject '<完成主题>' --in-reply-to '<原请求ID>' '<实际交付与证据>'
 ```
 
-普通进度不带原请求引用，保留完成后回复义务。真正完成后才以原请求 ID 回复；daemon
+普通进度不带原请求引用，保留完成后回复义务。CEO 经用户批准换人后，原请求的完成
+回复仍用原请求 ID，`ceo reply` 将结果交给现任 CEO，不手工改历史发送者或回复标记。
+真正完成后才以原请求 ID 回复；daemon
 在正确 master 的回信持久送达后清除精确原标记。收到 pending-reply idle 提醒时处理
 原请求，不回复提醒本身。回交后继续自己的任务；无可执行工作时按既有流程交回/申请
 idle。项目 master 不因全局 CEO 存在而放弃本项目交付责任。
@@ -1284,7 +1293,12 @@ collab ceo bootstrap-ready --op '<本次operation>' --subject '<就绪主题>' '
 
 仅窗口已创建时状态是 launched/pending。daemon 认证目标项目当前 master 并将握手
 持久送达 CEO 后才是 ready。同一 operation 不重复建窗口；结果未知保留现场，不盲目
-重试或自动删除。CEO 收到握手后，继续执行尚待派发的 send/append-task，不能到“创建
+重试或自动删除。需要放弃本次启动协调时，先向用户说明已知窗口和未决结果，取得明确
+取消批准，再执行 `collab ceo bootstrap-cancel --op '<本次operation>' --approval '<本次取消批准>'`。
+取消只关闭协调意图，不停止 Codex、不关闭 pane、不撤销已存在的 master；回执中的
+`process_stopped: false` 必须如实报告。确认旧尝试不会继续后，用户另行批准的新启动
+使用新 operation，不能把取消回执当成已清理进程。已 ready 的操作不能用此入口撤销。
+CEO 收到握手后，继续执行尚待派发的 send/append-task，不能到“创建
 成功”就停下。进度用 `collab ceo progress --project '<目标项目根目录>'` 查看。
 
 CEO 下一步提示词：先执行 `collab context` 和 `collab ceo progress`，读取当前授权、

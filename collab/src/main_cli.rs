@@ -331,6 +331,13 @@ pub(crate) enum CeoCmd {
         #[arg(long = "op")]
         operation_id: Option<String>,
     },
+    /// Cancel one retained bootstrap intent after explicit user confirmation; no process is stopped
+    BootstrapCancel {
+        #[arg(long = "op")]
+        operation_id: String,
+        #[arg(long)]
+        approval: String,
+    },
     /// Record one real target master's CEO handshake
     BootstrapReady {
         #[arg(long = "op")]

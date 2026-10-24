@@ -22,10 +22,14 @@ pub struct CeoBootstrapRecord {
     pub tmux_socket: String,
     pub tmux_session: String,
     pub requested_by: String,
+    pub requested_workspace: String,
+    pub requested_app_scope: String,
     pub phase: String,
     pub pane_id: Option<String>,
     pub error: Option<String>,
     pub handshake_message_id: Option<String>,
+    #[serde(default)]
+    pub cancellation_approval: Option<String>,
     pub updated_ms: i64,
 }
 
@@ -84,5 +88,9 @@ pub enum CeoCommand {
         operation_id: String,
         subject: String,
         body: String,
+    },
+    BootstrapCancel {
+        operation_id: String,
+        approval: String,
     },
 }

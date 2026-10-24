@@ -132,6 +132,20 @@ pub(crate) fn run(command: CeoCmd) -> anyhow::Result<()> {
             tmux_session,
             operation_id,
         ),
+        CeoCmd::BootstrapCancel {
+            operation_id,
+            approval,
+        } => {
+            let operation_id = required_text("operation id", operation_id)?;
+            let approval = required_text("approval", approval)?;
+            emit_ceo(
+                authenticated(),
+                CeoCommand::BootstrapCancel {
+                    operation_id,
+                    approval,
+                },
+            )
+        }
         CeoCmd::BootstrapReady {
             operation_id,
             subject,

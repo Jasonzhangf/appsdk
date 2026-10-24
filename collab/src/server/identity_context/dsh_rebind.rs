@@ -4,6 +4,10 @@ enum DshConvergence {
     ReceiveLoop,
 }
 
+fn dsh_control_error(error: &anyhow::Error) -> Option<&crate::client::adapters::dsh::ControlError> {
+    error.chain().find_map(|cause| cause.downcast_ref())
+}
+
 impl ProjectRuntimeManager {
     /// Use the current host publication, rather than ranking historical
     /// bindings by generation or lexical binding ID.
@@ -49,6 +53,48 @@ impl ProjectRuntimeManager {
         saved: &RuntimeBinding,
     ) -> anyhow::Result<()> {
         self.converge_dsh_binding(runtime, saved, DshConvergence::ReceiveLoop)
+    }
+
+    /// An explicit `unknown-agent` answer is terminal: the gateway does not know
+    /// the committed agent at all. Retire the current route and advance the
+    /// binding generation with no thread/pane, but keep the worker record so
+    /// name ownership, tasks, and mailbox history stay intact.
+    fn retire_absent_dsh_binding(
+        &self,
+        runtime: &Arc<Server>,
+        saved: &RuntimeBinding,
+    ) -> anyhow::Result<()> {
+        let _guard = self.identity_gate.lock().unwrap();
+        let mut state = runtime.state.lock().unwrap();
+        if state
+            .global
+            .lookup_binding_for(&saved.route_scope(), &saved.binding_id)
+            != Some(saved)
+        {
+            return Ok(());
+        }
+        let next_generation = saved
+            .endpoint_generation
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("IDENTITY_ENDPOINT_GENERATION_EXHAUSTED"))?;
+        let mut retired = saved.clone();
+        retired.endpoint_generation = next_generation;
+        retired.native_thread_id = None;
+        retired.tmux_endpoint = None;
+        let events = [
+            Event::GlobalCurrentThreadRouteRetired {
+                binding: saved.clone(),
+            },
+            Event::GlobalRuntimeBound { binding: retired },
+        ];
+        runtime.commit_locked(&mut state, &events)?;
+        drop(state);
+        if !Arc::ptr_eq(runtime, &self.host) {
+            self.host.commit_checked(&[Event::GlobalCurrentThreadRouteRetired {
+                binding: saved.clone(),
+            }])?;
+        }
+        Ok(())
     }
 
     fn converge_dsh_binding(
@@ -109,11 +155,14 @@ impl ProjectRuntimeManager {
         if matches!(mode, DshConvergence::ReceiveLoop) {
             match enroll(&ident, &transport) {
                 Ok(()) => return Ok(()),
-                Err(error)
-                    if matches!(error.downcast_ref::<crate::client::adapters::dsh::ControlError>(),
-                Some(crate::client::adapters::dsh::ControlError::Rejected { code, .. }) if code == "unknown-runtime") =>
-                    {}
-                Err(error) => return Err(error),
+                Err(error) => match dsh_control_error(&error) {
+                    Some(control) if control.is_definitely_absent() => {
+                        return self.retire_absent_dsh_binding(runtime, saved);
+                    }
+                    Some(crate::client::adapters::dsh::ControlError::Rejected { code, .. })
+                        if code == "unknown-runtime" => {}
+                    _ => return Err(error),
+                },
             }
         }
         // Discovery is scoped to the committed endpoint/session, and performs
@@ -152,13 +201,22 @@ impl ProjectRuntimeManager {
                 Err(error) => return Err(anyhow::Error::new(error)),
             }
         }
-        let resolved = crate::client::adapters::dsh::resolve_agent(
-            endpoint,
-            agent.as_str(),
-            session.as_str(),
-            &runtime.root,
-        )
-        .map_err(anyhow::Error::msg)?;
+        let resolved =
+            match crate::client::adapters::dsh::resolve_agent(
+                endpoint,
+                agent.as_str(),
+                session.as_str(),
+                &runtime.root,
+            ) {
+                Ok(resolved) => resolved,
+                Err(error)
+                    if matches!(mode, DshConvergence::ReceiveLoop)
+                        && error.is_definitely_absent() =>
+                {
+                    return self.retire_absent_dsh_binding(runtime, saved);
+                }
+                Err(error) => return Err(anyhow::Error::new(error)),
+            };
         let mut next = transport.clone();
         next.namespace = Some(resolved.runtime_id);
         if next == transport {

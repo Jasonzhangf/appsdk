@@ -96,7 +96,7 @@ pub(crate) fn apply_policy_field<T: Clone>(value: &Option<T>, clear: bool, targe
 #[derive(Debug, Clone, Serialize, Deserialize, Subcommand)]
 #[serde(tag = "action", rename_all = "kebab-case")]
 pub enum BoardCommand {
-    /// Read public work plus the caller's own or managed-child private queue.
+    /// Read open public work plus the caller's open own or managed-child private queue.
     Show,
     /// Publish pending work; managed-child publications remain private.
     Publish {

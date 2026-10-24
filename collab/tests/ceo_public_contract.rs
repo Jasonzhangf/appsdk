@@ -284,6 +284,77 @@ fn received_message<'a>(received: &'a Value, msg_id: &str) -> &'a Value {
 }
 
 #[test]
+fn ceo_explicit_reassignment_and_carrier_retirement_keep_authority_scoped() {
+    let _guard = lock_tmux();
+    let (fixture, pane) = Fixture::isolated_with_pane_command("ceo-retirement", "sleep 600");
+    let root = fixture.root.canonicalize().unwrap();
+    register_context(&fixture, &root, &pane, "ceo-retirement-register", false);
+    run_ok_at(
+        &fixture,
+        &root,
+        &pane,
+        &[
+            "ceo",
+            "promote",
+            "--approval",
+            "user approves the isolated CEO",
+        ],
+        false,
+    );
+    let pane = Pane {
+        server_pid: pane.server_pid,
+        pane_id: pane.pane_id.clone(),
+        session_anchor: "ceo-session-after-continuation".into(),
+        thread_anchor: "ceo-thread-after-continuation".into(),
+    };
+    register_context(
+        &fixture,
+        &root,
+        &pane,
+        "ceo-normal-session-continuation",
+        false,
+    );
+    let continued = run_ok_at(&fixture, &root, &pane, &["ceo", "status"], false);
+    assert_eq!(
+        continued["is_current"], false,
+        "a new work name must not inherit CEO authority: {continued}"
+    );
+    run_ok_at(
+        &fixture,
+        &root,
+        &pane,
+        &[
+            "ceo",
+            "promote",
+            "--approval",
+            "user explicitly replaces the global CEO after the session change",
+        ],
+        false,
+    );
+    let continued = run_ok_at(&fixture, &root, &pane, &["ceo", "status"], false);
+    assert_eq!(
+        continued["is_current"], true,
+        "explicitly approved CEO reassignment failed: {continued}"
+    );
+    run_ok_at(
+        &fixture,
+        &root,
+        &pane,
+        &["worker", "close", "--self"],
+        false,
+    );
+    let status = run_ok_at(&fixture, &root, &pane, &["ceo", "status"], false);
+    assert_eq!(
+        status["ceo"]["name"], continued["ceo"]["name"],
+        "retiring a carrier must preserve the authorized work name: {status}"
+    );
+    assert_eq!(
+        status["is_current"], false,
+        "a retired carrier must not remain authorized: {status}"
+    );
+}
+
+#[test]
 fn ceo_status_reads_host_without_registration_and_reports_default_workspace() {
     let fixture = Fixture::without_tmux("ceo-status-unregistered");
     let before = durable_surfaces(&fixture);
@@ -511,6 +582,19 @@ fn ceo_cross_project_task_message_reply_progress_and_clear_roundtrip() {
         false,
     );
 
+    let master_context = run_ok_at(&fixture, &target_root, &target_pane, &["context"], false);
+    let master_context = &master_context["result"]["snapshot"];
+    assert_eq!(
+        master_context["ceo"]["is_current"], false,
+        "{master_context}"
+    );
+    assert!(
+        master_context["ceo_upstream_rule"]
+            .as_str()
+            .is_some_and(|rule| rule.contains("collab ceo reply")),
+        "project master is missing its upstream reply instructions: {master_context}"
+    );
+
     let sent = run_ok_at(
         &fixture,
         &ceo_root,
@@ -541,6 +625,37 @@ fn ceo_cross_project_task_message_reply_progress_and_clear_roundtrip() {
         "{request}"
     );
 
+    let successor = create_session(&fixture, "ceo-successor");
+    register_context(
+        &fixture,
+        &ceo_root,
+        &successor,
+        "ceo-successor-register",
+        false,
+    );
+    let reassigned = run_ok_at(
+        &fixture,
+        &ceo_root,
+        &successor,
+        &[
+            "ceo",
+            "promote",
+            "--approval",
+            "user explicitly transfers global CEO coordination to the successor",
+        ],
+        false,
+    );
+    assert_eq!(reassigned["is_current"], true, "{reassigned}");
+    assert_ne!(
+        reassigned["ceo"]["name"], status["ceo"]["name"],
+        "fixture must transfer to a different work name"
+    );
+    let previous = run_at(&fixture, &ceo_root, &ceo_pane, &["ceo", "progress"], false);
+    assert!(
+        !previous.status.success(),
+        "former CEO retained global authority after transfer"
+    );
+    let ceo_pane = successor;
     let reply = run_ok_at(
         &fixture,
         &target_root,
@@ -1260,6 +1375,79 @@ fn ceo_bootstrap_quotes_approval_profile_and_project_without_execution() {
     assert!(argv.contains(&format!("arg={profile}")), "{argv}");
     assert!(argv.contains(&approval), "{argv}");
     assert!(argv.contains(target_root.to_str().unwrap()), "{argv}");
+
+    let windows_before = tmux_windows(&fixture, session);
+    let no_approval = run_at(
+        &fixture,
+        &ceo_root,
+        &ceo_pane,
+        &[
+            "ceo",
+            "bootstrap-cancel",
+            "--op",
+            "bootstrap-quote-op",
+            "--approval",
+            "",
+        ],
+        false,
+    );
+    assert!(
+        !no_approval.status.success(),
+        "bootstrap cancellation did not require explicit approval"
+    );
+    let cancelled = run_ok_at(
+        &fixture,
+        &ceo_root,
+        &ceo_pane,
+        &[
+            "ceo",
+            "bootstrap-cancel",
+            "--op",
+            "bootstrap-quote-op",
+            "--approval",
+            "user confirms cancellation of this isolated coordination attempt",
+        ],
+        false,
+    );
+    assert_eq!(cancelled["phase"], "cancelled", "{cancelled}");
+    assert_eq!(
+        cancelled["process_stopped"], false,
+        "cancellation must not claim process termination"
+    );
+    assert_eq!(
+        tmux_windows(&fixture, session),
+        windows_before,
+        "cancellation closed or created a window"
+    );
+    let next = run_ok_at(
+        &fixture,
+        &ceo_root,
+        &ceo_pane,
+        &[
+            "ceo",
+            "bootstrap-master",
+            "--project",
+            target_root.to_str().unwrap(),
+            "--approval",
+            "user explicitly approves a fresh isolated attempt after cancellation",
+            "--tmux-socket",
+            fixture.tmux_socket.to_str().unwrap(),
+            "--tmux-session",
+            session,
+            "--op",
+            "bootstrap-after-cancel",
+        ],
+        false,
+    );
+    assert_eq!(
+        next["phase"], "launched",
+        "cancelled intent permanently blocked a new approved attempt: {next}"
+    );
+    assert_eq!(
+        tmux_windows(&fixture, session).len(),
+        windows_before.len() + 1,
+        "fresh approved attempt must launch exactly one window"
+    );
 
     drop(fixture);
     std::fs::remove_dir_all(target_root).unwrap();

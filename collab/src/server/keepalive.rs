@@ -402,7 +402,7 @@ fn reply_reminder_body(obligations: &[serde_json::Value]) -> String {
             obligation["from"].as_str().unwrap_or(""),
             obligation["policy"].as_str().unwrap_or(""),
         ));
-        if obligation["from_project"].as_str().is_some() {
+        if obligation["from_ceo"].as_bool() == Some(true) {
             body.push_str("  Reply through `collab ceo reply --subject '<subject>' --in-reply-to '<message_id>' '<actual completed result>'`.\n");
         } else {
             body.push_str("  Reply through `collab sendmessage --to '<from>' --subject '<subject>' --in-reply-to '<message_id>' '<your answer>'`.\n");

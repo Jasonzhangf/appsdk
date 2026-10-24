@@ -40,10 +40,13 @@ fn bootstrap(operation_id: &str, phase: &str) -> CeoBootstrapRecord {
         tmux_socket: "/tmp/target.sock".into(),
         tmux_session: "target".into(),
         requested_by: "ceo".into(),
+        requested_workspace: "/workspace".into(),
+        requested_app_scope: "appserver-cli".into(),
         phase: phase.into(),
         pane_id: None,
         error: None,
         handshake_message_id: None,
+        cancellation_approval: None,
         updated_ms: 1,
     }
 }
@@ -53,6 +56,7 @@ fn cross_project_obligation() -> ReplyObligation {
         message_id: "m-1".into(),
         project: "/tmp/target-project".into(),
         from_project: Some("/tmp/origin-project".into()),
+        from_ceo: true,
         from_worker_id: "ceo".into(),
         from_name: Some("ceo".into()),
         recipient_worker_id: "master".into(),

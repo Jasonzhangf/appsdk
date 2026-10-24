@@ -312,6 +312,7 @@ impl State {
                     "from": obligation.from_worker_id,
                     "from_name": obligation.from_name,
                     "from_project": obligation.from_project,
+                    "from_ceo": obligation.from_ceo,
                     "project": obligation.project,
                     "policy": obligation.policy.as_str(),
                     "created_ms": obligation.created_ms,
@@ -2028,7 +2029,7 @@ mod ceo_reply_scope_tests {
     fn cross_project_name_handoff_does_not_rebind_foreign_sender() {
         let mut state=State::default();
         state.reply_obligations.insert("request".into(), crate::server::state::ReplyObligation {
-            message_id:"request".into(),project:"/target".into(),from_project:Some("/ceo".into()),
+            message_id:"request".into(),project:"/target".into(),from_project:Some("/ceo".into()),from_ceo:true,
             from_worker_id:"ceo-worker".into(),from_name:Some("SameName".into()),
             recipient_worker_id:"old-master".into(),recipient_name:Some("SameName".into()),
             policy:crate::proto::ReplyPolicy::Required,created_ms:1,reminded_idle_episode:true,

@@ -1,10 +1,42 @@
 // Durable bootstrap phases; the CLI owns process launch and the real master
 // owns registration. No agent identity is fabricated by this owner.
 impl ProjectRuntimeManager {
+    fn ceo_bootstrap_cancel(&self, id: String, approval: String) -> Result<Resp, Resp> {
+        if approval.trim().is_empty() {
+            return Err(Resp::err("CEO_BOOTSTRAP_CANCELLATION_APPROVAL_REQUIRED"));
+        }
+        let mut state = self.host.state.lock().unwrap();
+        let mut record = state
+            .ceo_bootstraps
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| Resp::err("CEO_BOOTSTRAP_OPERATION_NOT_FOUND"))?;
+        if record.phase == "ready" {
+            return Err(Resp::err(
+                "CEO_BOOTSTRAP_ALREADY_READY: manage the existing project master instead",
+            ));
+        }
+        if record.phase != "cancelled" {
+            record.phase = "cancelled".into();
+            record.cancellation_approval = Some(approval);
+            record.updated_ms = now_ms();
+            self.host
+                .commit_locked_checked(
+                    &mut state,
+                    &[Event::CeoBootstrapSet {
+                        record: record.clone(),
+                    }],
+                )
+                .map_err(|e| Resp::err(format!("CEO_BOOTSTRAP_CANCEL_DURABILITY_FAILED: {e}")))?;
+        }
+        Ok(Resp::data(
+            json!({"phase":"cancelled","operation":record,"should_launch":false,"process_stopped":false}),
+        ))
+    }
     #[allow(clippy::too_many_arguments)]
     fn ceo_bootstrap_prepare(
         &self,
-        actor: &str,
+        actor: &CeoGrant,
         project: String,
         approval: String,
         profile: String,
@@ -35,7 +67,9 @@ impl ProjectRuntimeManager {
                     || record.profile != profile
                     || record.tmux_socket != tmux_socket
                     || record.tmux_session != tmux_session
-                    || record.requested_by != actor
+                    || record.requested_by != actor.name
+                    || record.requested_workspace != actor.workspace
+                    || record.requested_app_scope != actor.app_scope_id
                 {
                     return Err(Resp::err("CEO_BOOTSTRAP_OPERATION_CONFLICT"));
                 }
@@ -77,11 +111,14 @@ impl ProjectRuntimeManager {
             profile,
             tmux_socket,
             tmux_session,
-            requested_by: actor.into(),
+            requested_by: actor.name.clone(),
+            requested_workspace: actor.workspace.clone(),
+            requested_app_scope: actor.app_scope_id.clone(),
             phase: "prepared".into(),
             pane_id: None,
             error: None,
             handshake_message_id: None,
+            cancellation_approval: None,
             updated_ms: now_ms(),
         };
         let mut state = self.host.state.lock().unwrap();
@@ -90,11 +127,9 @@ impl ProjectRuntimeManager {
                 "CEO_BOOTSTRAP_OPERATION_CHANGED: read the existing operation; do not relaunch",
             ));
         }
-        if state
-            .ceo_bootstraps
-            .values()
-            .any(|r| r.project == project && !matches!(r.phase.as_str(), "failed" | "ready"))
-        {
+        if state.ceo_bootstraps.values().any(|r| {
+            r.project == project && !matches!(r.phase.as_str(), "failed" | "ready" | "cancelled")
+        }) {
             return Err(Resp::err(
                 "CEO_BOOTSTRAP_ALREADY_PENDING: inspect the existing operation",
             ));
@@ -114,7 +149,7 @@ impl ProjectRuntimeManager {
 
     fn ceo_bootstrap_record(
         &self,
-        actor: &str,
+        actor: &CeoGrant,
         id: String,
         pane_id: Option<String>,
         outcome: String,
@@ -129,7 +164,10 @@ impl ProjectRuntimeManager {
             .get(&id)
             .cloned()
             .ok_or_else(|| Resp::err("CEO_BOOTSTRAP_OPERATION_NOT_FOUND"))?;
-        if record.requested_by != actor {
+        if record.requested_by != actor.name
+            || record.requested_workspace != actor.workspace
+            || record.requested_app_scope != actor.app_scope_id
+        {
             return Err(Resp::err("CEO_BOOTSTRAP_OWNER_REQUIRED"));
         }
         if record.phase == "ready" {

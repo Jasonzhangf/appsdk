@@ -408,6 +408,210 @@ fn dsh_transport(socket: &Path) -> SelectedTransport {
     }
 }
 
+fn commit_dsh_rebind_fixture(server: &Arc<Server>, gateway: &Gateway) -> RuntimeBinding {
+    let project_scope = GlobalState::canonical_project_scope(&server.root).unwrap();
+    let app_scope = AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
+    let agent_id = "dsh-rebind-agent";
+    let session_id = "dsh-rebind-session";
+    let runtime_id = "rt-stale";
+    let binding = RuntimeBinding::new_with_session(
+        project_scope.clone(),
+        app_scope.clone(),
+        AgentId::new(agent_id).unwrap(),
+        RuntimeId::new(runtime_id).unwrap(),
+        BindingId::new("binding-dsh-rebind").unwrap(),
+        1,
+        Some(crate::identity::SessionId::new(session_id).unwrap()),
+        Some(NativeThreadId::new(agent_id).unwrap()),
+    )
+    .unwrap();
+    let mut events = Vec::new();
+    if server
+        .state
+        .lock()
+        .unwrap()
+        .global
+        .lookup_registration(&project_scope, &app_scope)
+        .is_none()
+    {
+        events.push(Event::GlobalProjectRegistered {
+            registration: ProjectRegistration::new(project_scope.clone(), app_scope.clone())
+                .unwrap(),
+        });
+    }
+    events.extend([
+        Event::Registered {
+            worker: WorkerRec {
+                id: agent_id.into(),
+                token: "token-dsh-rebind-agent".into(),
+                cwd: server.root.display().to_string(),
+                registered_ms: now_ms(),
+                transport: Some(SelectedTransport {
+                    kind: TransportKind::Dsh,
+                    endpoint: Some(gateway.endpoint()),
+                    namespace: Some(runtime_id.into()),
+                    session_id: Some(session_id.into()),
+                    thread_id: Some(agent_id.into()),
+                    tmux_endpoint: None,
+                    capabilities: vec!["enqueue_wake".into()],
+                    self_check: "committed dsh rebind fixture".into(),
+                }),
+            },
+        },
+        Event::GlobalRuntimeBound {
+            binding: binding.clone(),
+        },
+        Event::GlobalCurrentThreadRouteSet {
+            binding: binding.clone(),
+        },
+    ]);
+    server.commit_checked(&events).unwrap();
+    binding
+}
+
+/// Reject `register-peer` with `unknown-runtime`, then answer `resolve-agent`
+/// with `resolve_code`. This matches the production path: enrollment stays
+/// pending because the gateway cannot observe the runtime, and discovery
+/// determines whether the committed agent itself is absent.
+fn dsh_rebind_gateway(name: &str, resolve_code: &str) -> Gateway {
+    let resolve_code = resolve_code.to_owned();
+    Gateway::start(name, move |request| {
+        if request["method"] == "resolve-agent" {
+            Some(
+                serde_json::json!({
+                    "ok": false,
+                    "error": {"code": resolve_code, "message": "fixture denial"}
+                })
+                .to_string(),
+            )
+        } else {
+            Some(
+                serde_json::json!({
+                    "ok": false,
+                    "error": {"code": "unknown-runtime", "message": "fixture pending runtime"}
+                })
+                .to_string(),
+            )
+        }
+    })
+}
+
+fn dsh_rebind_timeout_gateway(name: &str) -> Gateway {
+    Gateway::start(name, move |request| {
+        if request["method"] == "resolve-agent" {
+            None
+        } else {
+            Some(
+                serde_json::json!({
+                    "ok": false,
+                    "error": {"code": "unknown-runtime", "message": "fixture pending runtime"}
+                })
+                .to_string(),
+            )
+        }
+    })
+}
+
+#[test]
+fn dsh_reconcile_unknown_agent_retires_binding_and_stops_retry() {
+    let root = scratch("rebind-absent");
+    let gateway = dsh_rebind_gateway("rebind-absent", "unknown-agent");
+    let server = test_server(&root);
+    let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
+    let saved = commit_dsh_rebind_fixture(&server, &gateway);
+    assert_eq!(
+        manager.current_adapter_bindings(&server, &TransportKind::Dsh),
+        vec![saved.clone()]
+    );
+
+    manager
+        .reconcile_dsh_binding(&server, &saved)
+        .expect("an explicit unknown-agent must retire the committed binding");
+
+    assert!(
+        manager
+            .current_adapter_bindings(&server, &TransportKind::Dsh)
+            .is_empty(),
+        "the retired binding must not be selected for another scheduler tick"
+    );
+    let state = server.state.lock().unwrap();
+    let retired = state
+        .global
+        .lookup_binding_for(&saved.route_scope(), &saved.binding_id)
+        .expect("the retired binding remains durable history");
+    assert_eq!(retired.endpoint_generation, saved.endpoint_generation + 1);
+    assert!(retired.native_thread_id.is_none());
+    assert!(retired.tmux_endpoint.is_none());
+    assert!(state.workers.contains_key("dsh-rebind-agent"));
+    assert!(state
+        .global
+        .lookup_current_thread_route(
+            saved.session_id.as_ref().unwrap(),
+            saved.native_thread_id.as_ref().unwrap(),
+        )
+        .is_none());
+    drop(state);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn dsh_reconcile_unknown_runtime_keeps_binding_pending() {
+    let root = scratch("rebind-runtime");
+    let gateway = dsh_rebind_gateway("rebind-runtime", "unknown-runtime");
+    let server = test_server(&root);
+    let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
+    let saved = commit_dsh_rebind_fixture(&server, &gateway);
+
+    let error = manager
+        .reconcile_dsh_binding(&server, &saved)
+        .expect_err("unknown-runtime must remain pending");
+    assert!(error.to_string().contains("unknown-runtime"), "{error}");
+    assert_eq!(
+        manager.current_adapter_bindings(&server, &TransportKind::Dsh),
+        vec![saved.clone()]
+    );
+    let state = server.state.lock().unwrap();
+    assert_eq!(
+        state
+            .global
+            .lookup_binding_for(&saved.route_scope(), &saved.binding_id),
+        Some(&saved)
+    );
+    drop(state);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn dsh_reconcile_timeout_keeps_binding_pending() {
+    let root = scratch("rebind-timeout");
+    let gateway = dsh_rebind_timeout_gateway("rebind-timeout");
+    let server = test_server(&root);
+    let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
+    let saved = commit_dsh_rebind_fixture(&server, &gateway);
+
+    let error = manager
+        .reconcile_dsh_binding(&server, &saved)
+        .expect_err("a gateway timeout must remain pending");
+    assert!(
+        error.to_string().contains("DSH_ENDPOINT_UNKNOWN")
+            || error.to_string().contains("DSH_ENDPOINT_BLOCKED"),
+        "{error}"
+    );
+    assert_eq!(
+        manager.current_adapter_bindings(&server, &TransportKind::Dsh),
+        vec![saved.clone()]
+    );
+    let state = server.state.lock().unwrap();
+    assert_eq!(
+        state
+            .global
+            .lookup_binding_for(&saved.route_scope(), &saved.binding_id),
+        Some(&saved)
+    );
+    drop(state);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn dsh_presence_is_present_while_running_and_cold_when_inactive() {
     for (status, expected) in [

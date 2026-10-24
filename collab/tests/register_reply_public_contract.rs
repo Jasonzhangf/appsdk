@@ -31,8 +31,10 @@ fn initial_tmux_registers_once_without_participant_return() {
             .iter()
             .filter_map(Value::as_str)
             .any(|rule| {
-                rule.contains("no new task and no actionable work")
-                    && rule.contains("close your owned patrol tasks and timed subscriptions")
+                rule.contains("no authorized next action remains")
+                    && rule.contains("request next work or explicit idle approval before stopping")
+                    && rule.contains("Close unused owned patrol tasks and timed subscriptions")
+                    && rule.contains("keep direct-message reception")
             })
     };
     let owns_goal = |snapshot: &Value| {

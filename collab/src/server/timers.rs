@@ -57,13 +57,12 @@ fn tick_at(server: &Arc<Server>, now: i64) {
 }
 
 /// Refresh daemon-owned default direct-message leases from ordinary
-/// maintenance. The cheap gate scans only registered workers and their own
-/// lease row; the message-wide reconcile owner runs only when a lease is
-/// missing, retired, bound to a stale transport, or due for half-life renewal.
+/// maintenance. This owner is independent of `timers.enabled`, which controls
+/// finite schedule emission rather than base reception. The cheap gate scans
+/// only registered workers and their own lease row; the message-wide reconcile
+/// owner runs only when a lease is missing, retired, bound to a stale
+/// transport, or due for half-life renewal.
 fn tick_default_lease_maintenance_at(server: &Arc<Server>, now: i64) {
-    if !server.config.timers.enabled {
-        return;
-    }
     let needs_reconcile = {
         let state = server.state.lock().unwrap();
         let refresh_after_ms = super::DEFAULT_DIRECT_MESSAGE_TTL_SECONDS as i64 * 1000 / 2;

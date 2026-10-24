@@ -1780,6 +1780,103 @@ fn maintenance_tick_refreshes_idle_default_lease_without_recipient_context() {
 }
 
 #[test]
+fn maintenance_tick_refreshes_default_lease_with_timers_disabled() {
+    let (mut server, root) = test_server();
+    server.config.notifications.mode = "immediate".into();
+    server.config.timers.enabled = false;
+    let submitted = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    {
+        let submitted = Arc::clone(&submitted);
+        server.appserver_notification_sink =
+            Arc::new(move |_transport, _, _, message_id, _, _mode| {
+                submitted.lock().unwrap().push(message_id.to_string());
+                Ok(serde_json::json!({"accepted": true}))
+            });
+    }
+    let server = Arc::new(server);
+
+    assert!(register_synthetic_peer(&server, "peer", "thread-peer").ok);
+    let now = now_ms();
+    server.commit(&[Event::NotificationSubscribed {
+        subscription: NotificationSubscription {
+            id: "sub-default-direct-message-peer".into(),
+            worker_id: "peer".into(),
+            event: "direct-message".into(),
+            subject: None,
+            target: "thread-peer".into(),
+            method: "tmux".into(),
+            trigger_ms: None,
+            trigger_times_ms: Vec::new(),
+            interval_ms: None,
+            repeat_count: 1,
+            fired_count: 0,
+            expires_ms: now - 1000,
+            status: "armed".into(),
+            created_ms: now - DEFAULT_DIRECT_MESSAGE_TTL_SECONDS as i64 * 1000,
+            updated_ms: now - DEFAULT_DIRECT_MESSAGE_TTL_SECONDS as i64 * 1000,
+            status_reason: None,
+        },
+    }]);
+
+    // Disabling finite patrol timers must not close daemon-owned base
+    // reception. Maintenance still reconciles the default lease before the
+    // lifecycle pass sees it as expired.
+    crate::server::timers::tick_with_idle_at(&server, now, &|_| true);
+    {
+        let state = server.state.lock().unwrap();
+        let lease = &state.notification_subscriptions["sub-default-direct-message-peer"];
+        assert_eq!(
+            lease.status, "armed",
+            "disabling finite timers must not close base reception: {lease:?}"
+        );
+        assert!(
+            lease.expires_ms > now,
+            "an idle default lease must refresh even when timers are disabled: {lease:?}"
+        );
+    }
+
+    let sent = handle_send_with_task(
+        &server,
+        "sender".into(),
+        "peer".into(),
+        "notify".into(),
+        Some("deadline:report".into()),
+        "ordinary direct report".into(),
+        None,
+        "immediate".into(),
+        false,
+        None,
+    );
+    assert!(sent.ok, "{sent:?}");
+    let message_id = sent.data["msg_id"].as_str().unwrap().to_owned();
+    {
+        let state = server.state.lock().unwrap();
+        assert_eq!(
+            state.msgs[&message_id].wake_attempt_count, 1,
+            "a timer-disabled recipient must still receive one automatic attempt"
+        );
+        assert!(state
+            .notification_delivery_accepted
+            .contains_key(&message_id));
+        assert_eq!(
+            state.wake_bindings.get(&message_id).map(String::as_str),
+            Some("sub-default-direct-message-peer")
+        );
+    }
+    assert_eq!(
+        submitted.lock().unwrap().as_slice(),
+        [message_id.as_str()],
+        "timer-disabled maintenance must reach the idle recipient exactly once"
+    );
+
+    crate::server::timers::tick_with_idle_at(&server, now + 1, &|_| true);
+    assert_eq!(submitted.lock().unwrap().len(), 1);
+
+    drop(server);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn recovered_immediate_direct_message_reaches_automatic_attempt_once() {
     let (mut server, root) = test_server();
     let submitted = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));

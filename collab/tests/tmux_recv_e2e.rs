@@ -45,6 +45,14 @@ fn pane_only_context(fixture: &Fixture, pane: &Pane, args: &[&str]) -> Value {
     context_snapshot(&value).clone()
 }
 
+fn pane_shows_message(visible: &str, message_id: &str) -> bool {
+    // tmux wraps long notifications at the pane width, which can split the
+    // message id across rows. Compare with whitespace removed so wrapping
+    // cannot hide an id that the pane actually rendered.
+    let compact: String = visible.chars().filter(|ch| !ch.is_whitespace()).collect();
+    compact.contains(message_id)
+}
+
 fn wait_for_pane_message(fixture: &Fixture, pane: &Pane, message_id: &str) {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
@@ -53,7 +61,7 @@ fn wait_for_pane_message(fixture: &Fixture, pane: &Pane, message_id: &str) {
             &["capture-pane", "-p", "-t", &pane.pane_id, "-S", "-4096"],
         );
         let visible = String::from_utf8_lossy(&captured.stdout);
-        if visible.split_whitespace().any(|token| token == message_id) {
+        if pane_shows_message(&visible, message_id) {
             return;
         }
         if Instant::now() >= deadline {
@@ -64,10 +72,7 @@ fn wait_for_pane_message(fixture: &Fixture, pane: &Pane, message_id: &str) {
                 &["capture-pane", "-p", "-t", &pane.pane_id, "-S", "-4096"],
             );
             let final_visible = String::from_utf8_lossy(&final_captured.stdout);
-            if final_visible
-                .split_whitespace()
-                .any(|token| token == message_id)
-            {
+            if pane_shows_message(&final_visible, message_id) {
                 return;
             }
             panic!(
@@ -1233,4 +1238,11 @@ fn removed_identity_commands_and_flags_are_rejected_by_the_cli() {
         );
     }
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn pane_match_tolerates_message_id_wrapped_at_pane_width() {
+    let visible = "COLLAB_NOTIFY m179\n2810151585-1 [notification-batch]";
+    assert!(pane_shows_message(visible, "m1792810151585-1"));
+    assert!(!pane_shows_message(visible, "m1792810151585-2"));
 }

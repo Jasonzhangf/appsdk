@@ -36,6 +36,8 @@ impl From<anyhow::Error> for ReconcileError {
 
 include!("identity_context/operations.rs");
 include!("identity_context/recovery.rs");
+include!("identity_context/dsh_rebind.rs");
+include!("identity_context/desktop_lifecycle.rs");
 
 fn add_optional_master_choice(snapshot: &mut serde_json::Value) {
     let Some(holder) = snapshot["master"]["worker_id"].as_str() else {

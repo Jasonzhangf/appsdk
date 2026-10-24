@@ -91,7 +91,7 @@ function controlDirectory(target){
   }
   return current;
 }
-async function publishCapability(binding){
+async function publishCapability(binding,expectedCwd){
   const response=await nativeCall(binding,'read_thread',{threadId:binding.thread,turnLimit:1,includeOutputs:false,maxOutputCharsPerItem:1});
   if(response.error)throw Error(JSON.stringify(response.error));
   const native=response.result;
@@ -100,6 +100,7 @@ async function publishCapability(binding){
   const observed=content?JSON.parse(content.text):undefined;
   if(observed?.thread?.id!==binding.thread||typeof observed.thread.cwd!=='string')throw Error('DESKTOP_BRIDGE_PUBLICATION_FAILED: missing current native scope');
   const cwd=fs.realpathSync(observed.thread.cwd);
+  if(expectedCwd!==undefined&&cwd!==fs.realpathSync(expectedCwd))throw Error('DESKTOP_BRIDGE_SCOPE_MISMATCH: enrolled project changed');
   if(stopping)throw Error('DESKTOP_BRIDGE_UNAVAILABLE: retiring');
   const candidate={endpoint:`unix://${socketPath}`,namespace:tools.get('send_message_to_thread').namespace,session_id:binding.session,thread_id:binding.thread,cwd};
   let directory=path.join(runtimeDir,'capabilities','v1');
@@ -124,6 +125,44 @@ async function publishCapability(binding){
     throw Error(`DESKTOP_BRIDGE_PUBLICATION_FAILED: ${error.message}`);
   }
   return candidate;
+}
+function enrollmentDirectory(){
+  // A host pipe is an execution authority. A different host must enroll its
+  // own caller metadata; it cannot inherit a prior host's enrollment.
+  return controlDirectory(path.join(runtimeDir,'enrollments',Buffer.from(pipe).toString('base64url')));
+}
+function persistEnrollment(binding,cwd){
+  const directory=enrollmentDirectory();
+  const file=path.join(directory,Buffer.from(key(binding.session,binding.thread)).toString('base64url')+'.json');
+  const temporary=file+'.'+randomUUID()+'.tmp';
+  try{
+    fs.writeFileSync(temporary,JSON.stringify({schema:'collab-desktop-enrollment/v1',host_pipe:pipe,cwd,binding}),{flag:'wx',mode:0o600});
+    fs.renameSync(temporary,file);
+  }finally{
+    try{fs.unlinkSync(temporary);}catch(error){if(error.code!=='ENOENT')throw error;}
+  }
+}
+async function restoreEnrollments(){
+  if(!desktop)return;
+  const directory=enrollmentDirectory();
+  await Promise.all(fs.readdirSync(directory).filter(name=>name.endsWith('.json')).map(async name=>{
+    let binding;
+    try{
+      const file=path.join(directory,name),stat=fs.lstatSync(file);
+      if(!stat.isFile()||stat.isSymbolicLink()||stat.uid!==process.getuid()||(stat.mode&0o077))throw Error('DESKTOP_BRIDGE_ENROLLMENT_UNSAFE');
+      const record=JSON.parse(fs.readFileSync(file,'utf8'));
+      binding=record.binding;
+      if(record.schema!=='collab-desktop-enrollment/v1'||record.host_pipe!==pipe||typeof record.cwd!=='string'
+        ||!binding||['session','thread','callerThread','callerTurn'].some(k=>typeof binding[k]!=='string'||!binding[k])
+        ||binding.callerThread!==binding.thread)throw Error('DESKTOP_BRIDGE_ENROLLMENT_INVALID');
+      // Reuse genuine enrolled caller metadata only after the current host
+      // verifies the same native thread and project. No turn is synthesized.
+      await publishCapability(binding,record.cwd);
+      bindings.set(key(binding.session,binding.thread),binding);
+    }catch(error){
+      process.stderr.write(`Desktop bridge enrollment pending: ${error.message}\n`);
+    }
+  }));
 }
 function removePublicationFile(file){
   try{fs.unlinkSync(file);publicationFiles.delete(file);}catch(error){if(error.code==='ENOENT')publicationFiles.delete(file);else process.stderr.write(`Desktop publication cleanup: ${error.message}\n`);}
@@ -175,7 +214,7 @@ async function openHost(){
   });
   await new Promise((resolve,reject)=>{listener.once('error',reject);listener.listen(socketPath,()=>{ownedSocket=true;fs.chmodSync(socketPath,0o600);resolve();});});
 }
-const ready=openHost().catch(error=>{hostFailure=error;throw error;});
+const ready=openHost().then(restoreEnrollments).catch(error=>{hostFailure=error;throw error;});
 // A host error must be observed even before the first context call.
 ready.catch(()=>{});
 function stringValue(object,keys){for(const k of keys){if(typeof object?.[k]==='string'&&object[k].trim())return object[k];}return undefined;}
@@ -240,6 +279,7 @@ async function forward(body,kind){
       const binding={session,thread:context.thread,callerThread:context.thread,callerTurn:context.turn};
       bindings.set(key(session,context.thread),binding);
       const candidate=await publishCapability(binding);
+      persistEnrollment(binding,candidate.cwd);
       facts.session_id=session;facts.thread_id=context.thread;facts.desktop_bridge=candidate;
       delete facts.endpoint;delete facts.namespace;
       request.params.arguments={...args,provide:JSON.stringify(facts)};

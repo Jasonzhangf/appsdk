@@ -75,6 +75,13 @@ Playground/Active/Protected/generated 是消费者治理分区。不能据此把
 
 - AppSDK 全局项目/runtime/communication 真源：`~/.appsdk/` 的声明注册资源。
 - Collab 全局身份、route、mailbox 与 daemon 真源：`~/.collab/`，由 Collab 控制入口管理。
+- 绑定恢复由 daemon 的既有维护节奏推进，不要求 agent 在重启后调用 `context`。
+  DSH gateway 的 runtime UUID 只定位当前连接，不是 Collab runtime identity。
+  地址变化时，daemon 从已绑定 control endpoint 核实同 session、同项目的唯一当前宿主，
+  沿原绑定 owner 更新代际，再恢复 gateway 接收循环；不重新 Register 或退役身份。
+  Desktop bridge 的真实 enrollment 仅在同宿主 pipe 的私有控制资源中持久化，重启后
+  仍须经当前 native host 核实，公开 capability 不含 caller turn。流程与重启依赖见
+  [绑定生命周期](docs/design/collab-binding-lifecycle.md)。
 - Desktop 通信使用正常受宿主管理的 MCP bridge，daemon 只连接其本地 UDS，
   agent 使用 Collab CLI 注册、恢复、收发；调用 MCP 工具不是前置条件。
   Desktop 的身份锚点是 agent sessionID，沿用既有名字与工作继承规则；

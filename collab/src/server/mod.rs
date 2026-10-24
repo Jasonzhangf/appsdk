@@ -1,3 +1,4 @@
+mod binding_lifecycle;
 pub mod global_state;
 mod identity_context;
 pub(crate) mod keepalive;

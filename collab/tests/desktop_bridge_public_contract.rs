@@ -142,6 +142,82 @@ fn publish_capability(fixture: &Fixture, bridge: &DesktopBridgeFixture) -> PathB
 }
 
 #[test]
+fn desktop_endpoint_replacement_converges_without_agent_context() {
+    let fixture = Fixture::without_tmux("desktop-background");
+    let runtime = fixture.host_state.join("runtime/desktop");
+    let first = DesktopBridgeFixture::start_at(&fixture.root, &runtime);
+    publish_capability(&fixture, &first);
+    let enrolled = desktop_command(&fixture, &["context"]);
+    assert!(
+        enrolled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&enrolled.stderr)
+    );
+    let enrolled: Value = serde_json::from_slice(&enrolled.stdout).unwrap();
+    let worker = enrolled["result"]["snapshot"]["identity"]["worker_id"]
+        .as_str()
+        .unwrap();
+    let generation = enrolled["result"]["snapshot"]["binding"]["endpoint_generation"]
+        .as_u64()
+        .unwrap();
+    drop(first);
+    let second = DesktopBridgeFixture::start_at(&fixture.root, &runtime);
+    publish_capability(&fixture, &second);
+    let journal = fixture.project_journal();
+    assert!(
+        wait_until(Duration::from_secs(8), || {
+            std::fs::read_to_string(&journal)
+                .unwrap()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .any(|event| {
+                    event["ev"] == "GlobalRuntimeBound"
+                        && event["binding"]["agent_id"] == worker
+                        && event["binding"]["endpoint_generation"].as_u64() == Some(generation + 1)
+                })
+        }),
+        "replacement endpoint was not synchronized by the daemon"
+    );
+    // A normal business command, with no context/re-register after replacement.
+    let sent = desktop_command(
+        &fixture,
+        &[
+            "sendmessage",
+            "--to",
+            worker,
+            "--subject",
+            "background-replacement",
+            "same identity, current bridge",
+        ],
+    );
+    assert!(
+        sent.status.success(),
+        "{}",
+        String::from_utf8_lossy(&sent.stderr)
+    );
+    assert!(second
+        .sends
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|body| body.contains("background-replacement")));
+    let identities: Vec<Value> = std::fs::read_to_string(&journal)
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| event["ev"] == "Registered")
+        .collect();
+    assert!(identities
+        .iter()
+        .all(|event| event["worker"]["id"] == worker));
+    assert_eq!(
+        identities.len(),
+        2,
+        "one registration plus one endpoint update"
+    );
+}
+
+#[test]
 fn bare_desktop_context_discovers_current_scope_refreshes_and_preserves_identity_on_failure() {
     let fixture = Fixture::without_tmux("desktop-discovery");
     let runtime = fixture.host_state.join("runtime/desktop");

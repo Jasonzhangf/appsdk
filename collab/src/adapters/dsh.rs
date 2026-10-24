@@ -2,7 +2,7 @@
 //!
 //! Collab speaks to the dsh-gateway control plane over its NDJSON UNIX socket.
 //! Per the frozen interface (`docs/COLLAB-DSH-CHANNEL-DESIGN.md` section 3.7)
-//! three methods are ever issued from here:
+//! Scoped methods are issued from here:
 //!
 //! - `agent-facts`: the read-only single-response challenge that admits a
 //!   `DshCandidate`, and re-verifies it when a route is resolved.
@@ -11,6 +11,8 @@
 //!   to the selected gateway so it can start or restore the canonical Poll
 //!   receive loop. It is not a second registration owner: the gateway adopts
 //!   the binding instead of calling `Register` back.
+//! - `resolve-agent`: locates only the already-bound session in its canonical
+//!   project when a gateway connection UUID changes. Ambiguity is an error.
 //!
 //! The same control plane also exposes `runtimes`, `agents`, `agent-get`,
 //! `queue`, `hold-ack`, `release-ack`, `interrupt` and `shutdown`. Those are
@@ -107,6 +109,8 @@ pub enum ControlError {
     /// The control socket itself could not be reached.
     Unreachable { detail: String },
 }
+
+impl std::error::Error for ControlError {}
 
 impl ControlError {
     /// True only when the gateway explicitly denied knowing this agent.
@@ -332,6 +336,58 @@ pub fn facts(endpoint: &str, runtime_id: &str, agent_id: &str) -> Result<AgentFa
         session_id: field("sessionId")?,
         cwd: field("cwd")?,
         status: field("status")?,
+    })
+}
+
+/// Resolve one existing session through its committed control endpoint. This
+/// exposes no registry and grants no new identity or lifecycle authority.
+pub fn resolve_agent(
+    endpoint: &str,
+    agent_id: &str,
+    session_id: &str,
+    cwd: &Path,
+) -> Result<AgentFacts, ControlError> {
+    let nonce = fresh_nonce();
+    let result = round_trip(
+        &control_socket(endpoint)?,
+        "resolve-agent",
+        serde_json::json!({
+            "nonce": nonce, "agentId": agent_id, "cwd": cwd,
+        }),
+    )?;
+    let field = |name: &str| {
+        result[name]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| rejected(format!("resolve-agent reply is missing {name}")))
+    };
+    if field("nonce")? != nonce
+        || field("agentId")? != agent_id
+        || field("sessionId")? != session_id
+    {
+        return Err(rejected("resolve-agent session or nonce mismatch".into()));
+    }
+    let observed_cwd = field("cwd")?;
+    let canonical = |p: &Path| {
+        std::fs::canonicalize(p)
+            .map_err(|error| rejected(format!("resolve-agent cwd is unavailable: {error}")))
+    };
+    if canonical(Path::new(&observed_cwd))? != canonical(cwd)? {
+        return Err(rejected("resolve-agent project mismatch".into()));
+    }
+    let runtime_id = field("runtimeId")?;
+    let status = field("status")?;
+    if runtime_id.is_empty() || !matches!(status.as_str(), "running" | "inactive") {
+        return Err(rejected(
+            "resolve-agent returned invalid runtime or status".into(),
+        ));
+    }
+    Ok(AgentFacts {
+        runtime_id,
+        agent_id: agent_id.into(),
+        session_id: session_id.into(),
+        cwd: observed_cwd,
+        status,
     })
 }
 

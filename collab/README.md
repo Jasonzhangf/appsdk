@@ -11,6 +11,28 @@ the append-only journal, durable mailbox, task/resource state, and migration
 transaction. The server selects the App Server transport. Each subscribed
 wake is a bounded preview; the durable mailbox remains authoritative.
 
+## Binding and restart recovery
+
+The daemon restores committed bindings and receive loops at startup and on its
+existing maintenance cadence. Agents do not run recovery commands after a
+Collab or gateway restart. A gateway connection UUID can change while the DSH
+session remains the same. Collab resolves that exact session in its project,
+updates the existing binding generation, and enrolls the original identity on
+the new connection. Names, peer/master authority, tasks and mailbox ownership
+remain with the original worker. Old generations cannot replace newer routes.
+
+For explicit operator recovery in the current DSH session, use
+`collab context --recover-communication`. No runtime UUID or token argument is
+required. This restores the binding and receive loop without asking the agent
+to answer a message challenge. `worker close --self` is retirement and must not
+be used as a rebind command.
+
+A Collab restart does not require restarting the gateway, Desktop bridge, DSH,
+Desktop or tmux. Their existing connections reconnect or synchronize. A bridge
+process restart reuses only its private, same-host enrollment after the current
+native host verifies it; a rejected capability does not become a new identity.
+See [the lifecycle flow and restart table](../docs/design/collab-binding-lifecycle.md).
+
 ## tmux socket configuration
 
 Collab observes tmux panes only through host-owned socket endpoints. The
@@ -377,8 +399,8 @@ route and receive lease together. It never requires a maintenance window.
 ## Core invariants
 
 - One Server writer; append-only journal; deterministic replay.
-- App Server is the only registered transport; no control truth is inferred
-  from terminal text.
+- The daemon selects the registered adapter; no control truth is inferred
+  from terminal text or a gateway connection UUID.
 - No fallback, silent strip, automatic ownership, automatic claim release, or
   success projection from failed wake/cleanup/migration.
 - No uncommitted product edits in main as an intermediate test step.

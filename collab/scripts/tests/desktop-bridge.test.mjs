@@ -15,7 +15,7 @@ function capabilityPath(state,cwd,session='agent-session',thread='real-thread'){
 }
 function encode(value){const body=Buffer.from(JSON.stringify(value));const head=Buffer.alloc(4);head.writeUInt32LE(body.length);return Buffer.concat([head,body]);}
 function decode(stream,fn){let bytes=Buffer.alloc(0);stream.on('data',chunk=>{bytes=Buffer.concat([bytes,chunk]);while(bytes.length>=4){const n=bytes.readUInt32LE(0);assert.ok(n<=8*1024*1024);if(bytes.length<n+4)return;const v=JSON.parse(bytes.subarray(4,n+4));bytes=bytes.subarray(n+4);fn(v);}});}
-async function fixture(t,{host=true,legacy=false,launcher=false,origin='Codex Desktop',stateRoot,nativeCwd}={}){
+async function fixture(t,{host=true,legacy=false,launcher=false,origin='Codex Desktop',stateRoot,nativeCwd,hostPipe}={}){
   const root=await fs.mkdtemp('/tmp/cdb-');
   const calls=[];const connections=new Set();
   const server=net.createServer(stream=>{connections.add(stream);stream.on('close',()=>connections.delete(stream));decode(stream,req=>{
@@ -32,7 +32,7 @@ async function fixture(t,{host=true,legacy=false,launcher=false,origin='Codex De
   await fs.chmod(cli,0o700);
   const env={...process.env,FIXTURE_ROOT:root,COLLAB_STATE_DIR:stateRoot??path.join(root,'state'),COLLAB_BIN:cli,COLLAB_MCP_BIN:process.env.COLLAB_TEST_MCP_BINARY??path.join(process.env.CARGO_HOME||path.join(os.homedir(),'.cargo'),'bin','collab-mcp'),CODEX_INTERNAL_ORIGINATOR_OVERRIDE:origin};
   delete env.CODEX_SESSION_ID;delete env.CODEX_THREAD_ID;delete env.CODEX_APP_TOOLS_PIPE_PATH;
-  if(host)env.CODEX_APP_TOOLS_PIPE_PATH=path.join(root,'host.sock');
+  if(host)env.CODEX_APP_TOOLS_PIPE_PATH=hostPipe??path.join(root,'host.sock');
   env.CODEX_MCP_NODE_PATH=process.execPath;
   const child=legacy?spawn(env.COLLAB_MCP_BIN,[],{env,cwd:root}):launcher?spawn('/bin/sh',[path.join(path.dirname(wrapper),'collab-desktop-mcp')],{env,cwd:root}):spawn(process.execPath,[wrapper],{env,cwd:root});
   let stderr='';child.stderr.on('data',chunk=>stderr+=chunk);
@@ -47,8 +47,51 @@ async function fixture(t,{host=true,legacy=false,launcher=false,origin='Codex De
   const context=(extra={},meta=true)=>rpc('tools/call',{name:'collab_context',arguments:{provide:JSON.stringify({session_id:'agent-session',...extra})},...(meta?{_meta:{'x-codex-turn-metadata':{thread_id:'real-thread',turn_id:'real-origin-turn'}}}:{})});
   async function facts(){return JSON.parse(await fs.readFile(path.join(root,'facts.json'),'utf8'));}
   async function request(candidate,value){const stream=net.createConnection(candidate.endpoint.slice('unix://'.length));return await new Promise((resolve,reject)=>{const timer=setTimeout(()=>{stream.destroy();reject(Error('UDS timeout'));},5000);stream.on('error',error=>{clearTimeout(timer);reject(error);});stream.on('close',()=>{clearTimeout(timer);reject(Error('UDS closed before response'));});decode(stream,response=>{clearTimeout(timer);stream.end();resolve(response);});stream.on('connect',()=>stream.write(encode(value)));});}
-  return {root,child,calls,context,facts,request,rpc};
+  return {root,child,calls,context,facts,request,rpc,stderr:()=>stderr};
 }
+
+test('bridge restart rejects unsafe private enrollment without publishing or stopping other MCP tools',async t=>{
+  const a=await fixture(t);await a.context();
+  const state=path.join(a.root,'state'),pipe=path.join(a.root,'host.sock');
+  const directory=path.join(state,'runtime','desktop','enrollments',Buffer.from(pipe).toString('base64url'));
+  const [record]=await fs.readdir(directory);
+  const privateFile=path.join(directory,record);
+  assert.equal((await fs.stat(privateFile)).mode&0o077,0);
+  assert.equal(JSON.parse(await fs.readFile(privateFile,'utf8')).binding.callerTurn,'real-origin-turn');
+  const current=capabilityPath(state,await fs.realpath(a.root));
+  const prior=await fs.readFile(current,'utf8');
+  await fs.chmod(privateFile,0o644);
+  const stopped=new Promise(resolve=>a.child.once('exit',resolve));a.child.stdin.end();await stopped;
+  const b=await fixture(t,{stateRoot:state,hostPipe:pipe});
+  const deadline=Date.now()+5000;
+  while(!b.stderr().includes('ENROLLMENT_UNSAFE')&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,20));
+  assert.match(b.stderr(),/ENROLLMENT_UNSAFE/);
+  assert.equal(await fs.readFile(current,'utf8'),prior);
+  assert.ok((await b.rpc('tools/list',{})).result.tools.length>0);
+});
+
+test('same host restores enrolled bridge targets after process restart without a context call',async t=>{
+  const a=await fixture(t);await a.context();
+  const cwd=await fs.realpath(a.root),state=path.join(a.root,'state');
+  const current=capabilityPath(state,cwd);
+  const first=JSON.parse(await fs.readFile(current,'utf8')).desktop_bridge;
+  const stopped=new Promise(resolve=>a.child.once('exit',resolve));a.child.stdin.end();await stopped;
+  const b=await fixture(t,{stateRoot:state,nativeCwd:cwd,hostPipe:path.join(a.root,'host.sock')});
+  let replacement;
+  const deadline=Date.now()+7000;
+  while(Date.now()<deadline){
+    replacement=JSON.parse(await fs.readFile(current,'utf8')).desktop_bridge;
+    if(replacement.endpoint!==first.endpoint)break;
+    await new Promise(resolve=>setTimeout(resolve,20));
+  }
+  assert.notEqual(replacement.endpoint,first.endpoint,'bridge must republish without agent context');
+  await assert.rejects(fs.readFile(path.join(b.root,'facts.json')),'no forwarded context command');
+  const result=await b.request(replacement,{id:'restored',op:'send',session_id:'agent-session',thread_id:'real-thread',text:'after restart'});
+  assert.equal(result.ok,true);
+  const call=a.calls.findLast(c=>c.params?.arguments?.prompt==='after restart');
+  assert.equal(call.params.threadId,'real-thread');
+  assert.equal(call.params.turnId,'real-origin-turn','reuse genuine enrolled caller metadata, never invent a turn');
+});
 
 test('genuine enrollment publishes one current native scope and retirement leaves only inactive current metadata',async t=>{
   const f=await fixture(t);

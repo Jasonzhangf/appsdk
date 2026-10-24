@@ -1,0 +1,14 @@
+{
+  "id":"appsdk-collab-binding-lifecycle","version":"1.0.0",
+  "description":"一次绑定生命周期收敛。输入为初次绑定、重新绑定、信息变化、daemon 启动或既有维护 tick。重试是下一次独立调用，不构造图回边。身份持久化和传输就绪分别判断；失败止于所属绑定的 pending/error，不回滚身份、不阻塞其他绑定、不启动宿主或 tmux。",
+  "inputs":[{"id":"lifecycle_event","schema":"Object"}],
+  "nodes":[
+    {"id":"读取当前权威绑定","operator":"appsdk.collab_binding.load","operator_version":"1","description":"Collab 从当前 reducer 读取已提交身份、角色、会话、绑定代际和传输；首次注册沿 context 图提交后再进入本图。恢复不重新 Register。","inputs":["lifecycle_event"],"output":{"id":"current_binding","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"同步已授权端点变化","operator":"appsdk.collab_binding.refresh","operator_version":"1","description":"只按同一 session/thread 的宿主能力声明及当前 typed transport 更新端点。信息未变不改身份；实际换绑沿既有唯一 owner 增加代际并同步订阅。拒绝旧代际覆盖新绑定。","inputs":["current_binding"],"output":{"id":"current_transport","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"恢复适配器收件能力","operator":"appsdk.collab_binding.reconcile","operator_version":"1","description":"DSH 经可信 control socket 下发精确已提交身份，gateway 幂等建立 canonical Poll；Desktop 使用当前宿主发布端点。依赖未就绪保留 pending，由既有维护节奏及 runtime-ready 再推进。相互独立端点隔离等待，不要求 agent context。","inputs":["current_transport"],"output":{"id":"readiness_result","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"恢复持久消息与订阅","operator":"appsdk.collab_binding.resume","operator_version":"1","description":"收件能力恢复后沿 notification-consumption 与 dsh-channel 图消费原 mailbox，保留消息 ID、任务、角色与历史；已消费不重放。就绪、入队、收到、消费分别取真实回执。失败不伪造成功。","inputs":["readiness_result"],"output":{"id":"service_result","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"输出就绪或局部待恢复结果","operator":"appsdk.collab_binding.result","operator_version":"1","description":"每次调用单出口报告 ready/pending/error。Collab 重启不连带重启 gateway、bridge、DSH、Desktop、tmux 或 pane；各存活组件重连同步，自身重启由原 owner 管理。agent 不执行恢复命令。","inputs":["service_result"],"output":{"id":"lifecycle_result","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"}
+  ],
+  "edges":[{"from":"读取当前权威绑定","to":"同步已授权端点变化","arc_id":"current_binding"},{"from":"同步已授权端点变化","to":"恢复适配器收件能力","arc_id":"current_transport"},{"from":"恢复适配器收件能力","to":"恢复持久消息与订阅","arc_id":"readiness_result"},{"from":"恢复持久消息与订阅","to":"输出就绪或局部待恢复结果","arc_id":"service_result"}],
+  "outputs":["lifecycle_result"]
+}

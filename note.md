@@ -489,3 +489,27 @@ gateway重启，Register总数保持2。Gemini4 medium独立整体Review无findi
 本条记录的是源码候选验收。正式安装、用户管理服务加载及 NNAnything 实际会话验收
 分别记录在 `/Users/fanzhang/.collab/runs/dsh-full-channel-20261023/note.md`，不以本条
 记录代替运行证据。无全局daemon或tmux生命周期操作。
+
+## 2026-10-23 agent 无感的绑定与重启恢复
+
+上一轮只覆盖 context 恢复与相同 gateway UUID，不能替代后台生命周期。本轮补齐
+daemon 启动/既有维护 tick 读取当前 typed binding、恢复 gateway 接收循环，以及相同
+DSH session 在 gateway 重连后换成新 UUID 的自动换绑。Collab 是唯一换绑 owner；
+gateway 只按 session/cwd 查询唯一当前宿主。原 worker、角色/master、任务和信箱保持，
+旧代际不能覆盖新绑定。`context --recover-communication` 可显式恢复，不需要 UUID、
+token 或 agent 消息挑战；不以 self-close/UnregisterSelf 代替恢复。
+
+同宿主 Desktop bridge 的真实 enrollment 保存到私有控制资源；进程重启仍经当前
+native host 核实后发布新入口，daemon 后台同步端点。公开 capability 不含 caller turn。
+Collab 重启不连带重启 gateway、bridge、DSH、Desktop 或 tmux。
+
+新增生命周期 DAG 与 Desktop service 图通过 validate/inspect，图清单 gate 通过。
+旧实现的自动恢复、换 UUID、bridge 重启均有红测；真实 Collab + gateway 组合5例、
+Rust DSH公开11例、Desktop公开7例、DSH单测38例、Node bridge11例通过。
+gateway全套173通过，15项外部依赖测试跳过（真实组合另行启用）。TUI位置5例通过；
+并发巡检 deadline 原有3个时序失败按原断言串行复跑通过，未放宽断言或时间条件。
+Gemini4 medium 独立整体审查无 finding。
+
+本条仅记录源码 milestone；远端、正式安装和真实会话加载结果分别写入
+`/Users/fanzhang/.collab/runs/transparent-lifecycle-20261023/note.md`。全局 daemon/gateway
+由用户管理；本轮没有执行其重启、真实身份注销或任何 tmux server 生命周期操作。

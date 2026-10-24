@@ -55,6 +55,11 @@ fn poll_messages_with_context(
                     }),
                 ));
             };
+            let messages: Vec<_> = messages.iter().map(|message| {
+                let mut view = serde_json::to_value(message).expect("message serializes");
+                view["reply_obligation"] = json!(st.reply_obligations.get(&message.id));
+                view
+            }).collect();
             return Some(Resp::data(json!({
                 "messages": messages,
                 "count": receipt.message_ids.len(),
@@ -124,6 +129,11 @@ fn poll_messages_with_context(
             }),
         ));
     };
+    let msgs: Vec<_> = msgs.iter().map(|message| {
+        let mut view = serde_json::to_value(message).expect("message serializes");
+        view["reply_obligation"] = json!(st.reply_obligations.get(&message.id));
+        view
+    }).collect();
     Some(Resp::data(json!({
         "messages": msgs,
         "count": msgs.len(),

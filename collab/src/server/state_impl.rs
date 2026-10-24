@@ -253,6 +253,72 @@ impl State {
         }
     }
 
+    /// Move unsettled obligations that reference `name` in `project_scope` to
+    /// the current carrier `worker_id`. The stable name keeps the obligation
+    /// answerable across a session change; the old carrier loses it.
+    fn rebind_reply_obligations_for_name(
+        &mut self,
+        project_scope: &str,
+        name: &str,
+        worker_id: &str,
+    ) {
+        for obligation in self.reply_obligations.values_mut() {
+            if obligation.project != project_scope {
+                continue;
+            }
+            // Reset the idle reminder only on a real carrier change; an
+            // unchanged name resolution must not recreate a reminder window.
+            if obligation.from_name.as_deref() == Some(name)
+                && obligation.from_worker_id != worker_id
+            {
+                obligation.from_worker_id = worker_id.to_owned();
+            }
+            if obligation.recipient_name.as_deref() == Some(name)
+                && obligation.recipient_worker_id != worker_id
+            {
+                obligation.recipient_worker_id = worker_id.to_owned();
+                obligation.reminded_idle_episode = false;
+            }
+        }
+    }
+
+    /// Unsettled obligations owned by the current carrier `worker`. `worker`
+    /// is a worker id; the rebinding above keeps the
+    /// recipient id current for both, so a name that moved to a new session
+    /// still answers and the old carrier no longer does.
+    pub fn pending_reply_obligations(&self, worker: &str) -> Vec<ReplyObligation> {
+        let mut obligations: Vec<ReplyObligation> = self
+            .reply_obligations
+            .values()
+            .filter(|obligation| obligation.recipient_worker_id == worker)
+            .cloned()
+            .collect();
+        obligations.sort_by(|a, b| {
+            (a.created_ms, a.message_id.as_str()).cmp(&(b.created_ms, b.message_id.as_str()))
+        });
+        obligations
+    }
+
+    /// Read-only view of the pending replies owed by `worker`. `from` is the
+    /// current carrier of the original sender, which is exactly the worker a
+    /// linked reply must target.
+    pub fn reply_obligation_view(&self, worker: &str) -> Vec<serde_json::Value> {
+        self.pending_reply_obligations(worker)
+            .into_iter()
+            .map(|obligation| {
+                serde_json::json!({
+                    "message_id": obligation.message_id,
+                    "from": obligation.from_worker_id,
+                    "from_name": obligation.from_name,
+                    "project": obligation.project,
+                    "policy": obligation.policy.as_str(),
+                    "created_ms": obligation.created_ms,
+                    "reminded_idle_episode": obligation.reminded_idle_episode,
+                })
+            })
+            .collect()
+    }
+
     /// Apply one event for legacy callers.  The journal writer uses
     /// [`Self::apply_checked`] so a global reducer rejection is returned to
     /// the command boundary instead of being mistaken for success.
@@ -279,6 +345,11 @@ impl State {
                     handoff.occupancy_revision,
                 );
                 self.apply_mailbox_handoff(handoff);
+                self.rebind_reply_obligations_for_name(
+                    &handoff.project_scope,
+                    &handoff.name,
+                    &handoff.recipient,
+                );
             }
             Event::ProjectResetStarted {
                 project_scope,
@@ -546,6 +617,18 @@ impl State {
             Event::LegacyMasterTransferred { .. } => {}
             Event::Sent { msg } => {
                 self.msgs.insert(msg.id.clone(), msg.clone());
+            }
+            Event::ReplyObligationSet { obligation } => {
+                self.reply_obligations
+                    .insert(obligation.message_id.clone(), obligation.clone());
+            }
+            Event::ReplyObligationCleared { message_id } => {
+                self.reply_obligations.remove(message_id);
+            }
+            Event::ReplyObligationReminded { message_id, reminded } => {
+                if let Some(obligation) = self.reply_obligations.get_mut(message_id) {
+                    obligation.reminded_idle_episode = *reminded;
+                }
             }
             Event::DeliveryMode {
                 msg_id,
@@ -888,6 +971,11 @@ impl State {
                 assignments,
             } => {
                 self.apply_name_resolution(project_scope, occupancy, assignments)?;
+                self.rebind_reply_obligations_for_name(
+                    project_scope,
+                    &occupancy.name,
+                    &occupancy.worker_id,
+                );
             }
             Event::NameOccupancyRevisionRetained {
                 project_scope,
@@ -1624,6 +1712,17 @@ impl State {
                 });
             }
         }
+        // Unsettled obligations survive compaction. They follow the message
+        // rows above so a restored journal has the original message first.
+        let mut obligations: Vec<_> = self.reply_obligations.values().cloned().collect();
+        obligations.sort_by(|a, b| {
+            (a.created_ms, a.message_id.as_str()).cmp(&(b.created_ms, b.message_id.as_str()))
+        });
+        events.extend(
+            obligations
+                .into_iter()
+                .map(|obligation| Event::ReplyObligationSet { obligation }),
+        );
         if let Some(migration) = self.migration.clone() {
             events.push(Event::MigrationUpdated { migration });
         }

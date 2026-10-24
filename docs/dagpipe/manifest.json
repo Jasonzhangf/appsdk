@@ -2,6 +2,10 @@
   "schema_version": 1,
   "graphs": [
     {
+      "id": "collab-reply-obligation",
+      "path": "docs/dagpipe/collab-reply-obligation.graph.json"
+    },
+    {
       "id": "appsdk-collab-binding-lifecycle",
       "path": "docs/dagpipe/collab-binding-lifecycle.graph.json"
     },

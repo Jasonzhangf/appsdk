@@ -117,6 +117,7 @@ fn dispatch_with_route_context_bound(
             body,
             in_reply_to,
             delivery,
+            reply_policy,
         } => {
             let Some(worker_id) = worker_id else {
                 return Resp::err(
@@ -141,6 +142,7 @@ fn dispatch_with_route_context_bound(
                 in_reply_to,
                 delivery,
                 app_scope,
+                reply_policy,
             )
         }
         Req::LiveClosureDaemonSend {
@@ -332,6 +334,7 @@ fn dispatch_with_route_context_bound(
                         "subject": m.subject,
                         "state": m.state, "created_at": iso(m.created_ms),
                         "body": m.body,
+                        "reply_obligation": st.reply_obligations.get(&m.id),
                     })
                 })
                 .collect();
@@ -356,6 +359,7 @@ fn dispatch_with_route_context_bound(
                     .and_then(|s| serde_json::from_str::<Message>(&s).ok())
             });
             let answered = st.answered(&msg_id);
+            let reply_obligation = st.reply_obligations.get(&msg_id).cloned();
             let consumed = st.receive_receipts.values().any(|receipt| {
                 receipt.message_ids.iter().any(|received| received == &msg_id)
             });
@@ -368,6 +372,7 @@ fn dispatch_with_route_context_bound(
                     "created_at": iso(m.created_ms), "answered": answered,
                     "wake_transport_evidence": transport_evidence,
                     "consumed_by_recv": consumed,
+                    "reply_obligation": reply_obligation,
                 })),
                 None => Resp::err(format!("message {} not found", msg_id)),
             }

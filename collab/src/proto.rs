@@ -631,6 +631,29 @@ impl ProjectContext {
     }
 }
 
+/// How the recipient of a message must reply. `Option::None` on a send means
+/// no obligation is created; this enum deliberately has no `None` variant to
+/// avoid a second, ambiguous "not required" state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplyPolicy {
+    /// Reply once the request has been handled.
+    Required,
+    /// Reply when the requested work completes.
+    OnCompletion,
+}
+
+impl ReplyPolicy {
+    /// Wire/projection spelling. One owner keeps the CLI, view, and journal
+    /// spellings identical.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReplyPolicy::Required => "required",
+            ReplyPolicy::OnCompletion => "on_completion",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op")]
 pub enum Req {
@@ -686,6 +709,12 @@ pub enum Req {
         in_reply_to: Option<String>,
         #[serde(default = "default_delivery_mode")]
         delivery: String,
+        /// Reply obligation attached to an ordinary send. Absent means the
+        /// sender does not ask the recipient for a reply, so no obligation is
+        /// created. This is the only place a reply obligation is declared; it
+        /// is never inferred from a message body or metadata.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_policy: Option<ReplyPolicy>,
     },
     CrossProjectSend {
         from: String,

@@ -268,6 +268,66 @@ pub(crate) fn tick_at(server: &Server, now: i64) {
             record.unacked = 0;
             record.last_notice_id = None;
             let mut events = Vec::new();
+            // Reply obligations are durable message control state. Keepalive
+            // only projects the typed agent observation: a new Working episode
+            // re-arms an already reminded obligation, and a settled Waiting
+            // episode sends one reminder through the existing direct-message
+            // path. Unknown/WaitingUser never reach this block.
+            if agent == AgentState::Working {
+                for obligation in state.reply_obligation_view(&worker.id) {
+                    if obligation["reminded_idle_episode"].as_bool() == Some(true) {
+                        if let Some(message_id) = obligation["message_id"].as_str() {
+                            events.push(Event::ReplyObligationReminded {
+                                message_id: message_id.to_owned(),
+                                reminded: false,
+                            });
+                        }
+                    }
+                }
+            } else if agent == AgentState::Waiting && idle_record_ready {
+                let pending: Vec<_> = state
+                    .reply_obligation_view(&worker.id)
+                    .into_iter()
+                    .filter(|obligation| {
+                        obligation["reminded_idle_episode"].as_bool() != Some(true)
+                    })
+                    .collect();
+                if !pending.is_empty() {
+                    let alert_id = super::gen_msg_id();
+                    events.push(Event::Sent {
+                        msg: Message {
+                            id: alert_id.clone(),
+                            from: "collab-server".into(),
+                            to: worker.id.clone(),
+                            mtype: "notify".into(),
+                            subject: Some("reply-pending".into()),
+                            body: reply_reminder_body(&pending),
+                            in_reply_to: None,
+                            created_ms: now,
+                            state: "pending".into(),
+                            wake_attempt_count: 0,
+                            last_wake_attempt_ms: 0,
+                            retry_attempted: false,
+                        },
+                    });
+                    if let Some(subscription) =
+                        state.matching_subscription(&worker.id, "direct-message", None, now)
+                    {
+                        events.push(Event::WakeBound {
+                            message_id: alert_id,
+                            subscription_id: subscription.id.clone(),
+                        });
+                    }
+                    for obligation in &pending {
+                        if let Some(message_id) = obligation["message_id"].as_str() {
+                            events.push(Event::ReplyObligationReminded {
+                                message_id: message_id.to_owned(),
+                                reminded: true,
+                            });
+                        }
+                    }
+                }
+            }
             if idle_signal_due {
                 let signal = if is_live_master {
                     super::state::MasterWakeSignal::MasterIdle {
@@ -330,6 +390,22 @@ pub(crate) fn tick_at(server: &Server, now: i64) {
     }
     flush_idle_batches_if_ready(server, now);
 }
+
+fn reply_reminder_body(obligations: &[serde_json::Value]) -> String {
+    let mut body = String::from(
+        "Reply pending. Read the original message with `collab msg <message_id>` and answer it through `collab sendmessage --to '<from>' --subject '<subject>' --in-reply-to '<message_id>' '<your answer>'`.\n",
+    );
+    for obligation in obligations {
+        body.push_str(&format!(
+            "- message_id={} from={} policy={}\n",
+            obligation["message_id"].as_str().unwrap_or(""),
+            obligation["from"].as_str().unwrap_or(""),
+            obligation["policy"].as_str().unwrap_or(""),
+        ));
+    }
+    body
+}
+
 fn flush_idle_batches_if_ready(server: &Server, now: i64) {
     if !server.config.notifications.enabled {
         return;
@@ -1167,3 +1243,7 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "reply_idle_tests.rs"]
+mod reply_idle_tests;

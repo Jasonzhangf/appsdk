@@ -15,7 +15,7 @@ mod subagent;
 
 use clap::Parser;
 use identity::{Identity, RuntimeIdentity};
-use proto::{Req, Resp, TransportKind};
+use proto::{ReplyPolicy, Req, Resp, TransportKind};
 use scope::Scope;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -913,6 +913,8 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             r#type,
             in_reply_to,
             delivery,
+            reply_required,
+            reply_on_completion,
             body,
         } => {
             let scope = Scope::resolve()?;
@@ -921,6 +923,13 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             if body.is_empty() {
                 anyhow::bail!("empty message body");
             }
+            let reply_policy = if reply_required {
+                Some(ReplyPolicy::Required)
+            } else if reply_on_completion {
+                Some(ReplyPolicy::OnCompletion)
+            } else {
+                None
+            };
             let command = command_envelope(&scope, &ident)?;
             let v: serde_json::Value = call_project(
                 &scope,
@@ -936,6 +945,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     body,
                     in_reply_to,
                     delivery,
+                    reply_policy,
                 },
             )?;
             out(&v);

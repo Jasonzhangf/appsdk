@@ -3,6 +3,19 @@ use super::*;
 use crate::server::state::{now_ms, Event, Message};
 use std::sync::Mutex;
 
+#[test]
+fn notification_guidance_closes_the_reply_then_resumes_owned_work() {
+    let text = notification_text(&msg("reply-guidance")).unwrap();
+    assert!(text.contains("local/cross-project reply commands"));
+    assert!(text.contains("reply to the requester as required"));
+    assert!(text.contains("resume your current task"));
+    assert!(text.contains("not routinely to the user"));
+    assert!(text.contains("Do not reply to system reminders"));
+    let batch = batch_notification_text(&[], 0);
+    assert!(batch.contains("Reply to original requesters as required"));
+    assert!(batch.contains("results do not automatically need replies"));
+}
+
 fn test_server() -> (crate::server::Server, PathBuf) {
     static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

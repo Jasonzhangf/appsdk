@@ -10,7 +10,10 @@ blocked/waiting tasks do not get continuation wakes.
 Wake model:
 
 - Only master has long-horizon wake. Workers are not long-horizon wake targets
-  and are not automatically woken from idle.
+  and receive no automatic periodic task-continuation wake. An explicit pending
+  reply marker permits one reminder per observed idle episode through the existing
+  direct-message path; it asks the recipient to inspect the original requirement,
+  without starting a new task, answering automatically, or judging task completion.
 - A worker acts on an explicit dispatch, a bounded direct-message lease, or its
   own open task state. It inspects and progresses owned tasks during its
   working cycle; this is a task-bound inspect obligation, not a terminal

@@ -124,9 +124,10 @@ pub fn semantic_notification_category(subject: &str, mtype: &str) -> &'static st
 }
 
 const NOTIFY_PROTOCOL: &str =
-    "READ IS NOT DONE: never end your turn on an ACK, a read, or a summary. \
-     After handling, resume your current task; if you own none, run \
-     `appsdk longhorizon show` and take work.";
+    "READ IS NOT DONE: execute authorized actions and reply to the requester as required. \
+     Use the Collab Skill's local/cross-project reply commands. Do not reply to system reminders. \
+     Peers report to requester, not routinely to the user. After handling, resume your current task; \
+     if you own none, run `appsdk longhorizon show` and take work.";
 
 pub fn notification_text(message: &Message) -> Option<String> {
     let subject_raw = message.subject.as_deref()?;
@@ -182,7 +183,7 @@ pub fn batch_notification_text(
     let older = (remaining > 0)
         .then(|| format!(" older_messages={remaining}; run collab inbox"))
         .unwrap_or_default();
-    format!("Batch wake: message_ids={message_ids} task_ids={task_ids} action_categories={actions}. Read full durable details from collab inbox; execute the actions, do not ACK-only.{older}")
+    format!("Batch wake: message_ids={message_ids} task_ids={task_ids} action_categories={actions}. Read full durable details from collab inbox; execute the actions, do not ACK-only. Reply to original requesters as required, then resume your own unfinished work; peers do not routinely report to the user. System reminders and results do not automatically need replies.{older}")
 }
 
 #[derive(Debug)]

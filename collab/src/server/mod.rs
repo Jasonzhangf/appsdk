@@ -13,6 +13,7 @@ mod peer_lifecycle;
 pub mod presence;
 mod project_reset;
 pub(crate) mod register_reply;
+pub(crate) mod reply_obligation;
 pub mod state;
 pub mod timers;
 

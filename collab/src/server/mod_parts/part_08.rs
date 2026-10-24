@@ -222,6 +222,7 @@ fn handle_authenticated_send_with_app_scope(
     in_reply_to: Option<String>,
     delivery_mode: String,
     app_scope: Option<AppServerId>,
+    reply_policy: Option<crate::proto::ReplyPolicy>,
 ) -> Resp {
     let st = server.state.lock().unwrap();
     let Some(worker) = st.workers.get(&worker_id).cloned() else {
@@ -334,7 +335,7 @@ fn handle_authenticated_send_with_app_scope(
         return Resp::err("peer messaging requires type notify");
     }
     drop(st);
-    handle_send_with_task(
+    handle_send_with_task_policy(
         server,
         worker_id,
         to,
@@ -345,9 +346,12 @@ fn handle_authenticated_send_with_app_scope(
         delivery_mode,
         false,
         None,
+        reply_policy,
     )
 }
 
+/// Backwards-compatible entry for callers that do not declare a reply
+/// obligation. All ordinary sends run through here with no policy.
 pub(crate) fn handle_send_with_task(
     server: &Server,
     from: String,
@@ -359,6 +363,37 @@ pub(crate) fn handle_send_with_task(
     delivery_mode: String,
     assign_task: bool,
     managed_subagent_id: Option<&str>,
+) -> Resp {
+    handle_send_with_task_policy(
+        server,
+        from,
+        to,
+        mtype,
+        subject,
+        body,
+        in_reply_to,
+        delivery_mode,
+        assign_task,
+        managed_subagent_id,
+        None,
+    )
+}
+
+/// The real ordinary-send owner. `reply_policy` is the only source of a reply
+/// obligation; a linked reply validates and clears the original obligation in
+/// the same committed batch as the reply message.
+fn handle_send_with_task_policy(
+    server: &Server,
+    from: String,
+    to: String,
+    mtype: String,
+    subject: Option<String>,
+    body: String,
+    in_reply_to: Option<String>,
+    delivery_mode: String,
+    assign_task: bool,
+    managed_subagent_id: Option<&str>,
+    reply_policy: Option<crate::proto::ReplyPolicy>,
 ) -> Resp {
     if !matches!(delivery_mode.as_str(), "immediate" | "queued") {
         return Resp::err("delivery mode must be immediate or queued");
@@ -418,9 +453,21 @@ pub(crate) fn handle_send_with_task(
     }
     // Durable send admission depends on the recipient record and binding.
     // Endpoint failure is reported by the notification owner after enqueue.
+    let mut clear_obligation_id: Option<String> = None;
     if let Some(ref rid) = in_reply_to {
         if !st.msgs.contains_key(rid) {
             return Resp::err(format!("in_reply_to message {} not found", rid));
+        }
+        // Only an existing obligation adds the reply-identity gate. Legacy
+        // linked messages keep their previous behavior.
+        if let Some(obligation) = st.reply_obligations.get(rid) {
+            if body.trim().is_empty() {
+                return Resp::err("REPLY_BODY_REQUIRED: an obligated reply requires a nonempty answer");
+            }
+            if let Err(error) = reply_obligation::validate_reply(&st, obligation, &from, &to) {
+                return Resp::err(error);
+            }
+            clear_obligation_id = Some(rid.clone());
         }
     }
     if mtype == "request" {
@@ -458,6 +505,10 @@ pub(crate) fn handle_send_with_task(
             && m.body == msg.body
             && m.state == "pending"
             && st.mailbox_name_addresses.get(&m.id) == name_address.as_ref()
+            // A different link or reply policy is a different obligation even
+            // when the body is identical.
+            && m.in_reply_to == msg.in_reply_to
+            && st.reply_obligations.get(&m.id).map(|o| o.policy) == reply_policy
     }) {
         let managed_duplicate = assign_task
             && managed_child.as_ref().is_some_and(|child| {
@@ -536,6 +587,38 @@ pub(crate) fn handle_send_with_task(
     } else {
         vec![Event::Sent { msg }]
     };
+    // The obligation record and the message commit together. The reply-cleared
+    // marker is on the original message id, not this reply.
+    if let Some(policy) = reply_policy {
+        let Some(project) = reply_obligation::resolve_scope(
+            &st,
+            &from,
+            name_address
+                .as_ref()
+                .map(|address| address.project_scope.as_str()),
+        ) else {
+            return Resp::err(
+                "SEND_BINDING_REJECTED: reply obligation project scope is unavailable",
+            );
+        };
+        let recipient_name = name_address
+            .as_ref()
+            .map(|address| address.name.clone())
+            .or_else(|| reply_obligation::stable_name(&st, &to));
+        let obligation = reply_obligation::build_obligation(
+            &st,
+            mid.clone(),
+            project,
+            from.clone(),
+            to.clone(),
+            recipient_name,
+            policy,
+        );
+        events.push(Event::ReplyObligationSet { obligation });
+    }
+    if let Some(message_id) = clear_obligation_id {
+        events.push(Event::ReplyObligationCleared { message_id });
+    }
     if let Some(address) = name_address {
         events.push(Event::MailboxNameAddressed {
             message_id: mid.clone(),

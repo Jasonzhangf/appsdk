@@ -818,6 +818,7 @@ pub(crate) fn live_closure_probe(
                 body: challenge.clone(),
                 in_reply_to: None,
                 delivery: "immediate".into(),
+                reply_policy: None,
             },
         )?
     };

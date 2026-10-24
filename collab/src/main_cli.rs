@@ -482,6 +482,12 @@ pub(crate) enum Cmd {
         in_reply_to: Option<String>,
         #[arg(long, default_value = "immediate")]
         delivery: String,
+        /// Track an obligation: the recipient must reply to this message.
+        #[arg(long, conflicts_with = "reply_on_completion")]
+        reply_required: bool,
+        /// Track an obligation: reply once the delegated work is complete.
+        #[arg(long, conflicts_with = "reply_required")]
+        reply_on_completion: bool,
         #[arg(trailing_var_arg = true)]
         body: Vec<String>,
     },

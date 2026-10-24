@@ -696,6 +696,7 @@ mod legacy {
                     subject: Some("subject".into()),
                     body: "body".into(),
                     in_reply_to: None,
+                    reply_policy: None,
                     delivery: "immediate".into(),
                 },
                 Some(

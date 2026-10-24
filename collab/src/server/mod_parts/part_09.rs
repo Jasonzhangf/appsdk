@@ -1376,6 +1376,7 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
         .map(|id| (id.clone(), worker_work_roles(&st, route_scope.as_ref().map_or("",|route|route.project_scope_id.as_str()), id)))
         .collect();
     let work_policies=st.project_work_policy.clone();
+    let pending_reply_obligations = st.reply_obligation_view(&worker_id);
     drop(st);
 
     // Normal Context records presence before this pure projection. A completed
@@ -1585,6 +1586,7 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
         "role_brief": current_role_brief,
         "work_roles": work_roles_by_worker.get(&worker.id).cloned().unwrap_or_default(),
         "work_policies": work_policies,
+        "pending_reply_obligations": pending_reply_obligations,
         "liveness": {
             // `live` stays reserved for an endpoint that is resident now.
             // Durable identity presence is reported separately below.

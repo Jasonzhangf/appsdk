@@ -324,6 +324,51 @@ fn retention_skips_fresh_messages_and_frozen_admission() {
 }
 
 #[test]
+fn reply_obligation_retains_original_until_correlated_reply_clears_it() {
+    let (server, root) = test_server();
+    let now = now_ms();
+    let created_ms = now - 8 * 86_400_000;
+    server.commit(&[
+        Event::Sent {
+            msg: Message {
+                id: "retained-reply-request".into(),
+                from: "sender".into(),
+                to: "recipient".into(),
+                mtype: "notify".into(),
+                subject: Some("reply required".into()),
+                body: "Original requirement must remain readable".into(),
+                in_reply_to: None,
+                created_ms,
+                state: "read".into(),
+                wake_attempt_count: 0,
+                last_wake_attempt_ms: 0,
+                retry_attempted: false,
+            },
+        },
+        Event::ReplyObligationSet {
+            obligation: state::ReplyObligation {
+                message_id: "retained-reply-request".into(),
+                project: root.display().to_string(),
+                from_worker_id: "sender".into(),
+                from_name: None,
+                recipient_worker_id: "recipient".into(),
+                recipient_name: None,
+                policy: crate::proto::ReplyPolicy::Required,
+                created_ms,
+                reminded_idle_episode: false,
+            },
+        },
+    ]);
+    assert_eq!(purge_expired_storage(&server, now), 0);
+    assert!(server.state.lock().unwrap().msgs.contains_key("retained-reply-request"));
+    server.commit(&[Event::ReplyObligationCleared {
+        message_id: "retained-reply-request".into(),
+    }]);
+    assert_eq!(purge_expired_storage(&server, now), 1);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn fresh_default_does_not_skip_legacy_duplicate_cleanup() {
     let mut state = State::default();
     for event in

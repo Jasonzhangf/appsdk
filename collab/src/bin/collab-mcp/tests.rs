@@ -1,6 +1,108 @@
 use super::*;
 
 #[test]
+fn sendmessage_places_reply_flags_before_the_trailing_body() {
+    assert_eq!(
+        build_argv(
+            "collab_sendmessage",
+            &json!({"to":"Bob","subject":"ask","body":"please handle","delivery":"queued"})
+        )
+        .unwrap(),
+        [
+            "sendmessage",
+            "--to",
+            "Bob",
+            "--subject",
+            "ask",
+            "--delivery",
+            "queued",
+            "please handle",
+        ]
+    );
+    assert_eq!(
+        build_argv(
+            "collab_sendmessage",
+            &json!({
+                "to":"Bob",
+                "subject":"ask",
+                "body":"please handle",
+                "in_reply_to":"m-1",
+                "reply_required":true
+            })
+        )
+        .unwrap(),
+        [
+            "sendmessage",
+            "--to",
+            "Bob",
+            "--subject",
+            "ask",
+            "--in-reply-to",
+            "m-1",
+            "--reply-required",
+            "please handle",
+        ]
+    );
+    assert_eq!(
+        build_argv(
+            "collab_sendmessage",
+            &json!({"to":"Bob","subject":"done","body":"result","reply_on_completion":true})
+        )
+        .unwrap(),
+        [
+            "sendmessage",
+            "--to",
+            "Bob",
+            "--subject",
+            "done",
+            "--reply-on-completion",
+            "result",
+        ]
+    );
+}
+
+#[test]
+fn sendmessage_defaults_to_no_reply_obligation_and_rejects_non_boolean_flags() {
+    assert_eq!(
+        build_argv(
+            "collab_sendmessage",
+            &json!({
+                "to":"Bob",
+                "subject":"info",
+                "body":"fyi",
+                "reply_required":false,
+                "reply_on_completion":false
+            })
+        )
+        .unwrap(),
+        ["sendmessage", "--to", "Bob", "--subject", "info", "fyi"]
+    );
+    for key in ["reply_required", "reply_on_completion"] {
+        assert!(build_argv(
+            "collab_sendmessage",
+            &json!({"to":"Bob","subject":"bad","body":"x",(key):"true"})
+        )
+        .is_err());
+    }
+    assert!(build_argv(
+        "collab_sendmessage",
+        &json!({"to":"Bob","subject":"bad","body":"x","in_reply_to":7})
+    )
+    .is_err());
+    assert!(build_argv(
+        "collab_sendmessage",
+        &json!({
+            "to":"Bob",
+            "subject":"bad",
+            "body":"x",
+            "reply_required":true,
+            "reply_on_completion":true
+        })
+    )
+    .is_err());
+}
+
+#[test]
 fn work_role_adapter_preserves_explicit_clear_and_named_target() {
     assert_eq!(
         build_argv(

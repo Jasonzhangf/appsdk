@@ -1,5 +1,12 @@
 include!("support/tmux_cli_fixture.rs");
 
+fn now_epoch_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+
 fn context_snapshot(value: &Value) -> &Value {
     value
         .get("result")
@@ -36,6 +43,57 @@ fn pane_only_context(fixture: &Fixture, pane: &Pane, args: &[&str]) -> Value {
         );
     }
     context_snapshot(&value).clone()
+}
+
+fn pane_shows_message(visible: &str, message_id: &str) -> bool {
+    // tmux wraps long notifications at the pane width, which can split the
+    // message id across rows. Compare with whitespace removed so wrapping
+    // cannot hide an id that the pane actually rendered.
+    let compact: String = visible.chars().filter(|ch| !ch.is_whitespace()).collect();
+    compact.contains(message_id)
+}
+
+fn wait_for_pane_message(fixture: &Fixture, pane: &Pane, message_id: &str) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let captured = tmux(
+            &fixture.tmux_socket,
+            &["capture-pane", "-p", "-t", &pane.pane_id, "-S", "-4096"],
+        );
+        let visible = String::from_utf8_lossy(&captured.stdout);
+        if pane_shows_message(&visible, message_id) {
+            return;
+        }
+        if Instant::now() >= deadline {
+            // One final capture avoids failing on the last poll boundary: the
+            // assertion can otherwise race with the adapter's own publish step.
+            let final_captured = tmux(
+                &fixture.tmux_socket,
+                &["capture-pane", "-p", "-t", &pane.pane_id, "-S", "-4096"],
+            );
+            let final_visible = String::from_utf8_lossy(&final_captured.stdout);
+            if pane_shows_message(&final_visible, message_id) {
+                return;
+            }
+            panic!(
+                "message {message_id} was not observed in owned pane {}: {final_visible}",
+                pane.pane_id
+            );
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn owned_journal(fixture: &Fixture) -> PathBuf {
+    let project = std::fs::canonicalize(&fixture.root).unwrap();
+    let record: Value = std::fs::read_to_string(fixture.host_state.join("routes.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|record| record["project_scope"] == project.to_string_lossy().as_ref())
+        .expect("owned project route record");
+    PathBuf::from(record["storage_root"].as_str().unwrap())
+        .join(".agent-collab/server/journal.jsonl")
 }
 
 #[test]
@@ -126,6 +184,105 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
         .as_str()
         .expect("daemon receipt names sender worker")
         .to_owned();
+    let receiver_name = receiver_context["name"]
+        .as_str()
+        .expect("context names the receiver's stable occupancy")
+        .to_owned();
+    // The eventual recipient owns and ends this finite schedule, so the test
+    // proves that ending an owner's finite schedule preserves that owner's own
+    // daemon-owned direct-message reception. The trigger is close enough that
+    // the fixture actually crosses it before asserting termination.
+    let receiver_goal_id = "tmux-e2e-finite-goal";
+    let finite_trigger_ms = now_epoch_ms() + 5_000;
+    let armed_finite = fixture.run_ok(
+        &[
+            "goal",
+            "reconcile",
+            "--goal-id",
+            receiver_goal_id,
+            "--owner",
+            &receiver_name,
+            "--desired",
+            "active",
+            "--at-ms",
+            &finite_trigger_ms.to_string(),
+            "--ttl-seconds",
+            "300",
+            "--reason",
+            "owned finite schedule",
+        ],
+        Some(&receiver),
+    );
+    let finite_subscription_id = armed_finite["subscription"]["id"]
+        .as_str()
+        .expect("an active finite goal has a subscription id")
+        .to_owned();
+    assert_eq!(armed_finite["status"], "armed");
+    let ended_finite = fixture.run_ok(
+        &[
+            "goal",
+            "reconcile",
+            "--goal-id",
+            receiver_goal_id,
+            "--owner",
+            &receiver_name,
+            "--desired",
+            "ended",
+            "--reason",
+            "owned finite schedule ended",
+        ],
+        Some(&receiver),
+    );
+    assert_eq!(ended_finite["status"], "ended");
+    assert!(
+        ended_finite["retired_subscription_ids"]
+            .as_array()
+            .is_some_and(|ids| ids.iter().any(|id| id == &finite_subscription_id)),
+        "the ended receipt must retire the owned occurrence: {ended_finite}"
+    );
+    let ended_status = fixture.run_ok(&["notify", "status"], Some(&receiver));
+    let ended_occurrence = ended_status["subscriptions"]
+        .as_array()
+        .expect("notify status lists subscriptions")
+        .iter()
+        .find(|subscription| subscription["id"] == finite_subscription_id)
+        .expect("the retired occurrence stays observable");
+    assert_eq!(ended_occurrence["status"], "cancelled");
+    assert_eq!(
+        ended_occurrence["event"], "deadline",
+        "the ended schedule must not be a direct-message lease"
+    );
+    // Cross the bounded trigger window so the assertion cannot pass merely
+    // because the run finished before the trigger time.
+    let crossed_by = Instant::now() + Duration::from_secs(15);
+    while now_epoch_ms() <= finite_trigger_ms + 1_500 {
+        assert!(
+            Instant::now() < crossed_by,
+            "fixture did not cross the bounded goal trigger window"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    let ended_journal = std::fs::read_to_string(owned_journal(&fixture)).unwrap();
+    let ended_wake_count = ended_journal
+        .lines()
+        .filter(|line| {
+            line.contains("\"subscription_id\":\"") && line.contains(&finite_subscription_id)
+        })
+        .filter(|line| line.contains("\"ev\":\"WakeBound\""))
+        .count();
+    assert_eq!(
+        ended_wake_count, 0,
+        "an ended owned finite schedule must not emit a further occurrence: {ended_journal}"
+    );
+    let ended_deadline_messages = ended_journal
+        .lines()
+        .filter(|line| line.contains("\"ev\":\"Sent\""))
+        .filter(|line| line.contains(&format!("\"subject\":\"deadline:goal:{receiver_goal_id}\"")))
+        .count();
+    assert_eq!(
+        ended_deadline_messages, 0,
+        "an ended finite schedule must not send a deadline wake: {ended_journal}"
+    );
 
     let route = fixture.run_ok(
         &["route", "resolve", "--pane-id", &sender.pane_id],
@@ -243,8 +400,8 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
         .expect("preserved send has a durable message id")
         .to_owned();
 
-    // An explicit owner re-subscription after unsubscribing the system default
-    // must still satisfy the context lease receipt after identity loss.
+    // The default lease is daemon-owned. It satisfies the context receipt
+    // without any agent-controlled unsubscribe.
     let notify_status = fixture.run_ok(&["notify", "status"], Some(&sender));
     let default_subscription_id = notify_status["subscriptions"]
         .as_array()
@@ -259,26 +416,14 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
         .and_then(|subscription| subscription["id"].as_str())
         .expect("registered sender has the default direct-message lease")
         .to_owned();
-    fixture.run_ok(
-        &["notify", "unsubscribe", &default_subscription_id],
-        Some(&sender),
-    );
-    let resubscribed = fixture.run_ok(
-        &[
-            "notify",
-            "subscribe",
-            "--event",
-            "direct-message",
-            "--ttl-seconds",
-            "600",
-        ],
-        Some(&sender),
-    );
-    let resubscribed_id = resubscribed["subscription"]["id"]
-        .as_str()
-        .expect("explicit subscription has an id")
-        .to_owned();
-    assert_ne!(resubscribed_id, default_subscription_id);
+    let default_subscription = notify_status["subscriptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|subscription| subscription["id"] == default_subscription_id)
+        .expect("default direct-message lease")
+        .clone();
+    assert_eq!(default_subscription["status"], "armed");
 
     // Daemon restart and lost local receipt: the same actual tmux anchor must
     // return the same worker and generation without a fresh identity.
@@ -335,21 +480,14 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
     assert!(
         restart_subscriptions
             .iter()
-            .any(|subscription| subscription["id"] == resubscribed_id
+            .any(|subscription| subscription["id"] == default_subscription_id
                 && subscription["status"] == "armed"),
-        "the explicit direct-message lease must survive restart: {restart_subscriptions:?}"
+        "the daemon-owned default lease must stay armed after restart: {restart_subscriptions:?}"
     );
-    assert!(
-        restart_subscriptions.iter().any(|subscription| {
-            subscription["id"] == default_subscription_id
-                && subscription["status"] == "cancelled"
-                && subscription["status_reason"] == "explicit-unsubscribe"
-        }),
-        "the explicit unsubscribe must remain authoritative: {restart_subscriptions:?}"
-    );
-
     // Mailbox and tasks are daemon state, not receipt state: they survive the
-    // restart together with the recovered identity.
+    // restart together with the recovered identity. Read the preserved mailbox
+    // message here, before the post-goal direct message is consumed, so the
+    // two acceptance paths cannot consume each other's durable records.
     let tasks = restart_context["tasks"]
         .as_array()
         .expect("context lists the caller's tasks");
@@ -378,6 +516,77 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
     assert!(
         preserved_ids.contains(&preserved_id.as_str()),
         "unread mailbox must survive the daemon restart: {preserved_recv}"
+    );
+
+    // Direct-message reception stays daemon-owned after the finite schedule
+    // ended and after the same anchor recovered its identity.
+    let after_goal = fixture.run_ok(
+        &[
+            "sendmessage",
+            "--to",
+            &receiver_id,
+            "--subject",
+            "after finite schedule",
+            "owned pane body",
+        ],
+        Some(&sender),
+    );
+    let after_goal_id = after_goal["msg_id"]
+        .as_str()
+        .or_else(|| after_goal["message_id"].as_str())
+        .expect("a public sendmessage has a durable message id")
+        .to_owned();
+    assert_eq!(after_goal["notification"], "tmux-input-submitted");
+    wait_for_pane_message(&fixture, &receiver, &after_goal_id);
+    let after_goal_recv = fixture.run_ok(
+        &[
+            "recv",
+            "--timeout",
+            "0",
+            "--receive-id",
+            "after-finite-goal-recv",
+        ],
+        Some(&receiver),
+    );
+    assert!(
+        after_goal_recv["messages"]
+            .as_array()
+            .expect("recv returns messages")
+            .iter()
+            .any(|message| message["id"] == after_goal_id),
+        "the same message id must be receivable after the finite goal ended: {after_goal_recv}"
+    );
+    assert_eq!(
+        fixture.run_ok(&["msg", &after_goal_id], Some(&sender))["consumed_by_recv"],
+        true
+    );
+    let after_goal_status = fixture.run_ok(&["notify", "status"], Some(&receiver));
+    assert!(
+        after_goal_status["subscriptions"]
+            .as_array()
+            .expect("notify status lists subscriptions")
+            .iter()
+            .find(|subscription| subscription["id"] == finite_subscription_id)
+            .is_some_and(|subscription| subscription["status"] == "cancelled"),
+        "the ended finite schedule must stay terminal: {after_goal_status}"
+    );
+    assert!(
+        after_goal_status["subscriptions"]
+            .as_array()
+            .expect("notify status lists subscriptions")
+            .iter()
+            .find(|subscription| subscription["id"] == finite_subscription_id)
+            .is_some_and(|subscription| subscription["worker_id"] == receiver_id),
+        "the finite schedule that ended must belong to the receiving owner: {after_goal_status}"
+    );
+    assert!(
+        after_goal_status["subscriptions"]
+            .as_array()
+            .expect("notify status lists subscriptions")
+            .iter()
+            .any(|subscription| subscription["event"] == "direct-message"
+                && subscription["status"] == "armed"),
+        "daemon-owned direct-message reception must remain armed: {after_goal_status}"
     );
 
     // No `collab context` display path may leak the private credential or the
@@ -1029,4 +1238,11 @@ fn removed_identity_commands_and_flags_are_rejected_by_the_cli() {
         );
     }
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn pane_match_tolerates_message_id_wrapped_at_pane_width() {
+    let visible = "COLLAB_NOTIFY m179\n2810151585-1 [notification-batch]";
+    assert!(pane_shows_message(visible, "m1792810151585-1"));
+    assert!(!pane_shows_message(visible, "m1792810151585-2"));
 }

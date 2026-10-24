@@ -382,11 +382,31 @@ fn public_handlers_move_goal_schedule_and_pending_wake_across_intermediate_name(
         handle_master_promote(&server, "new".into(), "token-new".into(), "user approved new".into());
     assert!(promoted.ok, "{promoted:?}");
 
-    let old_denied =
-        handle_notification_unsubscribe(&server, "old".into(), "token-old".into(), goal_id.clone());
+    let old_denied = handle_goal_schedule_reconcile(
+        &server,
+        "old".into(),
+        "token-old".into(),
+        "shared-migration".into(),
+        "Jenny".into(),
+        "ended".into(),
+        None,
+        None,
+        None,
+        Some("fixture".into()),
+    );
     assert!(!old_denied.ok, "{old_denied:?}");
-    let cancelled =
-        handle_notification_unsubscribe(&server, "new".into(), "token-new".into(), goal_id.clone());
+    let cancelled = handle_goal_schedule_reconcile(
+        &server,
+        "new".into(),
+        "token-new".into(),
+        "shared-migration".into(),
+        "Jenny".into(),
+        "ended".into(),
+        None,
+        None,
+        None,
+        Some("fixture".into()),
+    );
     assert!(cancelled.ok, "{cancelled:?}");
 
     std::fs::remove_dir_all(root).unwrap();

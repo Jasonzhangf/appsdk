@@ -19,8 +19,12 @@ collab notify subscribe --event deadline --subject <timer-id> \
 collab notify subscribe --event deadline --subject <timer-id> \
   --every-ms <interval-ms> --repeat-count <1..=100> --ttl-seconds <bounded>
 collab notify status
-collab notify unsubscribe <subscription-id>
 ```
+
+Base direct-message reception is daemon-owned. There is no subscription-closing
+CLI, MCP tool, wire request, or alias. A finite owned goal schedule ends with
+`appsdk goal cancel`; a task-owned schedule ends with task closure. Neither
+operation controls base reception.
 
 ## Patrol duties and finite schedules
 
@@ -79,26 +83,24 @@ Up to three active subscriptions exist per agent.
 - AppSDK project initialization creates/refreshes the seven-day reusable default
   `direct-message` lease through the daemon identity context. Re-registering a peer
   follows its currently selected transport binding and replaces a persisted
-  default lease whose transport or target belongs to a retired route. An explicit owner
-  unsubscribe of that lease stays cancelled; later `register` / `context` /
-  `ack` must not silently re-arm it. Only an explicit unsubscribe stops the
-  default lease. Finishing or closing the last task never cancels it, so a
-  registered peer stays wakeable across task lifecycles. Task-scoped cleanup
-  must not cancel or replace that default lease, so `mailbox-only` cannot
-  appear silently. There is no `collab notify close` command; cancel a
-  specific owner-scoped lease with
-  `collab notify unsubscribe <subscription-id>`. After an explicit
-  unsubscribe, `collab notify subscribe --event direct-message` re-arms it for
-  the next collaboration.
+  default lease whose transport or target belongs to a retired route. Historical
+  cancellation (including an old explicit unsubscribe) is repairable: the daemon
+  re-arms the default lease from the current registered identity and selected
+  binding. Finishing or closing the last task never cancels it, so a registered
+  peer stays wakeable across task lifecycles. Task-scoped cleanup must not
+  cancel or replace that default lease, so `mailbox-only` cannot appear
+  silently. There is no subscription-closing command or interface; a finite
+  owned goal schedule ends with `appsdk goal cancel`, and task-owned schedules
+  end with task closure.
 - Direct-message leases are owner-scoped and reusable until expiry. Resource
   subscriptions are exact-subject and one-shot. Generic deadline subscriptions
   consume their explicit finite occurrence count; `goal:` deadlines remain
   one-shot and owned by the subscribing master or ordinary peer. Only
   `master-idle` requires current-master authority. A peer's goal deadline must
   wake that peer and must not alter the master's wake accumulator.
-- Success consumes only a one-shot event subscription. Expiry or unsubscribe
-  ends any subscription; one attempted batch exhausts only its messages on a
-  reusable direct-message lease.
+- Success consumes only a one-shot event subscription. One attempted batch
+  exhausts only its messages on a reusable direct-message lease; the base lease
+  is not a finite patrol resource.
 - Before every attempt, the daemon revalidates owner, event, subject, TTL,
   selected transport ownership and liveness, worker registration match, and
   presence. An unreachable, unowned, or mismatched endpoint transitions to its

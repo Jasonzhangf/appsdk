@@ -199,11 +199,28 @@ fn dispatch_with_route_context_bound(
         Req::NotificationStatus { worker_id, token } => {
             handle_notification_status(server, worker_id, token)
         }
-        Req::NotificationUnsubscribe {
+        Req::GoalScheduleReconcile {
             worker_id,
             token,
-            subscription_id,
-        } => handle_notification_unsubscribe(server, worker_id, token, subscription_id),
+            goal_id,
+            goal_owner,
+            desired,
+            trigger_ms,
+            ttl_seconds,
+            goal_subject,
+            reason,
+        } => handle_goal_schedule_reconcile(
+            server,
+            worker_id,
+            token,
+            goal_id,
+            goal_owner,
+            desired,
+            trigger_ms,
+            ttl_seconds,
+            goal_subject,
+            reason,
+        ),
         Req::Poll { .. } => {
             Resp::err("Poll is only handled by the async daemon connection path; use collab recv")
         }
@@ -826,7 +843,7 @@ fn wire_route_principals(req: &Req) -> Result<Vec<WireRoutePrincipal<'_>>, Strin
         | Req::LiveClosureDaemonSend { worker_id, .. }
         | Req::NotificationSubscribe { worker_id, .. }
         | Req::NotificationStatus { worker_id, .. }
-        | Req::NotificationUnsubscribe { worker_id, .. }
+        | Req::GoalScheduleReconcile { worker_id, .. }
         | Req::Poll { worker_id, .. }
         | Req::Ack { worker_id, .. }
         | Req::Inbox { worker_id, .. }

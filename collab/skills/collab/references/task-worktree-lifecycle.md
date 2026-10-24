@@ -70,8 +70,9 @@ The buffer does not prove busy/idle, Codex turn state, message consumption, or
 task completion, and it writes no durable receipt.
 
 Closing the last owned task does not cancel this peer's default direct-message
-lease. A specific owner-scoped lease can be cancelled with
-`collab notify unsubscribe <subscription-id>`.
+lease. Base reception is daemon-owned and has no subscription-closing command;
+end a leftover finite goal schedule with `appsdk goal cancel`, and let
+task-owned schedules end with task closure.
 
 - One issue owns one clean worktree. New work must use the configured
   `[worktree].base` when set, for example

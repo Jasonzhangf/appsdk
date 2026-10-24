@@ -69,6 +69,7 @@ fn appsdk_goal(fixture: &AppFixture, root: &std::path::Path, thread: &str, args:
         .args(args)
         .current_dir(root)
         .env("PATH", std::env::join_paths(paths).unwrap())
+        .env("HOME", fixture.root.join("home"))
         .env("COLLAB_STATE_DIR", &fixture.host_state)
         .env("COLLAB_APPSERVER_SOCKET", &fixture.app_socket)
         .env_remove("CODEX_APP_SERVER_SOCKET")
@@ -192,6 +193,184 @@ fn appsdk_linked_worktree_legacy_goal_is_cancelled_without_orphan() {
     assert_eq!(active[0]["id"], second["subscription_id"]);
     assert_eq!(std::fs::read(legacy).unwrap(), bytes);
     run(&["goal", "cancel", "--json"]);
+}
+
+#[test]
+#[ignore = "set APPSDK_GOAL_CONSUMER_BINARY and run explicitly"]
+fn appsdk_retained_historical_basename_subject_cancels_and_rearms_without_duplicate() {
+    let mut fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    std::fs::write(
+        fixture.project.join("long-task.md"),
+        "# Historical basename goal\n",
+    )
+    .unwrap();
+    let first = appsdk_goal(
+        &fixture,
+        &fixture.project,
+        THREAD_A,
+        &[
+            "goal",
+            "subscribe",
+            "--goal",
+            "long-task.md",
+            "--interval",
+            "5m",
+            "--json",
+        ],
+    );
+    let owner = first["owner"].as_str().unwrap().to_owned();
+    let goal_id = first["goal_id"].as_str().unwrap().to_owned();
+    let canonical_id = first["subscription_id"].as_str().unwrap().to_owned();
+    let context = fixture.run_public(&["context"], THREAD_A);
+    let worker_id = context["identity"]["worker_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let encoded: String = owner.bytes().map(|b| format!("{b:02x}")).collect();
+    let record_path = fixture
+        .project
+        .join(".appsdk-control/goals")
+        .join(encoded)
+        .join("long-task-goal.json");
+    let mut record: Value = serde_json::from_slice(&std::fs::read(&record_path).unwrap()).unwrap();
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let historical_subject = "goal:long-task.md";
+    let historical_id = "sub-legacy-goal";
+    let mut historical = first["collab_subscription"]["subscription"].clone();
+    historical["id"] = json!(historical_id);
+    historical["worker_id"] = json!(worker_id);
+    historical["subject"] = json!(historical_subject);
+    historical["trigger_ms"] = json!(now + 600_000);
+    historical["trigger_times_ms"] = json!([]);
+    historical["interval_ms"] = Value::Null;
+    historical["repeat_count"] = json!(1);
+    historical["fired_count"] = json!(0);
+    historical["expires_ms"] = json!(now + 86_400_000);
+    historical["status"] = json!("armed");
+    historical["status_reason"] = Value::Null;
+    fixture
+        .append_name_events(&[json!({"ev": "NotificationSubscribed", "subscription": historical})]);
+
+    record["subject"] = json!(historical_subject);
+    record["subscription_id"] = json!(historical_id);
+    record["collab_subscription"] = json!({"subscription_id": historical_id});
+    record["collab_subscribed"] = json!(true);
+    record["desired"] = json!("subscribed");
+    record["observed"] = json!("subscribed");
+    record["active"] = json!(true);
+    record["error"] = Value::Null;
+    std::fs::write(&record_path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+
+    let before_cancel = fixture.run_public(&["notify", "status"], THREAD_A);
+    assert!(
+        before_cancel["subscriptions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["id"] == historical_id && s["status"] == "armed"),
+        "the retained historical occurrence must be armed: {before_cancel}"
+    );
+
+    let cancelled = appsdk_goal(
+        &fixture,
+        &fixture.project,
+        THREAD_A,
+        &["goal", "cancel", "--json"],
+    );
+    assert_eq!(cancelled["status"], "cancelled", "{cancelled}");
+    let retired = cancelled["record"]["cancel_receipt"]["retired_subscription_ids"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        retired
+            .iter()
+            .any(|id| id.as_str() == Some(canonical_id.as_str())),
+        "cancel must retire the canonical occurrence: {cancelled}"
+    );
+    assert!(
+        retired.iter().any(|id| id.as_str() == Some(historical_id)),
+        "cancel must retire the retained historical occurrence: {cancelled}"
+    );
+    let after_cancel = fixture.run_public(&["notify", "status"], THREAD_A);
+    assert!(
+        after_cancel["subscriptions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["event"] != "deadline" || !matches!(s["status"].as_str(), Some("armed"))),
+        "cancel must leave no armed goal occurrence: {after_cancel}"
+    );
+
+    // Seed an already-due retained occurrence. The next subscribe must retire
+    // that exact subject and leave exactly one fresh canonical occurrence.
+    let due_id = "sub-legacy-goal-due";
+    let mut due = historical;
+    due["id"] = json!(due_id);
+    due["trigger_ms"] = json!(now - 1);
+    due["status"] = json!("armed");
+    due["status_reason"] = json!("deadline-master-busy-skipped");
+    fixture.append_name_events(&[json!({"ev": "NotificationSubscribed", "subscription": due})]);
+
+    record["subject"] = json!(historical_subject);
+    record["subscription_id"] = json!(due_id);
+    record["collab_subscription"] = json!({"subscription_id": due_id});
+    record["desired"] = json!("subscribed");
+    record["observed"] = json!("subscribed");
+    record["active"] = json!(true);
+    record["error"] = Value::Null;
+    record["remote_state"] = json!("armed");
+    std::fs::write(&record_path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+
+    let rearmed = appsdk_goal(
+        &fixture,
+        &fixture.project,
+        THREAD_A,
+        &[
+            "goal",
+            "subscribe",
+            "--goal",
+            "long-task.md",
+            "--interval",
+            "5m",
+            "--json",
+        ],
+    );
+    assert_eq!(rearmed["active"], true, "{rearmed}");
+    assert_eq!(rearmed["desired"], "subscribed", "{rearmed}");
+    assert_ne!(
+        rearmed["subscription_id"].as_str(),
+        Some(due_id),
+        "{rearmed}"
+    );
+
+    fixture.restart_daemon();
+    let after_rearm = fixture.run_public(&["notify", "status"], THREAD_A);
+    let active_goals = after_rearm["subscriptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["event"] == "deadline" && s["status"] == "armed")
+        .collect::<Vec<_>>();
+    assert_eq!(active_goals.len(), 1, "{after_rearm}");
+    assert_eq!(
+        active_goals[0]["subject"],
+        format!("goal:{goal_id}"),
+        "{after_rearm}"
+    );
+    assert!(
+        after_rearm["subscriptions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["id"] == due_id && s["status"] == "cancelled"),
+        "due rearm must retire the historical occurrence: {after_rearm}"
+    );
 }
 
 #[test]
@@ -491,7 +670,11 @@ fn peer_goal_deadline_is_delivered_consumed_and_cancelled_without_master_proxy()
         .unwrap();
     assert_eq!(subscription["status"], "consumed");
     assert_eq!(subscription["fired_count"], 1);
-    fixture.run_public(&["notify", "unsubscribe", peer_sub], THREAD_B);
+    let removed_close = fixture.command_public(&["notify", "unsubscribe", peer_sub], THREAD_B);
+    assert!(
+        !removed_close.status.success(),
+        "public subscription-closing command must be removed"
+    );
     let master_status = fixture.run_public(&["notify", "status"], THREAD_A);
     assert_eq!(
         master_status["subscriptions"]

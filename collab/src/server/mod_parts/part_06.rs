@@ -232,50 +232,365 @@ fn handle_notification_status(server: &Server, worker_id: String, token: String)
     Resp::data(json!({"subscriptions": subscriptions}))
 }
 
-fn handle_notification_unsubscribe(
+fn handle_goal_schedule_reconcile(
     server: &Server,
     worker_id: String,
     token: String,
-    subscription_id: String,
+    goal_id: String,
+    goal_owner: String,
+    desired: String,
+    trigger_ms: Option<i64>,
+    ttl_seconds: Option<u64>,
+    goal_subject: Option<String>,
+    reason: Option<String>,
 ) -> Resp {
+    if goal_id.trim().is_empty() {
+        return Resp::err("GOAL_SCHEDULE_ID_REQUIRED");
+    }
+    if goal_owner.trim().is_empty() {
+        return Resp::err("GOAL_SCHEDULE_OWNER_REQUIRED");
+    }
+    if !matches!(desired.as_str(), "active" | "ended") {
+        return Resp::err("GOAL_SCHEDULE_DESIRED_INVALID: expected active or ended");
+    }
+    // A retained historical subject is adopted only as an exact goal:<name>
+    // string. It is never interpreted as a subscription ID: matching below
+    // still requires the exact subject and the authenticated caller's own
+    // stable-name-scoped deadline subscription.
+    let retained_subject = match goal_subject.as_deref() {
+        None => None,
+        Some(raw) if raw.trim().is_empty() => {
+            return Resp::err("GOAL_SCHEDULE_SUBJECT_REQUIRED");
+        }
+        Some(raw) if raw != raw.trim() => {
+            return Resp::err(
+                "GOAL_SCHEDULE_SUBJECT_NOT_EXACT: subject must not carry surrounding whitespace",
+            );
+        }
+        Some(raw) if !raw.starts_with("goal:") || raw.len() <= "goal:".len() => {
+            return Resp::err(
+                "GOAL_SCHEDULE_SUBJECT_INVALID: subject must be an exact goal:<name>",
+            );
+        }
+        Some(raw) => Some(raw.to_owned()),
+    };
+    let now = now_ms();
     let mut state = server.state.lock().unwrap();
     if let Err(error) = verify(&state, &worker_id, &token) {
         return error;
     }
-    let Some(subscription) = state.notification_subscriptions.get(&subscription_id) else {
-        return Resp::err(format!(
-            "notification subscription {} not found",
-            subscription_id
-        ));
+    let route_scope = match server_route_scope(server, &state) {
+        Ok(scope) => scope,
+        Err(error) => return Resp::err(error),
     };
-    if subscription.worker_id != worker_id {
-        return Resp::err("only the subscription owner may unsubscribe");
+    let Some(route_scope) = route_scope else {
+        return Resp::err("GOAL_SCHEDULE_PROJECT_SCOPE_MISSING");
+    };
+    let owns_name = state
+        .name_occupancies
+        .get(route_scope.project_scope_id.as_str())
+        .and_then(|names| names.get(&goal_owner))
+        .is_some_and(|holder| holder.worker_id == worker_id);
+    if !owns_name {
+        return Resp::err(format!(
+            "GOAL_SCHEDULE_OWNER_MISMATCH: caller does not own stable name {goal_owner}"
+        ));
     }
-    let mut events = vec![Event::NotificationSuppressed {
-        subscription_id: subscription_id.clone(),
-        status: "cancelled".into(),
-        reason: EXPLICIT_UNSUBSCRIBE_REASON.into(),
-        updated_ms: now_ms(),
-    }];
-    let pending = state
+    let Some(worker) = state.workers.get(&worker_id).cloned() else {
+        return Resp::err("goal schedule reconcile requires a registered worker");
+    };
+    let Some(transport) = selected_transport_for_worker(&worker) else {
+        return Resp::err("registered worker has no server-selected transport");
+    };
+    let canonical_subject = format!("goal:{goal_id}");
+    let mut subjects = vec![canonical_subject];
+    if let Some(retained) = retained_subject.as_ref() {
+        if !subjects.contains(retained) {
+            subjects.push(retained.clone());
+        }
+    }
+    let master_holder = current_master_holder(server, &state).ok().flatten();
+    let caller_is_master = master_holder.as_deref() == Some(worker_id.as_str());
+    let matching = state
+        .notification_subscriptions
+        .values()
+        .filter(|subscription| {
+            subscription.worker_id == worker_id
+                && subscription.event == "deadline"
+                && subscription
+                    .subject
+                    .as_deref()
+                    .is_some_and(|subject| subjects.iter().any(|candidate| candidate == subject))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if desired == "active" {
+        if is_managed_subagent(&state, &worker_id) {
+            return Resp::err("managed subworkers cannot create independent deadline schedules");
+        }
+        let Some(trigger_ms) = trigger_ms else {
+            return Resp::err("GOAL_SCHEDULE_TRIGGER_REQUIRED");
+        };
+        let Some(ttl_seconds) = ttl_seconds else {
+            return Resp::err("GOAL_SCHEDULE_TTL_REQUIRED");
+        };
+        if ttl_seconds == 0 || ttl_seconds > MAX_NOTIFICATION_TTL_SECONDS {
+            return Resp::err(format!(
+                "ttl_seconds must be between 1 and {MAX_NOTIFICATION_TTL_SECONDS}"
+            ));
+        }
+        let expires_ms = now.saturating_add((ttl_seconds as i64).saturating_mul(1000));
+        if trigger_ms <= now || trigger_ms >= expires_ms {
+            return Resp::err("goal deadline trigger must be in the future and before expiry");
+        }
+        let Some(target) = notification_target(&transport) else {
+            return Resp::err("selected transport has no route address");
+        };
+        if let Some(mut existing) = matching.iter().find(|subscription| {
+            subscription.status == "armed"
+                && subscription.trigger_ms == Some(trigger_ms)
+                && subscription.trigger_times_ms.is_empty()
+                && subscription.interval_ms.is_none()
+                && subscription.repeat_count == 1
+                && subscription.expires_ms > now
+        }).cloned() {
+            let retained_id = existing.id.clone();
+            let mut events = Vec::new();
+            let mut retired = Vec::new();
+            let mut superseded = Vec::new();
+            if existing.method != transport.kind.as_str() || existing.target != target {
+                existing.method = transport.kind.as_str().into();
+                existing.target = target.to_owned();
+                existing.updated_ms = now;
+                events.push(Event::NotificationSubscribed {
+                    subscription: existing.clone(),
+                });
+            }
+            for subscription in matching.iter().filter(|subscription| {
+                subscription.id != retained_id
+                    && matches!(
+                        subscription.status.as_str(),
+                        "armed" | "consumed" | "transport-lost"
+                    )
+            }) {
+                retired.push(subscription.id.clone());
+                if matches!(subscription.status.as_str(), "armed" | "transport-lost") {
+                    events.push(Event::NotificationSuppressed {
+                        subscription_id: subscription.id.clone(),
+                        status: "cancelled".into(),
+                        reason: "goal-schedule-rearmed".into(),
+                        updated_ms: now,
+                    });
+                }
+                superseded.extend(pending_messages_for_subscription(&state, &subscription.id));
+            }
+            superseded.sort();
+            superseded.dedup();
+            if !superseded.is_empty() {
+                events.push(Event::Superseded { ids: superseded.clone() });
+            }
+            if caller_is_master {
+                if let Some(event) =
+                    cleared_master_goal_due_event(&state, &worker_id, &retired, now)
+                {
+                    events.push(event);
+                }
+            }
+            if !events.is_empty() {
+                if let Err(error) = server.commit_locked(&mut state, &events) {
+                    return Resp::err(format!("NOTIFICATION_DURABILITY_FAILED: {error}"));
+                }
+            }
+            return Resp::data(json!({
+                "goal_id": goal_id,
+                "goal_owner": goal_owner,
+                "desired": "active",
+                "status": "armed",
+                "subscription": existing,
+                "retired_subscription_ids": retired,
+                "superseded_message_ids": superseded,
+                "deduplicated": events.is_empty(),
+                "one_shot": true,
+                "max_repeat_count": crate::server::state::MAX_NOTIFICATION_REPEATS,
+            }));
+        }
+        let mut events = Vec::new();
+        let mut retired = Vec::new();
+        let mut superseded = Vec::new();
+        for subscription in matching.iter().filter(|subscription| {
+            matches!(
+                subscription.status.as_str(),
+                "armed" | "consumed" | "transport-lost"
+            )
+        }) {
+            retired.push(subscription.id.clone());
+            if matches!(subscription.status.as_str(), "armed" | "transport-lost") {
+                events.push(Event::NotificationSuppressed {
+                    subscription_id: subscription.id.clone(),
+                    status: "cancelled".into(),
+                    reason: "goal-schedule-rearmed".into(),
+                    updated_ms: now,
+                });
+            }
+            superseded.extend(pending_messages_for_subscription(&state, &subscription.id));
+        }
+        if !superseded.is_empty() {
+            events.push(Event::Superseded { ids: superseded.clone() });
+        }
+        let subscription = NotificationSubscription {
+            id: format!("sub-{}", gen_msg_id()),
+            worker_id: worker_id.clone(),
+            event: "deadline".into(),
+            subject: Some(format!("goal:{goal_id}")),
+            target: target.to_owned(),
+            method: transport.kind.as_str().into(),
+            trigger_ms: Some(trigger_ms),
+            trigger_times_ms: Vec::new(),
+            interval_ms: None,
+            repeat_count: 1,
+            fired_count: 0,
+            expires_ms,
+            status: "armed".into(),
+            created_ms: now,
+            updated_ms: now,
+            status_reason: None,
+        };
+        events.push(Event::NotificationSubscribed {
+            subscription: subscription.clone(),
+        });
+        if caller_is_master {
+            if let Some(event) =
+                cleared_master_goal_due_event(&state, &worker_id, &retired, now)
+            {
+                events.push(event);
+            }
+        }
+        if let Err(error) = server.commit_locked(&mut state, &events) {
+            return Resp::err(format!("NOTIFICATION_DURABILITY_FAILED: {error}"));
+        }
+        return Resp::data(json!({
+            "goal_id": goal_id,
+            "goal_owner": goal_owner,
+            "desired": "active",
+            "status": "armed",
+            "subscription": subscription,
+            "retired_subscription_ids": retired,
+            "superseded_message_ids": superseded,
+            "deduplicated": false,
+            "one_shot": true,
+            "max_repeat_count": crate::server::state::MAX_NOTIFICATION_REPEATS,
+        }));
+    }
+
+    let mut events = Vec::new();
+    let mut retired = Vec::new();
+    let mut superseded = Vec::new();
+    for subscription in &matching {
+        if matches!(
+            subscription.status.as_str(),
+            "armed" | "consumed" | "transport-lost"
+        ) {
+            retired.push(subscription.id.clone());
+        }
+        if matches!(subscription.status.as_str(), "armed" | "transport-lost") {
+            events.push(Event::NotificationSuppressed {
+                subscription_id: subscription.id.clone(),
+                status: "cancelled".into(),
+                reason: reason
+                    .clone()
+                    .unwrap_or_else(|| "goal-schedule-ended".into()),
+                updated_ms: now,
+            });
+        }
+        superseded.extend(pending_messages_for_subscription(&state, &subscription.id));
+    }
+    superseded.sort();
+    superseded.dedup();
+    if !superseded.is_empty() {
+        events.push(Event::Superseded { ids: superseded.clone() });
+    }
+    if caller_is_master {
+        if let Some(event) = cleared_master_goal_due_event(&state, &worker_id, &retired, now) {
+            events.push(event);
+        }
+    }
+    if !events.is_empty() {
+        if let Err(error) = server.commit_locked(&mut state, &events) {
+            return Resp::err(format!("NOTIFICATION_DURABILITY_FAILED: {error}"));
+        }
+    }
+    Resp::data(json!({
+        "goal_id": goal_id,
+        "goal_owner": goal_owner,
+        "desired": "ended",
+        "status": "ended",
+        "subscription": serde_json::Value::Null,
+        "retired_subscription_ids": retired,
+        "superseded_message_ids": superseded,
+        "deduplicated": events.is_empty(),
+    }))
+}
+
+fn pending_messages_for_subscription(state: &State, subscription_id: &str) -> Vec<String> {
+    state
         .wake_bindings
         .iter()
         .filter_map(|(message_id, bound_subscription)| {
-            (bound_subscription == &subscription_id
+            (bound_subscription == subscription_id
                 && state
                     .msgs
                     .get(message_id)
                     .is_some_and(|message| message.state == "pending"))
             .then_some(message_id.clone())
         })
-        .collect::<Vec<_>>();
-    if !pending.is_empty() {
-        events.push(Event::Superseded { ids: pending });
+        .collect()
+}
+
+/// Reconcile the master goal-due accumulator against the committed outcome of
+/// one lifecycle transition. `retired` names the occurrences this transition
+/// removes from the recoverable set, so an already-due occurrence being ended
+/// or replaced cannot keep the latch raised for itself. Only the master's own
+/// due goals are applicable; an unrelated peer goal must not preserve it.
+fn cleared_master_goal_due_event(
+    state: &State,
+    master_worker: &str,
+    retired: &[String],
+    now: i64,
+) -> Option<Event> {
+    // A delivery may clear `goal_due` while keeping the notified revision so
+    // a same-revision replay cannot raise the latch again. Retiring that
+    // occurrence still ends its revision, so a delivered-but-unconsumed due
+    // goal cannot leave a stale active revision behind the ended receipt.
+    let retired_revision = state.master_wake.active_goal_revision.is_some_and(|revision| {
+        retired.iter().any(|subscription_id| {
+            state
+                .notification_subscriptions
+                .get(subscription_id)
+                .and_then(crate::server::state::subscription_goal_deadline_revision)
+                == Some(revision)
+        })
+    });
+    if !state.master_wake.goal_due && !retired_revision {
+        return None;
     }
-    if let Err(error) = server.commit_locked(&mut state, &events) {
-        return Resp::err(format!("NOTIFICATION_DURABILITY_FAILED: {error}"));
+    let other_due_goal = state.notification_subscriptions.values().any(|subscription| {
+        subscription.worker_id == master_worker
+            && is_goal_deadline(subscription)
+            && subscription.status == "armed"
+            && !retired.iter().any(|retired| retired == &subscription.id)
+            && subscription
+                .trigger_ms
+                .is_some_and(|trigger| trigger <= now)
+    });
+    if other_due_goal {
+        return None;
     }
-    Resp::data(json!({"subscription_id": subscription_id, "status": "cancelled"}))
+    let mut accumulator = state.master_wake.clone();
+    accumulator.goal_due = false;
+    accumulator.active_goal_revision = None;
+    accumulator.last_updated_ms = now;
+    Some(Event::MasterWakeUpdated { accumulator })
 }
 
 // ---------- handlers ----------

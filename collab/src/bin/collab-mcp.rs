@@ -90,12 +90,6 @@ fn tools() -> Value {
             &[]
         ),
         tool(
-            "collab_notify_unsubscribe",
-            "Cancel one calling-Agent-owned notification subscription.",
-            json!({"subscription_id":{"type":"string"}}),
-            &["subscription_id"]
-        ),
-        tool(
             "collab_task_status",
             "Read the authoritative task registry.",
             json!({"id":{"type":"string"}}),
@@ -529,11 +523,6 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
             optional_integer_flag(&mut argv, args, "ttl_seconds", "--ttl-seconds")?;
         }
         "collab_notify_status" => argv.extend(["notify".into(), "status".into()]),
-        "collab_notify_unsubscribe" => argv.extend([
-            "notify".into(),
-            "unsubscribe".into(),
-            required(args, "subscription_id")?,
-        ]),
         "collab_inbox" => argv.push("inbox".into()),
         "collab_context" => {
             argv.push("context".into());

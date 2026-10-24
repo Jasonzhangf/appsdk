@@ -726,10 +726,24 @@ pub enum Req {
         worker_id: String,
         token: String,
     },
-    NotificationUnsubscribe {
+    GoalScheduleReconcile {
         worker_id: String,
         token: String,
-        subscription_id: String,
+        /// Stable goal identity. It is the goal-file SHA-256 used by AppSDK.
+        goal_id: String,
+        /// Stable-name owner that owns this goal in the current project.
+        goal_owner: String,
+        /// `active` creates or retains one bounded one-shot deadline;
+        /// `ended` retires only that goal's finite schedule occurrences.
+        desired: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger_ms: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ttl_seconds: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        goal_subject: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     Poll {
         worker_id: String,
@@ -1535,5 +1549,21 @@ mod tests {
         let mut bytes = br#"{"project_context":{"app_scope_id":"appserver-1","canonical_root":"/tmp","project_scope":"/tmp"},"op":"Ping"}"#.to_vec();
         bytes.push(0xff);
         assert!(serde_json::from_slice::<RequestEnvelope>(&bytes).is_err());
+    }
+
+    #[test]
+    fn removed_notification_unsubscribe_request_fails_to_decode() {
+        for op in ["NotificationUnsubscribe", "notification_unsubscribe"] {
+            let old = serde_json::json!({
+                "op": op,
+                "worker_id": "peer",
+                "token": "token-peer",
+                "subscription_id": "sub-default-direct-message-peer"
+            });
+            assert!(
+                serde_json::from_value::<RequestEnvelope>(old).is_err(),
+                "removed raw request must fail closed: {op}"
+            );
+        }
     }
 }

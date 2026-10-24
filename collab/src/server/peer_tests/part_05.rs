@@ -1333,66 +1333,56 @@ fn tmux_reregistration_replaces_a_persisted_appserver_default_wake_lease() {
 }
 
 #[test]
-fn cancelled_default_lease_stays_suppressed_until_explicit_subscribe() {
+fn explicit_cancelled_default_lease_is_repaired_by_registration() {
     let (server, root) = test_server();
     assert!(register(&server, "peer", "%peer").ok);
 
-    let cancelled = handle_notification_unsubscribe(
-        &server,
-        "peer".into(),
-        "token-peer".into(),
-        "sub-default-direct-message-peer".into(),
+    server.commit(&[Event::NotificationSuppressed {
+        subscription_id: "sub-default-direct-message-peer".into(),
+        status: "cancelled".into(),
+        reason: "explicit-unsubscribe".into(),
+        updated_ms: now_ms(),
+    }]);
+    let events = default_direct_message_events(
+        &server.state.lock().unwrap(),
+        "peer",
+        &test_tmux_transport("thread-peer"),
+        now_ms(),
     );
-    assert!(cancelled.ok, "{}", cancelled.error.unwrap_or_default());
-    assert!(register(&server, "peer", "%peer").ok);
-
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::NotificationSubscribed { subscription }
+                if subscription.id == "sub-default-direct-message-peer"
+                    && subscription.status == "armed"
+        )),
+        "historical explicit-unsubscribe must not disable base reception: {events:?}"
+    );
+    server.commit(&events);
     let state = server.state.lock().unwrap();
     assert_eq!(
         state.notification_subscriptions["sub-default-direct-message-peer"].status,
-        "cancelled"
+        "armed"
     );
-    assert!(default_direct_message_events(
-        &state,
-        "peer",
-        &test_tmux_transport("thread-peer"),
-        now_ms()
-    )
-    .is_empty());
-    drop(state);
-
-    let explicit = handle_notification_subscribe(
-        &server,
-        "peer".into(),
-        "token-peer".into(),
-        "direct-message".into(),
-        None,
-        None,
-        Vec::new(),
-        None,
-        1,
-        3_600,
-    );
-    assert!(explicit.ok, "{}", explicit.error.unwrap_or_default());
-    let explicit_id = explicit.data["subscription"]["id"].as_str().unwrap();
-    assert_ne!(explicit_id, "sub-default-direct-message-peer");
     assert_eq!(
-        explicit.data["subscription"]["status"],
-        serde_json::Value::String("armed".into())
+        state.notification_subscriptions["sub-default-direct-message-peer"]
+            .status_reason
+            .as_deref(),
+        None
     );
 
     std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
-fn legacy_cancelled_default_lease_is_rearmed_but_explicit_unsubscribe_stays_suppressed() {
+fn historical_cancelled_default_lease_is_rearmed_without_reviving_goal_schedules() {
     let (server, root) = test_server();
     assert!(register(&server, "peer", "%peer").ok);
 
-    // Simulate a lease cancelled by the removed automatic close path: no
-    // explicit-unsubscribe reason was recorded.
-    server.commit(&[Event::NotificationStatus {
+    server.commit(&[Event::NotificationSuppressed {
         subscription_id: "sub-default-direct-message-peer".into(),
         status: "cancelled".into(),
+        reason: "explicit-unsubscribe".into(),
         updated_ms: now_ms(),
     }]);
     {
@@ -1413,31 +1403,655 @@ fn legacy_cancelled_default_lease_is_rearmed_but_explicit_unsubscribe_stays_supp
             "a reason-less legacy cancellation must be recoverable: {events:?}"
         );
     }
+    assert!(register(&server, "peer", "%peer").ok);
+    let project_scope = GlobalState::canonical_project_scope(&server.root).unwrap();
+    server.commit(&[Event::NameResolutionCommitted {
+        project_scope: project_scope.as_str().to_owned(),
+        occupancy: crate::server::name_state::NameOccupancy {
+            name: "peer".into(),
+            worker_id: "peer".into(),
+            session_id: "session-peer".into(),
+            occupancy_revision: 1,
+            updated_ms: now_ms(),
+        },
+        assignments: Vec::new(),
+    }]);
 
-    // An explicit owner unsubscribe is a durable stop and must not be re-armed
-    // by registration or daemon replay.
-    let cancelled = handle_notification_unsubscribe(
+    let ended = handle_goal_schedule_reconcile(
         &server,
         "peer".into(),
         "token-peer".into(),
-        "sub-default-direct-message-peer".into(),
+        "finished-goal".into(),
+        "peer".into(),
+        "ended".into(),
+        None,
+        None,
+        None,
+        Some("goal-finished".into()),
     );
-    assert!(cancelled.ok, "{}", cancelled.error.unwrap_or_default());
-    assert!(register(&server, "peer", "%peer").ok);
+    assert!(ended.ok, "{}", ended.error.unwrap_or_default());
     let state = server.state.lock().unwrap();
     assert_eq!(
-        state.notification_subscriptions["sub-default-direct-message-peer"]
-            .status_reason
-            .as_deref(),
-        Some("explicit-unsubscribe")
+        state.notification_subscriptions["sub-default-direct-message-peer"].status,
+        "armed"
     );
-    assert!(default_direct_message_events(
-        &state,
+    assert!(
+        state
+            .notification_subscriptions
+            .values()
+            .all(|subscription| subscription.subject.as_deref() != Some("goal:finished-goal")),
+        "ending an absent goal must not resurrect or create a goal occurrence"
+    );
+    drop(state);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn pending_unattempted_direct_message_is_recovered_once_and_not_replayed() {
+    let (mut server, root) = test_server();
+    server.config.notifications.mode = "immediate".into();
+    assert!(register_synthetic_peer(&server, "peer", "thread-peer").ok);
+    let default_id = "sub-default-direct-message-peer";
+    let now = now_ms();
+    server.commit(&[Event::NotificationSuppressed {
+        subscription_id: default_id.into(),
+        status: "cancelled".into(),
+        reason: "explicit-unsubscribe".into(),
+        updated_ms: now,
+    }]);
+    let message = |id: &str, mtype: &str, subject: Option<&str>, state: &str, attempts: u32| {
+        Message {
+            id: id.into(),
+            from: "sender".into(),
+            to: "peer".into(),
+            mtype: mtype.into(),
+            subject: subject.map(str::to_owned),
+            body: "report".into(),
+            in_reply_to: None,
+            created_ms: now,
+            state: state.into(),
+            wake_attempt_count: attempts,
+            last_wake_attempt_ms: 0,
+            retry_attempted: false,
+        }
+    };
+    // A real ended scheduler occurrence is a typed notification bound to a
+    // cancelled deadline subscription, not a user-controlled subject prefix.
+    server.commit(&[Event::NotificationSubscribed {
+        subscription: NotificationSubscription {
+            id: "sub-goal-ended".into(),
+            worker_id: "peer".into(),
+            event: "deadline".into(),
+            subject: Some("goal:ended".into()),
+            target: "thread-peer".into(),
+            method: "tmux".into(),
+            trigger_ms: Some(now - 1),
+            trigger_times_ms: Vec::new(),
+            interval_ms: None,
+            repeat_count: 1,
+            fired_count: 0,
+            expires_ms: now - 1,
+            status: "cancelled".into(),
+            created_ms: now - 1000,
+            updated_ms: now - 1000,
+            status_reason: Some("goal-schedule-ended".into()),
+        },
+    }]);
+    server.commit(&[
+        Event::Sent {
+            msg: message("m-recover", "notify", Some("report"), "pending", 0),
+        },
+        Event::Sent {
+            msg: message(
+                "m-deadline-report",
+                "notify",
+                Some("deadline:report"),
+                "pending",
+                0,
+            ),
+        },
+        Event::Sent {
+            msg: message(
+                "m-idle-report",
+                "notify",
+                Some("master-idle:report"),
+                "pending",
+                0,
+            ),
+        },
+        Event::Sent {
+            msg: message(
+                "m-ended",
+                "notification",
+                Some("deadline:goal:ended"),
+                "pending",
+                0,
+            ),
+        },
+        Event::Sent {
+            msg: message("m-scheduler-bound", "notify", Some("report"), "pending", 0),
+        },
+        Event::WakeBound {
+            message_id: "m-ended".into(),
+            subscription_id: "sub-goal-ended".into(),
+        },
+        Event::WakeBound {
+            message_id: "m-scheduler-bound".into(),
+            subscription_id: "sub-goal-ended".into(),
+        },
+        Event::Sent {
+            msg: message("m-attempted", "notify", Some("report"), "pending", 1),
+        },
+        Event::Sent {
+            msg: message("m-accepted", "notify", Some("report"), "pending", 0),
+        },
+        Event::Sent {
+            msg: message("m-consumed", "notify", Some("report"), "read", 1),
+        },
+        Event::NotificationDeliveryAccepted {
+            message_id: "m-accepted".into(),
+            accepted_ms: now,
+            evidence: None,
+        },
+    ]);
+
+    let events = default_direct_message_events(
+        &server.state.lock().unwrap(),
         "peer",
         &test_tmux_transport("thread-peer"),
-        now_ms()
-    )
-    .is_empty());
+        now,
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::NotificationSubscribed { subscription }
+                if subscription.id == default_id && subscription.status == "armed"
+        )),
+        "historical cancellation must be repaired: {events:?}"
+    );
+    let mut bound = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::WakeBound {
+                message_id,
+                subscription_id,
+            } if subscription_id == default_id => Some(message_id.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    bound.sort();
+    assert_eq!(
+        bound,
+        vec!["m-deadline-report", "m-idle-report", "m-recover"],
+        "ordinary direct messages must recover regardless of subject prefix: {events:?}"
+    );
+    server.commit(&events);
+
+    let attempt_results: Vec<_> = ["m-recover", "m-deadline-report", "m-idle-report"]
+        .iter()
+        .map(|message_id| {
+            crate::server::attempt_notification_with_default(
+                &server,
+                message_id,
+                default_id,
+                &|_| true,
+                &|_, _| true,
+            )
+        })
+        .collect();
+    // One shared batch owns the three pending ordinary records. Each record
+    // receives exactly one accepted attempt; only the first seed call may
+    // report a newly issued attempt, and repeated seeds must not submit again.
+    assert_eq!(
+        attempt_results,
+        [true, false, false],
+        "ordinary direct messages must recover regardless of subject prefix"
+    );
+
+    {
+        let state = server.state.lock().unwrap();
+        for message_id in ["m-recover", "m-deadline-report", "m-idle-report"] {
+            assert_eq!(state.msgs[message_id].wake_attempt_count, 1);
+            assert!(state.notification_delivery_accepted.contains_key(message_id));
+        }
+        // A typed ended occurrence keeps its scheduler ownership. A notify
+        // record bound to a scheduler subscription is not ordinary payload
+        // merely because its subject has no reserved prefix.
+        for message_id in ["m-ended", "m-scheduler-bound"] {
+            assert_eq!(
+                state.wake_bindings.get(message_id).map(String::as_str),
+                Some("sub-goal-ended"),
+                "{message_id} must not be rebound to the default direct lease"
+            );
+            assert_eq!(state.msgs[message_id].wake_attempt_count, 0);
+            assert_eq!(state.msgs[message_id].state, "pending");
+        }
+        assert!(state.wake_bindings.get("m-attempted").is_none());
+        assert_eq!(state.msgs["m-attempted"].wake_attempt_count, 1);
+        assert!(state.wake_bindings.get("m-accepted").is_none());
+        assert_eq!(state.msgs["m-accepted"].wake_attempt_count, 0);
+        assert!(state.wake_bindings.get("m-consumed").is_none());
+    }
+
+    let repeated = default_direct_message_events(
+        &server.state.lock().unwrap(),
+        "peer",
+        &test_tmux_transport("thread-peer"),
+        now + 1,
+    );
+    assert!(
+        !repeated
+            .iter()
+            .any(|event| matches!(event, Event::WakeBound { .. })),
+        "recovery must not bind again after acceptance: {repeated:?}"
+    );
+    server.commit(&repeated);
+    assert!(!crate::server::attempt_notification_with_default(
+        &server,
+        "m-recover",
+        default_id,
+        &|_| true,
+        &|_, _| panic!("accepted recovery must not submit a second attempt"),
+    ));
+    assert_eq!(
+        server.state.lock().unwrap().msgs["m-recover"].wake_attempt_count,
+        1
+    );
+
+    let replayed = super::replay(&root).expect("journal replay keeps recovery facts");
+    assert_eq!(replayed.msgs["m-recover"].wake_attempt_count, 1);
+    assert!(replayed
+        .notification_delivery_accepted
+        .contains_key("m-recover"));
+    assert!(
+        !default_direct_message_events(
+            &replayed,
+            "peer",
+            &test_tmux_transport("thread-peer"),
+            now + 2,
+        )
+        .iter()
+        .any(|event| matches!(event, Event::WakeBound { .. }))
+    );
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn maintenance_tick_refreshes_idle_default_lease_without_recipient_context() {
+    let (mut server, root) = test_server();
+    server.config.notifications.mode = "immediate".into();
+    let submitted = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    {
+        let submitted = Arc::clone(&submitted);
+        server.appserver_notification_sink =
+            Arc::new(move |_transport, _, _, message_id, _, _mode| {
+                submitted.lock().unwrap().push(message_id.to_string());
+                Ok(serde_json::json!({"accepted": true}))
+            });
+    }
+    let server = Arc::new(server);
+
+    assert!(register_synthetic_peer(&server, "peer", "thread-peer").ok);
+    let now = now_ms();
+    // Seed the daemon-owned default lease as armed but already past expiry.
+    // The recipient has no later context, registration, or goal timer.
+    server.commit(&[Event::NotificationSubscribed {
+        subscription: NotificationSubscription {
+            id: "sub-default-direct-message-peer".into(),
+            worker_id: "peer".into(),
+            event: "direct-message".into(),
+            subject: None,
+            target: "thread-peer".into(),
+            method: "tmux".into(),
+            trigger_ms: None,
+            trigger_times_ms: Vec::new(),
+            interval_ms: None,
+            repeat_count: 1,
+            fired_count: 0,
+            expires_ms: now - 1000,
+            status: "armed".into(),
+            created_ms: now - DEFAULT_DIRECT_MESSAGE_TTL_SECONDS as i64 * 1000,
+            updated_ms: now - DEFAULT_DIRECT_MESSAGE_TTL_SECONDS as i64 * 1000,
+            status_reason: None,
+        },
+    }]);
+
+    // One ordinary maintenance tick must refresh the lease before the timer
+    // pass can mark it expired.
+    crate::server::timers::tick_with_idle_at(&server, now, &|_| true);
+    {
+        let state = server.state.lock().unwrap();
+        let lease = &state.notification_subscriptions["sub-default-direct-message-peer"];
+        assert_eq!(lease.status, "armed", "{lease:?}");
+        assert!(lease.expires_ms > now, "idle lease must be refreshed: {lease:?}");
+    }
+
+    // The recipient stays idle. Public sendmessage must reach the default
+    // lease with exactly one automatic attempt and no recipient context.
+    let sent = handle_send_with_task(
+        &server,
+        "sender".into(),
+        "peer".into(),
+        "notify".into(),
+        Some("deadline:report".into()),
+        "ordinary direct report".into(),
+        None,
+        "immediate".into(),
+        false,
+        None,
+    );
+    assert!(sent.ok, "{sent:?}");
+    let message_id = sent.data["msg_id"].as_str().unwrap().to_owned();
+    {
+        let state = server.state.lock().unwrap();
+        assert_eq!(
+            state.msgs[&message_id].wake_attempt_count,
+            1,
+            "the refreshed default lease must deliver exactly once"
+        );
+        assert!(state
+            .notification_delivery_accepted
+            .contains_key(&message_id));
+        assert_eq!(
+            state.wake_bindings.get(&message_id).map(String::as_str),
+            Some("sub-default-direct-message-peer")
+        );
+    }
+    assert_eq!(
+        submitted.lock().unwrap().as_slice(),
+        [message_id.as_str()],
+        "the idle recipient must be reached without context or re-registration"
+    );
+
+    // Later maintenance must not resubmit the accepted attempt.
+    crate::server::timers::tick_with_idle_at(&server, now + 1, &|_| true);
+    assert_eq!(submitted.lock().unwrap().len(), 1);
+    {
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.msgs[&message_id].wake_attempt_count, 1);
+        assert!(state.notification_subscriptions["sub-default-direct-message-peer"]
+            .expires_ms
+            > now + 1);
+    }
+
+    drop(server);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn maintenance_tick_refreshes_default_lease_with_timers_disabled() {
+    let (mut server, root) = test_server();
+    server.config.notifications.mode = "immediate".into();
+    server.config.timers.enabled = false;
+    let submitted = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    {
+        let submitted = Arc::clone(&submitted);
+        server.appserver_notification_sink =
+            Arc::new(move |_transport, _, _, message_id, _, _mode| {
+                submitted.lock().unwrap().push(message_id.to_string());
+                Ok(serde_json::json!({"accepted": true}))
+            });
+    }
+    let server = Arc::new(server);
+
+    assert!(register_synthetic_peer(&server, "peer", "thread-peer").ok);
+    let now = now_ms();
+    server.commit(&[Event::NotificationSubscribed {
+        subscription: NotificationSubscription {
+            id: "sub-default-direct-message-peer".into(),
+            worker_id: "peer".into(),
+            event: "direct-message".into(),
+            subject: None,
+            target: "thread-peer".into(),
+            method: "tmux".into(),
+            trigger_ms: None,
+            trigger_times_ms: Vec::new(),
+            interval_ms: None,
+            repeat_count: 1,
+            fired_count: 0,
+            expires_ms: now - 1000,
+            status: "armed".into(),
+            created_ms: now - DEFAULT_DIRECT_MESSAGE_TTL_SECONDS as i64 * 1000,
+            updated_ms: now - DEFAULT_DIRECT_MESSAGE_TTL_SECONDS as i64 * 1000,
+            status_reason: None,
+        },
+    }]);
+
+    // Disabling finite patrol timers must not close daemon-owned base
+    // reception. Maintenance still reconciles the default lease before the
+    // lifecycle pass sees it as expired.
+    crate::server::timers::tick_with_idle_at(&server, now, &|_| true);
+    {
+        let state = server.state.lock().unwrap();
+        let lease = &state.notification_subscriptions["sub-default-direct-message-peer"];
+        assert_eq!(
+            lease.status, "armed",
+            "disabling finite timers must not close base reception: {lease:?}"
+        );
+        assert!(
+            lease.expires_ms > now,
+            "an idle default lease must refresh even when timers are disabled: {lease:?}"
+        );
+    }
+
+    let sent = handle_send_with_task(
+        &server,
+        "sender".into(),
+        "peer".into(),
+        "notify".into(),
+        Some("deadline:report".into()),
+        "ordinary direct report".into(),
+        None,
+        "immediate".into(),
+        false,
+        None,
+    );
+    assert!(sent.ok, "{sent:?}");
+    let message_id = sent.data["msg_id"].as_str().unwrap().to_owned();
+    {
+        let state = server.state.lock().unwrap();
+        assert_eq!(
+            state.msgs[&message_id].wake_attempt_count, 1,
+            "a timer-disabled recipient must still receive one automatic attempt"
+        );
+        assert!(state
+            .notification_delivery_accepted
+            .contains_key(&message_id));
+        assert_eq!(
+            state.wake_bindings.get(&message_id).map(String::as_str),
+            Some("sub-default-direct-message-peer")
+        );
+    }
+    assert_eq!(
+        submitted.lock().unwrap().as_slice(),
+        [message_id.as_str()],
+        "timer-disabled maintenance must reach the idle recipient exactly once"
+    );
+
+    crate::server::timers::tick_with_idle_at(&server, now + 1, &|_| true);
+    assert_eq!(submitted.lock().unwrap().len(), 1);
+
+    drop(server);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn recovered_immediate_direct_message_reaches_automatic_attempt_once() {
+    let (mut server, root) = test_server();
+    let submitted = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    {
+        let submitted = Arc::clone(&submitted);
+        server.appserver_notification_sink =
+            Arc::new(move |_transport, _, _, message_id, _, _mode| {
+                submitted.lock().unwrap().push(message_id.to_string());
+                Ok(serde_json::json!({"accepted": true}))
+            });
+    }
+    let server = Arc::new(server);
+
+    assert!(register_synthetic_peer(&server, "peer", "thread-peer").ok);
+    server.commit(&[Event::NotificationSuppressed {
+        subscription_id: "sub-default-direct-message-peer".into(),
+        status: "cancelled".into(),
+        reason: "explicit-unsubscribe".into(),
+        updated_ms: now_ms(),
+    }]);
+
+    let sent = handle_send_with_task(
+        &server,
+        "sender".into(),
+        "peer".into(),
+        "notify".into(),
+        Some("report".into()),
+        "recovered report".into(),
+        None,
+        "immediate".into(),
+        false,
+        None,
+    );
+    assert!(sent.ok, "{sent:?}");
+    let message_id = sent.data["msg_id"].as_str().unwrap().to_owned();
+    {
+        let state = server.state.lock().unwrap();
+        assert_eq!(
+            state.delivery_modes.get(&message_id).map(String::as_str),
+            Some("immediate"),
+            "public sendmessage must persist delivery=immediate"
+        );
+        assert_eq!(state.msgs[&message_id].wake_attempt_count, 0);
+        assert!(state.wake_bindings.get(&message_id).is_none());
+    }
+
+    // Restore the daemon-owned default lease through the real reconciliation.
+    restore_registered_peer_default_leases(&server);
+    {
+        let state = server.state.lock().unwrap();
+        assert_eq!(
+            state.notification_subscriptions["sub-default-direct-message-peer"].status,
+            "armed"
+        );
+        assert_eq!(
+            state.wake_bindings.get(&message_id).map(String::as_str),
+            Some("sub-default-direct-message-peer")
+        );
+    }
+
+    let now = now_ms();
+    crate::server::timers::tick_with_idle_at(&server, now, &|_| true);
+    assert_eq!(
+        submitted.lock().unwrap().as_slice(),
+        [message_id.as_str()],
+        "the recovered immediate report must reach the adaptor exactly once"
+    );
+    assert_eq!(
+        server.state.lock().unwrap().msgs[&message_id].wake_attempt_count,
+        1
+    );
+    assert!(server
+        .state
+        .lock()
+        .unwrap()
+        .notification_delivery_accepted
+        .contains_key(&message_id));
+
+    // Repeated reconciliation and tick must not resubmit the accepted attempt.
+    restore_registered_peer_default_leases(&server);
+    crate::server::timers::tick_with_idle_at(&server, now + 1, &|_| true);
+    assert_eq!(submitted.lock().unwrap().len(), 1);
+    assert_eq!(
+        server.state.lock().unwrap().msgs[&message_id].wake_attempt_count,
+        1
+    );
+
+    drop(server);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn goal_reconcile_retires_retained_basename_subject_without_arbitrary_ids() {
+    let (server, root) = test_server();
+    assert!(register(&server, "peer", "%peer").ok);
+    let project_scope = GlobalState::canonical_project_scope(&server.root).unwrap();
+    server.commit(&[Event::NameResolutionCommitted {
+        project_scope: project_scope.as_str().to_owned(),
+        occupancy: crate::server::name_state::NameOccupancy {
+            name: "peer".into(),
+            worker_id: "peer".into(),
+            session_id: "session-peer".into(),
+            occupancy_revision: 1,
+            updated_ms: now_ms(),
+        },
+        assignments: Vec::new(),
+    }]);
+    let now = now_ms();
+    server.commit(&[Event::NotificationSubscribed {
+        subscription: NotificationSubscription {
+            id: "sub-legacy-goal".into(),
+            worker_id: "peer".into(),
+            event: "deadline".into(),
+            subject: Some("goal:long-task.md".into()),
+            target: "thread-peer".into(),
+            method: "tmux".into(),
+            trigger_ms: Some(now + 60_000),
+            trigger_times_ms: Vec::new(),
+            interval_ms: None,
+            repeat_count: 1,
+            fired_count: 0,
+            expires_ms: now + 86_400_000,
+            status: "armed".into(),
+            created_ms: now,
+            updated_ms: now,
+            status_reason: None,
+        },
+    }]);
+
+    let arbitrary = handle_goal_schedule_reconcile(
+        &server,
+        "peer".into(),
+        "token-peer".into(),
+        "different-id".into(),
+        "peer".into(),
+        "ended".into(),
+        None,
+        None,
+        Some("sub-legacy-goal".into()),
+        Some("fixture".into()),
+    );
+    assert!(
+        !arbitrary.ok,
+        "a subscription ID must never be accepted as a goal subject"
+    );
+
+    let ended = handle_goal_schedule_reconcile(
+        &server,
+        "peer".into(),
+        "token-peer".into(),
+        "different-id".into(),
+        "peer".into(),
+        "ended".into(),
+        None,
+        None,
+        Some("goal:long-task.md".into()),
+        Some("goal-finished".into()),
+    );
+    assert!(ended.ok, "{}", ended.error.unwrap_or_default());
+    assert_eq!(
+        ended.data["retired_subscription_ids"],
+        serde_json::json!(["sub-legacy-goal"])
+    );
+    let state = server.state.lock().unwrap();
+    assert_eq!(
+        state.notification_subscriptions["sub-legacy-goal"].status,
+        "cancelled"
+    );
+    assert!(
+        state
+            .notification_subscriptions
+            .values()
+            .all(|subscription| subscription.subject.as_deref() != Some("goal:different-id")),
+        "retained subject retirement must not create a canonical duplicate"
+    );
     drop(state);
     std::fs::remove_dir_all(root).ok();
 }

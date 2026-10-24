@@ -8,6 +8,32 @@ use crate::server::Server;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+/// Test-only pause between deriving a scheduler due batch and committing it.
+/// Regression tests use it to force the goal-reconcile interleaving that the
+/// real guard now prevents. The pair names the one subscription whose due
+/// batch engages the pause, so parallel timer tests cannot hit it.
+#[cfg(test)]
+pub(super) static TIMER_DUE_COMMIT_PAUSE: std::sync::Mutex<
+    Option<(String, Box<dyn Fn() + Send + Sync>)>,
+> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn timer_due_commit_pause_hook(due_events: &[Event]) {
+    let hook = TIMER_DUE_COMMIT_PAUSE.lock().unwrap();
+    let Some((subscribe_id, hook)) = hook.as_ref() else {
+        return;
+    };
+    let batch_targets_this_subscription = due_events.iter().any(|event| {
+        matches!(
+            event,
+            Event::WakeBound { subscription_id, .. } if subscription_id == subscribe_id
+        )
+    });
+    if batch_targets_this_subscription {
+        hook();
+    }
+}
+
 /// Server-side scheduler for finite subscriptions and bounded waits. It never
 /// creates task continuations or infers that ordinary work needs a wake.
 pub fn tick(server: &Arc<Server>) {
@@ -20,6 +46,7 @@ fn tick_at(server: &Arc<Server>, now: i64) {
     super::name_stewardship::tick(server, now);
     super::purge_expired_storage(server, now);
     tick_ledger_maintenance_at(server, now);
+    tick_default_lease_maintenance_at(server, now);
     if server.state.lock().unwrap().admission_frozen() {
         return;
     }
@@ -27,6 +54,37 @@ fn tick_at(server: &Arc<Server>, now: i64) {
     // outside this contract. Deadline wakeups use the normal notification
     // path; pane output is observation only, never a consumption receipt.
     tick_with_deadline_wake_at(server, now);
+}
+
+/// Refresh daemon-owned default direct-message leases from ordinary
+/// maintenance. This owner is independent of `timers.enabled`, which controls
+/// finite schedule emission rather than base reception. The cheap gate scans
+/// only registered workers and their own lease row; the message-wide reconcile
+/// owner runs only when a lease is missing, retired, bound to a stale
+/// transport, or due for half-life renewal.
+fn tick_default_lease_maintenance_at(server: &Arc<Server>, now: i64) {
+    let needs_reconcile = {
+        let state = server.state.lock().unwrap();
+        let refresh_after_ms = super::DEFAULT_DIRECT_MESSAGE_TTL_SECONDS as i64 * 1000 / 2;
+        state.workers.values().any(|worker| {
+            let Some(transport) = super::selected_transport_for_worker(worker) else {
+                return false;
+            };
+            let Some(lease) = state
+                .notification_subscriptions
+                .get(&super::default_direct_message_id(&worker.id))
+            else {
+                return true;
+            };
+            lease.status != "armed"
+                || !super::subscription_matches_transport(lease, &transport)
+                || lease.expires_ms <= now
+                || lease.expires_ms - now < refresh_after_ms
+        })
+    };
+    if needs_reconcile {
+        super::restore_registered_peer_default_leases_at(server, now);
+    }
 }
 
 #[cfg(test)]
@@ -173,7 +231,7 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
 
     let mut due_events = Vec::new();
     {
-        let state = server.state.lock().unwrap();
+        let mut state = server.state.lock().unwrap();
         let mut idle_gate_records = HashMap::new();
         let mut goal_deadline_keys = state
             .wake_bindings
@@ -306,9 +364,9 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                             let mut pending_merges: Vec<_> =
                                 state.pending_merges.keys().cloned().collect();
                             pending_merges.sort();
-                            format!("MASTER_IDLE_WAKE subject={} pending_merges={} scheduling continues; inspect actionable tasks, pending merges, and authorized open bugs. Merge accepted candidates by recording collab task integrated after moving the commit onto refs/heads/main. Cancel this subscription only iff no actionable task, dependency, resolvable blocker, or authorized open bug remains: collab notify unsubscribe {}", subscription.subject.as_deref().unwrap_or_default(), pending_merges.join(","), subscription.id)
+                            format!("MASTER_IDLE_WAKE subject={} pending_merges={}. Inspect actionable tasks, pending merges, and authorized open bugs. Merge accepted candidates by recording collab task integrated after moving the commit onto refs/heads/main. Do not rearm this finite master-idle schedule unless actionable work remains. When no actionable task, dependency, resolvable blocker, or authorized open issue remains, end the owning goal or task-owned finite schedule through its lifecycle (`appsdk goal cancel` for a goal, task closure for a task schedule) and let this schedule exhaust. Direct-message reception is daemon-owned and must never be closed.", subscription.subject.as_deref().unwrap_or_default(), pending_merges.join(","))
                         } else {
-                            format!("DEADLINE_REACHED subject={}{}", subscription.subject.as_deref().unwrap_or_default(), if subscription.fired_count + 1 >= if subscription.interval_ms.is_some() { subscription.repeat_count } else { subscription.trigger_times_ms.len().max(1) as u32 } { "; LAST_REMINDER=true; renew explicitly: collab notify subscribe --event deadline --subject <subject> --at-ms <future-epoch-ms> --ttl-seconds <bounded>" } else { "" })
+                            format!("DEADLINE_REACHED subject={}{}", subscription.subject.as_deref().unwrap_or_default(), if subscription.fired_count + 1 >= if subscription.interval_ms.is_some() { subscription.repeat_count } else { subscription.trigger_times_ms.len().max(1) as u32 } { if subscription.subject.as_deref().is_some_and(|subject| subject.starts_with("goal:")) { "; LAST_REMINDER=true; renew explicitly with `appsdk goal subscribe` for the owned goal only when continued scheduling is required" } else { "; LAST_REMINDER=true; renew explicitly with `collab notify subscribe --event deadline --subject <subject> --at-ms <future-epoch-ms> --ttl-seconds <bounded>` only when continued scheduling is required" } } else { "" })
                         },
                         in_reply_to: None,
                         created_ms: now,
@@ -324,9 +382,18 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                 },
             ]);
         }
-    }
-    if !due_events.is_empty() {
-        server.commit(&due_events);
+        // A due batch must land in the same guard that derived it. Goal
+        // reconciliation takes this same lock, so an ended or replaced
+        // occurrence is either already retired when the batch is derived, or
+        // supersedes the batch in the same commit that retires it. Committing
+        // after the guard is released lets a late batch resurrect a goal whose
+        // receipt is already terminal, and raises the master goal-due latch
+        // again.
+        if !due_events.is_empty() {
+            #[cfg(test)]
+            timer_due_commit_pause_hook(&due_events);
+            server.commit_locked_reporting(&mut state, &due_events);
+        }
     }
 
     let candidates: Vec<(String, String)> = {
@@ -347,25 +414,7 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                 }
                 (message.state == "pending"
                     && message.wake_attempt_count < MAX_WAKE_ATTEMPTS
-                    && (!super::mailbox::is_explicit_delivery_mode(&state, message)
-                        || (state
-                            .delivery_modes
-                            .get(message_id)
-                            .is_some_and(|mode| mode == "queued")
-                            && state
-                                .workers
-                                .get(&message.to)
-                                .and_then(super::selected_transport_for_worker)
-                                .is_some_and(|transport| {
-                                    transport.kind == crate::proto::TransportKind::Tmux
-                                })
-                            && !state
-                                .notification_delivery_accepted
-                                .contains_key(message_id)
-                            && state
-                                .notification_delivery_failures
-                                .get(message_id)
-                                .is_none_or(|failure| failure.retryable)))
+                    && automatic_delivery_candidate(&state, message)
                     && super::mailbox::automatic_retry_eligible(
                         message,
                         server.config.notifications.delay_ms(&subscription.event),
@@ -379,6 +428,61 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
     };
     for (message_id, subscription_id) in candidates {
         super::attempt_notification_with_at(server, &message_id, &subscription_id, now);
+    }
+}
+
+/// The automatic timer candidate domain.
+///
+/// Ordinary messages (no persisted delivery mode) keep the existing batch
+/// retry contract, and queued tmux delivery keeps its deferred path.
+/// `explicit-notification` stays with its explicit retry operator. A real
+/// public `delivery=immediate` record that was never attempted becomes
+/// eligible exactly once, so a restored daemon-owned default lease reaches the
+/// existing attempt owner. Any accepted, failed, or retried immediate outcome
+/// stays out of the timer path and cannot be replayed by a tick or replay.
+fn automatic_delivery_candidate(state: &super::state::State, message: &Message) -> bool {
+    match state.delivery_modes.get(&message.id).map(String::as_str) {
+        None => true,
+        Some("queued") => {
+            state
+                .workers
+                .get(&message.to)
+                .and_then(super::selected_transport_for_worker)
+                .is_some_and(|transport| transport.kind == crate::proto::TransportKind::Tmux)
+                && !state
+                    .notification_delivery_accepted
+                    .contains_key(&message.id)
+                && state
+                    .notification_delivery_failures
+                    .get(&message.id)
+                    .is_none_or(|failure| failure.retryable)
+        }
+        Some("immediate") => {
+            message.wake_attempt_count == 0
+                && message.last_wake_attempt_ms == 0
+                && !message.retry_attempted
+                && !state
+                    .notification_delivery_accepted
+                    .contains_key(&message.id)
+                && state
+                    .notification_delivery_failures
+                    .get(&message.id)
+                    .is_none_or(|failure| {
+                        // A max_unacked admission deferral records a retryable
+                        // `notification.not_attempted` failure before any
+                        // adaptor I/O. Its zero attempt facts distinguish it
+                        // from an attempted or uncertain delivery, so the
+                        // existing automatic attempt owner may resume it once
+                        // the safety limit clears.
+                        failure.operation == "notification.not_attempted"
+                            && failure.retryable
+                            && message.wake_attempt_count == 0
+                    })
+        }
+        Some("explicit-notification") => false,
+        // Internal daemon markers predate the explicit delivery domain and
+        // keep their pre-existing automatic path unchanged.
+        Some(_) => true,
     }
 }
 

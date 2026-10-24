@@ -405,7 +405,7 @@ unsupported; it is never guessed from thread ID or redirected to tmux.
 | `async-result` | No producer found in executable Collab source; it appears in the accepted event list, MCP schema, docs, skills and config. | A subscription can be persisted, but no result event reaches it. | Broken public DAG. The selected repair is to remove this unused public event contract consistently; no async-operation owner exists to preserve. |
 
 Subscription state itself is durable and owner-scoped (`handle_notification_subscribe`,
-state reducer/replay, unsubscribe); the missing link is not a second subscription
+`handle_goal_schedule_reconcile`, state reducer/replay); the missing link is not a second subscription
 store. It is the current tmux-only event-to-transport dispatcher and the
 unproduced `async-result` event. Existing AppSDK function/verification maps and
 Collab skill correctly document the current tmux source and must be updated in

@@ -51,7 +51,8 @@ Before review, prove the affected subset and every changed invariant:
   consumption;
 - successful resource/deadline delivery consumes exactly one
   matching one-shot subscription;
-- release clears obsolete wait state and does not wake an unsubscribed Agent;
+- release clears obsolete wait state; the daemon re-arms a registered identity's
+  default direct-message lease from the current selected binding;
 - no daemon-generated periodic continuation, inferred waiting, progress/ACK
   loop, implicit first-register master, treating Codex root as Collab
   master, legacy managed production dispatch, heartbeat, or `/goal` semantics; skill-level owner checks

@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-goal-ownership",
-  "version": "0.1.1",
-  "description": "一次本人长程目标请求的 SESE。master 与 peer 功能相同、层级不同，均自行登记、读取、更新、续订和取消目标。项目与稳定名字决定归属；会话与 worktree 只改变执行载体。任何错误均输出明确结果且不得改写他人记录。",
+  "version": "0.2.0",
+  "description": "一次本人长程目标请求的 SESE。master 与 peer 功能相同、层级不同，均自行登记、读取、更新、续订和取消目标。项目与稳定名字决定归属；会话与 worktree 只改变执行载体。目标结束/续订通过 daemon 的 GoalScheduleReconcile 只收敛该目标有限调度，不关闭 default direct-message 基础接收。任何错误均输出明确结果且不得改写他人记录。",
   "inputs": [{"id":"goal_request","schema":"Object"}],
   "nodes": [
     {
@@ -18,8 +18,14 @@
     },
     {
       "id":"执行本人目标转换","operator":"appsdk.collab_goal.apply_transition","operator_version":"1",
-      "description":"登记、读取、更新、续订和取消仅作用于本人记录及订阅。名字换载体时，名字 owner 同步仍有效的 goal 订阅归属与当前投递目标，保留订阅 ID、schedule、TTL、触发及消费历史，不复活终态、不增加副本。续订恢复证据只保留最近一次且不含递归历史的旧记录，记录大小保持有界。状态查询失败不得改写他人记录；完成或无事可做时关闭调度，保留消息接收。错误保留原状态并进入同一结果出口。",
-      "inputs":["owned_goal"],"output":{"id":"goal_transition_result","schema":"Object"},
+      "description":"登记、读取、更新、续订和取消仅作用于本人记录。名字换载体时，名字 owner 同步仍有效的 goal 订阅归属与当前投递目标，保留订阅 ID、schedule、TTL、触发及消费历史，不复活终态、不增加副本。续订恢复证据只保留最近一次且不含递归历史的旧记录，记录大小保持有界。状态查询失败不得改写他人记录。错误保留原状态并进入同一结果出口。",
+      "inputs":["owned_goal"],"output":{"id":"goal_transition_request","schema":"Object"},
+      "input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"
+    },
+    {
+      "id":"收敛本人目标调度","operator":"appsdk.collab_goal.reconcile_schedule","operator_version":"1",
+      "description":"按 desired active/ended 调用 daemon GoalScheduleReconcile：active 创建或保留一个匹配的一次性 bounded occurrence，重装先退役旧 occurrence；ended 仅退役该 goal 的 occurrence 并超期其待投 scheduler 消息，重复相同 desired 幂等。只处理 canonical project、稳定名字和 goal identity，不接收任意 subscription ID，永不触碰 default direct-message 基础接收。远端回执缺失时保持 pending，不宣称已取消。",
+      "inputs":["goal_transition_request"],"output":{"id":"goal_transition_result","schema":"Object"},
       "input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"
     },
     {
@@ -32,7 +38,8 @@
   "edges":[
     {"from":"解析当前目标归属","to":"选择本人持久目标","arc_id":"goal_scope"},
     {"from":"选择本人持久目标","to":"执行本人目标转换","arc_id":"owned_goal"},
-    {"from":"执行本人目标转换","to":"输出目标状态与回执","arc_id":"goal_transition_result"}
+    {"from":"执行本人目标转换","to":"收敛本人目标调度","arc_id":"goal_transition_request"},
+    {"from":"收敛本人目标调度","to":"输出目标状态与回执","arc_id":"goal_transition_result"}
   ],
   "outputs":["goal_result"]
 }

@@ -448,7 +448,7 @@ fn design_graph_ids() -> [&'static str; 26] {
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 126] {
+fn design_graph_operator_names() -> [&'static str; 127] {
     [
         "collab.work_roles.resolve_identity",
         "collab.work_roles.validate_specialties",
@@ -471,6 +471,7 @@ fn design_graph_operator_names() -> [&'static str; 126] {
         "appsdk.collab_goal.resolve_owner",
         "appsdk.collab_goal.select_record",
         "appsdk.collab_goal.apply_transition",
+        "appsdk.collab_goal.reconcile_schedule",
         "appsdk.collab_goal.emit_result",
         "appsdk.collab_appserver_route.fail_explicitly",
         "appsdk.collab_assignment.authorize_target",

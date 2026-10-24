@@ -319,7 +319,8 @@ pub(crate) fn live_closure_batch_input_contains_message(
     let Some((ids, rest)) = body.split_once(" task_ids=none action_categories=") else {
         return false;
     };
-    let Some((categories, _)) = rest.split_once(". Read full durable details from collab inbox;")
+    let Some((categories, _)) =
+        rest.split_once(". Run `collab recv` once to consume and read this durable batch;")
     else {
         return false;
     };

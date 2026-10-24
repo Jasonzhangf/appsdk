@@ -14,9 +14,9 @@ peer、CLI、master 或用户手工恢复成为主路径。
 | 能力 | 真源 | 结论 | 使用边界 |
 | --- | --- | --- | --- |
 | daemon 选择 transport | `WorkerRec.transport` / `SelectedTransport` | 可用 | daemon 是发送前 transport owner；peer 不能手改 route |
-| default direct-message lease | `default_direct_message_events` | 可用 | registered peer 应保持可唤醒；显式 unsubscribe 才是停止条件 |
+| default direct-message lease | `default_direct_message_events` | 可用 | registered peer/master 的 daemon 基础接收随身份保留；不存在公开退订入口 |
 | durable mailbox | `Event::Sent` / `msgs` | 可用 | mailbox 只承载 payload，不替代通知 |
-| subscription lifecycle | `NotificationSubscribed` / `NotificationSuppressed` | 可用 | 注册 owner 创建或对齐 default lease；只有 owner 显式 unsubscribe 可停止当前生命周期 |
+| subscription lifecycle | `NotificationSubscribed` / `NotificationSuppressed` | 可用 | 注册 owner 创建或对齐 default lease；default direct-message 由 daemon 唯一拥有，历史 explicit-unsubscribe 不再阻止恢复 |
 | AppServer immediate wake | `immediate_notify` | 可用 | success 只代表 AppServer accepted，不代表消费 |
 | AppServer queued wake | `queued_notify` | 可用 | 同样只证明 native accepted |
 | thread not found 判定 | `AdapterError::RouteUnavailable` | 可用 | 只有 route unavailable/thread missing 可触发 repair |
@@ -74,8 +74,10 @@ flowchart LR
 
 daemon 是 default lease 的唯一 owner。注册时或 route rebind 后，订阅必须重新指向
 当前 worker transport；订阅与 transport 不一致是发送前 fail-closed 条件，不能静默
-变成 mailbox-only。显式 unsubscribe 属于后续生命周期 epoch 的停止条件，不进入当前
-registration-to-active 的 repair 回边。
+变成 mailbox-only。default lease 的历史 `cancelled`（含历史 explicit-unsubscribe）属于
+可修复状态：恢复时按当前注册 identity 与 daemon 所选 binding 重新 armed，并绑定尚未尝试、
+无 acceptance、无 uncertain outcome 的 pending direct message。有限 schedule occurrence
+的 ended 仍为终态，不进入当前 registration-to-active 的 repair 回边。
 
 通知图的 retry 只允许由
 `rebind_current_route` 的新 route 触发一次，不能回到通用发送节点无限循环。
@@ -98,7 +100,7 @@ flowchart LR
 | 语义节点 | owner | 当前状态 | 缺口 |
 | --- | --- | --- | --- |
 | 解析注册 worker 和当前 transport | Collab daemon | 已实现 | 无 |
-| 创建或刷新 default direct-message lease | Collab daemon | 已实现 | route rebind 后必须刷新订阅 |
+| 创建或刷新 default direct-message lease | Collab daemon | 已实现 | route rebind 后必须刷新订阅；历史取消自动迁移，不再依赖显式订阅 |
 | 校验订阅与 transport 对齐 | Collab daemon | 已实现 | 不对齐时必须 fail closed，而不是 mailbox-only |
 | 尝试 AppServer 通知 | AppServer adapter | 已实现 | 无 |
 | 分类 route 失败 | AppServer adapter + daemon | 部分实现 | 只在 `RouteUnavailable` 触发 repair |
@@ -106,6 +108,8 @@ flowchart LR
 | durable rebind | Collab registration owner | 路径可用 | daemon 在 notification failure 后复用 |
 | 单次 retry | daemon notification owner | 缺失 | 只在 repair 成功后调用一次 |
 | 提交 consume receipt | Collab mailbox owner | 已实现 | 独立，不合并到通知图 |
+| 绑定尚未尝试的 pending direct message | Collab daemon | 已实现 | 恢复 default 后追加普通 WakeBound，再由既有 attempt owner 只投递一次 |
+| 收敛 owned goal 有限调度 | Collab daemon + AppSDK goal owner | 已实现 | `collab goal reconcile` active/ended，不接受任意 subscription ID，不触碰 default receive |
 
 ## 失败终点
 

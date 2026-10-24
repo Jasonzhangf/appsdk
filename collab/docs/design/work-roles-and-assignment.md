@@ -16,6 +16,13 @@
 未提供角色字段表示保留，明确空集合表示清空。用户指派其他 peer 的角色时，
 master 使用同一持久化 owner。角色更新不修改通信绑定或 master 授权。
 
+`collab context` 在 `work_roles` 返回当前调用者的最新专长，在 `peers` 返回其他名字的
+专长。master 与普通 peer 的 `role_brief` 自动提示指派前分析并确认 scope 和角色要求、
+持久保存分工、每次接单读取最新任务约束，以及指定 reviewer 的审查义务；这些提示也
+随 `operations` 返回。动态角色和任务条件复用已有字段，不在提示正文中保存第二份状态。
+角色替换或清空后，下一次 context 读取最新值；已有任务的执行者、reviewer 和 scope
+仍以该任务的已确认条件为准。已有明确确认可直接复用，只有缺失、歧义或变更才补问。
+
 ```mermaid
 flowchart TD
   S([接收角色请求]):::boundary --> A[解析当前身份与目标名字]:::action

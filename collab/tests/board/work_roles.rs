@@ -176,6 +176,141 @@ fn roles_registration_master_update_clear_and_replay_are_public() {
     );
 }
 
+fn joined_role_text(values: &[&str]) -> String {
+    values.join(" ").to_lowercase()
+}
+
+fn responsibility_text(snapshot: &Value) -> String {
+    joined_role_text(
+        &snapshot["operations"]
+            .as_array()
+            .expect("context operations")
+            .iter()
+            .filter(|operation| operation["kind"] == "responsibility")
+            .filter_map(|operation| operation["action"].as_str())
+            .collect::<Vec<_>>(),
+    )
+}
+
+#[test]
+fn context_role_guidance_reaches_master_and_peer_with_latest_dynamic_roles() {
+    let fixture = setup_roles();
+    let master = fixture.run_public(&["context"], THREAD_A);
+    let peer = fixture.run_public(&["context"], THREAD_B);
+
+    for (label, snapshot) in [("master", &master), ("peer", &peer)] {
+        let brief = &snapshot["role_brief"];
+        assert!(
+            brief.get("work_roles").is_none() && brief.get("tasks").is_none(),
+            "{label} role_brief must reuse top-level dynamic values instead of mirroring them: {brief}"
+        );
+        let responsibilities = joined_role_text(
+            &brief["responsibilities"]
+                .as_array()
+                .expect("role responsibilities")
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>(),
+        );
+        for expected in [
+            "analyze the requirement before assigning work",
+            "reuse items the user already specified or confirmed",
+            "missing or ambiguous scope",
+            "role requirements",
+            "collab context --work-roles",
+            "collab board policy",
+            "before accepting an invitation or beginning execution",
+            "latest `collab context` snapshot",
+            "current board task",
+            "role preference is a selection hint, not execution authorization",
+            "existing board claim or invite acceptance flow",
+            "specified executor is a hard constraint",
+            "the author and master cannot substitute",
+            "dynamic role change does not rewrite existing task",
+            "state the difference and obtain explicit user confirmation",
+            "continue under the confirmed requirements without asking again",
+            "read the board only when a specific task or detail is missing",
+        ] {
+            assert!(
+                responsibilities.contains(expected),
+                "{label} responsibilities miss `{expected}`: {responsibilities}"
+            );
+        }
+        let next_action = brief["next_action"]
+            .as_str()
+            .expect("role next_action")
+            .to_lowercase();
+        for expected in [
+            "role label is not authorization",
+            "existing claim or invite acceptance flow",
+            "require the specified reviewer",
+            "dynamic role change does not rewrite existing tasks",
+            "explicit confirmation",
+        ] {
+            assert!(
+                next_action.contains(expected),
+                "{label} next_action misses `{expected}`: {next_action}"
+            );
+        }
+        let operations = responsibility_text(snapshot);
+        assert!(
+            operations.contains("collab context --work-roles")
+                && operations.contains("current board task"),
+            "{label} operations must derive the shared work-role rules: {operations}"
+        );
+        assert!(
+            snapshot["operations"]
+                .as_array()
+                .expect("context operations")
+                .iter()
+                .any(|operation| operation["kind"] == "next_action"
+                    && operation["action"]
+                        .as_str()
+                        .is_some_and(|action| action.contains("role label is not authorization"))),
+            "{label} operations must derive the work-role next action: {snapshot}"
+        );
+    }
+
+    publish(
+        &fixture,
+        "role-context",
+        &["--executor", "Alice", "--reviewer", "Bob"],
+    );
+    let before = fixture.run_public(&["board", "show"], THREAD_A);
+    let saved = task(&before, "role-context");
+    assert_eq!(saved["executor_name"], "Alice");
+    assert_eq!(saved["reviewer_name"], "Bob");
+    assert_eq!(saved["delivery_condition"], "审查通过");
+    assert_eq!(saved["test_condition"], "公开入口断言");
+
+    let replaced = fixture.run_public(&["context", "--work-roles", "translator"], THREAD_B);
+    assert_eq!(replaced["work_roles"], json!(["translator"]));
+    let after_replace = fixture.run_public(&["context"], THREAD_B);
+    assert_eq!(after_replace["work_roles"], json!(["translator"]));
+    assert_eq!(
+        member(&fixture.run_public(&["board", "show"], THREAD_A), "Alice")["work_roles"],
+        json!(["translator"])
+    );
+    assert!(after_replace["role_brief"].get("work_roles").is_none());
+
+    let cleared = fixture.run_public(&["context", "--work-roles", ""], THREAD_B);
+    assert_eq!(cleared["work_roles"], json!([]));
+    let after_clear = fixture.run_public(&["context"], THREAD_B);
+    assert_eq!(after_clear["work_roles"], json!([]));
+    assert_eq!(
+        member(&fixture.run_public(&["board", "show"], THREAD_A), "Alice")["work_roles"],
+        json!([])
+    );
+    assert!(after_clear["role_brief"].get("work_roles").is_none());
+
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let unchanged = task(&board, "role-context");
+    assert_eq!(unchanged["executor_name"], "Alice");
+    assert_eq!(unchanged["reviewer_name"], "Bob");
+    assert_eq!(unchanged["delivery_condition"], "审查通过");
+    assert_eq!(unchanged["test_condition"], "公开入口断言");
+}
+
 #[test]
 fn pinned_executor_and_reviewer_complete_a_read_only_task_through_public_cli() {
     let fixture = setup_roles();

@@ -51,6 +51,7 @@ fn dispatch_with_route_context_bound(
         Req::IdentityContext { .. } => Resp::err("IDENTITY_CONTEXT_HOST_REQUIRED: identity reconciliation belongs to the host daemon"),
         Req::BoardShow => handle_board_show(server, None),
         Req::WorkerName { worker_id, token, name } => handle_worker_name(server, worker_id, token, name),
+        Req::WorkRolesSet { worker_id, token, name, roles } => handle_work_roles(server, worker_id, token, name, roles),
         Req::Board { worker_id, token, command } => handle_board_command(server, worker_id, token, command),
         Req::SubagentObserve { id, snapshot_lines } => {
             match crate::subagent::observe(server, id.as_deref(), snapshot_lines) {
@@ -526,7 +527,7 @@ fn dispatch_with_route_context_bound(
         } => handle_master_delegate(server, worker_id, token, target_id),
         Req::MasterStatus => handle_master_status(server),
         Req::Role { worker_id: _ } => {
-            Resp::err("declared roles are removed; use collab who/context for peer identity")
+            Resp::err("declared roles are removed; use collab who/context for peer identity, or collab context --work-roles for work specialties")
         }
         Req::Workers => {
             record_ordinary_peer_presence_edges(server, None);
@@ -836,6 +837,7 @@ fn wire_route_principals(req: &Req) -> Result<Vec<WireRoutePrincipal<'_>>, Strin
         Req::PeerLifecycle { request: crate::proto::PeerLifecycleRequest::Read { worker_id, .. } | crate::proto::PeerLifecycleRequest::Update { worker_id, .. } | crate::proto::PeerLifecycleRequest::Close { worker_id, .. } } => Ok(vec![WireRoutePrincipal::Authenticated { worker_id }]),
         Req::Board { worker_id, .. }
         | Req::WorkerName { worker_id, .. }
+        | Req::WorkRolesSet { worker_id, .. }
         | Req::Subagent { worker_id, .. }
         | Req::Register { worker_id, .. }
         | Req::LiveClosureDaemonSend { worker_id, .. }

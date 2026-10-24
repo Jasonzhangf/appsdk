@@ -2,6 +2,10 @@
   "lifecycle_id": "collab-v1-peer-low-intervention",
   "status": "active",
   "edges": [
+    {"from":"work-role-command","to":"stable-name-specialties","caller":"dispatch_with_route_context_bound","callee":"handle_work_roles","path":"src/server/work_roles.rs"},
+    {"from":"work-policy-command","to":"resolved-task-policy","caller":"handle_board_command","callee":"board_work_policy","path":"src/server/work_assignment.rs"},
+    {"from":"resolved-task-policy","to":"task-assignment","caller":"board_dispatch_work","callee":"board_invite_with_selection","path":"src/server/work_assignment.rs"},
+    {"from":"task-review","to":"required-review-gate","caller":"handle_task_review","callee":"work_review_valid","path":"src/server/required_review.rs"},
     {"from": "parent-or-current-master-managed-send", "to": "shared-execution-capacity", "caller": "handle_send_with_task", "callee": "board_peer_has_execution_reservation", "path": "src/server/mod_parts/part_08.rs"},
     {"from": "worker-name-command", "to": "durable-self-display-name", "caller": "dispatch", "callee": "handle_worker_name", "path": "src/server/names.rs"},
     {"from": "worker-name-control-and-current-role", "to": "human-display-label", "caller": "handle_worker_name", "callee": "worker_display_name", "path": "src/server/names.rs"},

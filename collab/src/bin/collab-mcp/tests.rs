@@ -1,6 +1,75 @@
 use super::*;
 
 #[test]
+fn work_role_adapter_preserves_explicit_clear_and_named_target() {
+    assert_eq!(
+        build_argv(
+            "collab_context",
+            &json!({"work_roles":[],"for_name":"Alice"})
+        )
+        .unwrap(),
+        ["context", "--work-roles", "", "--for-name", "Alice"]
+    );
+    assert_eq!(
+        build_argv(
+            "collab_context",
+            &json!({"work_roles":["designer","reviewer"]})
+        )
+        .unwrap(),
+        ["context", "--work-roles", "designer,reviewer"]
+    );
+    for roles in [
+        json!("designer"),
+        json!([false]),
+        json!(["designer,reviewer"]),
+    ] {
+        assert!(build_argv("collab_context", &json!({"work_roles":roles})).is_err());
+    }
+}
+
+#[test]
+fn policy_and_dispatch_adapter_preserve_work_constraints() {
+    assert_eq!(
+        build_argv(
+            "collab_board_policy",
+            &json!({
+                "scope":"task","id":"frontend","executor":"Alice","reviewer":"Bob",
+                "clear_prefer_role":true,"expected_revision":7
+            })
+        )
+        .unwrap(),
+        [
+            "board",
+            "policy",
+            "--scope",
+            "task",
+            "--id",
+            "frontend",
+            "--executor",
+            "Alice",
+            "--reviewer",
+            "Bob",
+            "--clear-prefer-role",
+            "--expected-revision",
+            "7"
+        ]
+    );
+    assert_eq!(
+        build_argv(
+            "collab_board_dispatch",
+            &json!({"id":"frontend","expected_revision":7})
+        )
+        .unwrap(),
+        ["board", "dispatch", "frontend", "--expected-revision", "7"]
+    );
+    assert!(build_argv(
+        "collab_board_dispatch",
+        &json!({"id":"frontend","expected_revision":0})
+    )
+    .is_err());
+}
+
+#[test]
 fn task_delivery_adapter_separates_code_and_explicit_read_only_work() {
     assert_eq!(
         build_argv(
@@ -233,14 +302,6 @@ fn context_schema_requires_current_native_facts_and_preserves_query() {
     assert_eq!(context["inputSchema"]["required"], json!([]));
     let provide = &context["inputSchema"]["properties"]["provide"];
     assert!(provide["oneOf"].is_array(), "{provide}");
-    assert!(context["description"]
-        .as_str()
-        .unwrap()
-        .contains("Desktop uses the installed collab-desktop-mcp entry"));
-    assert!(context["description"]
-        .as_str()
-        .unwrap()
-        .contains("Query only reads retained progress and needs no endpoint or registration"));
     assert!(
         definitions
             .as_array()

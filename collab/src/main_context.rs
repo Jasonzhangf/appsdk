@@ -311,6 +311,8 @@ pub(crate) fn context_env_view() -> serde_json::Value {
 #[serde(deny_unknown_fields)]
 struct IdentitySupplement {
     #[serde(default)]
+    dsh: Option<proto::DshCandidate>,
+    #[serde(default)]
     desktop_bridge: Option<proto::AppServerCandidate>,
     #[serde(default, deserialize_with = "provided_string")]
     session_id: Option<String>,
@@ -357,10 +359,13 @@ fn parse_identity_supplement(raw: &str) -> anyhow::Result<IdentityFacts> {
         && supplement.endpoint.is_none()
         && supplement.namespace.is_none()
         && supplement.desktop_bridge.is_none()
+        && supplement.dsh.is_none()
     {
         anyhow::bail!("IDENTITY_FACT_INVALID: --provide must contain at least one identity fact");
     }
     Ok(IdentityFacts {
+        dsh_session_id: supplement.dsh.as_ref().map(|dsh| dsh.session_id.clone()),
+        dsh: supplement.dsh,
         desktop_bridge: supplement.desktop_bridge,
         session_id: supplement.session_id,
         thread_id: supplement.thread_id,
@@ -370,7 +375,6 @@ fn parse_identity_supplement(raw: &str) -> anyhow::Result<IdentityFacts> {
         pane_hint: None,
         tmux: None,
         tmux_anchor: None,
-        dsh_session_id: None,
     })
 }
 
@@ -395,9 +399,40 @@ pub(crate) fn collect_identity_facts(provide: Option<&str>) -> anyhow::Result<Id
     let supplied = provide.map(parse_identity_supplement).transpose()?;
     let mut facts = crate::client::adapters::codex_app_server::identity_facts_from_env()
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    if facts.dsh_session_id.is_some()
+        || supplied.as_ref().is_some_and(|report| report.dsh.is_some())
+    {
+        // DSH owns this invocation. Native variables may describe its launcher.
+        facts.session_id = None;
+        facts.thread_id = None;
+        facts.endpoint = None;
+        facts.namespace = None;
+    }
     let Some(supplied) = supplied else {
         return Ok(facts);
     };
+    if let Some(candidate) = supplied.dsh {
+        if supplied.desktop_bridge.is_some()
+            || supplied.session_id.is_some()
+            || supplied.thread_id.is_some()
+            || supplied.endpoint.is_some()
+            || supplied.namespace.is_some()
+        {
+            anyhow::bail!(
+                "IDENTITY_FACT_INVALID: DSH report cannot be mixed with Desktop or AppServer facts"
+            );
+        }
+        merge_supplied_fact(
+            "dsh_session_id",
+            &mut facts.dsh_session_id,
+            Some(candidate.session_id.clone()),
+        )?;
+        facts.dsh = Some(candidate);
+        return Ok(facts);
+    }
+    if facts.dsh_session_id.is_some() {
+        anyhow::bail!("IDENTITY_FACT_CONFLICT: a DSH caller must report DSH facts, not its launcher's native facts");
+    }
     if supplied.desktop_bridge.is_some() {
         facts.session_id = supplied.session_id;
         facts.thread_id = supplied.thread_id;
@@ -615,7 +650,47 @@ pub(crate) fn context_operation_with_intent(
             operation_id,
         )?
     } else {
-        let facts = collect_identity_facts(provide)?;
+        let mut facts = collect_identity_facts(provide)?;
+        let explicit_transport = facts.endpoint.is_some()
+            || provide
+                .map(serde_json::from_str::<Value>)
+                .transpose()?
+                .is_some_and(|value| {
+                    ["desktop_bridge", "endpoint", "namespace"]
+                        .iter()
+                        .any(|key| value.get(key).is_some())
+                });
+        let origin = std::env::var("CODEX_INTERNAL_ORIGINATOR_OVERRIDE").unwrap_or_default();
+        let desktop = origin == "Codex Desktop"
+            || (origin.is_empty() && std::env::var_os("CODEX_APP_TOOLS_PIPE_PATH").is_some());
+        if desktop && !explicit_transport && facts.dsh_session_id.is_none() {
+            let candidate = crate::desktop_capability::discover(
+                host_paths.state_root(),
+                &cwd,
+                facts.session_id.as_deref(),
+                facts.thread_id.as_deref(),
+            );
+            facts.endpoint = None;
+            facts.namespace = None;
+            match candidate {
+                Ok(candidate) => facts.desktop_bridge = Some(candidate),
+                Err(error) => {
+                    // Desktop environment can be inherited by a tmux child.
+                    // Only the existing live ancestry observer can establish
+                    // that its native facts are not needed. The daemon still
+                    // performs its own authoritative admission observation.
+                    let current_pane = crate::client::adapters::tmux::observe_caller_at(
+                        host_paths.state_root(),
+                        std::process::id(),
+                        facts.pane_hint.as_deref(),
+                    )
+                    .map_err(anyhow::Error::msg)?;
+                    if current_pane.is_none() {
+                        return Err(error);
+                    }
+                }
+            }
+        }
         crate::context_operation::prepare_mutating_operation(
             &host_paths,
             &project_context,

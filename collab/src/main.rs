@@ -3,6 +3,7 @@ mod client;
 mod config;
 mod context_operation;
 mod dashboard;
+mod desktop_capability;
 mod identity;
 mod install_skills;
 pub(crate) mod migration;
@@ -1044,6 +1045,8 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Context {
+            work_roles,
+            for_name,
             operation_id,
             project,
             app_scope,
@@ -1074,7 +1077,55 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                         out(&value);
                         std::process::exit(2);
                     }
-                    out(&value);
+                    if let Some(roles) = work_roles {
+                        let updating_self = for_name.is_none();
+                        let scope = if let Some(project) = project.as_deref() {
+                            let app = crate::identity::AppServerId::new(
+                                app_scope
+                                    .as_deref()
+                                    .unwrap_or(crate::identity::CLI_APP_SERVER_ID),
+                            )?;
+                            let context = crate::context_operation::cli_project_context_for_root(
+                                project, &app,
+                            )?;
+                            Scope {
+                                root: context.canonical_root.into(),
+                            }
+                        } else {
+                            Scope::resolve()?
+                        };
+                        let ident = registered_project_identity(&scope)?;
+                        let request = Req::WorkRolesSet {
+                            worker_id: ident.worker_id.clone(),
+                            token: ident.token.clone(),
+                            name: for_name,
+                            roles: if roles.is_empty() {
+                                Vec::new()
+                            } else {
+                                roles.split(',').map(str::to_owned).collect()
+                            },
+                        };
+                        let roles_result: Value = call_project(&scope, &ident, &request)?;
+                        let mut updated = value;
+                        updated["work_roles_update"] = roles_result.clone();
+                        if updating_self {
+                            updated["work_roles"] = roles_result["work_roles"].clone();
+                        }
+                        if updated
+                            .pointer("/result/snapshot")
+                            .is_some_and(Value::is_object)
+                        {
+                            updated["result"]["snapshot"]["work_roles_update"] =
+                                roles_result.clone();
+                            if updating_self {
+                                updated["result"]["snapshot"]["work_roles"] =
+                                    roles_result["work_roles"].clone();
+                            }
+                        }
+                        out(&updated);
+                    } else {
+                        out(&value);
+                    }
                 }
                 Err(error) => {
                     if let Some(server_error) = error.downcast_ref::<client::ServerResponseError>()

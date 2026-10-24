@@ -290,6 +290,11 @@ fn board_invitation_uses_authoritative_binding_when_identity_projection_is_stale
             delivery_condition: "invite and acceptance are defined".into(),
             test_condition: "two peer regression passes".into(),
             priority: "p1".into(),
+            work_kind: None,
+            parent_task: None,
+            prefer_role: None,
+            executor: None,
+            reviewer: None,
         },
     );
     assert!(published.ok, "{:?}", published.error);
@@ -876,6 +881,7 @@ fn squash_merged_holder(
                     integration_commit: Some(squash.clone()),
                     integration_evidence: Some("squash commit recorded on main".into()),
                     integrated_ms: Some(updated_ms),
+                    ..Default::default()
                 },
             },
         ]);

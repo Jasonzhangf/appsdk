@@ -5,6 +5,7 @@
   "entrypoint": "dispatch",
   "return_path": "Resp",
   "lifecycle_rules": {
+    "work_specialties": "Persist specialties by project and stable name. Project/category defaults, goal/category defaults and explicit task fields materialize one task policy. Roles are preferences; named executors and reviewers are requirements. Invitations, recipient acceptance, review acceptance, integration and cleanup remain separate facts. Changed delivery contracts invalidate old review acceptance; manual termination never proves delivery completion.",
     "loop": "Every master goal, bug report/fix, master-to-subagent assignment, and peer task follows Trigger -> Work -> Gate -> State -> Stop.",
     "sequence": "Declare board work and queue pending tasks -> claim or accept -> Verify -> Persist -> close applicable duties or record blocker -> inspect remaining work and blocker release -> continue eligible work or idle. Re-arm a consumed one-shot goal or deadline wake before the patrol ends when scheduling must continue. Recheck on the next authorized activation; no new periodic worker wake.",
     "role_default": "Default identity is peer; master authority is user-authorized through explicit promotion or delegation by the current live master.",
@@ -21,6 +22,7 @@
     "verification_boundary": "The stable-name session synchronization, unknown arbitration, and presence/activity contract are target design for name-runtime-closure-20261020; source and runtime gates are tracked separately and were not passed by the T1 document task."
   },
   "canonical_docs": [
+    "docs/design/work-roles-and-assignment.md",
     "README.md",
     "docs/resource-map.md",
     "docs/function-map.md",
@@ -31,6 +33,8 @@
     "skills/collab/SKILL.md"
   ],
   "resources": [
+    {"id":"stable-name-specialties","kind":"control","owner":"NameWorkRoles"},
+    {"id":"resolved-task-policy","kind":"control","owner":"BoardTaskDetails"},
     {"id": "peer-identity", "kind": "truth", "owner": "ProjectRuntimeManager::identity_context"},
     {"id": "task-lifecycle", "kind": "truth", "owner": "Server"},
     {"id": "durable-mailbox", "kind": "truth", "owner": "Server"},
@@ -41,6 +45,11 @@
     {"id": "migration-transaction", "kind": "truth", "owner": "MigrationRecord"}
   ],
   "nodes": [
+    {"id":"work-role-command","owner_feature":"work.roles"},
+    {"id":"stable-name-specialties","owner_feature":"work.roles"},
+    {"id":"work-policy-command","owner_feature":"work.assignment"},
+    {"id":"resolved-task-policy","owner_feature":"work.assignment"},
+    {"id":"required-review-gate","owner_feature":"work.required-review"},
     {"id": "peer-register", "owner_feature": "identity.peer-register"},
     {"id": "task-register", "owner_feature": "task.self-lifecycle"},
     {"id": "resource-wait", "owner_feature": "wait.liveness"},

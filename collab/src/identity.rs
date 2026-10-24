@@ -736,13 +736,47 @@ fn identity_by_current_anchors_same_scope_at(
     scope: &Scope,
     observed: &AnchorObservation,
 ) -> anyhow::Result<Option<Identity>> {
-    match identity_by_current_anchors_at(host_paths, scope, observed)? {
+    let resolution = identity_by_current_anchors_at(host_paths, scope, observed)?;
+    if resolution.is_none() && observed.dsh.is_some() {
+        let session_only = AnchorObservation {
+            dsh: None,
+            ..observed.clone()
+        };
+        if identity_by_current_anchors_at(host_paths, scope, &session_only)?.is_some() {
+            anyhow::bail!(
+                "IDENTITY_RESTORE_CONFLICT: DSH communication API differs from the saved identity"
+            );
+        }
+    }
+    match resolution {
         Some(AnchorResolution::CurrentScope(identity)) => Ok(Some(identity)),
         Some(AnchorResolution::CrossProject) => anyhow::bail!(
             "IDENTITY_RESTORE_CROSS_PROJECT: a unique tmux/Codex anchor belongs to another project"
         ),
         None => Ok(None),
     }
+}
+
+/// The dsh compound anchor's communication API dimension.
+///
+/// An explicit API must match the saved target. Without a report, the scoped
+/// resolver can recover only a unique durable session owner.
+fn dsh_api_matches(observed: &AnchorObservation, transport: &SelectedTransport) -> bool {
+    observed
+        .dsh
+        .as_ref()
+        .is_none_or(|candidate| dsh_transport_matches(candidate, transport))
+}
+
+pub(crate) fn dsh_transport_matches(
+    candidate: &crate::proto::DshCandidate,
+    transport: &SelectedTransport,
+) -> bool {
+    transport.kind == TransportKind::Dsh
+        && transport.endpoint.as_deref() == Some(candidate.endpoint.as_str())
+        && transport.namespace.as_deref() == Some(candidate.runtime_id.as_str())
+        && transport.thread_id.as_deref() == Some(candidate.agent_id.as_str())
+        && transport.session_id.as_deref() == Some(candidate.session_id.as_str())
 }
 
 fn identity_by_current_anchors_at(
@@ -802,17 +836,15 @@ fn identity_by_current_anchors_at(
                 // The dsh anchor lives on the runtime binding, not on a tmux
                 // endpoint: `RuntimeIdentity.session_id` carries the gateway
                 // session id the adapter returned in its agent-facts reply.
-                "dsh_session_id" => {
-                    identity
-                        .transport
-                        .as_ref()
-                        .is_some_and(|transport| transport.kind == TransportKind::Dsh)
+                "dsh_session_id" => identity.transport.as_ref().is_some_and(|transport| {
+                    transport.kind == TransportKind::Dsh
                         && identity
                             .runtime
                             .as_ref()
                             .and_then(|runtime| runtime.session_id.as_ref())
                             .is_some_and(|persisted| persisted.as_str() == value)
-                }
+                        && dsh_api_matches(observed, transport)
+                }),
                 _ => false,
             };
             if matched {

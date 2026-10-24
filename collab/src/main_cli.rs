@@ -509,6 +509,12 @@ pub(crate) enum Cmd {
     /// Restore current project identity and communication through the existing
     /// user-managed service, then return the authoritative snapshot
     Context {
+        /// Set comma-separated work specialties; an empty value clears them.
+        #[arg(long, conflicts_with_all = ["query", "return_challenge"])]
+        work_roles: Option<String>,
+        /// Current master may set another stable name's work specialties.
+        #[arg(long, requires = "work_roles", conflicts_with_all = ["query", "return_challenge"])]
+        for_name: Option<String>,
         #[arg(long = "op")]
         operation_id: Option<String>,
         #[arg(long)]

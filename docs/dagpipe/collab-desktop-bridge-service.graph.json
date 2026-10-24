@@ -1,13 +1,13 @@
 {
   "id": "appsdk-collab-desktop-bridge-service",
-  "version": "1.0.0",
-  "description": "设计合同：一次 Desktop 正常 MCP 管理实例到一次正常退出。bridge 是前台受管服务，连接宿主明确提供的 app-tools pipe，单 owner 读取上游。每次 context 从 executor metadata 捕获真实 caller/turn，授予仅此注册收件 thread 的控制引用；caller 与通知发送者分开，不接受客户端自选上游身份。请求处理是服务内部事件循环，不在图中画回边。stdin 结束、正常信号或上游断开使本实例失效，仅清理自有 socket。不 detach、不忽略终止、不拥有 Collab daemon 或 tmux 生命周期。基础 active 和 idle 唤醒已在 bridge-proof-20261023 实测，正式 MCP 和 Collab 组合仍需验收。",
+  "version": "1.1.0",
+  "description": "一次 Desktop 前台受管 bridge 实例到正常退出的 SESE 合同。连接宿主当前 app-tools pipe；真实 executor enrollment 后按 canonical cwd/sessionID/thread 发布可供 CLI 直接读取的当前能力。caller turn 留在内存，不由外部发信者选择。内部请求循环不画回边。后继同 scope 能力原子替换前者；旧实例退出只清理自有资源，不删除后继能力或留下阻止恢复的孤锁。不 detach、不忽略终止，不拥有全局 daemon 或 tmux 生命周期。基础投递证据与正式能力发现验收分别报告。",
   "inputs": [{"id":"desktop_mcp_start","schema":"Object"}],
   "nodes": [
     {"id":"读取宿主能力并初始化服务","operator":"appsdk.collab_desktop_bridge.initialize","operator_version":"1","inputs":["desktop_mcp_start"],"output":{"id":"managed_bridge","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
     {"id":"发布自有本地通信入口","operator":"appsdk.collab_desktop_bridge.publish","operator_version":"1","inputs":["managed_bridge"],"output":{"id":"owned_endpoint","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
-    {"id":"处理绑定范围内的请求","operator":"appsdk.collab_desktop_bridge.serve","operator_version":"1","inputs":["owned_endpoint"],"output":{"id":"service_terminal","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
-    {"id":"停止服务并撤销自有入口","operator":"appsdk.collab_desktop_bridge.retire","operator_version":"1","inputs":["service_terminal"],"output":{"id":"bridge_stopped","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"}
+    {"id":"处理绑定范围内的请求","operator":"appsdk.collab_desktop_bridge.serve","operator_version":"1","description":"服务内部在真实 executor enrollment 后取得当前 native cwd，按 canonical cwd/sessionID/thread ID 原子发布本实例受限能力，供普通 CLI 单次精确查找。同 scope 后提交能力替换前者，不转成名字接管或身份冲突；启动但未 enrollment 不发布，caller turn 只留在 bridge 内存。真实投递和 probe 仍只服务已绑定收件 thread，不扫描、猜测或从历史补授权。","inputs":["owned_endpoint"],"output":{"id":"service_terminal","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"停止服务并撤销自有入口","operator":"appsdk.collab_desktop_bridge.retire","operator_version":"1","description":"只清理本实例的通信入口与自有发布资源，不删除同 scope 后继发布者的能力，不留下会阻断后继发布的孤锁。进程异常遗留声明不能免除 adapter 的当前能力验证，也不保护旧名字或禁止新发布。无全局 daemon、Desktop 或 tmux 生命周期动作。","inputs":["service_terminal"],"output":{"id":"bridge_stopped","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"}
   ],
   "edges":[{"from":"读取宿主能力并初始化服务","to":"发布自有本地通信入口","arc_id":"managed_bridge"},{"from":"发布自有本地通信入口","to":"处理绑定范围内的请求","arc_id":"owned_endpoint"},{"from":"处理绑定范围内的请求","to":"停止服务并撤销自有入口","arc_id":"service_terminal"}],
   "outputs":["bridge_stopped"]

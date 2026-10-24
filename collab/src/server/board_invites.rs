@@ -10,6 +10,11 @@ fn board_unstarted_resources(state: &State, task: &TaskRec) -> Result<(), Resp> 
 }
 
 fn board_invite(server: &Server, actor: String, token: String, id: String, to: String, expected_revision: u64) -> Resp {
+    board_invite_with_selection(server,actor,token,id,to,expected_revision,None)
+}
+
+fn board_invite_with_selection(server: &Server, actor: String, token: String, id: String, to: String,
+    expected_revision: u64,selection:Option<(String,String)>) -> Resp {
     // Resolve the name, binding and task revision under the same reducer lock.
     // Notification delivery happens after the durable invitation is committed.
     let mut state = server.state.lock().unwrap();
@@ -29,6 +34,7 @@ fn board_invite(server: &Server, actor: String, token: String, id: String, to: S
         .map(|occupancy| occupancy.worker_id.clone()).unwrap_or(to);
     if to == actor || is_managed_subagent(&state, &to) { return Resp::err("BOARD_ORDINARY_PEER_REQUIRED: invite a different ordinary peer"); }
     if !state.workers.contains_key(&to) { return Resp::err("peer not registered"); }
+    if let Err(error)=work_executor_gate(server,&state,&id,&to) {return error;}
     let binding = match authoritative_send_binding(&state, &route, &to) { Ok(binding) => binding, Err(error) => return Resp::err(error) };
     let now = now_ms();
     let message_id = format!("board-invite-{}-{}", id, details.revision + 1);
@@ -38,6 +44,9 @@ fn board_invite(server: &Server, actor: String, token: String, id: String, to: S
         original_status: Some(task.status.clone()), original_owner: Some(task.owner.clone()),
     });
     details.last_response = None;
+    if let Some((name,reason))=selection {
+        details.dispatch_selection=Some(name);details.dispatch_reason=Some(reason);
+    }
     details.revision += 1;
     if first_invitation { task.status = "invited".into(); }
     task.updated_ms = now;
@@ -92,6 +101,7 @@ fn board_respond(server: &Server, actor: String, token: String, id: String, expe
     }
     let mut events = Vec::new();
     if accept {
+        if let Err(error)=work_executor_gate(server,&state,&id,&actor) {return error;}
         // Validate resources before moving their current owner references.
         if let Err(error) = board_resume_gate(&state, &task.owner, &id) { return error; }
         let route = match server_route_scope(server, &state) { Ok(Some(route)) => route, _ => return Resp::err("project route is not ready") };

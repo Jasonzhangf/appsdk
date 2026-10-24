@@ -1,0 +1,20 @@
+{
+  "id": "collab-role-assignment",
+  "version": "1",
+  "description": "候选设计：单次分类规则维护、任务约束设置或分派请求。master 将用户自然语言转成 typed 控制请求，daemon 不解析自然语言。任务显式字段覆盖目标规则，目标覆盖项目规则；解析结果保存到任务。指定人是硬约束，角色是优先项；无匹配角色可选普通可用 peer并返回原因，指定人不可用则等待且不静默换人。复用 invite/respond、执行容量和稳定名字归属，不新增任务状态机；等待或拒绝是本次操作结果，下次操作重新进入，无回边。",
+  "inputs": [{"id": "分工请求", "schema": "Object"}],
+  "nodes": [
+    {"id": "读取当前任务与分工规则", "operator": "collab.assignment.read", "operator_version": "1", "inputs": ["分工请求"], "output": {"id": "分工上下文", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "合并适用规则并保存任务约束", "operator": "collab.assignment.resolve_constraints", "operator_version": "1", "inputs": ["分工上下文"], "output": {"id": "已解析任务约束", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "按指定人员或角色优先选择", "operator": "collab.assignment.select", "operator_version": "1", "inputs": ["已解析任务约束"], "output": {"id": "人员选择结果", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "通过现有邀请接收门禁", "operator": "collab.assignment.invite_accept", "operator_version": "1", "inputs": ["人员选择结果"], "output": {"id": "分派提交结果", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "返回指派或等待原因", "operator": "collab.assignment.emit", "operator_version": "1", "inputs": ["分派提交结果"], "output": {"id": "分派操作结果", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"}
+  ],
+  "edges": [
+    {"from": "读取当前任务与分工规则", "to": "合并适用规则并保存任务约束", "arc_id": "分工上下文"},
+    {"from": "合并适用规则并保存任务约束", "to": "按指定人员或角色优先选择", "arc_id": "已解析任务约束"},
+    {"from": "按指定人员或角色优先选择", "to": "通过现有邀请接收门禁", "arc_id": "人员选择结果"},
+    {"from": "通过现有邀请接收门禁", "to": "返回指派或等待原因", "arc_id": "分派提交结果"}
+  ],
+  "outputs": ["分派操作结果"]
+}

@@ -93,6 +93,7 @@ pub struct AppServerCandidate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DshCandidate {
     pub endpoint: String,
     pub runtime_id: String,
@@ -118,6 +119,9 @@ pub struct TransportCandidates {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IdentityFacts {
+    /// Current gateway API and target reported by a DSH caller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dsh: Option<DshCandidate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub desktop_bridge: Option<AppServerCandidate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -944,6 +948,12 @@ pub enum Req {
         worker_id: String,
         token: String,
         name: Option<String>,
+    },
+    WorkRolesSet {
+        worker_id: String,
+        token: String,
+        name: Option<String>,
+        roles: Vec<String>,
     },
     WorkerSnapshot {
         worker_id: String,

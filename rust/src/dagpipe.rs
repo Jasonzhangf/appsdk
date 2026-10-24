@@ -300,8 +300,20 @@ fn ensure_graph_nodes_use_registered_operators(
 mod notification;
 use notification::{register_notification_operator, validate_notification_objects};
 
-fn embedded_graph_paths() -> [(&'static str, &'static str); 25] {
+fn embedded_graph_paths() -> [(&'static str, &'static str); 28] {
     [
+        (
+            "docs/dagpipe/collab-work-role-registration.graph.json",
+            include_str!("../../docs/dagpipe/collab-work-role-registration.graph.json"),
+        ),
+        (
+            "docs/dagpipe/collab-role-assignment.graph.json",
+            include_str!("../../docs/dagpipe/collab-role-assignment.graph.json"),
+        ),
+        (
+            "docs/dagpipe/collab-required-review.graph.json",
+            include_str!("../../docs/dagpipe/collab-required-review.graph.json"),
+        ),
         (
             "contracts/dagpipe/fix-lifecycle.graph.json",
             FIX_LIFECYCLE_GRAPH,
@@ -405,8 +417,11 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 25] {
     ]
 }
 
-fn design_graph_ids() -> [&'static str; 23] {
+fn design_graph_ids() -> [&'static str; 26] {
     [
+        "collab-work-role-registration",
+        "collab-role-assignment",
+        "collab-required-review",
         "appsdk-collab-context",
         "appsdk-collab-desktop-bridge-service",
         "appsdk-collab-desktop-bridge-delivery",
@@ -433,8 +448,22 @@ fn design_graph_ids() -> [&'static str; 23] {
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 113] {
+fn design_graph_operator_names() -> [&'static str; 127] {
     [
+        "collab.work_roles.resolve_identity",
+        "collab.work_roles.validate_specialties",
+        "collab.work_roles.persist",
+        "collab.work_roles.emit",
+        "collab.assignment.read",
+        "collab.assignment.resolve_constraints",
+        "collab.assignment.select",
+        "collab.assignment.invite_accept",
+        "collab.assignment.emit",
+        "collab.required_review.read",
+        "collab.required_review.check",
+        "collab.required_review.commit",
+        "collab.required_review.notify",
+        "collab.required_review.emit",
         "appsdk.collab.board.admit_request",
         "appsdk.collab.board.apply",
         "appsdk.collab.board.authorize",

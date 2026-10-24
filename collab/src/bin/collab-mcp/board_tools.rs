@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 
 pub fn tools() -> Vec<Value> {
     let revision = json!({"type":"integer","minimum":1});
-    vec![
+    let mut tools = vec![
         tool("collab_board_show", "Read public tasks and the caller's own or managed-child private queue. Private child work is visible only to the child and its parent. Does not register peers, start the daemon, or consume messages.", json!({}), &[]),
         tool("collab_board_publish", "Any registered master, peer, or managed child publishes a pending task with delivery/test conditions. Ordinary actors publish publicly; managed children publish private queue work. This does not start execution or transfer ownership.", json!({"id":{"type":"string"},"title":{"type":"string"},"description":{"type":"string"},"delivery_condition":{"type":"string"},"test_condition":{"type":"string"},"priority":{"type":"string","enum":["p0","p1","p2","p3","p4"]}}), &["id","title","description","delivery_condition","test_condition"]),
         tool("collab_board_claim", "Any registered actor atomically claims one pending task at the observed revision. Public tasks are claimable by registered actors; a private queue task is claimable only by its publisher. Success transfers TaskRec.owner and enters working without changing publisher.", json!({"id":{"type":"string"},"expected_revision":revision}), &["id","expected_revision"]),
@@ -13,7 +13,31 @@ pub fn tools() -> Vec<Value> {
         tool("collab_board_update", "Authenticated task owner updates its own progress using a current revision. Old revisions fail explicitly; delivery/review/integration/cleanup still use evidence-bearing task tools.", json!({"id":{"type":"string"},"expected_revision":revision,"status":{"type":"string"},"next":{"type":"string"}}), &["id","expected_revision"]),
         tool("collab_board_describe", "Authenticated task owner describes an existing independent task. Does not modify lifecycle. Withdraw invitations before changing their contract.", json!({"id":{"type":"string"},"expected_revision":revision,"title":{"type":"string"},"description":{"type":"string"},"delivery_condition":{"type":"string"},"test_condition":{"type":"string"}}), &["id","expected_revision","title","description","delivery_condition","test_condition"]),
         tool("collab_task_decline", "Reject a board invitation, or an unstarted legacy assignment when legacy_assignment=true. Only the invited peer/legacy owner may act; reason and current revision are required.", json!({"id":{"type":"string"},"expected_revision":revision,"reason":{"type":"string"},"legacy_assignment":{"type":"boolean"}}), &["id","expected_revision","reason"]),
-    ]
+    ];
+    let policy = json!({
+        "scope":{"type":"string","enum":["project","goal","task"]},
+        "id":{"type":"string"},"work_kind":{"type":"string"},
+        "prefer_role":{"type":"string"},"executor":{"type":"string"},
+        "reviewer":{"type":"string"},"clear_prefer_role":{"type":"boolean"},
+        "clear_executor":{"type":"boolean"},"clear_reviewer":{"type":"boolean"},
+        "expected_revision":revision
+    });
+    tools.push(tool("collab_board_policy", "Save typed project, goal or task work policy. Explicit task fields override inherited defaults. Named executors and reviewers remain requirements until explicitly changed.", policy, &["scope"]));
+    tools.push(tool("collab_board_dispatch", "Select the pinned executor or prefer peers with matching work specialties, then use the existing invitation transaction. Waiting is not assignment or completion.", json!({"id":{"type":"string"},"expected_revision":revision}), &["id","expected_revision"]));
+    let publish = tools
+        .iter_mut()
+        .find(|entry| entry["name"] == "collab_board_publish")
+        .unwrap();
+    for field in [
+        "work_kind",
+        "parent_task",
+        "prefer_role",
+        "executor",
+        "reviewer",
+    ] {
+        publish["inputSchema"]["properties"][field] = json!({"type":"string"});
+    }
+    tools
 }
 
 fn revision(argv: &mut Vec<String>, args: &Value) -> Result<(), String> {
@@ -45,6 +69,8 @@ pub fn argv(name: &str, args: &Value) -> Result<Option<Vec<String>>, String> {
         "collab_board_withdraw" => "withdraw",
         "collab_board_update" => "update",
         "collab_board_describe" => "describe",
+        "collab_board_policy" => "policy",
+        "collab_board_dispatch" => "dispatch",
         "collab_task_decline" => "decline",
         _ => return Ok(None),
     };
@@ -58,6 +84,31 @@ pub fn argv(name: &str, args: &Value) -> Result<Option<Vec<String>>, String> {
         action.into(),
     ];
     if action == "show" {
+        return Ok(Some(argv));
+    }
+    if action == "policy" {
+        argv.extend(["--scope".into(), required(args, "scope")?]);
+        for (key, flag) in [
+            ("id", "--id"),
+            ("work_kind", "--work-kind"),
+            ("prefer_role", "--prefer-role"),
+            ("executor", "--executor"),
+            ("reviewer", "--reviewer"),
+        ] {
+            optional_flag(&mut argv, args, key, flag)?;
+        }
+        for (key, flag) in [
+            ("clear_prefer_role", "--clear-prefer-role"),
+            ("clear_executor", "--clear-executor"),
+            ("clear_reviewer", "--clear-reviewer"),
+        ] {
+            if boolean(args, key)? {
+                argv.push(flag.into());
+            }
+        }
+        if args.get("expected_revision").is_some() {
+            revision(&mut argv, args)?;
+        }
         return Ok(Some(argv));
     }
     argv.push(required(args, "id")?);
@@ -76,9 +127,18 @@ pub fn argv(name: &str, args: &Value) -> Result<Option<Vec<String>>, String> {
             }
             if action == "publish" {
                 optional_flag(&mut argv, args, "priority", "--priority")?;
+                for (key, flag) in [
+                    ("work_kind", "--work-kind"),
+                    ("parent_task", "--parent-task"),
+                    ("prefer_role", "--prefer-role"),
+                    ("executor", "--executor"),
+                    ("reviewer", "--reviewer"),
+                ] {
+                    optional_flag(&mut argv, args, key, flag)?;
+                }
             }
         }
-        "claim" => {}
+        "claim" | "dispatch" => {}
         "invite" => argv.extend(["--to".into(), required(args, "to")?]),
         "respond" => {
             let accept = boolean(args, "accept")?;
@@ -117,7 +177,7 @@ mod tests {
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names.len(), 9);
+        assert_eq!(names.len(), 11);
         for tool in tools.iter().filter(|tool| {
             !matches!(
                 tool["name"].as_str(),

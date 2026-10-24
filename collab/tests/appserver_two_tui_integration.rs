@@ -23,6 +23,8 @@ mod name_confirmed_takeover;
 mod name_runtime_cli;
 #[path = "board/patrol_subscriptions.rs"]
 mod patrol_subscriptions;
+#[path = "board/work_roles.rs"]
+mod work_roles_cli;
 
 const THREAD_A: &str = "01a0d637-75e2-71b2-8634-2be0c08a9adc";
 const THREAD_B: &str = "01a0d639-dafc-7571-a0aa-bbc2bbbc04ce";
@@ -1644,12 +1646,17 @@ fn desktop_managed_socket_is_not_inferred_without_explicit_endpoint() {
     let output = fixture.command_desktop_without_explicit_endpoint(&["context"], THREAD_A);
     assert!(
         !output.status.success(),
-        "missing endpoint is an actionable typed result"
+        "unenrolled Desktop must report its actual bridge capability gap"
     );
-    let context: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(context["ok"], false);
-    assert_eq!(context["result"]["outcome"], "missing_facts");
-    assert_eq!(context["result"]["requires"]["fields"], json!(["endpoint"]));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("DESKTOP_BRIDGE_CAPABILITY_REQUIRED"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "no fabricated AppServer requirement projection"
+    );
     assert_eq!(
         fixture.appserver_connections.load(Ordering::Relaxed),
         0,

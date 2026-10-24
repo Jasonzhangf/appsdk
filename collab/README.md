@@ -29,7 +29,8 @@ socket path. Collab never reads the socket from the `TMUX` environment value.
 ## Model
 
 - Every registered identity is an equal peer. Declared `master`/`worker` roles
-  are removed.
+  are removed. Work specialties such as `designer` and `reviewer` are separate
+  stable-name facts; they do not grant authority.
 - Registration returns the `role_brief` effective at that registration.
   `collab context`, `collab who`, and worker status project the current role
   brief from server role truth; promotion and delegation return the new brief.
@@ -56,6 +57,28 @@ socket path. Collab never reads the socket from the `TMUX` environment value.
 Scoped capabilities replace roles: task owner for one task, resource holder
 for one resource, integration lease for one main merge, and daemon operator for
 one maintenance action.
+
+## Work specialties and assignment
+
+Register multiple work specialties with `collab context --work-roles designer,reviewer`.
+Omitting the option preserves them; an empty value clears them. The current
+master can apply a user's assignment to another name with
+`collab context --for-name Alice --work-roles designer`.
+
+The master saves category defaults through `collab board policy --scope project
+--work-kind frontend --executor Alice --reviewer Bob`. Publish a task with
+`--work-kind frontend`, then use `collab board dispatch <id> --expected-revision <n>`
+to create the existing invitation. The recipient must still accept it.
+Use `--prefer-role designer` for a preference that permits a documented fallback;
+an explicit executor stays pinned when unavailable.
+
+Goal defaults use an existing board task and `--scope goal --id <goal>`; child
+tasks use `--parent-task <goal>`. Explicit task fields override goal and project
+defaults. Materialized task constraints survive changes to broader defaults.
+A named reviewer must accept the delivered work before completion. Code work
+retains its integration requirements; read-only work needs no merge.
+
+See [the three operation DAGs and verification boundaries](docs/design/work-roles-and-assignment.md).
 
 ## Board work and queued tasks
 
@@ -151,7 +174,7 @@ Supply only those real values once with `collab context --provide '<JSON>'`.
 AppServer supplement keys are `session_id`, `thread_id`, `endpoint`, and
 `namespace`; Desktop uses the separate `desktop_bridge` capability. See
 [Desktop CLI registration](skills/collab/references/migration-daemon.md#desktop-cli-registration-and-messaging)
-for the verified command shape and automatic-discovery limitation. No worker
+for the command shape, automatic discovery and first-enrollment limit. No worker
 selector or separate migration command is needed.
 
 The context bootstrap also merges the shared `collab-mcp` server into project

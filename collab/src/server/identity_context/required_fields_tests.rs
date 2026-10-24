@@ -564,6 +564,11 @@ fn context_binding_public_context_restore_reconciles_worker_projection() {
                 delivery_condition: "context, status, and board use one binding".into(),
                 test_condition: "the public in-process regression passes".into(),
                 priority: "p1".into(),
+                work_kind: None,
+                parent_task: None,
+                prefer_role: None,
+                executor: None,
+                reviewer: None,
             },
         },
     );

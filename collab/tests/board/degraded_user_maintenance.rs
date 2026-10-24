@@ -48,7 +48,7 @@ fn degraded_daemon_keeps_authenticated_user_shutdown_available() {
     )
     .unwrap();
     let log = std::fs::File::create(root.join("daemon.log")).unwrap();
-    let mut child = OwnedChild(
+    let start = || {
         Command::new(env!("CARGO_BIN_EXE_collab"))
             .arg("serve")
             .current_dir(&root)
@@ -58,10 +58,11 @@ fn degraded_daemon_keeps_authenticated_user_shutdown_available() {
             .env("COLLAB_STATE_DIR", &host)
             .stdin(Stdio::null())
             .stdout(log.try_clone().unwrap())
-            .stderr(log)
+            .stderr(log.try_clone().unwrap())
             .spawn()
-            .unwrap(),
-    );
+            .unwrap()
+    };
+    let mut child = OwnedChild(start());
     let socket = host.join("server.sock");
     let deadline = Instant::now() + Duration::from_secs(30);
     while !socket.exists() && Instant::now() < deadline {
@@ -76,6 +77,24 @@ fn degraded_daemon_keeps_authenticated_user_shutdown_available() {
         "isolated daemon did not become ready: {}",
         std::fs::read_to_string(root.join("daemon.log")).unwrap_or_default()
     );
+    assert_ne!(
+        request(&socket, json!({"op":"Ping"}))["degraded"],
+        true,
+        "retired local corruption must not enter current runtime"
+    );
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+    let journals = super::central_storage::runtime_journals(&host.join("projects"));
+    assert_eq!(journals.len(), 1);
+    let journal = journals[0].clone();
+    std::fs::write(&journal, b"{malformed-fixture}\n").unwrap();
+    std::fs::remove_file(&socket).ok();
+    child.0 = start();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !socket.exists() && Instant::now() < deadline {
+        assert!(child.0.try_wait().unwrap().is_none());
+        std::thread::sleep(Duration::from_millis(20));
+    }
     assert_eq!(request(&socket, json!({"op":"Ping"}))["degraded"], true);
     // Keep another client connected: successful maintenance must also release it.
     let mut idle_client = UnixStream::connect(&socket).unwrap();

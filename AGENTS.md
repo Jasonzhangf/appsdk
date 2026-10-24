@@ -123,6 +123,12 @@ Playground/Active/Protected/generated 是消费者治理分区。不能据此把
   目标按规范项目和稳定名字隔离，sessionID 是执行载体；同名换会话或 worktree 继续
   原目标。普通 task、board 分配、笔记和定时订阅不能代替 goal 的真实登记回执。
 - `.agent-collab/` 为项目局部状态；存在目录不证明当前 peer 已注册。
+- 当前 Collab 运行态只使用 `~/.collab/` 下的 central project/app 存储。
+  旧项目本地 `.agent-collab/server` journal、信箱和任务按存储版本隔离，
+  不自动导入或重放，也不删除。当前 central 数据保持，损坏仍明确失败。
+- Desktop bridge 按 host runtime 共享，session/thread 只登记身份与投递范围。
+  公开 `collab context` 自动接入并由 native host 核实 thread/cwd；新聊天不先调 MCP。
+  bridge 生命周期跟随 host pipe，不随 MCP wrapper stdin 退出。
 - AppSDK/Collab 不拥有 tmux server 的生命周期。tmux adaptor 只使用已存在的
   通信端点；安装、升级、daemon 维护、注册、恢复、巡检或数据迁移不关闭、
   重启 tmux server，不终止宿主 pane，也不将这些动作作为前置条件。

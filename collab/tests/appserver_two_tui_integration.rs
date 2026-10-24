@@ -827,6 +827,8 @@ impl AppFixture {
             .env_remove("COLLAB_APPSERVER_SOCKET")
             .env_remove("CODEX_APP_SERVER_SOCKET")
             .env_remove("COLLAB_APPSERVER_NAMESPACE")
+            .env_remove("CODEX_APP_TOOLS_PIPE_PATH")
+            .env_remove("CODEX_MCP_NODE_PATH")
             .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop")
             .env("CODEX_SESSION_ID", thread)
             .env("CODEX_THREAD_ID", thread)

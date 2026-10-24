@@ -77,13 +77,17 @@ runtime truth. Project journals, mailbox, tasks, claims and bindings persist
 under the global host root's project/app namespace. The project cwd remains
 the logical scope even though its data is stored beneath `~/.collab`.
 
-The daemon's storage owner transfers valid legacy project-local data before
-activating the centralized route. It preserves data on failure and reports the
-affected project. Do not copy or edit journals to repair an active service.
+The current runtime opens only the centralized project/app store. Legacy
+project-local journals and mailbox files belong to the retired storage version;
+they are not imported or replayed by registration, recovery or daemon startup.
+They remain on disk. A stale route storage reference is rebound to the current
+central store without copying old data. Existing central peers and messages
+remain authoritative; a corrupt central journal still fails explicitly.
+Do not copy or edit journals to repair an active service.
 No command may reconstruct the current peer from a legacy
 `runs/<worker-id>/identity.json`. AppSDK reset must never delete
-`.agent-collab/`; use `collab migrate` or the explicit reset lifecycle rather
-than deleting files by hand.
+`.agent-collab/`; do not delete files by hand or run migration to bypass a
+registration error.
 
 For a new project, use the installed `collab context`. Existing tasks and
 messages belong to the storage owner; ordinary version installation or

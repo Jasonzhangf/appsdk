@@ -295,8 +295,8 @@ sessionID; the stable name owns work. Thread IDs and bridge sockets locate
 communication and never replace that anchor. A Desktop-owned bridge carries
 daemon-to-chat delivery; its lifecycle is separate from the agent's choice of
 CLI or MCP. See [Desktop CLI registration and messaging](references/migration-daemon.md#desktop-cli-registration-and-messaging)
-for automatic current-capability discovery, commands, receipts and the
-first-enrollment limit. Do not guess or reuse an AppServer socket.
+for automatic runtime-service admission, commands and receipts. New chats need
+no prior MCP invocation. Do not guess or reuse an AppServer socket.
 
 DSH 的接收方式不同：gateway 独占 canonical `Poll` / `Ack`，将完整正文直接送入
 原生会话。收到正文后直接处理并用 `collab sendmessage` 回复。不要运行 `collab recv`
@@ -1774,7 +1774,7 @@ action=restore_master），或由已授权 master 委托。注册前先确认自
 | --- | --- | --- | --- |
 | DSH | gateway session（`DSH_SESSION_ID`）+ communication API（gateway 控制 socket 与 runtime id） | 普通 `collab context` 由 CLI 读取 gateway 发布的控制能力并查询该真实 session 的当前事实；已有注册沿已提交 route 恢复。`--provide` 仅用于显式提供真实 DSH 能力 | 不手工猜测或从日志、plist 找 ids；不填 Codex thread/namespace；不与 appserver/tmux 候选混报；不用 tmux pane 当锚点 |
 | Codex TUI / CLI | AppServer session + thread，或当前 tmux pane | `session_id`、`thread_id`、`endpoint`、`namespace`；CLI 自动读 `CODEX_SESSION_ID`、`CODEX_THREAD_ID`、`TMUX_PANE` | 不假设自己一定有 tmux pane；不填 pane 冒充 Codex 会话；不借用其他进程的 AppServer endpoint |
-| Codex Desktop | AppServer session + thread，经受管 MCP bridge | 同 TUI 字段；bridge 的 executor metadata 提供真实 caller thread/turn，daemon 只连该 bridge 的 UDS | 不连 tools pipe，不猜测不存在的 AppServer endpoint，不把 recipient target 当 caller |
+| Codex Desktop | 当前 agent sessionID；native thread 定位通信 | 普通 `collab context` 自动接入 runtime 共享 bridge，由 native host 核实 thread/cwd 并登记；不需要先调用 MCP | 不手填 socket 或执行 turn，不猜 AppServer endpoint；daemon 只连 bridge UDS |
 
 锚点归属规则：一个宿主只有一个锚点；DSH 的锚点是 gateway session 加 gateway
 控制面标识，不是 tmux pane，即使该 DSH 会话在 tmux 里启动，pane 也只定位
@@ -1821,12 +1821,13 @@ prove that the current client uses that AppServer. If the current runtime does
 not provide its endpoint, do not register an AppServer route or guess one; use
 another already verified transport only when it belongs to this peer, otherwise
 report that registration lacks a current-session endpoint. `CODEX_APP_TOOLS_PIPE_PATH`
-is a tool pipe, not an AppServer endpoint. Desktop uses its separate normally
-managed MCP bridge: executor metadata supplies the true caller thread/turn,
-and the bridge publishes its scoped local capability to context. The daemon
+is a tool pipe, not an AppServer endpoint. Desktop uses a runtime-shared bridge:
+CLI automatically enrolls its current session/thread, and native Desktop verifies
+the canonical project before the bridge publishes a scoped capability. Native
+service calls use explicit correlation IDs, which do not claim agent turns. The daemon
 connects only that bridge UDS; it does not connect the tools pipe or require
-a nonexistent AppServer endpoint. The original real caller context remains
-separate from the registered recipient target and the message sender. See
+a nonexistent AppServer endpoint. Runtime service correlation remains separate
+from agent execution evidence and the message sender. See
 [current recovery facts](references/stable-name-recovery.md).
 The daemon still verifies the exact thread/session/project tuple before
 committing a supplied route.

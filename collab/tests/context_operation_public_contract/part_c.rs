@@ -1143,8 +1143,8 @@ fn c13_cancellation_after_owner_begins_never_claims_cancelled() {
             "restart query must not append to the operation journal"
         );
         assert_eq!(
-            fs::read(fixture.project_journal()).expect("project journal after query"),
-            project_before,
+            without_ledger_scans(&fs::read(fixture.project_journal()).expect("project journal after query")),
+            without_ledger_scans(&project_before),
             "restart query must not replay the grant owner"
         );
     }

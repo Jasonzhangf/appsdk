@@ -1,6 +1,6 @@
 use super::*;
 
-fn runtime_journals(root: &std::path::Path) -> Vec<PathBuf> {
+pub(super) fn runtime_journals(root: &std::path::Path) -> Vec<PathBuf> {
     fn visit(path: &std::path::Path, found: &mut Vec<PathBuf>) {
         let entries = match std::fs::read_dir(path) {
             Ok(entries) => entries,
@@ -37,7 +37,19 @@ fn find_task<'a>(board: &'a Value, id: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("board contains task {id}: {board}"))
 }
 
-fn move_runtime_data(source: &std::path::Path, destination: &std::path::Path) {
+fn seed_retired_runtime_copy(source: &std::path::Path, destination: &std::path::Path) {
+    fn copy_tree(source: &std::path::Path, destination: &std::path::Path) {
+        std::fs::create_dir_all(destination).unwrap();
+        for entry in std::fs::read_dir(source).unwrap() {
+            let entry = entry.unwrap();
+            let target = destination.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
     std::fs::create_dir_all(destination).expect("create legacy runtime root");
     for name in ["server", "mailbox"] {
         let from = source.join(".agent-collab").join(name);
@@ -48,8 +60,17 @@ fn move_runtime_data(source: &std::path::Path, destination: &std::path::Path) {
         if to.exists() {
             std::fs::remove_dir_all(&to).expect("remove destination runtime directory");
         }
-        std::fs::rename(&from, &to).expect("move runtime data");
+        copy_tree(&from, &to);
     }
+    use std::io::Write;
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(destination.join(".agent-collab/server/journal.jsonl"))
+            .unwrap(),
+        "incompatible-retired-version"
+    )
+    .unwrap();
 }
 
 fn point_route_at(fixture: &AppFixture, storage_root: &std::path::Path) {
@@ -156,7 +177,7 @@ fn start_daemon_from(fixture: &mut AppFixture, daemon_root: &std::path::Path) {
 }
 
 #[test]
-fn legacy_subscription_pane_migrates_and_daemon_serves_messages() {
+fn retired_local_subscription_history_does_not_override_current_central_runtime() {
     let mut fixture = AppFixture::new();
     let first = fixture.run_public(&["context"], THREAD_A);
     let first_id = first["identity"]["worker_id"].as_str().unwrap().to_owned();
@@ -173,7 +194,7 @@ fn legacy_subscription_pane_migrates_and_daemon_serves_messages() {
         .unwrap()
         .to_path_buf();
     fixture.stop_daemon();
-    move_runtime_data(&central_root, &fixture.project);
+    seed_retired_runtime_copy(&central_root, &fixture.project);
     let legacy_journal = fixture.project.join(".agent-collab/server/journal.jsonl");
     let mut file = std::fs::OpenOptions::new()
         .append(true)
@@ -194,7 +215,6 @@ fn legacy_subscription_pane_migrates_and_daemon_serves_messages() {
     drop(file);
     let legacy_before = std::fs::read(&legacy_journal).unwrap();
     std::fs::remove_file(fixture.host_state.join("routes.jsonl")).unwrap();
-    std::fs::remove_dir_all(&central_root).unwrap();
     let project = fixture.project.clone();
     start_daemon_from(&mut fixture, &project);
     let restored = fixture.run_public(&["context"], THREAD_A);
@@ -332,7 +352,7 @@ fn central_storage_survives_restart_and_stays_under_private_host() {
 }
 
 #[test]
-fn external_legacy_without_host_route_migrates_before_fresh_central_runtime() {
+fn current_central_recovery_without_host_route_ignores_retired_local_journal() {
     let mut fixture = AppFixture::new();
     let first = fixture.run_public(&["context"], THREAD_A);
     let second = fixture.run_public(&["context"], THREAD_B);
@@ -407,12 +427,11 @@ fn external_legacy_without_host_route_migrates_before_fresh_central_runtime() {
         .expect("central storage root")
         .to_path_buf();
     fixture.stop_daemon();
-    move_runtime_data(&central_root, &fixture.project);
+    seed_retired_runtime_copy(&central_root, &fixture.project);
     let legacy_journal = fixture.project.join(".agent-collab/server/journal.jsonl");
     let legacy_before = std::fs::read(&legacy_journal).expect("read external legacy journal");
     std::fs::remove_file(fixture.host_state.join("routes.jsonl"))
         .expect("remove host route before first admission");
-    std::fs::remove_dir_all(&central_root).expect("remove central destination");
 
     let host_project = fixture.root.join("host-project");
     std::fs::create_dir_all(host_project.join(".agent-collab"))
@@ -450,7 +469,7 @@ fn external_legacy_without_host_route_migrates_before_fresh_central_runtime() {
             std::fs::read_to_string(journal).is_ok_and(|body| body.contains("external-legacy-task"))
         })
         .expect("central journal after external migration");
-    assert!(std::fs::read(&migrated_journal)
+    assert!(!std::fs::read(&migrated_journal)
         .expect("read migrated central journal")
         .starts_with(&legacy_before));
     assert_eq!(
@@ -461,7 +480,7 @@ fn external_legacy_without_host_route_migrates_before_fresh_central_runtime() {
 }
 
 #[test]
-fn legacy_runtime_migrates_without_becoming_a_second_writer() {
+fn stale_local_storage_reference_rebinds_without_importing_retired_journal() {
     let mut fixture = AppFixture::new();
     let first = fixture.run_public(&["context"], THREAD_A);
     let second = fixture.run_public(&["context"], THREAD_B);
@@ -534,16 +553,8 @@ fn legacy_runtime_migrates_without_becoming_a_second_writer() {
         .expect("central storage root")
         .to_path_buf();
     fixture.stop_daemon();
-    move_runtime_data(&central_root, &fixture.project);
+    seed_retired_runtime_copy(&central_root, &fixture.project);
     point_route_at(&fixture, &fixture.project);
-    std::fs::remove_dir_all(&central_root).expect("remove pre-migration destination");
-    std::fs::create_dir_all(central_root.join(".agent-collab/server"))
-        .expect("seed interrupted migration destination");
-    std::fs::write(
-        central_root.join(".agent-collab/server/journal.jsonl"),
-        b"{this is an unactivated partial destination}\n",
-    )
-    .expect("seed partial destination journal");
     let legacy_journal = fixture.project.join(".agent-collab/server/journal.jsonl");
     let legacy_before = std::fs::read(&legacy_journal).expect("read legacy journal");
 
@@ -593,8 +604,8 @@ fn legacy_runtime_migrates_without_becoming_a_second_writer() {
     );
     let migrated_before_writes = std::fs::read(&migrated).expect("read migrated journal");
     assert!(
-        migrated_before_writes.starts_with(&legacy_before),
-        "migration must preserve the original journal history byte for byte"
+        !migrated_before_writes.starts_with(&legacy_before),
+        "current storage must not import the incompatible retired journal"
     );
     fixture.run_public(
         &[

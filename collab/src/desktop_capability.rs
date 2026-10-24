@@ -2,7 +2,7 @@
 use crate::proto::AppServerCandidate;
 use std::ffi::CString;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
@@ -63,6 +63,72 @@ fn open_child(parent: &File, name: &std::ffi::OsStr, directory: bool) -> anyhow:
     Ok(file)
 }
 
+fn admit_running_runtime(
+    state_root: &Path,
+    pipe: &str,
+    cwd: &str,
+    session: &str,
+    thread: &str,
+) -> anyhow::Result<bool> {
+    use sha2::{Digest, Sha256};
+    let root = match state_root.canonicalize() {
+        Ok(root) => root,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    let mut directory = File::open(&root)?;
+    owned(&directory, true)?;
+    for name in ["runtime", "desktop"] {
+        directory = match open_child(&directory, std::ffi::OsStr::new(name), true) {
+            Ok(directory) => directory,
+            Err(error) if error.is::<DeclarationMissing>() => return Ok(false),
+            Err(error) => return Err(error),
+        };
+    }
+    let key = format!("{:x}", Sha256::digest(pipe.as_bytes()));
+    let socket = root
+        .join("runtime/desktop")
+        .join(format!("pipe-{}.sock", &key[..24]));
+    let mut stream = match std::os::unix::net::UnixStream::connect(socket) {
+        Ok(stream) => stream,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            return Ok(false)
+        }
+        Err(error) => return Err(error.into()),
+    };
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
+    stream.set_write_timeout(Some(std::time::Duration::from_secs(10)))?;
+    static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let id = format!(
+        "admit-{}-{}",
+        std::process::id(),
+        NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let request = serde_json::to_vec(
+        &serde_json::json!({"id":id,"op":"admit","session_id":session,"thread_id":thread,"cwd":cwd}),
+    )?;
+    stream.write_all(&(request.len() as u32).to_le_bytes())?;
+    stream.write_all(&request)?;
+    let mut header = [0; 4];
+    stream.read_exact(&mut header)?;
+    let length = u32::from_le_bytes(header) as usize;
+    if length > 65536 {
+        anyhow::bail!("DESKTOP_BRIDGE_ADMISSION_FAILED: response exceeds 64 KiB");
+    }
+    let mut bytes = vec![0; length];
+    stream.read_exact(&mut bytes)?;
+    let response: serde_json::Value = serde_json::from_slice(&bytes)?;
+    if response["id"] != id || response["ok"] != true {
+        anyhow::bail!("DESKTOP_BRIDGE_ADMISSION_FAILED: {response}");
+    }
+    Ok(true)
+}
+
 pub fn discover(
     state_root: &Path,
     cwd: &Path,
@@ -79,6 +145,40 @@ pub fn discover(
     let cwd_text = cwd
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("DESKTOP_BRIDGE_SCOPE_INVALID: cwd is not UTF-8"))?;
+    if let Ok(pipe) = std::env::var("CODEX_APP_TOOLS_PIPE_PATH") {
+        if !admit_running_runtime(state_root, &pipe, cwd_text, session, thread)? {
+            // Native host access stays in its signed Node bridge. The CLI only
+            // asks that runtime service to admit this exact current scope.
+            let node = std::env::var_os("CODEX_MCP_NODE_PATH").ok_or_else(|| {
+                anyhow::anyhow!("DESKTOP_BRIDGE_HOST_REQUIRED: CODEX_MCP_NODE_PATH is missing")
+            })?;
+            let script = match std::env::var_os("COLLAB_DESKTOP_BRIDGE_SCRIPT") {
+                Some(script) => PathBuf::from(script),
+                None => std::env::current_exe()?
+                    .parent()
+                    .ok_or_else(|| anyhow::anyhow!("DESKTOP_BRIDGE_INSTALLATION_INVALID"))?
+                    .join("collab-desktop-mcp.mjs"),
+            };
+            let output = std::process::Command::new(node)
+                .arg(script)
+                .arg("--admit")
+                .arg(
+                    serde_json::json!({
+                        "session_id": session, "thread_id": thread, "cwd": cwd_text
+                    })
+                    .to_string(),
+                )
+                .env("COLLAB_STATE_DIR", state_root)
+                .output()
+                .map_err(|error| anyhow::anyhow!("DESKTOP_BRIDGE_UNAVAILABLE: {error}"))?;
+            if !output.status.success() {
+                anyhow::bail!(
+                    "DESKTOP_BRIDGE_ADMISSION_FAILED: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
+        }
+    }
     let root = state_root.canonicalize()?;
     let mut directory = File::open(&root)?;
     owned(&directory, true)?;

@@ -11,14 +11,20 @@ description: "仅约束已成功注册 Collab 的 peer；master 权限需另行�
 它们不改变 master/peer 职责，也不增加项目权限。省略 `--work-roles` 保留原值，
 明确传空字符串清空。当前 master 可按用户指令为其他稳定名字设置角色。
 
+先判断用户要求：注册/恢复协作身份、设置工作角色、指派具体任务是三种独立操作，
+不是每次都要依次完成的检查表。“担任 iOS app 执行负责人”先按用户确认保存工作角色；
+除非同时明确了任务或某类工作的默认分工，不创建 board 任务，不写 `board policy`。
+设置自己的角色不要求 master 代办，也不以任务 ID、board 可用或已有执行者为前提。
+
 ### 指派前确认并保存
 
 master 或负责子目标的 peer 在指派前先分析需求，向用户列明 scope（目标、允许修改的
 范围、非目标、交付与验收条件）和角色要求（工作类别、角色偏好、指定执行者、指定
 reviewer）。用户确认后才保存分工并发出协作请求。用户已经明确指定或确认的条目
 直接复用，只确认缺失或有歧义的部分；未确认前可做只读分析，不派发受影响的执行。
+未指定固定执行者或 reviewer 是允许的，不将可选字段为空当作必须补问的缺口。
 
-角色用 `context --work-roles` 按项目和稳定名字持久保存；分工用 `board policy` 与
+角色用 `collab context --work-roles` 按项目和稳定名字持久保存；分工用 `collab board policy` 与
 任务明确字段保存。scope、交付与测试条件写入已有 board 任务的 description、
 delivery-condition、test-condition，用户确认原文或所在对话位置记入该任务描述。
 角色及执行者约束以正式控制字段为准，不能只留在聊天、消息正文或 agent 临时记忆。
@@ -36,26 +42,53 @@ delivery-condition、test-condition，用户确认原文或所在对话位置记
 
 ### 每次接收协作请求
 
-master 与 peer 每次收到协作请求，在接受邀请或开始执行前，读取当前 board 任务，
+仅具体执行、交付或审查请求需要任务 ID。注册/恢复身份、更新工作角色、需求讨论和
+状态查询不要求先有 board 任务；不要为这些请求虚构或补建任务。
+master 与 peer 收到具体执行请求，在接受邀请或开始执行前，读取当前任务，
 核对已确认 scope、有效角色要求、指定执行者、reviewer、交付与验收条件。恢复会话时
 通过 `collab context` 读取持久身份与角色，不从旧消息或会话身份猜测工作归属。
-请求必须引用任务 ID；缺少任务或必要条件时，由指派者补齐，只暂停受影响的执行。
+具体执行请求缺少任务或必要条件时，由指派者补齐，只暂停受影响的执行。
 
 请求符合已确认要求时，按原约束接受并编排执行；角色偏好不等于执行授权。请求与
 保存的约束冲突或超出 scope 时，向指派者报告具体差异，由其取得用户确认并更新任务，
 接收者不自行放宽要求。向下派发也必须传递任务 ID、scope、角色与审查要求；每次交付
 按同一任务的当前条件验收，并送指定 reviewer 审查，不能以消息已读或已接受代替完成。
 
-```sh
-collab context --work-roles designer,reviewer
-collab context --for-name Alice --work-roles designer
-collab board policy --scope project --work-kind frontend --prefer-role designer
-collab board policy --scope project --work-kind frontend --executor Alice --reviewer Bob
-collab board publish frontend-task --title "前端页面" --description "任务范围" \
-  --delivery-condition "页面与交互通过审查" --test-condition "公开入口验收" \
-  --work-kind frontend
-collab board dispatch frontend-task --expected-revision 1
-```
+### 按当前请求选择命令
+
+在用户指定的项目 cwd 中执行。下列命令是不同场景的入口，不是连续执行脚本。
+`<...>` 必须替换为用户确认值或真实回执，不能直接照抄占位符。
+
+| 当前请求 | 直接执行的命令 | 到此为止的条件 |
+|---|---|---|
+| 用户要求注册/恢复，或当前身份确实缺失 | `collab context` | 读取 registered、identity、work_roles、role_brief、operations。已有当前有效回执就复用；仅按返回的缺失事实通过 `context --provide '<真实事实JSON>'` 补充，不猜宿主事实。 |
+| 设置或修改自己的工作角色 | `collab context --work-roles '<完整角色集合，逗号分隔>'` | 检查 work_roles_update 回执；保留仍需的原角色。成功即完成角色设置，不继续创建任务或设置执行者。 |
+| 撤销自己的全部工作角色 | `collab context --work-roles ''` | 仅在用户明确要求清空时执行，不用作排障试探。 |
+| 当前 master 按用户指令给别人设置角色 | `collab context --for-name '<稳定名字>' --work-roles '<完整角色集合>'` | `--for-name` 是设置目标名字的专长，不是切换调用者身份。 |
+| 当前 master 保存用户明确要求的某类工作默认分工 | `collab board policy --scope project --work-kind '<类别>' --prefer-role '<角色>'` | 只有明确要求默认分工才使用；指定人时用 `--executor '<名字>'`，指定审查者时加 `--reviewer '<名字>'`，不补造用户未要求的人员或 reviewer。 |
+| 查具体任务的当前条件、邀请或 revision | `collab board show` | 从当前回执读取任务 ID、scope、有效分工和 revision；不能把消息中的旧 revision 当当前值。 |
+| 发布已确认的具体任务 | `collab board publish '<任务ID>' --title '<标题>' --description '<scope与确认来源>' --delivery-condition '<交付条件>' --test-condition '<验收条件>'` | 仅按已确认要求附加 `--work-kind`、`--prefer-role`、`--executor`、`--reviewer`；不因发布任务而强制创建项目默认。 |
+| 指派者按任务有效分工发邀请 | `collab board dispatch '<任务ID>' --expected-revision <当前revision>` | 使用 publish 或 board show 的真实回执；不写死为 1。邀请不等于接受。 |
+| 接收者接受发给自己的邀请 | `collab board respond '<任务ID>' --accept --expected-revision <当前revision>` | 核对 scope、约束与资源后执行；成功后才转移责任。 |
+| 接收者主动认领允许认领的待办 | `collab board claim '<任务ID>' --expected-revision <当前revision>` | 遵守现有认领门禁；有工作角色不等于已有执行授权，也不要求所有合法认领必须先收到邀请。 |
+| 指定 reviewer 接受交付 | `collab task review '<任务ID>' --accept --evidence '<实际审查证据>'` | 必须实际完成审查；角色标签、读消息和接受邀请不等于审查通过。 |
+
+例如用户只要求“你担任 iOS app 执行负责人”，且已确认当前角色为空，执行
+`collab context --work-roles 'iOS app执行负责人'`；不接着运行 `board policy`。
+回执会规范化角色标签的大小写，以实际回执为准。
+
+### 命令失败时的停止点
+
+身份注册、角色保存、任务分派分别报告结果，不能把前一步成功说成全部成功。
+遇到 `BOARD_IDENTITY_REQUIRED` 等错误，保留原命令、错误与已有成功回执；若没有新的
+缺失事实或环境变化，不重复相同命令，不从 CLI 换 MCP 或换参数格式碰运气，不让
+master 代写来绕过当前身份失败。只读一次 `collab --version` 可记录版本；无需读源码、
+二进制字符串或 journal 来完成普通角色设置，不编辑身份、route、token 或控制状态文件。
+
+只暂停失败写入及真正依赖它的后续动作。已有明确授权、scope 和有效任务归属且不依赖
+该失败写入的工作可继续；没有任务就报告“角色保存失败，尚未指派具体任务”，不虚构工作。
+需要产品排障时单独提出具体问题，只有用户明确授权该维修范围后才进入开发流程。
+不在普通角色设置中自行安装、重启 daemon 或把修客户端列为用户必须完成的初始化步骤。
 
 用户在 master 任务中指派某类工作时，master 将要求保存为明确分工字段。
 项目默认、目标默认、任务明确字段逐项覆盖。目标使用已有 board 任务，子任务用

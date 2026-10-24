@@ -65,11 +65,22 @@ fn me(scope: &Scope) -> anyhow::Result<Identity> {
 
 /// Registered project operations never bootstrap identity or launch the daemon.
 fn registered_project_identity(scope: &Scope) -> anyhow::Result<Identity> {
+    registered_project_identity_with_provide(scope, None)
+}
+
+fn registered_project_identity_with_provide(
+    scope: &Scope,
+    provide: Option<&str>,
+) -> anyhow::Result<Identity> {
     let paths = scope::HostPaths::resolve()?;
-    let facts = collect_identity_facts(None)?;
-    let session = facts.session_id.as_deref().ok_or_else(|| {
-        anyhow::anyhow!("BOARD_IDENTITY_REQUIRED: current agent session id is required")
-    })?;
+    let facts = collect_identity_facts(provide)?;
+    let session = facts
+        .session_id
+        .as_deref()
+        .or(facts.dsh_session_id.as_deref())
+        .ok_or_else(|| {
+            anyhow::anyhow!("BOARD_IDENTITY_REQUIRED: current agent session id is required")
+        })?;
     // Names own work; the agent session identifies the current actor. Pane,
     // thread and endpoint belong to transport recovery, not credential reads.
     let route = client::resolve_native_session_route(
@@ -97,6 +108,19 @@ fn registered_project_identity(scope: &Scope) -> anyhow::Result<Identity> {
         anyhow::bail!("BOARD_STALE_IDENTITY: credential does not match the current route");
     }
     Ok(identity)
+}
+
+fn require_cli_mailbox_consumer(identity: &Identity) -> anyhow::Result<()> {
+    if identity
+        .transport
+        .as_ref()
+        .is_some_and(|transport| transport.kind == TransportKind::Dsh)
+    {
+        anyhow::bail!(
+            "DSH_NATIVE_DELIVERY_OWNED: the DSH gateway owns Poll/Ack and delivers the full message into the native conversation; act on that body and reply with collab sendmessage. Do not run collab recv or ack. Use collab msg <id> or collab inbox for read-only inspection"
+        );
+    }
+    Ok(())
 }
 
 fn persisted_runtime_matches_scope(scope: &Scope, ident: &Identity) -> anyhow::Result<bool> {
@@ -1010,6 +1034,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
         } => {
             let scope = Scope::resolve()?;
             let ident = me(&scope)?;
+            require_cli_mailbox_consumer(&ident)?;
             let receive_id = receive_id.unwrap_or_else(new_receive_id);
             // The caller must know the receive identity before consumption, not
             // only after a successful reply: a lost socket response still
@@ -1094,7 +1119,8 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                         } else {
                             Scope::resolve()?
                         };
-                        let ident = registered_project_identity(&scope)?;
+                        let ident =
+                            registered_project_identity_with_provide(&scope, provide.as_deref())?;
                         let request = Req::WorkRolesSet {
                             worker_id: ident.worker_id.clone(),
                             token: ident.token.clone(),
@@ -1149,6 +1175,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             }
             let scope = Scope::resolve()?;
             let ident = me(&scope)?;
+            require_cli_mailbox_consumer(&ident)?;
             let v: serde_json::Value = call_project(
                 &scope,
                 &ident,

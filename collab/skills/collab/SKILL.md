@@ -186,6 +186,12 @@ daemon-to-chat delivery; its lifecycle is separate from the agent's choice of
 CLI or MCP. See [Desktop CLI registration and messaging](references/migration-daemon.md#desktop-cli-registration-and-messaging)
 for automatic current-capability discovery, commands, receipts and the
 first-enrollment limit. Do not guess or reuse an AppServer socket.
+
+DSH 的接收方式不同：gateway 独占 canonical `Poll` / `Ack`，将完整正文直接送入
+原生会话。收到正文后直接处理并用 `collab sendmessage` 回复。不要运行 `collab recv`
+或 `collab ack`；这两个 CLI 命令会返回 `DSH_NATIVE_DELIVERY_OWNED`，避免与 gateway
+争抢信箱。需要诊断时只读 `collab msg <id>` 或 `collab inbox`。下文的 CLI 收件、
+消费与 ACK 指引只适用于非 DSH 传输。通信恢复也不是处理原生正文的前置步骤。
 Production projects use the globally installed Collab v1.
 Candidate consumers may use the existing `COLLAB_TEST_BINARY` seam to select
 the exact tested binary. Candidate results do not prove the canonical installed
@@ -960,7 +966,8 @@ inputs only.
    as PROTECTED_HOLD. If continued scheduling is required, explicitly re-arm a
    consumed one-shot goal or deadline wake before this cycle ends. Repeat this
    check on the next message or supported notification. Consume applicable
-   messages with `collab recv`.
+   messages with `collab recv` on non-DSH transports. DSH receives full messages
+   natively through its gateway and acts directly on them.
 
 These are agent actions within an activation. The board does not automatically
 claim, execute, or resume work. Idle peers and children have no new periodic
@@ -982,6 +989,7 @@ actions with the CLI in the inherited project cwd:
 `collab msg <id>`,
 `collab inbox`, `collab worker status [id]`,
 `collab sendmessage --to <parent> --subject <topic> "<body>"`.
+DSH uses native incoming messages instead of the listed `recv` and `ack` actions.
 The CLI is a complete protocol path. Missing MCP is not a blocker and
 does not justify skipping receive or waiting. `collab context` is the only
 agent bootstrap entry; do not run a separate identity, route or archive probe.
@@ -1048,12 +1056,13 @@ collab board invite fix-notify-lost-recv --to <peer> \
   --expected-revision <observed>
 ```
 
-Consume notifications promptly with `collab recv`. A successful receive delivers
+On non-DSH transports, consume notifications promptly with `collab recv`. A successful receive delivers
 and acknowledges the batch atomically. After 3 delivered-but-unconsumed
 notifications, push knocks pause automatically to prevent notification storms
 and prompt pollution; `collab inbox` is read-only and does not resume delivery.
 Use explicit `collab ack` only for legacy clients or recovery of an already
-delivered message. Inspect peer/worker health, identity validity, and throttle
+delivered message on non-DSH transports. DSH's gateway performs consumption and
+acknowledgement; process the native full body directly. Inspect peer/worker health, identity validity, and throttle
 status via the `collab context` snapshot. The human diagnostic
 `collab worker status [id]` and `collab who` print the same fields when an
 operator audits them; neither is part of the default agent flow.
@@ -1400,10 +1409,10 @@ is an observation, never task or control truth.
 |---|---|
 | Bootstrap, recover, or re-locate this agent; read peers, master, scheduling state, and env | `collab context` |
 | Notify a peer now | `collab sendmessage --to <peer> --subject <short-topic> "<original message>"` |
-| Receive and consume notifications | `collab recv` |
+| Receive and consume notifications | DSH: native full-body delivery by gateway; other transports: `collab recv` |
 | Read one notification without consuming | `collab msg <notification-id>` |
 | List unread messages | `collab inbox` |
-| Recover an already-delivered notification | `collab ack <id>` or `collab ack --all` |
+| Recover an already-delivered notification | Non-DSH only: `collab ack <id>` or `collab ack --all`; DSH gateway owns Ack |
 | Inspect worker health and notification status | `collab worker status [id]` |
 | List peers (operator diagnostic; also in `collab context`) | `collab who` |
 | Check own subscriptions | `collab notify status` |
@@ -1459,7 +1468,7 @@ projections that used to require separate calls, so no agent flow needs to run
 | `requires_identity_update` is present | supply only requested real runtime facts; a user-authorized identity/name/role recovery uses the exact intent command in stable-name-recovery; context handles migration internally | guess archived workers, inspect routes/tokens, hand-edit state, invent approval or treat historical ambiguity as insufficient user authority |
 | `collab context` exits non-zero with `COLLAB_CONTEXT_UNRESOLVED` | preserve the error; failed initial registration continues independently; existing registered participants report the affected coordination without clearing owned tasks/claims | automatically retry from another cwd; edit routes/token state, copy identity, reset the project |
 | Default lease looks stopped | `collab context` re-arms it from the registered identity | probe sockets, call a transport directly |
-| Notification arrived | run `collab recv` once to consume and read, then act | ACK-only, or treat submission as consumption |
+| Notification arrived | DSH: act on the native full body and reply with `collab sendmessage`; other transports: run `collab recv` once, then act | DSH running `recv`/`ack` or recovery before replying; treating submission as consumption |
 | Master has a pending merge | `collab context` → `pending_merges`, merge the candidate, then `collab task integrated` | rely on a remembered message, or try to close first |
 
 ### Master peer CRUD

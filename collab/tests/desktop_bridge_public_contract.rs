@@ -142,6 +142,68 @@ fn publish_capability(fixture: &Fixture, bridge: &DesktopBridgeFixture) -> PathB
 }
 
 #[test]
+fn desktop_connect_failure_resumes_after_bridge_and_daemon_restart_without_agent_action() {
+    let mut fixture = Fixture::without_tmux("desktop-connect-resume");
+    let runtime = fixture.host_state.join("runtime/desktop");
+    let bridge = DesktopBridgeFixture::start_at(&fixture.root, &runtime);
+    publish_capability(&fixture, &bridge);
+    let enrolled = desktop_command(&fixture, &["context"]);
+    assert!(
+        enrolled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&enrolled.stderr)
+    );
+    let enrolled: Value = serde_json::from_slice(&enrolled.stdout).unwrap();
+    let worker = enrolled["result"]["snapshot"]["identity"]["worker_id"]
+        .as_str()
+        .unwrap();
+    let socket = PathBuf::from(bridge.endpoint.strip_prefix("unix://").unwrap());
+    let offline = socket.with_extension("offline");
+    std::fs::rename(&socket, &offline).unwrap();
+    let sent = desktop_command(
+        &fixture,
+        &[
+            "sendmessage",
+            "--to",
+            worker,
+            "--subject",
+            "connect-recovery",
+            "retain this message across bridge downtime",
+        ],
+    );
+    assert!(!sent.status.success());
+    assert!(String::from_utf8_lossy(&sent.stderr).contains("\"durable\":true"));
+    assert!(bridge.sends.lock().unwrap().is_empty());
+    fixture.restart_daemon();
+    std::fs::rename(&offline, &socket).unwrap();
+    assert!(
+        wait_until(Duration::from_secs(6), || bridge
+            .sends
+            .lock()
+            .unwrap()
+            .len()
+            == 1),
+        "a never-submitted Desktop message was stranded after recovery"
+    );
+    std::thread::sleep(Duration::from_millis(1200));
+    assert_eq!(
+        bridge.sends.lock().unwrap().len(),
+        1,
+        "accepted recovery is never replayed"
+    );
+    let journal = std::fs::read_to_string(fixture.project_journal()).unwrap();
+    let failures: Vec<Value> = journal
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .filter(|e: &Value| e["ev"] == "NotificationDeliveryFailed")
+        .collect();
+    assert!(failures.iter().any(|e| e["retryable"] == true
+        && e["error"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("DESKTOP_BRIDGE_NOT_SUBMITTED:"))));
+}
+
+#[test]
 fn consecutive_desktop_sends_do_not_wait_for_recipient_consumption() {
     let fixture = Fixture::without_tmux("desktop-immediate-burst");
     let runtime = fixture.host_state.join("runtime/desktop");
@@ -855,6 +917,46 @@ fn desktop_candidate_mismatch_is_rejected_and_unknown_send_is_not_replayed() {
         .find(|event| event["ev"] == "NotificationDeliveryFailed")
         .expect("explicit failure receipt");
     assert_eq!(failure["retryable"], false, "{failure}");
+    // A later safe connection recovery must not batch-replay the unknown sibling.
+    let socket = PathBuf::from(bridge.endpoint.strip_prefix("unix://").unwrap());
+    let offline = socket.with_extension("offline");
+    std::fs::rename(&socket, &offline).unwrap();
+    let later = desktop_command(
+        &fixture,
+        &[
+            "sendmessage",
+            "--to",
+            id,
+            "--subject",
+            "safe-after-unknown",
+            "only this never-submitted message may resume",
+        ],
+    );
+    assert!(!later.status.success());
+    bridge.disconnect_send.store(false, Ordering::SeqCst);
+    std::fs::rename(&offline, &socket).unwrap();
+    assert!(wait_until(Duration::from_secs(6), || bridge
+        .sends
+        .lock()
+        .unwrap()
+        .len()
+        >= 2));
+    std::thread::sleep(Duration::from_millis(1200));
+    let texts = bridge.sends.lock().unwrap();
+    assert_eq!(
+        texts.len(),
+        2,
+        "only the new unsubmitted message may resume"
+    );
+    assert_eq!(
+        texts
+            .iter()
+            .filter(|text| text.contains("unknown-bridge-result"))
+            .count(),
+        1,
+        "a safe sibling retry must not resend a post-write unknown result"
+    );
+    drop(texts);
     let recv = desktop_command(
         &fixture,
         &[

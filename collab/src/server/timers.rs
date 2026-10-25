@@ -413,11 +413,17 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                         .then(|| (message_id.clone(), subscription_id.clone()));
                 }
                 (message.state == "pending"
-                    && message.wake_attempt_count < MAX_WAKE_ATTEMPTS
+                    && (message.wake_attempt_count < MAX_WAKE_ATTEMPTS
+                        || super::desktop_connect_retry(&state, message))
                     && automatic_delivery_candidate(&state, message)
                     && super::mailbox::automatic_retry_eligible(
                         message,
-                        server.config.notifications.delay_ms(&subscription.event),
+                        super::notification_delivery_delay_ms(
+                            &state,
+                            &message.id,
+                            &subscription.event,
+                            &server.config.notifications,
+                        ),
                         now,
                     )
                     && subscription.status == "armed"
@@ -439,7 +445,8 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
 /// public `delivery=immediate` record that was never attempted becomes
 /// eligible exactly once, so a restored daemon-owned default lease reaches the
 /// existing attempt owner. Any accepted, failed, or retried immediate outcome
-/// stays out of the timer path and cannot be replayed by a tick or replay.
+/// stays out of the timer path. A Desktop connect refused before any byte was
+/// written is the sole attempted immediate outcome that may resume safely.
 fn automatic_delivery_candidate(state: &super::state::State, message: &Message) -> bool {
     match state.delivery_modes.get(&message.id).map(String::as_str) {
         None => true,
@@ -458,26 +465,27 @@ fn automatic_delivery_candidate(state: &super::state::State, message: &Message) 
                     .is_none_or(|failure| failure.retryable)
         }
         Some("immediate") => {
-            message.wake_attempt_count == 0
-                && message.last_wake_attempt_ms == 0
-                && !message.retry_attempted
-                && !state
-                    .notification_delivery_accepted
-                    .contains_key(&message.id)
-                && state
-                    .notification_delivery_failures
-                    .get(&message.id)
-                    .is_none_or(|failure| {
-                        // A max_unacked admission deferral records a retryable
-                        // `notification.not_attempted` failure before any
-                        // adaptor I/O. Its zero attempt facts distinguish it
-                        // from an attempted or uncertain delivery, so the
-                        // existing automatic attempt owner may resume it once
-                        // the safety limit clears.
-                        failure.operation == "notification.not_attempted"
-                            && failure.retryable
-                            && message.wake_attempt_count == 0
-                    })
+            super::desktop_connect_retry(state, message)
+                || (message.wake_attempt_count == 0
+                    && message.last_wake_attempt_ms == 0
+                    && !message.retry_attempted
+                    && !state
+                        .notification_delivery_accepted
+                        .contains_key(&message.id)
+                    && state
+                        .notification_delivery_failures
+                        .get(&message.id)
+                        .is_none_or(|failure| {
+                            // A max_unacked admission deferral records a retryable
+                            // `notification.not_attempted` failure before any
+                            // adaptor I/O. Its zero attempt facts distinguish it
+                            // from an attempted or uncertain delivery, so the
+                            // existing automatic attempt owner may resume it once
+                            // the safety limit clears.
+                            failure.operation == "notification.not_attempted"
+                                && failure.retryable
+                                && message.wake_attempt_count == 0
+                        }))
         }
         Some("explicit-notification") => false,
         // Internal daemon markers predate the explicit delivery domain and

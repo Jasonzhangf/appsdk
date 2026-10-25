@@ -178,20 +178,31 @@ impl ProjectRuntimeManager {
         let agent = saved
             .native_thread_id
             .as_ref()
+            .map(|id| id.as_str())
+            // Only explicit context reaches Endpoint reconciliation for a
+            // retired binding. Its retained typed transport identifies the
+            // exact session to verify; maintenance never revives this route.
+            .or_else(|| {
+                matches!(mode, DshConvergence::Endpoint)
+                    .then_some(transport.thread_id.as_deref())
+                    .flatten()
+            })
             .ok_or_else(|| anyhow::anyhow!("DSH_AGENT_MISSING"))?;
         if matches!(mode, DshConvergence::Endpoint) {
             let namespace = transport
                 .namespace
                 .as_deref()
                 .ok_or_else(|| anyhow::anyhow!("DSH_RUNTIME_MISSING"))?;
-            match crate::client::adapters::dsh::facts(endpoint, namespace, agent.as_str()) {
+            match crate::client::adapters::dsh::facts(endpoint, namespace, agent) {
                 Ok(current)
                     if current.runtime_id == namespace
-                        && current.agent_id == agent.as_str()
+                        && current.agent_id == agent
                         && current.session_id == session.as_str()
                         && std::fs::canonicalize(&current.cwd)? == runtime.root =>
                 {
-                    return Ok(())
+                    if saved.native_thread_id.is_some() {
+                        return Ok(());
+                    }
                 }
                 Ok(_) => anyhow::bail!(
                     "DSH_ENDPOINT_REJECTED: current host facts do not match the binding"
@@ -204,7 +215,7 @@ impl ProjectRuntimeManager {
         let resolved =
             match crate::client::adapters::dsh::resolve_agent(
                 endpoint,
-                agent.as_str(),
+                agent,
                 session.as_str(),
                 &runtime.root,
             ) {
@@ -219,7 +230,7 @@ impl ProjectRuntimeManager {
             };
         let mut next = transport.clone();
         next.namespace = Some(resolved.runtime_id);
-        if next == transport {
+        if next == transport && saved.native_thread_id.is_some() {
             // Keep the actual enrollment failure, including a rejected receipt.
             return if matches!(mode, DshConvergence::ReceiveLoop) {
                 enroll(&ident, &transport)

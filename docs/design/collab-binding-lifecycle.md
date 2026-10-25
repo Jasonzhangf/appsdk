@@ -82,5 +82,15 @@ flowchart TD
 | 显式换绑 | 读取当前宿主事实，沿同一 owner 更新原绑定 | 不调用 `worker close --self` 或 `UnregisterSelf` |
 
 名字、master/peer、任务、未读消息及已消费历史在恢复中保持。
+gateway 没有任何就绪 runtime 时，没有证据判断 agent 缺席，必须返回
+`unknown-runtime` 并保持 pending。真正退役的绑定不自动复活；随后显式执行
+`collab context` 时，按保留的精确 session 和 typed transport 重新核实宿主，
+核实成功后恢复原 worker 的有效端点。没有地址的退役绑定不重复提交路由退役事件。
+Desktop 仅在 socket connect 返回 ENOENT 或 ECONNREFUSED、确定没有写出任何字节时，
+记录可重试的未提交失败。bridge 恢复后，既有维护周期在当前绑定上自动补派，
+保留真实尝试次数，并使用原生渠道的即时投递策略。请求写出后的超时、断连、
+拒绝及结果未知均不自动重放；已接受或已消费的消息也不重放。
+后台换绑先持久化新凭据，再公布当前路由。原生路由查询与换绑共享身份锁，
+避免业务命令读到尚未完成凭据持久化的新路由。
 实际 session 续接按既有名字交接合同处理；不能只凭名字认领外部会话。
 重启服务由其原 owner 管理。Collab 不拥有 tmux server 或宿主 pane 的生命周期。

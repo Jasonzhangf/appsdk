@@ -7,6 +7,7 @@ use std::path::Path;
 use std::time::Duration;
 
 const LIMIT: usize = 8 * 1024 * 1024;
+pub const NOT_SUBMITTED_PREFIX: &str = "DESKTOP_BRIDGE_NOT_SUBMITTED:";
 
 fn exchange(transport: &SelectedTransport, op: &str, text: Option<&str>) -> Result<Value, String> {
     let fail = |error: &str| format!("DESKTOP_BRIDGE_FAILED: {error}");
@@ -40,8 +41,16 @@ fn exchange(transport: &SelectedTransport, op: &str, text: Option<&str>) -> Resu
     if bytes.len() > LIMIT {
         return Err(fail("request exceeds frame limit"));
     }
-    let mut socket =
-        std::os::unix::net::UnixStream::connect(path).map_err(|e| fail(&e.to_string()))?;
+    let mut socket = std::os::unix::net::UnixStream::connect(path).map_err(|error| {
+        if matches!(
+            error.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+        ) {
+            format!("{NOT_SUBMITTED_PREFIX} {error}")
+        } else {
+            fail(&error.to_string())
+        }
+    })?;
     socket
         .set_read_timeout(Some(Duration::from_secs(15)))
         .map_err(|e| fail(&e.to_string()))?;

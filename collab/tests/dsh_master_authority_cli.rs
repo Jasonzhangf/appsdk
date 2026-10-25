@@ -1986,5 +1986,17 @@ fn dsh_absent_binding_retires_once_without_repeated_maintenance_retry() {
 
     assert_eq!(fixture.registrations(), registrations);
     assert_eq!(only_identity(&fixture).1, identity);
+    // A later explicit context must still be able to restore the exact
+    // returning session. Retirement terminates maintenance, not public repair.
+    fixture
+        .gateway
+        .forgotten_agents
+        .lock()
+        .unwrap()
+        .remove("agentA");
+    let restored = fixture.dsh_command(&["context", "--provide", &facts], "agentA");
+    assert!(restored.status.success(), "{}", rendered(&restored));
+    assert_eq!(only_identity(&fixture).0, worker);
+    assert!(fixture.gateway.is_enrolled("gateway-runtime", "agentA"));
     fixture.finish();
 }

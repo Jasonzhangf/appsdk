@@ -1,7 +1,7 @@
 {
   "id": "collab-ceo-coordination",
-  "version": "1.1.0",
-  "description": "全局 CEO 请求与进度报告单入口单出口。认证来源与全局授权，解析目标项目当前 master 与 CEO 工作区，提交所属 owner 的授权/任务/消息/回复标记，并初始化非破坏性 CEO 工作区偏好指引。进度按项目与实质变化去重合并；普通心跳、重复文本、更新时间或仅 ACK 不产生用户报告。非紧急用户报告每小时至多一次，默认 Asia/Shanghai 00:00（含）至 08:00（不含）静默；静默期接收、去重、累计，08:00 后合并为一次，不逐条补发。typed urgent 是唯一例外，立即穿透小时与静默限制；普通 P1 不自动升级，正文关键词不参与判定。报告由 daemon 定时与 native CEO 唤醒自动调度，不依赖人工轮询 ceo progress。prepare、读取或 flush 不等于用户已收到报告；只有真实用户入口输出或明确用户确认才记为已报告。queued、accepted、consumed 与 user-report confirmed 分别记录，不伪造已读。无 CEO 授权时返回明确未配置，不虚构接收者。状态跨 daemon 重启持久保留。对应设计 collab/docs/design/ceo-coordination.md。",
+  "version": "1.2.0",
+  "description": "全局 CEO 请求与进度报告单入口单出口。认证来源与全局授权，解析目标项目当前 master 与 CEO 工作区，提交所属 owner 的授权/任务/消息/回复标记，并初始化非破坏性 CEO 工作区偏好指引。进度按项目与实质变化去重合并；普通心跳、重复文本、更新时间或仅 ACK 不产生用户报告。非紧急用户报告每小时至多一次，默认 Asia/Shanghai 00:00（含）至 08:00（不含）静默；静默期接收、去重、累计，08:00 后合并为一次，不逐条补发。typed urgent 是唯一例外，立即穿透小时与静默限制；普通 P1 不自动升级，正文关键词不参与判定。后台到期调度只发送无正文、可持久的提醒并唤醒 native CEO，不生成或预绑定报告批次；CEO 在宿主锁内读取当前进度，准备精确正文与覆盖，真实用户入口输出后由调用方显式 ACK 推进已报告水位。prepare、读取或 flush 不等于用户已收到报告；queued、accepted、consumed 只记录投递证据，不等于 user report confirmed。无 CEO 授权或无待报告内容时返回明确无报告结果；周期重触发在图外，不构成回边。状态跨 daemon 重启持久保留。对应设计 docs/design/collab-board-patrol-ceo-reporting.md。",
   "inputs": [{"id": "ceo_request", "schema": "Object"}],
   "nodes": [
     {
@@ -52,7 +52,7 @@
       "id": "判定报告资格与时限",
       "operator": "collab.ceo.report_policy",
       "operator_version": "1",
-      "description": "用 typed 状态判定是否报告：存在显式 urgent 时可立即穿透；无 urgent 时普通进度每小时至多一次，并遵守默认 Asia/Shanghai 00:00 含至 08:00 不含静默窗口。无新增实质内容不报告。08:00 后由定时触发合并一次，不逐条补发。计算下一次允许报告时间，不依赖有人手动运行 ceo progress。",
+      "description": "用 typed 状态判定是否报告：存在显式 urgent 时可立即穿透；无 urgent 时普通进度每小时至多一次，并遵守默认 Asia/Shanghai 00:00 含至 08:00 不含静默窗口。无新增实质内容或无待报告项目时输出明确无报告结果，并沿同一出口传递，不生成正文、不预绑定批次。普通抑制只选择 urgent 项目，普通内容继续累计。计算下一次允许报告时间；15 分钟后的新到期评估独立成立，旧未消费提醒不永久抑制，也不重放结果不确定的旧消息。周期重触发在图外，不构成回边。",
       "inputs": ["coalesced_progress"],
       "output": {"id": "report_decision", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
@@ -60,23 +60,34 @@
       "iterator": "Whole"
     },
     {
-      "id": "准备并认领用户报告",
+      "id": "发送无正文到期提醒并唤醒CEO",
+      "operator": "collab.ceo.notify",
+      "operator_version": "1",
+      "description": "后台只投递 durable、content-free 的到期提醒并尝试 native CEO 唤醒，不生成正文、不预绑定批次。提醒闸门记录已评估的 urgent_generation；并发到期最多产生一次投递。已排队预留只清除，不重试输入；结果不确定的旧提醒不自动重放。busy 或 unknown 只评估一次并推进 15 分钟截止，消费该 generation 且不追赶补发。queued、accepted、consumed 只记录投递证据，不等于用户报告。无报告决策直传到出口，不产生通知副作用。",
+      "inputs": ["report_decision"],
+      "output": {"id": "due_notice", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "CEO读取当前进度并准备正文与覆盖",
       "operator": "collab.ceo.prepare_user_report",
       "operator_version": "1",
-      "description": "为本次汇总生成报告标识、范围、内容与认领状态。准备、读取或 flush 只证明报告已就绪，不证明用户已收到；不得仅凭 prepare 成功提交用户报告已发送或推进最近报告时间。重复触发复用同一认领，不重复生成。",
-      "inputs": ["report_decision"],
+      "description": "CEO 收到到期提醒后在宿主锁内读取当前进度，按报告决策选择内容，准备与所选 revision 一致的精确正文与覆盖。读取或准备不会剪除批次，也不推进已确认水位；不把到期提醒当作预绑定批次。无报告决策直传，不生成正文。",
+      "inputs": ["due_notice"],
       "output": {"id": "prepared_user_report", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
       "output_selector": {"include": [], "exclude": [], "predicate": null},
       "iterator": "Whole"
     },
     {
-      "id": "交付到用户入口并确认收到",
-      "operator": "collab.ceo.notify",
+      "id": "宿主实际输出后显式确认",
+      "operator": "collab.ceo.ack_user_report",
       "operator_version": "1",
-      "description": "经当前宿主用户入口或 CEO 身份显式确认交付汇总。daemon 定时与 native CEO 唤醒自动触发，不依赖人工轮询。分别记录进入队列、宿主接受、用户入口输出和明确确认；未取得真实输出或用户确认时保持 pending，不标记已报告，不伪造已读。紧急与合并报告使用同一交付路径。",
+      "description": "只有真实宿主用户入口完成输出后，调用方才显式 ACK。ACK 推进实际已报告的最大覆盖 revision，并受当前 revision 上限约束；可剪除被已报告水位完全覆盖的批次，但不清除 canonical progress.urgent，旧批次 ACK 不能清除新进度。queued、accepted、consumed 不等于用户报告；未取得真实输出时保持 pending，不伪造已读。无报告决策直传，不产生确认副作用。",
       "inputs": ["prepared_user_report"],
-      "output": {"id": "delivered_user_report", "schema": "Object"},
+      "output": {"id": "acknowledged_report", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
       "output_selector": {"include": [], "exclude": [], "predicate": null},
       "iterator": "Whole"
@@ -85,8 +96,8 @@
       "id": "返回真实回执",
       "operator": "collab.ceo.receipt",
       "operator_version": "1",
-      "description": "输出去重合并结果、是否 urgent 穿透、抑制原因（静默窗口、小时限制或无新增内容）、下一次允许报告时间、待汇总项目，以及 queued、accepted、consumed、user-report confirmed 的分别回执。未就绪、部分交付和拒绝均携明确结果到出口。",
-      "inputs": ["delivered_user_report"],
+      "description": "输出去重合并结果、是否 urgent 穿透、抑制原因（静默窗口、小时限制或无新增内容）、下一次允许报告时间、待汇总项目，以及 queued、accepted、consumed、user-report confirmed 的分别回执。无 CEO、无待报告内容或抑制分支携明确无报告结果到出口；未就绪、部分交付和拒绝均携明确结果到出口。",
+      "inputs": ["acknowledged_report"],
       "output": {"id": "ceo_receipt", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
       "output_selector": {"include": [], "exclude": [], "predicate": null},
@@ -98,9 +109,10 @@
     {"from": "解析项目与CEO工作区", "to": "提交所属效果", "arc_id": "resolved_request"},
     {"from": "提交所属效果", "to": "按项目去重合并进度", "arc_id": "durable_outcome"},
     {"from": "按项目去重合并进度", "to": "判定报告资格与时限", "arc_id": "coalesced_progress"},
-    {"from": "判定报告资格与时限", "to": "准备并认领用户报告", "arc_id": "report_decision"},
-    {"from": "准备并认领用户报告", "to": "交付到用户入口并确认收到", "arc_id": "prepared_user_report"},
-    {"from": "交付到用户入口并确认收到", "to": "返回真实回执", "arc_id": "delivered_user_report"}
+    {"from": "判定报告资格与时限", "to": "发送无正文到期提醒并唤醒CEO", "arc_id": "report_decision"},
+    {"from": "发送无正文到期提醒并唤醒CEO", "to": "CEO读取当前进度并准备正文与覆盖", "arc_id": "due_notice"},
+    {"from": "CEO读取当前进度并准备正文与覆盖", "to": "宿主实际输出后显式确认", "arc_id": "prepared_user_report"},
+    {"from": "宿主实际输出后显式确认", "to": "返回真实回执", "arc_id": "acknowledged_report"}
   ],
   "outputs": ["ceo_receipt"]
 }

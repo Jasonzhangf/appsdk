@@ -468,7 +468,7 @@ fn design_graph_ids() -> [&'static str; 30] {
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 149] {
+fn design_graph_operator_names() -> [&'static str; 150] {
     [
         "collab.reply.read",
         "appsdk.collab_context.bootstrap_policy",
@@ -502,6 +502,7 @@ fn design_graph_operator_names() -> [&'static str; 149] {
         "collab.ceo.report_policy",
         "collab.ceo.prepare_user_report",
         "collab.ceo.notify",
+        "collab.ceo.ack_user_report",
         "collab.ceo.receipt",
         "appsdk.collab.board.admit_request",
         "appsdk.collab.board.apply",

@@ -1,6 +1,8 @@
 # Collab board 巡检与 CEO 进度汇报
 
-状态：2026-10-25 用户确认需求；设计与实现验收进行中。
+状态：2026-10-25 用户确认需求；设计与实现验收进行中。本文是产品设计契约，
+不证明已安装或 live。具体审计版本、参与者名字与个人偏好样例留在本轮独占
+运行观察记录，不写入通用产品契约。
 
 ## 目标与权威需求
 
@@ -21,23 +23,23 @@ arm；每次巡检提醒必须检查 worker 是否 idle。项目 `.appsdk/requir
 
 ## 已观察事实与缺口
 
-2026-10-25 05:54 America/Los_Angeles 附近只读重测：
+2026-10-25 05:54 America/Los_Angeles 附近的只读审计是实现前的观察基线，不是
+当前运行态证明，也不证明本轮改动已安装或 live。具体安装版本、参与者名字、
+绑定异常与 workspace 现状只保留在本轮运行观察记录中。
 
-- 已安装 Collab 0.2.0361。Desktop native wait 可读 active/inProgress、idle/completed；
-  Collab desktop bridge 返回 active、notLoaded。读取能力不证明常驻巡检已接通。
-- DSH 当前 runtime ready，声明 event.agent-status。agent-get 分别返回
-  running/live=true 与 inactive/live=true。Emma 的 Collab 绑定仍指向旧 runtime，
-  返回 unknown-runtime；旧绑定不可观测不等于整个 DSH 不可用。
-- Jenny tmux pane 前台为 Codex、存活、非复制模式，当前输入区有忙碌标记，Collab
-  投影 working/busy。tmux 是界面观测，不是原生 turn 状态事件。
-- `collab notify unsubscribe` 不存在。独立取消 board 巡检须补实现，不能借关闭
+当时确认的通用事实：
+
+- Desktop native 状态读取可区分活动与空闲；Collab desktop bridge 的读取结果不等于
+  常驻巡检已接通。DSH 的 runtime/agent 状态可读，旧绑定不可观测不等于整个 DSH
+  不可用。tmux 只提供界面观测，不是原生 turn 状态事件。
+- 当时没有公开的独立巡检取消入口。取消 board 巡检须由专门入口实现，不能借关闭
   未完任务、取消整个 goal 或关闭基本 direct-message 接收替代。
-- 当前 CEO grant 指向 Alice，workspace 为 `/Users/fanzhang`。本任务不接管 CEO。
-  workspace 当前没有 AGENTS.md；新增默认内容必须保留用户已有文件与规则。
+- 全局 CEO grant 指向某个用户工作区；本任务不接管 CEO。新增默认内容必须保留用户
+  已有文件与规则。
 
-现有注册、订阅、投递与消费 DAG 可复用；缺少从 board 持有关系、宿主 idle 到继续
-请求，以及项目进度到 CEO 汇总和用户报告的闭合路径。Planner 须亲读最新主线图，
-补齐所需机器图与 gate，图校验后再红测、实现和黑盒回归。
+现有注册、订阅、投递与消费 DAG 可复用；实现前缺少从 board 持有关系、宿主 idle 到
+继续请求，以及项目进度到 CEO 汇总和用户报告的闭合路径。该缺口已由本文件与
+`docs/dagpipe/` 对应机器图补正，当前实现与验收状态按文末边界单独判定。
 
 ## 状态与巡检
 
@@ -72,6 +74,12 @@ Jenny 使用现有项目 master → CEO 路由报告项目事实：目标、已�
 CEO 按项目与业务进度去重，合并同一项目重复进度，保留最新有意义变化。普通心跳、
 重复文本、更新时间或仅 ACK 不产生用户报告。复用现有 typed 状态，不加 hash 清单。
 
+后台到期调度只发送无正文、可持久的提醒并尝试 native CEO 唤醒，不生成正文、不
+预绑定报告批次。CEO 收到提醒后在宿主锁内读取当前进度，按报告决策选择内容并
+准备与该选择一致的精确正文与覆盖。只有真实宿主用户入口完成输出后，调用方才
+显式 ACK 推进已报告水位。读取、准备、flush、queued、accepted、consumed 都
+不等于用户报告已确认；旧批次 ACK 不能清除新进度，也不清除 canonical urgent。
+
 非紧急进度默认每小时至多向用户汇报一次，统一汇总各项目；没有新增内容则不报告。
 静默窗口可配置，默认 Asia/Shanghai 每日 00:00（含）至 08:00（不含）。静默期仍
 接收、去重、积累项目进度，08:00 后在允许报告时合并为一次，不逐条补发。
@@ -87,9 +95,9 @@ CEO 按项目与业务进度去重，合并同一项目重复进度，保留最�
 已存在的中央 Collab Skill；不新建第二套 CEO Skill。只增补本产品负责的必要段落，
 保留用户内容，不用文件存在证明配置生效。
 
-稳定用户偏好以已有 `/Users/fanzhang/.codex/USER.md` 等用户真源为准，默认引用并
-遵循。明确确认的新偏好与风格习惯在其唯一 owner 沉淀，CEO 指引给出入口与维护
-职责。不凭模型推断记录隐私、秘密或一次情绪，不重复复制跨项目规则。
+稳定用户偏好以用户既有 USER/preferences 真源和当前全局 CEO grant 的 workspace
+为准，默认引用并遵循。明确确认的新偏好与风格习惯在其唯一 owner 沉淀，CEO 指引
+给出入口与维护职责。不凭模型推断记录隐私、秘密或一次情绪，不重复复制跨项目规则。
 本轮已知表达偏好：中文、结论先行、证据明确、短句、区分完成与未验证、避免重复
 报告。不得把所有项目状态写进用户偏好。
 
@@ -140,19 +148,19 @@ flowchart TD
 ```mermaid
 flowchart TD
  S([Jenny巡检产生项目进度]):::boundary --> A{已配置CEO?}:::decision
- A -->|无| L[继续项目工作]:::action
+ A -->|无| L[返回明确无报告结果]:::action
  A -->|有| B[(按项目合并实质变化)]:::data
  B --> C{有未报告变化?}:::decision
  C -->|无| L
  C -->|有| D{明确紧急或满足小时与静默规则?}:::decision
- D -->|否| P[保留待报告并等待后台到期调度]:::action
- D -->|是| W[后台生成批次并唤醒CEO]:::action
- W -->|可继续处理| U[CEO读取进度并向用户报告]:::action
- W -->|投递失败或暂不可达| P
- U -->|完成输出| R[实际输出后显式确认该批次]:::action
- U -->|中断且未确认| P
- R -->|确认有效| V[(仅推进该批次覆盖的版本与报告时间)]:::data
- R -->|确认失败| P
+ D -->|否| P[保留待报告并返回抑制结果]:::action
+ D -->|是| W[后台只发送无正文到期提醒并唤醒CEO]:::action
+ W -->|已投递或无报告决策| U[CEO在宿主锁内读取当前进度并准备正文与覆盖]:::action
+ W -->|投递失败、busy或暂不可达| P
+ U -->|真实宿主入口完成输出| R[输出后由调用方显式ACK]:::action
+ U -->|中断且未输出| P
+ R -->|ACK有效| V[(推进已报告水位并剪除已覆盖批次)]:::data
+ R -->|ACK失败| P
  L --> E([结束本次处理]):::boundary
  P --> E
  V --> E
@@ -163,7 +171,34 @@ flowchart TD
 ```
 
 每次触发是一张有终点的 DAG；周期与后续事件在图外重新触发，不在图中造循环。
-图展示业务语义，具体 owner 与算子由规划/实现补绑定。
+图展示业务语义。机器图是 `docs/dagpipe/collab-ceo-coordination.graph.json`，
+当前版本 `1.2.0`，九阶段单入口单出口。
+
+后台提醒本身没有正文，也没有预绑定批次。CEO 读取的是提醒到达时的当前进度，
+因此提醒与正文之间不存在固定批次对应关系；ACK 只推进实际覆盖的 revision，
+受当前 revision 上限约束，且不清除 canonical urgent。无 CEO、无待报告内容和
+抑制分支都携明确无报告结果沿同一出口结束。
+
+## 状态 owner 与实现位置
+
+报告状态与调度的唯一真源是 daemon 的 canonical CEO report state，不是日志、
+消息正文或进程内计时。CEO 正文与覆盖由 CEO agent 在宿主锁内按当前进度准备；
+用户入口实际输出与显式 ACK 由宿主批次 CLI 承担。三者职责分开，不用
+queued/accepted/consumed 代替 user report confirmed。
+
+| 机制 | 当前唯一 owner |
+|---|---|
+| board 持有关系、按任务取消与 15 分钟巡检策略 | `collab/src/board_patrol_policy.rs`；调度接线在 `collab/src/server/keepalive.rs` |
+| 报告时间资格、小时与静默窗口 | `collab/src/ceo_reporting_policy.rs` |
+| 进度去重、批次准备、ACK 水位与提醒闸门状态 | `collab/src/ceo_report_state.rs` |
+| CEO 授权、工作区与跨项目协调 | `collab/src/server/ceo.rs`、`collab/src/server/ceo_bootstrap.rs` |
+| 到期提醒巡逻与 native 唤醒 | `collab/src/server/ceo_report_patrol.rs` |
+| 定时触发（每轮调用一次巡逻） | `collab/src/server/mod_parts/part_12.rs` 既有 `spawn_blocking` 定时回调 |
+| 状态与持久记录 | `collab/src/server/state.rs`、`collab/src/server/state/` |
+| 配置（静默分钟值、间隔） | `collab/src/config.rs` |
+| agent 行为与命令入口 | `collab/skills/collab/references/board-idle-patrol.md` 与 `collab/skills/collab/operations.md` |
+
+机器图算子绑定在 `rust/src/dagpipe.rs` 既有设计算子列表，不新增注册框架。
 
 ## 实现与验收边界
 
@@ -177,5 +212,6 @@ Jenny→CEO 进度交付；同进度不重复报告；小时限制；北京时�
 静默累积一次汇总；明确紧急例外；replay 保持状态；CEO 指引初始化保留用户内容。
 
 先绑定具体失败模式和红测，再修改唯一 owner。真实 CLI/公开接口黑盒贯穿持久状态
-与可观测副作用；单测辅助定位。候选验证不等于线上部署。正式安装可按项目授权
-进行，但全局 Collab daemon 激活由用户完成；未获得 live 结果时明确保留未验证项。
+与可观测副作用；单测辅助定位。候选构建、静态图和测试通过只证明候选范围，不等于
+线上部署。正式安装可按项目授权进行，但全局 Collab daemon 由用户拥有并激活；
+未获得 live 结果时明确保留未验证项。

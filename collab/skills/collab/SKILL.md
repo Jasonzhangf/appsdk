@@ -65,19 +65,27 @@ master 不代持或代登记 peer goal，旧 runtime 拒绝 peer 时记录具体
 ## Registered patrol duties
 
 项目 Jenny/master 默认承担本项目 worker 巡检。初始化或恢复本人 longhorizon 后，
-须确保本人巡检已 armed；每次提醒检查 worker 的 busy/idle、board 任务和按任务取消
-状态。peer 持有未关闭 board 任务且正态 idle 时应唤醒本人，由本人继续推理并判断
-下一步；busy 跳过，不补发；unknown、offline、cold 或 waiting_user 不当作 idle。
-支持实时状态事件时及时触发；不支持时默认每 15 分钟检查。
+须确保本人常驻项目巡检已 armed；它是一条 `master-idle` 订阅，subject
+`project-patrol`、interval `900000` 毫秒，ensure/renew 复用同一订阅而不并排新建。
+有限 goal/task 定时器按生命周期关闭，但单个 goal 结束不关闭这条常驻巡检义务。
+每次提醒检查 worker 的 busy/idle、board 任务和按任务取消状态。当前 master 用
+`collab notify status` 的 `project_board_patrol` 只读视图检查 peer 取消；该读取不授予
+替 peer 恢复或覆盖取消的权限。peer 持有未关闭
+board 任务且正态 idle 时应唤醒本人，由本人继续推理并判断下一步；busy 跳过，不
+补发；unknown、offline、cold 或 waiting_user 不当作 idle。支持实时状态事件时及时
+触发；不支持时默认每 15 分钟检查（当前 `notify status` 报告 realtime 未接通）。
 
 peer 可取消本人 board 巡检，任务与基本收件仍保留。取消按任务和当前稳定 owner
 持久保存；新任务不恢复旧任务取消，同稳定名字换会话保留取消。恢复使用明确入口。
 目标命令、回执和 CEO 回报边界见
 [board idle 巡检契约](references/board-idle-patrol.md)。
 
-这是 2026-10-25 用户确认的新契约，尚未证明已安装 runtime 实现。当前版本可能没有
-独立巡检取消入口；核心公开 CLI 验收前不运行文档中的拟定命令，不以关闭未完任务或
-取消基本收件代替。缺口只影响自动巡检，已授权工作仍继续。
+这是 2026-10-25 用户确认的契约。`collab notify cancel --event board-idle`、
+`collab notify subscribe --event board-idle` 与 `collab notify status` 已在当前源码
+实现，并由源码级/隔离 runtime 测试覆盖；这不等于已安装或已 live。正在运行的 daemon
+可能带不同构建，使用前先在该 daemon 上核实 `collab notify methods` 与
+`collab notify status`。公开 runtime 套件里的 parent-idle 唤醒仍为 RED，不宣称
+完整 runtime 验收。缺口只影响自动巡检，已授权工作仍继续。
 
 巡检只提供兜底唤醒，不是执行前提。登记后立即推进 ready 工作，结果或资源变化后按
 统一调度规则自检并补位。peer 保留本人范围的交付责任；遇到受限步骤先按已有授权

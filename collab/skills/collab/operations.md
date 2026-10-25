@@ -523,18 +523,26 @@ or implementation details.
    another patrol. Close only owned patrol scope; do not cancel another goal's
    subscriptions.
 10. 每个项目的 Jenny（当前获授权 master）默认承担本项目 worker 巡检。初始化或恢复
-    本人 longhorizon 后，确保本项目 15 分钟巡检已 armed；复用有效订阅，不重复创建。
-    `appsdk longhorizon show` 是只读投影，读取成功不证明已 arm。每次巡检提醒检查
-    worker 活动、未关闭 board 任务、当前绑定和按任务取消状态；存在全局 CEO 时按
-    [board idle 巡检契约](references/board-idle-patrol.md)回报本项目实质进度。
+    本人 longhorizon 后，确保本项目常驻巡检已 armed；它是当前 master 的 `master-idle`
+    订阅，subject `project-patrol`、interval `900000` 毫秒，ensure/renew 复用同一
+    订阅，不重复创建。`appsdk longhorizon show` 是只读投影，读取成功不证明已 arm。
+    有限 goal/task 定时器按生命周期关闭，单个 goal 结束不关闭这条常驻项目巡检义务。
+    每次巡检提醒检查 worker 活动、未关闭 board 任务、当前绑定和按任务取消状态；
+    存在全局 CEO 时按 [board idle 巡检契约](references/board-idle-patrol.md)回报本项目
+    实质进度。
 11. 已持有未关闭 board 任务的 peer 在正态 online+idle 时由本人巡检唤醒继续推理；
     busy 跳过且不补发；unknown、offline、cold 或 waiting_user 产生零传输输入。
-    peer 可仅取消本人任务的 board-idle 巡检，目标入口为
-    `collab notify cancel --task-id <task-id>`（省略任务时作用于当前持有的全部未关闭
-    任务），恢复入口为 `collab notify subscribe --event board-idle --task-id <task-id>`。
-    取消按任务粒度和当前稳定 owner 持久保存，不取消任务、其他订阅或基本
-    direct-message；新任务不恢复旧任务取消。核心公开 CLI 验证完成前不宣称这些接口
-    已在安装 runtime 生效。
+    peer 可仅取消本人任务的 board-idle 巡检，入口为
+    `collab notify cancel --event board-idle [--task-id <task-id> ...]`（省略任务时
+    取消当前持有的全部未关闭任务），恢复入口为
+    `collab notify subscribe --event board-idle [--task-id <task-id> ...]`（省略任务
+    时恢复当前已取消且仍未关闭的任务）。取消按任务粒度和当前稳定 owner 持久保存，
+    同稳定名字换会话保留；任务转交后新 owner 不受旧取消影响；其他 owner 提交取消
+    原子失败。取消不取消任务、其他订阅或基本 direct-message；新任务不恢复旧任务
+    取消。`collab notify status` 的 `board_patrol` 当前字段为 `owner_key`/
+    `cancelled_tasks`/`eligible_task_ids`/`interval_ms`/`periodic_fallback`/
+    `realtime_connected`，无 `armed_tasks`。这些入口已在当前源码实现并有源码级测试；
+    不宣称已在安装或 live daemon 生效，使用前在该 daemon 上核实。
 
 A legacy managed-subagent record creates no new patrol task, subscription,
 dispatch, or execution authority. Its parent or master preserves it only for
@@ -1326,11 +1334,15 @@ collab ceo reply --subject '<完成主题>' --in-reply-to '<原请求ID>' '<实�
 idle。项目 master 不因全局 CEO 存在而放弃本项目交付责任。
 
 Jenny 巡检向 CEO 上报本项目实质进度时使用同一 `collab ceo reply` 入口，可用
-`--urgent` 标记明确紧急。CEO 按项目与实质业务进展去重：重复回报没有实质变化时
+`--urgent` 标记明确紧急。`--urgent` 是唯一 typed 紧急入口，可立即穿透限流与安静
+窗口；正文关键词、普通 P1 阻塞或 ACK 不升级紧急。不带 `--in-reply-to` 的普通进度
+走非紧急汇总，与带 `--in-reply-to` 的请求回复（保留真实投递与回复义务语义）区别
+处理。CEO 按项目与实质业务进展去重：重复回报没有实质变化时
 不重复唤醒，也不产生用户报告。非紧急汇报默认每小时最多一次，安静窗口默认
-`Asia/Shanghai` 每日 `[00:00, 08:00)`；窗口内继续接收、去重并累计，08:00 后合并
-为一次，不逐条补发。`--urgent` 是唯一 typed 紧急入口，可立即穿透限流与安静窗口；
-正文关键词、普通 P1 阻塞或 ACK 不升级紧急。
+`Asia/Shanghai` 每日 `[00:00, 08:00)`（固定 UTC+8，无夏令时）；窗口内继续接收、去重
+并累计，08:00 后合并为一次，不逐条补发。安静窗口由全局 `[ceo_report]` typed 配置
+`quiet_window_start_minute`/`quiet_window_end_minute`（0..1439，相等即禁用），项目级
+覆盖被拒绝；小时间隔固定 3600000 毫秒。
 
 CEO 向用户实际输出汇报后，才由 CEO 执行显式确认：
 
@@ -1340,13 +1352,21 @@ collab ceo report-ack --batch-id '<batch-id>'
 
 `queued`、传输 `accepted`、CEO `consumed` 与 `reported_to_user` 四阶段分开记录。
 读取 `collab ceo progress`、准备批次、入队或传输接受都不是向用户汇报，不能改写成
-`reported_to_user`。该确认是调用者在宿主可见输出后的声明，不独立证明用户实际收到
-或已读。未确认批次跨 daemon 重启持久保留。
+`reported_to_user`。`collab ceo reply` 无引用结果回执含 `project`、`recorded`、
+`deduplicated`、`urgent`、`revision` 及 `notified:false`/`reported:false`；`collab ceo
+progress` 在 `report` 下给出 `batch_id`、`coverage`、`projects`、`last_actual_report_ms`、
+`suppressed`、`suppression`、`next_eligible_ms`、`excluded_project_count`，且只准备
+批次不推进已报告水位；`collab ceo report-ack` 返回 `batch_id`、`reported_ms`、
+`last_actual_report_ms`、`pending_revision_count`、`remaining_batch_count`。该确认是
+调用者在宿主可见输出后的声明，不独立证明用户实际收到或已读。未确认批次跨 daemon
+重启持久保留。
 
 `collab ceo promote` 在 workspace 的 `AGENTS.md` 非破坏性写入或更新受管偏好与
 写作/汇报风格指引段：保留全部已有内容，引用权威偏好源 `~/.codex/USER.md`，不复制
 其内容、个人信息或秘密；目录、符号链接、损坏目标或其他非法目标显式失败，不跟随
-链接改写共享文件，也不写备选文件。不新建第二套 CEO Skill。
+链接改写共享文件，也不写备选文件。不新建第二套 CEO Skill。grant 已持久但受管段落
+写入失败时，回执标记部分成功并保留 `CEO_GRANT_RECORDED_BUT_WORKSPACE_GUIDANCE_FAILED`，
+不掩盖该失败。
 
 以上目标接口和调度行为由 core 实现与公开 CLI 黑盒验收确认；完成前不宣称已安装
 runtime 生效，详见 [board idle 巡检契约](references/board-idle-patrol.md)。

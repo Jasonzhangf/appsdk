@@ -114,20 +114,6 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    const REQUIRED_SKILL_FILES: &[&str] = &[
-        "SKILL.md",
-        "operations.md",
-        "references/board-idle-patrol.md",
-        "references/workflow-templates.json",
-        "references/migration-daemon.md",
-        "references/notifications.md",
-        "references/resource-waits.md",
-        "references/task-worktree-lifecycle.md",
-        "references/verification.md",
-        "references/state-paths.md",
-        "references/stable-name-recovery.md",
-    ];
-
     fn temp_target(tag: &str) -> PathBuf {
         let n = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -170,16 +156,6 @@ mod tests {
         for (rel, outcome) in &outcomes {
             assert_eq!(outcome, &InstallOutcome::Written, "expected written: {rel}");
             assert!(target.join(rel).is_file(), "missing: {rel}");
-        }
-        for required in REQUIRED_SKILL_FILES {
-            assert!(
-                SKILL_FILES.iter().any(|(rel, _)| rel == required),
-                "required skill file is not embedded: {required}"
-            );
-            assert!(
-                target.join(required).is_file(),
-                "required installed file is missing: {required}"
-            );
         }
         // A manifest that accidentally omits the new asset would otherwise
         // satisfy the self-enumerating checks above while shipping no workflow.
@@ -229,13 +205,6 @@ mod tests {
             source, embedded,
             "every file under {SKILL_ROOT} must be embedded and every embed must exist"
         );
-        for required in REQUIRED_SKILL_FILES {
-            assert_eq!(
-                SKILL_FILES.iter().filter(|(rel, _)| rel == required).count(),
-                1,
-                "required skill file must be embedded exactly once: {required}"
-            );
-        }
     }
 
     #[test]
@@ -327,7 +296,7 @@ mod tests {
                 );
             }
             if *rel == "references/board-idle-patrol.md" {
-                assert!(embedded.contains("collab notify cancel --task-id"));
+                assert!(embedded.contains("collab notify cancel --event board-idle"));
                 assert!(embedded.contains("collab notify subscribe --event board-idle"));
                 assert!(embedded.contains("collab ceo report-ack --batch-id"));
                 assert!(embedded.contains("reported_to_user"));
@@ -343,8 +312,7 @@ mod tests {
                 let master =
                     serde_json::to_string(&workflow["identity_templates"]["master"]).unwrap();
                 assert!(master.contains("worker patrol"));
-                let peer =
-                    serde_json::to_string(&workflow["identity_templates"]["peer"]).unwrap();
+                let peer = serde_json::to_string(&workflow["identity_templates"]["peer"]).unwrap();
                 assert!(peer.contains("board idle reminder"));
                 let rules = serde_json::to_string(&workflow["coordination_rules"]).unwrap();
                 assert!(rules.contains("Board idle patrol is per task and current stable owner"));

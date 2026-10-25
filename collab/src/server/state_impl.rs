@@ -1131,6 +1131,21 @@ impl State {
                     grant: grant.clone(),
                 })?;
             }
+            Event::GlobalBootstrapPolicySet { policy } => {
+                let project = self
+                    .global
+                    .projects
+                    .entry(policy.project_scope.as_str().to_owned())
+                    .or_insert(
+                        crate::server::global_state::ProjectState::new(
+                            policy.project_scope.clone(),
+                        )
+                        .map_err(|error| error.to_string())?,
+                    );
+                project
+                    .bootstrap_policies
+                    .insert(policy.app_scope_id.as_str().to_owned(), policy.clone());
+            }
             Event::GlobalMasterRevoked {
                 project_scope,
                 binding_id,
@@ -1823,6 +1838,11 @@ impl State {
                 .map(|binding| Event::WorktreeBound { binding }),
         );
         for (_, project) in &self.global.projects {
+            for policy in project.bootstrap_policies.values() {
+                events.push(Event::GlobalBootstrapPolicySet {
+                    policy: policy.clone(),
+                });
+            }
             for registration in project.registrations.values() {
                 events.push(Event::GlobalProjectRegistered {
                     registration: registration.clone(),

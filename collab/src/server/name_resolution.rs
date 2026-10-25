@@ -232,13 +232,27 @@ pub(crate) fn resolve_registered_name_with_authorization(
             )
         }),
     };
+    let mut notices = Vec::new();
+    if let NameResolutionDecision::Committed { occupancy, .. } = &plan.decision {
+        if !is_master && occupancy.name != "Jenny"
+            && state.name_occupancy(route.project_scope_id.as_str(), &occupancy.name).is_none() {
+            if let Some(master) = super::current_master_worker_id(&state, Some(&route))
+                .filter(|master| master != worker_id && state.workers.contains_key(master)) {
+                notices = super::relationship_notice_events(&state, route.project_scope_id.as_str(), &master,
+                    "peer-registered", format!("新 peer {} 已加入。读取 collab board show 核对当前任务与可用人选；有已授权且可交付的子目标时，沿基础 master/peer 模板 publish 后 dispatch 或 invite。无需先设置专长或策略；没有可派任务则保留收件，不创建空转巡检。", occupancy.name));
+            }
+        }
+    }
     events.extend(plan.events);
+    events.extend(notices.clone());
     if !events.is_empty() {
         server
             .commit_locked_checked(&mut state, &events)
             .map_err(|error| format!("NAME_DURABILITY_FAILED: {error}"))?;
     }
     outcome["effects"] = serde_json::to_value(effects).expect("name effects serialize");
+    drop(state);
+    outcome["notifications"] = serde_json::json!(super::deliver_relationship_notices(server, &notices));
     Ok(outcome)
 }
 

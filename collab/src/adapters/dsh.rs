@@ -304,7 +304,7 @@ fn round_trip(
                     ),
                 }
             }
-            _ => ControlError::Unreachable {
+            _ => ControlError::Unusable {
                 detail: format!("reading {method} reply: {error}"),
             },
         })?;

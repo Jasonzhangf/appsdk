@@ -777,6 +777,8 @@ pub struct ProjectState {
     #[serde(default)]
     pub master_grants: BTreeMap<String, MasterGrant>,
     #[serde(default)]
+    pub bootstrap_policies: BTreeMap<String, BootstrapPolicy>,
+    #[serde(default)]
     pub runtime_binding_ledger: BTreeMap<String, RuntimeBindingLedgerRecord>,
 }
 
@@ -788,6 +790,7 @@ impl ProjectState {
             registrations: BTreeMap::new(),
             runtime_bindings: BTreeMap::new(),
             master_grants: BTreeMap::new(),
+            bootstrap_policies: BTreeMap::new(),
             runtime_binding_ledger: BTreeMap::new(),
         })
     }
@@ -910,6 +913,23 @@ impl ProjectState {
     pub fn lookup_master_grant(&self, binding_id: &BindingId) -> Option<&MasterGrant> {
         self.master_grants.get(binding_id.as_str())
     }
+}
+
+/// One explicit project/app authorization, consumed by the first registration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BootstrapPolicy {
+    pub project_scope: ProjectScopeId,
+    pub app_scope_id: AppServerId,
+    pub authorization: String,
+    pub authorized_operation: String,
+    pub consumption: Option<BootstrapConsumption>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BootstrapConsumption {
+    pub command_id: String,
+    pub binding_id: BindingId,
+    pub outcome: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

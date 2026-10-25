@@ -590,6 +590,10 @@ impl Server {
         approval: Option<&RegisterApprovalProof>,
         outer_binding: Option<&RegisterOuterBinding>,
     ) -> Result<state::TypedOutcome, notification_contract::JournalError> {
+        // The synchronous context path schedules this same typed control
+        // binding before Register; continuations pass it directly.
+        let scheduled = CONTEXT_REGISTER_START_BINDING.with(|value| value.borrow().clone());
+        let outer_binding = outer_binding.or(scheduled.as_ref());
         typed.envelope.validate().map_err(|error| {
             notification_contract::JournalError::InvalidCommand(error.to_string())
         })?;
@@ -725,6 +729,68 @@ impl Server {
                     events.push(Event::GlobalRuntimeBound {
                         binding: binding.clone(),
                     });
+                    if let Some(project) = st.global.lookup_project(&binding.project_scope) {
+                        if let Some(mut policy) = project
+                            .bootstrap_policies
+                            .get(binding.app_scope_id.as_str())
+                            .filter(|policy| policy.consumption.is_none())
+                            .cloned()
+                        {
+                            let explicit_peer = outer_binding
+                                .and_then(|outer| outer.continuation.as_ref())
+                                .and_then(|continuation| {
+                                    continuation
+                                        .request
+                                        .grant_approval
+                                        .as_ref()
+                                        .or(continuation.request.approval.as_ref())
+                                })
+                                .is_some_and(|approval| approval["action"] == "restore_peer");
+                            let history = project
+                                .runtime_bindings
+                                .values()
+                                .any(|old| old.app_scope_id == binding.app_scope_id);
+                            let incumbent = st.master_worker_id.is_some()
+                                || project
+                                    .master_grants
+                                    .values()
+                                    .any(|grant| grant.app_scope_id == binding.app_scope_id);
+                            let outcome = if explicit_peer {
+                                "explicit_peer"
+                            } else if incumbent {
+                                "incumbent"
+                            } else if history {
+                                "registration_history"
+                            } else {
+                                "master_granted"
+                            };
+                            if outcome == "master_granted" {
+                                let grant = global_state::MasterGrant::new(
+                                    binding.project_scope.clone(),
+                                    binding.app_scope_id.clone(),
+                                    binding.agent_id.clone(),
+                                    "project",
+                                    "user",
+                                    &policy.authorization,
+                                    binding.binding_id.clone(),
+                                    binding.endpoint_generation,
+                                    now_ms(),
+                                )
+                                .map_err(|error| {
+                                    notification_contract::JournalError::InvalidCommand(
+                                        error.to_string(),
+                                    )
+                                })?;
+                                events.push(Event::GlobalMasterGranted { grant });
+                            }
+                            policy.consumption = Some(global_state::BootstrapConsumption {
+                                command_id: typed.envelope.command_id.as_str().to_owned(),
+                                binding_id: binding.binding_id.clone(),
+                                outcome: outcome.into(),
+                            });
+                            events.push(Event::GlobalBootstrapPolicySet { policy });
+                        }
+                    }
                     if let Some(grant) = reissued_master_grant {
                         events.push(Event::GlobalMasterGranted { grant });
                     }

@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-dsh-channel",
-  "version": "0.3.0",
-  "description": "DSH 注册后通信的单入口单出口对象流。公开 CLI/MCP context 报告 typed DSH 能力，daemon 将其接入既有 Register。复用已经验证的 gateway 基础通信，不增加首次注册消息挑战。普通身份恢复属于 collab-context 图，直接读取持久身份和绑定，不重新 Register；本图仍在其已提交 identity/binding 上恢复 gateway canonical 接收循环。缺事实、拒绝或未知结果作为当前阶段的明确结果向后传递，不产生后续副作用；仅已提交注册进入实际消息收发。成功终点区分入队、adaptor 接受、接收、回复和消费。相同 session 的显式 API 冲突不覆盖旧身份、角色或工作。全局 daemon 与 tmux 生命周期不属于本图。",
+  "version": "0.4.0",
+  "description": "DSH 首次注册片段：一次注册意图到一次已提交身份与绑定结果。公开 CLI/MCP context 报告 typed DSH 能力，daemon 将其接入既有 Register。复用已经验证的 gateway 基础通信，不增加首次注册消息挑战。普通身份恢复属于 collab-context 图，直接读取持久身份和绑定，不重新 Register；本图仍在其已提交 identity/binding 上恢复 gateway canonical 接收循环。缺事实、拒绝或未知结果作为当前阶段的明确结果向后传递，不产生后续副作用；仅已提交注册进入实际消息收发。注册结果不证明发送、接收、presence、wake、消费或回复：一次发送以持久入队结果结束；一次投递尝试由 dsh-delivery 图提交 accepted/rejected/unknown 回执；消费由 notification-consumption 图提交真实消费回执；回复是新的 send 请求。身份有效性与通信可达性的 presence 投影属于 context/status 读取，不从注册链推出。相同 session 的显式 API 冲突不覆盖旧身份、角色或工作。全局 daemon 与 tmux 生命周期不属于本图。设计 operator 不可执行；静态图校验不证明 runtime 绑定或行为通过。",
   "inputs": [
     {
       "id": "dsh_registration_intent",
@@ -55,7 +55,7 @@
     },
     {
       "id": "arm_default_lease",
-      "description": "注册成功后建立默认收件订阅；普通恢复复用持久身份，不重新 Register 或验证通信。",
+      "description": "注册成功后建立默认收件订阅；普通恢复复用持久身份，不重新 Register 或验证通信。订阅只表示可收件，不证明 wake、接收或消费。",
       "operator": "appsdk.collab_dsh_channel.arm_default_lease",
       "operator_version": "1",
       "inputs": ["route_address"],
@@ -66,44 +66,11 @@
     },
     {
       "id": "enroll_receive_loop",
-      "description": "持久 binding 提交后，经所选可信同用户 gateway control socket 的 register-peer 把已提交身份与 binding 交给 gateway，由 gateway 建立或恢复唯一 canonical Poll 接收循环。普通恢复重复调用幂等，不产生新的 Register，不要求通信挑战。拒绝、超时、协议错误或回执不匹配保留已提交身份、角色与 route，并显式失败；token 只交给该 socket，不写入回执、日志或业务元数据。",
+      "description": "持久 binding 提交后，经所选可信同用户 gateway control socket 的 register-peer 把已提交身份与 binding 交给 gateway，由 gateway 建立或恢复唯一 canonical Poll 接收循环。普通恢复重复调用幂等，不产生新的 Register，不要求通信挑战。拒绝、超时、协议错误或回执不匹配保留已提交身份、角色与 route，并显式失败；token 只交给该 socket，不写入回执、日志或业务元数据。输出包含已提交身份、binding、route、默认订阅与收件循环状态的唯一注册结果，不输出 presence、wake、发送或消费证明。",
       "operator": "appsdk.collab_dsh_channel.enroll_receive_loop",
       "operator_version": "1",
       "inputs": ["subscription_state"],
-      "output": {"id": "enrolled_loop_state", "schema": "Object"},
-      "input_selector": {"include": [], "exclude": [], "predicate": null},
-      "output_selector": {"include": [], "exclude": [], "predicate": null},
-      "iterator": "Whole"
-    },
-    {
-      "id": "project_presence",
-      "description": "context 返回当前身份与项目状态，身份有效性与通信可达性分别投影。",
-      "operator": "appsdk.collab_dsh_channel.project_presence",
-      "operator_version": "1",
-      "inputs": ["enrolled_loop_state"],
-      "output": {"id": "presence_projection", "schema": "Object"},
-      "input_selector": {"include": [], "exclude": [], "predicate": null},
-      "output_selector": {"include": [], "exclude": [], "predicate": null},
-      "iterator": "Whole"
-    },
-    {
-      "id": "deliver_wake",
-      "description": "注册后的真实消息经 daemon 持久 mailbox 与 gateway enqueue 唤醒已登记的 canonical Poll 循环；signalReceive 只提示该循环，消息正文由 Poll 取得并经 agent/notify 交付、ReceiveCommitted 消费。enqueue 接受回执不冒充接收或消费。",
-      "operator": "appsdk.collab_dsh_channel.deliver_wake",
-      "operator_version": "1",
-      "inputs": ["presence_projection"],
-      "output": {"id": "wake_evidence", "schema": "Object"},
-      "input_selector": {"include": [], "exclude": [], "predicate": null},
-      "output_selector": {"include": [], "exclude": [], "predicate": null},
-      "iterator": "Whole"
-    },
-    {
-      "id": "send_to_peer",
-      "description": "DSH gateway 独占 canonical Poll/Ack，将原文送入原生会话并记录真实消费；DSH CLI recv/ack 返回 DSH_NATIVE_DELIVERY_OWNED，避免争抢 mailbox。agent 直接处理原文并经公开 send 回复，msg/inbox 仅只读诊断；形成关联接收、回复和消费证据或明确失败结果。",
-      "operator": "appsdk.collab_dsh_channel.send_to_peer",
-      "operator_version": "1",
-      "inputs": ["wake_evidence"],
-      "output": {"id": "channel_roundtrip_evidence", "schema": "Object"},
+      "output": {"id": "identity_binding_result", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
       "output_selector": {"include": [], "exclude": [], "predicate": null},
       "iterator": "Whole"
@@ -114,10 +81,7 @@
     {"from": "admit_dsh_transport", "to": "bind_and_receipt", "arc_id": "admitted_transport"},
     {"from": "bind_and_receipt", "to": "publish_route", "arc_id": "registration_receipt"},
     {"from": "publish_route", "to": "arm_default_lease", "arc_id": "route_address"},
-    {"from": "arm_default_lease", "to": "enroll_receive_loop", "arc_id": "subscription_state"},
-    {"from": "enroll_receive_loop", "to": "project_presence", "arc_id": "enrolled_loop_state"},
-    {"from": "project_presence", "to": "deliver_wake", "arc_id": "presence_projection"},
-    {"from": "deliver_wake", "to": "send_to_peer", "arc_id": "wake_evidence"}
+    {"from": "arm_default_lease", "to": "enroll_receive_loop", "arc_id": "subscription_state"}
   ],
-  "outputs": ["channel_roundtrip_evidence"]
+  "outputs": ["identity_binding_result"]
 }

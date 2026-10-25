@@ -1,0 +1,75 @@
+{
+  "id": "appsdk-collab-dsh-delivery",
+  "version": "0.1.0",
+  "description": "DSH 投递尝试的单入口单出口对象流。入口是一次已持久入队的消息触发的投递请求，不是发送本身：一次发送以 daemon durable mailbox 入队结果结束，本图不重做入队。图只读取当前已提交 binding，核对 project/app/session 范围与同用户可信 gateway control socket，再向 gateway 提交 enqueue 唤醒已登记的 canonical Poll 循环。signalReceive 只提示该循环，消息正文仍由 Poll 取得。接受、明确拒绝和请求后未知汇入同一结果出口；未知不自动重发，也不切换 transport。投递回执不冒充接收、消费或回复：真实消费由 notification-consumption 图提交 ReceiveCommitted，回复是新的 send 请求。DSH gateway 独占 canonical Poll/Ack，CLI recv/ack 返回 DSH_NATIVE_DELIVERY_OWNED；该事实属于消费适配器的传输约束，不把本图出口升级为消费证据。缺口、拒绝或未知作为当前结果传递，后续副作用跳过。设计 operator 不可执行；静态图校验不证明 runtime 绑定或行为通过。",
+  "inputs": [
+    {
+      "id": "durable_delivery_request",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "读取已提交 DSH 收件绑定",
+      "description": "只读当前已提交的 project/app 收件 route、gateway control endpoint 与 binding generation；不重新 Register、不恢复身份、不读取旧 archive 或日志推断端点。缺绑定、歧义或代际不符返回明确结果。",
+      "operator": "appsdk.collab_dsh_delivery.resolve",
+      "operator_version": "1",
+      "inputs": ["durable_delivery_request"],
+      "output": {"id": "dsh_recipient_binding", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "核对目标范围与可信控制端点",
+      "description": "核对目标 project/app/session 与已提交 binding 范围，只接受同用户可信 gateway control socket；scope 不符、未知或不可信端点明确拒绝，不切换 transport，也不自动发现其他端点。",
+      "operator": "appsdk.collab_dsh_delivery.authorize",
+      "operator_version": "1",
+      "inputs": ["dsh_recipient_binding"],
+      "output": {"id": "scoped_dsh_delivery", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "提交 gateway enqueue 唤醒",
+      "description": "将 durable mailbox 中的既有消息经 gateway enqueue 提交给已登记的 canonical Poll 循环；signalReceive 只提示该循环，消息正文仍由 Poll 取得并经 agent/notify 交付。enqueue 接受回执不冒充接收或消费。",
+      "operator": "appsdk.collab_dsh_delivery.enqueue_wake",
+      "operator_version": "1",
+      "inputs": ["scoped_dsh_delivery"],
+      "output": {"id": "gateway_enqueue_outcome", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "分类接受拒绝或未知结果",
+      "description": "接受、明确拒绝、不可达、超时和畸形回复分别分类；unknown 保留原绑定并显式失败，不自动重发，也不把 malformed/timeout 改称 missing。",
+      "operator": "appsdk.collab_dsh_delivery.classify",
+      "operator_version": "1",
+      "inputs": ["gateway_enqueue_outcome"],
+      "output": {"id": "delivery_outcome", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "记录独立投递回执",
+      "description": "按真实尝试记录独立投递回执，区分 enqueue accepted、delivery rejected 和 unknown；回执不写消费或回复证据，也不改变身份、route、任务或订阅。真实消费仍由 notification-consumption 图提交 ReceiveCommitted，回复是新的 send 请求。",
+      "operator": "appsdk.collab_dsh_delivery.commit",
+      "operator_version": "1",
+      "inputs": ["delivery_outcome"],
+      "output": {"id": "delivery_receipt", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {"from": "读取已提交 DSH 收件绑定", "to": "核对目标范围与可信控制端点", "arc_id": "dsh_recipient_binding"},
+    {"from": "核对目标范围与可信控制端点", "to": "提交 gateway enqueue 唤醒", "arc_id": "scoped_dsh_delivery"},
+    {"from": "提交 gateway enqueue 唤醒", "to": "分类接受拒绝或未知结果", "arc_id": "gateway_enqueue_outcome"},
+    {"from": "分类接受拒绝或未知结果", "to": "记录独立投递回执", "arc_id": "delivery_outcome"}
+  ],
+  "outputs": ["delivery_receipt"]
+}

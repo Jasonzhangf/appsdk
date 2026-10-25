@@ -147,6 +147,11 @@ fn persisted_context_uses_daemon_observation_without_adjacent_admission() {
 fn single_context_master_peer_intent_overrides_and_replays_after_restart() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (mut fixture, pane) = Fixture::isolated("single-role");
+    // Same periodic-producer guard as the c13 window: replay identity must be
+    // byte-identical, so the daemon tick (keepalive, presence, ledger
+    // maintenance) is held at its entry point for the two replay windows.
+    let mut harness = CancellationHarness::start(&unique_root("ctxop-role-replay"));
+    fixture.enable_cancellation_hooks(harness.socket());
     let fence = seed_stale_identity(&fixture, &pane, "ctxop-role-seed", false);
     let other = second_pane(&fixture, "unrelated-master", pane.server_pid);
     let other_context = fixture.registered_context("ctxop-other-seed", &other);
@@ -248,6 +253,7 @@ fn single_context_master_peer_intent_overrides_and_replays_after_restart() {
         assert_eq!(messages.iter().find(|event| event["ev"] == "Sent" && event["msg"]["id"] == message_baseline["id"]).unwrap()["msg"], message_baseline);
         assert!(!messages.iter().any(|event| matches!(event["ev"].as_str(), Some("ReceiveCommitted" | "Delivered" | "Acked" | "Superseded"))
             && event["ids"].as_array().is_some_and(|ids| ids.contains(&message_baseline["id"]))), "context must not consume the worker-addressed message");
+        let held = harness.hold(TIMER_TICK_BOUNDARY, TIMER_TICK_ID, Duration::from_secs(30));
         let bytes = role_consumer_replay_facts(&fixture, &fence.identity_path);
         let replay = run_context_cli(
             &fixture,
@@ -265,12 +271,14 @@ fn single_context_master_peer_intent_overrides_and_replays_after_restart() {
             bytes,
             role_consumer_replay_facts(&fixture, &fence.identity_path)
         );
+        drop(held);
         fixture.restart_daemon();
         assert_eq!(
             master_status(&fixture, &pane),
             grant,
             "restart retains exact durable role"
         );
+        let held = harness.hold(TIMER_TICK_BOUNDARY, TIMER_TICK_ID, Duration::from_secs(30));
         let after_restart = role_consumer_replay_facts(&fixture, &fence.identity_path);
         let replay = run_context_cli(
             &fixture,
@@ -289,6 +297,7 @@ fn single_context_master_peer_intent_overrides_and_replays_after_restart() {
             role_consumer_replay_facts(&fixture, &fence.identity_path),
             "same-key replay after restart must not repeat effects"
         );
+        drop(held);
         let restored = fixture.context(Some(&format!("ctxop-role-readback-{step}")), Some(&pane));
         assert_eq!(
             restored["result"]["snapshot"]["identity"]["worker_id"],

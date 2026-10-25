@@ -500,6 +500,7 @@ impl GlobalState {
                 .projects
                 .entry(scope_key.clone())
                 .or_insert_with(|| ProjectState {
+                    bootstrap_policies: BTreeMap::new(),
                     project_scope: registration.project_scope.clone(),
                     registrations: BTreeMap::new(),
                     runtime_bindings: BTreeMap::new(),

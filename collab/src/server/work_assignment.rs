@@ -315,11 +315,19 @@ fn board_dispatch_work(
                     .preferred_roles
                     .as_ref()
                     .is_some_and(|preferred| preferred.iter().any(|role| roles.contains(role)));
-                (matched, name, worker.id.clone())
+                let unassigned = !state.tasks.values().any(|task| {
+                    !matches!(task.status.as_str(), "closed" | "cancelled")
+                        && (task.owner == worker.id
+                            || state.board_details.get(&task.id)
+                                .and_then(|details| details.invitation.as_ref())
+                                .is_some_and(|invite| invite.peer_id == worker.id))
+                });
+                (matched, unassigned, name, worker.id.clone())
             })
             .collect();
-        candidates.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
-        candidates.first().map(|(matched, name, id)| {
+        candidates.sort_by(|left, right| right.0.cmp(&left.0)
+            .then(right.1.cmp(&left.1)).then(left.2.cmp(&right.2)));
+        candidates.first().map(|(matched, unassigned, name, id)| {
             let reason = if *matched {
                 "matched preferred work role"
             } else if policy
@@ -328,6 +336,8 @@ fn board_dispatch_work(
                 .is_some_and(|roles| !roles.is_empty())
             {
                 "no matching work role; selected another available peer"
+            } else if *unassigned {
+                "selected unassigned peer"
             } else {
                 "selected available peer"
             };

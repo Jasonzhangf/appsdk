@@ -17,48 +17,37 @@ Use this Skill for requested control-plane migration, version installation, iden
 
 ## 1. Identity & route recovery (no reset, no restart)
 
-`collab context` owns automatic compatibility and migration of old identity,
-binding, route, name/session and receive state. The agent never inventories
-duplicate credentials, chooses a historical worker, closes old peers as a
-prerequisite, or hand-edits the control plane. New identity semantics and the
-user's explicit current recovery intent take precedence over old records.
-Use the exact [recovery commands and receipt contract](../collab/references/stable-name-recovery.md#恢复操作context-自己迁移agent-不做历史清理).
-Do not reverse-engineer approval fields or run a separate migration ceremony.
-
-For ordinary peer or master recovery, use the existing user-managed daemon.
-Desktop also uses Collab CLI. Its identity anchor is the current agent
-sessionID; thread and bridge endpoint only locate communication. Agent-side
-MCP calls are optional. Follow [Desktop CLI registration and messaging](../collab/references/migration-daemon.md#desktop-cli-registration-and-messaging)
-for automatic current bridge discovery, the first-enrollment limit and receipts.
-Do not supply an AppServer endpoint for Desktop. Only AppServer supplements
-the top-level endpoint in the example below:
+Use the [Collab recovery contract](../collab/references/stable-name-recovery.md#恢复操作context-自己迁移agent-不做历史清理)
+for current identity, name/session ownership, binding and receive state.
+It owns the host-specific facts and takeover authority; this Skill does not
+maintain another recovery protocol. Ordinary recovery uses the existing
+user-managed daemon:
 
 ```sh
 collab context
-# If required_fields are returned, provide only observed runtime facts once:
-collab context --provide '{"session_id":"...","thread_id":"...","endpoint":"..."}'
 ```
 
-- Context restores current identity, binding, route, receive lease and existing valid owned subscriptions together. cwd selects project; the stable name owns work, and the reported agent sessionID is its current carrier. Same-name session changes automatically update all unclosed board assignments. Explicitly retire the old rule that a tmux session selects peer identity: tmux sessions, socket paths, server PIDs and pane history are placement only. The CLI does not parse the `TMUX` value. Migration never requires restarting tmux or rewriting historical task evidence.
-- An existing master does not block ordinary peer recovery. Name/session takeover follows the [Collab name contract](../collab/references/stable-name-recovery.md). Explicitly confirmed user takeover of unavailable unknown Jenny takes precedence over Jenny adjudication; do not wait for the old executor. Do not simulate recovery by changing a display label.
-- Explicit communication repairs and communication-feature delivery require real send, receive and reply evidence. Ordinary identity recovery adds no communication round trip. Do not reset a project or operate daemon lifecycle for identity recovery.
-- After recovery, evaluate owned patrol tasks and timed subscriptions. Close them when their task is complete or no new task and no actionable work remains; do not recreate idle patrol loops. Keep direct-message reception for new assignments.
-- Master and peer each restore and manage their own goal under the current stable name. Recovery does not transfer a peer goal to master, require master proxy registration, or grant project-master authority to a peer.
-- Do not hand-edit `routes.jsonl`, `identities/`, or `.agent-collab/` files.
+Reuse a successful result. Supply only actual missing facts requested by
+`required_fields`, using the selected host contract; do not invent an endpoint,
+choose a historical identity or require a second context call. Recovery
+preserves owned work and unconsumed messages. It does not authorize reset,
+daemon operations or hand-edited control state. Communication repairs verify
+the affected send/receive/reply behavior; ordinary recovery adds no round trip.
+Continue owned tasks and maintain only their necessary schedules through the
+[Collab Skill](../collab/SKILL.md#目标编排与接续).
 
 ## 2. Collab version upgrade & daemon maintenance
 
-Installing a new binary (`scripts/install-global-collab.sh`) updates `$CARGO_HOME/bin/collab` and `collab-mcp` and refreshes the embedded Skill. Installation and activation are separate facts. The global daemon is user-managed; agents do not manage its lifecycle. Maintenance commands and credentials stay outside agent interfaces. After user-managed activation, inspect:
-
-```sh
-collab --version
-collab status --all
-collab context
-printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"codex","version":"0.0.0"}}}\n' | collab-mcp
-```
+The official `scripts/install-global-collab.sh` updates the installed binaries
+and embedded Skill. Installation and activation are separate facts. The global
+daemon is user-managed; agents do not manage its lifecycle. Maintenance commands
+and credentials stay outside agent interfaces. Select affected checks through
+[Collab verification](../collab/references/verification.md); a version query,
+all-project status, context and MCP initialization are not a mandatory sequence.
 
 For Desktop, keep the CLI entry; use the current Desktop bridge capability as
-documented above. Installing files does not activate a bridge service. Record
+documented in [Desktop registration](../collab/references/migration-daemon.md#desktop-cli-registration-and-messaging).
+Installing files does not activate a bridge service. Record
 installed and loaded-runtime evidence separately; do not require an MCP tool
 call or ask the user to find an assumed reconnect control.
 Detailed maintenance boundaries live in [`collab/references/migration-daemon.md`](../collab/references/migration-daemon.md); ordinary identity migration remains internal to context.

@@ -45,27 +45,32 @@ collab notify subscribe --event deadline --subject <timer-id> \
 collab notify status
 ```
 
-Base direct-message reception is daemon-owned. There is no subscription-closing
-CLI, MCP tool, wire request, or alias. A finite owned goal schedule ends with
-`appsdk goal cancel`; a task-owned schedule ends with task closure. Neither
+Base `direct-message` reception is daemon-owned. There is no CLI, MCP tool, wire
+request, or alias that closes that base lease. A finite owned goal schedule ends
+with `appsdk goal cancel`; a task-owned schedule ends with task closure. Neither
 operation controls base reception.
 
-The target board-idle cancel and re-arm entry points, with their per-task
-owner scope, are documented in
-[board-idle-patrol.md](board-idle-patrol.md). They are not part of the
-installed command surface until core public CLI validation. Do not substitute a
-general unsubscribe, goal cancellation or task closure for them, and do not
-cancel base `direct-message` reception.
+Per-task `board-idle` patrol cancellation and re-arming use
+`collab notify cancel --event board-idle` and
+`collab notify subscribe --event board-idle`, with the owner scope documented in
+[board-idle-patrol.md](board-idle-patrol.md). Do not substitute a general
+unsubscribe, goal cancellation or task closure for them, and do not cancel base
+`direct-message` reception. These entry points exist in the current source and
+passed this round's isolated public CLI/native and finite-timer compatibility
+acceptance; that is not proof that a production daemon is enabled or that
+production peer consumption and inference resumption are verified. Verify
+`collab notify methods` and `collab notify status` on the running daemon before
+relying on them.
 
 ## Patrol duties and finite schedules
 
 The user-confirmed board idle patrol contract is maintained in
 [board-idle-patrol.md](board-idle-patrol.md). It requires master default arming,
 real-time idle notification where connected, a 15-minute check otherwise,
-busy-skip, and owner cancellation of board patrol only. Pending runtime
-requirements stay pending until core public CLI validation; the current
-command and finite-schedule limitations below describe the installed
-implementation and do not override that newer contract.
+busy-skip, and owner cancellation of board patrol only. A peer with no unclosed
+board task, or with that task's patrol cancelled, has no board-idle polling.
+The running daemon's `methods` and `status` responses remain the runtime
+authority for which parts are active.
 
 A registration or dispatch reminder is not a schedule. It requires the role to
 reconcile its existing scope on the next authorized activation. Do not create
@@ -101,25 +106,29 @@ task-scoped subscriptions by ID.
 
 Run `collab notify methods` against the current daemon before selecting an
 event or schedule. The current source defines `direct-message`,
-`resource-released`, `deadline`, and `master-idle`; the loaded runtime's
-`methods` response is authoritative. An absent event requires implementation
-in its owning source, not a fake event, synthetic subject, or polling loop.
-`board-idle` is a target event in the user-confirmed patrol contract; do not
-claim it is available before the public CLI evidence exists.
+`resource-released`, `deadline`, `master-idle`, and `board-idle`; the loaded
+runtime's `methods` response is authoritative. An absent event requires
+implementation in its owning source, not a fake event, synthetic subject, or
+polling loop. `board-idle` passed this round's isolated public CLI/native and
+finite-timer acceptance; a running daemon that does not list it is a runtime
+gap to report, not a reason to invent another event.
 Up to three active subscriptions exist per agent.
 
 - `direct-message` requires no subject and is reusable. `resource-released` and
-  `deadline` require a non-empty exact subject. Master-idle and goal deadlines
-  require the current registered master. Legacy managed records cannot create
-  independent deadline schedules.
+  `deadline` require a non-empty exact subject. `board-idle` requires no subject
+  and applies only to the caller's own unclosed board tasks. Only master-idle
+  requires the current registered master; an ordinary peer may create its own
+  goal deadline. Managed subworkers cannot create independent deadline
+  schedules.
 - A deadline uses repeated `--at-ms` values or `--every-ms`; the modes are
   mutually exclusive. Absolute times must be in the future and before TTL
   expiry. `--every-ms` must be positive and fire before expiry.
   `--repeat-count` is 1 through 100. TTL is 1 second through seven days.
 - The command examples show syntax only, not a default patrol cadence. The
-  board-idle contract's 15-minute fallback is target behavior pending core
-  validation; do not apply it to other events or invent another interval. A
-  finite subscription is created only for a concrete supported event and
+  board-idle contract's 15-minute fallback applies only to `board-idle`; do not
+  apply it to other events or invent another interval. That fallback is the
+  current behavior while `collab notify status` reports realtime not connected.
+  A finite subscription is created only for a concrete supported event and
   expires or consumes without automatic rearm.
 
 - AppSDK project initialization creates/refreshes the seven-day reusable default
@@ -131,9 +140,10 @@ Up to three active subscriptions exist per agent.
   binding. Finishing or closing the last task never cancels it, so a registered
   peer stays wakeable across task lifecycles. Task-scoped cleanup must not
   cancel or replace that default lease, so `mailbox-only` cannot appear
-  silently. There is no subscription-closing command or interface; a finite
-  owned goal schedule ends with `appsdk goal cancel`, and task-owned schedules
-  end with task closure.
+  silently. No command or interface closes the base `direct-message` lease; a
+  finite owned goal schedule ends with `appsdk goal cancel`, and task-owned
+  schedules end with task closure. Per-task `board-idle` cancellation follows
+  [board-idle-patrol.md](board-idle-patrol.md).
 - Direct-message leases are owner-scoped and reusable until expiry. Resource
   subscriptions are exact-subject and one-shot. Generic deadline subscriptions
   consume their explicit finite occurrence count; `goal:` deadlines remain
@@ -190,7 +200,8 @@ Up to three active subscriptions exist per agent.
   The task-liveness rule is an Agent/skill obligation: when a supported
   timer/wake or direct wake arrives, the owner inspects durable task state and
   continues or escalates it. It is not a second queue or a synthetic periodic
-  task. A worker does not poll on a fixed internal schedule.
+  task. A worker does not poll on a fixed internal schedule; a daemon-driven
+  `board-idle` patrol wake is a supported wake, not worker polling.
 
 ## Worker inspection and acknowledgment
 

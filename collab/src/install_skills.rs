@@ -323,7 +323,6 @@ mod tests {
             if *rel == "references/notifications.md" {
                 assert!(embedded.contains("one-shot wake"));
                 assert!(embedded.contains("[board-idle-patrol.md](board-idle-patrol.md)"));
-                assert!(embedded.contains("core public CLI validation"));
             }
         }
     }

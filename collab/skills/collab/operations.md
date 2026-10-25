@@ -498,7 +498,8 @@ or implementation details.
    deduplication before repair or dispatch. Record evidence according to the
    owning project contract; project-specific error codes, wire status, and
    response planes stay in the owning project Skill.
-6. Continuous patrol uses existing goal or deadline one-shot wakes. Before a
+6. Continuous patrol uses existing goal or deadline one-shot wakes, plus the
+   daemon `board-idle` patrol for held board tasks. Before a
    turn ends while scheduling continues, explicitly re-arm a consumed one-shot
    wake. A read, ACK, status summary, or dispatch receipt is not completion and
    does not renew a wake. Do not invent a periodic polling loop.
@@ -541,8 +542,10 @@ or implementation details.
     原子失败。取消不取消任务、其他订阅或基本 direct-message；新任务不恢复旧任务
     取消。`collab notify status` 的 `board_patrol` 当前字段为 `owner_key`/
     `cancelled_tasks`/`eligible_task_ids`/`interval_ms`/`periodic_fallback`/
-    `realtime_connected`，无 `armed_tasks`。这些入口已在当前源码实现并有源码级测试；
-    不宣称已在安装或 live daemon 生效，使用前在该 daemon 上核实。
+    `realtime_connected`，无 `armed_tasks`。这些入口已在当前源码实现，并通过本轮
+    隔离公开入口/native 与有限 timer 兼容验收；这不等于生产 daemon 启用或真实
+    peer 消费恢复推理已验证。使用前按运行 daemon 的实际构建核实
+    `collab notify methods` 与 `collab notify status`。
 
 A legacy managed-subagent record creates no new patrol task, subscription,
 dispatch, or execution authority. Its parent or master preserves it only for
@@ -1159,9 +1162,13 @@ inputs only.
    natively through its gateway and acts directly on them.
 
 These are agent actions within an activation. The board does not automatically
-claim, execute, or resume work. Idle peers and children have no new periodic
-wake guarantee. Do not invent a polling interval, cron job, or retry loop.
-Existing subscriptions, master wake, and one worker-idle fact remain unchanged.
+claim, execute, or resume work. A peer holding an unclosed, uncancelled board
+task receives a board-idle wake on fresh `online`+`idle` under
+[board-idle-patrol.md](references/board-idle-patrol.md), through the realtime
+event when connected and the 15-minute check otherwise. A peer with no unclosed
+task or with its patrol cancelled is not polled. Do not invent a polling
+interval, cron job, or retry loop. Existing subscriptions, master wake, and one
+worker-idle fact remain unchanged.
 
 ## Common command card
 
@@ -1256,13 +1263,16 @@ status via the `collab context` snapshot. The human diagnostic
 `collab worker status [id]` and `collab who` print the same fields when an
 operator audits them; neither is part of the default agent flow.
 
-Worker wake model: only master has long-horizon wake; workers are not
-long-horizon wake targets and receive no automatic periodic task-continuation wake.
-An explicit outstanding reply marker permits one reminder per observed idle episode;
+Worker wake model: master and each ordinary peer own their own goal deadlines;
+only the current master owns master-idle project patrol. Workers are not
+master-idle wake targets. A worker holding an unclosed, uncancelled board
+task does receive the `board-idle` patrol wake on fresh `online`+`idle`, per
+[board-idle-patrol.md](references/board-idle-patrol.md). An explicit outstanding
+reply marker permits one reminder per observed idle episode;
 it only asks the recipient to read the original reply requirement. A worker
 acts on an explicit dispatch, a bounded direct-message lease, or its own open
 task state;
-it does not need periodic activation to make progress. Unknown/absent produces
+it does not depend on a wake to make progress. Unknown/absent produces
 no transport input. On each `working` -> `idle` transition, a worker sends one
 idempotent worker-idle fact to the current master. Before stopping, it follows
 the board queue and blocker checks above; it continues any eligible work.
@@ -1368,8 +1378,10 @@ progress` 在 `report` 下给出 `batch_id`、`coverage`、`projects`、`last_ac
 写入失败时，回执标记部分成功并保留 `CEO_GRANT_RECORDED_BUT_WORKSPACE_GUIDANCE_FAILED`，
 不掩盖该失败。
 
-以上目标接口和调度行为由 core 实现与公开 CLI 黑盒验收确认；完成前不宣称已安装
-runtime 生效，详见 [board idle 巡检契约](references/board-idle-patrol.md)。
+以上接口和调度行为已在当前源码实现，并通过本轮隔离公开入口/native 与有限 timer
+兼容验收；这不等于生产 daemon 启用或真实 peer 消费恢复推理已验证。使用前按运行
+daemon 核实 `collab notify methods` 与 `collab notify status`，详见
+[board idle 巡检契约](references/board-idle-patrol.md)。
 
 ### 目标项目没有 master
 
@@ -1465,7 +1477,8 @@ DSH 直接处理 gateway 已投递的正文，不再 Poll/ACK。回信仍在自�
 Task liveness is an obligation, not an ACK ceremony. A worker owns its assigned
 tasks and drives them to verified cleanup/close during its working cycle. This
 is a task-bound inspect obligation, not a transport activation schedule: it
-does not wake idle workers and does not generate worker transport input. If an actionable
+does not wake idle workers and does not generate worker transport input. The
+daemon board-idle patrol is a separate wake source. If an actionable
 task is open, continue it; if an ordinary peer is blocked, first ask the current
 master for help with the available evidence and decision needed. A proven root
 cause or fix is not a prerequisite for that request. Do not leave a task
@@ -1590,10 +1603,15 @@ Master operates under two prime directives:
   dispatches open bugs in strict priority order (P0 > P1 > P2) to keep
   worker capacity saturated before suggesting closure.
 
-**Worker->Master idle fact and master long-horizon wake**:
+**Worker->Master idle fact and goal deadlines**:
 When a worker transitions from `working` to `idle`, it emits one idempotent
-worker-idle fact to the current master. The master has long-horizon wake; the
-worker does not. On an idle fact, master must:
+worker-idle fact to the current master. Master and each ordinary peer own their
+own goal deadlines; only the current master owns master-idle project patrol. A
+managed one-shot subworker has no independent goal. A worker has direct-message
+wake and, while holding an unclosed, uncancelled board task, the `board-idle`
+patrol wake described in
+[board-idle-patrol.md](references/board-idle-patrol.md). On an idle fact,
+master must:
 1. Check the active task graph for unblocked downstream tasks and offer them
    peer-first through the public board;
 2. If the main graph is clear, pull the highest-priority open issue from the
@@ -1617,9 +1635,10 @@ attempts. An observed change to `working` ends that episode; after three
 consecutive attempts without an observed `working` change, the episode stops.
 Worker-idle facts do not count toward this budget, and there is no
 scheduling-turn counter.
-Master must not expect workers to be woken periodically. A read, ACK, status
-summary, or dispatch receipt does not complete a patrol or renew a one-shot
-wake.
+Master may rely on board-idle patrol to wake owners of unclosed, uncancelled
+board tasks on fresh idle, after verifying the running daemon. That wake is a
+fallback, not proof of progress. A read, ACK, status summary, or dispatch
+receipt does not complete a patrol or renew a one-shot wake.
 
 **Unacknowledged Workers & Pane Diagnostic Closure**:
 If a worker fails to acknowledge notifications or remains unresponsive across
@@ -1741,16 +1760,15 @@ it and continue safe in-scope work. If delivery or test conditions are unclear,
 propose the missing conditions instead of guessing. The default direct-message
 lease is daemon-owned and stays armed while the identity is registered;
 finishing or closing the last task or a goal never cancels it, so a registered
-peer stays wakeable. There is no subscription-closing command, interface, or
-alias. When a finite goal or task patrol has no actionable work, end it through
+peer stays wakeable. There is no command, interface, or alias that closes the
+base `direct-message` lease; per-task `board-idle` cancellation and re-arming
+use the entries in [board-idle-patrol.md](references/board-idle-patrol.md).
+When a finite goal or task patrol has no actionable work, end it through
 its owner lifecycle (`appsdk goal cancel` for a goal, task closure for a
 task-owned schedule); this never controls base direct-message reception.
 
-AGY review is not used for Collab v1 lifecycle gates. Ordinary review uses an
-independent review path when review is required; milestone review uses Codex
-Review with the `oauth` profile and `gpt-6.1-sol`. Astra is not a reviewer.
-Missing AGY is not a blocker because it is excluded; missing a
-declared review gate is a failure.
+Review triggering, reviewer selection, and model routing follow
+`codex-orchestrator`. A missing declared review gate is a failure.
 
 Without an available, verified selected transport, initialization fails
 explicitly. AppServer is preferred when its candidate passes the owner
@@ -2111,11 +2129,13 @@ claim an independent goal or infer master authority.
   root cause and solution need not be proven first. Apply Registered patrol
   duties for master verification and continued ownership. Legacy managed records grant no new task
   authority. Last owned
-  task close keeps that owner's auto-notify armed. There is no subscription-closing
-  command; end a leftover finite goal schedule with `appsdk goal cancel` and
-  keep base direct-message reception daemon-owned. AGY review is not a Collab v1 gate; ordinary review is independent,
-  and milestone review uses Codex Review (`oauth`, `gpt-6.1-sol`). Legacy
-  managed records remain diagnostic compatibility facts only.
+  task close keeps that owner's auto-notify armed. No command closes the base
+  `direct-message` lease; per-task `board-idle` cancellation and re-arming use
+  the entries in [board-idle-patrol.md](references/board-idle-patrol.md). End a
+  leftover finite goal schedule with `appsdk goal cancel` and keep base
+  direct-message reception daemon-owned. Review triggering and model routing
+  follow `codex-orchestrator`. Legacy managed records remain diagnostic
+  compatibility facts only.
 - Each peer owns its complete task/worktree/integration/resource/cleanup
   lifecycle. Never mutate or close another peer's work.
 - Send requested replies, authorized action results, explicit notices,
@@ -2144,13 +2164,12 @@ claim an independent goal or infer master authority.
 
 Do not load references for ordinary `sendmessage`, `msg`, or `inbox`.
 
-The current installed v1 contract has no 15-minute periodic worker liveness.
-Until the target below is implemented and validated, worker and master liveness
-wake only on a supported timer/wake, direct message, or real external event. If
-any installed copy still contains the old wording, replace it from this Skill and
-its references. The user-confirmed board idle patrol is
-[board-idle-patrol.md](references/board-idle-patrol.md); it requires Jenny default
-arming, real-time idle notification where connected, a 15-minute busy-skipping check
-otherwise, per-task owner cancellation, and CEO progress deduplication with
-`Asia/Shanghai` quiet hours. These target interfaces and runtime claims are pending
-core public CLI validation; do not report them as installed before that evidence.
+The user-confirmed board idle patrol contract is
+[board-idle-patrol.md](references/board-idle-patrol.md). It requires Jenny default
+arming, real-time idle notification where connected, a 15-minute busy-skipping
+check otherwise, per-task owner cancellation, and CEO progress deduplication with
+`Asia/Shanghai` quiet hours. The entry points exist in the current source and
+passed this round's isolated public CLI/native and finite-timer compatibility
+acceptance. That is not proof that a production daemon is enabled or that
+production peer consumption and inference resumption are verified; verify
+`collab notify methods` and `collab notify status` on the running daemon.

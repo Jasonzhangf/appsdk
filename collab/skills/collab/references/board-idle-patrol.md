@@ -4,12 +4,12 @@
 不要把读到本文件当作 runtime 修复，也不要把源码提交当作安装完成。
 
 `collab notify cancel --event board-idle`、`collab notify subscribe --event board-idle`
-与 `collab notify status` 的 board-idle 入口已在当前源码实现，并由源码级/隔离 runtime
-测试覆盖（`patrol_subscriptions`、`patrol_runtime`）。这不等于已安装或已 live；正在
-运行或已安装的 daemon 可能带不同构建，使用前先用该 daemon 的 `collab notify methods`
-和 `collab notify status` 核实。公开 runtime 套件里的 parent-idle 唤醒用例仍为 RED，
-因此不宣称完整 runtime 验收通过。巡检的调度、每次判定和投递实际由 daemon 触发，
-本 Skill 只固定 agent 行为与命令入口；目标机制唯一 owner 是 core 实现与项目 DAG。
+与 `collab notify status` 的 board-idle 入口已在当前源码实现。本轮隔离公开入口/native
+与有限 timer 兼容验收已通过；这不等于生产 daemon 启用或生产 peer 消费或恢复推理
+已验证。使用前先按运行 daemon 的实际构建核实 `collab notify methods` 和
+`collab notify status`；其能力或状态不满足时只停受影响自动巡检。巡检的调度、每次
+判定和投递实际由 daemon 触发，本 Skill 只固定 agent 行为与命令入口；目标机制唯一
+owner 是 core 实现与项目 DAG。
 
 ## 默认责任与触发
 

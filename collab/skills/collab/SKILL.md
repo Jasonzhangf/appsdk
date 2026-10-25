@@ -82,10 +82,10 @@ peer 可取消本人 board 巡检，任务与基本收件仍保留。取消按�
 
 这是 2026-10-25 用户确认的契约。`collab notify cancel --event board-idle`、
 `collab notify subscribe --event board-idle` 与 `collab notify status` 已在当前源码
-实现，并由源码级/隔离 runtime 测试覆盖；这不等于已安装或已 live。正在运行的 daemon
-可能带不同构建，使用前先在该 daemon 上核实 `collab notify methods` 与
-`collab notify status`。公开 runtime 套件里的 parent-idle 唤醒仍为 RED，不宣称
-完整 runtime 验收。缺口只影响自动巡检，已授权工作仍继续。
+实现。本轮隔离公开入口/native 与有限 timer 兼容验收已通过；这不等于生产 daemon
+启用或生产 peer 消费或恢复推理已验证。使用前先按运行 daemon 的实际构建核实
+`collab notify methods` 与 `collab notify status`；其能力或状态不满足时只停受影响
+自动巡检，已授权工作仍继续。
 
 巡检只提供兜底唤醒，不是执行前提。登记后立即推进 ready 工作，结果或资源变化后按
 统一调度规则自检并补位。peer 保留本人范围的交付责任；遇到受限步骤先按已有授权

@@ -21,6 +21,14 @@ messages while prior deliveries remain unconsumed. `desktop_bridge_public_contra
 covers consecutive public CLI sends through the real daemon and bridge protocol.
 Native acceptance remains separate from consumption; transport failures remain explicit.
 
+DSH contract split: `docs/dagpipe/collab-dsh-channel.graph.json` covers first-use
+registration only and ends at the committed identity/binding result.
+`docs/dagpipe/collab-dsh-delivery.graph.json` covers one delivery attempt for a
+durable message and ends at accepted/rejected/unknown. Consumption remains
+`appsdk-collab-notification-consumption`; a reply is a new send request. Send
+enqueue, delivery acceptance, consumption and reply are separate facts, so no
+registration success is read as a real roundtrip.
+
 The name/session, activity and mailbox contracts below have dedicated source and
 public-consumer gates. Installed binary and global-daemon activation require
 separate evidence. Existing display-label tests remain label tests only.

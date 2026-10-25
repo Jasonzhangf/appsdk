@@ -64,9 +64,9 @@ fn role_contract_is_identical_across_context_workers_and_status() {
             assert!(responsibilities.contains("user-facing summary is not that reply"));
             assert!(responsibilities.contains("register your own accepted goal"));
             assert!(responsibilities.contains("request next work or explicit idle approval"));
-            assert!(
-                responsibilities.contains("automatically update affected role workflow templates")
-            );
+            assert!(responsibilities.contains("adjust only affected duties, dependencies or handoffs"));
+            assert!(responsibilities.contains("specialty roles, policy and workflow overrides are optional"));
+            assert!(!responsibilities.contains("automatically update affected role workflow templates"));
             let workflow = &context.data["role_brief"]["workflow_template"];
             assert_eq!(workflow["base_version"], serde_json::json!(1), "{workflow}");
             assert_eq!(

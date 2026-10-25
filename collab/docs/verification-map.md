@@ -1,5 +1,15 @@
 # Collab v1 verification map
 
+Minimal relationship/delegation acceptance uses the public CLI consumer
+`appserver_two_tui_integration` with `work_roles_cli::minimal_*`: unassigned
+selection across active tasks and pending invitations, preserved role/pinned
+preferences, first-name registration vs repeated context/restart, changed roles
+vs silent no-ops, affected template updates/reset, and durable mail despite a
+rejected native wake. Existing `work_roles_cli` and `workflow_templates` cases
+retain pinned-review, accepted-task, scope, persistence and handoff coverage.
+The shared journal commits relationship changes and advisory mail together;
+native acceptance and receive consumption remain separate evidence.
+
 V2's first production increment is scoped in `design/collab-v2-production-increment.md`.
 `bootstrap_policy_public_contract` exercises the public policy producer and registration
 consumer: authorization/scope refusal, first and concurrent winner, explicit ordinary peer,

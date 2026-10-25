@@ -123,10 +123,50 @@ impl CancellationHarness {
             barrier.release();
         }
     }
+
+    /// Arm one exact boundary and wait for it, returning a scoped guard that
+    /// owns the armed-set entry and the held connection.
+    pub fn hold(&mut self, boundary: &str, operation_id: &str, timeout: Duration) -> HeldBoundary {
+        self.arm(boundary, operation_id);
+        // Own the armed entry before waiting: a timed-out wait must still
+        // disarm through the guard's Drop instead of leaving a later arrival
+        // trapped with no owner.
+        let mut held = HeldBoundary {
+            armed: self.armed.clone(),
+            boundary: boundary.to_owned(),
+            operation_id: operation_id.to_owned(),
+            barrier: None,
+        };
+        held.barrier = Some(self.wait_for(boundary, operation_id, timeout));
+        held
+    }
+}
+
+/// One held acknowledgement that owns its exact armed-set entry. Dropping it
+/// disarms the boundary before releasing the paused connection, so a panic
+/// unwind cannot leave a later tick trapped behind fixture shutdown.
+pub struct HeldBoundary {
+    armed: Arc<Mutex<std::collections::HashSet<(String, String)>>>,
+    boundary: String,
+    operation_id: String,
+    barrier: Option<Barrier>,
+}
+
+impl Drop for HeldBoundary {
+    fn drop(&mut self) {
+        self.armed
+            .lock()
+            .unwrap()
+            .remove(&(self.boundary.clone(), self.operation_id.clone()));
+        if let Some(barrier) = self.barrier.take() {
+            barrier.release();
+        }
+    }
 }
 
 impl Drop for CancellationHarness {
     fn drop(&mut self) {
+        self.armed.lock().unwrap().clear();
         self.stop.store(true, Ordering::Relaxed);
         if let Some(waiter) = self.waiter.take() {
             // Signal shutdown and wake accept() while the listening path still exists.

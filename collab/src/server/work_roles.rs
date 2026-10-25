@@ -1,3 +1,48 @@
+// Relationship changes and their advisory mail share the caller's journal
+// transaction. Existing mailbox/wake owners handle delivery and consumption.
+fn relationship_notice_events(
+    state: &State, scope: &str, recipient: &str, subject: &str, body: String,
+) -> Vec<Event> {
+    let now = now_ms();
+    let id = format!("relationship-{}", rand::random::<u128>());
+    let mut events = vec![Event::Sent { msg: Message {
+        id: id.clone(), from: "daemon".into(), to: recipient.into(),
+        mtype: "notification".into(), subject: Some(subject.into()), body,
+        in_reply_to: None, created_ms: now, state: "pending".into(),
+        wake_attempt_count: 0, last_wake_attempt_ms: 0, retry_attempted: false,
+    } }, Event::DeliveryMode {
+        msg_id: id.clone(), mode: "explicit-notification".into(), source_thread_id: None,
+    }];
+    if let Some(holder) = state.name_occupancies.get(scope)
+        .and_then(|names| names.values().find(|holder| holder.worker_id == recipient)) {
+        events.push(Event::MailboxNameAddressed { message_id: id.clone(),
+            address: name_mailbox::MailboxNameAddress { project_scope: scope.into(), name: holder.name.clone() } });
+    }
+    if let Some(subscription) = state.matching_subscription(recipient, "direct-message", None, now) {
+        events.push(Event::WakeBound { message_id: id, subscription_id: subscription.id.clone() });
+    }
+    events
+}
+
+fn deliver_relationship_notices(server: &Server, events: &[Event]) -> Vec<serde_json::Value> {
+    events.iter().filter_map(|event| {
+        let Event::Sent { msg } = event else { return None; };
+        let (subscription, method) = {
+            let state = server.state.lock().unwrap();
+            (state.matching_subscription(&msg.to, "direct-message", None, now_ms()).cloned(),
+             notification_method_for_worker(&state, &msg.to))
+        };
+        let attempt = match &subscription {
+            Some(subscription) => attempt_notification_detailed_with_at(server, &msg.id, &subscription.id, now_ms()),
+            None => NotificationAttempt::NotAttempted(NOTIFICATION_SUBSCRIPTION_MISSING_ERROR.into()),
+        };
+        Some(serde_json::to_value(notification_send_response(
+            json!({"msg_id":msg.id,"to":msg.to,"consumed":false}),
+            subscription.is_some(), method, &attempt,
+        )).expect("notification receipt serializes"))
+    }).collect()
+}
+
 fn worker_work_roles(state: &State, project_scope: &str, worker_id: &str) -> Vec<String> {
     state
         .name_occupancies
@@ -62,6 +107,7 @@ fn handle_work_roles(
     normalized.sort();
     normalized.dedup();
     let unchanged = state.name_work_roles(scope, &name) == normalized;
+    let mut notices = Vec::new();
     if !unchanged {
         let event = Event::NameWorkRolesUpdated {
             project_scope: scope.into(),
@@ -70,12 +116,25 @@ fn handle_work_roles(
                 work_roles: normalized.clone(),
             },
         };
-        if let Err(error) = server.commit_locked_checked(&mut state, &[event]) {
+        let recipient = if own_name.as_deref() == Some(name.as_str()) {
+            current_master_worker_id(&state, Some(&route))
+        } else {
+            state.name_occupancy(scope, &name).map(|holder| holder.worker_id.clone())
+        };
+        if let Some(recipient) = recipient.filter(|recipient| recipient != &actor && state.workers.contains_key(recipient)) {
+            notices = relationship_notice_events(&state, scope, &recipient, "work-roles-changed",
+                format!("{name} 的工作专长已变更为 {:?}。读取 collab context / collab board show 获取当前关系。只调整受影响的新任务或交接；已接任务的归属与验收保持。无需仅因角色变化改模板或向用户例行汇报。", normalized));
+        }
+        let mut events = vec![event];
+        events.extend(notices.clone());
+        if let Err(error) = server.commit_locked_checked(&mut state, &events) {
             return Resp::err(format!("WORK_ROLES_DURABILITY_FAILED: {error}"));
         }
     }
+    drop(state);
+    let notifications = deliver_relationship_notices(server, &notices);
     Resp::data(
-        json!({"name":name,"work_roles":normalized,"outcome":if unchanged {"unchanged"} else {"updated"}}),
+        json!({"name":name,"work_roles":normalized,"outcome":if unchanged {"unchanged"} else {"updated"},"notifications":notifications}),
     )
 }
 

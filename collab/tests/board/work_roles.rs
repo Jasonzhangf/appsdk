@@ -2,6 +2,198 @@ use super::*;
 
 const THREAD_C: &str = "01a0d641-13f1-7b31-8d84-530f0f2d3fdd";
 
+fn relationship_fixture() -> AppFixture {
+    let fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(
+        &[
+            "context",
+            "--approve-grant",
+            r#"{"action":"restore_master","authorization":"relationship consumer"}"#,
+        ],
+        THREAD_A,
+    );
+    fixture
+}
+
+fn notices(fixture: &AppFixture, thread: &str, subject: &str) -> Vec<Value> {
+    let received = fixture.run_public(&["recv", "--timeout", "0"], thread);
+    received["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["subject"] == subject)
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn minimal_dispatch_prefers_unassigned_over_owned_or_invited_peer() {
+    for owned in [false, true] {
+        let fixture = relationship_fixture();
+        let alice = fixture.run_public(&["context"], THREAD_B);
+        let bob = fixture.run_public(&["context"], THREAD_C);
+        assert_eq!(alice["work_roles"], json!([]));
+        publish(&fixture, "first", &[]);
+        if owned {
+            fixture.run_public(
+                &["board", "claim", "first", "--expected-revision", "1"],
+                THREAD_B,
+            );
+        } else {
+            fixture.run_public(
+                &["board", "dispatch", "first", "--expected-revision", "1"],
+                THREAD_A,
+            );
+        }
+        fixture.run_public(&["context", "--work-roles", "designer"], THREAD_B);
+        publish(&fixture, "preferred", &["--prefer-role", "designer"]);
+        let preferred = fixture.run_public(
+            &["board", "dispatch", "preferred", "--expected-revision", "1"],
+            THREAD_A,
+        );
+        assert_eq!(
+            preferred["task"]["invited_peer"],
+            alice["identity"]["worker_id"]
+        );
+        publish(&fixture, "pinned", &["--executor", "Alice"]);
+        let pinned = fixture.run_public(
+            &["board", "dispatch", "pinned", "--expected-revision", "1"],
+            THREAD_A,
+        );
+        assert_eq!(
+            pinned["task"]["invited_peer"],
+            alice["identity"]["worker_id"]
+        );
+        publish(&fixture, "second", &[]);
+        let result = fixture.run_public(
+            &["board", "dispatch", "second", "--expected-revision", "1"],
+            THREAD_A,
+        );
+        assert_eq!(
+            result["task"]["invited_peer"], bob["identity"]["worker_id"],
+            "owned={owned}: {result}"
+        );
+    }
+}
+
+#[test]
+fn minimal_registration_notice_is_once_and_role_changes_are_distinct() {
+    let mut fixture = relationship_fixture();
+    assert!(notices(&fixture, THREAD_A, "peer-registered").is_empty());
+    fixture.run_public(&["context"], THREAD_B);
+    let joined = notices(&fixture, THREAD_A, "peer-registered");
+    assert_eq!(joined.len(), 1, "{joined:?}");
+    fixture.run_public(&["context"], THREAD_B);
+    assert!(notices(&fixture, THREAD_A, "peer-registered").is_empty());
+    fixture.run_public(&["context", "--work-roles", "reviewer"], THREAD_C);
+    let received = fixture.run_public(&["recv", "--timeout", "0"], THREAD_A);
+    for subject in ["peer-registered", "work-roles-changed"] {
+        assert_eq!(
+            received["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|m| m["subject"] == subject)
+                .count(),
+            1,
+            "{received}"
+        );
+    }
+    fixture.run_public(&["context", "--work-roles", "reviewer"], THREAD_C);
+    assert!(notices(&fixture, THREAD_A, "work-roles-changed").is_empty());
+    fixture.stop_daemon();
+    fixture.start_daemon();
+    fixture.run_public(&["context"], THREAD_B);
+    assert!(notices(&fixture, THREAD_A, "peer-registered").is_empty());
+}
+
+#[test]
+fn minimal_role_change_notifies_counterpart_without_reassigning_task() {
+    let fixture = relationship_fixture();
+    fixture.run_public(&["context"], THREAD_B);
+    notices(&fixture, THREAD_A, "peer-registered");
+    publish(&fixture, "retained", &[]);
+    fixture.run_public(
+        &["board", "claim", "retained", "--expected-revision", "1"],
+        THREAD_B,
+    );
+    let before = fixture.run_public(&["task", "status", "retained"], THREAD_B);
+    fixture.run_public(&["context", "--work-roles", "designer"], THREAD_B);
+    assert_eq!(notices(&fixture, THREAD_A, "work-roles-changed").len(), 1);
+    fixture.run_public(&["context", "--work-roles", "designer"], THREAD_B);
+    assert!(notices(&fixture, THREAD_A, "work-roles-changed").is_empty());
+    fixture.run_public(
+        &["context", "--for-name", "Alice", "--work-roles", "reviewer"],
+        THREAD_A,
+    );
+    assert_eq!(notices(&fixture, THREAD_B, "work-roles-changed").len(), 1);
+    let after = fixture.run_public(&["task", "status", "retained"], THREAD_B);
+    assert_eq!(before["owner"], after["owner"]);
+    assert_eq!(before["status"], after["status"]);
+}
+
+#[test]
+fn minimal_workflow_change_notifies_only_affected_peers_and_reset() {
+    let fixture = relationship_fixture();
+    fixture.run_public(&["context", "--work-roles", "designer"], THREAD_B);
+    fixture.run_public(&["context"], THREAD_C);
+    let spec = json!({"role_task":"Design accepted work", "responsibilities":["Keep accepted task obligations"], "next_action":"Read current task", "completion_action":"Return evidence"}).to_string();
+    let args = [
+        "context",
+        "--workflow-target",
+        "role:designer",
+        "--workflow-template",
+        &spec,
+    ];
+    fixture.run_public(&args, THREAD_A);
+    assert_eq!(
+        notices(&fixture, THREAD_B, "workflow-template-changed").len(),
+        1
+    );
+    assert!(notices(&fixture, THREAD_C, "workflow-template-changed").is_empty());
+    fixture.run_public(&args, THREAD_A);
+    assert!(notices(&fixture, THREAD_B, "workflow-template-changed").is_empty());
+    fixture.run_public(
+        &[
+            "context",
+            "--workflow-target",
+            "role:designer",
+            "--reset-workflow-template",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(
+        notices(&fixture, THREAD_B, "workflow-template-changed").len(),
+        1
+    );
+}
+
+#[test]
+fn minimal_role_notice_survives_rejected_wake_without_rolling_back_roles() {
+    let fixture = relationship_fixture();
+    fixture.run_public(&["context"], THREAD_B);
+    notices(&fixture, THREAD_A, "peer-registered");
+    fixture
+        .state
+        .lock()
+        .unwrap()
+        .get_mut(THREAD_A)
+        .unwrap()
+        .reject_input = true;
+    let updated = fixture.run_public(&["context", "--work-roles", "designer"], THREAD_B);
+    assert_eq!(updated["work_roles"], json!(["designer"]));
+    let receipt = &updated["work_roles_update"]["notifications"][0];
+    assert_eq!(receipt["durable"], true, "{updated}");
+    assert_eq!(receipt["ok"], false, "{updated}");
+    assert!(
+        receipt["notification_error"].as_str().is_some(),
+        "{updated}"
+    );
+    assert_eq!(notices(&fixture, THREAD_A, "work-roles-changed").len(), 1);
+    assert!(notices(&fixture, THREAD_A, "work-roles-changed").is_empty());
+}
+
 fn setup_roles() -> AppFixture {
     let fixture = AppFixture::new();
     fixture.run_public(&["context"], THREAD_A);

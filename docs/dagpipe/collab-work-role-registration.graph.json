@@ -1,7 +1,7 @@
 {
   "id": "collab-work-role-registration",
   "version": "1",
-  "description": "单次工作角色及其流程模板更新或查询请求。复用当前身份、稳定名字和 canonical project，不赋予 master 权限，不新增身份恢复条件。角色沿原授权更新，项目流程模板仅当前 master 可写入或重置；模板为同一 Collab Skill 的版本化资源，专长模板目标显式使用 role: 前缀，不与 master/peer 身份混同。各阶段错误在写入前返回，统一收口。角色与模板覆盖通过现有 journal 持久化、snapshot 重放和项目 reset 清理；普通恢复按当前角色读取有效流程，不重新声明、不要求通信回环。角色关系或模板变化不直接改写正在执行任务的归属、指定执行者或必需 reviewer。",
+  "description": "单次工作角色及其流程模板更新或查询请求。复用当前身份、稳定名字和 canonical project，不赋予 master 权限，不新增身份恢复条件。角色沿原授权更新，项目流程模板仅当前 master 可写入或重置；模板为同一 Collab Skill 的版本化资源，专长模板目标显式使用 role: 前缀，不与 master/peer 身份混同。各阶段错误在写入前返回，统一收口。角色与模板覆盖通过现有 journal 持久化、snapshot 重放和项目 reset 清理；真实角色或流程变更向注册受影响相对方发送持久化信箱通知，幂等无变化保持静默，离线不阻断持久化；普通恢复按当前角色读取有效流程，不重新声明、不要求通信回环。角色关系或模板变化不直接改写正在执行任务的归属、指定执行者或必需 reviewer。",
   "inputs": [{"id": "角色请求", "schema": "Object"}],
   "nodes": [
     {"id": "解析当前身份与目标名字", "operator": "collab.work_roles.resolve_identity", "operator_version": "1", "inputs": ["角色请求"], "output": {"id": "角色操作范围", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},

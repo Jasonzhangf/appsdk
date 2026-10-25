@@ -10,10 +10,12 @@ lease, install target, or daemon:
 4. Create a bounded wait only for a real blocker/responsible actor.
 5. Subscribe to the exact release/deadline event only when async wake is useful.
 
-## Bounded observation while waiting
+## On-demand tmux observation while waiting
 
-Before creating a wait, and on each timer or direct wake while waiting, inspect
-the peer you wait for with a bounded snapshot:
+Do not require a snapshot before creating a wait or on each wake. Snapshot is an
+optional, on-demand tmux diagnostic, not a completion proof or a required
+pre-probe. Use it only when the target is a tmux peer and you actually need
+current pane text to decide how to proceed:
 
 ```sh
 collab snapshot <peer-id> --lines 40
@@ -27,7 +29,8 @@ collab snapshot <peer-id> --lines 40
 - Use the buffer only to decide: keep waiting, escalate, or steer through the
   normal contractual input path.
 - If the target is an AppServer or DSH peer, snapshot is unsupported. Keep the
-  existing wait contract and do not invent a substitute state claim.
+  existing wait contract and rely on the peer's real progress or result events;
+  do not invent a substitute state claim or call snapshot unconditionally.
 
 ```sh
 collab sendmessage --to <peer> --subject resource-busy "RESOURCE_OCCUPIED ..."

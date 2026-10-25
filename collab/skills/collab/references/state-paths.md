@@ -107,6 +107,12 @@ identity recovery is not authorization to discard them.
   snapshot. Historical routes are not candidates and `routes.jsonl` must not
   be read to guess one. Never register the worktree as a second peer or create
   a second route.
+  An external linked worktree resolves to its registered Git main root;
+  directory containment does not establish project identity. Do not switch cwd
+  to recover an identity. A failed `collab context` is not evidence that no
+  master exists. Master promotion requires explicit user approval and an
+  authenticated current binding, not the incumbent's or the candidate's
+  liveness.
 - Default role is `peer`; master is explicit and user-approved.
 - `collab context` is the single information endpoint for the current peer,
   binding, role, transport, liveness, tasks, master, and peers.
@@ -187,3 +193,9 @@ binding and never selects another thread by history. It is read-only and returns
 no token. The daemon remains the sole owner of route selection and identity
 recovery. Never edit `routes.jsonl`, identity files, journal, or mailbox to force
 a route, and never start a second daemon.
+
+`collab route resolve` accepts `--native-thread-id <id>` and `--session-id <id>`,
+which must match the live runtime binding. It returns exactly one route,
+`ROUTE_RESOLVE_NOT_FOUND` for zero matches, and `ROUTE_RESOLVE_AMBIGUOUS` when
+multiple current bindings match. Missing, unknown, mismatched or malformed
+endpoints fail explicitly.

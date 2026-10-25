@@ -10,16 +10,16 @@
     "loop": "Every master goal, bug report/fix, master-to-subagent assignment, and peer task follows Trigger -> Work -> Gate -> State -> Stop.",
     "sequence": "Declare board work and queue pending tasks -> claim or accept -> Verify -> Persist -> close applicable duties or record blocker -> inspect remaining work and blocker release -> continue eligible work or idle. Re-arm a consumed one-shot goal or deadline wake before the patrol ends when scheduling must continue. Recheck on the next authorized activation; no new periodic worker wake.",
     "role_default": "Default identity is peer; master authority is user-authorized through explicit promotion or delegation by the current live master.",
-    "wake": "Ordinary peers may create finite, owner-scoped subscriptions for their assigned work. Project goal deadlines and master-idle reminders require current master authority. Managed subworkers cannot create independent deadline schedules. There is no periodic worker wake. A known-idle recipient with an explicit outstanding reply marker may receive one pending-reply reminder per idle episode; this does not start a new task or schedule.",
+    "wake": "Ordinary peers may create finite, owner-scoped subscriptions for their assigned work, including their own finite goal deadline. Master-idle reminders require current master authority. Managed subworkers cannot create independent deadline schedules. There is no periodic worker wake. A known-idle recipient with an explicit outstanding reply marker may receive one pending-reply reminder per idle episode; this does not start a new task or schedule.",
     "worker_idle_fact": "On each worker working -> idle transition, emit one idempotent worker-idle fact to the live master; this fact does not count or control the master idle reminder episode.",
     "master_idle_episode": "Master idle reminders are level-triggered. Within the same master idle episode, each reminder attempt consumes the shared episode-local budget, up to three attempts. An observed working change ends that episode; after three consecutive attempts without an observed working change, the episode stops. Worker-idle facts do not count toward this budget, and there is no scheduling-turn counter or automatic rearm.",
     "name_ownership": "A project-scoped stable name is the work-attribution owner; the current agent sessionID is the execution carrier. When the same name remains with the current worker and its sessionID changes, update the name and all unclosed board assignments in the same logical mutation. Closed history is not rewritten. Old sessions are not admission gates; old executors are not notified, stopped, revoked, or awaited.",
     "sendmessage": "Explicit collab sendmessage is immediate; idle, progress, delivery, bug, and worker-idle notices are auto-merged by the daemon in the 120-second batch window.",
     "bug_backlog": "Bugs enter AppSDK or git-bug backlog with investigation evidence; P0 blocks the affected project.",
-    "desktop": "Desktop does not register goal subscribe.",
+    "desktop": "Desktop uses the same host-independent role and goal rules as other hosts; host placement does not grant or deny a role, and a registered Desktop peer may own its own finite goal deadline.",
     "unknown_failure": "Unknown name occupancy, timeout, and failure are preserved explicitly. Unknown occupancy keeps the existing binding and a durable pending request for Jenny arbitration; pending is a terminal result for that invocation. No ACK, fallback, or fake success.",
-    "review_gates": "AGY review is not used for Collab v1 lifecycle gates; ordinary and milestone review use an independent Codex OAuth gpt-6.1-sol medium Reviewer.",
-    "legacy": "Any 15-minute periodic worker liveness wording is deprecated and non-authoritative. Current v1 uses the task-bound inspect obligation, owner-scoped finite peer subscriptions, and current-master-only project goal and master-idle subscriptions.",
+    "review_gates": "Review routing, model selection, and review backends follow the host Plan/Review contract. Collab v1 keeps an independent reviewer requirement but adds no model or provider table.",
+    "legacy": "Any 15-minute periodic worker liveness wording is deprecated and non-authoritative. Current v1 uses the task-bound inspect obligation, owner-scoped finite peer subscriptions (including peer-owned goal deadlines), and current-master-only master-idle subscriptions.",
     "verification_boundary": "The stable-name session synchronization, unknown arbitration, and presence/activity contract are target design for name-runtime-closure-20261020; source and runtime gates are tracked separately and were not passed by the T1 document task."
   },
   "canonical_docs": [
@@ -74,18 +74,19 @@
     "isolated-migration-replay-blackbox",
     "independent-review"
   ],
+  "verification_scope": "Select gates by the affected behavior using the project appsdk-dev risk-selection owner. A change revalidates only the conclusions it can affect: documentation/prompt edits do not require full build, migration replay, or live replay; delivery, transport, or installation changes still require their real consumer and isolated blackbox. This list is a candidate menu, not a universal checklist for every change.",
   "review_policy": {
-    "ordinary": "independent-review",
-    "milestone": "independent Codex OAuth gpt-6.1-sol medium review",
-    "excluded": "AGY review"
+    "ordinary": "independent review per the host Plan/Review contract",
+    "milestone": "independent review per the host Plan/Review contract",
+    "excluded": "none; model and provider selection is owned by the host contract"
   },
   "gate_descriptions": {
-    "independent-review": "Ordinary Collab v1 review uses an independent review path; AGY review is not used.",
-    "milestone-review": "At the formal integration boundary, use an independent Codex OAuth gpt-6.1-sol medium Reviewer; AGY and Astra are not review backends.",
+    "independent-review": "Ordinary Collab v1 review uses an independent review path selected by the host Plan/Review contract.",
+    "milestone-review": "At the formal integration boundary, use an independent milestone review selected by the host Plan/Review contract.",
     "loop-rules": "Documented gate: each lifecycle is Trigger -> Work -> Gate -> State -> Stop and follows Discover -> durable dispatch intent -> Hand off -> Verify -> Persist -> Schedule.",
     "bug-backlog": "Documented gate: bugs are tracked in AppSDK/git-bug backlog and P0 blocks affected projects.",
     "role-default": "Documented gate: default identity is peer; master is explicit and user-approved.",
-    "worker-wake": "Documented gate: ordinary peers can own finite owner-scoped subscriptions for assigned work; project goal deadlines and master-idle reminders are current-master-only; managed subworkers cannot create independent deadline schedules. There is no periodic worker wake. Outstanding explicit reply requirements allow one pending-reply reminder per known-idle episode; busy and unknown do not. Working -> idle sends one idempotent fact; unknown does not wake. Master idle reminders retain their existing shared three-attempt episode budget and stop after three consecutive attempts without observed working change.",
+    "worker-wake": "Documented gate: ordinary peers can own finite owner-scoped subscriptions for assigned work, including their own finite goal deadline; master-idle reminders are current-master-only; managed subworkers cannot create independent deadline schedules. There is no periodic worker wake. Outstanding explicit reply requirements allow one pending-reply reminder per known-idle episode; busy and unknown do not. Working -> idle sends one idempotent fact; unknown does not wake. Master idle reminders retain their existing shared three-attempt episode budget and stop after three consecutive attempts without observed working change.",
     "name-work-ownership": "Target design gate: name is project work attribution and agent sessionID is the current execution carrier. Same-name S1 -> S2 updates every unclosed assignment without rewriting closed history. Online occupancy requires this request's confirmation; unknown occupancy persists pending and waits for Jenny arbitration. Runtime verification is not claimed."
   }
 }

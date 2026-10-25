@@ -68,9 +68,10 @@ in its owning source, not a fake event, synthetic subject, or polling loop.
 Up to three active subscriptions exist per agent.
 
 - `direct-message` requires no subject and is reusable. `resource-released` and
-  `deadline` require a non-empty exact subject. Master-idle and goal deadlines
-  require the current registered master. Legacy managed records cannot create
-  independent deadline schedules.
+  `deadline` require a non-empty exact subject. Only `master-idle` requires the
+  current registered master; a `goal:` deadline is owned by the subscribing
+  master or ordinary peer. Legacy managed records cannot create independent
+  deadline schedules.
 - A deadline uses repeated `--at-ms` values or `--every-ms`; the modes are
   mutually exclusive. Absolute times must be in the future and before TTL
   expiry. `--every-ms` must be positive and fire before expiry.
@@ -179,3 +180,22 @@ collab msg <notification-id>
 collab inbox
 collab context
 ```
+
+## Delivery claims are separate
+
+Treat each durable claim independently:
+
+```text
+durable=true -> mailbox journal accepted
+notification=accepted -> selected transport accepted the operation; it is not consumption
+recv receipt -> peer consumed the message
+task close receipt -> lifecycle ended
+```
+
+For tmux, `send --delivery queued` retains the durable message until the existing
+configured event window. It returns `notification=queued`, `consumed=false` and
+records no wake attempt while deferred. Only actual adapter success records
+submission; accepted or unknown native outcomes are not blindly retried. Pane
+output never supplies a busy/idle decision or a recv receipt. Transport
+observations (`unknown`, `cold`, `missing`) are separate from authority; they
+never create, replace, or clear the current master grant.

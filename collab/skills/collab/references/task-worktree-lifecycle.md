@@ -62,12 +62,13 @@ collab task integrated <task-id> --commit <main-sha> --evidence "main gates=pass
 collab task close <task-id>
 ```
 
-While a task waits on another peer, inspect that peer with
-`collab snapshot <peer-id> --lines <1..200>` before and during the wait. The
-bounded buffer shows the current pane text without sending input. Decide from
-it whether to keep waiting, escalate, or steer through the normal input path.
-The buffer does not prove busy/idle, Codex turn state, message consumption, or
-task completion, and it writes no durable receipt.
+While a task waits on another peer, do not require a snapshot before or during
+the wait. Use the durable wait contract and the peer's real progress or result
+events to continue, escalate, or stay blocked. An on-demand tmux snapshot is
+only an optional diagnostic for a tmux peer when current pane text is actually
+needed; it does not prove busy/idle, Codex turn state, message consumption, or
+task completion, and it writes no durable receipt. See
+[resource-waits](resource-waits.md).
 
 Closing the last owned task does not cancel this peer's default direct-message
 lease. Base reception is daemon-owned and has no subscription-closing command;
@@ -151,6 +152,141 @@ returns `TASK_DELIVERY_CANDIDATE_UNRESOLVED` at integration or normal close;
 rework and redeliver it with the correct code intent. Once review and
 applicable integration are complete, the owner removes only its clean owned
 worktree, records the cleanup receipt, and closes normally.
+
+## Public task board and read-only dashboard
+
+未关闭任务保留；负责人身份的当前绑定失效时，board 负责人显示为空，由 master 重新安排。读取不恢复旧身份、不自动关闭任务，也不修改历史 owner、资源或证据。已关闭任务保留历史负责人。board 是独立业务读取，不参与身份恢复判定。
+
+The task board is the shared work surface for registered masters and peers.
+Each active role declares its current work and may queue later work here.
+Legacy managed records remain visible only through their existing
+compatibility scope; they receive no new assignment. The public view carries
+task identity, lifecycle status, owner, and the typed delivery/test conditions.
+It never exposes worker tokens, runtime endpoints, role briefs, managed-child
+identity, private assignments, or raw journal events. A published task does not
+start execution; an invitation does not transfer ownership.
+
+Read the board without consuming messages or changing lifecycle:
+
+```sh
+collab board show
+```
+
+Any registered execution role publishes a pending task with its contract.
+Publishing queues work; it does not start it. Publish several task IDs to queue
+later work without consuming execution capacity:
+
+```sh
+collab board publish <task-id> --title <t> --description <d> \
+  --delivery-condition <d> --test-condition <t> [--priority p0|p1|p2|p3|p4]
+collab board claim <task-id> --expected-revision <observed>
+```
+
+Claim starts one pending task in the caller's own identity. A peer may claim
+its own publication or another authorized task. Read the current revision from
+`board show`. Claim atomically checks that the task is still pending and that
+the caller can start execution; it records the actual executor as owner. A
+stale or competing claim fails without taking the task. Do not update a
+pending task to `working` to bypass claim. Never claim outside the user's
+authorized goal or take another owner's working or blocked task.
+
+For a long-horizon goal, master may instead offer a public task to one ordinary
+peer:
+
+```sh
+collab board invite <task-id> --to <peer> --expected-revision <observed>
+```
+
+Invite and respond are revision-checked. `invite` fails with
+`BOARD_STALE_REVISION` when the observed revision is old, and with
+`BOARD_PEER_BUSY` when the target already owns an unfinished task or another
+invitation. Take the revision from `collab board show`, never from a message
+body.
+
+The invited peer accepts or declines in its own identity. Accept rechecks the
+peer's other responsibilities and its live binding before ownership moves:
+
+```sh
+collab board respond <task-id> --accept --expected-revision <observed>
+collab board respond <task-id> --decline --expected-revision <observed> --reason "<text>"
+```
+
+Decline requires a nonempty reason and leaves publisher ownership unchanged. The
+owner updates progress on its own task with a current revision:
+
+```sh
+collab board update <task-id> --expected-revision <observed> --status <s> [--next <step>]
+```
+
+The master withdraws an unaccepted invitation with its observed revision and a
+reason; withdrawal never reclaims peer-owned execution:
+
+```sh
+collab board withdraw <task-id> --expected-revision <observed> --reason "<text>"
+```
+
+Public work uses claim or the board invitation above. `collab subagent
+dispatch` is a legacy private managed path and grants no new production work.
+If a peer declines a long-horizon invitation, retain that goal and arrange
+another consenting peer or decompose it under the current orchestrator.
+Dispatch its bounded execution or observation directly to independent
+`codex exec --profile gcm` workers. A refusal does not authorize the legacy
+private managed path or transfer orchestration responsibility to a subworker.
+
+`collab dashboard` opens a read-only loopback Web observer for the same public
+board. It requires a registered identity, does not bootstrap or restart the
+daemon, and never consumes messages:
+
+```sh
+collab dashboard [--port <loopback-port>]
+```
+
+It prints one JSON line and then serves until stopped:
+
+```json
+{"url":"http://127.0.0.1:<port>/#<capability>","read_only":true,"refresh_seconds":2}
+```
+
+Open that printed URL in a browser on the same host. The capability is a fresh
+per-run read credential carried only in the URL fragment: the page keeps it in
+memory, sends it as a bearer header, and never puts it in a query string or a
+log. It grants no actor identity and no write authority. The page re-reads the
+board projection every 2 seconds; it is a polling view, not an event stream.
+
+Any registered identity on that host may start one, so a master or an ordinary
+peer can expose the project board for the human controller. It is an observer,
+not a control surface: it cannot publish, invite, respond, update, withdraw or
+close anything.
+
+The observer rejects a request whose `Host` is not its own bound authority with
+`DASHBOARD_HOST_REJECTED` (403) and a request without the exact capability with
+`DASHBOARD_CAPABILITY_REQUIRED` (401). While the daemon is unreachable the
+board endpoint answers 503 with the exact daemon error instead of an empty
+board. Static assets carry no state and no token.
+
+Legacy managed identities and private child tasks remain compatibility facts.
+They do not receive new public assignments. Preserve their historical privacy
+and visibility semantics; do not create or bind another child from current
+work. New bounded execution or observation uses an independent GCM worker.
+
+An owner edits the descriptive part of its own independent task without
+changing lifecycle. Every flag is required and the revision is checked:
+
+```sh
+collab board describe <task-id> --expected-revision <observed> --title <t> \
+  --description <d> --delivery-condition <d> --test-condition <t>
+```
+
+`collab-mcp` exposes the same operations as `collab_board_show`,
+`collab_board_publish`, `collab_board_claim`, `collab_board_invite`, `collab_board_respond`,
+`collab_board_withdraw`, `collab_board_update`, `collab_board_describe`, and
+`collab_task_decline`. Each takes `expected_revision` as an integer of at least
+1; `collab_task_decline` takes `legacy_assignment: true` only for an unstarted
+legacy assignment.
+
+When any board command fails, the CLI preserves the server's full typed
+response, including durable IDs and `repair_required`. Read the `collab
+response:` line before retrying: a durable outcome is not a retryable failure.
 
 ## Task liveness and escalation
 

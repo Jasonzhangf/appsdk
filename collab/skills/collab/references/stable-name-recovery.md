@@ -101,6 +101,87 @@ session 和当前 binding；queued/partial/pending 不等于恢复完成。确�
 runtime 仍返回裸 `IDENTITY_RESTORE_AMBIGUOUS`，保留 operation_id 和原错，报告实现
 或版本缺陷；不要把错误当成用户授权不足，更不要手工清理以绕过。未受影响工作继续。
 
+## 显式恢复变体与通信诊断
+
+普通恢复不需要通信回环。只有显式需要通信诊断时才执行
+`collab context --recover-communication`；participant 从所选 adapter 读取
+`COLLAB_REGISTER_CHALLENGE <JSON>`，并从自身环境回传
+`collab context --return-challenge '<JSON>'`。daemon 只把 scope、purpose、
+operation、command、nonce 和所选 target 当作事实运输安全检查，不据此建立历史
+身份或权限。诊断失败保留已恢复身份与当前 binding；`--query` 保持只读。
+
+恢复为 master 是用户明确授权，使用既有意图，不另建身份选择：
+
+```sh
+collab context --approve-grant '{"decision":"approved","action":"restore_master","authorization":"<本次用户原话>"}'
+```
+
+daemon 从当前身份、project/session 和 incumbent 推导替换目标，直接由权限 owner
+覆盖。不要求 target snapshot、旧凭据、digest、grant 代际或第二次身份批准；省略
+approval 时普通 peer 恢复成功且 incumbent 不变。pane、AppServer oracle 是地址
+不是凭据，任一可达性都不能困住权限。context 从不自动提升或推导权限。
+
+显式提供 DSH 能力时，事实来自当前 DSH gateway API，不猜、不复制旧日志：
+
+```sh
+collab context --provide '{"dsh":{"endpoint":"unix:///actual/control.sock","runtime_id":"actual-runtime","agent_id":"actual-agent","session_id":"actual-session","cwd":"/actual/project"}}'
+```
+
+MCP `collab_context` 接受同一 `provide` 对象。该路径不填 Codex thread 或
+namespace；显式 API 冲突失败且不替换已保存身份、角色或工作。
+
+## Context 状态与终点
+
+`context_request` 是唯一入口，`state_snapshot` 是本次权威结果出口。现有七节点链为：
+解析项目与控制范围 → 读取现有服务 → 读取持久名字、agent sessionID 与占用 →
+判定续接、分配、确认或待决 → 提交名字绑定并同步未关闭任务或持久待决 →
+生成安全环境投影 → 输出含名字归属的权威快照。binding 收敛属于现有名字提交链，
+由既有 credential/binding/route owner 完成，不另建身份选择路径。
+Binding convergence makes context completion, worker status, and board admission
+read one authoritative project/app/agent binding and endpoint generation. Only
+context repairs; status and board admission are read-only consumers. Missing,
+ambiguous, stale, or principal-mismatched bindings return a typed
+`SESSION_THREAD_BINDING_MISMATCH` with known expected/observed generations and
+`collab context` as the only repair entry.
+The canonical project and app scope bound the lookup; another project's binding
+or a historical pane/native route cannot supply a missing current binding.
+Endpoint liveness remains separate from durable identity validity.
+
+Missing facts are the terminal of this invocation: `registered=false`,
+`identity=null`, and `requires_identity_update` gives exact `required_fields`,
+`reason`, `action`, and `exact_error`. The agent uses one
+`collab context --provide` for this invocation's requested current facts; native
+facts are required on every new context call, even after registration. Initial
+registration does not wait for challenge. Root failures and explicit
+conflicts preserve the original error and do not masquerade as a successful
+snapshot:
+
+| 状态/终态 | 含义 | Agent 动作 |
+| --- | --- | --- |
+| `state_snapshot` 且 `registered=true` | 注册成功；含 role/operations/master/peers/peer_count/summary/master_wake/subagents/inbox/worktrees/tasks/env | 读快照执行已注册角色的 `operations`；无需再跑 who/status/master status |
+| 历史 pane claim 与当前投递位置不符 | daemon 对齐通信位置；不由 pane 决定名字归属 | 名字续接按稳定名字合同；在线他人占名需确认，unknown 交 Jenny |
+| 名字占用 unknown | 持久 context operation 返回 `pending`；不是注册成功 | 等待同一请求裁决续接；Jenny 自身 unknown 且本次用户明确恢复并确认接管时直接接管 Jenny/master |
+| `identity_update` | daemon 缺少真实运行事实；`registered=false`，`requires_identity_update.required=true` | 按 `required_fields`/`reason`/`action` 只补实际缺项。已授权恢复意图按稳定名字合同提交；重复档案及旧绑定由 context 自行迁移。若仍泄漏裸历史冲突，保留原错作为实现缺陷，不让 agent 选旧身份或维护控制面 |
+| 可选通信诊断 pending | 原身份与当前 route 仍可用；诊断 reply 未完成 | 该诊断不是恢复前提；若显式使用，participant 从所选 adapter 读取 challenge 并从自身环境回传；`--query` 保持只读 |
+| `COLLAB_CONTEXT_UNRESOLVED` | 无 route、无 baseline、无 git 根（非零退出） | 保留原错，不自动换 cwd 重试；首次注册失败则独立继续，已注册者报告受影响协作，保留已领任务/claim |
+| 拒绝在 playground 创建基线 | 在 worktree 内引导（非零退出） | 保留原错，不改主树或删除旧身份；首次注册失败则独立继续，已注册者保留已有职责并报告协作缺口 |
+| 默认订阅已停 | daemon 按当前注册身份自动重武装，不存在显式退订 | 需要再收消息时运行 `collab context` 自动恢复，不由 agent 手工重订阅 |
+
+`requires_identity_update.reason` is a typed code. It is not prose and it is not
+permission to select a worker. The supplement has exactly the four scalar fields
+`session_id`, `thread_id`, `endpoint`, and `namespace`. A value that conflicts
+with an automatically observed fact is `IDENTITY_FACT_CONFLICT`, not an override.
+Historical duplicate identities and retired carriers are context-owned migration
+inputs, not conflicts for the agent to resolve. Current user-approved recovery
+is evaluated before those records. Real input conflicts, token rejection, route failure, runtime-binding failure, and
+transport failure keep their original error and non-zero exit; unapproved
+automatic resolution cannot bypass them. A communication diagnostic can await
+a participant return; ordinary identity restoration does not.
+
+完整语义图、转移表和 owner 映射见 `../../../docs/collab-context-state-machine.md`；
+机器可校验 SESE 图见 `../../../docs/dagpipe/collab-context.graph.json`
+（`dagpipe graph validate`）。
+
 ## 名字、角色与会话
 
 名字承载项目内工作归属，master/peer 表示角色和权限，agent sessionID 是当前

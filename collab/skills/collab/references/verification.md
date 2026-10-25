@@ -18,6 +18,43 @@ by the user. Agents do not operate its lifecycle or request maintenance credenti
 Installation and live activation are separate results. After user activation,
 verify `collab context`, MCP initialize, identity, durable state and live replay.
 
+The canonical candidate delivery sequence is a single source, single sink DAG.
+Every applicable node must finish before claiming delivery:
+
+```text
+latest_main_candidate
+  -> targeted_tests + build/install
+  -> user-managed runtime activation when applicable (outside the agent interface)
+  -> installed binary + collab context + affected bridge service live checks
+  -> black-box live behavior replay + author debug complete
+  -> applicable independent architecture review PASS
+  -> commit/merge/push and cleanup
+```
+
+Before changing the installed binary, inspect the current source version,
+installed version, canonical paths, and daemon PID/socket:
+
+```sh
+cargo metadata --no-deps --format-version 1
+collab --version
+command -v collab
+command -v collab-mcp
+collab status --all
+```
+
+If the version or command path is stale after installation, fix PATH or refresh
+the shell command cache (`rehash` in zsh, `hash -r` in bash), then verify that
+`command -v collab` and `command -v collab-mcp` resolve to the exact
+`$CARGO_HOME/bin` pair. Do not hand-copy binaries, leave a second managed entry,
+or select an older binary as a fallback.
+
+The manifest `verification_gates` list is a candidate menu, not a universal
+checklist. Select checks by the affected behavior using the project appsdk-dev
+risk-selection owner: a prompt or documentation edit does not require full
+build, migration replay, or live replay; a delivery, transport, or installation
+change still requires its real consumer and isolated blackbox. Keep source,
+installed, and live results separate.
+
 Before review, prove the affected subset and every changed invariant:
 
 - architecture/resource/function/verification gates;
@@ -66,7 +103,25 @@ Before review, prove the affected subset and every changed invariant:
   records grant no new production execution authority; master-only rules
   require an explicitly authorized master grant.
 
-Review only after tests and runtime evidence pass. Post-review source/config/test
-changes invalidate review and affected runtime evidence. Integrate the reviewed
-commit into latest main, rerun main verification, and install globally. After
-user-managed runtime activation when applicable, replay the installed path.
+Review only after the applicable tests and runtime evidence pass. A later
+change invalidates only the conclusions it can affect: revalidate those
+conclusions, not every prior review or runtime result. Integrate a reviewed
+commit into latest main and run the affected main verification for that change;
+install and live replay are separate results and are required only when the
+change reaches the install or runtime boundary.
+
+After a fix, verify the same user path again and classify the first divergence:
+
+- `send` durable but no transport acceptance: inspect the selected transport,
+  subscription, ownership, Agent state, and daemon log.
+- tmux input submission appears but no worker result: inspect the durable
+  mailbox receipt and peer state; do not call submission a reply.
+- `recv` returns messages: the read is consumed atomically; no follow-up ACK is
+  required. `msg`, `inbox`, and `context` remain read-only.
+- task remains open: inspect owner identity, master responsibility, cleanup
+  receipt, and notification supersession.
+
+Record the tested source commit, installed version, daemon PID/socket, exact
+commands, and live replay result in the bug system. A test pass without
+latest-main merge, installed-binary verification, or applicable live replay
+does not close the bug.

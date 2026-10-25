@@ -71,7 +71,7 @@ teammate 或 worker 标识；不知道这些内部标识不构成转请 master �
 | 回复原请求 | 同一发送命令，原消息确有 ID 时加 `--in-reply-to '<原消息ID>'`；没有 ID 不猜、不查内部信箱找值 |
 | DSH 收件 | gateway 将完整正文送入原生回合；直接处理和回信，不运行 `recv/ack` |
 | 非 DSH 收件 | 按本 Skill 的 `collab recv` 流程消费 |
-| 确实跨项目 | 沿下文 master-to-master 通道；普通 peer 交给自己的 master |
+| 确实跨项目 | 沿 [master-to-master 通道](references/migration-daemon.md#cross-project-master-communication)；普通 peer 交给自己的 master |
 
 需要显式固定目录时，整条命令是：
 `(cd '<已注册项目根目录>' && collab sendmessage --to 'Alice' --subject '<主题>' '<正文>')`。
@@ -93,8 +93,9 @@ Alice 等收件人不存在。若 `resolve-agent` 错误列出自己的 session 
 “完成后回复”要求在交回实际结果时答复，不能用“已收到、正在做”代替完成结果。
 
 先区分项目内与跨项目消息。下面的 `sendmessage` 回复命令仅用于项目内消息。
-跨项目消息的 `from` 是 `<worker-id>@<source-project>`；必须按下文
-“Cross-project master communication”走 `master send`，不能把整个跨项目地址传给 `sendmessage`。
+跨项目消息的 `from` 是 `<worker-id>@<source-project>`；必须按
+[Cross-project master communication](references/migration-daemon.md#cross-project-master-communication)
+走 `master send`，不能把整个跨项目地址传给 `sendmessage`。
 项目内回复使用原消息的真实 from 和 id，不猜名字或任务 ID：
 `collab sendmessage --to '<原消息from>' --subject '<主题>' --in-reply-to '<原消息ID>' '<实际结果、答复或阻塞证据>'`。
 向用户报告、消费通知、ACK 或写任务进度都不等于已回复请求方。回复不自动要求对方再回，
@@ -256,22 +257,9 @@ master 与 peer 均自行管理本人的 longhorizon goal；旧的“goal 只归
 同一 session 的后提交绑定收敛旧绑定，不让历史歧义成为 agent 的决策分支。
 准确命令、最小授权 JSON 与结果读取见
 [恢复操作](references/stable-name-recovery.md#恢复操作context-自己迁移agent-不做历史清理)。
-
-Collab 只有一个全局、由用户管理的 daemon。agent 不启动、关闭或重启它，也不为身份恢复申请维护窗口。用户维护命令、参数和凭据不属于 agent 接口。
-
-Collab/AppSDK 与 tmux 使用独立生命周期。Collab 安装、重启、注册、身份恢复、
-巡检或 daemon 不可达，都不得触发 tmux server 的重启或停止，也不得关闭、
-终止宿主 pane。现有共享 Collab daemon 继续由用户管理。
-
-默认使用 `collab context`。当前 `cwd` 决定 project，名字承载工作归属，注册报告的 agent sessionID 绑定当前执行载体；历史 pane 绑定到谁都不阻断恢复。当前 project 没有 master 时自动恢复为 peer。用户指定恢复 Jenny 时同时恢复 master；另一个在线工作者占名时，默认不替换，用户要求接管需本次二次确认。确认离线后可正常分配；归属 unknown 时交 Jenny snapshot 裁决。未获 master 授权的普通恢复继续作为 peer。不按任务内容、worktree、旧角色或 master 派单增加身份准入校验，不要求重新注册或通信回环。daemon 不可达时保留身份和任务，返回服务不可用；不启动第二个服务或修改 journal、route、credential 文件。
-
-明确恢复授权覆盖当前 pane 的历史 peer/master；旧绑定和旧 route 自动失效，不再要求旧身份批准。agent 可以移除当前 pane 自身的 agent 绑定和 route，不关闭宿主。daemon 自动清理失效 route。当前项目 master 可以 reset 本项目的 Collab，移除历史消息、route、任务、资产和负载；只清当前项目，不操作其他项目或全局 daemon 生命周期。实际 I/O 错误保留原错，不用历史身份保护拒绝当前授权，也不伪造成功。
-
-context 恢复还会把当前身份已存在且仍有效的订阅对齐到当前投递位置。
-这不新增巡检周期，不重置触发时间、次数或到期时间；显式取消和已到期的订阅不恢复。
-peer 仍负责按自己的目标创建或续订所需的巡检范围。
-
-身份恢复不依赖 board、任务分配或空闲产能。worker 状态从所属项目的当前 binding 读取身份事实；端点和活动状态分别观察，不把 host-only route 投影缺失误报为项目身份失效。
+Collab 只有一个全局、由用户管理的 daemon；agent 不启动、关闭或重启它，也不为
+身份恢复申请维护窗口。Collab 安装、注册、恢复、巡检或 daemon 不可达都不触发
+tmux server 的重启、停止或宿主 pane 终止。用户维护命令、参数和凭据不属于 agent 接口。
 
 ## 适用身份
 
@@ -308,8 +296,9 @@ no prior MCP invocation. Do not guess or reuse an AppServer socket.
 DSH 的接收方式不同：gateway 独占 canonical `Poll` / `Ack`，将完整正文直接送入
 原生会话。收到正文后直接处理并用 `collab sendmessage` 回复。不要运行 `collab recv`
 或 `collab ack`；这两个 CLI 命令会返回 `DSH_NATIVE_DELIVERY_OWNED`，避免与 gateway
-争抢信箱。需要诊断时只读 `collab msg <id>` 或 `collab inbox`。下文的 CLI 收件、
-消费与 ACK 指引只适用于非 DSH 传输。通信恢复也不是处理原生正文的前置步骤。
+争抢信箱。需要诊断时只读 `collab msg <id>` 或 `collab inbox`。CLI 收件、消费与
+ACK 指引只适用于非 DSH 传输。通信恢复也不是处理原生正文的前置步骤。
+（[非 DSH 收件与消费](references/migration-daemon.md#desktop-cli-registration-and-messaging)）
 Production projects use the globally installed Collab v1.
 Candidate consumers may use the existing `COLLAB_TEST_BINARY` seam to select
 the exact tested binary. Candidate results do not prove the canonical installed
@@ -496,94 +485,6 @@ session 时继承工作并同步未关闭任务，不能恢复 pane ID 默认名
 新名字接管。升级以当前 `collab context` 与名字恢复合同为准，读取其权威回执；
 旧 runtime 未加载新实现时明确报告版本边界，不把改 label 当作恢复成功。
 
-## Current-version baseline
-
-Use only the current globally installed `collab` and `collab-mcp`. The
-`Cargo.toml` version is the semantic source baseline; every official release
-compile uses `scripts/build-collab.sh`, which increments the host-global
-`~/.collab/build-version` counter under one lock. The installed binary's
-`collab --version` reports `0.2.NNNN` as the runtime build version. Direct
-release builds fail with an instruction to use the official entry. An upgrade
-targets the current reviewed source and does not migrate, replay, or interpret
-older local versions.
-
-The canonical candidate delivery sequence is a single source, single
-sink DAG. Every applicable node must finish before claiming delivery:
-
-```text
-latest_main_candidate
-  -> targeted_tests + build/install
-  -> user-managed runtime activation when applicable (outside the agent interface)
-  -> installed binary + collab context + affected bridge service live checks
-  -> black-box live behavior replay + author debug complete
-  -> applicable independent architecture review PASS
-  -> commit/merge/push and cleanup
-```
-
-For ordinary peer bootstrap and identity recovery, the only entry remains
-`collab context`. Each AppServer context call carries its current session,
-thread, endpoint and namespace from the host or this call's `--provide`.
-Desktop CLI uses the current scoped bridge capability described above.
-The managed MCP entry can also supply it from executor metadata; invoking that
-tool is optional, and agent sessionID remains the identity anchor.
-That command is not a daemon lifecycle owner. A Collab runtime
-delivery that changes server, notification, identity, route, MCP, CLI, or daemon
-behavior must cross the runtime lifecycle boundary in the same delivery unit
-after installation, unless the owner explicitly records why no daemon change is
-applicable.
-
-The canonical install sequence from the candidate source is:
-
-```sh
-scripts/install-global-collab.sh
-```
-
-The installer performs one release build and installs those exact candidate
-bytes; it does not run a second build with another auto-incremented version.
-The canonical pair is `$CARGO_HOME/bin/collab` and
-`$CARGO_HOME/bin/collab-mcp` (default `$HOME/.cargo/bin`). The sequence invokes
-the exact newly installed binary to refresh the embedded Skill, so an older
-PATH entry cannot write a stale Skill. The install does not remove business
-source, Git history, `~/.collab/`, project-local `.agent-collab/`, AppSDK
-state, run notes, or shared evidence.
-
-Legacy user-local copies are not removed automatically by this sequence.
-If an exact old copy must be retired, first prove it is Collab by running its
-own `--version` (and for MCP, its `initialize` response), then remove only the
-verified pair. A path that cannot prove that identity is a collision: preserve
-it and report the exact path. Never delete `~/.local/bin/collab*` or
-`~/.local/lib/collab/*` merely because the pathname matches.
-
-Installing a binary does not replace the running user-managed daemon. Agents
-never perform its lifecycle actions or request maintenance credentials. After
-user-managed activation, verify the available service:
-
-```sh
-collab context
-printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"codex","version":"0.0.0"}}}\n' | collab-mcp
-```
-
-Never use a broad process kill or a second daemon. If the live service reports
-an older installed version, runtime activation is `INCOMPLETE`, not delivered.
-
-Before changing the installed binary, inspect the current source version,
-installed version, canonical paths, and daemon PID/socket:
-
-```sh
-cargo metadata --no-deps --format-version 1
-collab --version
-command -v collab
-command -v collab-mcp
-collab status --all
-```
-
-If the version or command path is stale after installation, fix PATH or refresh
-the shell command cache (`rehash` in zsh, `hash -r` in bash), then verify that
-`command -v collab` and `command -v collab-mcp` resolve to the exact
-`$CARGO_HOME/bin` pair.
-Do not hand-copy binaries, leave a second managed entry, or select an older
-binary as a fallback.
-
 ## One lifecycle loop
 
 Every master goal, bug report/fix, master-to-subagent assignment, and peer task
@@ -601,9 +502,9 @@ replace a missing gate. Bug reports and fixes enter the AppSDK or git-bug
 backlog with investigation evidence. P0 is highest priority and blocks the
 affected project.
 
-## Recovery, Failure, Reset, Regression
+## Recovery and Reset
 
-### 1. Recovery
+### Recovery
 
 Start with the one-step bootstrap. `collab context` is the single automatic
 state entry. The CLI resolves the current cwd project, connects to the existing
@@ -624,25 +525,6 @@ with recovery semantics in
 collab context
 ```
 
-An optional explicit diagnostic may check the restored route through
-`collab context --recover-communication` and a challenge/reply. It is not a
-recovery prerequisite, and ordinary `collab context` does not wait for it.
-When used, the participant reads `COLLAB_REGISTER_CHALLENGE <JSON>` through the
-selected adapter and returns it with
-`collab context --return-challenge '<JSON>'` from its own environment. The
-daemon checks scope, purpose, operation, command, nonce and selected target as
-factual transport-safety checks; they do not establish historical identity or
-authority. Query remains read-only. A failed diagnostic leaves the restored
-identity and current binding intact.
-
-For tmux, cwd selects the project; the stable name owns the work and the agent
-sessionID is its current carrier. A new pane or tmux session changes placement,
-not ownership. Same-name session changes automatically update unclosed tasks.
-With no project master, context restores a peer; an existing master does not
-block ordinary peer recovery. A different online name holder requires the
-one takeover confirmation; self-restoration does not. Native session/thread
-facts locate the selected adaptor and never replace the stable-name contract.
-
 Ordinary persisted restore reuses the identity and restores its current
 communication binding, route and default lease without another Register or
 mandatory communication challenge. Task content, worktree and old pane
@@ -650,175 +532,47 @@ claimants do not gate restoration; historical pane identities and routes are
 retired. Actual I/O or persistence errors remain explicit without daemon
 lifecycle steps. Acceptance of a restored peer and a restored master requires
 each to send, receive and reply through the current route. A durable send or
-role alone does not prove message consumption.
-
-For the optional master choice, `--approve-grant` carries `action=restore_master`
-and `authorization` containing the user's words. The daemon derives the
-current identity, project/session and incumbent and uses the authority owner to
-replace it directly. Do not require target snapshots, old credentials, digests,
-grant generations or a second identity approval. Omitted approval leaves peer
-restoration successful and the incumbent unchanged.
-
-Tmux identity uses current project and socket/server/session facts. Pane, pane
-PID, native thread, activity and capture do not select the identity. Endpoint
-status and message delivery remain separate from identity restoration.
-
-The CLI reads `DSH_SESSION_ID`, `CODEX_SESSION_ID`, `CODEX_THREAD_ID` and
-current pane facts. A unique saved DSH identity restores from its current
-session in the same scope without Register or a communication challenge.
-Gateway unreachability does not revoke that identity or its work.
-
-For a new DSH identity, run ordinary `collab context`. With `DSH_SESSION_ID`,
-the CLI reads the gateway-published control capability and resolves that exact
-session in the current project. The gateway supplies current runtime facts;
-the agent does not inspect logs, plists or runtime state files. Existing
-registered sessions recover through their committed route and do not depend
-on this bootstrap declaration. A missing declaration is a gateway integration
-gap; an unreachable or rejected declared endpoint stays an explicit error.
-
-For an explicit caller-provided DSH capability, report actual facts through
-`collab context --provide '{"dsh":{"endpoint":"unix:///actual/control.sock","runtime_id":"actual-runtime","agent_id":"actual-agent","session_id":"actual-session","cwd":"/actual/project"}}'`.
-MCP `collab_context` accepts the same object in `provide`. Obtain these facts
-from the current DSH gateway API; do not guess them or reuse stale logs.
-The daemon verifies the report and uses the existing DSH registration owner.
-Do not supply Codex thread or namespace fields for this path. An explicit
-API conflict fails without replacing the saved identity, role or work.
+role alone does not prove message consumption. Tmux session, pane, socket and
+server PID locate transport only; native thread and activity facts locate the
+selected adaptor and never replace the stable-name contract. For the master
+restoration, DSH capability, and explicit communication-diagnostic variants,
+read [stable-name recovery](references/stable-name-recovery.md).
 
 When the snapshot contains `requires_identity_update`, read
 `required_fields`, `reason`, and `exact_error`. Supply requested current facts
-from their real source in this invocation. The AppServer form is:
-
-```sh
-collab context --provide '{"session_id":"...","thread_id":"...","endpoint":"...","namespace":"..."}'
-```
-
-Each AppServer context invocation carries the current session, thread, endpoint
-and namespace. The daemon never fills these facts from historical registration.
-AppServer CLI facts come from the current host or this invocation's `--provide`;
-AppServer MCP callers submit them on each call because startup facts may be stale.
-Desktop uses the separate bridge capability through CLI or the optional MCP
-entry, not this AppServer supplement.
+from their real source in this invocation. Each AppServer context invocation
+carries the current session, thread, endpoint and namespace; the daemon never
+fills these facts from historical registration. Desktop uses the separate
+bridge capability through CLI or the optional MCP entry, not this AppServer
+supplement. The supplement accepts only `session_id`, `thread_id`, `endpoint`,
+and `namespace`; it rejects any other key. An agent never supplies
+`worker_id`, approval, token, generation, binding, or project scope.
 Missing facts preserve durable identity and work but do not complete restoration.
 `--query` only reads retained progress and needs no current endpoint.
 See [current-fact recovery](references/stable-name-recovery.md) for the contract.
 
-The AppServer supplement accepts only the scalar facts `session_id`, `thread_id`,
-`endpoint`, and `namespace`. It rejects any other key. An agent never guesses,
-selects, or hunts a worker, and never supplies `worker_id`, approval, token,
-generation, binding, or project scope. Invalid or unsupported input fails
-explicitly. The returned snapshot is the complete state read: role, operations,
-peers, master, scheduling, tasks, binding, and filtered environment. `binding`
-comes from the daemon ledger when the caller has a unique binding.
+The returned snapshot is the complete state read: role, operations, peers,
+master, scheduling, tasks, binding, and filtered environment. `binding` comes
+from the daemon ledger when the caller has a unique binding.
 
 If `collab context` fails explicitly, preserve the original error and affected
 scope. Do not retry automatically, edit route/identity files, copy tokens,
 start another daemon, or invent a fallback. Daemon lifecycle is outside the
 agent interface. Ordinary identity recovery uses `collab context` only.
 
-Master authority is separate from identity. The authority owner is the current
-typed grant in the exact project and app scope, with only two states: empty (no
-current grant) and assigned (one current holder). When the user explicitly
-approves this session for this exact project, run one command with their words
-as the approval:
+### Reset
 
-```sh
-collab master promote --approval '<why the user approved this>'
-```
+Reset is explicit, destructive, and master-only. The current project master may
+run `collab reset --project` from the current project only when the user
+explicitly requests discarding that project's Collab epoch. It clears only this
+project and never the global daemon. AppSDK `reset-governance` or
+`appsdk init --fresh --discard-legacy` is not a Collab reset; never remove
+`.appsdk/`, `.agent-collab/`, journals, tokens or bindings by hand. Full rules:
+[Migration and User-Managed Daemon Boundary](references/migration-daemon.md#reset-is-explicit-discard-not-recovery).
 
-An approved promote atomically replaces any recorded holder and is not gated on
-the incumbent's or the candidate's transport liveness. A tmux pane and an
-AppServer oracle are addresses, not credentials: neither being reachable is
-allowed to strand authority. Explicit approval is the whole authority for the
-transition. To remove the scoped authority instead, an authenticated peer with
-explicit approval runs `collab master clear --approval '<why the user approved
-this>'`; clear removes only the scoped grant and never deletes tasks, messages,
-peers, or bindings. Context never auto-promotes and never infers authority.
-
-### 2. Failure
-
-Treat each claim separately:
-
-```text
-durable=true -> mailbox journal accepted
-notification=accepted -> selected transport accepted the operation; it is not consumption
-recv receipt -> peer consumed the message
-task close receipt -> lifecycle ended
-```
-
-For tmux, `send --delivery queued` retains the durable message until the existing
-configured event window. It returns `notification=queued`, `consumed=false` and
-records no wake attempt while deferred. The existing timer drains it through a
-daemon wake; only actual adapter success records submission. Accepted or unknown
-native outcomes are not blindly retried. Pane output never supplies a busy/idle
-decision or a recv receipt.
-
-An error, timeout, `subscribed-not-sent`, `thread-lost`, `identity-mismatch`,
-`unknown`, or absent Agent is not success. Preserve the exact error and
-durable IDs; do not retry automatically, ACK for another identity, or mark a
-task delivered/closed without its required evidence. Apply Registered patrol
-duties for a prompt evidence-based help request and independent master
-verification. The peer retains delivery ownership unless explicitly reassigned.
-
-Transport observations (`unknown`, `cold`, `missing`) are separate from
-authority. They never create, replace, or clear the current master grant. Do
-not promote, clear, or regrant the master merely because a transport probe is
-unknown; the holder keeps control, and the communication error stays explicit
-and independent.
-
-### 3. Reset
-
-The current project master may reset the project's Collab state online:
-
-```sh
-collab reset --project
-```
-
-Run it from the current project. The daemon authenticates the current scoped
-master, clears project messages, tasks, bindings, routes, subscriptions,
-operations and assets, and deletes project history. It preserves other projects
-and the global daemon. Historical pane owners, open work and resident host
-storage do not block this authorized project reset. The next `collab context`
-creates a peer with no inherited master grant. Real deletion or durability
-errors return incomplete and retain the scoped reset intent for recovery.
-No legacy discard mode or separate approval argument exists for this project
-reset. Host maintenance is outside the agent interface.
-
-`.appsdk/` and `.appsdk-control/` are AppSDK-owned and are not removed by
-`collab reset`. The host-wide runtime truth remains `~/.collab/`
-(`server.sock`, `events.jsonl`, `log.txt`, and route state); project-local
-`.agent-collab/` is reducer input and local durable data, not the global truth.
-For a new project or an explicitly authorized clean epoch, remove old
-project-local governance only through the owner's canonical reset/migration
-command. Never manually remove `.agent-collab/server/journal.jsonl`, mailbox
-files, identity tokens, task records, or bindings to make status look clean.
-Never start a second daemon or use broad process kills. `collab ack` remains a
-compatibility operation; it is not a substitute for task close or identity
-recovery.
-
-An AppSDK `reset-governance` or `appsdk init --fresh --discard-legacy` is not
-Collab reset/migration and must not remove `.agent-collab/`. AppSDK's reset owner
-explicitly treats `.agent-collab/` as a reserved root. If the project also
-needs to move or retire Collab state, follow
-[Migration and User-Managed Daemon Boundary](references/migration-daemon.md); the two
-operations have separate transactions and separate completion evidence.
-
-### 4. Regression recognition
-
-After a fix, verify the same user path again and classify the first divergence:
-
-- `send` durable but no transport acceptance: inspect the selected transport,
-  subscription, ownership, Agent state, and daemon log.
-- tmux input submission appears but no worker result: inspect the durable
-  mailbox receipt and peer state; do not call submission a reply.
-- `recv` returns messages: the read is consumed atomically; no follow-up ACK is
-  required. `msg`, `inbox`, and `context` remain read-only.
-- task remains open: inspect owner identity, master responsibility, cleanup
-  receipt, and notification supersession.
-
-Record the tested source commit, installed version, daemon PID/socket, exact
-commands, and live replay result in the bug system. A test pass without
-latest-main merge, installed-binary verification, or applicable live replay
-does not close the bug.
+A later change invalidates only the conclusions it can affect; revalidate those
+affected conclusions only. For post-fix regression recognition and divergence
+triage, read [verification](references/verification.md).
 
 ## Registered multi-worker collaboration
 
@@ -921,135 +675,31 @@ selection and sends only through the selected adapter.
 未关闭任务保留；负责人身份的当前绑定失效时，board 负责人显示为空，由 master 重新安排。读取不恢复旧身份、不自动关闭任务，也不修改历史 owner、资源或证据。已关闭任务保留历史负责人。board 是独立业务读取，不参与身份恢复判定。
 
 The task board is the shared work surface for registered masters and peers.
-Each active role declares its current work and may queue later work here.
-Legacy managed records remain visible only through their existing
-compatibility scope; they receive no new assignment. The public view carries
-task identity, lifecycle status, owner, and the typed delivery/test conditions.
-It never exposes worker tokens, runtime endpoints, role briefs, managed-child
-identity, private assignments, or raw journal events. A published task does not
-start execution; an invitation does not transfer ownership.
-
-Read the board without consuming messages or changing lifecycle:
-
-```sh
-collab board show
-```
-
-Any registered execution role publishes a pending task with its contract.
-Publishing queues work; it does not start it. Publish several task IDs to queue
-later work without consuming execution capacity:
+Read it without consuming messages or changing lifecycle with `collab board
+show`. Any registered role publishes a pending task and claims it, or the
+master offers it to one peer with the observed revision:
 
 ```sh
 collab board publish <task-id> --title <t> --description <d> \
   --delivery-condition <d> --test-condition <t> [--priority p0|p1|p2|p3|p4]
 collab board claim <task-id> --expected-revision <observed>
-```
-
-Claim starts one pending task in the caller's own identity. A peer may claim
-its own publication or another authorized task. Read the current revision from
-`board show`. Claim atomically checks that the task is still pending and that
-the caller can start execution; it records the actual executor as owner. A
-stale or competing claim fails without taking the task. Do not update a
-pending task to `working` to bypass claim. Never claim outside the user's
-authorized goal or take another owner's working or blocked task.
-
-For a long-horizon goal, master may instead offer a public task to one ordinary
-peer:
-
-```sh
 collab board invite <task-id> --to <peer> --expected-revision <observed>
-```
-
-Invite and respond are revision-checked. `invite` fails with
-`BOARD_STALE_REVISION` when the observed revision is old, and with
-`BOARD_PEER_BUSY` when the target already owns an unfinished task or another
-invitation. Take the revision from `collab board show`, never from a message
-body.
-
-The invited peer accepts or declines in its own identity. Accept rechecks the
-peer's other responsibilities and its live binding before ownership moves:
-
-```sh
 collab board respond <task-id> --accept --expected-revision <observed>
 collab board respond <task-id> --decline --expected-revision <observed> --reason "<text>"
-```
-
-Decline requires a nonempty reason and leaves publisher ownership unchanged. The
-owner updates progress on its own task with a current revision:
-
-```sh
 collab board update <task-id> --expected-revision <observed> --status <s> [--next <step>]
 ```
 
-The master withdraws an unaccepted invitation with its observed revision and a
-reason; withdrawal never reclaims peer-owned execution:
+Publishing queues work; an invitation does not transfer ownership; claim starts
+one pending task in the caller's own identity. Never claim outside the user's
+authorized goal or take another owner's working or blocked task. `collab
+subagent dispatch` is legacy and grants no new production work; bounded
+execution or observation goes to an independent `codex exec --profile gcm`
+worker.
 
-```sh
-collab board withdraw <task-id> --expected-revision <observed> --reason "<text>"
-```
-
-Public work uses claim or the board invitation above. `collab subagent
-dispatch` is a legacy private managed path and grants no new production work.
-If a peer declines a long-horizon invitation, retain that goal and arrange
-another consenting peer or decompose it under the current orchestrator.
-Dispatch its bounded execution or observation directly to independent
-`codex exec --profile gcm` workers. A refusal does not authorize the legacy
-private managed path or transfer orchestration responsibility to a subworker.
-
-`collab dashboard` opens a read-only loopback Web observer for the same public
-board. It requires a registered identity, does not bootstrap or restart the
-daemon, and never consumes messages:
-
-```sh
-collab dashboard [--port <loopback-port>]
-```
-
-It prints one JSON line and then serves until stopped:
-
-```json
-{"url":"http://127.0.0.1:<port>/#<capability>","read_only":true,"refresh_seconds":2}
-```
-
-Open that printed URL in a browser on the same host. The capability is a fresh
-per-run read credential carried only in the URL fragment: the page keeps it in
-memory, sends it as a bearer header, and never puts it in a query string or a
-log. It grants no actor identity and no write authority. The page re-reads the
-board projection every 2 seconds; it is a polling view, not an event stream.
-
-Any registered identity on that host may start one, so a master or an ordinary
-peer can expose the project board for the human controller. It is an observer,
-not a control surface: it cannot publish, invite, respond, update, withdraw or
-close anything.
-
-The observer rejects a request whose `Host` is not its own bound authority with
-`DASHBOARD_HOST_REJECTED` (403) and a request without the exact capability with
-`DASHBOARD_CAPABILITY_REQUIRED` (401). While the daemon is unreachable the
-board endpoint answers 503 with the exact daemon error instead of an empty
-board. Static assets carry no state and no token.
-
-Legacy managed identities and private child tasks remain compatibility facts.
-They do not receive new public assignments. Preserve their historical privacy
-and visibility semantics; do not create or bind another child from current
-work. New bounded execution or observation uses an independent GCM worker.
-
-An owner edits the descriptive part of its own independent task without
-changing lifecycle. Every flag is required and the revision is checked:
-
-```sh
-collab board describe <task-id> --expected-revision <observed> --title <t> \
-  --description <d> --delivery-condition <d> --test-condition <t>
-```
-
-`collab-mcp` exposes the same operations as `collab_board_show`,
-`collab_board_publish`, `collab_board_claim`, `collab_board_invite`, `collab_board_respond`,
-`collab_board_withdraw`, `collab_board_update`, `collab_board_describe`, and
-`collab_task_decline`. Each takes `expected_revision` as an integer of at least
-1; `collab_task_decline` takes `legacy_assignment: true` only for an unstarted
-legacy assignment.
-
-When any board command fails, the CLI preserves the server's full typed
-response, including durable IDs and `repair_required`. Read the `collab
-response:` line before retrying: a durable outcome is not a retryable failure.
+`collab dashboard` is a read-only loopback observer of the same board. Full
+command grammar, revision errors, MCP tool names, dashboard capability rules
+and failure handling:
+[task board and dashboard](references/task-worktree-lifecycle.md#public-task-board-and-read-only-dashboard).
 
 ### Continue the queue and recheck blockers
 
@@ -1219,200 +869,34 @@ Codex thread history is read only from the owning AppServer when supported and
 is never fabricated. A tmux pane locates delivery and observation only; it is
 not an identity anchor, task owner, or snapshot receipt.
 
-## 全局 CEO 与项目 master
+## Global CEO and cross-project master communication
 
-CEO 是宿主全局唯一的跨项目协调者。各项目 master 继续负责本项目目标、peer 分工、
-验收和交付，旧项目合同保持原义。工作角色 `ceo` 不授予全局权限；只有 daemon 的
-typed CEO grant 才有效。全部规则仍在本 Skill，不新建 CEO、master 或角色 Skill。
+CEO is a host-global typed grant, not a work role. Each project master keeps
+responsibility for its own projects' goals, peer split, acceptance and delivery.
+Only the daemon's typed CEO grant grants global authority; the `ceo` work role
+does not. Cross-project requests from an ordinary peer go to its own project
+master. Only the current master grant holder may use the master-to-master
+channel, and the target must be that project's current master grant holder.
+Never switch cwd to impersonate another project's agent, write a mailbox
+directly, guess a session ID, or bypass a rejection through another host
+channel.
 
-先在用户选定的 workspace 注册真实身份，再按用户明确批准授予 CEO。已有 workspace
-直接复用，不迁移或覆盖；没有既有配置时使用 `~/.collab/workspace`。目录存在不是
-CEO 已授权的证据。`collab ceo status` 只读查看当前 grant 和默认 workspace，不注册。
+Entry points:
 
 ```sh
 collab ceo status
-collab ceo promote --approval '<用户明确批准原文>' --workspace '<当前已注册workspace>'
-collab ceo clear --approval '<用户明确撤销原文>'
-collab ceo progress
-collab ceo progress --project '<目标项目根目录>'
+collab ceo send --project <target-root> --subject <topic> --reply-required "<body>"
+collab ceo append-task --project <target-root> --id <task-id> ...
+collab master send --project <target-root> --to <target-master> --subject <topic> "<message>"
 ```
 
-context 返回当前全局 CEO 联系方式。只有当前 grant 持有者才获 CEO 操作与职责；
-`identity.role` 和项目 `authority` 保持原义。正常会话续接沿现有稳定名字 owner 规则，
-不能凭旧 session、消息正文或角色字符串重建权限。没有 CEO 投影或入口不受支持时，
-报告安装/运行差异，不声称已启用、不手工改状态、不管理全局 daemon 生命周期。
+Exact commands, workspace and bootstrap rules, reply handling, and the
+"target project has no master" flow:
+[Global CEO and project master](references/migration-daemon.md#global-ceo-and-project-master)
+and [Cross-project master communication](references/migration-daemon.md#cross-project-master-communication).
 
-CEO 在自己的 workspace 调用下列入口。目标由 daemon 解析为该项目当前 master，
-新请求不取消 master 原有任务，不改已有 owner、scope、固定执行者或必需 reviewer。
-
-```sh
-collab ceo send --project '<目标项目根目录>' --subject '<主题>' --reply-required '<需要实际执行或回答的正文>'
-collab ceo send --project '<目标项目根目录>' --subject '<主题>' --reply-on-completion '<完成后交回的要求>'
-collab ceo append-task --project '<目标项目根目录>' --id '<任务ID>' --title '<标题>' --description '<范围与授权>' --delivery-condition '<交付条件>' --test-condition '<验收条件>'
-```
-
-append-task 追加到目标项目现有 board，由当前 master 负责，并默认要求完成后回复。
-不要另建 CEO 业务任务表，也不要把发送消息当作任务板已写入。回执只证明其实际字段：
-持久入队、通知提交、master 已安排、交付和回报各自分开。
-
-项目 master 收到 CEO 请求后，落实授权 action，安排 ready 工作，并向 CEO 交回实际
-结果、进度或具体阻塞。使用自己的项目身份，不切到 CEO 的目录冒充其身份：
-
-```sh
-collab ceo reply --subject '<主题>' '<普通进度或具体阻塞>'
-collab ceo reply --subject '<完成主题>' --in-reply-to '<原请求ID>' '<实际交付与证据>'
-```
-
-普通进度不带原请求引用，保留完成后回复义务。CEO 经用户批准换人后，原请求的完成
-回复仍用原请求 ID，`ceo reply` 将结果交给现任 CEO，不手工改历史发送者或回复标记。
-真正完成后才以原请求 ID 回复；daemon
-在正确 master 的回信持久送达后清除精确原标记。收到 pending-reply idle 提醒时处理
-原请求，不回复提醒本身。回交后继续自己的任务；无可执行工作时按既有流程交回/申请
-idle。项目 master 不因全局 CEO 存在而放弃本项目交付责任。
-
-### 目标项目没有 master
-
-未知、不可达或发送失败不等于没有 master。只有当前控制真源明确无 master，才向用户
-说明目标路径、profile（默认 gcm）、现有 tmux socket/session 与新会话用途，并取得
-本次明确启动批准。不要把“实施 CEO 功能”的开发授权当作生产新建 agent 的批准。
-
-```sh
-collab ceo bootstrap-master --project '<目标项目根目录>' --approval '<本次用户启动批准原文>' --profile gcm --tmux-socket '<已有socket>' --tmux-session '<已有session>' --op '<本次operation>'
-```
-
-该入口只在现有 tmux server 的指定 session 创建自有窗口，启动 Codex YOLO；用户可
-指定其他 profile。不能注入假 Codex session ID，不能直接伪造身份、授权或收信。若无
-现有端点，报告具体缺口；不启动、重启或终止 tmux server，不关闭用户已有窗口。
-
-新 master 的初始提示要求它在真实会话内依次完成：`collab context`；按批准原文执行
-`collab master promote --approval '<原文>'`；再给 CEO 发真实就绪握手：
-
-```sh
-collab ceo bootstrap-ready --op '<本次operation>' --subject '<就绪主题>' '<真实注册、master授权与可收信结果>'
-```
-
-仅窗口已创建时状态是 launched/pending。daemon 认证目标项目当前 master 并将握手
-持久送达 CEO 后才是 ready。同一 operation 不重复建窗口；结果未知保留现场，不盲目
-重试或自动删除。需要放弃本次启动协调时，先向用户说明已知窗口和未决结果，取得明确
-取消批准，再执行 `collab ceo bootstrap-cancel --op '<本次operation>' --approval '<本次取消批准>'`。
-取消只关闭协调意图，不停止 Codex、不关闭 pane、不撤销已存在的 master；回执中的
-`process_stopped: false` 必须如实报告。确认旧尝试不会继续后，用户另行批准的新启动
-使用新 operation，不能把取消回执当成已清理进程。已 ready 的操作不能用此入口撤销。
-CEO 收到握手后，继续执行尚待派发的 send/append-task，不能到“创建
-成功”就停下。进度用 `collab ceo progress --project '<目标项目根目录>'` 查看。
-
-CEO 下一步提示词：先执行 `collab context` 和 `collab ceo progress`，读取当前授权、
-项目 master 与任务回报。在已有授权内追加目标、要求实际进度并处理回信；项目没有
-master 时先取得本次启动批准。收到真实就绪握手后继续派发待办。保留项目 owner 和
-用户指定的执行/review 约束，向用户报告实际安排、交付与尚待决定项，然后继续推进。
-
-## Cross-project master communication
-
-### 权限、目标解析与下一步动作
-
-这是一条已存在的项目 master 到项目 master 通道。工作角色（designer、reviewer）
-不授予此权限。普通 peer 把跨项目请求交给本项目当前 master；不得换 cwd 冒充目标
-项目的 agent，不得直接写 mailbox、猜 session ID，或通过另一个宿主通道绕过拒绝。
-全局 CEO 走上一节的独立授权通道，不把 CEO 称呼当作项目 master 授权。
-
-发送者在自己的项目执行 `collab context`，使用返回的当前身份和 master 授权。
-用户提供目标项目绝对路径后，可以只读查询目标当前 master；这个查询不注册身份：
-
-```sh
-(cd '/目标项目绝对路径' && collab master status)
-```
-
-读取回执的 `master.worker_id` 作为 `--to`，不要按 Jenny 等显示名搜索历史 session。
-查询失败不代表没有 master。已有 master 但未知、不可达或投递失败时，保留原错，
-不创建替代 master。只有真源明确无 master，才向用户说明项目路径、profile 和启动方式，
-经确认后创建新的具名 tmux Codex session 并授权 master。默认 profile 为 `gcm`，
-使用用户已确认的 YOLO 模式；不得关闭现有 tmux server 或 pane。
-
-从发送者自己的项目目录执行下列命令；`--project` 只指定接收项目，不改变发送者身份：
-
-This existing master-to-master channel is master-only and explicit. Only the
-current master grant holder may send to the current master grant holder of
-another initialized project; non-master peers and managed subagents are
-rejected before any message is persisted:
-
-```sh
-collab master send --project /abs/path/to/target --to <target-master> \
-  --subject <short-topic> "<original message>"
-```
-
-`--project` must be the exact target project root with `.agent-collab`, and
-`--to` must be that project's current master grant holder, whose target binding
-and address must be available. The target daemon also verifies the sender's
-current typed grant (holder, scope, approval) before accepting the message.
-
-接收 master 读取完整原消息并执行已授权动作。非 DSH 宿主用 `collab recv`；
-DSH 直接处理 gateway 已投递的正文，不再 Poll/ACK。回信仍在自己的项目执行
-`collab master send`，将原消息 `from` 中的源项目用作 `--project`、源 worker ID
-用作 `--to`；当前 CLI 的这条命令尚不支持 `--in-reply-to`，在正文中写明原消息 ID。
-这只提供可读关联，不宣称已清除 daemon 回复标记。持久入队、宿主投递、接收消费和
-实际回信分别核实，发送成功不能证明对方已经执行。
-
-可直接给 agent 的下一步提示词：
-
-> 先在自己的项目执行 collab context，核对你是当前 master。对用户给定的目标项目
-> 用 `(cd '<目标项目>' && collab master status)` 只读获取 master.worker_id。
-> 回到自己的项目，用 `collab master send --project '<目标项目>' --to '<worker_id>'
-> --subject '<主题>' '<具体action、范围、验收和回信要求>'` 发送。不要搜索历史 Jenny
-> session，不要用 sendmessage 跨项目投递。保存 msg_id，分别报告已入队、已消费和
-> 已收到实际回信的证据；只获得哪一步就报告哪一步。拒绝或未知状态保留原错。
-
-Task liveness is an obligation, not an ACK ceremony. A worker owns its assigned
-tasks and drives them to verified cleanup/close during its working cycle. This
-is a task-bound inspect obligation, not a transport activation schedule: it
-does not wake idle workers and does not generate worker transport input. If an actionable
-task is open, continue it; if an ordinary peer is blocked, first ask the current
-master for help with the available evidence and decision needed. A proven root
-cause or fix is not a prerequisite for that request. Do not leave a task
-at `assigned`, `working`, `blocked`, `waiting`, `delivered`, or
-`cleanup_pending` merely because the last direct message was acknowledged.
-After delivery or merge, perform the real cleanup and close the task; a
-reminder does not create a second task or a duplicate dispatch. After closing
-or recording a blocker, inspect the board and continue the next eligible task.
-Enter idle only after the remaining-work and blocker checks above and the current workflow's completion handoff/idle-request procedure.
-
-Escalation routing is explicit:
-
-- An ordinary worker reports blockers to the current Collab master immediately.
-  Do not wait for the next liveness cycle or for master to invent the fix.
-  Supply available failure evidence, attempted remedies and the decision
-  needed; distinguish unknown cause from verified facts. Do not delay an
-  assistance request until the root cause or solution is proven. Do not
-  dump "I'm blocked" and idle. If the assignment's delivery or test conditions
-  are ambiguous, do not guess; propose the missing conditions and send them to
-  master. Independent peers may temporarily decline a master collaboration
-  invite to protect their own current task. If no current
-  master exists, report to the collaborator that initiated the task. Include
-  the task ID, failure evidence, attempted actions/results, and requested
-  decision. Include a cause or proposed solution when known; otherwise state
-  unknown and request help immediately.
-- Master authority is the current typed grant in the exact project and app
-  scope. Only two authority states exist: empty (no current grant) and
-  assigned (one current holder). When the user explicitly approves this peer
-  for this exact project, record it with `collab master promote --approval
-  "<user text>"`; the approved promote atomically replaces any recorded holder
-  and is independent of the incumbent's or the candidate's liveness. Only the
-  current master grant holder may `collab master delegate <peer>`. An
-  authenticated peer with explicit approval may `collab master clear
-  --approval "<user text>"` to remove the scoped grant; the caller does not
-  need to be the master first. An internal init adapter result alone never
-  proves master ownership, and AppSDK init is not an implicit authority reset.
-  Read the current holder, its scope, and its approval from the `collab
-  context` snapshot and `collab master status`; agent liveness is a separate
-  transport fact and does not change authority. A missing worktree-local
-  `.agent-collab/`, a failed `collab context`, a token mismatch, or a missing
-  `who.master` field never authorizes a mutation; promote, clear, and delegate
-  still require an authenticated current binding. Codex root is not Collab
-  master. Operators may use `collab master status` read-only for audit.
-- If an evidenced dependency cannot be resolved locally, report the evidence
-  and requested decision to the current master immediately instead of
-  silently waiting. Keep the durable wait/task state, continue any
-  independent work, and re-escalate on the next direct master communication or
-  when the situation changes; do not wait for a periodic worker wake.
+Task liveness and escalation routing for both roles:
+[task liveness and escalation](references/task-worktree-lifecycle.md#task-liveness-and-escalation).
 
 ## Master owns the outcome, not the excuse
 
@@ -1587,29 +1071,6 @@ decision that must preserve evidence, not a reason to stop dispatching.
 
 否则 merge 的 owner 仍是 current master；review PASS 不授予流程外发布或生产变更。
 
-### Collab runtime delivery DAG（单源单汇）
-
-适用范围：Collab server、daemon、CLI、MCP、route、identity、notification、wake、
-mailbox、task lifecycle 或安装包的修复/发布。源码测试和 `git push` 都不是终点；
-runtime 节点未完成时必须报 `INCOMPLETE`。
-
-```text
-入口: latest_origin_main_candidate
-  -> applicable_targeted_tests_pass
-  -> scripts/install-global-collab.sh
-  -> installed_binary_version_verified
-  -> user_managed_runtime_activation_if_applicable
-  -> collab_context_registered_live
-  -> collab_mcp_initialize_matches_version
-  -> live_replay_or_explicit_non_applicable_reason
-  -> applicable_architecture_review_pass_after_behavior_verified
-  -> commit_merge_push_verified
-终点: cleanup_verified
-```
-
-daemon 生命周期由用户管理，agent 不执行维护动作、不索取凭据，也不为身份恢复
-申请维护窗口。安装、源码测试与 live 验收分别报告；用户激活后验证受影响行为。
-
 **peer 资源回收单源单汇：**
 
 - 入口：本任务生命周期终点；
@@ -1645,11 +1106,9 @@ alias. When a finite goal or task patrol has no actionable work, end it through
 its owner lifecycle (`appsdk goal cancel` for a goal, task closure for a
 task-owned schedule); this never controls base direct-message reception.
 
-AGY review is not used for Collab v1 lifecycle gates. Ordinary review uses an
-independent review path when review is required; milestone review uses Codex
-Review with the `oauth` profile and `gpt-6.1-sol`. Astra is not a reviewer.
-Missing AGY is not a blocker because it is excluded; missing a
-declared review gate is a failure.
+Review routing, model selection, and review backends follow the host
+Plan/Review contract. Collab v1 keeps an independent reviewer requirement but
+adds no model or provider table. Missing a declared review gate is a failure.
 
 Without an available, verified selected transport, initialization fails
 explicitly. AppServer is preferred when its candidate passes the owner
@@ -1683,179 +1142,6 @@ urgency against the current task. When selecting the notice, run
 request inside this Agent's scope. Do not stop at ACK or waiting; mailbox truth
 persists.
 
-### Situation -> action (one entry)
-
-This table applies to registered participants recovering state, or to initial
-registration explicitly requested by the user. It does not activate Collab
-merely because an agent enters a project.
-
-`collab context` is the single agent entry. It resolves the canonical root,
-connects to the existing daemon, creates a missing baseline when applicable,
-restores peer identity, re-arms the default direct-message lease, and returns the
-authoritative snapshot plus the current role's `operations`.
-
-That one snapshot is also the agent's complete state read. It carries the
-projections that used to require separate calls, so no agent flow needs to run
-`collab who`, `collab status --all`, `collab master status`, or a shell
-`env | rg` probe first:
-
-| Snapshot field | Replaces | Contents |
-|---|---|---|
-| `master` | `collab master status` | current master authority projection (holder, scope, approval) and `master_wake`; transport liveness is a separate fact |
-| `peers`, `peer_count` | `collab who` | every registered peer with role and presence |
-| `summary`, `master_wake`, `subagents` | `collab status --all` | worker/message/task/subagent counts and the scheduling state |
-| `pending_merges` | `collab status --all` | applicable durable code-delivery merge obligations; explicit read-only delivery has none |
-| `env` | `env \| rg '(COLLAB\|APPSDK\|CODEX\|HOME\|USER)'` | the identity-relevant variables of this agent's own process; credential-shaped names (`*TOKEN*`, `*KEY*`, `*SECRET*`, `*PASSWORD*`, `*CREDENTIAL*`) are dropped, so `CODEX_API_KEY` never appears |
-| `operations`, `next_actions` | — | the current role's required actions |
-| `requires_identity_update` | — | present only when the agent must repair its identity; see below |
-
-| Situation | Do this | Never do this |
-|---|---|---|
-| User explicitly requests first registration | `collab context` | automatic registration merely on entering a project; a separate identity probe, or `collab init` used as a substitute for `collab context` |
-| Another worker or project claims your tmux pane, or the recorded pane route is stale | `collab context`; the daemon replaces the claim by default | inspect routes or archives, pick a worker id, or edit any route/identity file |
-| Master authority must move to this peer | `collab master promote --approval "<user text>"` | promote without explicit user approval |
-| Master authority must be cleared for this project scope | `collab master clear --approval "<user text>"` | clear without explicit user approval; or expect clear to delete tasks, messages, peers, or bindings |
-| Thread/session changed, or after daemon restart | `collab context` (daemon reconciles identity in place) | manual identity or daemon lifecycle commands |
-| Worker status, board admission, or a mutation reports a stale binding generation or `SESSION_THREAD_BINDING_MISMATCH` | preserve the registered binding and run `collab context` as the only repair entry | manually rebind, edit routes or journals, or infer a binding |
-| Need peer list, master state, scheduling state, or env | read them from the single `collab context` snapshot | call `collab who`, `collab status --all`, `collab master status`, or grep the environment as a separate step |
-| `requires_identity_update` is present | supply only requested real runtime facts; a user-authorized identity/name/role recovery uses the exact intent command in stable-name-recovery; context handles migration internally | guess archived workers, inspect routes/tokens, hand-edit state, invent approval or treat historical ambiguity as insufficient user authority |
-| `collab context` exits non-zero with `COLLAB_CONTEXT_UNRESOLVED` | preserve the error; failed initial registration continues independently; existing registered participants report the affected coordination without clearing owned tasks/claims | automatically retry from another cwd; edit routes/token state, copy identity, reset the project |
-| Default lease looks stopped | `collab context` re-arms it from the registered identity | probe sockets, call a transport directly |
-| Notification arrived | DSH: act on the native full body and reply with `collab sendmessage`; other transports: run `collab recv` once, then act | DSH running `recv`/`ack` or recovery before replying; treating submission as consumption |
-| Master has a pending merge | `collab context` → `pending_merges`, merge the candidate, then `collab task integrated` | rely on a remembered message, or try to close first |
-
-### Master peer CRUD
-
-`collab context` returns a `peer_lifecycle` operation card only to the current
-master. It contains the exact commands, scope rule, success receipt, and failure
-handling. Use it as the command contract. A peer with no current master grant
-does not manage other peers.
-
-All targets must belong to the same registered canonical project `main` and app
-scope as the master. The requested `cwd` may be the main checkout or any
-existing directory/linked worktree in that same project. Collab resolves the
-worktree to its registered `main`; directory nesting or a matching path prefix
-does not establish project identity.
-
-| When | Command | Required result |
-|---|---|---|
-| Create a peer | `collab worker create <peer-id> --cwd <existing-project-dir-or-linked-worktree> --op <stable-operation-id> [--model <model>]` | `outcome=complete`; response identifies the real thread, route, registration, and verified ready turn. Reuse the same operation ID to recover a retry; never create a replacement ID after an unknown result. |
-| Inspect a peer | `collab worker read <peer-id>` | `outcome=ok` with the exact peer lifecycle projection. `collab worker read` with no ID reads the caller. |
-| Move a peer's AppServer cwd | `collab worker update <peer-id> --cwd <existing-project-dir-or-linked-worktree>` | First call omits `--op`. `outcome=complete` requires settings update and cwd readback. Supply `--op <returned-operation-id>` only to retry/query that retained update after an uncertain result. |
-| Unregister yourself | `collab worker close --self --reason "<auditable reason>"` | The authenticated current pane may retire its own identity even with outstanding tasks. `outcome=complete` requires self binding and route retirement; `runtime_archive=not-applicable`. The host process, tasks, messages and history are preserved. Only this identity's exact master grant is revoked. |
-| Close another peer | `collab worker close <peer-id> --reason "<auditable reason>"` | First call omits `--op`. `outcome=complete` requires verified runtime archive and peer, binding, route, lease, and subscription retirement. Open responsibilities are refused. Use `--op <returned-operation-id>` only for its retained retry/query. |
-| Read an uncertain operation | `collab worker query --op <returned-operation-id>` | Reads the retained outcome without repeating a host effect. Do not start a replacement operation while the result is unknown. |
-
-For self-unregister, the first call also omits `--op`; use the returned operation
-ID for query or retained retry. Self-close does not stop the host process or
-delete tasks, messages, claims, pending merges or history. Unread messages
-remain durable. A later `collab context` at the same live anchor rebuilds a
-default peer with a current binding and route. It does not restore the retired
-master grant.
-
-### Peer observation
-
-Any authenticated peer of the same registered project may read the latest live
-buffer of an exact registered tmux peer. Master authority is not required
-because the read changes no durable state.
-
-| When | Command | Required result |
-|---|---|---|
-| Decide whether to keep waiting, escalate, or steer | `collab snapshot <peer-id> --lines <1..200>` | Returns the latest bounded, transient tmux pane buffer through one presence check and one `capture-pane`. It sends no input, consumes no mailbox message, bumps no revision, and writes no durable snapshot receipt. AppServer and DSH peers remain unsupported. |
-
-`collab worker snapshot <peer-id> --lines <1..200>` remains a compatibility
-alias. The buffer is only the latest visible pane text. It does not prove
-busy/idle, Codex turn state, message consumption, or task completion.
-
-For `refused`, `partial`, or `unknown`, keep the typed response and its
-operation ID. A responsibility or project-scope refusal has no lifecycle
-success; fix the named condition before a new operation. An unknown or partial
-result is not success: query that operation and do not claim the peer was
-created, updated, or closed until its verified terminal receipt says so.
-
-Read-only operator diagnostics remain available for human audit: `collab who`,
-`collab status --all`, `collab worker status`, `collab
-route resolve`, and `collab master status`. They are not agent identity
-recovery steps. User daemon maintenance is outside the agent interface.
-`collab init` is not an agent bootstrap and not a second identity algorithm: it
-drives the same daemon identity gate as `collab context`, and it remains the
-documented entry for existing AppSDK init consumers. Historical pane claims
-do not override the current cwd/session or block peer
-restoration. Optional user authorization replaces the current project master
-through the existing authority owner.
-
-### Context 状态与终点（DAGpipe：单源单汇）
-
-`context_request` 是唯一入口，`state_snapshot` 是本次权威结果出口。现有七节点链为：
-解析项目与控制范围 → 读取现有服务 → 读取持久名字、agent sessionID 与占用 →
-判定续接、分配、确认或待决 → 提交名字绑定并同步未关闭任务或持久待决 →
-生成安全环境投影 → 输出含名字归属的权威快照。binding 收敛属于现有名字提交链，
-由既有 credential/binding/route owner 完成，不另建身份选择路径。
-Binding convergence makes context completion, worker status, and board admission
-read one authoritative project/app/agent binding and endpoint generation. Only
-context repairs; status and board admission are read-only consumers. Missing,
-ambiguous, stale, or principal-mismatched bindings return a typed
-`SESSION_THREAD_BINDING_MISMATCH` with known expected/observed generations and
-`collab context` as the only repair entry.
-The canonical project and app scope bound the lookup; another project's binding
-or a historical pane/native route cannot supply a missing current binding.
-Endpoint liveness remains separate from durable identity validity.
-
-Missing facts are the terminal of this invocation: `registered=false`,
-`identity=null`, and `requires_identity_update` gives exact `required_fields`,
-`reason`, `action`, and `exact_error`. The agent uses one
-`collab context --provide` for this invocation's requested current facts; native
-facts are required on every new context call, even after registration. Initial
-registration does not wait for challenge. Root failures and explicit
-conflicts preserve the original error and do not masquerade as a successful
-snapshot:
-
-| 状态/终态 | 含义 | Agent 动作 |
-| --- | --- | --- |
-| `state_snapshot` 且 `registered=true` | 注册成功；含 role/operations/master/peers/peer_count/summary/master_wake/subagents/inbox/worktrees/tasks/env | 读快照执行已注册角色的 `operations`；无需再跑 who/status/master status |
-| 历史 pane claim 与当前投递位置不符 | daemon 对齐通信位置；不由 pane 决定名字归属 | 名字续接按稳定名字合同；在线他人占名需确认，unknown 交 Jenny |
-| 名字占用 unknown | 持久 context operation 返回 `pending`；不是注册成功 | 等待同一请求裁决续接；Jenny 自身 unknown 且本次用户明确恢复并确认接管时直接接管 Jenny/master |
-| `identity_update` | daemon 缺少真实运行事实；`registered=false`，`requires_identity_update.required=true` | 按 `required_fields`/`reason`/`action` 只补实际缺项。已授权恢复意图按稳定名字合同提交；重复档案及旧绑定由 context 自行迁移。若仍泄漏裸历史冲突，保留原错作为实现缺陷，不让 agent 选旧身份或维护控制面 |
-| 可选通信诊断 pending | 原身份与当前 route 仍可用；诊断 reply 未完成 | 该诊断不是恢复前提；若显式使用，participant 从所选 adapter 读取 challenge 并从自身环境回传；`--query` 保持只读 |
-| `COLLAB_CONTEXT_UNRESOLVED` | 无 route、无 baseline、无 git 根（非零退出） | 保留原错，不自动换 cwd 重试；首次注册失败则独立继续，已注册者报告受影响协作，保留已领任务/claim |
-| 拒绝在 playground 创建基线 | 在 worktree 内引导（非零退出） | 保留原错，不改主树或删除旧身份；首次注册失败则独立继续，已注册者保留已有职责并报告协作缺口 |
-| 默认订阅已停 | daemon 按当前注册身份自动重武装，不存在显式退订 | 需要再收消息时运行 `collab context` 自动恢复，不由 agent 手工重订阅 |
-
-`requires_identity_update.reason` is a typed code. It is not prose and it is not
-permission to select a worker. The supplement has exactly the four scalar fields
-`session_id`, `thread_id`, `endpoint`, and `namespace`. A value that conflicts
-with an automatically observed fact is `IDENTITY_FACT_CONFLICT`, not an override.
-Historical duplicate identities and retired carriers are context-owned migration
-inputs, not conflicts for the agent to resolve. Current user-approved recovery
-is evaluated before those records. Real input conflicts, token rejection, route failure, runtime-binding failure, and
-transport failure keep their original error and non-zero exit; unapproved
-automatic resolution cannot bypass them. A communication diagnostic can await
-a participant return; ordinary identity restoration does not.
-
-完整语义图、转移表和 owner 映射见 `docs/collab-context-state-machine.md`；
-机器可校验 SESE 图见 `docs/dagpipe/collab-context.graph.json`
-（`dagpipe graph validate`）。
-
-## Initialize once
-
-Only for an existing registered participant or an explicit user request to
-register, the single state entry is:
-
-```sh
-collab context
-```
-
-The daemon-owned identity context completes the bootstrap. It reconciles
-delivery placement inside this call. Pane history does not select the name;
-same-name continuation, online takeover confirmation, and unknown adjudication
-follow the stable-name contract.
-`collab init` is not a second agent entry and not a second identity algorithm,
-but it drives the same daemon identity gate and stays the documented entry for
-existing AppSDK init consumers. Neither `collab init` nor AppSDK init creates,
-changes, or clears master authority; init is not an implicit authority reset.
-Agents do not run a separate identity, route or archive probe, or a manual
-subscription, as part of bootstrap.
-
 ## 三种宿主的注册方式与锚点（DSH / Codex TUI / Codex Desktop）
 
 注册入口对三种宿主相同：`collab context`。宿主只决定锚点与要报告的事实，
@@ -1878,95 +1164,9 @@ action=restore_master），或由已授权 master 委托。注册前先确认自
 加 communication API 联合判定；仅 session 相同会显式冲突失败，不会静默覆盖
 已有身份、角色或工作。DSH 首次注册只需普通 `collab context`，CLI 自动查询真实
 gateway 能力。缺控制声明属于 gateway 集成缺口，应保留明确错误，不让 agent
-查文件、猜 ids 或手工补值；显式 `--provide` 仍须来自真实能力。详见 AppServer runtime
-registration 与 DSH 段的验证规则。
-
-## AppServer runtime registration
-
-Register only the AppServer that serves the current caller's active session and
-thread. The endpoint, session ID, and thread ID must come from that caller's
-own runtime; never submit another agent's or worker's AppServer, session, or
-thread, even if it is reachable. If ownership of the exact endpoint and tuple
-cannot be established, fail registration rather than borrowing another
-runtime's identity.
-
-Registration derives the host namespace from the active runtime. The exact
-`CODEX_INTERNAL_ORIGINATOR_OVERRIDE=Codex Desktop` marker selects `codex_app`;
-`Codex CLI` or `Codex TUI` selects `codex_tui`, and `TMUX_PANE` selects
-`codex_tui` when no originator marker is present. An explicit
-`COLLAB_APPSERVER_NAMESPACE` is reserved for nonstandard hosts and must be one
-of those two values. Unknown host markers never select an AppServer namespace.
-With an explicit AppServer socket they fail registration; without one, the
-adapter returns no AppServer candidate and may continue through another
-existing transport only after that transport's normal verification. Never
-default an unidentified session to `codex_tui`.
-
-For the AppServer branch, the Collab client accepts only `COLLAB_APPSERVER_SOCKET` or
-`CODEX_APP_SERVER_SOCKET` supplied by the current runtime as the endpoint for
-the current session. In particular, never derive
-`$CODEX_HOME/app-server-control/app-server-control.sock` or
-`$HOME/.codex/app-server-control/app-server-control.sock`: those are
-host-managed paths, and their existence, owning daemon PID, or ability to list
-the thread does not prove that the registering client uses that AppServer.
-Never copy a parent agent's, another process's, or a merely host-managed
-endpoint into registration or `collab context --provide`. A matching
-`thread/read` result proves that an endpoint can access the thread; it does not
-prove that the current client uses that AppServer. If the current runtime does
-not provide its endpoint, do not register an AppServer route or guess one; use
-another already verified transport only when it belongs to this peer, otherwise
-report that registration lacks a current-session endpoint. `CODEX_APP_TOOLS_PIPE_PATH`
-is a tool pipe, not an AppServer endpoint. Desktop uses a runtime-shared bridge:
-CLI automatically enrolls its current session/thread, and native Desktop verifies
-the canonical project before the bridge publishes a scoped capability. Native
-service calls use explicit correlation IDs, which do not claim agent turns. The daemon
-connects only that bridge UDS; it does not connect the tools pipe or require
-a nonexistent AppServer endpoint. Runtime service correlation remains separate
-from agent execution evidence and the message sender. See
-[current recovery facts](references/stable-name-recovery.md).
-The daemon still verifies the exact thread/session/project tuple before
-committing a supplied route.
-
-The AppServer namespace is persisted with the recipient route. Its `turn/start`
-notifications use that stored recipient namespace (`codex_app` or
-`codex_tui`); they never infer it from the sender or hardcode the TUI namespace.
-If an AppServer endpoint is unavailable before registration, the existing
-transport selection rules apply. Once an AppServer binding is selected, do not
-switch transports after an RPC error.
-
-## Worktree identity
-
-A Git worktree is a task execution directory, not a second identity or a
-substitute for the canonical project root. A peer and its master are related
-through the same registered canonical project `main` and app scope. Their
-worktrees may be in different directories. `collab context` resolves the
-canonical root automatically and the daemon owns identity selection, creation,
-recovery, update, route publication, and binding persistence. Do not create a
-worktree-local peer. External linked worktrees resolve to their registered Git
-main root for context and ordinary commands; path containment does not establish
-project identity. Do not switch cwd to recover an identity. The `collab context` snapshot is the agent's complete
-master-authority and peer read. A failed context is not evidence that no master
-exists; preserve the exact error. Master promotion requires explicit user
-approval and an authenticated current binding, not the incumbent's or the
-candidate's liveness. `collab master status` remains a
-read-only operator diagnostic.
-
-### Native thread route resolution
-
-The daemon is the sole route selector. The current AppServer owner plus exact
-session/thread binding identifies a route. Historical routes and tombstones
-are not candidates. The daemon verifies the selected owner with native
-`thread/read`; a tmux socket + pane locates transport only. Name ownership and
-the current agent sessionID determine continuation. Tmux never substitutes for
-an AppServer communication channel. The daemon reads tmux route ownership
-without an admission probe.
-
-`collab route resolve` exposes a read-only operator diagnostic for the current
-native thread; `--native-thread-id <id>` and `--session-id <id>` must match the
-live runtime binding. It is not an agent identity recovery step. The daemon
-returns exactly one route, `ROUTE_RESOLVE_NOT_FOUND` for zero matches, and
-`ROUTE_RESOLVE_AMBIGUOUS` when multiple current bindings match. Missing, unknown,
-mismatched, or malformed endpoints fail explicitly. The resolver is read-only
-and returns no token.
+查文件、猜 ids 或手工补值；显式 `--provide` 仍须来自真实能力。详见
+[AppServer runtime registration](references/migration-daemon.md#appserver-runtime-registration)
+与 DSH 段的验证规则。
 
 ## Subscribe to a future event
 
@@ -2012,8 +1212,8 @@ claim an independent goal or infer master authority.
   authority. Last owned
   task close keeps that owner's auto-notify armed. There is no subscription-closing
   command; end a leftover finite goal schedule with `appsdk goal cancel` and
-  keep base direct-message reception daemon-owned. AGY review is not a Collab v1 gate; ordinary review is independent,
-  and milestone review uses Codex Review (`oauth`, `gpt-6.1-sol`). Legacy
+  keep base direct-message reception daemon-owned. Review routing and model
+  selection follow the host Plan/Review contract; Collab adds no model table. Legacy
   managed records remain diagnostic compatibility facts only.
 - Each peer owns its complete task/worktree/integration/resource/cleanup
   lifecycle. Never mutate or close another peer's work.
@@ -2034,10 +1234,18 @@ claim an independent goal or infer master authority.
 
 - Task/worktree registration, delivery, close, cleanup:
   [references/task-worktree-lifecycle.md](references/task-worktree-lifecycle.md)
+  (also public board commands, dashboard, and task liveness/escalation)
 - Resource conflicts and bounded waits:
   [references/resource-waits.md](references/resource-waits.md)
-- Migration, user-managed daemon boundary, deprecated commands:
+- Migration, reset, user-managed daemon boundary, peer lifecycle CRUD, CEO and
+  cross-project master channel, AppServer registration, deprecated commands:
   [references/migration-daemon.md](references/migration-daemon.md)
+- Subscriptions, notification delivery, and patrol schedules:
+  [references/notifications.md](references/notifications.md)
+- Explicit recovery variants and context terminal states:
+  [references/stable-name-recovery.md](references/stable-name-recovery.md)
+- State paths, transport selection, and read-only route diagnostics:
+  [references/state-paths.md](references/state-paths.md)
 - Source/release/install/live verification:
   [references/verification.md](references/verification.md)
 

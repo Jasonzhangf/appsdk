@@ -49,6 +49,10 @@ pub struct State {
     pub receive_receipts: HashMap<String, ReceiveReceipt>,
     pub tasks: HashMap<String, TaskRec>,
     pub board_details: HashMap<String, crate::board::BoardTaskDetails>,
+    pub cancelled_board_patrol_tasks:
+        std::collections::BTreeMap<String, crate::board_patrol_policy::TaskPatrolCancelRecord>,
+    pub board_patrol_gates:
+        std::collections::BTreeMap<String, crate::board_patrol_policy::PeerBoardPatrolGate>,
     pub scheduler_admissions: HashMap<String, SchedulerAdmissionRecord>,
     pub task_lifecycle: HashMap<String, TaskLifecycleRecord>,
     /// Accepted tasks awaiting a main merge, keyed by task id. Daemon-owned so

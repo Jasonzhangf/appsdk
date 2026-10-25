@@ -1,4 +1,5 @@
 mod board;
+pub mod board_patrol_policy;
 mod ceo;
 mod client;
 mod config;

@@ -830,6 +830,10 @@ fn responsibility_effect<'a>(state: &'a State, event: &'a Event) -> Responsibili
         {
             ResponsibilityEffect::Mutates(operation.exact_target().worker_id.as_str())
         }
+        Event::BoardPatrolCancelled { .. } => ResponsibilityEffect::Safe,
+        Event::BoardPatrolRearmed { .. } => ResponsibilityEffect::Safe,
+        Event::BoardPatrolCancellationCleared { .. } => ResponsibilityEffect::Safe,
+        Event::BoardPatrolGateUpdated { .. } => ResponsibilityEffect::Safe,
         Event::ReducerSnapshot { .. } => ResponsibilityEffect::Safe,
         _ => ResponsibilityEffect::Safe,
     }
@@ -1502,6 +1506,20 @@ pub enum Event {
     BoardDetailsChanged {
         task_id: String,
         details: crate::board::BoardTaskDetails,
+    },
+    BoardPatrolCancelled {
+        record: crate::board_patrol_policy::TaskPatrolCancelRecord,
+    },
+    BoardPatrolRearmed {
+        task_id: String,
+        owner_key: String,
+    },
+    BoardPatrolCancellationCleared {
+        task_id: String,
+    },
+    BoardPatrolGateUpdated {
+        worker_id: String,
+        gate: crate::board_patrol_policy::PeerBoardPatrolGate,
     },
     /// Compacted journal baseline. The payload is the existing snapshot event
     /// set, and `sequence`/`revision` are the exact pre-compaction counters.

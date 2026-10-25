@@ -948,6 +948,26 @@ impl State {
             Event::BoardDetailsChanged { task_id, details } => {
                 self.board_details.insert(task_id.clone(), details.clone());
             }
+            Event::BoardPatrolCancelled { record } => {
+                self.cancelled_board_patrol_tasks
+                    .insert(record.task_id.clone(), record.clone());
+            }
+            Event::BoardPatrolRearmed { task_id, owner_key } => {
+                if self
+                    .cancelled_board_patrol_tasks
+                    .get(task_id)
+                    .is_some_and(|record| record.owner_key == *owner_key)
+                {
+                    self.cancelled_board_patrol_tasks.remove(task_id);
+                }
+            }
+            Event::BoardPatrolCancellationCleared { task_id } => {
+                self.cancelled_board_patrol_tasks.remove(task_id);
+            }
+            Event::BoardPatrolGateUpdated { worker_id, gate } => {
+                self.board_patrol_gates
+                    .insert(worker_id.clone(), gate.clone());
+            }
             Event::ReducerSnapshot { .. } => {
                 return Err("reducer snapshot is replay-only".into());
             }
@@ -1934,6 +1954,18 @@ impl State {
                     details: details.clone(),
                 }),
         );
+        events.extend(
+            self.cancelled_board_patrol_tasks
+                .values()
+                .cloned()
+                .map(|record| Event::BoardPatrolCancelled { record }),
+        );
+        events.extend(self.board_patrol_gates.iter().map(|(worker_id, gate)| {
+            Event::BoardPatrolGateUpdated {
+                worker_id: worker_id.clone(),
+                gate: gate.clone(),
+            }
+        }));
         (self.sequence, self.revision, events)
     }
 
@@ -2059,5 +2091,147 @@ mod ceo_reply_scope_tests {
         assert_eq!(obligation.from_worker_id,"ceo-worker","a recipient-project name cannot own the foreign sender");
         assert_eq!(obligation.recipient_worker_id,"new-master");
         assert!(!obligation.reminded_idle_episode);
+    }
+}
+
+#[cfg(test)]
+mod board_patrol_state_tests {
+    use super::*;
+
+    fn cancel_record(
+        task_id: &str,
+        owner_key: &str,
+    ) -> crate::board_patrol_policy::TaskPatrolCancelRecord {
+        crate::board_patrol_policy::TaskPatrolCancelRecord {
+            task_id: task_id.into(),
+            owner_key: owner_key.into(),
+            reason: Some("operator pause".into()),
+            resume_condition: Some("operator resume".into()),
+            cancelled_ms: 42,
+        }
+    }
+
+    fn gate(owner_key: &str) -> crate::board_patrol_policy::PeerBoardPatrolGate {
+        crate::board_patrol_policy::PeerBoardPatrolGate {
+            owner_key: owner_key.into(),
+            last_wake_ms: 100,
+            last_realtime_idle_since_ms: 90,
+            last_wake_tasks: vec!["task-a".into()],
+            next_due_ms: 900_100,
+        }
+    }
+
+    fn unrelated_task() -> TaskRec {
+        TaskRec {
+            id: "task-unrelated".into(),
+            owner: "owner-b".into(),
+            created_by: "master".into(),
+            feature_id: None,
+            worktree_path: None,
+            branch: None,
+            base_commit: None,
+            priority: "p2".into(),
+            status: "working".into(),
+            next_step: None,
+            wait: None,
+            created_ms: 1,
+            updated_ms: 1,
+        }
+    }
+
+    fn unrelated_message() -> Message {
+        Message {
+            id: "message-unrelated".into(),
+            from: "owner-a".into(),
+            to: "owner-b".into(),
+            mtype: "request".into(),
+            subject: None,
+            body: "keep me".into(),
+            in_reply_to: None,
+            created_ms: 1,
+            state: "pending".into(),
+            wake_attempt_count: 0,
+            last_wake_attempt_ms: 0,
+            retry_attempted: false,
+        }
+    }
+
+    fn replay_through_serde(state: &State) -> State {
+        let body = state
+            .snapshot_events()
+            .iter()
+            .map(|event| serde_json::to_string(event).unwrap())
+            .collect::<Vec<_>>();
+        let mut replayed = State::default();
+        for line in body {
+            let event: Event = serde_json::from_str(&line).unwrap();
+            replayed.apply(&event);
+        }
+        replayed
+    }
+
+    #[test]
+    fn cancellation_and_gate_survive_snapshot_serde_replay_preserving_unrelated_state() {
+        let mut state = State::default();
+        state.apply(&Event::TaskCreated {
+            task: unrelated_task(),
+        });
+        state.apply(&Event::Sent {
+            msg: unrelated_message(),
+        });
+        state.apply(&Event::BoardPatrolCancelled {
+            record: cancel_record("task-a", "owner-a"),
+        });
+        state.apply(&Event::BoardPatrolGateUpdated {
+            worker_id: "worker-a".into(),
+            gate: gate("owner-a"),
+        });
+
+        let replayed = replay_through_serde(&state);
+
+        assert_eq!(
+            replayed.cancelled_board_patrol_tasks.get("task-a"),
+            state.cancelled_board_patrol_tasks.get("task-a")
+        );
+        assert_eq!(
+            replayed.board_patrol_gates.get("worker-a"),
+            state.board_patrol_gates.get("worker-a")
+        );
+        assert_eq!(replayed.tasks["task-unrelated"].id, "task-unrelated");
+        assert_eq!(replayed.msgs["message-unrelated"].body, "keep me");
+    }
+
+    #[test]
+    fn rearm_removes_only_matching_owner() {
+        let mut state = State::default();
+        state.apply(&Event::BoardPatrolCancelled {
+            record: cancel_record("task-a", "owner-a"),
+        });
+
+        state.apply(&Event::BoardPatrolRearmed {
+            task_id: "task-a".into(),
+            owner_key: "owner-b".into(),
+        });
+        assert!(state.cancelled_board_patrol_tasks.contains_key("task-a"));
+
+        state.apply(&Event::BoardPatrolRearmed {
+            task_id: "task-a".into(),
+            owner_key: "owner-a".into(),
+        });
+        assert!(!state.cancelled_board_patrol_tasks.contains_key("task-a"));
+    }
+
+    #[test]
+    fn explicit_clear_persists_absence_after_replay() {
+        let mut state = State::default();
+        state.apply(&Event::BoardPatrolCancelled {
+            record: cancel_record("task-a", "owner-a"),
+        });
+        state.apply(&Event::BoardPatrolCancellationCleared {
+            task_id: "task-a".into(),
+        });
+
+        let replayed = replay_through_serde(&state);
+        assert!(replayed.cancelled_board_patrol_tasks.is_empty());
     }
 }

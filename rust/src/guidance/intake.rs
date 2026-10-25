@@ -335,35 +335,9 @@ fn bootstrap_setup(root: &Path, project: &Value, selected_module: &Value, task: 
         },
         "read_first": sources,
         "skill_commands": skill_commands,
-        "questions": [
-            {
-                "question_id": "standard_template_comparison",
-                "prompt": "Read the effective upper-level rules, local AGENTS and Skills, actual test commands, and CI/hook behavior first. Compare the actual entrypoints with the installed AppSDK standard template. Audit each difference for deletion, merge, scope reduction, or necessary addition; retain project decisions and record declined template items. Reuse valid audit evidence when no relevant resource changed.",
-                "required": true
-            },
-            {
-                "question_id": "standard_workflows",
-                "prompt": "Resolve the applicable develop, debug, review, delivery, integration and cleanup flows from the project documents and existing authorization. Ask only material unresolved questions. Promotion and freeze apply only to an explicitly selected release flow, never ordinary development.",
-                "required": true
-            },
-            {
-                "question_id": "project_commands",
-                "prompt": "Confirm the project-owned test, build, install, restart, deployed-entrypoint replay, review, merge, and cleanup commands, their evidence, the risk-based selection for ordinary changes, and the full release gate.",
-                "required": true
-            },
-            {
-                "question_id": "rule_ownership",
-                "prompt": "Confirm which facts remain in AGENTS.md, which reusable procedures belong in project-local Skills, and which nodes, edges, gates, severities, commands, and evidence contracts belong in machine guidance. Keep one owner per rule and remove confirmed duplication or unnecessary structure.",
-                "required": true
-            },
-            {
-                "question_id": "approval_boundary",
-                "prompt": "Compare recommended durable changes with the existing conversation authorization. Reuse authorization that already covers a difference, and ask the user only about uncovered durable changes. Guidance compilation is optional and is not required when Guidance is not selected.",
-                "required": true
-            }
-        ],
+        "questions": [],
         "proposal_schema": proposal_schema,
-        "agent_instruction": "Read the effective upper-level rules, local AGENTS and Skills, actual test commands, and CI/hook behavior before the advisory AppSDK template. Correct only affected contradictions and confirmed duplication at the unique owner; record material decisions in existing task notes without a separate difference ledger. Reuse existing authorization and valid audit evidence. Ask only about uncovered durable changes. Do not require Guidance compilation when Guidance is not selected. Do not modify out-of-scope project rules, contracts or runtime state.",
+        "agent_instruction": "Read the effective upper-level rules, local AGENTS and Skills, actual test commands, and CI/hook behavior before the advisory AppSDK template. Resolve internal workflow, command, ownership, and template-comparison questions through the owning peer, designer, or master. Correct only affected contradictions and confirmed duplication at the unique owner; record material decisions in existing task notes without a separate difference ledger. Reuse existing authorization and valid audit evidence. Ask the user only for a genuinely uncovered durable authorization, a human-exclusive fact, or a change to an explicit hard constraint, naming the precise missing decision and affected scope. Do not require Guidance compilation when Guidance is not selected. Do not modify out-of-scope project rules, contracts or runtime state.",
         "after_user_approval": {
             "condition": "only for uncovered durable changes; reuse existing session authorization when it covers the change",
             "actions": [

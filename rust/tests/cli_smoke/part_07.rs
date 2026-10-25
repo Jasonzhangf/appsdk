@@ -364,6 +364,11 @@ fn repeated_init_projects_standard_template_and_bootstrap_upgrade_proposal() {
     );
     assert_eq!(intake_json["readiness"], "needs_conditional_authorization");
     assert_eq!(intake_json["writes_state"], false);
+    assert_eq!(intake_json["questions"], serde_json::json!([]));
+    assert!(intake_json["agent_instruction"]
+        .as_str()
+        .unwrap()
+        .contains("genuinely uncovered durable authorization"));
     assert_eq!(
         intake_json["standard_template"]["path"],
         ".appsdk/templates/minimal/AGENTS.md"
@@ -507,6 +512,117 @@ fn repeated_init_projects_standard_template_and_bootstrap_upgrade_proposal() {
 
     fs::remove_dir_all(root).unwrap();
     fs::remove_dir_all(outside).unwrap();
+}
+
+#[test]
+fn bootstrap_intake_returns_only_declared_gaps_and_keeps_conditional_authorization() {
+    let root = temp_root("guidance-bootstrap-declared-gaps");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    fs::write(
+        root.join("AGENTS.md"),
+        "# Project rules\n\nUse the project test command before merge.\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("skills/project-flow")).unwrap();
+    fs::write(
+        root.join("skills/project-flow/SKILL.md"),
+        "---\nname: project-flow\ndescription: Project-owned workflow.\n---\n",
+    )
+    .unwrap();
+
+    let intake = run(&[
+        "guide",
+        "init",
+        root_text,
+        "--task",
+        "guidance-setup",
+        "--mode",
+        "bootstrap",
+        "--module",
+        "app-core",
+    ]);
+    assert!(
+        intake.status.success(),
+        "{}",
+        String::from_utf8_lossy(&intake.stderr)
+    );
+    let intake_json: Value = serde_json::from_slice(&intake.stdout).unwrap();
+
+    assert_eq!(intake_json["questions"], serde_json::json!([]));
+    for question_id in [
+        "standard_template_comparison",
+        "standard_workflows",
+        "project_commands",
+        "rule_ownership",
+        "approval_boundary",
+    ] {
+        assert!(
+            !intake_json["questions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|question| question["question_id"] == question_id),
+            "bootstrap must not emit the internal {question_id} question"
+        );
+    }
+    assert!(intake_json.get("command_sequence").is_none());
+    assert!(intake_json.get("persistence").is_none());
+    assert_eq!(
+        intake_json["next"]["action"],
+        "agent_reads_effective_rules_and_presents_guidance_setup_proposal"
+    );
+    assert_eq!(
+        intake_json["next"]["requires"],
+        "authorization_check_for_uncovered_durable_changes"
+    );
+    assert_eq!(intake_json["readiness"], "needs_conditional_authorization");
+
+    let agents_source = intake_json["read_first"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["path"] == "AGENTS.md")
+        .unwrap();
+    assert_eq!(agents_source["precedence"], 100);
+    assert!(agents_source.get("digest").is_none());
+    assert_eq!(
+        intake_json["standard_template"]["path"],
+        ".appsdk/templates/minimal/AGENTS.md"
+    );
+    assert_eq!(intake_json["standard_template"]["version"], "0.1.0015");
+    assert!(intake_json["standard_template"].get("digest").is_none());
+    assert!(intake_json["read_first"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|source| source.get("digest").is_none()));
+
+    let instruction = intake_json["agent_instruction"].as_str().unwrap();
+    assert!(instruction.contains("owning"));
+    assert!(instruction.contains("genuinely uncovered durable authorization"));
+    assert!(instruction.contains("human-exclusive fact"));
+    assert!(instruction.contains("explicit hard constraint"));
+    assert!(instruction.contains("precise missing decision"));
+    assert!(instruction.contains("affected scope"));
+    assert_eq!(
+        intake_json["proposal_schema"]["approval_required"],
+        "uncovered_durable_changes_only"
+    );
+    assert_eq!(
+        intake_json["proposal_schema"]["authorization_reuse"],
+        "existing_session_authorization"
+    );
+    assert_eq!(
+        intake_json["after_user_approval"]["condition"],
+        "only for uncovered durable changes; reuse existing session authorization when it covers the change"
+    );
+    assert_eq!(intake_json["writes_state"], false);
+    assert!(!root
+        .join(".appsdk-control/guidance/guidance-setup")
+        .exists());
+
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

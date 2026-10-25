@@ -596,6 +596,168 @@ fn appsdk_master_and_peer_goals_use_real_daemon_and_native_delivery() {
 }
 
 #[test]
+#[ignore = "set APPSDK_GOAL_CONSUMER_BINARY and run explicitly"]
+fn appsdk_goals_arm_only_master_project_patrol() {
+    let fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "own-goal project patrol arm",
+        ],
+        THREAD_A,
+    );
+    std::fs::write(
+        fixture.project.join("master.md"),
+        "# Project orchestration\n",
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.project.join("peer.md"),
+        "# Delegated orchestration\n",
+    )
+    .unwrap();
+    let goal = |thread: &str, args: &[&str]| appsdk_goal(&fixture, &fixture.project, thread, args);
+    // Only the standing master-idle/project-patrol/-900000 record counts; the
+    // caller's own goal deadline and the daemon direct-message lease do not.
+    let project_patrols = |status: &Value| -> Vec<Value> {
+        status["subscriptions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|subscription| {
+                subscription["event"] == "master-idle"
+                    && subscription["subject"] == "project-patrol"
+                    && subscription["interval_ms"] == 900_000
+            })
+            .cloned()
+            .collect()
+    };
+
+    // The real AppSDK goal init must arm the master's standing project patrol.
+    let master = goal(
+        THREAD_A,
+        &[
+            "goal",
+            "subscribe",
+            "--goal",
+            "master.md",
+            "--interval",
+            "5m",
+            "--json",
+        ],
+    );
+    assert_eq!(master["patrol_source"], "armed", "{master}");
+    let master_status = fixture.run_public(&["notify", "status"], THREAD_A);
+    let armed = project_patrols(&master_status);
+    assert_eq!(
+        armed.len(),
+        1,
+        "exactly one armed project-patrol subscription: {master_status}"
+    );
+    assert_eq!(armed[0]["status"], "armed", "{master_status}");
+    let patrol_id = armed[0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        master["patrol_subscription_id"].as_str(),
+        Some(patrol_id.as_str()),
+        "{master}"
+    );
+    let deadline_id = master["subscription_id"].as_str().unwrap().to_owned();
+
+    // A peer goal must not arm a project patrol of its own.
+    let peer = goal(
+        THREAD_B,
+        &[
+            "goal",
+            "subscribe",
+            "--goal",
+            "peer.md",
+            "--interval",
+            "5m",
+            "--json",
+        ],
+    );
+    assert_ne!(master["owner"], peer["owner"]);
+    assert_ne!(peer["patrol_armed"], true, "{peer}");
+    let peer_status = fixture.run_public(&["notify", "status"], THREAD_B);
+    assert!(
+        project_patrols(&peer_status).is_empty(),
+        "peer notify status must not contain project-patrol: {peer_status}"
+    );
+
+    // Restoring the existing master goal keeps the same standing resource.
+    let restored = goal(
+        THREAD_A,
+        &[
+            "goal",
+            "subscribe",
+            "--goal",
+            "master.md",
+            "--interval",
+            "5m",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        restored["patrol_subscription_id"].as_str(),
+        Some(patrol_id.as_str()),
+        "{restored}"
+    );
+    let restored_status = fixture.run_public(&["notify", "status"], THREAD_A);
+    let restored_patrols = project_patrols(&restored_status);
+    assert_eq!(
+        restored_patrols.len(),
+        1,
+        "one valid project-patrol resource after restore: {restored_status}"
+    );
+    assert_eq!(restored_patrols[0]["id"].as_str(), Some(patrol_id.as_str()));
+
+    // Cancelling the goal's finite deadline retires that deadline but must keep
+    // the standing patrol and the daemon direct-message lease armed.
+    let cancelled = goal(THREAD_A, &["goal", "cancel", "--json"]);
+    assert_eq!(cancelled["status"], "cancelled", "{cancelled}");
+    let after_cancel = fixture.run_public(&["notify", "status"], THREAD_A);
+    let deadline_retired = after_cancel["subscriptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|subscription| subscription["id"] == deadline_id.as_str())
+        .is_none_or(|subscription| subscription["status"] != "armed");
+    assert!(
+        deadline_retired,
+        "goal cancel must retire the finite deadline: {after_cancel}"
+    );
+    let standing = project_patrols(&after_cancel);
+    assert_eq!(
+        standing.len(),
+        1,
+        "standing project patrol retained after goal cancel: {after_cancel}"
+    );
+    assert_eq!(standing[0]["id"].as_str(), Some(patrol_id.as_str()));
+    assert_eq!(standing[0]["status"], "armed", "{after_cancel}");
+    assert!(
+        has_direct_message_subscription(&after_cancel),
+        "direct-message lease retained after goal cancel: {after_cancel}"
+    );
+
+    // Cancelling the peer goal must not touch the master's standing resource.
+    let peer_cancel = goal(THREAD_B, &["goal", "cancel", "--json"]);
+    assert_eq!(peer_cancel["status"], "cancelled", "{peer_cancel}");
+    let after_peer_cancel = fixture.run_public(&["notify", "status"], THREAD_A);
+    let still_standing = project_patrols(&after_peer_cancel);
+    assert_eq!(
+        still_standing.len(),
+        1,
+        "master standing patrol unaffected by peer goal cancel: {after_peer_cancel}"
+    );
+    assert_eq!(still_standing[0]["id"].as_str(), Some(patrol_id.as_str()));
+    assert_eq!(still_standing[0]["status"], "armed", "{after_peer_cancel}");
+}
+
+#[test]
 fn peer_goal_deadline_is_delivered_consumed_and_cancelled_without_master_proxy() {
     let fixture = AppFixture::new();
     fixture.run_public(&["context"], THREAD_A);
@@ -970,10 +1132,7 @@ fn board_idle_patrol_control_cancel_persists_and_rearm_keeps_inbox() {
     assert_eq!(before["board_patrol"]["interval_ms"], 900_000);
     assert_eq!(before["board_patrol"]["periodic_fallback"], true);
     assert_eq!(before["board_patrol"]["realtime_connected"], false);
-    assert_eq!(
-        board_patrol_ids(&before, "eligible_task_ids"),
-        vec!["T1"]
-    );
+    assert_eq!(board_patrol_ids(&before, "eligible_task_ids"), vec!["T1"]);
     assert!(board_patrol_ids(&before, "cancelled_tasks").is_empty());
     assert!(
         has_direct_message_subscription(&before),
@@ -1008,10 +1167,7 @@ fn board_idle_patrol_control_cancel_persists_and_rearm_keeps_inbox() {
     let resumed = fixture.run_public(&["context"], THREAD_A);
     assert_eq!(resumed["name"], "Alice");
     let persisted = fixture.run_public(&["notify", "status"], THREAD_A);
-    assert_eq!(
-        persisted["board_patrol"]["cancelled_tasks"],
-        json!(["T1"])
-    );
+    assert_eq!(persisted["board_patrol"]["cancelled_tasks"], json!(["T1"]));
 
     let rearmed = fixture.run_public(
         &[
@@ -1046,14 +1202,7 @@ fn board_idle_patrol_control_cancel_all_is_atomic_and_new_task_stays_eligible() 
     fixture.run_public(&["task", "register", "U1"], THREAD_B);
 
     let mixed = fixture.command_public(
-        &[
-            "notify",
-            "cancel",
-            "--task-id",
-            "T1",
-            "--task-id",
-            "U1",
-        ],
+        &["notify", "cancel", "--task-id", "T1", "--task-id", "U1"],
         THREAD_A,
     );
     assert!(!mixed.status.success(), "mixed owner cancel must fail");
@@ -1073,8 +1222,7 @@ fn board_idle_patrol_control_cancel_all_is_atomic_and_new_task_stays_eligible() 
         vec!["T1", "T2"]
     );
 
-    let cancelled =
-        fixture.run_public(&["notify", "cancel", "--reason", "all"], THREAD_A);
+    let cancelled = fixture.run_public(&["notify", "cancel", "--reason", "all"], THREAD_A);
     assert_eq!(cancelled["cancelled_task_ids"], json!(["T1", "T2"]));
 
     fixture.run_public(&["task", "register", "T3"], THREAD_A);
@@ -1100,10 +1248,7 @@ fn board_idle_patrol_control_cancel_all_is_atomic_and_new_task_stays_eligible() 
         THREAD_A,
     );
     let rearmed = fixture.run_public(&["notify", "status"], THREAD_A);
-    assert_eq!(
-        rearmed["board_patrol"]["cancelled_tasks"],
-        json!(["T2"])
-    );
+    assert_eq!(rearmed["board_patrol"]["cancelled_tasks"], json!(["T2"]));
     assert_eq!(
         board_patrol_ids(&rearmed, "eligible_task_ids"),
         vec!["T1", "T3"]
@@ -1117,25 +1262,15 @@ fn board_idle_patrol_control_rearm_is_scoped_to_the_caller() {
     fixture.run_public(&["context"], THREAD_B);
     fixture.run_public(&["task", "register", "T1"], THREAD_A);
     fixture.run_public(&["task", "register", "U1"], THREAD_B);
-    fixture.run_public(
-        &["notify", "cancel", "--task-id", "T1"],
-        THREAD_A,
-    );
-    fixture.run_public(
-        &["notify", "cancel", "--task-id", "U1"],
-        THREAD_B,
-    );
+    fixture.run_public(&["notify", "cancel", "--task-id", "T1"], THREAD_A);
+    fixture.run_public(&["notify", "cancel", "--task-id", "U1"], THREAD_B);
 
-    let rearmed =
-        fixture.run_public(&["notify", "subscribe", "--event", "board-idle"], THREAD_A);
+    let rearmed = fixture.run_public(&["notify", "subscribe", "--event", "board-idle"], THREAD_A);
     assert_eq!(rearmed["rearmed_task_ids"], json!(["T1"]));
 
     let alice = fixture.run_public(&["notify", "status"], THREAD_A);
     assert!(board_patrol_ids(&alice, "cancelled_tasks").is_empty());
-    assert_eq!(
-        board_patrol_ids(&alice, "eligible_task_ids"),
-        vec!["T1"]
-    );
+    assert_eq!(board_patrol_ids(&alice, "eligible_task_ids"), vec!["T1"]);
 
     let bob = fixture.run_public(&["notify", "status"], THREAD_B);
     assert_eq!(bob["board_patrol"]["cancelled_tasks"], json!(["U1"]));
@@ -1150,10 +1285,7 @@ fn board_idle_patrol_control_lifecycle_uses_stable_owner_key() {
     let alice_name = alice["name"].as_str().unwrap().to_owned();
     let bob_name = bob["name"].as_str().unwrap().to_owned();
     fixture.run_public(&["task", "register", "T1"], THREAD_A);
-    fixture.run_public(
-        &["notify", "cancel", "--task-id", "T1"],
-        THREAD_A,
-    );
+    fixture.run_public(&["notify", "cancel", "--task-id", "T1"], THREAD_A);
 
     fixture.append_name_events(&[json!({
         "ev": "TaskAssignmentUpdated",
@@ -1202,5 +1334,95 @@ fn board_idle_patrol_control_lifecycle_uses_stable_owner_key() {
     assert_eq!(
         board_patrol_ids(&transferred_back, "eligible_task_ids"),
         vec!["T1"]
+    );
+}
+
+#[test]
+fn master_notify_status_projects_peer_board_patrol_cancellations() {
+    let fixture = AppFixture::new();
+    let master = fixture.run_public(
+        &[
+            "context",
+            "--approve-grant",
+            r#"{"action":"restore_master","authorization":"fixture user promotes Jenny for patrol projection"}"#,
+        ],
+        THREAD_A,
+    );
+    assert_eq!(master["name"], "Jenny");
+    let master_id = master["identity"]["worker_id"].as_str().unwrap().to_owned();
+
+    let peer = fixture.run_public(&["context"], THREAD_B);
+    let peer_id = peer["identity"]["worker_id"].as_str().unwrap().to_owned();
+    let peer_name = peer["name"].as_str().unwrap().to_owned();
+    fixture.run_public(&["task", "register", "T1"], THREAD_B);
+    let cancelled = fixture.run_public(
+        &[
+            "notify",
+            "cancel",
+            "--task-id",
+            "T1",
+            "--reason",
+            "peer checkpoint",
+            "--resume-condition",
+            "after peer review",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(cancelled["cancelled_task_ids"], json!(["T1"]));
+
+    let master_status = fixture.run_public(&["notify", "status"], THREAD_A);
+    let project = master_status["project_board_patrol"]
+        .as_array()
+        .unwrap_or_else(|| {
+            panic!("master notify status must project board patrol: {master_status}")
+        });
+    let peer_record = project
+        .iter()
+        .find(|record| record["worker_id"] == peer_id)
+        .unwrap_or_else(|| {
+            panic!("peer {peer_id} missing from project projection: {master_status}")
+        });
+    assert_eq!(peer_record["owner_key"], peer_name);
+    assert_eq!(peer_record["eligible_task_ids"], json!([]));
+    let peer_cancelled = peer_record["cancelled_tasks"]
+        .as_array()
+        .unwrap_or_else(|| panic!("peer cancellations must be an array: {master_status}"));
+    assert_eq!(peer_cancelled.len(), 1, "{master_status}");
+    assert_eq!(peer_cancelled[0]["task_id"], "T1");
+    assert_eq!(peer_cancelled[0]["reason"], "peer checkpoint");
+    assert_eq!(peer_cancelled[0]["resume_condition"], "after peer review");
+    assert!(
+        project
+            .iter()
+            .any(|record| { record["worker_id"] == master_id && record["owner_key"] == "Jenny" }),
+        "project projection must include the current master carrier: {master_status}"
+    );
+
+    let peer_status = fixture.run_public(&["notify", "status"], THREAD_B);
+    assert!(
+        peer_status.get("project_board_patrol").is_none(),
+        "ordinary peer must not receive project-wide projection: {peer_status}"
+    );
+    assert_eq!(
+        peer_status["board_patrol"]["cancelled_tasks"],
+        json!(["T1"])
+    );
+    assert!(board_patrol_ids(&peer_status, "eligible_task_ids").is_empty());
+
+    let other_project = AppFixture::new();
+    let other_peer = other_project.run_public(&["context"], NEXT_CARRIER);
+    let other_peer_id = other_peer["identity"]["worker_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(other_peer_id, peer_id);
+    let refreshed = fixture.run_public(&["notify", "status"], THREAD_A);
+    assert!(
+        !refreshed["project_board_patrol"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|record| record["worker_id"] == other_peer_id),
+        "project projection must not leak another project's worker: {refreshed}"
     );
 }

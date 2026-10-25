@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 mod board_cli;
 #[path = "board/central_storage.rs"]
 mod central_storage;
+#[path = "board/ceo_patrol_runtime.rs"]
+mod ceo_patrol_runtime;
 #[path = "board/degraded_user_maintenance.rs"]
 mod degraded_user_maintenance;
 #[path = "board/name_adjudication.rs"]
@@ -21,10 +23,12 @@ mod name_adjudication;
 mod name_confirmed_takeover;
 #[path = "board/name_runtime.rs"]
 mod name_runtime_cli;
-#[path = "board/patrol_subscriptions.rs"]
-mod patrol_subscriptions;
 #[path = "board/patrol_runtime.rs"]
 mod patrol_runtime;
+#[path = "board/patrol_subscriptions.rs"]
+mod patrol_subscriptions;
+#[path = "board/project_patrol_subscribe.rs"]
+mod project_patrol_subscribe;
 #[path = "board/reply_obligations.rs"]
 mod reply_obligations_cli;
 #[path = "board/work_roles.rs"]

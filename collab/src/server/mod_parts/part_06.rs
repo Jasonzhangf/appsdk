@@ -1,3 +1,8 @@
+/// Subject of the current master's standing project patrol. Only this exact
+/// event, subject, and interval are ensured idempotently; every other
+/// subscription keeps the ordinary finite-schedule semantics.
+const PROJECT_PATROL_SUBJECT: &str = "project-patrol";
+
 fn handle_notification_subscribe(
     server: &Server,
     worker_id: String,
@@ -126,6 +131,38 @@ fn handle_notification_subscribe(
             }));
         }
     }
+    if event == "master-idle"
+        && subject.as_deref() == Some(PROJECT_PATROL_SUBJECT)
+        && interval_ms == Some(crate::board_patrol_policy::BOARD_IDLE_PATROL_INTERVAL_MS)
+        && trigger_ms.is_none()
+        && trigger_times_ms.is_empty()
+        && (1..=crate::server::state::MAX_NOTIFICATION_REPEATS).contains(&repeat_count)
+    {
+        let existing = state
+            .notification_subscriptions
+            .values()
+            .filter(|subscription| {
+                subscription.worker_id == worker_id
+                    && subscription.event == "master-idle"
+                    && subscription.subject.as_deref() == Some(PROJECT_PATROL_SUBJECT)
+                    && subscription.interval_ms
+                        == Some(crate::board_patrol_policy::BOARD_IDLE_PATROL_INTERVAL_MS)
+                    && subscription.status == "armed"
+                    && subscription.expires_ms > now
+                    && subscription.method == transport.kind.as_str()
+                    && subscription.target == target
+            })
+            .min_by_key(|subscription| (subscription.created_ms, subscription.id.clone()))
+            .cloned();
+        if let Some(existing) = existing {
+            return Resp::data(json!({
+                "subscription": existing,
+                "one_shot": false,
+                "max_repeat_count": crate::server::state::MAX_NOTIFICATION_REPEATS,
+                "deduplicated": true,
+            }));
+        }
+    }
     let active = state
         .notification_subscriptions
         .values()
@@ -229,8 +266,67 @@ fn handle_notification_status(server: &Server, worker_id: String, token: String)
         .filter(|subscription| subscription.worker_id == worker_id)
         .collect();
     subscriptions.sort_by_key(|subscription| (subscription.created_ms, &subscription.id));
+    let is_current_master = current_master_holder(server, &state)
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some(worker_id.as_str());
+    let mut project_board_patrol: Vec<(String, String, serde_json::Value)> = Vec::new();
+    if is_current_master {
+        for current_worker_id in state.workers.keys() {
+            let Some(current_owner_key) =
+                crate::server::state::board_patrol_current_owner_key(&state, current_worker_id)
+            else {
+                continue;
+            };
+            let Some(eligible_task_ids) =
+                crate::server::state::board_patrol_eligible_task_ids(&state, current_worker_id)
+            else {
+                continue;
+            };
+            let owned_unclosed = crate::server::state::board_patrol_owned_unclosed_task_ids(
+                &state,
+                current_worker_id,
+                &current_owner_key,
+            );
+            let mut cancelled_records: Vec<_> = state
+                .cancelled_board_patrol_tasks
+                .values()
+                .filter(|record| {
+                    record.owner_key == current_owner_key
+                        && owned_unclosed.contains(&record.task_id)
+                })
+                .collect();
+            cancelled_records.sort_by(|left, right| left.task_id.cmp(&right.task_id));
+            let cancelled_tasks: Vec<serde_json::Value> = cancelled_records
+                .into_iter()
+                .map(|record| {
+                    json!({
+                        "task_id": record.task_id.clone(),
+                        "reason": record.reason.clone(),
+                        "resume_condition": record.resume_condition.clone(),
+                        "cancelled_ms": record.cancelled_ms,
+                    })
+                })
+                .collect();
+            project_board_patrol.push((
+                current_owner_key.clone(),
+                current_worker_id.clone(),
+                json!({
+                    "worker_id": current_worker_id,
+                    "owner_key": current_owner_key,
+                    "eligible_task_ids": eligible_task_ids,
+                    "cancelled_tasks": cancelled_tasks,
+                }),
+            ));
+        }
+        project_board_patrol.sort_by(|left, right| {
+            (left.0.as_str(), left.1.as_str()).cmp(&(right.0.as_str(), right.1.as_str()))
+        });
+    }
     let owner_key = crate::server::state::board_patrol_owner_key(&state, &worker_id);
-    let owned_unclosed = crate::server::state::board_patrol_owned_unclosed_task_ids(&state, &worker_id, &owner_key);
+    let owned_unclosed =
+        crate::server::state::board_patrol_owned_unclosed_task_ids(&state, &worker_id, &owner_key);
     let mut cancelled_tasks: Vec<String> = state
         .cancelled_board_patrol_tasks
         .values()
@@ -248,7 +344,7 @@ fn handle_notification_status(server: &Server, worker_id: String, token: String)
         })
         .cloned()
         .collect();
-    Resp::data(json!({
+    let mut body = json!({
         "subscriptions": subscriptions,
         "board_patrol": {
             "owner_key": owner_key,
@@ -258,7 +354,14 @@ fn handle_notification_status(server: &Server, worker_id: String, token: String)
             "periodic_fallback": true,
             "realtime_connected": false,
         }
-    }))
+    });
+    if is_current_master {
+        body["project_board_patrol"] = serde_json::json!(project_board_patrol
+            .into_iter()
+            .map(|(_, _, record)| record)
+            .collect::<Vec<_>>());
+    }
+    Resp::data(body)
 }
 
 fn handle_notification_cancel(
@@ -481,14 +584,18 @@ fn handle_goal_schedule_reconcile(
         let Some(target) = notification_target(&transport) else {
             return Resp::err("selected transport has no route address");
         };
-        if let Some(mut existing) = matching.iter().find(|subscription| {
-            subscription.status == "armed"
-                && subscription.trigger_ms == Some(trigger_ms)
-                && subscription.trigger_times_ms.is_empty()
-                && subscription.interval_ms.is_none()
-                && subscription.repeat_count == 1
-                && subscription.expires_ms > now
-        }).cloned() {
+        if let Some(mut existing) = matching
+            .iter()
+            .find(|subscription| {
+                subscription.status == "armed"
+                    && subscription.trigger_ms == Some(trigger_ms)
+                    && subscription.trigger_times_ms.is_empty()
+                    && subscription.interval_ms.is_none()
+                    && subscription.repeat_count == 1
+                    && subscription.expires_ms > now
+            })
+            .cloned()
+        {
             let retained_id = existing.id.clone();
             let mut events = Vec::new();
             let mut retired = Vec::new();
@@ -522,7 +629,9 @@ fn handle_goal_schedule_reconcile(
             superseded.sort();
             superseded.dedup();
             if !superseded.is_empty() {
-                events.push(Event::Superseded { ids: superseded.clone() });
+                events.push(Event::Superseded {
+                    ids: superseded.clone(),
+                });
             }
             if caller_is_master {
                 if let Some(event) =
@@ -570,7 +679,9 @@ fn handle_goal_schedule_reconcile(
             superseded.extend(pending_messages_for_subscription(&state, &subscription.id));
         }
         if !superseded.is_empty() {
-            events.push(Event::Superseded { ids: superseded.clone() });
+            events.push(Event::Superseded {
+                ids: superseded.clone(),
+            });
         }
         let subscription = NotificationSubscription {
             id: format!("sub-{}", gen_msg_id()),
@@ -594,9 +705,7 @@ fn handle_goal_schedule_reconcile(
             subscription: subscription.clone(),
         });
         if caller_is_master {
-            if let Some(event) =
-                cleared_master_goal_due_event(&state, &worker_id, &retired, now)
-            {
+            if let Some(event) = cleared_master_goal_due_event(&state, &worker_id, &retired, now) {
                 events.push(event);
             }
         }
@@ -642,7 +751,9 @@ fn handle_goal_schedule_reconcile(
     superseded.sort();
     superseded.dedup();
     if !superseded.is_empty() {
-        events.push(Event::Superseded { ids: superseded.clone() });
+        events.push(Event::Superseded {
+            ids: superseded.clone(),
+        });
     }
     if caller_is_master {
         if let Some(event) = cleared_master_goal_due_event(&state, &worker_id, &retired, now) {
@@ -696,27 +807,33 @@ fn cleared_master_goal_due_event(
     // a same-revision replay cannot raise the latch again. Retiring that
     // occurrence still ends its revision, so a delivered-but-unconsumed due
     // goal cannot leave a stale active revision behind the ended receipt.
-    let retired_revision = state.master_wake.active_goal_revision.is_some_and(|revision| {
-        retired.iter().any(|subscription_id| {
-            state
-                .notification_subscriptions
-                .get(subscription_id)
-                .and_then(crate::server::state::subscription_goal_deadline_revision)
-                == Some(revision)
-        })
-    });
+    let retired_revision = state
+        .master_wake
+        .active_goal_revision
+        .is_some_and(|revision| {
+            retired.iter().any(|subscription_id| {
+                state
+                    .notification_subscriptions
+                    .get(subscription_id)
+                    .and_then(crate::server::state::subscription_goal_deadline_revision)
+                    == Some(revision)
+            })
+        });
     if !state.master_wake.goal_due && !retired_revision {
         return None;
     }
-    let other_due_goal = state.notification_subscriptions.values().any(|subscription| {
-        subscription.worker_id == master_worker
-            && is_goal_deadline(subscription)
-            && subscription.status == "armed"
-            && !retired.iter().any(|retired| retired == &subscription.id)
-            && subscription
-                .trigger_ms
-                .is_some_and(|trigger| trigger <= now)
-    });
+    let other_due_goal = state
+        .notification_subscriptions
+        .values()
+        .any(|subscription| {
+            subscription.worker_id == master_worker
+                && is_goal_deadline(subscription)
+                && subscription.status == "armed"
+                && !retired.iter().any(|retired| retired == &subscription.id)
+                && subscription
+                    .trigger_ms
+                    .is_some_and(|trigger| trigger <= now)
+        });
     if other_due_goal {
         return None;
     }
@@ -1738,11 +1855,13 @@ fn handle_register_with_app_scope_inner_bound(
                 })
         });
         let same_transport_address = match selected.kind {
-            TransportKind::Dsh | TransportKind::DesktopBridge => selected_transport_for_worker(&existing).is_some_and(|old| {
-                old.kind == selected.kind
-                    && old.endpoint == selected.endpoint
-                    && old.namespace == selected.namespace
-            }),
+            TransportKind::Dsh | TransportKind::DesktopBridge => {
+                selected_transport_for_worker(&existing).is_some_and(|old| {
+                    old.kind == selected.kind
+                        && old.endpoint == selected.endpoint
+                        && old.namespace == selected.namespace
+                })
+            }
             _ => true,
         };
         let same_runtime_key = same_transport_address

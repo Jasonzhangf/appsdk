@@ -1218,3 +1218,378 @@ fn ledger_commit_drops_classifications_the_reducer_would_reject() {
 }
 
 include!("timers_tests_part2.rs");
+
+const PROJECT_PATROL_SUBJECT: &str = "project-patrol";
+const PROJECT_PATROL_INTERVAL_MS: i64 = 900_000;
+
+fn project_patrol_subscription(
+    server: &Server,
+    trigger_ms: i64,
+    expires_ms: i64,
+    repeat_count: u32,
+    fired_count: u32,
+) -> String {
+    let now = now_ms();
+    let id = format!("sub-project-patrol-{now}");
+    let (target, method) = subscription_target(server, "master");
+    server.commit(&[Event::NotificationSubscribed {
+        subscription: NotificationSubscription {
+            id: id.clone(),
+            worker_id: "master".into(),
+            event: "master-idle".into(),
+            subject: Some(PROJECT_PATROL_SUBJECT.into()),
+            target,
+            method,
+            trigger_ms: Some(trigger_ms),
+            trigger_times_ms: Vec::new(),
+            interval_ms: Some(PROJECT_PATROL_INTERVAL_MS),
+            repeat_count,
+            fired_count,
+            expires_ms,
+            status: "armed".into(),
+            created_ms: now - PROJECT_PATROL_INTERVAL_MS,
+            updated_ms: now,
+            status_reason: None,
+        },
+    }]);
+    id
+}
+
+fn set_master_activity(server: &Server, observed: &str, idle_since_ms: i64) {
+    let mut record = server
+        .state
+        .lock()
+        .unwrap()
+        .keepalives
+        .get("master")
+        .cloned()
+        .unwrap_or_default();
+    record.observed = observed.into();
+    record.idle_since_ms = idle_since_ms;
+    server.commit(&[Event::KeepaliveUpdated {
+        worker_id: "master".into(),
+        record,
+    }]);
+}
+
+fn project_patrol_bodies(server: &Server, subscription_id: &str) -> Vec<String> {
+    let state = server.state.lock().unwrap();
+    subscription_messages(&state, subscription_id)
+        .into_iter()
+        .map(|message| message.body.clone())
+        .collect()
+}
+
+fn register_project_patrol_master(server: &Server) {
+    let transport = crate::server::peer_tests::test_appserver_transport("thread-master");
+    let app = crate::identity::AppServerId::new("tui-default").unwrap();
+    let cwd = server.root.display().to_string();
+    let registered = crate::server::peer_tests::seed_committed_owner(
+        server,
+        "master",
+        "token-master",
+        &transport,
+        &cwd,
+        Some(app.clone()),
+    );
+    assert!(registered.ok, "master registration failed: {registered:?}");
+    crate::server::commit_current_thread_route_for_runtime(
+        server,
+        server,
+        "master",
+        &cwd,
+        Some(&app),
+    )
+    .expect("master native thread route must commit");
+    crate::server::restore_registered_peer_default_leases(server);
+
+    let promoted = crate::server::handle_master_promote(
+        server,
+        "master".into(),
+        "token-master".into(),
+        "user-approved".into(),
+    );
+    assert!(promoted.ok, "master promotion failed: {promoted:?}");
+    server.commit(&[Event::KeepaliveUpdated {
+        worker_id: "master".into(),
+        record: Record {
+            observed: "idle".into(),
+            idle_since_ms: now_ms() - 900_001,
+            ..Record::default()
+        },
+    }]);
+}
+
+fn install_project_patrol_thread_status(server: &mut Arc<Server>, status: Arc<Mutex<String>>) {
+    Arc::get_mut(server)
+        .expect("unique project patrol test server")
+        .appserver_thread_status = Arc::new(move |_, thread_id| {
+        let observed = status.lock().unwrap().clone();
+        let status = match observed.as_str() {
+            "working" => serde_json::json!({"type": "active", "activeFlags": []}),
+            "unknown" => return Err("fixture native thread status is unknown".into()),
+            _ => serde_json::json!({"type": "idle"}),
+        };
+        Ok(serde_json::json!({
+            "thread": {
+                "id": thread_id,
+                "status": status,
+                "canAcceptDirectInput": observed == "idle"
+            }
+        }))
+    });
+}
+
+#[test]
+fn project_patrol_wakes_with_master_tasks_old_notice_and_idle_caps() {
+    let (server, root) = test_server();
+    register_project_patrol_master(&server);
+    let now = now_ms();
+    let subscription_id = project_patrol_subscription(&server, now - 1, now + 86_400_000, 100, 0);
+    working_task(&server, "master");
+    let created_ms =
+        server.state.lock().unwrap().notification_subscriptions[&subscription_id].created_ms;
+    let mut record = server.state.lock().unwrap().keepalives["master"].clone();
+    record.idle_episode_notices = 3;
+    record.idle_episode_stopped = true;
+    record.idle_since_ms = created_ms - 1;
+    record.idle_episode_tasks = vec![("task".into(), "working".into())];
+    server.commit(&[Event::KeepaliveUpdated {
+        worker_id: "master".into(),
+        record,
+    }]);
+
+    let old_message_id = "old-project-patrol-notice".to_string();
+    server.commit(&[
+        Event::Sent {
+            msg: Message {
+                id: old_message_id.clone(),
+                from: "collab-server".into(),
+                to: "master".into(),
+                mtype: "notification".into(),
+                subject: Some("master-idle:project-patrol".into()),
+                body: "old accepted project patrol".into(),
+                in_reply_to: None,
+                created_ms: now - 60_000,
+                state: "pending".into(),
+                wake_attempt_count: 1,
+                last_wake_attempt_ms: now - 60_000,
+                retry_attempted: true,
+            },
+        },
+        Event::WakeBound {
+            message_id: old_message_id.clone(),
+            subscription_id: subscription_id.clone(),
+        },
+        Event::NotificationDeliveryAccepted {
+            message_id: old_message_id.clone(),
+            accepted_ms: now - 60_000,
+            evidence: Some(serde_json::json!({"accepted": true})),
+        },
+    ]);
+
+    tick_with_idle_at(&server, now, &|_| false);
+
+    let state = server.state.lock().unwrap();
+    let messages = subscription_messages(&state, &subscription_id);
+    assert_eq!(
+        messages.len(),
+        2,
+        "a due standing patrol must create a new occurrence despite an old accepted notice"
+    );
+    let body = messages
+        .iter()
+        .find(|message| message.id != old_message_id)
+        .expect("new project patrol notice")
+        .body
+        .clone();
+    for phrase in [
+        "current activity",
+        "unclosed board ownership",
+        "per-task board patrol cancellations",
+        "real blockers",
+        "eligible uncancelled tasks",
+        "peer-owned",
+        "collab notify status",
+        "project_board_patrol",
+        "collab board show",
+        "collab ceo status",
+        "CEO_NOT_CONFIGURED",
+        "collab ceo reply",
+        "Direct-message reception is daemon-owned",
+    ] {
+        assert!(body.contains(phrase), "missing {phrase}: {body}");
+    }
+    assert_eq!(
+        state.keepalives["master"].idle_episode_notices, 3,
+        "the standing schedule must not consume the finite idle-episode budget"
+    );
+    drop(state);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn project_patrol_skips_non_idle_and_advances_without_catch_up() {
+    for observed in ["working", "unknown"] {
+        let (mut server, root) = test_server();
+        let native_status = Arc::new(Mutex::new(observed.to_string()));
+        install_project_patrol_thread_status(&mut server, Arc::clone(&native_status));
+        register_project_patrol_master(&server);
+        let base = now_ms();
+        let subscription_id =
+            project_patrol_subscription(&server, base - 1, base + 86_400_000, 100, 0);
+        set_master_activity(&server, observed, 0);
+
+        tick_with_idle_at(&server, base, &|_| false);
+
+        {
+            let state = server.state.lock().unwrap();
+            assert!(
+                subscription_messages(&state, &subscription_id).is_empty(),
+                "{observed} master must not be woken"
+            );
+            let subscription = &state.notification_subscriptions[&subscription_id];
+            assert_eq!(
+                subscription.trigger_ms,
+                Some(base + PROJECT_PATROL_INTERVAL_MS),
+                "{observed} skip must advance from the current instant"
+            );
+            assert_eq!(subscription.status, "armed", "{observed}");
+            assert_eq!(
+                subscription.fired_count, 0,
+                "{observed} skip must not increment the successful notice count"
+            );
+        }
+
+        *native_status.lock().unwrap() = "idle".into();
+        set_master_activity(&server, "idle", base + 1);
+        tick_with_idle_at(&server, base + 1, &|_| false);
+        {
+            let state = server.state.lock().unwrap();
+            assert!(
+                subscription_messages(&state, &subscription_id).is_empty(),
+                "{observed}: becoming idle must not backfill the skipped occurrence"
+            );
+            assert_eq!(
+                state.notification_subscriptions[&subscription_id].fired_count, 0,
+                "{observed}: no skipped occurrence may count as delivered"
+            );
+        }
+
+        tick_with_idle_at(&server, base + PROJECT_PATROL_INTERVAL_MS, &|_| false);
+        {
+            let state = server.state.lock().unwrap();
+            let messages = subscription_messages(&state, &subscription_id);
+            assert_eq!(messages.len(), 1, "{observed}: next interval must wake");
+            assert!(messages[0].body.contains("MASTER_IDLE_WAKE"));
+            assert_eq!(
+                state.notification_subscriptions[&subscription_id].fired_count, 1,
+                "{observed}: only the idle occurrence counts as delivered"
+            );
+        }
+        std::fs::remove_dir_all(root).ok();
+    }
+}
+
+#[test]
+fn project_patrol_renews_finite_budget_and_ttl_on_same_subscription() {
+    let (server, root) = test_server();
+    register_project_patrol_master(&server);
+    let base = now_ms();
+    let subscription_id = project_patrol_subscription(&server, base - 1, base + 1_000, 2, 1);
+    set_master_activity(&server, "idle", 0);
+
+    tick_with_idle_at(&server, base, &|_| false);
+
+    let mut at = base;
+    {
+        let state = server.state.lock().unwrap();
+        let subscription = &state.notification_subscriptions[&subscription_id];
+        assert_eq!(subscription.status, "armed");
+        assert_eq!(subscription.id, subscription_id);
+        assert_eq!(subscription.fired_count, 2);
+        assert!(
+            subscription.repeat_count > subscription.fired_count,
+            "renewed budget must leave headroom: {subscription:?}"
+        );
+        assert!(
+            subscription.expires_ms >= base + 604_800_000,
+            "renewed TTL must extend the same subscription: {subscription:?}"
+        );
+        assert_eq!(
+            subscription.trigger_ms,
+            Some(base + PROJECT_PATROL_INTERVAL_MS)
+        );
+    }
+
+    for _ in 0..120 {
+        at = at.saturating_add(PROJECT_PATROL_INTERVAL_MS);
+        tick_with_idle_at(&server, at, &|_| false);
+    }
+
+    {
+        let state = server.state.lock().unwrap();
+        let subscription = &state.notification_subscriptions[&subscription_id];
+        assert_eq!(subscription.status, "armed");
+        assert_eq!(subscription.id, subscription_id);
+        assert!(
+            subscription.fired_count >= 100,
+            "the renewal must survive the old 100-occurrence boundary: {subscription:?}"
+        );
+        assert!(
+            subscription.repeat_count > subscription.fired_count,
+            "the standing patrol must retain a live occurrence budget: {subscription:?}"
+        );
+        assert!(
+            subscription.expires_ms > at,
+            "the standing patrol must retain a live TTL: {subscription:?}"
+        );
+    }
+
+    server
+        .state
+        .lock()
+        .unwrap()
+        .notification_subscriptions
+        .get_mut(&subscription_id)
+        .unwrap()
+        .expires_ms = at + 1_000;
+    at = at.saturating_add(PROJECT_PATROL_INTERVAL_MS);
+    tick_with_idle_at(&server, at, &|_| false);
+    let state = server.state.lock().unwrap();
+    let subscription = &state.notification_subscriptions[&subscription_id];
+    assert_eq!(subscription.status, "armed");
+    assert!(
+        subscription.expires_ms >= at + 604_800_000,
+        "near-expiry renewal must stay on the same subscription: {subscription:?}"
+    );
+    drop(state);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn project_patrol_prompt_uses_ceo_reply_when_configured() {
+    let (server, root) = test_server();
+    register_project_patrol_master(&server);
+    let now = now_ms();
+    let subscription_id = project_patrol_subscription(&server, now - 1, now + 86_400_000, 100, 0);
+
+    tick_with_idle_at(&server, now, &|_| false);
+
+    let bodies = project_patrol_bodies(&server, &subscription_id);
+    assert_eq!(bodies.len(), 1);
+    for phrase in [
+        "collab ceo status",
+        "CEO_NOT_CONFIGURED",
+        "If configured",
+        "collab ceo reply",
+        "substantive progress",
+    ] {
+        assert!(
+            bodies[0].contains(phrase),
+            "missing {phrase} without a project CEO grant: {}",
+            bodies[0]
+        );
+    }
+    std::fs::remove_dir_all(root).ok();
+}

@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-goal-ownership",
-  "version": "0.2.0",
-  "description": "一次本人长程目标请求的 SESE。master 与 peer 功能相同、层级不同，均自行登记、读取、更新、续订和取消目标。项目与稳定名字决定归属；会话与 worktree 只改变执行载体。目标结束/续订通过 daemon 的 GoalScheduleReconcile 只收敛该目标有限调度，不关闭 default direct-message 基础接收。任何错误均输出明确结果且不得改写他人记录。",
+  "version": "0.3.0",
+  "description": "一次本人长程目标请求的 SESE。master 与 peer 功能相同、层级不同，均自行登记、读取、更新、续订和取消目标。项目与稳定名字决定归属；会话与 worktree 只改变执行载体。目标结束/续订通过 daemon 的 GoalScheduleReconcile 只收敛该目标有限调度，不关闭 default direct-message 基础接收。项目 master（Jenny）初始化或恢复本人目标后默认确保本项目 worker 巡检已 arm：已有有效调度则复用，不重复创建，并以真实订阅回执为准；只读投影只报告真实 arm 状态，不宣称已 arm。任何错误均输出明确结果且不得改写他人记录。",
   "inputs": [{"id":"goal_request","schema":"Object"}],
   "nodes": [
     {
@@ -24,13 +24,13 @@
     },
     {
       "id":"收敛本人目标调度","operator":"appsdk.collab_goal.reconcile_schedule","operator_version":"1",
-      "description":"按 desired active/ended 调用 daemon GoalScheduleReconcile：active 创建或保留一个匹配的一次性 bounded occurrence，重装先退役旧 occurrence；ended 仅退役该 goal 的 occurrence 并超期其待投 scheduler 消息，重复相同 desired 幂等。只处理 canonical project、稳定名字和 goal identity，不接收任意 subscription ID，永不触碰 default direct-message 基础接收。远端回执缺失时保持 pending，不宣称已取消。",
+      "description":"按 desired active/ended 调用 daemon GoalScheduleReconcile：active 创建或保留一个匹配的一次性 bounded occurrence，重装先退役旧 occurrence；ended 仅退役该 goal 的 occurrence 并超期其待投 scheduler 消息，重复相同 desired 幂等。owner 为项目 master 时，同一收敛还确保本项目 worker 巡检已 arm：已有有效 armed 调度直接复用，不重复创建；无有效调度时按既有订阅接口创建并取得真实 subscription 回执。只处理 canonical project、稳定名字和 goal identity，不接收任意 subscription ID，永不触碰 default direct-message 基础接收。远端回执缺失时保持 pending，不宣称已取消或已 arm。",
       "inputs":["goal_transition_request"],"output":{"id":"goal_transition_result","schema":"Object"},
       "input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"
     },
     {
       "id":"输出目标状态与回执","operator":"appsdk.collab_goal.emit_result","operator_version":"1",
-      "description":"输出本人的目标标识、当前执行载体和真实登记或取消回执。交付证据先确认精确消息 ID 已送入当前 native 线程，再确认相同消息的真实消费；仅主动 recv 不证明 native 唤醒。普通 task、board 分配、笔记和定时器不等于 goal 登记。master 不代持 peer goal。",
+      "description":"输出本人的目标标识、当前执行载体和真实登记或取消回执，并分别报告项目巡检的 patrol_armed、subscription ID 与下一次计划时间。只读查询只投影真实现存状态，不触发写入，也不以只读结果冒充已 arm。交付证据先确认精确消息 ID 已送入当前 native 线程，再确认相同消息的真实消费；仅主动 recv 不证明 native 唤醒。普通 task、board 分配、笔记和定时器不等于 goal 登记。master 不代持 peer goal。",
       "inputs":["goal_transition_result"],"output":{"id":"goal_result","schema":"Object"},
       "input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"
     }

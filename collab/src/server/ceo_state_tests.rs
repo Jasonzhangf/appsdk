@@ -4,11 +4,12 @@
 //! commits the same typed events, and replay uses `snapshot_events`.
 
 use crate::ceo::{CeoBootstrapRecord, CeoGrant};
-use crate::proto::ReplyPolicy;
+use crate::proto::{ReplyPolicy, Resp};
 use crate::server::state::{
     responsibility_preflight, Event, ReplyObligation, ResponsibilityFence, ResponsibilitySnapshot,
     State,
 };
+use serde_json::json;
 
 fn replay(state: &State) -> State {
     state
@@ -189,4 +190,336 @@ fn ceo_events_do_not_change_business_task_responsibility() {
         },
     ];
     assert_eq!(responsibility_preflight(&state, &events), Ok(()));
+}
+
+/// Handler-level fixture: a real reducer-backed `Server` plus a manager, no
+/// Unix listener. A disabled quiet window (`start == end`) makes the ordinary
+/// hourly policy deterministic so the urgent-bypass path can be exercised after
+/// one acknowledgement establishes the cooldown.
+fn ceo_handler_fixture() -> (
+    std::sync::Arc<crate::server::Server>,
+    std::sync::Arc<super::ProjectRuntimeManager>,
+) {
+    let (mut server, _root) = super::peer_tests::test_server();
+    server.config.ceo_report.quiet_window_start_minute = 0;
+    server.config.ceo_report.quiet_window_end_minute = 0;
+    let server = std::sync::Arc::new(server);
+    let manager = super::ProjectRuntimeManager::new(server.clone(), &server.host_paths)
+        .expect("build manager without a listener");
+    (server, manager)
+}
+
+#[test]
+fn ceo_handler_progress_records_trims_and_dedups_exact_content() {
+    let (server, manager) = ceo_handler_fixture();
+    let project = server.root.to_string_lossy().into_owned();
+
+    let first = manager
+        .ceo_record_progress(
+            &server,
+            "progress subject".into(),
+            "  progress body  ".into(),
+            false,
+        )
+        .expect("first progress records");
+    assert_eq!(first["recorded"], true, "{first}");
+    assert_eq!(first["deduplicated"], false, "{first}");
+    assert_eq!(first["revision"], 1, "{first}");
+    assert_eq!(first["project"], project, "{first}");
+
+    // Edge whitespace is trimmed, so the identical business content is a dedup.
+    let repeat = manager
+        .ceo_record_progress(
+            &server,
+            "progress subject".into(),
+            "progress body".into(),
+            false,
+        )
+        .expect("repeat progress is accepted as a no-op");
+    assert_eq!(repeat["recorded"], false, "{repeat}");
+    assert_eq!(repeat["deduplicated"], true, "{repeat}");
+    assert_eq!(repeat["revision"], 1, "{repeat}");
+
+    // A typed urgent signal for equal content is a new meaningful revision.
+    let urgent = manager
+        .ceo_record_progress(
+            &server,
+            "progress subject".into(),
+            "progress body".into(),
+            true,
+        )
+        .expect("typed urgent upgrade records");
+    assert_eq!(urgent["recorded"], true, "{urgent}");
+    assert_eq!(urgent["revision"], 2, "{urgent}");
+    assert_eq!(urgent["urgent"], true, "{urgent}");
+
+    // Empty content is rejected on the wire even if the CLI trim is bypassed.
+    assert!(manager
+        .ceo_record_progress(&server, "subject".into(), "   ".into(), false)
+        .is_err());
+}
+
+#[test]
+fn ceo_handler_batch_ack_is_urgent_only_during_ordinary_suppression() {
+    let (server, manager) = ceo_handler_fixture();
+    let (other_server, _other_root) = super::peer_tests::test_server();
+    let other_server = std::sync::Arc::new(other_server);
+
+    // Ordinary progress is allowed before any report, so a normal digest batch
+    // covers it.
+    manager
+        .ceo_record_progress(&server, "alpha".into(), "first delivery".into(), false)
+        .expect("record ordinary progress");
+    let ordinary = manager
+        .ceo_prepare_report_batch(None)
+        .expect("prepare ordinary batch");
+    assert_eq!(ordinary["suppressed"], false, "{ordinary}");
+    assert_eq!(
+        ordinary["coverage"].as_object().unwrap().len(),
+        1,
+        "{ordinary}"
+    );
+    let ordinary_id = ordinary["batch_id"]
+        .as_str()
+        .expect("ordinary batch id")
+        .to_owned();
+
+    // Acknowledging after visible output starts the hourly ordinary cooldown.
+    let ack = manager
+        .ceo_report_ack(ordinary_id.clone())
+        .expect("ack ordinary batch");
+    assert_eq!(ack.data["batch_id"], ordinary_id, "{:?}", ack.data);
+    assert_eq!(ack.data["pending_revision_count"], 0, "{:?}", ack.data);
+
+    // During cooldown an ordinary update and an urgent update arrive. Only the
+    // explicitly typed urgent project may pass.
+    manager
+        .ceo_record_progress(&server, "alpha".into(), "ordinary later".into(), false)
+        .expect("record newer ordinary progress");
+    manager
+        .ceo_record_progress(&other_server, "beta".into(), "urgent now".into(), true)
+        .expect("record urgent progress");
+
+    let suppressed = manager
+        .ceo_prepare_report_batch(None)
+        .expect("prepare suppressed batch");
+    assert_eq!(suppressed["suppressed"], true, "{suppressed}");
+    assert_eq!(suppressed["excluded_project_count"], 1, "{suppressed}");
+    let beta_key = other_server.root.to_string_lossy().into_owned();
+    let coverage = suppressed["coverage"].as_object().unwrap();
+    assert_eq!(
+        coverage.len(),
+        1,
+        "ordinary project leaked into urgent batch: {suppressed}"
+    );
+    assert!(coverage.contains_key(&beta_key), "{suppressed}");
+    let urgent_id = suppressed["batch_id"]
+        .as_str()
+        .expect("urgent batch id")
+        .to_owned();
+
+    // Repeating the read returns the exact prepared batch, not a new identity.
+    let repeated = manager
+        .ceo_prepare_report_batch(None)
+        .expect("repeat suppressed read");
+    assert_eq!(repeated["batch_id"], urgent_id, "{repeated}");
+
+    // Unknown and repeated acknowledgements are rejected without mutation.
+    assert!(manager.ceo_report_ack("missing-batch".into()).is_err());
+    manager
+        .ceo_report_ack(urgent_id.clone())
+        .expect("ack urgent batch");
+    assert!(manager.ceo_report_ack(urgent_id).is_err());
+
+    // The ordinary alpha revision stays pending after the urgent batch is acked.
+    let after = manager
+        .ceo_prepare_report_batch(None)
+        .expect("read after urgent ack");
+    assert!(after["batch_id"].is_null(), "{after}");
+    assert_eq!(after["suppressed"], true, "{after}");
+    assert_eq!(after["excluded_project_count"], 1, "{after}");
+}
+
+#[test]
+fn ceo_handler_durable_reply_keeps_receipt_when_progress_record_fails() {
+    let (server, manager) = ceo_handler_fixture();
+    server.state.lock().unwrap().journal_poison = Some("synthetic journal failure".into());
+
+    let delivered = Ok(Resp::data(json!({"msg_id":"m-reply","durable":true})));
+    let response = manager
+        .attach_solicited_progress(
+            delivered,
+            &server,
+            "progress subject".into(),
+            "progress body".into(),
+            false,
+        )
+        .expect("a durable reply must keep its receipt when progress cannot be recorded");
+
+    assert_eq!(response.data["msg_id"], "m-reply", "{}", response.data);
+    assert_eq!(response.data["durable"], true, "{}", response.data);
+    assert_eq!(
+        response.data["progress_recorded"], false,
+        "{}",
+        response.data
+    );
+    assert!(!response.ok, "partial failure must stay visible");
+    assert!(
+        response
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("do not resend"),
+        "partial failure must forbid an uncertain resend: {:?}",
+        response.error
+    );
+}
+
+#[test]
+fn ceo_handler_durable_marker_failure_records_progress_without_clearing_receipt() {
+    let (server, manager) = ceo_handler_fixture();
+    let delivered = Err(Resp::err_data(
+        "CEO_REPLY_MARKER_COMMIT_FAILED: reply is durable; do not resend",
+        json!({"msg_id":"m-durable","durable":true,"reply_marker_cleared":false}),
+    ));
+
+    let response = manager
+        .attach_solicited_progress(
+            delivered,
+            &server,
+            "progress subject".into(),
+            "progress body".into(),
+            false,
+        )
+        .expect_err("marker failure is still a partial failure");
+
+    assert_eq!(response.data["msg_id"], "m-durable", "{}", response.data);
+    assert_eq!(response.data["recorded"], true, "{}", response.data);
+    assert_eq!(response.data["revision"], 1, "{}", response.data);
+    assert!(
+        server.state.lock().unwrap().reply_obligations.is_empty(),
+        "recording progress alone must never create or clear a reply obligation"
+    );
+}
+
+#[test]
+fn ceo_handler_unsolicited_progress_claims_no_notification_or_report() {
+    let (server, manager) = ceo_handler_fixture();
+    let first = manager
+        .ceo_record_unsolicited_progress(&server, "subject".into(), "body".into(), true)
+        .expect("first unsolicited progress records");
+    assert_eq!(first.data["recorded"], true, "{:?}", first.data);
+    assert_eq!(first.data["urgent"], true, "{:?}", first.data);
+    assert_eq!(first.data["notified"], false, "{:?}", first.data);
+    assert_eq!(first.data["reported"], false, "{:?}", first.data);
+
+    let repeat = manager
+        .ceo_record_unsolicited_progress(&server, "subject".into(), "body".into(), true)
+        .expect("duplicate unsolicited progress is a no-op");
+    assert_eq!(repeat.data["recorded"], false, "{:?}", repeat.data);
+    assert_eq!(repeat.data["deduplicated"], true, "{:?}", repeat.data);
+    assert_eq!(repeat.data["revision"], 1, "{:?}", repeat.data);
+}
+
+#[test]
+fn ceo_handler_prepare_batch_reports_the_stored_batch_id() {
+    let (server, manager) = ceo_handler_fixture();
+    manager
+        .ceo_record_progress(&server, "alpha".into(), "first delivery".into(), false)
+        .expect("record ordinary progress");
+
+    let first = manager
+        .ceo_prepare_report_batch(None)
+        .expect("prepare batch");
+    let batch_id = first["batch_id"]
+        .as_str()
+        .expect("prepared batch id")
+        .to_owned();
+    {
+        let state = server.state.lock().unwrap();
+        let stored = state
+            .ceo_report_state
+            .batches
+            .get(&batch_id)
+            .expect("response must name the persisted batch");
+        assert_eq!(stored.coverage.len(), 1, "{stored:?}");
+    }
+
+    let repeat = manager
+        .ceo_prepare_report_batch(None)
+        .expect("repeat prepare");
+    assert_eq!(repeat["batch_id"], batch_id, "{repeat}");
+}
+
+#[test]
+fn ceo_promote_guidance_preserves_user_content_and_reports_partial_failure() {
+    let (server, manager) = ceo_handler_fixture();
+    let workspace = server.root.join("ceo-workspace");
+    std::fs::create_dir_all(&workspace).expect("create workspace");
+    std::fs::write(workspace.join("AGENTS.md"), "# User rules\n\nkeep me\n")
+        .expect("seed user content");
+
+    let grant = CeoGrant {
+        workspace: workspace.to_string_lossy().into_owned(),
+        app_scope_id: "appsdk".into(),
+        name: "ceo".into(),
+        granted_by: "user".into(),
+        approval: "approved".into(),
+        granted_ms: 1,
+    };
+    let mut status = Resp::data(json!({"is_current": true}));
+    manager.attach_ceo_workspace_guidance(&mut status, &grant);
+    assert!(status.ok, "guidance failed: {:?}", status.error);
+    assert_eq!(
+        status.data["workspace_guidance"]["action"], "changed",
+        "{}",
+        status.data
+    );
+    let text = std::fs::read_to_string(workspace.join("AGENTS.md")).expect("read guidance");
+    assert!(
+        text.starts_with("# User rules\n\nkeep me\n"),
+        "user content was rewritten: {text}"
+    );
+    assert!(
+        text.contains(crate::ceo_workspace_guidance::MANAGED_BLOCK_START),
+        "{text}"
+    );
+    assert!(text.contains("USER.md"), "{text}");
+    assert!(text.contains("skills/collab/SKILL.md"), "{text}");
+
+    // Repeating the same promote guidance is idempotent and rewrites nothing.
+    let mut repeat = Resp::data(json!({"is_current": true}));
+    manager.attach_ceo_workspace_guidance(&mut repeat, &grant);
+    assert_eq!(
+        repeat.data["workspace_guidance"]["action"], "noop",
+        "{}",
+        repeat.data
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("AGENTS.md")).expect("reread guidance"),
+        text,
+        "repeated guidance rewrote user content"
+    );
+
+    let missing = CeoGrant {
+        workspace: workspace.join("missing").to_string_lossy().into_owned(),
+        ..grant
+    };
+    let mut status = Resp::data(json!({"is_current": true}));
+    manager.attach_ceo_workspace_guidance(&mut status, &missing);
+    assert!(!status.ok, "missing workspace must stay visible");
+    assert_eq!(
+        status.data["workspace_guidance"]["grant_durable"], true,
+        "{}",
+        status.data
+    );
+    assert!(
+        status
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("CEO_GRANT_RECORDED_BUT_WORKSPACE_GUIDANCE_FAILED"),
+        "{:?}",
+        status.error
+    );
 }

@@ -1503,6 +1503,25 @@ pub enum Event {
         task_id: String,
         details: crate::board::BoardTaskDetails,
     },
+    BoardPatrolCancelled {
+        record: crate::board_patrol_policy::TaskPatrolCancelRecord,
+    },
+    BoardPatrolRearmed {
+        task_id: String,
+        owner_key: String,
+    },
+    BoardPatrolCancellationCleared {
+        task_id: String,
+    },
+    BoardPatrolGateUpdated {
+        worker_id: String,
+        gate: crate::board_patrol_policy::PeerBoardPatrolGate,
+    },
+    /// Typed binding between a daemon-generated cue and its durable message.
+    /// Delivery revalidation uses this marker instead of parsing text.
+    BoardPatrolNoticeBound {
+        message_id: String,
+    },
     /// Compacted journal baseline. The payload is the existing snapshot event
     /// set, and `sequence`/`revision` are the exact pre-compaction counters.
     /// This record is generated only by the journal rewrite owner.
@@ -1594,6 +1613,34 @@ pub enum Event {
     /// Durable master-bootstrap launch intent/progress keyed by operation id.
     CeoBootstrapSet {
         record: crate::ceo::CeoBootstrapRecord,
+    },
+    /// One recorded CEO progress revision. Content equality is the dedup key;
+    /// urgency is only this explicit typed flag.
+    CeoProgressRecorded {
+        project: String,
+        content: crate::ceo_report_state::CeoProgressContent,
+        urgent: bool,
+    },
+    /// One prepared report batch. Preparation never marks a revision reported.
+    CeoReportBatchPrepared {
+        batch_id: String,
+        coverage: std::collections::BTreeMap<String, u64>,
+        urgent: bool,
+    },
+    /// Explicit acknowledgement of a prepared batch after actual host output.
+    CeoReportBatchAcknowledged {
+        batch_id: String,
+        reported_ms: u64,
+    },
+    /// Durable automatic notice gate update. The gate owns only scheduling and
+    /// reservation facts; progress, prepared batches and report time stay in
+    /// their existing canonical fields.
+    CeoReportNoticeGateUpdated {
+        gate: crate::ceo_report_state::CeoNoticeGate,
+    },
+    /// Snapshot replay baseline carrying the exact canonical helper state.
+    CeoReportStateRestored {
+        report_state: crate::ceo_report_state::CeoReportState,
     },
     ReducerCheckpoint {
         sequence: u64,

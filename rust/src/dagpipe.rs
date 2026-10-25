@@ -300,7 +300,7 @@ fn ensure_graph_nodes_use_registered_operators(
 mod notification;
 use notification::{register_notification_operator, validate_notification_objects};
 
-fn embedded_graph_paths() -> [(&'static str, &'static str); 31] {
+fn embedded_graph_paths() -> [(&'static str, &'static str); 32] {
     [
         (
             "docs/dagpipe/collab-reply-obligation.graph.json",
@@ -426,10 +426,14 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 31] {
             "docs/dagpipe/sdk-resource-refresh.graph.json",
             include_str!("../../docs/dagpipe/sdk-resource-refresh.graph.json"),
         ),
+        (
+            "docs/dagpipe/collab-ceo-coordination.graph.json",
+            include_str!("../../docs/dagpipe/collab-ceo-coordination.graph.json"),
+        ),
     ]
 }
 
-fn design_graph_ids() -> [&'static str; 29] {
+fn design_graph_ids() -> [&'static str; 30] {
     [
         "collab-reply-obligation",
         "appsdk-collab-binding-lifecycle",
@@ -460,10 +464,11 @@ fn design_graph_ids() -> [&'static str; 29] {
         "appsdk-user-requirement-change",
         "appsdk-user-requirement-consumption",
         "appsdk-sdk-resource-refresh",
+        "collab-ceo-coordination",
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 141] {
+fn design_graph_operator_names() -> [&'static str; 150] {
     [
         "collab.reply.read",
         "appsdk.collab_context.bootstrap_policy",
@@ -490,6 +495,15 @@ fn design_graph_operator_names() -> [&'static str; 141] {
         "collab.required_review.commit",
         "collab.required_review.notify",
         "collab.required_review.emit",
+        "collab.ceo.authenticate",
+        "collab.ceo.resolve",
+        "collab.ceo.commit",
+        "collab.ceo.coalesce_progress",
+        "collab.ceo.report_policy",
+        "collab.ceo.prepare_user_report",
+        "collab.ceo.notify",
+        "collab.ceo.ack_user_report",
+        "collab.ceo.receipt",
         "appsdk.collab.board.admit_request",
         "appsdk.collab.board.apply",
         "appsdk.collab.board.authorize",

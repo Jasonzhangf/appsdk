@@ -1,6 +1,10 @@
 use std::path::Path;
 
-pub(crate) fn generate_long_horizon_goal_prompt(goal_path: &Path, interval_str: &str) -> String {
+pub(crate) fn generate_long_horizon_goal_prompt(
+    goal_path: &Path,
+    interval_str: &str,
+    role: ExecutionRole,
+) -> String {
     format!(
         r#"# 本人长程目标编排提示词（Master / Peer）
 
@@ -24,21 +28,23 @@ THEN: 派发、解阻塞、或用证据收口。ACK 和摘要不是完成；仅�
 
 {}
 
-## 4. 全生命周期治理与 AppSDK 规范
+{}
+
+## 5. 全生命周期治理与 AppSDK 规范
 {}
 - **按风险验收**：核对适用红测、真实入口回归和交付结果；完整重大 milestone 在集成边界做一次独立审查。复用有效证据，不为内部节点逐次审查，不引入来源包装、候选身份、哈希或冻结仪式。具体流程沿宿主交付合同。
 - **上报 AppSDK 框架异常**：若执行过程中遇到 AppSDK 工具链、verify 规则或治理阻断，严禁在业务仓库内 hack 规避；按实际影响定级并复用 canonical intake 判重：
   `appsdk bug intake --input <json>`（携带 original_input、classification、scope、owner、parent、acceptance、evidence_links；优先级标签按实际影响选择，不固定 P0）。
 - **无歧义派单契约**：每个派发任务必须具备独立的写入范围与 Worktree，明确交付条件（完成 iff、产物范围、禁止篡改区）与测试条件（执行命令、期望结果、证据路径）。
 
-## 5. 目标阻塞与项目仲裁
+## 6. 目标阻塞与项目仲裁
 - 只处理与本人目标有真实依赖的阻塞项；当前视图来自 `appsdk longhorizon show`，不另跑固定状态查询。项目范围的跨 owner 仲裁仍由 master 负责。
 - **阻塞须有证据并交给对应 owner**：peer 是受托范围的唯一交付负责人，派单或求助不转移责任。先调查、核实子 agent 限制并尝试已有授权内的解法；事实、接口和依赖问题交给负责该事实的 peer，架构、需求解释和设计取舍先交总设计师，范围、优先级、资源与跨 peer 冲突交 master，只有用户独占事实、新授权或硬约束变化才问用户。及时提交任务与受影响验收、真实失败入口和原错/证据路径、已尝试动作及结果、其他授权内路径为何不可行、外部依赖、所需决定和恢复条件。事实与假设分开；求助不要求先证明根因。待核实的阻塞不是停工批准，只暂停确实依赖或不安全的动作，继续其余工作，不等待别人替自己解决。
 - **master 核实后才认可阻塞**：不能直接相信 peer 的结论。独立检查或复现相关失败证据，核对权限、替代路径和影响范围。有确凿外部依赖或未覆盖决定才批准，并记录证据、受影响范围和恢复条件；证据不足退回继续调查。peer 仍负责交付，除非明确改派。不得为停掉提醒而强制关闭未完成任务。
 - **AppSDK 框架缺陷**：按实际影响定级并经 canonical intake 判重登记，不能 hack 规避；缺陷报告本身不证明整个目标阻塞。继续未受影响工作，跨 owner 决策按上述路由与核实规则处理。
 - Worker 完成后督促其提交 solution 并关闭缺陷：`appsdk bug close <id> -m "Solution: ..."`。
 
-## 6. 结束条件
+## 7. 结束条件
 当且仅当目标文档要求的结果和适用验收全部满足时，长程任务完成。完成后关闭本人目标调度和巡检；没有新任务且无可执行工作时同样关闭无意义的定时巡检，记录未完成目标的解除条件。保留新任务消息及必要事件接收；新任务到达后重新评估巡检范围。
 "#,
         goal_path.display(),
@@ -46,8 +52,25 @@ THEN: 派发、解阻塞、或用证据收口。ACK 和摘要不是完成；仅�
         POLICY.worker_charter().trim(),
         POLICY.fleet_rules().trim(),
         POLICY.notification_rules().trim(),
+        project_patrol_brief(role),
         DEVELOPMENT_INTAKE_CONTRACT.trim(),
     )
+}
+
+pub(crate) fn project_patrol_brief(role: ExecutionRole) -> String {
+    if role != ExecutionRole::Master {
+        return "## 4. 项目巡检与 CEO 汇报\n\n项目巡检和 CEO 汇总由本项目 master 负责。普通 peer 只维护本人目标，不 arm 项目巡检。".to_string();
+    }
+    r#"## 4. 项目巡检与 CEO 汇报
+
+（仅本项目 master / Jenny 适用；普通 peer 不 arm 项目巡检。）
+
+- **默认 arm 已完成**：`appsdk goal subscribe` 在初始化或恢复本人长程目标时，会确保本项目 `collab notify subscribe --event master-idle --subject project-patrol --every-ms 900000` 的 15 分钟巡检已 armed，并复用有效订阅、不重复创建。只读命令 `appsdk longhorizon show --json` 只投影真实 `patrol_armed` 与 `patrol_subscription_id`，绝不创建订阅，也不能拿投影当作已 arm 回执。
+- **每次巡检必须检查真实 worker 状态**：分别读每个 worker 的 `idle`、`busy`、`unknown`，不要只判断“非 busy”。同时核对 `collab status --all` 中未关闭 board 任务的所有权与每个任务的巡检取消状态。只有真实观测到 `idle` 且该任务未被本人取消时才继续；`busy` 跳过且不补发，`unknown`、`offline`、`absent` 记录具体缺口，不臆断唤醒。
+- **不 rearm 已取消任务**：peer 可取消其本人任务的 board 巡检，取消只停该任务的巡检，保留任务、direct-message 和其他订阅。巡检不得重新 arm 已被 peer 取消的任务；本人明确恢复后才恢复。
+- **有 CEO 时回报实质进度**：`collab ceo reply --subject "<项目进度>" <正文>`，正文必须含目标、已验收结果、剩余工作、有证据的阻塞和下一动作，不写无证据心跳，不按正文关键词猜测紧急程度。
+- **无 CEO 时明确走无上游分支**：继续本项目本地工作，不虚构接收者，也不在测试外发送真实消息。"#
+        .to_string()
 }
 
 pub(crate) struct PolicySource {
@@ -200,13 +223,18 @@ mod tests {
 
     #[test]
     fn generated_prompt_uses_the_canonical_role_policy() {
-        let prompt = generate_long_horizon_goal_prompt(Path::new("goal.md"), "15m");
+        let prompt =
+            generate_long_horizon_goal_prompt(Path::new("goal.md"), "15m", ExecutionRole::Master);
 
         assert!(prompt.contains("peer 不是执行 worker"));
         assert!(!prompt.contains("只有所有合适 peer 都忙"));
         assert!(!prompt.contains("Master 专属"));
         assert!(prompt.contains("Worker / subworker 处理规则"));
         assert!(prompt.contains("通知处理准则"));
+        assert!(prompt.contains("项目巡检与 CEO 汇报"));
+        assert!(prompt.contains("--event master-idle"));
+        assert!(prompt.contains("collab ceo reply"));
+        assert!(prompt.contains("无 CEO 时明确走无上游分支"));
         assert!(prompt.contains("appsdk bug intake --input <json>"));
         assert!(prompt.contains("Peer-first"));
         assert!(prompt.contains("PROTECTED_HOLD"));
@@ -237,5 +265,9 @@ mod tests {
         assert!(unknown.contains("独立完成用户已授权的工作"));
         assert!(unknown.contains("codex exec --profile gcm"));
         assert!(!unknown.contains("只允许恢复绑定/注册"));
+        let worker_prompt =
+            generate_long_horizon_goal_prompt(Path::new("goal.md"), "15m", ExecutionRole::Worker);
+        assert!(!worker_prompt.contains("默认 arm 已完成"));
+        assert!(worker_prompt.contains("普通 peer 只维护本人目标"));
     }
 }

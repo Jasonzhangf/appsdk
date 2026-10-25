@@ -30,6 +30,7 @@ pub(super) struct GoalScope {
     pub project: PathBuf,
     pub invocation_root: PathBuf,
     pub session_id: Option<String>,
+    pub role: ExecutionRole,
 }
 
 impl GoalScope {
@@ -440,6 +441,7 @@ pub(super) fn goal_scope_from_context(context: &Value, root: &Path) -> Result<Go
             .as_str()
             .or_else(|| context["binding"]["session_id"].as_str())
             .map(str::to_owned),
+        role: execution_role(context),
     })
 }
 
@@ -736,8 +738,232 @@ pub(super) fn goal_check_subscription_owner(
     Ok(())
 }
 
+pub(super) const PROJECT_PATROL_EVENT: &str = "master-idle";
+pub(super) const PROJECT_PATROL_SUBJECT: &str = "project-patrol";
+pub(super) const PROJECT_PATROL_EVERY_MS: i64 = 900_000;
+
+fn goal_notify_subscriptions(root: &Path) -> Result<Vec<Value>, String> {
+    let mut command = Command::new("collab");
+    command.args(["notify", "status"]).current_dir(root);
+    let out = run_goal_collab_command(command, GOAL_COLLAB_READ_TIMEOUT)
+        .map_err(|error| format!("GOAL_PATROL_STATUS_UNAVAILABLE:{}", error))?;
+    if !out.status.success() {
+        let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(format!(
+            "GOAL_PATROL_STATUS_FAILED:exit={}{}",
+            out.status.code().unwrap_or(1),
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(":{}", detail)
+            }
+        ));
+    }
+    let response: Value = serde_json::from_slice(&out.stdout)
+        .map_err(|error| format!("GOAL_PATROL_STATUS_INVALID:{}", error))?;
+    response
+        .get("subscriptions")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| "GOAL_PATROL_STATUS_MISSING_SUBSCRIPTIONS".to_string())
+}
+
 pub(super) fn goal_subscription_is_terminal(status: &str) -> bool {
     matches!(status, "consumed" | "expired" | "cancelled")
+}
+
+fn goal_patrol_subscription_is_usable(
+    scope: &GoalScope,
+    subscription: &Value,
+    now_ms: i64,
+) -> Option<String> {
+    if goal_check_subscription_owner(scope, subscription).is_err()
+        || subscription["event"].as_str() != Some(PROJECT_PATROL_EVENT)
+        || subscription["interval_ms"].as_i64() != Some(PROJECT_PATROL_EVERY_MS)
+        || subscription["status"].as_str() != Some("armed")
+        || subscription["subject"].as_str() != Some(PROJECT_PATROL_SUBJECT)
+    {
+        return None;
+    }
+    if subscription["expires_ms"]
+        .as_i64()
+        .is_some_and(|expires_ms| expires_ms <= now_ms)
+    {
+        return None;
+    }
+    if let (Some(fired), Some(repeat)) = (
+        subscription["fired_count"].as_u64(),
+        subscription["repeat_count"].as_u64(),
+    ) {
+        if fired >= repeat {
+            return None;
+        }
+    }
+    subscription["id"]
+        .as_str()
+        .or_else(|| subscription["subscription_id"].as_str())
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_owned)
+}
+
+pub(super) fn goal_project_patrol_subscription(
+    root: &Path,
+    scope: &GoalScope,
+) -> Result<Option<(String, Value)>, String> {
+    let now_ms = goal_now_ms();
+    let mut matches: Vec<(String, Value)> = goal_notify_subscriptions(root)?
+        .into_iter()
+        .filter_map(|subscription| {
+            goal_patrol_subscription_is_usable(scope, &subscription, now_ms)
+                .map(|id| (id, subscription))
+        })
+        .collect();
+    matches.sort_by_key(|(_, subscription)| {
+        (
+            subscription["created_ms"].as_i64().unwrap_or(i64::MAX),
+            subscription["id"].as_str().unwrap_or_default().to_string(),
+        )
+    });
+    Ok(matches.into_iter().next())
+}
+
+fn goal_project_patrol_subscribe(
+    root: &Path,
+    scope: &GoalScope,
+) -> Result<(String, Value), String> {
+    let mut command = Command::new("collab");
+    command
+        .args([
+            "notify",
+            "subscribe",
+            "--event",
+            PROJECT_PATROL_EVENT,
+            "--subject",
+            PROJECT_PATROL_SUBJECT,
+            "--every-ms",
+            "900000",
+            "--repeat-count",
+            "100",
+            "--ttl-seconds",
+            "604800",
+        ])
+        .current_dir(root);
+    let out = run_goal_collab_command(command, GOAL_COLLAB_WRITE_TIMEOUT)
+        .map_err(|error| format!("GOAL_PATROL_SUBSCRIBE_FAILED:{}", error))?;
+    if !out.status.success() {
+        let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(format!(
+            "GOAL_PATROL_SUBSCRIBE_FAILED:exit={}{}",
+            out.status.code().unwrap_or(1),
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(":{}", detail)
+            }
+        ));
+    }
+    let response: Value = serde_json::from_slice(&out.stdout)
+        .map_err(|error| format!("GOAL_PATROL_SUBSCRIBE_INVALID:{}", error))?;
+    let subscription = response
+        .get("subscription")
+        .ok_or_else(|| "GOAL_PATROL_SUBSCRIBE_MISSING_SUBSCRIPTION".to_string())?;
+    let subscription_id = goal_patrol_subscription_is_usable(scope, subscription, goal_now_ms())
+        .ok_or_else(|| "GOAL_PATROL_SUBSCRIBE_NOT_ARMED".to_string())?;
+    Ok((subscription_id, subscription.clone()))
+}
+
+pub(super) fn goal_ensure_project_patrol(root: &Path, scope: &GoalScope) -> Value {
+    if scope.role != ExecutionRole::Master {
+        return serde_json::json!({
+            "applicable": false,
+            "armed": false,
+            "subscription_id": Value::Null,
+            "every_ms": Value::Null,
+            "source": "not-applicable",
+            "error": Value::Null,
+        });
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    match goal_project_patrol_subscription(root, scope) {
+        Ok(Some((subscription_id, subscription))) => serde_json::json!({
+            "applicable": true,
+            "armed": true,
+            "subscription_id": subscription_id,
+            "every_ms": PROJECT_PATROL_EVERY_MS,
+            "source": "reused",
+            "checked_at": now,
+            "subscription": subscription,
+            "error": Value::Null,
+        }),
+        Ok(None) => match goal_project_patrol_subscribe(root, scope) {
+            Ok((subscription_id, subscription)) => serde_json::json!({
+                "applicable": true,
+                "armed": true,
+                "subscription_id": subscription_id,
+                "every_ms": PROJECT_PATROL_EVERY_MS,
+                "source": "armed",
+                "checked_at": now,
+                "subscription": subscription,
+                "error": Value::Null,
+            }),
+            Err(error) => serde_json::json!({
+                "applicable": true,
+                "armed": false,
+                "subscription_id": Value::Null,
+                "every_ms": PROJECT_PATROL_EVERY_MS,
+                "source": "failed",
+                "checked_at": now,
+                "subscription": Value::Null,
+                "error": error,
+            }),
+        },
+        Err(error) => serde_json::json!({
+            "applicable": true,
+            "armed": false,
+            "subscription_id": Value::Null,
+            "every_ms": PROJECT_PATROL_EVERY_MS,
+            "source": "failed",
+            "checked_at": now,
+            "subscription": Value::Null,
+            "error": error,
+        }),
+    }
+}
+
+pub(super) fn goal_project_patrol_projection(root: &Path, scope: &GoalScope) -> Value {
+    if scope.role != ExecutionRole::Master {
+        return serde_json::json!({
+            "applicable": false,
+            "armed": false,
+            "subscription_id": Value::Null,
+            "every_ms": PROJECT_PATROL_EVERY_MS,
+            "error": Value::Null,
+        });
+    }
+    match goal_project_patrol_subscription(root, scope) {
+        Ok(Some((subscription_id, subscription))) => serde_json::json!({
+            "applicable": true,
+            "armed": true,
+            "subscription_id": subscription_id,
+            "every_ms": PROJECT_PATROL_EVERY_MS,
+            "subject": subscription["subject"].clone(),
+            "error": Value::Null,
+        }),
+        Ok(None) => serde_json::json!({
+            "applicable": true,
+            "armed": false,
+            "subscription_id": Value::Null,
+            "every_ms": PROJECT_PATROL_EVERY_MS,
+            "error": Value::Null,
+        }),
+        Err(error) => serde_json::json!({
+            "applicable": true,
+            "armed": false,
+            "subscription_id": Value::Null,
+            "every_ms": PROJECT_PATROL_EVERY_MS,
+            "error": error,
+        }),
+    }
 }
 
 // Collab leaves a skipped goal deadline `armed` with its one-shot trigger in

@@ -66,9 +66,16 @@ pub enum CeoCommand {
         subject: String,
         body: String,
         in_reply_to: Option<String>,
+        /// Explicit typed urgency for this progress. Never inferred from text.
+        #[serde(default)]
+        urgent: bool,
     },
     Progress {
         project: Option<String>,
+    },
+    /// Acknowledge one prepared report batch after actual visible user output.
+    ReportAck {
+        batch_id: String,
     },
     BootstrapPrepare {
         project: String,
@@ -93,4 +100,51 @@ pub enum CeoCommand {
         operation_id: String,
         approval: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CeoCommand;
+    use serde_json::json;
+
+    #[test]
+    fn reply_urgent_is_typed_wire_flag_defaulting_to_false() {
+        let legacy: CeoCommand =
+            serde_json::from_value(json!({"action":"reply","subject":"s","body":"b"})).unwrap();
+        match legacy {
+            CeoCommand::Reply {
+                urgent,
+                in_reply_to,
+                ..
+            } => {
+                assert!(!urgent, "reply without --urgent must default to false");
+                assert!(in_reply_to.is_none());
+            }
+            other => panic!("expected reply, got {other:?}"),
+        }
+
+        let urgent: CeoCommand = serde_json::from_value(json!({
+            "action":"reply","subject":"s","body":"b","urgent":true
+        }))
+        .unwrap();
+        let wire = serde_json::to_value(&urgent).unwrap();
+        assert_eq!(
+            wire,
+            json!({
+                "action":"reply","subject":"s","body":"b","in_reply_to":null,"urgent":true
+            })
+        );
+    }
+
+    #[test]
+    fn report_ack_round_trips_on_the_typed_action() {
+        let command: CeoCommand = serde_json::from_value(json!({
+            "action":"report-ack","batch_id":"batch-1"
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&command).unwrap(),
+            json!({"action":"report-ack","batch_id":"batch-1"})
+        );
+    }
 }

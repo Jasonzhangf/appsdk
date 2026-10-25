@@ -1,3 +1,5 @@
+include!("goal_project_patrol.rs");
+
 include!("goal_subscribe_rearm.rs");
 
 #[test]
@@ -423,10 +425,8 @@ esac
     assert_eq!(previous["active"], false);
     assert_eq!(previous["collab_subscribed"], false);
     assert_eq!(previous["collab_subscription"]["id"], "sub-consumed");
-    let persisted: Value = serde_json::from_slice(
-        &fs::read(goal_test_record_path(&root)).unwrap(),
-    )
-    .unwrap();
+    let persisted: Value =
+        serde_json::from_slice(&fs::read(goal_test_record_path(&root)).unwrap()).unwrap();
     assert_eq!(persisted["subscription_id"], "sub-rearmed");
     assert_eq!(
         persisted["recovery_history"][0]["previous_record"]["subscription_id"],
@@ -565,8 +565,14 @@ fn goal_stale_lock_is_recovered_after_owner_exit() {
     fs::create_dir_all(&fake_bin).unwrap();
     fs::write(fake_bin.join("collab"), "#!/bin/sh\nexit 64\n").unwrap();
     install_goal_test_context(&fake_bin.join("collab"), &root);
-    let run_status = || Command::new(binary()).args(["goal", "status", "--json"])
-        .current_dir(&root).env("PATH", &fake_bin).output().unwrap();
+    let run_status = || {
+        Command::new(binary())
+            .args(["goal", "status", "--json"])
+            .current_dir(&root)
+            .env("PATH", &fake_bin)
+            .output()
+            .unwrap()
+    };
     let mut exited = Command::new("/bin/sh")
         .args(["-c", "exit 0"])
         .spawn()
@@ -658,10 +664,7 @@ fn goal_stale_lock_is_recovered_after_owner_exit() {
         .expect("truncated lock recovery receipt");
     assert_eq!(truncated_receipt["status"], "recovered");
     assert_eq!(truncated_receipt["original_metadata"], "pid=");
-    assert_eq!(
-        truncated_receipt["reason"],
-        "invalid or truncated metadata"
-    );
+    assert_eq!(truncated_receipt["reason"], "invalid or truncated metadata");
 
     let mut live_owner = Command::new("/bin/sh")
         .args(["-c", "sleep 2"])
@@ -983,10 +986,7 @@ exit 64
     assert!(text.contains("appsdk bug intake --input <json>"), "{text}");
     assert!(text.contains("按实际影响"), "{text}");
     assert!(text.contains("master 核实后才认可阻塞"), "{text}");
-    assert!(
-        text.contains("peer 是受托范围的唯一交付负责人"),
-        "{text}"
-    );
+    assert!(text.contains("peer 是受托范围的唯一交付负责人"), "{text}");
 
     fs::remove_dir_all(root).unwrap();
 }

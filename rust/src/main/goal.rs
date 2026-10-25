@@ -38,12 +38,15 @@ pub(super) fn longhorizon_show(root: &Path, format_json: bool) {
         .ok()
         .and_then(|context| context["identity"]["worker_id"].as_str())
         .map(str::to_owned);
-    let (record, record_error) = match context
-        .and_then(|context| goal_scope_from_context(&context, root))
-        .and_then(|scope| goal_record_read(&scope))
-    {
-        Ok(record) => (record, None),
-        Err(error) => (None, Some(error)),
+    let (record, record_error, scope) = match context.as_ref() {
+        Ok(context) => match goal_scope_from_context(context, root) {
+            Ok(scope) => match goal_record_read(&scope) {
+                Ok(record) => (record, None, Some(scope)),
+                Err(error) => (None, Some(error), Some(scope)),
+            },
+            Err(error) => (None, Some(error), None),
+        },
+        Err(error) => (None, Some(error.clone()), None),
     };
     let (status, collab_status_error) = match collab_status_all(root) {
         Ok(status) => (Some(status), None),
@@ -65,6 +68,16 @@ pub(super) fn longhorizon_show(root: &Path, format_json: bool) {
     let role_label = role.label();
     let charter = role.charter();
     let fleet_rules = role.fleet_rules();
+    let patrol = match scope.as_ref() {
+        Some(scope) => goal_project_patrol_projection(root, scope),
+        None => serde_json::json!({
+            "applicable": false,
+            "armed": false,
+            "subscription_id": Value::Null,
+            "every_ms": Value::Null,
+            "error": Value::Null,
+        }),
+    };
 
     let goal_path = record
         .as_ref()
@@ -170,6 +183,10 @@ pub(super) fn longhorizon_show(root: &Path, format_json: bool) {
                 "active": record.as_ref().and_then(|r| r["active"].as_bool()),
                 "registered_at": record.as_ref().and_then(|r| r["registered_at"].as_str()),
                 "objective": objective,
+                "patrol_armed": patrol["armed"].as_bool().unwrap_or(false),
+                "patrol_subscription_id": patrol["subscription_id"].clone(),
+                "patrol_every_ms": patrol["every_ms"].clone(),
+                "patrol_error": patrol["error"].clone(),
             },
             "assigned": active_tasks,
             "pending_merges": pending_merges,
@@ -214,6 +231,23 @@ pub(super) fn longhorizon_show(root: &Path, format_json: bool) {
                 rec["active"].as_bool().unwrap_or(false),
                 rec["registered_at"].as_str().unwrap_or("unknown")
             );
+            if patrol["applicable"].as_bool().unwrap_or(false) {
+                if patrol["armed"].as_bool().unwrap_or(false) {
+                    println!(
+                        "- 项目巡检: 已 armed ({}, 每 {} ms)",
+                        patrol["subscription_id"].as_str().unwrap_or("unknown"),
+                        patrol["every_ms"].as_i64().unwrap_or(900_000)
+                    );
+                } else {
+                    println!(
+                        "- 项目巡检: 未 armed{}",
+                        patrol["error"]
+                            .as_str()
+                            .map(|error| format!(": {}", error))
+                            .unwrap_or_default()
+                    );
+                }
+            }
         }
         _ => println!("- 未注册长程目标。先运行 `appsdk goal subscribe --goal <path.md> --interval <period>`。"),
         }
@@ -343,6 +377,37 @@ pub(super) fn longhorizon_show(root: &Path, format_json: bool) {
     }
 }
 
+fn goal_record_apply_patrol(record: &mut Value, patrol: &Value) {
+    record["patrol_applicable"] = patrol["applicable"].clone();
+    record["patrol_armed"] = patrol["armed"].clone();
+    record["patrol_subscription_id"] = patrol["subscription_id"].clone();
+    record["patrol_every_ms"] = patrol["every_ms"].clone();
+    record["patrol_source"] = patrol["source"].clone();
+    record["patrol_checked_at"] = patrol["checked_at"].clone();
+    record["patrol_subscription"] = patrol["subscription"].clone();
+    record["patrol_error"] = patrol["error"].clone();
+}
+
+fn goal_print_patrol_status(record: &Value) {
+    if !record["patrol_applicable"].as_bool().unwrap_or(false) {
+        return;
+    }
+    if record["patrol_armed"].as_bool().unwrap_or(false) {
+        println!(
+            "- Project patrol: armed ({}, every {} ms)",
+            record["patrol_subscription_id"]
+                .as_str()
+                .unwrap_or("unknown"),
+            record["patrol_every_ms"].as_i64().unwrap_or(900_000)
+        );
+    } else {
+        println!(
+            "- Project patrol: NOT armed: {}",
+            record["patrol_error"].as_str().unwrap_or("unknown error")
+        );
+    }
+}
+
 pub(super) fn handle_goal_command<I>(root: &Path, mut args: I)
 where
     I: Iterator<Item = String>,
@@ -435,7 +500,12 @@ where
                     GOAL_MIN_INTERVAL_MS / 60_000
                 ));
             }
-            let goal_prompt = generate_long_horizon_goal_prompt(&goal_path, &interval_str);
+            let scope = match resolve_goal_scope(root) {
+                Ok(scope) => scope,
+                Err(error) => goal_fail(format_json, &error, None),
+            };
+            let goal_prompt =
+                generate_long_horizon_goal_prompt(&goal_path, &interval_str, scope.role);
             let canonical_goal_path = goal_path
                 .canonicalize()
                 .unwrap_or_else(|_| goal_path.clone());
@@ -450,10 +520,6 @@ where
                     )
                 });
 
-            let scope = match resolve_goal_scope(root) {
-                Ok(scope) => scope,
-                Err(error) => goal_fail(format_json, &error, None),
-            };
             let owner = scope.owner.clone();
             let _goal_lock = match GoalLock::acquire(&scope) {
                 Ok(lock) => lock,
@@ -584,6 +650,8 @@ where
                                     });
                                     response["subject"] = Value::String(matched_subject);
                                 }
+                                let patrol = goal_ensure_project_patrol(root, &scope);
+                                goal_record_apply_patrol(&mut response, &patrol);
                                 if let Err(error) = goal_record_write(&scope, &response) {
                                     drop(_goal_lock);
                                     goal_fail(format_json, &error, Some(&response));
@@ -597,6 +665,7 @@ where
                                     println!("Long-horizon goal already registered:");
                                     println!("- Goal file: {}", canonical_goal_path.display());
                                     println!("- Existing Collab subscription retained");
+                                    goal_print_patrol_status(&response);
                                 }
                                 return;
                             }
@@ -797,6 +866,10 @@ where
                 }
             }
             record["revision"] = Value::Number(2.into());
+            if collab_subscribed {
+                let patrol = goal_ensure_project_patrol(root, &scope);
+                goal_record_apply_patrol(&mut record, &patrol);
+            }
             if let Err(error) = goal_record_write(&scope, &record) {
                 record["active"] = Value::Bool(false);
                 record["observed"] = Value::String("unknown".into());
@@ -824,6 +897,7 @@ where
                     interval_str, interval_str, repeat_count, ttl_seconds
                 );
                 println!("- Collab notification status: one-shot armed; rearm is explicit and verifiable");
+                goal_print_patrol_status(&record);
                 println!("\n{}", goal_prompt);
             }
         }
@@ -1314,11 +1388,12 @@ where
                     goal_path.display()
                 ));
             }
-            if let Err(error) = resolve_goal_scope(root) {
-                goal_fail(false, &error, None);
-            }
+            let role = match resolve_goal_scope(root) {
+                Ok(scope) => scope.role,
+                Err(error) => goal_fail(false, &error, None),
+            };
 
-            let prompt = generate_long_horizon_goal_prompt(&goal_path, &interval_str);
+            let prompt = generate_long_horizon_goal_prompt(&goal_path, &interval_str, role);
             println!("{}", prompt);
         }
         _ => fail(format!("UNKNOWN_GOAL_SUBCOMMAND:{}", sub)),

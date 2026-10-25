@@ -44,7 +44,8 @@ fn routing_requires_explicit_master_and_respects_scope_boundaries() {
             }
         }),
     );
-    assert_eq!(local_peer["route"]["mode"], "same-scope-peer");
+    assert_route_not_duplicated(&local_peer);
+    assert_eq!(local_peer["message"]["route"]["mode"], "same-scope-peer");
     assert_eq!(local_peer["message"]["state"], "accepted");
 
     let bound_child = call(
@@ -60,7 +61,8 @@ fn routing_requires_explicit_master_and_respects_scope_boundaries() {
             }
         }),
     );
-    assert_eq!(bound_child["route"]["mode"], "same-scope-parent");
+    assert_route_not_duplicated(&bound_child);
+    assert_eq!(bound_child["message"]["route"]["mode"], "same-scope-parent");
 
     let cross_master = call(
         &root,
@@ -75,7 +77,11 @@ fn routing_requires_explicit_master_and_respects_scope_boundaries() {
             }
         }),
     );
-    assert_eq!(cross_master["route"]["mode"], "cross-scope-master");
+    assert_route_not_duplicated(&cross_master);
+    assert_eq!(
+        cross_master["message"]["route"]["mode"],
+        "cross-scope-master"
+    );
 
     let peer_cross = call_error(
         &root,
@@ -158,9 +164,10 @@ fn cross_project_master_messages_use_shared_host_discovery_and_replay_target_mai
             }
         }),
     );
-    assert_eq!(a_to_b["route"]["mode"], "cross-scope-master");
-    assert_eq!(a_to_b["route"]["sameAppserver"], false);
-    assert_eq!(a_to_b["route"]["sameProject"], false);
+    assert_route_not_duplicated(&a_to_b);
+    assert_eq!(a_to_b["message"]["route"]["mode"], "cross-scope-master");
+    assert_eq!(a_to_b["message"]["route"]["sameAppserver"], false);
+    assert_eq!(a_to_b["message"]["route"]["sameProject"], false);
     assert_eq!(a_to_b["message"]["state"], "accepted");
 
     let b_to_a = call_with_host(
@@ -177,7 +184,8 @@ fn cross_project_master_messages_use_shared_host_discovery_and_replay_target_mai
             }
         }),
     );
-    assert_eq!(b_to_a["route"]["mode"], "cross-scope-master");
+    assert_route_not_duplicated(&b_to_a);
+    assert_eq!(b_to_a["message"]["route"]["mode"], "cross-scope-master");
 
     let status_a = call_with_host(&project_a, &host, json!({ "op": "status" }));
     assert_eq!(status_a["messages"].as_array().unwrap().len(), 1);

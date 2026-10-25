@@ -231,6 +231,7 @@ fn idle_window_retry_of_older_message_keeps_latest_generation() {
     // and append no third queued fact.
     let retry_pending = call(&root, json!({ "op": "send", "message": message_a.clone() }));
     assert_eq!(retry_pending["idempotent"], true);
+    assert_route_not_duplicated(&retry_pending);
     let after_pending_retry = call(&root, json!({ "op": "status" }));
     assert_eq!(
         after_pending_retry["notificationProjection"]["pending"][0]["messageId"],
@@ -256,6 +257,7 @@ fn idle_window_retry_of_older_message_keeps_latest_generation() {
     // latest generation; it must not reopen generation two or batch A again.
     let retry_terminal = call(&root, json!({ "op": "send", "message": message_a }));
     assert_eq!(retry_terminal["idempotent"], true);
+    assert_route_not_duplicated(&retry_terminal);
     let status = call(&root, json!({ "op": "status" }));
     assert_eq!(
         status["notificationProjection"]["emitted"]

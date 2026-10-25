@@ -1609,6 +1609,28 @@ pub enum Event {
     CeoBootstrapSet {
         record: crate::ceo::CeoBootstrapRecord,
     },
+    /// One recorded CEO progress revision. Content equality is the dedup key;
+    /// urgency is only this explicit typed flag.
+    CeoProgressRecorded {
+        project: String,
+        content: crate::ceo_report_state::CeoProgressContent,
+        urgent: bool,
+    },
+    /// One prepared report batch. Preparation never marks a revision reported.
+    CeoReportBatchPrepared {
+        batch_id: String,
+        coverage: std::collections::BTreeMap<String, u64>,
+        urgent: bool,
+    },
+    /// Explicit acknowledgement of a prepared batch after actual host output.
+    CeoReportBatchAcknowledged {
+        batch_id: String,
+        reported_ms: u64,
+    },
+    /// Snapshot replay baseline carrying the exact canonical helper state.
+    CeoReportStateRestored {
+        report_state: crate::ceo_report_state::CeoReportState,
+    },
     ReducerCheckpoint {
         sequence: u64,
         revision: u64,

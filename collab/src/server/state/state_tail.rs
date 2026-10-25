@@ -53,6 +53,11 @@ pub struct State {
         std::collections::BTreeMap<String, crate::board_patrol_policy::TaskPatrolCancelRecord>,
     pub board_patrol_gates:
         std::collections::BTreeMap<String, crate::board_patrol_policy::PeerBoardPatrolGate>,
+    /// Canonical CEO progress coalescing and report acknowledgement state.
+    /// Only the host runtime writes it; authorization, grant eligibility and
+    /// clock ownership belong to the later caller. Initialize with the typed
+    /// default so replay and snapshot restore the exact helper state.
+    pub ceo_report_state: crate::ceo_report_state::CeoReportState,
     pub scheduler_admissions: HashMap<String, SchedulerAdmissionRecord>,
     pub task_lifecycle: HashMap<String, TaskLifecycleRecord>,
     /// Accepted tasks awaiting a main merge, keyed by task id. Daemon-owned so

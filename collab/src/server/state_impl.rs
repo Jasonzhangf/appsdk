@@ -1173,6 +1173,34 @@ impl State {
                 self.ceo_bootstraps
                     .insert(record.operation_id.clone(), record.clone());
             }
+            Event::CeoProgressRecorded {
+                project,
+                content,
+                urgent,
+            } => {
+                self.ceo_report_state
+                    .record_progress(project.clone(), content.clone(), *urgent);
+            }
+            Event::CeoReportBatchPrepared {
+                batch_id,
+                coverage,
+                urgent,
+            } => {
+                self.ceo_report_state
+                    .prepare_batch(batch_id.clone(), coverage.clone(), *urgent)
+                    .map_err(|error| error.to_string())?;
+            }
+            Event::CeoReportBatchAcknowledged {
+                batch_id,
+                reported_ms,
+            } => {
+                self.ceo_report_state
+                    .acknowledge_batch(batch_id, *reported_ms)
+                    .map_err(|error| error.to_string())?;
+            }
+            Event::CeoReportStateRestored { report_state } => {
+                self.ceo_report_state = report_state.clone();
+            }
             Event::ReducerCheckpoint { .. } => {}
             Event::CommandStarted { .. } => {}
             Event::CommandRecorded {
@@ -2038,6 +2066,20 @@ impl State {
                 gate: gate.clone(),
             }
         }));
+        // Carry the canonical CEO report state only when it is meaningful: an
+        // existing CEO grant, a pending revision, an unacknowledged batch, or a
+        // recorded actual-report time. This preserves cleared-grant outstanding
+        // progress and report history while avoiding an unused empty CEO state
+        // on every non-CEO project. The restore assigns the exact helper state.
+        let ceo_meaningful = self.ceo_grant.is_some()
+            || !self.ceo_report_state.pending_revisions().is_empty()
+            || self.ceo_report_state.batch_count() > 0
+            || self.ceo_report_state.last_actual_report_ms().is_some();
+        if ceo_meaningful {
+            events.push(Event::CeoReportStateRestored {
+                report_state: self.ceo_report_state.clone(),
+            });
+        }
         (self.sequence, self.revision, events)
     }
 
@@ -2305,5 +2347,181 @@ mod board_patrol_state_tests {
 
         let replayed = replay_through_serde(&state);
         assert!(replayed.cancelled_board_patrol_tasks.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod ceo_report_state_wiring_tests {
+    use super::*;
+    use crate::ceo_report_state::CeoProgressContent;
+    use std::collections::BTreeMap;
+
+    fn replay_through_serde(state: &State) -> State {
+        let body = state
+            .snapshot_events()
+            .iter()
+            .map(|event| serde_json::to_string(event).unwrap())
+            .collect::<Vec<_>>();
+        let mut replayed = State::default();
+        for line in body {
+            let event: Event = serde_json::from_str(&line).unwrap();
+            replayed.apply(&event);
+        }
+        replayed
+    }
+
+    fn content(subject: &str, body: &str) -> CeoProgressContent {
+        CeoProgressContent::new(subject, body)
+    }
+
+    fn coverage(project: &str, revision: u64) -> BTreeMap<String, u64> {
+        BTreeMap::from([(project.to_owned(), revision)])
+    }
+
+    fn progress(project: &str, body: &str) -> Event {
+        Event::CeoProgressRecorded {
+            project: project.into(),
+            content: content("progress", body),
+            urgent: false,
+        }
+    }
+
+    fn prepared(batch_id: &str, project: &str, revision: u64) -> Event {
+        Event::CeoReportBatchPrepared {
+            batch_id: batch_id.into(),
+            coverage: coverage(project, revision),
+            urgent: false,
+        }
+    }
+
+    fn acknowledged(batch_id: &str, reported_ms: u64) -> Event {
+        Event::CeoReportBatchAcknowledged {
+            batch_id: batch_id.into(),
+            reported_ms,
+        }
+    }
+
+    fn contains_restored(events: &[Event]) -> bool {
+        events
+            .iter()
+            .any(|event| matches!(event, Event::CeoReportStateRestored { .. }))
+    }
+
+    #[test]
+    fn progress_and_prepare_survive_snapshot_serde_replay_without_ack() {
+        let mut state = State::default();
+        state.apply(&progress("proj-a", "first"));
+        state.apply(&prepared("batch-1", "proj-a", 1));
+
+        assert!(contains_restored(&state.snapshot_events()));
+
+        let replayed = replay_through_serde(&state);
+
+        let pending = replayed
+            .ceo_report_state
+            .pending_revision("proj-a")
+            .expect("pending revision survives replay");
+        assert_eq!(pending.revision, 1);
+        assert_eq!(pending.content, content("progress", "first"));
+        assert_eq!(replayed.ceo_report_state.batch_count(), 1);
+        assert_eq!(
+            replayed.ceo_report_state.batches["batch-1"].coverage,
+            coverage("proj-a", 1)
+        );
+        assert_eq!(replayed.ceo_report_state.last_actual_report_ms(), None);
+        assert_eq!(
+            replayed.ceo_report_state.projects["proj-a"].reported_revision,
+            0
+        );
+    }
+
+    #[test]
+    fn ack_of_superseded_revision_keeps_later_pending_and_replay_time_then_rejects_ack() {
+        let mut state = State::default();
+        state.apply(&progress("proj-a", "revision one"));
+        state.apply(&prepared("batch-1", "proj-a", 1));
+        // A newer same-project revision exists before the acknowledgement.
+        state.apply(&progress("proj-a", "revision two"));
+        state.apply(&acknowledged("batch-1", 1_000));
+
+        assert_eq!(state.ceo_report_state.last_actual_report_ms(), Some(1_000));
+        assert_eq!(
+            state
+                .ceo_report_state
+                .pending_revision("proj-a")
+                .expect("revision two stays pending live")
+                .revision,
+            2
+        );
+
+        let mut replayed = replay_through_serde(&state);
+        assert_eq!(
+            replayed
+                .ceo_report_state
+                .pending_revision("proj-a")
+                .expect("revision two stays pending after replay")
+                .revision,
+            2
+        );
+        assert_eq!(
+            replayed.ceo_report_state.last_actual_report_ms(),
+            Some(1_000)
+        );
+
+        // Unknown and repeated acknowledgements are explicit errors and do not
+        // advance the declared report time or change pending progress.
+        assert!(replayed
+            .apply_checked(&acknowledged("missing-batch", 9_000))
+            .is_err());
+        assert_eq!(
+            replayed.ceo_report_state.last_actual_report_ms(),
+            Some(1_000)
+        );
+        assert!(replayed
+            .apply_checked(&acknowledged("batch-1", 9_000))
+            .is_err());
+        assert_eq!(
+            replayed.ceo_report_state.last_actual_report_ms(),
+            Some(1_000)
+        );
+        assert_eq!(
+            replayed
+                .ceo_report_state
+                .pending_revision("proj-a")
+                .expect("revision two still pending")
+                .revision,
+            2
+        );
+    }
+
+    #[test]
+    fn default_state_emits_no_empty_ceo_event_but_nonempty_report_state_does() {
+        let untouched = State::default();
+        assert!(!contains_restored(&untouched.snapshot_events()));
+
+        let mut cleared_grant = State::default();
+        cleared_grant.apply(&Event::CeoGrantSet {
+            grant: Some(crate::ceo::CeoGrant {
+                workspace: "/workspace".into(),
+                app_scope_id: "app".into(),
+                name: "CEO".into(),
+                granted_by: "user".into(),
+                approval: "approved".into(),
+                granted_ms: 1,
+            }),
+        });
+        cleared_grant.apply(&Event::CeoGrantSet { grant: None });
+        assert!(cleared_grant.ceo_grant.is_none());
+
+        cleared_grant.apply(&progress("project-after-revoke", "retained"));
+        let events = cleared_grant.snapshot_events();
+        let restored = events
+            .iter()
+            .find_map(|event| match event {
+                Event::CeoReportStateRestored { report_state } => Some(report_state),
+                _ => None,
+            })
+            .expect("nonempty report state is retained without a CEO grant");
+        assert!(restored.pending_revision("project-after-revoke").is_some());
     }
 }

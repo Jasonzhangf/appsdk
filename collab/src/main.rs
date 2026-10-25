@@ -1,6 +1,9 @@
 mod board;
 pub mod board_patrol_policy;
 mod ceo;
+mod ceo_report_state;
+mod ceo_reporting_policy;
+mod ceo_workspace_guidance;
 mod client;
 mod config;
 mod context_operation;

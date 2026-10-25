@@ -438,7 +438,7 @@ fn project_memory_index_query_review_and_compact_are_layered() {
     assert!(queried.status.success());
     let queried_json: Value = serde_json::from_slice(&queried.stdout).unwrap();
     assert_eq!(queried_json["semantic_backend"]["status"], "candidate-only");
-    assert!(queried_json["keyword_matches"]
+    assert!(queried_json["results"]
         .as_array()
         .unwrap()
         .iter()
@@ -508,6 +508,104 @@ fn project_memory_index_query_review_and_compact_are_layered() {
 }
 
 #[test]
+fn project_memory_query_deduplicates_overlapping_hits_and_keeps_origin() {
+    let root = temp_root("project-memory-overlapping-query");
+    let memory_home = temp_root("project-memory-overlapping-query-home");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&memory_home).unwrap();
+    let project_body = "project overlap body appears once";
+    let global_body = "global overlap body appears once";
+
+    for args in [
+        vec![
+            "entry",
+            "--id",
+            "overlap",
+            "--category",
+            "lesson",
+            "--text",
+            project_body,
+            "--importance",
+            "120",
+        ],
+        vec![
+            "entry",
+            "--id",
+            "global-overlap",
+            "--category",
+            "lesson",
+            "--text",
+            global_body,
+            "--importance",
+            "110",
+            "--global",
+        ],
+    ] {
+        let created = run_memory(&root, &args, &memory_home);
+        assert!(
+            created.status.success(),
+            "{}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+    }
+    let promoted = run_memory(
+        &root,
+        &[
+            "promote",
+            "--id",
+            "overlap",
+            "--level",
+            "1",
+            "--evidence",
+            "review/overlap#critical",
+        ],
+        &memory_home,
+    );
+    assert!(
+        promoted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&promoted.stderr)
+    );
+
+    let queried = run_memory(&root, &["query", "overlap"], &memory_home);
+    assert!(
+        queried.status.success(),
+        "{}",
+        String::from_utf8_lossy(&queried.stderr)
+    );
+    let rendered = String::from_utf8_lossy(&queried.stdout);
+    assert_eq!(rendered.matches(project_body).count(), 1, "{rendered}");
+    assert_eq!(rendered.matches(global_body).count(), 1, "{rendered}");
+    let queried_json: Value = serde_json::from_slice(&queried.stdout).unwrap();
+    let results = queried_json["results"].as_array().unwrap();
+    assert_eq!(results.len(), 2, "{queried_json}");
+    assert_eq!(results[0]["id"], "overlap");
+    assert_eq!(results[0]["scope"], "project");
+    assert_eq!(
+        results[0]["match_sources"],
+        serde_json::json!(["anchors", "exact", "category", "lesson", "keyword"])
+    );
+    assert_eq!(results[1]["id"], "global-overlap");
+    assert_eq!(results[1]["scope"], "global");
+    assert_eq!(
+        results[1]["match_sources"],
+        serde_json::json!(["category", "lesson", "keyword"])
+    );
+    let detail_path = results[0]["detail_path"].as_str().unwrap();
+    assert!(root.join(detail_path).is_file(), "{detail_path}");
+    assert!(fs::read_to_string(root.join(detail_path))
+        .unwrap()
+        .contains(project_body));
+    let inspected = run_memory(&root, &["get", "overlap"], &memory_home);
+    assert!(inspected.status.success());
+    let inspected: Value = serde_json::from_slice(&inspected.stdout).unwrap();
+    assert_eq!(inspected["matches"][0]["content"], project_body);
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(memory_home).unwrap();
+}
+
+#[test]
 fn project_memory_edges_and_latest_compaction_are_explicit() {
     let root = temp_root("project-memory-edges");
     let caller = temp_root("project-memory-edge-caller");
@@ -546,11 +644,16 @@ fn project_memory_edges_and_latest_compaction_are_explicit() {
         String::from_utf8_lossy(&queried.stderr)
     );
     let queried_json: Value = serde_json::from_slice(&queried.stdout).unwrap();
-    assert!(queried_json["anchors"]
+    assert!(queried_json["results"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|entry| entry["id"] == "anchor-edge"));
+        .any(|entry| entry["id"] == "anchor-edge"
+            && entry["match_sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|source| source == "anchors")));
     assert!(queried_json["declared_related"]
         .as_array()
         .unwrap()
@@ -692,7 +795,7 @@ fn project_memory_updates_follow_current_version_and_verify_source_drift() {
     let refreshed = run_memory(&root, &["query", "drifted"], &memory_home);
     assert!(refreshed.status.success());
     let refreshed: Value = serde_json::from_slice(&refreshed.stdout).unwrap();
-    assert!(refreshed["keyword_matches"]
+    assert!(refreshed["results"]
         .as_array()
         .unwrap()
         .iter()
@@ -1004,7 +1107,7 @@ fn project_memory_uses_review_levels_markdown_details_and_tag_search() {
     let tagged = run_memory(&root, &["query", "--tag", "architecture"], &memory_home);
     assert!(tagged.status.success());
     let tagged: Value = serde_json::from_slice(&tagged.stdout).unwrap();
-    assert!(tagged["keyword_matches"]
+    assert!(tagged["results"]
         .as_array()
         .unwrap()
         .iter()
@@ -1052,7 +1155,7 @@ fn project_memory_uses_review_levels_markdown_details_and_tag_search() {
     let rebuilt = run_memory(&root, &["query", "--tag", "review"], &memory_home);
     assert!(rebuilt.status.success());
     let rebuilt: Value = serde_json::from_slice(&rebuilt.stdout).unwrap();
-    assert!(rebuilt["keyword_matches"]
+    assert!(rebuilt["results"]
         .as_array()
         .unwrap()
         .iter()

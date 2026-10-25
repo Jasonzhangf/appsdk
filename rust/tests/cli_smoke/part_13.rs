@@ -1045,11 +1045,17 @@ fn guidance_init_projects_declared_context_and_commands() {
         .unwrap()
         .iter()
         .any(|skill| skill["command"] == "$local-debug"));
-    assert!(developed_json["questions"]
-        .as_array()
+    assert_eq!(developed_json["questions"], serde_json::json!([]));
+    assert!(developed_json.get("command_sequence").is_none());
+    assert!(developed_json.get("persistence").is_none());
+    assert!(developed_json["agent_instruction"]
+        .as_str()
         .unwrap()
-        .iter()
-        .any(|question| question["question_id"] == "architecture_confirmation"));
+        .contains("owning Skill or Collab peer"));
+    assert!(developed_json["agent_instruction"]
+        .as_str()
+        .unwrap()
+        .contains("user-exclusive facts, new authorization, or hard-constraint changes"));
     assert!(developed_json["next"]["command"]
         .as_str()
         .unwrap()
@@ -1069,16 +1075,13 @@ fn guidance_init_projects_declared_context_and_commands() {
     ]);
     assert!(debugged.status.success());
     let debugged_json: Value = serde_json::from_slice(&debugged.stdout).unwrap();
-    assert!(debugged_json["questions"]
-        .as_array()
+    assert_eq!(debugged_json["questions"], serde_json::json!([]));
+    assert!(debugged_json.get("command_sequence").is_none());
+    assert!(debugged_json.get("persistence").is_none());
+    assert!(debugged_json["agent_instruction"]
+        .as_str()
         .unwrap()
-        .iter()
-        .any(|question| question["question_id"] == "failure_sample"));
-    assert!(debugged_json["questions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|question| question["question_id"] == "causal_evidence"));
+        .contains("owning Skill or Collab peer"));
 
     fs::remove_dir_all(root).unwrap();
 }

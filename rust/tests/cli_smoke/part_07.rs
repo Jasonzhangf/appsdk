@@ -369,10 +369,7 @@ fn repeated_init_projects_standard_template_and_bootstrap_upgrade_proposal() {
         ".appsdk/templates/minimal/AGENTS.md"
     );
     assert_eq!(intake_json["standard_template"]["version"], "0.1.0015");
-    assert_eq!(
-        intake_json["standard_template"]["digest"],
-        file_digest(&reference)
-    );
+    assert!(intake_json["standard_template"].get("digest").is_none());
     let reference_source = intake_json["read_first"]
         .as_array()
         .unwrap()
@@ -383,6 +380,20 @@ fn repeated_init_projects_standard_template_and_bootstrap_upgrade_proposal() {
     assert_eq!(reference_source["disposition"], "standard_reference");
     assert_eq!(reference_source["required"], false);
     assert_eq!(reference_source["enforcement"], "advisory");
+    assert!(reference_source.get("digest").is_none());
+    let agents_source = intake_json["read_first"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["path"] == "AGENTS.md")
+        .unwrap();
+    assert_eq!(agents_source["precedence"], 100);
+    assert!(agents_source.get("digest").is_none());
+    assert!(intake_json["read_first"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|source| source.get("digest").is_none()));
     assert_eq!(
         intake_json["read_first"]
             .as_array()
@@ -396,9 +407,16 @@ fn repeated_init_projects_standard_template_and_bootstrap_upgrade_proposal() {
         "template_upgrade_review"
     );
     assert_eq!(
-        intake_json["proposal_schema"]["standard_template"]["digest"],
-        file_digest(&reference)
+        intake_json["proposal_schema"]["standard_template"]["path"],
+        ".appsdk/templates/minimal/AGENTS.md"
     );
+    assert_eq!(
+        intake_json["proposal_schema"]["standard_template"]["version"],
+        "0.1.0015"
+    );
+    assert!(intake_json["proposal_schema"]["standard_template"]
+        .get("digest")
+        .is_none());
     assert_eq!(
         intake_json["proposal_schema"]["recommended_changes"],
         serde_json::json!([])

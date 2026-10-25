@@ -994,7 +994,8 @@ fn validate_record(record: &OperationJournalRecord, expected_sequence: u64) -> a
 fn valid_business_receipt(receipt: &str) -> bool {
     matches!(
         receipt,
-        "approval_decision"
+        "bootstrap_policy"
+            | "approval_decision"
             | "nested_register"
             | "route"
             | "credential"

@@ -297,6 +297,46 @@ fn every_challenge_carries_a_distinct_nonce() {
 // -------------------------------------------------------------- failure classes
 
 #[test]
+fn dsh_post_submit_read_error_is_unknown() {
+    use crate::client::adapters::{dsh, AdapterError, NotificationDeliveryClass};
+    let root = scratch("read-error");
+    let socket = root.join("control.sock");
+    let listener = StdUnixListener::bind(&socket).unwrap();
+    let peer = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        BufReader::new(&stream).read_line(&mut line).unwrap();
+        let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(request["method"], "enqueue");
+        // Invalid UTF-8 deterministically fails read_line after submission.
+        stream.write_all(&[0xff, b'\n']).unwrap();
+    });
+    let error = dsh::notify_with_message_id(
+        &format!("unix://{}", socket.display()),
+        "rt-1",
+        "ses-1",
+        "followup",
+        "sender",
+        "body",
+        "message-1",
+    )
+    .unwrap_err();
+    peer.join().unwrap();
+    let _ = std::fs::remove_dir_all(root);
+    assert!(
+        error.to_string().contains("reading enqueue reply:"),
+        "{error}"
+    );
+    assert!(error.to_string().contains("UTF-8"), "{error}");
+    assert!(!error.is_definitely_absent());
+    assert!(!error.is_definitely_undelivered(), "{error}");
+    assert_eq!(
+        AdapterError::notification_class_from_display(&error.to_string()),
+        NotificationDeliveryClass::Unknown
+    );
+}
+
+#[test]
 fn an_unreachable_gateway_is_blocked_and_never_absent() {
     let dir = scratch("unreachable");
     let socket = dir.join("missing.sock");
@@ -365,6 +405,8 @@ fn a_gateway_refusal_carries_its_stable_code() {
     });
     let error = crate::client::adapters::dsh::facts(&gateway.endpoint(), "rt-1", "ses-1")
         .expect_err("a gateway refusal must fail closed");
+
+    assert!(error.is_definitely_undelivered());
 
     assert!(
         error.to_string().starts_with("DSH_ENDPOINT_REJECTED:"),

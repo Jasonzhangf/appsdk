@@ -109,7 +109,7 @@ teammate 或 worker 标识；不知道这些内部标识不构成转请 master �
 | 回复原请求 | 同一发送命令，原消息确有 ID 时加 `--in-reply-to '<原消息ID>'`；没有 ID 不猜、不查内部信箱找值 |
 | DSH 收件 | gateway 将完整正文送入原生回合；直接处理和回信，不运行 `recv/ack` |
 | 非 DSH 收件 | 按本 Skill 的 `collab recv` 流程消费 |
-| 确实跨项目 | 沿下文 master-to-master 通道；普通 peer 交给自己的 master |
+| 确实跨项目 | 沿下文 master-to-master 通道；普通 peer 交给自己的 master，不把跨项目地址传给 sendmessage |
 
 需要显式固定目录时，整条命令是：
 `(cd '<已注册项目根目录>' && collab sendmessage --to 'Alice' --subject '<主题>' '<正文>')`。
@@ -122,6 +122,12 @@ Alice 等收件人不存在。若 `resolve-agent` 错误列出自己的 session 
 （例如 `/Users/…`），先回已注册项目目录，使用同一公开入口；不要重新注册、
 查 journal/route/token，或调用 `register-peer`、`resolve-agent`、`Poll/Ack` 修身份。
 在正确项目仍失败时，保留原命令、项目、错误和已有消息 ID，报告具体失败边界。
+
+宿主 `list_agents` 只枚举该宿主的子 agent，不是 Collab 项目成员目录。列表里没有
+某个名字（例如 Jenny）不能证明目标 master 不存在或没有通信通道；当前会话未注册、
+缺 master 授权和目标不可达是不同失败，分别以真实 Collab 回执判断。确实要交付资料
+给另一项目时，按上文“确实跨项目”走 master-to-master 通道，不因宿主列表无匹配就
+默认要求用户人工转发，也不自行注册、猜身份或提升 master。
 
 ## 协作请求的执行、回复与接续
 
@@ -1354,7 +1360,7 @@ master 时先取得本次启动批准。收到真实就绪握手后继续派发�
 全局 CEO 走上一节的独立授权通道，不把 CEO 称呼当作项目 master 授权。
 
 发送者在自己的项目执行 `collab context`，使用返回的当前身份和 master 授权。
-用户提供目标项目绝对路径后，可以只读查询目标当前 master；这个查询不注册身份：
+先从已有项目记录或当前上下文取得目标项目的真实根目录；只有无法唯一确定时才向用户确认绝对路径。取得后可以只读查询目标当前 master；这个查询不注册身份：
 
 ```sh
 (cd '/目标项目绝对路径' && collab master status)

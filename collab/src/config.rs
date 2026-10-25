@@ -6,6 +6,10 @@ use std::{
     process::Command,
 };
 
+use crate::ceo_reporting_policy::{
+    CeoReportPolicy, DEFAULT_QUIET_END_MINUTE, DEFAULT_QUIET_START_MINUTE,
+};
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -15,6 +19,7 @@ pub struct Config {
     pub maintenance: Maintenance,
     pub keepalive: Keepalive,
     pub notifications: Notifications,
+    pub ceo_report: CeoReport,
     pub timers: Timers,
     pub subagent: Subagent,
     pub retention: Retention,
@@ -27,6 +32,7 @@ impl Default for Config {
             maintenance: Maintenance::default(),
             keepalive: Keepalive::default(),
             notifications: Notifications::default(),
+            ceo_report: CeoReport::default(),
             timers: Timers::default(),
             subagent: Subagent::default(),
             retention: Retention::default(),
@@ -140,6 +146,26 @@ impl Notifications {
         }
     }
 }
+
+/// CEO user-report timing. Only the Beijing quiet window is configurable; the
+/// hourly interval and the fixed UTC+8 offset remain in `ceo_reporting_policy`.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CeoReport {
+    /// Beijing local minute of day (`0..1440`) when quiet hours begin.
+    pub quiet_window_start_minute: u32,
+    /// Beijing local minute of day (`0..1440`) when quiet hours end.
+    pub quiet_window_end_minute: u32,
+}
+impl Default for CeoReport {
+    fn default() -> Self {
+        Self {
+            quiet_window_start_minute: DEFAULT_QUIET_START_MINUTE,
+            quiet_window_end_minute: DEFAULT_QUIET_END_MINUTE,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Timers {
@@ -528,6 +554,9 @@ pub fn parse(text: &str, root: &Path) -> Result<Config> {
             if table.contains_key("tmux") {
                 bail!("tmux is global-only; project overrides are not supported");
             }
+            if table.contains_key("ceo_report") {
+                bail!("ceo_report is global-only; project overrides are not supported");
+            }
             let path = table
                 .remove("root")
                 .and_then(|v| v.as_str().map(PathBuf::from))
@@ -555,10 +584,26 @@ pub fn parse(text: &str, root: &Path) -> Result<Config> {
     Ok(config)
 }
 impl Config {
+    /// Build the CEO report policy from the typed quiet-window settings.
+    ///
+    /// Invalid minutes surface as an explicit error from
+    /// `CeoReportPolicy::with_quiet_window`; no value is silently substituted.
+    /// The hourly interval and Beijing (UTC+8) offset stay fixed in
+    /// `CeoReportPolicy::beijing_default`.
+    pub fn ceo_report_policy(&self) -> Result<CeoReportPolicy> {
+        CeoReportPolicy::beijing_default()
+            .with_quiet_window(
+                self.ceo_report.quiet_window_start_minute,
+                self.ceo_report.quiet_window_end_minute,
+            )
+            .map_err(|error| anyhow::anyhow!("invalid ceo_report quiet window: {error}"))
+    }
+
     fn validate(&self) -> Result<()> {
         if self.maintenance.password.is_empty() {
             bail!("maintenance.password must not be empty");
         }
+        self.ceo_report_policy()?;
         for endpoint in &self.tmux.endpoints {
             validate_tmux_endpoint(endpoint)?;
         }
@@ -757,6 +802,15 @@ pub fn load(root: &Path) -> Result<Config> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ceo_reporting_policy::{CeoReportSuppression, BEIJING_UTC_OFFSET_MS};
+
+    const DAY_MS: u64 = 86_400_000;
+
+    /// Build an instant whose Beijing local minute of day equals `minute`.
+    fn at_beijing_minute(minute: u32) -> u64 {
+        10 * DAY_MS + u64::from(minute) * 60_000 - BEIJING_UTC_OFFSET_MS
+    }
+
     #[test]
     fn legacy_defaults_and_project_override() {
         let c = parse("", Path::new("/project")).unwrap();
@@ -943,5 +997,73 @@ projects = [
             .worktree
             .render_relative("project-a", "bad/slug")
             .is_err());
+    }
+
+    #[test]
+    fn ceo_report_quiet_hours_default_to_hourly_beijing_midnight_to_eight() {
+        let config = parse("", Path::new("/project")).unwrap();
+        let policy = config.ceo_report_policy().unwrap();
+        assert_eq!(policy.quiet_window(), (0, 480));
+        assert_eq!(policy.min_interval_ms(), 3_600_000);
+    }
+
+    #[test]
+    fn ceo_report_quiet_hours_accept_custom_wrapping_window() {
+        let config = parse(
+            "[ceo_report]\nquiet_window_start_minute=1380\nquiet_window_end_minute=360",
+            Path::new("/project"),
+        )
+        .unwrap();
+        let policy = config.ceo_report_policy().unwrap();
+        assert_eq!(policy.quiet_window(), (1380, 360));
+        assert_eq!(
+            policy
+                .evaluate(at_beijing_minute(1410), None, false)
+                .suppression,
+            CeoReportSuppression::QuietHours
+        );
+        assert!(policy.evaluate(at_beijing_minute(720), None, false).allowed);
+    }
+
+    #[test]
+    fn ceo_report_quiet_hours_equal_minutes_disable_window() {
+        let config = parse(
+            "[ceo_report]\nquiet_window_start_minute=600\nquiet_window_end_minute=600",
+            Path::new("/project"),
+        )
+        .unwrap();
+        let policy = config.ceo_report_policy().unwrap();
+        assert_eq!(policy.quiet_window(), (600, 600));
+        assert!(policy.evaluate(at_beijing_minute(600), None, false).allowed);
+    }
+
+    #[test]
+    fn ceo_report_quiet_hours_reject_out_of_range_minutes() {
+        for text in [
+            "[ceo_report]\nquiet_window_start_minute=1440",
+            "[ceo_report]\nquiet_window_end_minute=1440",
+        ] {
+            assert!(parse(text, Path::new("/project")).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn ceo_report_quiet_hours_reject_non_integer_and_unknown_settings() {
+        for text in [
+            "[ceo_report]\nquiet_window_start_minute='soon'",
+            "[ceo_report]\nquiet_window_end_minute=8.5",
+            "[ceo_report]\nmin_interval_ms=1000",
+        ] {
+            assert!(parse(text, Path::new("/project")).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn ceo_report_quiet_hours_are_global_only() {
+        assert!(parse(
+            "[[projects]]\nroot='/project'\n[projects.ceo_report]\nquiet_window_start_minute=60",
+            Path::new("/project"),
+        )
+        .is_err());
     }
 }

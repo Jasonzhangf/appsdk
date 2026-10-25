@@ -23,6 +23,8 @@ mod name_confirmed_takeover;
 mod name_runtime_cli;
 #[path = "board/patrol_subscriptions.rs"]
 mod patrol_subscriptions;
+#[path = "board/patrol_runtime.rs"]
+mod patrol_runtime;
 #[path = "board/reply_obligations.rs"]
 mod reply_obligations_cli;
 #[path = "board/work_roles.rs"]

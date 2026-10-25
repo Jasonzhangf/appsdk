@@ -941,3 +941,266 @@ fn accepted_master_goal_deadline_clears_goal_due_before_recv() {
         "a later master deadline must re-raise goal_due until accepted: {context}"
     );
 }
+
+fn board_patrol_ids(status: &Value, field: &str) -> Vec<String> {
+    status["board_patrol"][field]
+        .as_array()
+        .unwrap_or_else(|| panic!("board_patrol.{field} must be an array: {status}"))
+        .iter()
+        .map(|value| value.as_str().unwrap().to_owned())
+        .collect()
+}
+
+fn has_direct_message_subscription(status: &Value) -> bool {
+    status["subscriptions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|subscription| subscription["event"] == "direct-message")
+}
+
+#[test]
+fn board_idle_patrol_control_cancel_persists_and_rearm_keeps_inbox() {
+    let mut fixture = AppFixture::new();
+    let alice = fixture.run_public(&["context"], THREAD_A);
+    assert_eq!(alice["name"], "Alice");
+    fixture.run_public(&["task", "register", "T1"], THREAD_A);
+
+    let before = fixture.run_public(&["notify", "status"], THREAD_A);
+    assert_eq!(before["board_patrol"]["interval_ms"], 900_000);
+    assert_eq!(before["board_patrol"]["periodic_fallback"], true);
+    assert_eq!(before["board_patrol"]["realtime_connected"], false);
+    assert_eq!(
+        board_patrol_ids(&before, "eligible_task_ids"),
+        vec!["T1"]
+    );
+    assert!(board_patrol_ids(&before, "cancelled_tasks").is_empty());
+    assert!(
+        has_direct_message_subscription(&before),
+        "context must retain the daemon-owned direct-message lease: {before}"
+    );
+
+    let cancelled = fixture.run_public(
+        &[
+            "notify",
+            "cancel",
+            "--task-id",
+            "T1",
+            "--reason",
+            "checkpoint",
+            "--resume-condition",
+            "after review",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(cancelled["cancelled_task_ids"], json!(["T1"]));
+
+    let after = fixture.run_public(&["notify", "status"], THREAD_A);
+    assert_eq!(after["board_patrol"]["cancelled_tasks"], json!(["T1"]));
+    assert!(board_patrol_ids(&after, "eligible_task_ids").is_empty());
+    assert!(has_direct_message_subscription(&after));
+    assert_eq!(
+        fixture.run_public(&["task", "status", "T1"], THREAD_A)["id"],
+        "T1"
+    );
+
+    fixture.restart_daemon();
+    let resumed = fixture.run_public(&["context"], THREAD_A);
+    assert_eq!(resumed["name"], "Alice");
+    let persisted = fixture.run_public(&["notify", "status"], THREAD_A);
+    assert_eq!(
+        persisted["board_patrol"]["cancelled_tasks"],
+        json!(["T1"])
+    );
+
+    let rearmed = fixture.run_public(
+        &[
+            "notify",
+            "subscribe",
+            "--event",
+            "board-idle",
+            "--task-id",
+            "T1",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(rearmed["event"], "board-idle");
+    assert_eq!(rearmed["status"], "armed");
+    assert_eq!(rearmed["rearmed_task_ids"], json!(["T1"]));
+
+    let final_status = fixture.run_public(&["notify", "status"], THREAD_A);
+    assert!(board_patrol_ids(&final_status, "cancelled_tasks").is_empty());
+    assert_eq!(
+        board_patrol_ids(&final_status, "eligible_task_ids"),
+        vec!["T1"]
+    );
+}
+
+#[test]
+fn board_idle_patrol_control_cancel_all_is_atomic_and_new_task_stays_eligible() {
+    let fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(&["task", "register", "T1"], THREAD_A);
+    fixture.run_public(&["task", "register", "T2"], THREAD_A);
+    fixture.run_public(&["task", "register", "U1"], THREAD_B);
+
+    let mixed = fixture.command_public(
+        &[
+            "notify",
+            "cancel",
+            "--task-id",
+            "T1",
+            "--task-id",
+            "U1",
+        ],
+        THREAD_A,
+    );
+    assert!(!mixed.status.success(), "mixed owner cancel must fail");
+    let mixed_output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&mixed.stdout),
+        String::from_utf8_lossy(&mixed.stderr)
+    );
+    assert!(
+        mixed_output.contains("BOARD_PATROL_TASK_OWNER_REQUIRED"),
+        "unexpected mixed-owner failure: {mixed_output}"
+    );
+    let unchanged = fixture.run_public(&["notify", "status"], THREAD_A);
+    assert!(board_patrol_ids(&unchanged, "cancelled_tasks").is_empty());
+    assert_eq!(
+        board_patrol_ids(&unchanged, "eligible_task_ids"),
+        vec!["T1", "T2"]
+    );
+
+    let cancelled =
+        fixture.run_public(&["notify", "cancel", "--reason", "all"], THREAD_A);
+    assert_eq!(cancelled["cancelled_task_ids"], json!(["T1", "T2"]));
+
+    fixture.run_public(&["task", "register", "T3"], THREAD_A);
+    let with_new_task = fixture.run_public(&["notify", "status"], THREAD_A);
+    assert_eq!(
+        with_new_task["board_patrol"]["cancelled_tasks"],
+        json!(["T1", "T2"])
+    );
+    assert_eq!(
+        board_patrol_ids(&with_new_task, "eligible_task_ids"),
+        vec!["T3"]
+    );
+
+    fixture.run_public(
+        &[
+            "notify",
+            "subscribe",
+            "--event",
+            "board-idle",
+            "--task-id",
+            "T1",
+        ],
+        THREAD_A,
+    );
+    let rearmed = fixture.run_public(&["notify", "status"], THREAD_A);
+    assert_eq!(
+        rearmed["board_patrol"]["cancelled_tasks"],
+        json!(["T2"])
+    );
+    assert_eq!(
+        board_patrol_ids(&rearmed, "eligible_task_ids"),
+        vec!["T1", "T3"]
+    );
+}
+
+#[test]
+fn board_idle_patrol_control_rearm_is_scoped_to_the_caller() {
+    let fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(&["task", "register", "T1"], THREAD_A);
+    fixture.run_public(&["task", "register", "U1"], THREAD_B);
+    fixture.run_public(
+        &["notify", "cancel", "--task-id", "T1"],
+        THREAD_A,
+    );
+    fixture.run_public(
+        &["notify", "cancel", "--task-id", "U1"],
+        THREAD_B,
+    );
+
+    let rearmed =
+        fixture.run_public(&["notify", "subscribe", "--event", "board-idle"], THREAD_A);
+    assert_eq!(rearmed["rearmed_task_ids"], json!(["T1"]));
+
+    let alice = fixture.run_public(&["notify", "status"], THREAD_A);
+    assert!(board_patrol_ids(&alice, "cancelled_tasks").is_empty());
+    assert_eq!(
+        board_patrol_ids(&alice, "eligible_task_ids"),
+        vec!["T1"]
+    );
+
+    let bob = fixture.run_public(&["notify", "status"], THREAD_B);
+    assert_eq!(bob["board_patrol"]["cancelled_tasks"], json!(["U1"]));
+    assert!(board_patrol_ids(&bob, "eligible_task_ids").is_empty());
+}
+
+#[test]
+fn board_idle_patrol_control_lifecycle_uses_stable_owner_key() {
+    let mut fixture = AppFixture::new();
+    let alice = fixture.run_public(&["context"], THREAD_A);
+    let bob = fixture.run_public(&["context"], THREAD_B);
+    let alice_name = alice["name"].as_str().unwrap().to_owned();
+    let bob_name = bob["name"].as_str().unwrap().to_owned();
+    fixture.run_public(&["task", "register", "T1"], THREAD_A);
+    fixture.run_public(
+        &["notify", "cancel", "--task-id", "T1"],
+        THREAD_A,
+    );
+
+    fixture.append_name_events(&[json!({
+        "ev": "TaskAssignmentUpdated",
+        "assignment": {
+            "task_id": "T1",
+            "name": alice_name,
+            "session_id": THREAD_B,
+            "assignment_revision": 1,
+            "updated_ms": 1
+        }
+    })]);
+    let same_name = fixture.run_public(&["notify", "status"], THREAD_A);
+    assert_eq!(
+        same_name["board_patrol"]["cancelled_tasks"],
+        json!(["T1"]),
+        "same stable name with a new session carrier must retain cancellation: {same_name}"
+    );
+
+    fixture.append_name_events(&[
+        json!({
+            "ev": "TaskAssignmentUpdated",
+            "assignment": {
+                "task_id": "T1",
+                "name": bob_name,
+                "session_id": THREAD_B,
+                "assignment_revision": 2,
+                "updated_ms": 2
+            }
+        }),
+        json!({
+            "ev": "TaskAssignmentUpdated",
+            "assignment": {
+                "task_id": "T1",
+                "name": alice_name,
+                "session_id": THREAD_B,
+                "assignment_revision": 3,
+                "updated_ms": 3
+            }
+        }),
+    ]);
+    let transferred_back = fixture.run_public(&["notify", "status"], THREAD_A);
+    assert!(
+        board_patrol_ids(&transferred_back, "cancelled_tasks").is_empty(),
+        "a true owner transfer must clear the old cancellation: {transferred_back}"
+    );
+    assert_eq!(
+        board_patrol_ids(&transferred_back, "eligible_task_ids"),
+        vec!["T1"]
+    );
+}

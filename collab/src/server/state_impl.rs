@@ -1,6 +1,54 @@
 use super::*;
 use crate::server::global_state::CurrentThreadRouteReplayStatus;
 
+pub(crate) fn board_patrol_owner_key(state: &State, worker_id: &str) -> String {
+    let scoped = state
+        .workers
+        .get(worker_id)
+        .and_then(|worker| state.name_occupancies.get(&worker.cwd))
+        .and_then(|names| names.values().find(|holder| holder.worker_id == worker_id));
+    let unique = scoped.or_else(|| {
+        let mut holders = state
+            .name_occupancies
+            .values()
+            .flat_map(|names| names.values())
+            .filter(|holder| holder.worker_id == worker_id);
+        let first = holders.next();
+        if holders.next().is_none() {
+            first
+        } else {
+            None
+        }
+    });
+    unique
+        .map(|holder| holder.name.clone())
+        .or_else(|| state.worker_names.get(worker_id).cloned())
+        .unwrap_or_else(|| worker_id.to_owned())
+}
+
+pub(crate) fn board_patrol_owned_unclosed_task_ids(
+    state: &State,
+    worker_id: &str,
+    owner_key: &str,
+) -> Vec<String> {
+    let mut task_ids: Vec<String> = state
+        .tasks
+        .values()
+        .filter(|task| {
+            crate::board_patrol_policy::is_unclosed_board_status(&task.status)
+                && state
+                    .task_assignments
+                    .get(&task.id)
+                    .map_or(task.owner == worker_id, |assignment| {
+                        assignment.name == owner_key
+                    })
+        })
+        .map(|task| task.id.clone())
+        .collect();
+    task_ids.sort();
+    task_ids
+}
+
 impl State {
     /// Clear a persisted goal-due wake that no longer has an armed goal
     /// deadline owned by the master. Old daemons could snapshot `goal_due`
@@ -972,6 +1020,22 @@ impl State {
                 return Err("reducer snapshot is replay-only".into());
             }
             Event::TaskCreated { task } | Event::TaskUpdated { task } => {
+                let cancellation_owner = self
+                    .cancelled_board_patrol_tasks
+                    .get(&task.id)
+                    .map(|record| record.owner_key.clone());
+                if task_status_is_terminal(&task.status) {
+                    self.cancelled_board_patrol_tasks.remove(&task.id);
+                } else if let Some(record_owner) = cancellation_owner {
+                    let current_owner = self
+                        .task_assignments
+                        .get(&task.id)
+                        .map(|assignment| assignment.name.clone())
+                        .unwrap_or_else(|| board_patrol_owner_key(self, &task.owner));
+                    if record_owner != current_owner {
+                        self.cancelled_board_patrol_tasks.remove(&task.id);
+                    }
+                }
                 let known_public = self.workers.contains_key(&task.owner)
                     && !self
                         .subagents
@@ -1009,6 +1073,14 @@ impl State {
             }
             Event::TaskAssignmentUpdated { assignment } => {
                 self.apply_task_assignment(assignment)?;
+                if self
+                    .cancelled_board_patrol_tasks
+                    .get(&assignment.task_id)
+                    .is_some_and(|record| record.owner_key != assignment.name)
+                {
+                    self.cancelled_board_patrol_tasks
+                        .remove(&assignment.task_id);
+                }
             }
             Event::NameWorkRolesUpdated {
                 project_scope,

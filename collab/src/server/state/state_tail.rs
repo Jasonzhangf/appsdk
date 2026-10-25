@@ -126,6 +126,9 @@ fn subscription_affects_master_wake(
 #[path = "../state_impl.rs"]
 mod state_impl;
 
+pub(crate) use state_impl::board_patrol_owner_key;
+pub(crate) use state_impl::board_patrol_owned_unclosed_task_ids;
+
 #[cfg(test)]
 #[path = "../state_tests.rs"]
 mod tests;

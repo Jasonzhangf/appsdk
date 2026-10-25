@@ -1047,22 +1047,59 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 NotifyCmd::Methods => Req::NotificationMethods,
                 NotifyCmd::Subscribe {
                     event,
+                    task_ids,
                     subject,
                     at_ms,
                     every_ms,
                     repeat_count,
                     trigger_ms,
                     ttl_seconds,
-                } => Req::NotificationSubscribe {
+                } => {
+                    if event == "board-idle" {
+                        if subject.is_some()
+                            || !at_ms.is_empty()
+                            || every_ms.is_some()
+                            || trigger_ms.is_some()
+                            || repeat_count != 1
+                        {
+                            anyhow::bail!(
+                                "board-idle rearm does not accept subject or schedule options"
+                            );
+                        }
+                        Req::NotificationBoardRearm {
+                            worker_id: ident.worker_id.clone(),
+                            token: ident.token.clone(),
+                            task_ids,
+                        }
+                    } else {
+                        if !task_ids.is_empty() {
+                            anyhow::bail!("--task-id requires --event board-idle");
+                        }
+                        Req::NotificationSubscribe {
+                            worker_id: ident.worker_id.clone(),
+                            token: ident.token.clone(),
+                            event,
+                            subject,
+                            trigger_ms,
+                            trigger_times_ms: at_ms,
+                            interval_ms: every_ms,
+                            repeat_count,
+                            ttl_seconds,
+                        }
+                    }
+                }
+                NotifyCmd::Cancel {
+                    task_ids,
+                    event,
+                    reason,
+                    resume_condition,
+                } => Req::NotificationCancel {
                     worker_id: ident.worker_id.clone(),
                     token: ident.token.clone(),
+                    task_ids,
                     event,
-                    subject,
-                    trigger_ms,
-                    trigger_times_ms: at_ms,
-                    interval_ms: every_ms,
-                    repeat_count,
-                    ttl_seconds,
+                    reason,
+                    resume_condition,
                 },
                 NotifyCmd::Status => Req::NotificationStatus {
                     worker_id: ident.worker_id.clone(),

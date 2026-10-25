@@ -10,6 +10,9 @@ pub(crate) enum NotifyCmd {
     Subscribe {
         #[arg(long)]
         event: String,
+        /// Caller-owned task IDs whose board patrol is being rearmed
+        #[arg(long = "task-id")]
+        task_ids: Vec<String>,
         #[arg(long)]
         subject: Option<String>,
         /// Absolute UTC epoch milliseconds; repeat to define multiple fire times
@@ -23,8 +26,20 @@ pub(crate) enum NotifyCmd {
         repeat_count: u32,
         #[arg(long)]
         trigger_ms: Option<i64>,
-        #[arg(long)]
+        #[arg(long, default_value_t = 604_800)]
         ttl_seconds: u64,
+    },
+    /// Cancel board-idle patrol for caller-owned unclosed tasks
+    Cancel {
+        /// Task IDs to cancel; omitted cancels all caller-owned unclosed tasks
+        #[arg(long = "task-id")]
+        task_ids: Vec<String>,
+        #[arg(long, default_value = "board-idle")]
+        event: String,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long = "resume-condition")]
+        resume_condition: Option<String>,
     },
     /// List the caller's notification subscriptions
     Status,

@@ -204,6 +204,27 @@ fn dispatch_with_route_context_bound(
             repeat_count,
             ttl_seconds,
         ),
+        Req::NotificationCancel {
+            worker_id,
+            token,
+            task_ids,
+            event,
+            reason,
+            resume_condition,
+        } => handle_notification_cancel(
+            server,
+            worker_id,
+            token,
+            task_ids,
+            event,
+            reason,
+            resume_condition,
+        ),
+        Req::NotificationBoardRearm {
+            worker_id,
+            token,
+            task_ids,
+        } => handle_notification_board_rearm(server, worker_id, token, task_ids),
         Req::NotificationStatus { worker_id, token } => {
             handle_notification_status(server, worker_id, token)
         }
@@ -855,6 +876,8 @@ fn wire_route_principals(req: &Req) -> Result<Vec<WireRoutePrincipal<'_>>, Strin
         | Req::Register { worker_id, .. }
         | Req::LiveClosureDaemonSend { worker_id, .. }
         | Req::NotificationSubscribe { worker_id, .. }
+        | Req::NotificationCancel { worker_id, .. }
+        | Req::NotificationBoardRearm { worker_id, .. }
         | Req::NotificationStatus { worker_id, .. }
         | Req::GoalScheduleReconcile { worker_id, .. }
         | Req::Poll { worker_id, .. }

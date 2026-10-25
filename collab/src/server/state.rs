@@ -830,10 +830,6 @@ fn responsibility_effect<'a>(state: &'a State, event: &'a Event) -> Responsibili
         {
             ResponsibilityEffect::Mutates(operation.exact_target().worker_id.as_str())
         }
-        Event::BoardPatrolCancelled { .. } => ResponsibilityEffect::Safe,
-        Event::BoardPatrolRearmed { .. } => ResponsibilityEffect::Safe,
-        Event::BoardPatrolCancellationCleared { .. } => ResponsibilityEffect::Safe,
-        Event::BoardPatrolGateUpdated { .. } => ResponsibilityEffect::Safe,
         Event::ReducerSnapshot { .. } => ResponsibilityEffect::Safe,
         _ => ResponsibilityEffect::Safe,
     }

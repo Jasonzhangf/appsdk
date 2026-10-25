@@ -229,7 +229,141 @@ fn handle_notification_status(server: &Server, worker_id: String, token: String)
         .filter(|subscription| subscription.worker_id == worker_id)
         .collect();
     subscriptions.sort_by_key(|subscription| (subscription.created_ms, &subscription.id));
-    Resp::data(json!({"subscriptions": subscriptions}))
+    let owner_key = crate::server::state::board_patrol_owner_key(&state, &worker_id);
+    let owned_unclosed = crate::server::state::board_patrol_owned_unclosed_task_ids(&state, &worker_id, &owner_key);
+    let mut cancelled_tasks: Vec<String> = state
+        .cancelled_board_patrol_tasks
+        .values()
+        .filter(|record| record.owner_key == owner_key)
+        .map(|record| record.task_id.clone())
+        .collect();
+    cancelled_tasks.sort();
+    let eligible_task_ids: Vec<String> = owned_unclosed
+        .iter()
+        .filter(|task_id| {
+            !state
+                .cancelled_board_patrol_tasks
+                .get(*task_id)
+                .is_some_and(|record| record.owner_key == owner_key)
+        })
+        .cloned()
+        .collect();
+    Resp::data(json!({
+        "subscriptions": subscriptions,
+        "board_patrol": {
+            "owner_key": owner_key,
+            "cancelled_tasks": cancelled_tasks,
+            "eligible_task_ids": eligible_task_ids,
+            "interval_ms": crate::board_patrol_policy::BOARD_IDLE_PATROL_INTERVAL_MS,
+            "periodic_fallback": true,
+            "realtime_connected": false,
+        }
+    }))
+}
+
+fn handle_notification_cancel(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    task_ids: Vec<String>,
+    event: String,
+    reason: Option<String>,
+    resume_condition: Option<String>,
+) -> Resp {
+    if event != "board-idle" {
+        return Resp::err(
+            "NOTIFY_CANCEL_SCOPE_FORBIDDEN: only caller-owned board-idle patrol can be cancelled via collab notify cancel",
+        );
+    }
+    let mut state = server.state.lock().unwrap();
+    if let Err(error) = verify(&state, &worker_id, &token) {
+        return error;
+    }
+    let owner_key = crate::server::state::board_patrol_owner_key(&state, &worker_id);
+    let owned_unclosed =
+        crate::server::state::board_patrol_owned_unclosed_task_ids(&state, &worker_id, &owner_key);
+    let mut next = state.cancelled_board_patrol_tasks.clone();
+    let cancelled = match crate::board_patrol_policy::apply_cancel(
+        &mut next,
+        &owned_unclosed,
+        &task_ids,
+        &owner_key,
+        reason,
+        resume_condition,
+        now_ms(),
+    ) {
+        Ok(cancelled) => cancelled,
+        Err(error) => return Resp::err(error),
+    };
+    let events: Vec<Event> = cancelled
+        .iter()
+        .filter_map(|task_id| {
+            next.get(task_id)
+                .cloned()
+                .map(|record| Event::BoardPatrolCancelled { record })
+        })
+        .collect();
+    if !events.is_empty() {
+        if let Err(error) = server.commit_locked(&mut state, &events) {
+            return Resp::err(format!("BOARD_PATROL_DURABILITY_FAILED: {error}"));
+        }
+    }
+    Resp::data(json!({
+        "event": "board-idle",
+        "status": "cancelled",
+        "cancelled_task_ids": cancelled,
+    }))
+}
+
+fn handle_notification_board_rearm(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    task_ids: Vec<String>,
+) -> Resp {
+    let mut state = server.state.lock().unwrap();
+    if let Err(error) = verify(&state, &worker_id, &token) {
+        return error;
+    }
+    let owner_key = crate::server::state::board_patrol_owner_key(&state, &worker_id);
+    let owned_unclosed =
+        crate::server::state::board_patrol_owned_unclosed_task_ids(&state, &worker_id, &owner_key);
+    let requested: Vec<String> = if task_ids.is_empty() {
+        owned_unclosed
+            .iter()
+            .filter(|task_id| {
+                state
+                    .cancelled_board_patrol_tasks
+                    .get(*task_id)
+                    .is_some_and(|record| record.owner_key == owner_key)
+            })
+            .cloned()
+            .collect()
+    } else {
+        task_ids
+            .into_iter()
+            .filter(|task_id| owned_unclosed.contains(task_id))
+            .collect()
+    };
+    let mut next = state.cancelled_board_patrol_tasks.clone();
+    let rearmed = crate::board_patrol_policy::apply_rearm(&mut next, &requested, &owner_key);
+    let events: Vec<Event> = rearmed
+        .iter()
+        .map(|task_id| Event::BoardPatrolRearmed {
+            task_id: task_id.clone(),
+            owner_key: owner_key.clone(),
+        })
+        .collect();
+    if !events.is_empty() {
+        if let Err(error) = server.commit_locked(&mut state, &events) {
+            return Resp::err(format!("BOARD_PATROL_DURABILITY_FAILED: {error}"));
+        }
+    }
+    Resp::data(json!({
+        "event": "board-idle",
+        "status": "armed",
+        "rearmed_task_ids": rearmed,
+    }))
 }
 
 fn handle_goal_schedule_reconcile(

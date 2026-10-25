@@ -14,19 +14,35 @@ impl ProjectRuntimeManager {
         continuing: bool,
         continuation_facts: Option<IdentityFacts>,
     ) -> (Arc<Server>, Resp) {
+        let bootstrap_policy = request
+            .grant_approval
+            .as_ref()
+            .is_some_and(|raw| raw["action"] == "authorize_first_registered_peer");
         if request.action == "prepare_invocation" {
             return self.prepare_context_invocation(&context, request);
         }
         if request.action == "cancel" {
             return self.cancel_context_operation(&context, request);
         }
-        if !request.query {
+        if !request.query && !bootstrap_policy {
             if let Err(error) = self.reconcile_current_dsh_session(&context, &request.facts) {
                 return (self.host.clone(), Resp::err(error.to_string()));
             }
         }
         let _guard = self.identity_gate.lock().unwrap();
         if request.operation_id.is_empty() {
+            // A bootstrap policy commit is a durable global owner and carries
+            // the caller's operation id. Without one, the legacy branch below
+            // would run ordinary registration and silently ignore the policy.
+            // Reject before any owner effect; never synthesize missing identity.
+            if bootstrap_policy {
+                return (
+                    self.host.clone(),
+                    Resp::err(
+                        "IDENTITY_OPERATION_ID_REQUIRED: bootstrap policy authorization requires a durable operation id",
+                    ),
+                );
+            }
             match name_adjudication_control(&request) {
                 Ok(Some(_)) => {
                     if let Err(ApprovedAdmissionError::Error(error)) =
@@ -116,7 +132,10 @@ impl ProjectRuntimeManager {
                             }
                         }
                         let completed = projection.outcome == "completed";
-                        let (runtime, snapshot) = if completed && request.action == "context" {
+                        let (runtime, snapshot) = if completed
+                            && request.action == "context"
+                            && !bootstrap_policy
+                        {
                             match self.completed_context_readback(
                                 &context,
                                 continuation_facts.as_ref().unwrap_or(&request.facts),
@@ -178,6 +197,9 @@ impl ProjectRuntimeManager {
                 return (self.host.clone(), typed_operation_resp(cancelled));
             }
             return (self.host.clone(), Resp::err(error));
+        }
+        if bootstrap_policy {
+            return self.authorize_bootstrap_policy(&context, &request);
         }
         // New approved recovery requires both owner fences before durable
         // admission. A same-key retry above returns its retained projection;
@@ -952,6 +974,109 @@ impl ProjectRuntimeManager {
         }
         self.operation_journal.remove_live(&request.operation_id);
         current
+    }
+
+    fn authorize_bootstrap_policy(
+        &self,
+        context: &ProjectContext,
+        request: &IdentityContextRequest,
+    ) -> (Arc<Server>, Resp) {
+        let result = (|| -> Result<(Arc<Server>, Resp), String> {
+            let raw = request.grant_approval.as_ref().unwrap();
+            if raw
+                .get("decision")
+                .is_some_and(|decision| decision != "approved")
+            {
+                return Err("BOOTSTRAP_APPROVAL_NOT_APPROVED".into());
+            }
+            let authorization = raw["authorization"]
+                .as_str()
+                .filter(|s| !s.trim().is_empty())
+                .ok_or("BOOTSTRAP_AUTHORIZATION_REQUIRED")?;
+            for (field, expected) in [
+                ("project_scope", context.project_scope.as_str()),
+                ("app_scope_id", context.app_scope_id.as_str()),
+            ] {
+                if raw
+                    .get(field)
+                    .is_some_and(|value| value.as_str() != Some(expected))
+                {
+                    return Err("BOOTSTRAP_APPROVAL_SCOPE_MISMATCH".into());
+                }
+            }
+            if request.approval.is_some() {
+                return Err("BOOTSTRAP_POLICY_ONLY: submit registration separately".into());
+            }
+            let runtime = self.select_runtime(context)?;
+            let mut state = runtime.state.lock().unwrap();
+            if state
+                .global
+                .lookup_project(&context.project_scope)
+                .is_some_and(|project| {
+                    project
+                        .bootstrap_policies
+                        .contains_key(context.app_scope_id.as_str())
+                })
+            {
+                return Err("BOOTSTRAP_POLICY_ALREADY_AUTHORIZED".into());
+            }
+            let admitted = self.admit_identity_operation(context, request)?;
+            let outer = RegisterOuterBinding::new(
+                self.operation_journal.clone(),
+                request.operation_id.clone(),
+            );
+            let command_id = format!("bootstrap-{}", request.operation_id);
+            let operation_id = format!("bootstrap-{}", request.operation_id);
+            outer.bind_validating_ids(&command_id, &operation_id)?;
+            self.operation_journal
+                .begin_owner_start(&request.operation_id, "bootstrap_policy")?;
+            let policy = global_state::BootstrapPolicy {
+                project_scope: context.project_scope.clone(),
+                app_scope_id: context.app_scope_id.clone(),
+                authorization: authorization.to_owned(),
+                authorized_operation: request.operation_id.clone(),
+                consumption: None,
+            };
+            let committed = runtime.commit_command_locked(
+                &mut state,
+                &command_id,
+                &operation_id,
+                &[Event::GlobalBootstrapPolicySet { policy }],
+                json!({"bootstrap_policy":"authorized"}),
+                None,
+                Some(&outer),
+            );
+            drop(state);
+            if let Err(error) = committed {
+                let operation = self.record_incomplete_operation(
+                    context,
+                    request,
+                    admitted,
+                    outer.bound(),
+                    false,
+                    Vec::new(),
+                );
+                let mut result = operation_result(request, operation, false, None);
+                result.owner_readback.insert(
+                    "bootstrap_policy".into(),
+                    json!({"error":error.to_string()}),
+                );
+                return Ok((runtime, typed_operation_resp(result)));
+            }
+            let operation = self.finish_identity_operation(
+                context,
+                request,
+                Some((command_id, operation_id)),
+                true,
+                vec!["bootstrap_policy".into(), "context_complete".into()],
+            )?;
+            self.operation_journal.remove_live(&request.operation_id);
+            Ok((
+                runtime,
+                typed_operation_resp(operation_result(request, operation, true, None)),
+            ))
+        })();
+        result.unwrap_or_else(|error| (self.host.clone(), Resp::err(error)))
     }
 
     fn manual_communication_gate(

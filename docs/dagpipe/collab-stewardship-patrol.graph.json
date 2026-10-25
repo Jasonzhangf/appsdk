@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-stewardship-patrol",
-  "version": "0.2.0",
-  "description": "One authorized Collab stewardship patrol activation reads current role, task, capacity, worktree, resource, P0/P1, and issue facts; classifies actionable work and protected holds; selects a suitable peer before a master-owned independent GCM worker; executes through the public board or one-shot `codex exec --profile gcm`; verifies behavior and closure or an explicit park; then makes one final scheduling decision: re-arm one consumed one-shot goal/deadline occurrence with `appsdk goal subscribe`, or reconcile the owned goal/task to ended when no actionable work remains. Every failure or ambiguous ownership state reaches the same result sink without becoming success. Direct-message reception is daemon-owned and never closed by patrol termination.",
+  "version": "0.2.1",
+  "description": "One authorized Collab stewardship patrol activation reads current role, task, capacity, worktree, resource, P0/P1, and issue facts; classifies actionable work and protected holds; then routes by work horizon, not by a peer-first rule: a durable long-horizon subgoal goes to an available authorized peer that owns that subgoal as its own orchestrator, while one-shot execution or observation goes to a `codex exec --profile gcm` subworker (the declared host fallback applies only when gcm is unavailable). A peer is not a universal first hop and is not a direct execution worker; the master does not take over a peer's goal. Execute through the public board or the one-shot worker; verify behavior and closure or an explicit park; then make one final scheduling decision: re-arm one consumed one-shot goal/deadline occurrence with `appsdk goal subscribe`, or reconcile the owned goal/task to ended when no actionable work remains. Every failure or ambiguous ownership state reaches the same result sink without becoming success. Direct-message reception is daemon-owned and never closed by patrol termination.",
   "inputs": [
     {
       "id": "authorized_patrol_activation",
@@ -33,6 +33,7 @@
       "id": "select_execution_owner",
       "operator": "appsdk.collab_stewardship.select_execution_owner",
       "operator_version": "1",
+      "description": "Choose the owner by work horizon and authority: a durable long-horizon subgoal goes to an available authorized peer that is the orchestrator of that subgoal, not a direct worker; one-shot execution or observation goes to a `codex exec --profile gcm` subworker, with the declared host fallback only when gcm is unavailable. No peer-first universal rule and no private-child fallback path. Missing capacity or authority is an explicit hold, not a silent re-route.",
       "inputs": ["classified_patrol_work"],
       "output": {"id": "owner_decision", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},

@@ -118,6 +118,10 @@
       "path": "docs/dagpipe/collab-peer-lifecycle.graph.json"
     },
     {
+      "id": "collab-ceo-coordination",
+      "path": "docs/dagpipe/collab-ceo-coordination.graph.json"
+    },
+    {
       "id": "appsdk-user-requirement-change",
       "path": "docs/dagpipe/user-requirement-change.graph.json"
     },

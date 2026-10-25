@@ -6,6 +6,7 @@
   "nodes": [
     {
       "id": "resolve_authority_scope", "operator": "appsdk.collab_authority.resolve_scope", "operator_version": "1",
+      "description": "无 master 默认 peer；唯一例外是同 project/app 的明确首次注册预授权。authorize_first_registered_peer 沿 context grant_approval 创建 reducer 策略，有注册历史或 incumbent 时拒绝，不从 offline/unknown 推导空缺。首个注册同 command 消费策略并使用现有 MasterGrant；明确普通 peer 意图消费而不授予。并发只一个 winner，clear 不重置，重试/完整 replay 保持结果，持久失败明确返回。",
       "inputs": ["authority_request"], "output": {"id": "authority_scope", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
       "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"

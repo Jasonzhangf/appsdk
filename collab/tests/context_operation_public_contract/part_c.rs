@@ -7,6 +7,11 @@ fn without_ledger_scans(bytes: &[u8]) -> Vec<Value> {
         .collect()
 }
 
+/// The acknowledged daemon-wide timer entry point. Ticks perform no work
+/// before this boundary, so holding it freezes the periodic producer.
+const TIMER_TICK_BOUNDARY: &str = "daemon_timer_tick";
+const TIMER_TICK_ID: &str = "daemon-timer";
+
 /// Stale the identity produced by an already-completed seed so an approved
 /// recovery can be staged against the exact committed incumbent fence.
 fn stale_seeded_identity(fixture: &Fixture, seed: &Value) -> IdentityFence {
@@ -981,6 +986,15 @@ fn c13_cancellation_after_owner_begins_never_claims_cancelled() {
             0,
             "promotion failure precedes Register business and completion"
         );
+        // Hold the next periodic tick at its entry point so presence, activity,
+        // recovery and ledger maintenance cannot write inside the query window.
+        // The scheduler runs ticks serially, so an acknowledged arrival also
+        // proves the previous tick has finished.
+        let held_timer_tick = harness.hold(
+            TIMER_TICK_BOUNDARY,
+            TIMER_TICK_ID,
+            Duration::from_secs(30),
+        );
         let host_before =
             fs::read(fixture.host_journal()).expect("host journal before unknown query");
         let project_before =
@@ -1003,7 +1017,12 @@ fn c13_cancellation_after_owner_begins_never_claims_cancelled() {
             "{query}"
         );
         assert_eq!(fs::read(fixture.host_journal()).unwrap(), host_before);
-        assert_eq!(without_ledger_scans(&fs::read(fixture.project_journal()).unwrap()), without_ledger_scans(&project_before));
+        assert_eq!(
+            fs::read(fixture.project_journal()).unwrap(),
+            project_before,
+            "query must not write the project journal while the timer is held"
+        );
+        drop(held_timer_tick);
         fixture.stop_degraded_daemon();
         fixture.restart_daemon();
         let host_after_restart =

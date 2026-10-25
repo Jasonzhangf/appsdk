@@ -41,6 +41,19 @@ pub fn tick(server: &Arc<Server>) {
 }
 
 fn tick_at(server: &Arc<Server>, now: i64) {
+    // Feature-only fixture boundary. It runs before any timer work and before
+    // any reducer/journal lock, so a held tick can never block request
+    // handling. The scheduler runs one blocking tick at a time, so an
+    // acknowledged arrival also proves the preceding tick finished.
+    #[cfg(feature = "context-cancel-test-hooks")]
+    crate::context_cancel_test_hooks::barrier(
+        "daemon_timer_tick",
+        "daemon-timer",
+        std::process::id(),
+        None,
+        None,
+        || false,
+    );
     super::keepalive::tick_at(server, now);
     super::name_monitor::tick(server, now);
     super::name_stewardship::tick(server, now);

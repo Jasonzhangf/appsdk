@@ -243,16 +243,31 @@ fn handle_workflow_template_set(
         Ok(plan) => plan,
         Err(error) => return Resp::err(error),
     };
+    let mut notices = Vec::new();
     if let Some(event) = plan.event {
-        if let Err(error) = server.commit_locked_checked(&mut state, &[event]) {
+        let mut recipients: Vec<_> = state.workers.keys().filter(|id| **id != actor && !is_managed_subagent(&state, id))
+            .filter(|id| plan.target == "peer" || plan.target.strip_prefix("role:").is_some_and(|role|
+                worker_work_roles(&state, route.project_scope_id.as_str(), id).iter().any(|value| value == role)))
+            .cloned().collect();
+        recipients.sort();
+        for recipient in recipients {
+            notices.extend(relationship_notice_events(&state, route.project_scope_id.as_str(), &recipient,
+                "workflow-template-changed", format!("流程模板 {} 已{}。读取 collab context 获取当前模板。已接任务的归属、指定执行者、reviewer 和验收条件保持；只协调受影响的职责或交接。", plan.target, if plan.outcome == "reset" {"重置"} else {"更新"})));
+        }
+        let mut events = vec![event];
+        events.extend(notices.clone());
+        if let Err(error) = server.commit_locked_checked(&mut state, &events) {
             return Resp::err(format!("WORKFLOW_TEMPLATE_DURABILITY_FAILED: {error}"));
         }
     }
+    drop(state);
+    let notifications = deliver_relationship_notices(server, &notices);
     Resp::data(json!({
         "target": plan.target,
         "outcome": plan.outcome,
         "revision": plan.revision,
         "base_version": workflow_template_asset().base_version,
+        "notifications": notifications,
     }))
 }
 

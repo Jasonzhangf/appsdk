@@ -957,7 +957,7 @@ esac
         .find(|chain| chain["chain_id"] == "development-intake-v1")
         .unwrap();
     assert_eq!(chain["entry_symbol"], "bug_intake");
-    assert_eq!(chain["terminal_symbol"], "bug_intake_triage");
+    assert_eq!(chain["terminal_symbol"], "bug_intake");
     for edge in mainline_map["edges"]
         .as_array()
         .unwrap()

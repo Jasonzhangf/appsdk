@@ -96,6 +96,12 @@ pub struct CeoReportState {
     /// Last actual-report timestamp supplied by the caller on successful ack.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_actual_report_ms: Option<u64>,
+    /// Durable generation counter for meaningful typed urgent updates. Observers
+    /// use this to detect a new actual urgent signal without replaying content.
+    /// It advances only on a meaningful typed urgent revision and never on
+    /// acknowledgement, read, ordinary progress or a duplicate typed urgent.
+    #[serde(default)]
+    pub urgent_generation: u64,
 }
 
 impl CeoReportState {
@@ -149,6 +155,13 @@ impl CeoReportState {
                     },
                 );
             }
+        }
+        // urgent_generation tracks only meaningful typed urgent updates: a new
+        // revision caused by the typed urgent signal (new content or an urgent
+        // upgrade of equal content). A duplicate typed urgent that does not
+        // change business state is a no-op above and never reaches this point.
+        if urgent {
+            self.urgent_generation += 1;
         }
         true
     }
@@ -236,11 +249,17 @@ impl CeoReportState {
 
     /// Explicitly acknowledge a prepared batch after actual host output.
     ///
-    /// Only revisions covered by this batch advance. A newer same-project
-    /// revision, another project's pending revision, and any newer typed urgent
-    /// revision remain pending. On the first successful acknowledgement the
-    /// caller-supplied timestamp becomes `last_actual_report_ms`. The batch is
-    /// then removed, so a repeated acknowledgement is an exact rejection and
+    /// An acknowledgement advances the maximum acknowledged covered revision for
+    /// each project, bounded by that project's current revision:
+    /// `reported_revision = max(reported_revision, min(covered, revision))`.
+    /// Acknowledging an older batch after a newer revision still advances the
+    /// older watermark without regressing the newer revision, which stays
+    /// pending. The latest canonical `urgent` marker is never cleared by an
+    /// acknowledgement. After advancing, only batches fully covered by the new
+    /// reported watermarks are pruned; preparing, reading and recording never
+    /// invalidate a still-valid batch. On the first successful acknowledgement
+    /// the caller-supplied timestamp becomes `last_actual_report_ms`. A
+    /// subsequent acknowledgement of a removed batch is an exact rejection and
     /// cannot move the timestamp again or clear later progress.
     pub fn acknowledge_batch(
         &mut self,
@@ -258,11 +277,28 @@ impl CeoReportState {
             let Some(progress) = self.projects.get_mut(&project) else {
                 continue;
             };
-            if progress.revision == revision && revision > progress.reported_revision {
-                progress.reported_revision = revision;
+            let covered = revision.min(progress.revision);
+            let new_reported = progress.reported_revision.max(covered);
+            if new_reported > progress.reported_revision {
+                progress.reported_revision = new_reported;
                 advanced_revisions += 1;
             }
+            // The latest canonical urgent marker is never cleared by ack.
         }
+
+        // Only ACK may prune. Retain every batch that still contains at least one
+        // project revision above its reported watermark.
+        let reported: BTreeMap<&String, u64> = self
+            .projects
+            .iter()
+            .map(|(project, progress)| (project, progress.reported_revision))
+            .collect();
+        self.batches.retain(|_, kept| {
+            kept.coverage
+                .iter()
+                .any(|(project, revision)| reported.get(project).copied().unwrap_or(0) < *revision)
+        });
+
         self.last_actual_report_ms = Some(reported_ms);
         Ok(CeoAckResult::Advanced { advanced_revisions })
     }

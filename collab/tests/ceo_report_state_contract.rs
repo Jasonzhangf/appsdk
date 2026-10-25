@@ -96,13 +96,16 @@ fn old_batch_ack_preserves_a_newer_same_project_revision() {
     let ack = state
         .acknowledge_batch("batch-old", 1_000)
         .expect("ack old batch");
+    // The acknowledged coverage still advances the watermark for revision 1,
+    // while the newer revision 2 remains pending.
     assert_eq!(
         ack,
         CeoAckResult::Advanced {
-            advanced_revisions: 0
+            advanced_revisions: 1
         }
     );
     assert_eq!(state.last_actual_report_ms(), Some(1_000));
+    assert_eq!(state.projects["alpha"].reported_revision, 1);
 
     let pending = state
         .pending_revision("alpha")
@@ -143,13 +146,16 @@ fn ack_preserves_another_projects_pending_update() {
     let ack = state
         .acknowledge_batch("batch-both", 3_000)
         .expect("ack batch");
+    // Both covered revisions advance their watermarks: alpha to 1, beta to 1.
     assert_eq!(
         ack,
         CeoAckResult::Advanced {
-            advanced_revisions: 1
+            advanced_revisions: 2
         }
     );
     assert!(state.pending_revision("alpha").is_none());
+    assert_eq!(state.projects["alpha"].reported_revision, 1);
+    assert_eq!(state.projects["beta"].reported_revision, 1);
 
     let beta = state
         .pending_revision("beta")
@@ -332,12 +338,15 @@ fn explicit_urgent_upgrade_of_equal_content_is_a_new_revision() {
     let ack = state
         .acknowledge_batch("batch-1", 8_000)
         .expect("ack old batch");
+    // Revision 1 becomes the acknowledged watermark; the urgent revision 2
+    // still stays pending and keeps its canonical urgent marker.
     assert_eq!(
         ack,
         CeoAckResult::Advanced {
-            advanced_revisions: 0
+            advanced_revisions: 1
         }
     );
+    assert_eq!(state.projects["alpha"].reported_revision, 1);
     let pending = state
         .pending_revision("alpha")
         .expect("urgent revision must survive the old ack");
@@ -371,4 +380,209 @@ fn batch_rejections_are_explicit() {
             batch_id: "missing".to_owned()
         })
     );
+}
+
+#[test]
+fn partial_ack_advances_covered_revision_and_keeps_newer_same_project_pending() {
+    // read B1(R1) -> update R2 -> read B2(R2) -> ack B1 must leave
+    // reported_revision = 1 with revision 2 still pending and B2 still valid.
+    let mut state = CeoReportState::new();
+    assert!(state.record_progress("alpha", content("alpha", "v1"), false));
+    state
+        .prepare_batch("B1", coverage(&[("alpha", 1)]), false)
+        .expect("prepare B1");
+
+    assert!(state.record_progress("alpha", content("alpha", "v2"), false));
+    state
+        .prepare_batch("B2", coverage(&[("alpha", 2)]), false)
+        .expect("prepare B2");
+    // Recording a newer revision and preparing a newer batch must not invalidate
+    // the older batch that is still waiting for acknowledgement.
+    assert_eq!(state.batch_count(), 2);
+
+    let ack = state.acknowledge_batch("B1", 1_000).expect("ack B1");
+    assert_eq!(
+        ack,
+        CeoAckResult::Advanced {
+            advanced_revisions: 1
+        }
+    );
+
+    let progress = &state.projects["alpha"];
+    assert_eq!(progress.reported_revision, 1);
+    assert_eq!(progress.revision, 2);
+
+    let pending = state
+        .pending_revision("alpha")
+        .expect("revision 2 stays pending");
+    assert_eq!(pending.revision, 2);
+    assert_eq!(pending.content, content("alpha", "v2"));
+
+    // B1 is consumed, B2 survives because revision 2 is still unreported.
+    assert_eq!(state.batch_count(), 1);
+    assert!(state.batches.contains_key("B2"));
+
+    let ack = state.acknowledge_batch("B2", 2_000).expect("ack B2");
+    assert_eq!(
+        ack,
+        CeoAckResult::Advanced {
+            advanced_revisions: 1
+        }
+    );
+    assert!(state.pending_revision("alpha").is_none());
+    assert_eq!(state.last_actual_report_ms(), Some(2_000));
+}
+
+#[test]
+fn reverse_ack_order_cannot_regress_reported_revision() {
+    let mut state = CeoReportState::new();
+    assert!(state.record_progress("alpha", content("alpha", "v1"), false));
+    assert!(state.record_progress("beta", content("beta", "v1"), false));
+    state
+        .prepare_batch("old-both", coverage(&[("alpha", 1), ("beta", 1)]), false)
+        .expect("prepare old batch");
+    assert!(state.record_progress("alpha", content("alpha", "v2"), false));
+    state
+        .prepare_batch("new-alpha", coverage(&[("alpha", 2)]), false)
+        .expect("prepare new batch");
+
+    // Acknowledge the newer alpha coverage first.
+    let ack = state
+        .acknowledge_batch("new-alpha", 1_000)
+        .expect("ack new alpha");
+    assert_eq!(
+        ack,
+        CeoAckResult::Advanced {
+            advanced_revisions: 1
+        }
+    );
+    assert_eq!(state.projects["alpha"].reported_revision, 2);
+
+    // The older batch stays valid because beta revision 1 is still unreported.
+    assert_eq!(state.batch_count(), 1);
+    assert!(state.batches.contains_key("old-both"));
+
+    let ack = state
+        .acknowledge_batch("old-both", 2_000)
+        .expect("ack old both");
+    // Only beta advances; alpha must not move backwards from 2 to 1.
+    assert_eq!(
+        ack,
+        CeoAckResult::Advanced {
+            advanced_revisions: 1
+        }
+    );
+    assert_eq!(state.projects["alpha"].reported_revision, 2);
+    assert_eq!(state.projects["beta"].reported_revision, 1);
+    assert!(state.pending_revision("alpha").is_none());
+    assert!(state.pending_revision("beta").is_none());
+}
+
+#[test]
+fn only_ack_prunes_batches_fully_covered_by_reported_watermarks() {
+    let mut state = CeoReportState::new();
+    assert!(state.record_progress("alpha", content("alpha", "v1"), false));
+    state
+        .prepare_batch("B1", coverage(&[("alpha", 1)]), false)
+        .expect("prepare B1");
+    // A newer revision and a newer read must not remove the older in-flight batch.
+    assert!(state.record_progress("alpha", content("alpha", "v2"), false));
+    state
+        .prepare_batch("B2", coverage(&[("alpha", 2)]), false)
+        .expect("prepare B2");
+    assert_eq!(state.batch_count(), 2);
+
+    // Acknowledging B2 raises the watermark to 2 and prunes the now fully
+    // covered B1 while consuming B2.
+    let ack = state.acknowledge_batch("B2", 500).expect("ack B2");
+    assert_eq!(
+        ack,
+        CeoAckResult::Advanced {
+            advanced_revisions: 1
+        }
+    );
+    assert_eq!(state.batch_count(), 0);
+    assert!(state.pending_revision("alpha").is_none());
+    assert_eq!(state.projects["alpha"].reported_revision, 2);
+}
+
+#[test]
+fn urgent_generation_advances_only_on_meaningful_typed_urgent_update() {
+    let mut state = CeoReportState::new();
+    assert_eq!(state.urgent_generation, 0);
+
+    // Ordinary progress never advances the urgent generation.
+    assert!(state.record_progress("alpha", content("alpha", "ordinary"), false));
+    assert_eq!(state.urgent_generation, 0);
+
+    // A new typed urgent revision advances it once.
+    assert!(state.record_progress("beta", content("beta", "blocked"), true));
+    assert_eq!(state.urgent_generation, 1);
+
+    // A duplicate typed urgent with equal content creates no revision and no
+    // new generation.
+    assert!(!state.record_progress("beta", content("  beta ", " blocked\n"), true));
+    assert_eq!(state.urgent_generation, 1);
+    assert_eq!(state.projects["beta"].revision, 1);
+
+    // An urgent upgrade of equal ordinary content is meaningful and advances.
+    assert!(state.record_progress("alpha", content("alpha", "ordinary"), true));
+    assert_eq!(state.urgent_generation, 2);
+    assert_eq!(state.projects["alpha"].revision, 2);
+
+    // Acknowledgement and reads never advance the urgent generation.
+    state
+        .prepare_batch("urgent-batch", coverage(&[("beta", 1)]), true)
+        .expect("prepare urgent batch");
+    state.pending_urgent_revisions();
+    state
+        .acknowledge_batch("urgent-batch", 1_000)
+        .expect("ack urgent batch");
+    assert_eq!(state.urgent_generation, 2);
+}
+
+#[test]
+fn ack_never_clears_latest_canonical_urgent_marker() {
+    let mut state = CeoReportState::new();
+    assert!(state.record_progress("alpha", content("alpha", "blocked"), true));
+    state
+        .prepare_batch("urgent-batch", coverage(&[("alpha", 1)]), true)
+        .expect("prepare urgent batch");
+
+    let ack = state
+        .acknowledge_batch("urgent-batch", 1_000)
+        .expect("ack urgent batch");
+    assert_eq!(
+        ack,
+        CeoAckResult::Advanced {
+            advanced_revisions: 1
+        }
+    );
+    // The revision is reported, but the canonical urgent marker on the latest
+    // progress is retained for observers of the durable urgent signal.
+    assert!(state.projects["alpha"].urgent);
+    assert_eq!(state.projects["alpha"].reported_revision, 1);
+    assert!(state.pending_revision("alpha").is_none());
+    assert_eq!(state.urgent_generation, 1);
+
+    // An exact duplicate typed urgent after ack creates no revision/generation.
+    assert!(!state.record_progress("alpha", content("alpha", "blocked"), true));
+    assert_eq!(state.projects["alpha"].revision, 1);
+    assert_eq!(state.urgent_generation, 1);
+}
+
+#[test]
+fn urgent_generation_is_serde_default_for_older_state() {
+    let legacy = r#"{"projects":{},"batches":{}}"#;
+    let state: CeoReportState = serde_json::from_str(legacy).expect("legacy state decodes");
+    assert_eq!(state.urgent_generation, 0);
+    assert_eq!(state, CeoReportState::new());
+
+    let mut advanced = CeoReportState::new();
+    assert!(advanced.record_progress("beta", content("beta", "blocked"), true));
+    assert_eq!(advanced.urgent_generation, 1);
+    let encoded = serde_json::to_string(&advanced).expect("serialize generation");
+    let restored: CeoReportState = serde_json::from_str(&encoded).expect("restore generation");
+    assert_eq!(restored.urgent_generation, 1);
+    assert_eq!(restored, advanced);
 }

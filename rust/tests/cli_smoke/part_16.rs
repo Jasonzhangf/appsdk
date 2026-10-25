@@ -145,6 +145,9 @@ fn longhorizon_show_lists_daemon_registered_pending_merges() {
         &fake_collab,
         r#"#!/bin/sh
 case "$1 $2" in
+  "context ")
+    printf '%s\n' '{"identity":{"worker_id":"master-peer","role":"master","kind":"peer"}}'
+    ;;
   "status --all")
     printf '%s\n' '{"workers":[{"id":"master-peer","active_task":null,"endpoint_live":true,"identity_valid":true,"suspected_offline":false,"agent_state":"waiting"}],"tasks":[],"subagents":[],"pending_merges":[{"task_id":"task-merge-1","owner":"worker-a","requested_by":"master-peer","requested_at":"2026-09-25T00:00:00Z","status":"accepted","branch":"codex/merge-1","worktree":"playground/merge-1"}]}'
     ;;
@@ -184,6 +187,271 @@ esac
     assert!(json_res.status.success());
     let payload: Value = serde_json::from_slice(&json_res.stdout).unwrap();
     assert_eq!(payload["pending_merges"][0]["task_id"], "task-merge-1");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn longhorizon_peer_hides_project_lists_except_own_delivery_dependencies() {
+    let root = temp_root("longhorizon-peer-scope");
+    fs::create_dir_all(&root).unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    let project_scope = root.canonicalize().unwrap();
+    fs::write(
+        &fake_collab,
+        format!(
+            r#"#!/bin/sh
+case "$1 $2" in
+  "context ")
+    if [ "$ROLE_CASE" = "master" ]; then
+      printf '%s\n' '{{"name":"master-peer","identity":{{"worker_id":"master-peer","role":"master","kind":"peer"}},"binding":{{"project_scope":"{}"}}}}'
+    else
+      printf '%s\n' '{{"name":"peer-a","identity":{{"worker_id":"peer-a","role":"peer","kind":"peer"}},"binding":{{"project_scope":"{}"}}}}'
+    fi
+    ;;
+  "status --all")
+    printf '%s\n' '{{"workers":[{{"id":"peer-a","active_task":"task-own","endpoint_live":true,"identity_valid":true,"suspected_offline":false,"agent_state":"working"}},{{"id":"peer-b","active_task":null,"endpoint_live":false,"identity_valid":false,"suspected_offline":true,"agent_state":"unknown"}}],"tasks":[{{"id":"task-own","status":"working","owner":"peer-a","next_step":"verify"}},{{"id":"task-foreign","status":"working","owner":"peer-b","next_step":"verify"}}],"pending_merges":[{{"task_id":"merge-own","owner":"peer-a","requested_by":"master-peer","status":"accepted","branch":"codex/own","worktree":"playground/own"}},{{"task_id":"merge-foreign","owner":"peer-b","requested_by":"master-peer","status":"accepted","branch":"codex/foreign","worktree":"playground/foreign"}}],"subagents":[]}}'
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+"#,
+            project_scope.display(),
+            project_scope.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let fake_git_bug = fake_bin.join("git-bug");
+    fs::write(
+        &fake_git_bug,
+        "#!/bin/sh\nprintf '%s\\n' '[{\"human_id\":\"bug-framework\",\"labels\":[\"P0\",\"cli\"],\"title\":\"SDK verify block\"}]'\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_git_bug, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:/usr/bin:/bin", fake_bin.display());
+
+    let peer = Command::new(binary())
+        .args(["longhorizon", "show", "--json"])
+        .current_dir(&root)
+        .env("PATH", &path)
+        .env_remove("ROLE_CASE")
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        peer.status.success(),
+        "{}",
+        String::from_utf8_lossy(&peer.stderr)
+    );
+    let peer_payload: Value = serde_json::from_slice(&peer.stdout).unwrap();
+    assert_eq!(peer_payload["role"], "peer");
+    assert_eq!(
+        peer_payload["pending_merges"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(peer_payload["pending_merges"][0]["task_id"], "merge-own");
+    assert_eq!(
+        peer_payload["workers_needing_intervention"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    assert!(peer_payload["open_bugs"].as_array().unwrap().is_empty());
+
+    let master = Command::new(binary())
+        .args(["longhorizon", "show", "--json"])
+        .current_dir(&root)
+        .env("PATH", &path)
+        .env("ROLE_CASE", "master")
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        master.status.success(),
+        "{}",
+        String::from_utf8_lossy(&master.stderr)
+    );
+    let master_payload: Value = serde_json::from_slice(&master.stdout).unwrap();
+    assert_eq!(master_payload["role"], "master");
+    assert_eq!(
+        master_payload["pending_merges"].as_array().unwrap().len(),
+        2
+    );
+    assert_eq!(
+        master_payload["workers_needing_intervention"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(master_payload["open_bugs"].as_array().unwrap().len(), 1);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn longhorizon_peer_never_runs_project_bug_backend() {
+    let root = temp_root("longhorizon-peer-bug-backend");
+    fs::create_dir_all(&root).unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let project_scope = root.canonicalize().unwrap();
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        format!(
+            r#"#!/bin/sh
+case "$1 $2" in
+  "context ")
+    if [ "$ROLE_CASE" = "master" ]; then
+      printf '%s\n' '{{"name":"master-peer","identity":{{"worker_id":"master-peer","role":"master","kind":"peer"}},"binding":{{"project_scope":"{}"}}}}'
+    else
+      printf '%s\n' '{{"name":"peer-a","identity":{{"worker_id":"peer-a","role":"peer","kind":"peer"}},"binding":{{"project_scope":"{}"}}}}'
+    fi
+    ;;
+  "status --all")
+    printf '%s\n' '{{"workers":[],"tasks":[],"subagents":[]}}'
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+"#,
+            project_scope.display(),
+            project_scope.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let invocations = root.join("bug-invocations");
+    let fake_git_bug = fake_bin.join("git-bug");
+    fs::write(
+        &fake_git_bug,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nprintf '%s\\n' 'project bug backend unavailable' >&2\nexit 126\n",
+            invocations.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_git_bug, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:/usr/bin:/bin", fake_bin.display());
+    let backend_calls = || {
+        fs::read_to_string(&invocations)
+            .map(|log| log.lines().count())
+            .unwrap_or(0)
+    };
+    let show = |role: Option<&str>, json: bool| {
+        let mut command = Command::new(binary());
+        command.args(["longhorizon", "show"]);
+        if json {
+            command.arg("--json");
+        }
+        command
+            .current_dir(&root)
+            .env("PATH", &path)
+            .env_remove("GIT_BUG_BIN")
+            .env_remove("TMUX_PANE");
+        match role {
+            Some(role) => {
+                command.env("ROLE_CASE", role);
+            }
+            None => {
+                command.env_remove("ROLE_CASE");
+            }
+        }
+        command.output().unwrap()
+    };
+
+    let peer_json = show(None, true);
+    assert!(
+        peer_json.status.success(),
+        "{}",
+        String::from_utf8_lossy(&peer_json.stderr)
+    );
+    let peer_payload: Value = serde_json::from_slice(&peer_json.stdout).unwrap();
+    assert_eq!(peer_payload["role"], "peer");
+    assert!(peer_payload["open_bugs"].as_array().unwrap().is_empty());
+    assert!(
+        peer_payload["open_bugs_error"].is_null(),
+        "peer json must not receive the project bug read error: {}",
+        peer_payload["open_bugs_error"]
+    );
+    assert_eq!(
+        backend_calls(),
+        0,
+        "peer json must not run the project bug backend"
+    );
+
+    let peer_text = show(None, false);
+    assert!(
+        peer_text.status.success(),
+        "{}",
+        String::from_utf8_lossy(&peer_text.stderr)
+    );
+    let peer_text = String::from_utf8_lossy(&peer_text.stdout).to_string();
+    assert!(!peer_text.contains("开放缺陷读取失败"), "{}", peer_text);
+    assert!(
+        !peer_text.contains("project bug backend unavailable"),
+        "{}",
+        peer_text
+    );
+    assert_eq!(
+        backend_calls(),
+        0,
+        "peer text must not run the project bug backend"
+    );
+
+    let master_json = show(Some("master"), true);
+    assert!(
+        master_json.status.success(),
+        "{}",
+        String::from_utf8_lossy(&master_json.stderr)
+    );
+    let master_payload: Value = serde_json::from_slice(&master_json.stdout).unwrap();
+    assert_eq!(master_payload["role"], "master");
+    assert!(master_payload["open_bugs"].as_array().unwrap().is_empty());
+    let master_error = master_payload["open_bugs_error"].as_str().unwrap_or("");
+    assert!(
+        master_error.contains("GIT_BUG_OPEN_READ_FAILED"),
+        "{}",
+        master_error
+    );
+    assert!(
+        master_error.contains("project bug backend unavailable"),
+        "{}",
+        master_error
+    );
+    assert_eq!(
+        backend_calls(),
+        1,
+        "master json must query the project bug backend"
+    );
+
+    let master_text = show(Some("master"), false);
+    assert!(
+        master_text.status.success(),
+        "{}",
+        String::from_utf8_lossy(&master_text.stderr)
+    );
+    let master_text = String::from_utf8_lossy(&master_text.stdout).to_string();
+    assert!(master_text.contains("开放缺陷读取失败"), "{}", master_text);
+    assert!(
+        master_text.contains("project bug backend unavailable"),
+        "{}",
+        master_text
+    );
+    assert_eq!(
+        backend_calls(),
+        2,
+        "master text must query the project bug backend"
+    );
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -446,22 +714,26 @@ fn longhorizon_show_never_masks_bug_read_failures() {
     fs::create_dir_all(&home).unwrap();
     let fake_bin = root.join("fake-bin");
     fs::create_dir_all(&fake_bin).unwrap();
+    let project_scope = root.canonicalize().unwrap();
     let fake_collab = fake_bin.join("collab");
     fs::write(
         &fake_collab,
-        r#"#!/bin/sh
+        format!(
+            r#"#!/bin/sh
 case "$1 $2" in
   "status --all")
-    printf '%s\n' '{"workers":[],"tasks":[],"subagents":[]}'
+    printf '%s\n' '{{"workers":[],"tasks":[],"subagents":[]}}'
     ;;
   "context ")
-    exit 1
+    printf '%s\n' '{{"name":"master-peer","identity":{{"worker_id":"master-peer","role":"master","kind":"peer"}},"binding":{{"project_scope":"{}"}}}}'
     ;;
   *)
     exit 64
     ;;
 esac
 "#,
+            project_scope.display()
+        ),
     )
     .unwrap();
     fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();

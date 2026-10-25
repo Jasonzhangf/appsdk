@@ -43,22 +43,33 @@
 - `guide --help` exposes every command, including `guide init`;
 - uncompiled intake returns the missing compile/init commands without writing;
 - bootstrap intake works before and after compile, returns current root AGENTS,
-  the advisory standard template path/version/digest, bundled AppSDK Skill, and
+  the advisory standard template path and version, bundled AppSDK Skill, and
   direct project-local Skill candidates, and never scans nested or unrelated
   directories;
-- bootstrap intake returns project/module state, user questions, a
-  `GuidanceSetupProposal` schema, and post-approval compile/verify commands;
+- bootstrap intake returns project/module state, only declared unresolved
+  questions, a `GuidanceSetupProposal` schema, and post-approval compile/verify
+  commands;
+- bootstrap intake emits no fixed internal `required` questions such as
+  `standard_template_comparison`, `standard_workflows`, `project_commands`,
+  `rule_ownership`, or `approval_boundary`, and adds no mandatory human
+  confirmation chain;
+- a genuinely uncovered durable authorization still carries an accurate
+  conditional instruction naming the precise missing decision and affected
+  scope;
 - bootstrap intake does not modify project.json, lifecycle records, Skills,
   compiled guidance, or `.appsdk-control`;
-- template upgrade intake requires user approval, distinguishes recommended,
-  retained, and declined items, never overwrites project rules, and never
-  declares the standard template as a rule source;
+- template upgrade intake requires user approval only for uncovered durable
+  changes, distinguishes recommended, retained, and declined items, never
+  overwrites project rules, and never declares the standard template as a rule
+  source;
 - removing the advisory template does not fail ordinary `appsdk verify`, while
   a symlinked reference path fails safely without modifying its target;
 - compiled intake returns declared AGENTS/Skill sources, exact Skill commands,
   project/module/goal context, and the next guide commands;
-- develop intake asks requirements, architecture, and delivery questions;
-- debug intake asks failing-sample, causal-evidence, and replay questions;
+- develop and debug intake return only declared unresolved goal questions;
+  internal questions route to the owning Skill or Collab peer, and the user is
+  asked only for user-exclusive facts, new authorization, or hard-constraint
+  changes;
 - intake never creates `.appsdk-control` task state; `guide plan` remains the
   first write.
 - task PlanProposal never mutates or replaces the project-level setup proposal

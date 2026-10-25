@@ -9,6 +9,30 @@ collab sendmessage --to <peer> --subject <short-topic> "<original message>"
 
 ## Subscription commands
 
+### DSH gateway tools
+
+For a registered DSH peer whose gateway exposes `collab_notify_subscribe`, use
+that tool to arm its own one-shot deadline. Supply `subject`, `after_seconds`,
+and `ttl_seconds`; TTL must exceed the delay. Use `collab_notify_status` to read
+the subscription back. The gateway owns the peer identity, so do not supply a
+worker token, gateway endpoint, or another session's identity.
+
+This Collab subscription uses native steering: it starts an idle agent or
+reaches the next step of a running turn. A reminder received inside an existing
+turn proves steering, not a new turn. Prove idle start with the prior turn end
+and the authoritative next `turn/start`; record any fixture preparation, such
+as stopping its prior generation, separately from the automatic wake.
+DSH's separate Automation task /
+`schedule_create` is a host reminder, not a Collab subscription. Do not replace
+a Collab wake with a host reminder or a sleeping shell command. Tool acceptance
+and durable ACK are not proof that a model turn ran; verify native automatic
+start/steering without pressing Continue. Preserve provider failures explicitly.
+If the gateway tool is unavailable, report that capability gap and keep the
+subscription unverified; do not invent an internal command or silently choose
+another scheduler.
+
+### CLI subscriptions
+
 ```sh
 collab notify methods
 collab notify subscribe --event direct-message --ttl-seconds <bounded>
@@ -26,7 +50,22 @@ CLI, MCP tool, wire request, or alias. A finite owned goal schedule ends with
 `appsdk goal cancel`; a task-owned schedule ends with task closure. Neither
 operation controls base reception.
 
+The target board-idle cancel and re-arm entry points, with their per-task
+owner scope, are documented in
+[board-idle-patrol.md](board-idle-patrol.md). They are not part of the
+installed command surface until core public CLI validation. Do not substitute a
+general unsubscribe, goal cancellation or task closure for them, and do not
+cancel base `direct-message` reception.
+
 ## Patrol duties and finite schedules
+
+The user-confirmed board idle patrol contract is maintained in
+[board-idle-patrol.md](board-idle-patrol.md). It requires master default arming,
+real-time idle notification where connected, a 15-minute check otherwise,
+busy-skip, and owner cancellation of board patrol only. Pending runtime
+requirements stay pending until core public CLI validation; the current
+command and finite-schedule limitations below describe the installed
+implementation and do not override that newer contract.
 
 A registration or dispatch reminder is not a schedule. It requires the role to
 reconcile its existing scope on the next authorized activation. Do not create
@@ -65,6 +104,8 @@ event or schedule. The current source defines `direct-message`,
 `resource-released`, `deadline`, and `master-idle`; the loaded runtime's
 `methods` response is authoritative. An absent event requires implementation
 in its owning source, not a fake event, synthetic subject, or polling loop.
+`board-idle` is a target event in the user-confirmed patrol contract; do not
+claim it is available before the public CLI evidence exists.
 Up to three active subscriptions exist per agent.
 
 - `direct-message` requires no subject and is reusable. `resource-released` and
@@ -75,10 +116,11 @@ Up to three active subscriptions exist per agent.
   mutually exclusive. Absolute times must be in the future and before TTL
   expiry. `--every-ms` must be positive and fire before expiry.
   `--repeat-count` is 1 through 100. TTL is 1 second through seven days.
-- The command examples show syntax only, not a default patrol cadence. Do not
-  invent a patrol interval or wake schedule. A finite subscription is created
-  only for a concrete supported event and expires or consumes without
-  automatic rearm.
+- The command examples show syntax only, not a default patrol cadence. The
+  board-idle contract's 15-minute fallback is target behavior pending core
+  validation; do not apply it to other events or invent another interval. A
+  finite subscription is created only for a concrete supported event and
+  expires or consumes without automatic rearm.
 
 - AppSDK project initialization creates/refreshes the seven-day reusable default
   `direct-message` lease through the daemon identity context. Re-registering a peer

@@ -30,7 +30,7 @@
       "id": "提交名字绑定或保存待决",
       "operator": "appsdk.collab_name.commit_resolution",
       "operator_version": "1",
-      "description": "committed 分支更新名字 owner、agent sessionID 和当前投递位置；Jenny 的主动委派在同一提交中交接 typed master grant 与名字，清除 master 时明确撤销当前 grant，不能依附历史占名者是否仍是 master。无 grant 的历史 Jenny 普通恢复走 peer 名字池，不自动要求 Jenny 授权。pending 分支只保存原操作、目标名字、占用引用和投递进度。占用变化时旧 pending/裁决不应用；snapshot 失败或 Jenny 不可用时保留原绑定。该节点不执行旧 session 拦截或旧执行者管控。",
+      "description": "committed 分支更新名字 owner、agent sessionID 和当前投递位置；普通 peer 建立当前未占用的名字时，与名字同批写入给现有 master 的持久通知。重复 context、同名恢复、master 自身及无 master 时不生成加入通知；通知只是读取当前任务板的提示，不自动派单。唤醒在释放状态锁后沿既有通知 owner 执行，失败回执不撤销已提交名字或邮件。Jenny 的主动委派在同一提交中交接 typed master grant 与名字，清除 master 时明确撤销当前 grant，不能依附历史占名者是否仍是 master。无 grant 的历史 Jenny 普通恢复走 peer 名字池，不自动要求 Jenny 授权。pending 分支只保存原操作、目标名字、占用引用和投递进度。占用变化时旧 pending/裁决不应用；snapshot 失败或 Jenny 不可用时保留原绑定。该节点不执行旧 session 拦截或旧执行者管控。",
       "inputs": ["name_decision"],
       "output": {"id": "name_commit_outcome", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},

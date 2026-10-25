@@ -13,11 +13,15 @@
 //!   the binding instead of calling `Register` back.
 //! - `resolve-agent`: locates only the already-bound session in its canonical
 //!   project when a gateway connection UUID changes. Ambiguity is an error.
+//! - `agent-get`: one exact read-only status read for the requested runtime and
+//!   agent, so the caller can sense DSH's current activity. Nothing else in the
+//!   `agent-get` reply is read.
 //!
-//! The same control plane also exposes `runtimes`, `agents`, `agent-get`,
-//! `queue`, `hold-ack`, `release-ack`, `interrupt` and `shutdown`. Those are
-//! operator surfaces and stay unreachable from this adapter: collab must never
-//! read the whole registry, and must never drive an agent's lifecycle.
+//! The same control plane also exposes `runtimes`, `agents`, `queue`,
+//! `hold-ack`, `release-ack`, `interrupt` and `shutdown`. Those are operator
+//! surfaces and stay unreachable from this adapter: collab must never read the
+//! whole registry, and must never drive an agent's lifecycle. `agent-get` is
+//! reachable only through [`activity`], as that one scoped status query.
 //!
 //! The three failure classes are kept apart on purpose. "The gateway says it
 //! does not know this agent" is proof of absence; "the socket is down" and
@@ -99,6 +103,20 @@ pub struct AgentFacts {
     pub session_id: String,
     pub cwd: String,
     pub status: String,
+}
+
+/// One read-only `agent-get` observation of the requested agent.
+///
+/// `status` is the gateway's own string kept verbatim, so an unknown value
+/// stays explicit for the caller to classify. Only `live && status ==
+/// "inactive"` is positive idle and only `live && status == "running"` is
+/// positive busy; `live == false` is never idle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentActivityFacts {
+    pub runtime_id: String,
+    pub agent_id: String,
+    pub status: String,
+    pub live: bool,
 }
 
 /// The `runtime_context` is the authoritative Collab runtime identity carried
@@ -391,6 +409,68 @@ pub fn facts(endpoint: &str, runtime_id: &str, agent_id: &str) -> Result<AgentFa
         session_id: field("sessionId")?,
         cwd: field("cwd")?,
         status: field("status")?,
+    })
+}
+
+/// Reads the requested agent's current activity through one exact `agent-get`.
+///
+/// This is the only operator surface this adapter touches, and only in this
+/// shape: the reply must carry a nested `ok`, echo exactly the requested
+/// runtime and agent, and give a status string plus a live flag. No inbox,
+/// history, configuration or model content is read, and there is no fallback
+/// to `agent-facts`, no registration or rebinding, and no clock, state or
+/// polling loop. The caller checks whether the selected binding is still
+/// current after this read.
+pub fn activity(
+    endpoint: &str,
+    runtime_id: &str,
+    agent_id: &str,
+) -> Result<AgentActivityFacts, ControlError> {
+    let outer = round_trip(
+        &control_socket(endpoint)?,
+        "agent-get",
+        serde_json::json!({"runtimeId": runtime_id, "agentId": agent_id}),
+    )?;
+    let echoed_runtime = outer
+        .get("runtimeId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| rejected("agent-get reply carries no runtimeId".into()))?;
+    if echoed_runtime != runtime_id {
+        return Err(rejected(format!(
+            "agent-get echoed runtime {echoed_runtime} for request {runtime_id}"
+        )));
+    }
+    if outer.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err(rejected("agent-get gateway result is not ok".into()));
+    }
+    let agent = outer
+        .get("result")
+        .and_then(|result| result.get("agent"))
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| rejected("agent-get reply carries no agent".into()))?;
+    let echoed_agent = agent
+        .get("agentId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| rejected("agent-get reply carries no agentId".into()))?;
+    if echoed_agent != agent_id {
+        return Err(rejected(format!(
+            "agent-get echoed agent {echoed_agent} for request {agent_id}"
+        )));
+    }
+    let status = agent
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .filter(|status| !status.is_empty())
+        .ok_or_else(|| rejected("agent-get reply carries no status".into()))?;
+    let live = agent
+        .get("live")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| rejected("agent-get reply carries no live flag".into()))?;
+    Ok(AgentActivityFacts {
+        runtime_id: runtime_id.into(),
+        agent_id: agent_id.into(),
+        status: status.into(),
+        live,
     })
 }
 
@@ -780,5 +860,221 @@ mod enrollment_tests {
         assert_ne!(context["runtime_id"], committed.runtime_id);
         assert_ne!(context["agent_id"], committed.agent_id);
         assert_eq!(context["agent_id"], committed.worker_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    /// One NDJSON control-socket answer. It records the request it received so
+    /// a test can prove which method actually went on the wire.
+    struct Wire {
+        dir: PathBuf,
+        socket: PathBuf,
+        seen: Arc<Mutex<Vec<serde_json::Value>>>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Wire {
+        fn serve(reply: serde_json::Value) -> Self {
+            let id = SEQ.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir()
+                .join(format!("collab-dsh-activity-{}-{id}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("create fixture directory");
+            let socket = dir.join("control.sock");
+            let listener = UnixListener::bind(&socket).expect("bind control socket");
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let recorded = Arc::clone(&seen);
+            let handle = std::thread::spawn(move || {
+                let Ok((stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut reader = BufReader::new(&stream);
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    return;
+                }
+                let request: serde_json::Value =
+                    serde_json::from_str(line.trim()).expect("control request is JSON");
+                recorded.lock().unwrap().push(request);
+                let mut stream = &stream;
+                let _ = stream.write_all(reply.to_string().as_bytes());
+                let _ = stream.write_all(b"\n");
+                let _ = stream.flush();
+            });
+            Self {
+                dir,
+                socket,
+                seen,
+                handle: Some(handle),
+            }
+        }
+
+        fn endpoint(&self) -> String {
+            format!("unix://{}", self.socket.display())
+        }
+
+        fn requests(&mut self) -> Vec<serde_json::Value> {
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    impl Drop for Wire {
+        fn drop(&mut self) {
+            if self.handle.is_some() {
+                let _ = UnixStream::connect(&self.socket);
+                if let Some(handle) = self.handle.take() {
+                    let _ = handle.join();
+                }
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn agent_get_reply(
+        runtime_id: &str,
+        agent_id: &str,
+        status: &str,
+        live: bool,
+    ) -> serde_json::Value {
+        json!({
+            "ok": true,
+            "result": {
+                "runtimeId": runtime_id,
+                "ok": true,
+                "result": {
+                    "agent": {
+                        "agentId": agent_id,
+                        "status": status,
+                        "live": live
+                    }
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn activity_reports_the_exact_status_and_live_flag() {
+        for (status, live) in [
+            ("running", true),
+            ("inactive", true),
+            ("inactive", false),
+            ("unrecognised-state", false),
+        ] {
+            let wire = Wire::serve(agent_get_reply("rt-1", "agent-1", status, live));
+            let facts = activity(&wire.endpoint(), "rt-1", "agent-1")
+                .unwrap_or_else(|error| panic!("{status}/{live} must be read: {error}"));
+            assert_eq!(
+                facts,
+                AgentActivityFacts {
+                    runtime_id: "rt-1".into(),
+                    agent_id: "agent-1".into(),
+                    status: status.into(),
+                    live,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn activity_rejects_foreign_or_malformed_agent_get_replies() {
+        let mut cases = Vec::new();
+
+        let reply = agent_get_reply("rt-2", "agent-1", "running", true);
+        cases.push(("foreign runtime", reply));
+
+        let reply = agent_get_reply("rt-1", "agent-2", "running", true);
+        cases.push(("foreign agent", reply));
+
+        let mut reply = agent_get_reply("rt-1", "agent-1", "running", true);
+        reply["result"]["ok"] = json!(false);
+        cases.push(("nested refusal", reply));
+
+        let mut reply = agent_get_reply("rt-1", "agent-1", "running", true);
+        reply["result"].as_object_mut().unwrap().remove("ok");
+        cases.push(("missing nested ok", reply));
+
+        let mut reply = agent_get_reply("rt-1", "agent-1", "running", true);
+        reply["result"].as_object_mut().unwrap().remove("runtimeId");
+        cases.push(("missing echoed runtime", reply));
+
+        let mut reply = agent_get_reply("rt-1", "agent-1", "running", true);
+        reply["result"].as_object_mut().unwrap().remove("result");
+        cases.push(("missing nested result", reply));
+
+        let mut reply = agent_get_reply("rt-1", "agent-1", "running", true);
+        reply["result"]["result"]
+            .as_object_mut()
+            .unwrap()
+            .remove("agent");
+        cases.push(("missing agent", reply));
+
+        let mut reply = agent_get_reply("rt-1", "agent-1", "running", true);
+        reply["result"]["result"]["agent"]
+            .as_object_mut()
+            .unwrap()
+            .remove("agentId");
+        cases.push(("missing echoed agent", reply));
+
+        let mut reply = agent_get_reply("rt-1", "agent-1", "running", true);
+        reply["result"]["result"]["agent"]
+            .as_object_mut()
+            .unwrap()
+            .remove("status");
+        cases.push(("missing status", reply));
+
+        let mut reply = agent_get_reply("rt-1", "agent-1", "running", true);
+        reply["result"]["result"]["agent"]["status"] = json!(7);
+        cases.push(("non-string status", reply));
+
+        cases.push(("empty status", agent_get_reply("rt-1", "agent-1", "", true)));
+
+        let mut reply = agent_get_reply("rt-1", "agent-1", "running", true);
+        reply["result"]["result"]["agent"]
+            .as_object_mut()
+            .unwrap()
+            .remove("live");
+        cases.push(("missing live", reply));
+
+        let mut reply = agent_get_reply("rt-1", "agent-1", "running", true);
+        reply["result"]["result"]["agent"]["live"] = json!("true");
+        cases.push(("non-bool live", reply));
+
+        for (name, reply) in cases {
+            let mut wire = Wire::serve(reply);
+            let result = activity(&wire.endpoint(), "rt-1", "agent-1");
+            assert!(result.is_err(), "{name} must be rejected: {result:?}");
+            let requests = wire.requests();
+            assert_eq!(requests.len(), 1, "{name}: exactly one request");
+            assert_eq!(
+                requests[0]["method"], "agent-get",
+                "{name}: no fallback call"
+            );
+        }
+    }
+
+    #[test]
+    fn activity_sends_exactly_one_agent_get_and_nothing_else() {
+        let mut wire = Wire::serve(agent_get_reply("rt-1", "agent-1", "inactive", true));
+        activity(&wire.endpoint(), "rt-1", "agent-1").expect("read activity");
+        let requests = wire.requests();
+        assert_eq!(requests.len(), 1, "exactly one control request");
+        assert_eq!(requests[0]["method"], "agent-get");
+        assert_eq!(
+            requests[0]["params"],
+            json!({"runtimeId": "rt-1", "agentId": "agent-1"}),
+            "the query names only the requested runtime and agent"
+        );
     }
 }

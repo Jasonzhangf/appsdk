@@ -95,6 +95,24 @@ pub(super) fn longhorizon_show(root: &Path, format_json: bool) {
                     .as_str()
                     .is_some_and(|owner| Some(owner) == caller.as_deref()))
     };
+    // A peer sees only its own delivery obligations and its own worker health.
+    // Project-wide merge, worker and bug lists stay with the master view.
+    let project_view = role == ExecutionRole::Master;
+    let merge_in_scope = |merge: &Value| {
+        project_view
+            || merge["owner"]
+                .as_str()
+                .is_some_and(|owner| Some(owner) == caller.as_deref())
+            || merge["requested_by"]
+                .as_str()
+                .is_some_and(|by| Some(by) == caller.as_deref())
+    };
+    let worker_in_scope = |worker: &Value| {
+        project_view
+            || worker["id"]
+                .as_str()
+                .is_some_and(|id| Some(id) == caller.as_deref())
+    };
     let blocked_tasks: Vec<&Value> = tasks
         .iter()
         .filter(|t| in_goal_scope(t) && is_blocked(t))
@@ -102,6 +120,10 @@ pub(super) fn longhorizon_show(root: &Path, format_json: bool) {
     let active_tasks: Vec<&Value> = tasks
         .iter()
         .filter(|t| in_goal_scope(t) && !is_blocked(t))
+        .collect();
+    let pending_merges: Vec<&Value> = pending_merges
+        .iter()
+        .filter(|merge| merge_in_scope(merge))
         .collect();
 
     // Spare capacity means a live App Server route holding no task. A worker
@@ -119,7 +141,13 @@ pub(super) fn longhorizon_show(root: &Path, format_json: bool) {
             || worker["suspected_offline"].as_bool().unwrap_or(false)
     };
     let idle_workers: Vec<&Value> = workers.iter().filter(|w| is_idle(w)).collect();
-    let broken_workers: Vec<&Value> = workers.iter().filter(|w| needs_intervention(w)).collect();
+    let broken_workers: Vec<&Value> = workers
+        .iter()
+        .filter(|w| needs_intervention(w) && worker_in_scope(w))
+        .collect();
+    // Bug records carry no owner, so an ordinary peer cannot establish a real
+    // dependency from this list; keep read failures explicit for every role.
+    let open_bugs: Vec<&Value> = bugs.iter().filter(|_| project_view).collect();
 
     if format_json {
         let payload = serde_json::json!({
@@ -144,7 +172,7 @@ pub(super) fn longhorizon_show(root: &Path, format_json: bool) {
             "blocked": blocked_tasks,
             "idle_workers": idle_workers,
             "workers_needing_intervention": broken_workers,
-            "open_bugs": bugs,
+            "open_bugs": open_bugs,
             "open_bugs_error": open_bugs_error,
             "collab_reachable": status.is_some(),
             "collab_status_error": collab_status_error.as_deref(),
@@ -268,11 +296,11 @@ pub(super) fn longhorizon_show(root: &Path, format_json: bool) {
     if let Some(err) = open_bugs_error {
         println!("\n开放缺陷读取失败: {}", err);
     } else {
-        println!("\n开放缺陷 ({}，P0 优先):", bugs.len());
-        if bugs.is_empty() {
+        println!("\n开放缺陷 ({}):", open_bugs.len());
+        if open_bugs.is_empty() {
             println!("- 无");
         }
-        for bug in bugs.iter().take(10) {
+        for bug in open_bugs.iter().take(10) {
             let labels: Vec<&str> = bug["labels"]
                 .as_array()
                 .map(|arr| arr.iter().filter_map(Value::as_str).collect())
@@ -1371,9 +1399,9 @@ where
         let notice_title = format!("【AppSDK 任务阻塞门禁提醒】任务 '{}' 已调用 collab task block，通知策略以 Collab 响应为准。", task_id);
         let notice_body = r#"================================================================================
 【重要门禁与合规约束】
-1. AppSDK 的问题可以报 bug：若阻断由 AppSDK 框架缺陷导致（CLI 异常、verify 误报、准入阻断），
-   必须立即上报 upstream 缺陷系统：
-   appsdk bug new --upstream -t "[SDK Bug] <简述>" -m "<复现与上下文>" -l "P0,cli"
+1. AppSDK 的问题按实际影响走 canonical intake 判重：若阻断由 AppSDK 框架缺陷导致（CLI 异常、verify 误报、准入阻断），
+   不得在业务仓库 hack 规避；用 `appsdk bug intake --input <json>` 提交 original_input、classification、scope、owner、parent、acceptance 与 evidence_links，
+   优先级标签按实际影响选择，不固定 P0。
 2. 合法等待必须写清原因、责任人、解除条件和恢复触发：
    外部依赖、资源占用、凭证/批准缺失、跨 owner 决策等可以进入 waiting/blocked，
    但严禁只写“blocked”而不带恢复方案，也严禁因任务难就空等。

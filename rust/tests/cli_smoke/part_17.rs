@@ -883,6 +883,9 @@ exit 44
     assert_eq!(block_json["status"], "blocked");
     assert_eq!(block_json["reminders_stopped"], false);
     assert_eq!(block_json["task_id"], "task-404");
+    let notice = block_json["notice"].as_str().unwrap();
+    assert!(notice.contains("appsdk bug intake --input <json>"));
+    assert!(!notice.contains("P0,cli"));
     let rule = block_json["rule"].as_str().unwrap();
     assert!(rule.contains("original failure evidence, attempted remedies"));
     assert!(rule.contains("unavailable authorized alternatives and a decision/resume condition"));
@@ -918,6 +921,66 @@ exit 44
     assert_eq!(failed.status.code(), Some(44));
     assert!(String::from_utf8_lossy(&failed.stderr).contains("COLLAB_TASK_BLOCK_FAILED"));
     assert!(!String::from_utf8_lossy(&failed.stdout).contains("\"ok\":true"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn goal_prompt_avoids_fixed_status_query_and_forced_p0_intake() {
+    let root = temp_root("goal-prompt-policy");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("long-task.md"), "# Goal\n").unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    let project_scope = root.canonicalize().unwrap();
+    fs::write(
+        &fake_collab,
+        format!(
+            r#"#!/bin/sh
+if [ "$1" = "context" ]; then
+  printf '%s\n' '{{"name":"peer-a","identity":{{"worker_id":"peer-a","role":"peer","kind":"peer"}},"binding":{{"project_scope":"{}"}}}}'
+  exit 0
+fi
+exit 64
+"#,
+            project_scope.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let prompt = Command::new(binary())
+        .args([
+            "goal",
+            "prompt",
+            "--goal",
+            "long-task.md",
+            "--interval",
+            "5m",
+        ])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        prompt.status.success(),
+        "{}",
+        String::from_utf8_lossy(&prompt.stderr)
+    );
+    let text = String::from_utf8_lossy(&prompt.stdout);
+    assert!(!text.contains("每次唤醒必查"), "{text}");
+    assert!(!text.contains("collab task status"), "{text}");
+    assert!(!text.contains("appsdk bug new --upstream"), "{text}");
+    assert!(!text.contains("P0,cli"), "{text}");
+    assert!(text.contains("appsdk bug intake --input <json>"), "{text}");
+    assert!(text.contains("按实际影响"), "{text}");
+    assert!(text.contains("master 核实后才认可阻塞"), "{text}");
+    assert!(
+        text.contains("peer 是受托范围的唯一交付负责人"),
+        "{text}"
+    );
 
     fs::remove_dir_all(root).unwrap();
 }

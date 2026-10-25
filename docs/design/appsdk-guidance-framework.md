@@ -95,16 +95,19 @@ proposal schema. They never choose technical implementation details.
 returns `guide_flow_required`, the selected goal/module/workflow projection,
 present declared sources in precedence order, missing optional context, exact
 `$skill-id` suggestions from a declared Skill contract or `<skill-id>/SKILL.md`
-path, and mode-specific questions. Develop intake confirms requirements,
-architecture closure, and delivery depth. Debug intake confirms the failing
-sample, causal experiment, and old-sample replay.
+path, and only unresolved questions already declared in `.appsdk/goal.json`;
+it does not emit fixed domain confirmations. Internal technical, scope,
+ownership, and collaboration questions go to the owning Skill or Collab peer.
+The user is asked only for a genuinely uncovered durable authorization, a
+human-exclusive fact, or a change to an explicit hard constraint, naming the
+precise missing decision and affected scope. `next` is the single next action.
 
 Normal task intake never scans undeclared Skill directories and never writes
 task state. If approved guidance has not been compiled, it returns the missing
 `guide compile` and repeatable `guide init` commands. `new` and configured
 `init` print this onboarding sequence. After the Agent reads context and asks
-only unresolved questions, it runs the projected domain command and submits
-PlanProposal; `guide plan` is the first task-state write.
+only declared unresolved questions, it runs the projected domain command and
+submits PlanProposal; `guide plan` is the first task-state write.
 
 When an existing `.appsdk/project.json` has no `guidance` member, `appsdk init`
 preserves that contract and all lifecycle truth, installs missing Guide bundle
@@ -122,15 +125,22 @@ project source remains a candidate until explicit user authorization and
 declaration in the project contract. The standard template is advisory
 comparison material and is never an active rule source.
 
-Bootstrap output includes existing project/module state, candidate source paths
-and digests, Skill invocation suggestions, unresolved workflow/command/rule
-ownership questions, a `GuidanceSetupProposal` schema, and the post-approval
-compile/verify commands. It writes neither durable rules nor
-`.appsdk-control`. The Agent reads effective upstream rules, project AGENTS and
-Skills, actual test commands, and CI/hook entrypoints; records each difference
-with owner, delete/merge/narrow/add action, basis, retained safeguard, and
-entrypoint impact; reuses session authorization that already covers a
-difference; and asks only for uncovered changes.
+Bootstrap output includes existing project/module state, candidate source paths,
+precedence where declared, the standard template where applicable with its
+path and necessary version, Skill invocation suggestions, a
+`GuidanceSetupProposal` schema, and the post-approval compile/verify commands.
+Sources carry no digest wrapper. Bootstrap emits no fixed internal human
+questions; its `questions` list contains only declared, still-unresolved gaps,
+while internal workflow, command, ownership, and template-comparison facts are
+handled through the owning peer, designer, or master. It writes neither
+durable rules nor `.appsdk-control`. The Agent reads effective upstream rules,
+project AGENTS and Skills, actual test commands, and CI/hook entrypoints;
+records each difference with owner, delete/merge/narrow/add action, basis,
+retained safeguard, and entrypoint impact; reuses session authorization that
+already covers a difference; and asks the user only for a genuinely uncovered
+durable authorization, a human-exclusive fact, or a change to an explicit hard
+constraint, naming the precise missing decision and affected scope. `next` is
+the single next action; no mirrored command sequence is emitted.
 
 After the authorized changes, the Agent edits project-owned AGENTS, local
 Skills, machine contracts, and the source declaration in a clean owner worktree;
@@ -141,10 +151,12 @@ compile step.
 Repeated `appsdk init` refreshes `.appsdk/templates/minimal/AGENTS.md` from the
 current Bundle without overwriting the project-owned root `AGENTS.md`. A
 configured project may then request bootstrap with task `guidance-upgrade`.
-The output uses `setup_kind=template_upgrade_review`, binds the reference path,
-version, and digest, and asks the Agent to read current rules first. The
-proposal separates recommended changes, retained project rules, and declined
-template items. It writes no project, lifecycle, or task state before approval.
+The output uses `setup_kind=template_upgrade_review`, binds the reference path
+and necessary version without a digest wrapper, and asks the Agent to read
+current rules first. The proposal separates recommended changes, retained
+project rules, and declined template items. It writes no project, lifecycle, or
+task state before the authorized changes. Authorization already covering a
+change is reused; only uncovered durable changes require user approval.
 Repeated initialization and unrelated version refreshes do not trigger a
 whole-project rule audit. The advisory reference is outside the strict SDK
 resource-integrity set, so its absence cannot block ordinary verification or

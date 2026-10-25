@@ -319,11 +319,7 @@ fn existing_governance_without_guide_gets_read_only_setup_proposal() {
             .count(),
         1
     );
-    assert!(intake_json["questions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|question| question["question_id"] == "project_commands"));
+    assert_eq!(intake_json["questions"], serde_json::json!([]));
     assert!(intake_json["after_user_approval"]["commands"]
         .as_array()
         .unwrap()
@@ -341,17 +337,10 @@ fn existing_governance_without_guide_gets_read_only_setup_proposal() {
         .as_str()
         .unwrap()
         .contains("CI/hook"));
-    assert!(intake_json["questions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|question| {
-            question["question_id"] == "approval_boundary"
-                && question["prompt"]
-                    .as_str()
-                    .unwrap()
-                    .contains("existing conversation authorization")
-        }));
+    let instruction = intake_json["agent_instruction"].as_str().unwrap();
+    assert!(instruction.contains("genuinely uncovered durable authorization"));
+    assert!(instruction.contains("precise missing decision"));
+    assert!(instruction.contains("affected scope"));
     assert!(!root
         .join(".appsdk-control/guidance/guidance-setup")
         .exists());

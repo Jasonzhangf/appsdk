@@ -1900,7 +1900,10 @@ mod tests {
         id: &str,
         thread_id: &str,
     ) -> super::super::state::WorkerRec {
-        let cwd = server.root.display().to_string();
+        let cwd = super::super::global_state::GlobalState::canonical_project_scope(&server.root)
+            .unwrap()
+            .as_str()
+            .to_owned();
         let app = crate::identity::AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
         let transport = super::super::peer_tests::test_appserver_transport(thread_id);
         let response = super::super::peer_tests::seed_committed_owner(
@@ -1923,30 +1926,32 @@ mod tests {
         worker: &super::super::state::WorkerRec,
         name: &str,
     ) {
-        let mut state = server.state.lock().unwrap();
+        let project_scope = super::super::global_state::GlobalState::canonical_project_scope(
+            std::path::Path::new(&worker.cwd),
+        )
+        .unwrap()
+        .as_str()
+        .to_owned();
         let session_id = worker
             .transport
             .as_ref()
             .and_then(|transport| transport.session_id.clone())
             .expect("seeded appserver transport has a session id");
-        let revision = state.name_occupancy_revision(&worker.cwd, name) + 1;
-        state
-            .name_occupancies
-            .entry(worker.cwd.clone())
-            .or_default()
-            .insert(
-                name.to_owned(),
-                super::super::name_state::NameOccupancy {
-                    name: name.to_owned(),
-                    worker_id: worker.id.clone(),
-                    session_id,
-                    occupancy_revision: revision,
-                    updated_ms: 1,
-                },
-            );
-        state
-            .worker_names
-            .insert(worker.id.clone(), name.to_owned());
+        let revision = {
+            let state = server.state.lock().unwrap();
+            state.name_occupancy_revision(&project_scope, name) + 1
+        };
+        server.commit(&[Event::NameResolutionCommitted {
+            project_scope,
+            occupancy: super::super::name_state::NameOccupancy {
+                name: name.to_owned(),
+                worker_id: worker.id.clone(),
+                session_id,
+                occupancy_revision: revision,
+                updated_ms: 1,
+            },
+            assignments: vec![],
+        }]);
     }
 
     fn add_board_patrol_task(
@@ -2313,6 +2318,21 @@ mod tests {
         let old = seed_board_patrol_owner(&server, "old", "thread-old");
         let current = seed_board_patrol_owner(&server, "current", "thread-current");
         occupy_board_patrol_name(&server, &current, "Alice");
+        let current_name_occupancies: Vec<_> = {
+            let state = server.state.lock().unwrap();
+            state
+                .name_occupancies
+                .values()
+                .flat_map(|names| names.values())
+                .filter(|occupancy| occupancy.worker_id == current.id)
+                .cloned()
+                .collect()
+        };
+        assert_eq!(
+            current_name_occupancies.len(),
+            1,
+            "fixture invariant: current worker must hold exactly one name across alias scopes, got {current_name_occupancies:?}"
+        );
         {
             let mut state = server.state.lock().unwrap();
             state.worker_names.insert("old".into(), "Alice".into());

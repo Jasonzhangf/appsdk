@@ -478,6 +478,33 @@ fn bug_command_lifecycle() {
     fs::remove_dir_all(root).unwrap();
 }
 
+fn assert_minimal_intake_receipt(receipt: &Value, issue_id: &str, mode: &str) {
+    assert_eq!(receipt["issue_id"], issue_id);
+    assert_eq!(receipt["bug_triage"]["query_executed"], true);
+    assert_eq!(receipt["bug_triage"]["mode"], mode);
+    assert!(
+        receipt.get("bug_triage_query_binding").is_none(),
+        "intake receipt must not expose the retired triage binding digest: {receipt}"
+    );
+    assert!(
+        receipt.get("lifecycle_binding").is_none(),
+        "intake receipt must not repeat the issue_id lifecycle binding: {receipt}"
+    );
+    assert!(
+        receipt["bug_triage"].get("query_result").is_none(),
+        "intake receipt must not expose the dedup query result: {receipt}"
+    );
+    let serialized = serde_json::to_string(receipt).unwrap();
+    assert!(
+        !serialized.contains("query_result"),
+        "intake receipt leaks dedup query digests: {serialized}"
+    );
+    assert!(
+        !serialized.contains("\"records\""),
+        "intake receipt leaks full dedup records: {serialized}"
+    );
+}
+
 #[test]
 fn bug_intake_accepts_inline_json_input() {
     let root = temp_root("bug-intake-inline");
@@ -507,6 +534,8 @@ fn bug_intake_accepts_inline_json_input() {
         String::from_utf8_lossy(&created.stderr)
     );
     let created_json: Value = serde_json::from_slice(&created.stdout).unwrap();
+    let issue_id = created_json["issue_id"].as_str().unwrap();
+    assert!(!issue_id.is_empty());
     assert_eq!(created_json["classification"], "bug");
     assert_eq!(created_json["created"], true);
     assert_eq!(created_json["deduplicated"], false);
@@ -514,6 +543,7 @@ fn bug_intake_accepts_inline_json_input() {
         created_json["bug_triage"]["query"],
         "git-bug bug \"Fix inline intake input\" -f json"
     );
+    assert_minimal_intake_receipt(&created_json, issue_id, "new_confirmed");
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -568,33 +598,12 @@ fn bug_intake_deduplicates_execution_work_and_rejects_read_only_conversation() {
         created_json["bug_triage"]["query"],
         "git-bug bug \"governed development intake\" -f json"
     );
-    let created_query_result = &created_json["bug_triage"]["query_result"];
-    assert_eq!(
-        created_query_result["query_result_hash"],
-        digest(&canonical(&created_query_result["records"]))
-    );
-    assert_eq!(created_query_result["records"], serde_json::json!([]));
     assert_eq!(created_json["bug_triage"]["matched_issue_id"], Value::Null);
     assert_eq!(
         created_json["bug_triage"]["reopened_from_issue_id"],
         Value::Null
     );
-    assert_eq!(
-        created_json["bug_triage_query_binding"],
-        digest(&canonical(&serde_json::json!({
-            "issue_id": issue_id,
-            "query": "git-bug bug \"governed development intake\" -f json",
-            "mode": "new_confirmed",
-            "reopened_from_issue_id": null,
-            "matched_issue_id": null,
-            "matched_title": null,
-            "matched_classification": null,
-            "query_result": {
-                "records": [],
-                "query_result_hash": digest(&canonical(&serde_json::json!([])))
-            }
-        })))
-    );
+    assert_minimal_intake_receipt(&created_json, issue_id, "new_confirmed");
 
     let shown = run_bug_in(&root, &["bug", "show", issue_id, "--json"]);
     assert!(shown.status.success());
@@ -676,8 +685,8 @@ esac
     assert_eq!(reused_json["issue_id"], issue_id);
     assert_eq!(reused_json["deduplicated"], true);
     assert_eq!(reused_json["created"], false);
+    assert_eq!(reused_json["reopened"], false);
     assert_eq!(reused_json["appended"], false);
-    assert_eq!(reused_json["bug_triage"]["mode"], "reused");
     assert_eq!(reused_json["bug_triage"]["matched_issue_id"], issue_id);
     assert_eq!(
         reused_json["bug_triage"]["matched_title"],
@@ -687,37 +696,11 @@ esac
         reused_json["bug_triage"]["matched_classification"],
         "feature"
     );
-    let reused_query_result = &reused_json["bug_triage"]["query_result"];
-    assert_eq!(
-        reused_query_result["query_result_hash"],
-        digest(&canonical(&reused_query_result["records"]))
-    );
-    assert_eq!(
-        reused_query_result["records"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|record| record["human_id"] == issue_id)
-            .count(),
-        1
-    );
     assert_eq!(
         reused_json["bug_triage"]["reopened_from_issue_id"],
         Value::Null
     );
-    assert_eq!(
-        reused_json["bug_triage_query_binding"],
-        digest(&canonical(&serde_json::json!({
-            "issue_id": issue_id,
-            "query": "git-bug bug \"governed development intake\" -f json",
-            "mode": "reused",
-            "reopened_from_issue_id": null,
-            "matched_issue_id": issue_id,
-            "matched_title": "Add governed development intake",
-            "matched_classification": "feature",
-            "query_result": reused_query_result
-        })))
-    );
+    assert_minimal_intake_receipt(&reused_json, issue_id, "reused");
 
     let shown_after_reuse = run_bug_in(&root, &["bug", "show", issue_id, "--json"]);
     assert!(shown_after_reuse.status.success());
@@ -765,7 +748,6 @@ esac
     assert_eq!(reopened_json["deduplicated"], true);
     assert_eq!(reopened_json["reopened"], true);
     assert_eq!(reopened_json["appended"], false);
-    assert_eq!(reopened_json["bug_triage"]["mode"], "reopened_same_record");
     assert_eq!(reopened_json["bug_triage"]["matched_issue_id"], issue_id);
     assert_eq!(
         reopened_json["bug_triage"]["matched_title"],
@@ -779,19 +761,7 @@ esac
         reopened_json["bug_triage"]["reopened_from_issue_id"],
         issue_id
     );
-    assert_eq!(
-        reopened_json["bug_triage_query_binding"],
-        digest(&canonical(&serde_json::json!({
-            "issue_id": issue_id,
-            "query": "git-bug bug \"governed development intake\" -f json",
-            "mode": "reopened_same_record",
-            "reopened_from_issue_id": issue_id,
-            "matched_issue_id": issue_id,
-            "matched_title": "Add governed development intake",
-            "matched_classification": "feature",
-            "query_result": reopened_json["bug_triage"]["query_result"]
-        })))
-    );
+    assert_minimal_intake_receipt(&reopened_json, issue_id, "reopened_same_record");
     let reopened_record = run_bug_in(&root, &["bug", "show", issue_id, "--json"]);
     assert!(reopened_record.status.success());
     assert_eq!(
@@ -900,10 +870,10 @@ esac
     assert_eq!(migrated_json["issue_id"], legacy_id);
     assert_eq!(migrated_json["deduplicated"], true);
     assert_eq!(migrated_json["created"], false);
-    assert_eq!(migrated_json["bug_triage"]["mode"], "reused");
     assert_eq!(migrated_json["bug_triage"]["matched_issue_id"], legacy_id);
     assert_eq!(migrated_json["bug_triage"]["matched_title"], legacy_title);
     assert_eq!(migrated_json["bug_triage"]["matched_classification"], "bug");
+    assert_minimal_intake_receipt(&migrated_json, &legacy_id, "reused");
     let migrated_record = run_bug_in(&root, &["bug", "show", legacy_id.as_str(), "--json"]);
     assert!(migrated_record.status.success());
     let migrated_record_json: Value = serde_json::from_slice(&migrated_record.stdout).unwrap();

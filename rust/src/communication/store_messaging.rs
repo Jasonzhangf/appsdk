@@ -82,7 +82,6 @@ impl CommunicationStore {
             .map(NotificationRecord::summary);
         Ok(json!({
             "message": current,
-            "route": current.route,
             "deliveryAttempt": delivery_attempt,
             "notification": direct,
             "idempotent": false
@@ -102,7 +101,6 @@ impl CommunicationStore {
             .map(NotificationRecord::summary);
         Ok(json!({
             "message": current,
-            "route": current.route,
             "deliveryAttempt": delivery_attempt,
             "notification": direct,
             "idempotent": true

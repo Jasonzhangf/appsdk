@@ -652,7 +652,7 @@ pub(super) fn bug_intake(
             Some(matched_classification),
         )
     };
-    let (bug_triage, bug_triage_query_binding) = bug_intake_triage(
+    let (mut bug_triage, _bug_triage_query_binding) = bug_intake_triage(
         &issue_id,
         &triage_query,
         &records,
@@ -662,6 +662,9 @@ pub(super) fn bug_intake(
         matched_title,
         matched_classification,
     );
+    // The durable triage keeps the executed dedup query; the public receipt
+    // must not replay full records or retired binding digests.
+    bug_triage.as_object_mut().unwrap().remove("query_result");
 
     println!(
         "{}",
@@ -674,16 +677,7 @@ pub(super) fn bug_intake(
             "reopened": reopened,
             "appended": appended,
             "governed_completion_requires_issue_id": true,
-            "bug_triage": bug_triage,
-            "bug_triage_query_binding": bug_triage_query_binding,
-            "lifecycle_binding": {
-                "worktree": "issue_id",
-                "implementation": "issue_id",
-                "test": "issue_id",
-                "review": "issue_id",
-                "merge": "issue_id",
-                "closure": "issue_id"
-            }
+            "bug_triage": bug_triage
         }))
         .unwrap()
     );

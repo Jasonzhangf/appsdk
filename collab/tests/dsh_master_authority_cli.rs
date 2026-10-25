@@ -47,6 +47,8 @@ struct Gateway {
     forgotten_agents: Arc<Mutex<HashSet<String>>>,
     enroll_mode: Arc<Mutex<EnrollMode>>,
     current_runtime: Arc<Mutex<Option<String>>>,
+    fail_enqueue_read: Arc<AtomicBool>,
+    enqueue_attempts: Arc<AtomicU64>,
 }
 
 impl Gateway {
@@ -79,6 +81,10 @@ impl Gateway {
         let thread_mode = Arc::clone(&enroll_mode);
         let current_runtime = Arc::new(Mutex::new(None::<String>));
         let thread_runtime = current_runtime.clone();
+        let fail_enqueue_read = Arc::new(AtomicBool::new(false));
+        let thread_read_failure = fail_enqueue_read.clone();
+        let enqueue_attempts = Arc::new(AtomicU64::new(0));
+        let thread_enqueues = enqueue_attempts.clone();
         let handle = thread::spawn(move || {
             while !flag.load(Ordering::SeqCst) {
                 let Ok((stream, _)) = listener.accept() else {
@@ -94,6 +100,16 @@ impl Gateway {
                 }
                 let request: Value = serde_json::from_str(line.trim()).expect("gateway JSON");
                 let method = request["method"].as_str().unwrap_or_default();
+                if method == "enqueue" {
+                    thread_enqueues.fetch_add(1, Ordering::SeqCst);
+                    if thread_read_failure.load(Ordering::SeqCst) {
+                        let mut stream = &stream;
+                        stream
+                            .write_all(&[0xff, b'\n'])
+                            .expect("write invalid UTF-8 reply");
+                        continue;
+                    }
+                }
                 let runtime_id = request["params"]["runtimeId"].as_str().unwrap_or_default();
                 let agent_id = request["params"]["agentId"].as_str().unwrap_or_default();
                 if method == "register-peer" {
@@ -185,6 +201,8 @@ impl Gateway {
             forgotten_agents,
             enroll_mode,
             current_runtime,
+            fail_enqueue_read,
+            enqueue_attempts,
         }
     }
 
@@ -1524,6 +1542,64 @@ fn dsh_mcp_registers_from_typed_gateway_facts() {
     assert!(
         !text.contains("\"token\""),
         "MCP must not expose stored credentials"
+    );
+    fixture.finish();
+}
+
+#[test]
+fn dsh_post_submit_read_error_preserves_durable_message_without_retry() {
+    let mut fixture = Fixture::new();
+    fixture.start_daemon();
+    let reg_a = register(&fixture, "workerA", "tokenA", "agentA");
+    assert_ok(&reg_a);
+    let reg_b = register(&fixture, "workerB", "tokenB", "agentB");
+    assert_ok(&reg_b);
+    let ctx_a = binding_context(&reg_a, &fixture.root);
+    let ctx_b = binding_context(&reg_b, &fixture.root);
+    let before = fixture.gateway.enqueue_attempts.load(Ordering::SeqCst);
+    fixture
+        .gateway
+        .fail_enqueue_read
+        .store(true, Ordering::SeqCst);
+    let request = json!({"op":"Send","from":"workerA","worker_id":"workerA",
+        "token":"tokenA","to":"workerB","type":"notify","subject":"read failure",
+        "body":"durable despite unknown wake","delivery":"queued","message_id":"read-failure-message",
+        "command":{"command_id":"cmd-read-failure","operation_id":"op-read-failure",
+            "actor_binding_id":reg_a["command"]["binding"]["binding_id"],
+            "endpoint_generation":reg_a["command"]["binding"]["endpoint_generation"],
+            "scope":{"app_scope_id":"appserver-cli","project_scope_id":fixture.root}},
+        "project_context":ctx_a});
+    let sent = fixture.request(request.clone());
+    let msg_id = sent["msg_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("durable message ID missing: {sent}"));
+    let mailbox = fixture.request(json!({"op":"MailboxRead","all":true,"worker_id":"workerB",
+        "token":"tokenB","project_context":ctx_b}));
+    assert_ok(&mailbox);
+    assert!(mailbox.to_string().contains(msg_id), "{mailbox}");
+    assert!(
+        mailbox.to_string().contains("durable despite unknown wake"),
+        "{mailbox}"
+    );
+    let status = fixture.request(json!({"op":"MsgStatus","msg_id":msg_id,"project_context":ctx_a}));
+    assert_ok(&status);
+    assert_eq!(status["consumed_by_recv"], false, "{status}");
+    // Replay plus a duplicate public Send must not resubmit an unknown wake.
+    fixture.restart_daemon();
+    let duplicate = fixture.request(request);
+    assert_eq!(duplicate["msg_id"], msg_id, "{duplicate}");
+    assert_eq!(duplicate["deduplicated"], true, "{duplicate}");
+    let status = fixture.request(json!({"op":"MsgStatus","msg_id":msg_id,"project_context":ctx_a}));
+    assert_ok(&status);
+    assert_eq!(status["consumed_by_recv"], false, "{status}");
+    assert_eq!(
+        fixture.gateway.enqueue_attempts.load(Ordering::SeqCst),
+        before + 1
+    );
+    assert!(sent.to_string().contains("DSH_ENDPOINT_UNKNOWN:"), "{sent}");
+    assert!(
+        !sent.to_string().contains("DSH_ENDPOINT_BLOCKED:"),
+        "{sent}"
     );
     fixture.finish();
 }

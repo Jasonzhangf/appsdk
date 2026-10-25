@@ -514,6 +514,147 @@ fn flush_idle_batches_if_ready(server: &Server, now: i64) {
     server.commit_locked_reporting(&mut state, &events);
 }
 
+/// Read one worker's current activity for board-patrol wake decisions.
+///
+/// This is a single fresh read through the selected transport. It does not
+/// touch state, timers or notifications, and an Unknown or error is never
+/// capacity: the caller must verify the binding after the read before acting.
+pub(super) fn current_board_patrol_activity(
+    server: &Server,
+    worker: &super::state::WorkerRec,
+) -> Result<super::name_state::AgentActivity, String> {
+    use super::name_state::AgentActivity;
+    let Some(transport) = super::selected_transport_for_worker(worker) else {
+        return Ok(AgentActivity::Unknown);
+    };
+    match transport.kind {
+        crate::proto::TransportKind::Tmux => {
+            let Some(endpoint) = transport.tmux_endpoint.as_ref() else {
+                return Ok(AgentActivity::Unknown);
+            };
+            let observed = crate::client::adapters::tmux::observe_agent(endpoint)?;
+            Ok(match (observed.agent_presence, observed.activity) {
+                (
+                    crate::client::adapters::tmux::AgentPresence::Online,
+                    crate::client::adapters::tmux::AgentActivity::Idle,
+                ) => AgentActivity::Idle,
+                (
+                    crate::client::adapters::tmux::AgentPresence::Online,
+                    crate::client::adapters::tmux::AgentActivity::Busy,
+                ) => AgentActivity::Busy,
+                (
+                    crate::client::adapters::tmux::AgentPresence::Online,
+                    crate::client::adapters::tmux::AgentActivity::WaitingUser,
+                ) => AgentActivity::WaitingUser,
+                _ => AgentActivity::Unknown,
+            })
+        }
+        crate::proto::TransportKind::AppServer | crate::proto::TransportKind::DesktopBridge => {
+            let Some(thread_id) = transport.thread_id.as_deref() else {
+                return Ok(AgentActivity::Unknown);
+            };
+            let raw = (server.appserver_thread_status)(&transport, thread_id)?;
+            Ok(native_thread_activity(&raw))
+        }
+        crate::proto::TransportKind::Dsh => {
+            let (Some(endpoint), Some(runtime_id), Some(agent_id)) = (
+                transport.endpoint.as_deref(),
+                transport.namespace.as_deref(),
+                transport.thread_id.as_deref(),
+            ) else {
+                return Ok(AgentActivity::Unknown);
+            };
+            let facts = crate::client::adapters::dsh::activity(endpoint, runtime_id, agent_id)
+                .map_err(|error| error.to_string())?;
+            Ok(if !facts.live {
+                AgentActivity::Unknown
+            } else {
+                match facts.status.as_str() {
+                    "inactive" => AgentActivity::Idle,
+                    "running" => AgentActivity::Busy,
+                    _ => AgentActivity::Unknown,
+                }
+            })
+        }
+    }
+}
+
+/// Classify one native `thread/read` reply. Only a present, well-formed idle
+/// thread with no active flag or in-flight turn is positive idle.
+fn native_thread_activity(raw: &serde_json::Value) -> super::name_state::AgentActivity {
+    use super::name_state::AgentActivity;
+    let Some(kind) = raw
+        .pointer("/thread/status/type")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return AgentActivity::Unknown;
+    };
+    if kind == "waiting_user" {
+        return AgentActivity::WaitingUser;
+    }
+    // Optional activity fields used for idle decisions. A present field with
+    // the wrong shape is a malformed native reply and must not be guessed into
+    // Idle/Busy/WaitingUser. An absent field (or explicit null) means "no
+    // value" and is not a new error.
+    let active_flags: Vec<&str> = match raw
+        .pointer("/thread/status/activeFlags")
+        .or_else(|| raw.pointer("/activeFlags"))
+    {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(serde_json::Value::Array(flags)) => {
+            let mut strings = Vec::with_capacity(flags.len());
+            for flag in flags {
+                match flag.as_str() {
+                    Some(text) => strings.push(text),
+                    // A non-string array member makes the field malformed.
+                    None => return AgentActivity::Unknown,
+                }
+            }
+            strings
+        }
+        // Present but not a string array: malformed.
+        Some(_) => return AgentActivity::Unknown,
+    };
+    // Only the known native waiting flags mean WaitingUser. Any other
+    // non-empty flag string is unsupported and makes the reply Unknown rather
+    // than a guessed state.
+    let mut waiting = false;
+    let mut unsupported_flag = false;
+    for flag in &active_flags {
+        if matches!(*flag, "waitingOnApproval" | "waitingOnUserInput") {
+            waiting = true;
+        } else if !flag.is_empty() {
+            unsupported_flag = true;
+        }
+    }
+    if waiting {
+        return AgentActivity::WaitingUser;
+    }
+    if unsupported_flag {
+        return AgentActivity::Unknown;
+    }
+    let active_turns = match raw.pointer("/activeTurns") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::Array(turns)) => !turns.is_empty(),
+        Some(_) => return AgentActivity::Unknown,
+    };
+    let turn_in_progress = match raw
+        .pointer("/thread/latestTurnStatus")
+        .or_else(|| raw.pointer("/turns/0/status"))
+    {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::String(status)) => {
+            matches!(status.as_str(), "inProgress" | "active")
+        }
+        Some(_) => return AgentActivity::Unknown,
+    };
+    match kind {
+        "idle" if !active_turns && !turn_in_progress => AgentActivity::Idle,
+        "idle" | "active" | "inProgress" => AgentActivity::Busy,
+        _ => AgentActivity::Unknown,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::peer_tests::{register, test_server};
@@ -1245,6 +1386,235 @@ mod tests {
             batch.body
         );
         drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Seed a synthetic peer whose selected transport is a native thread read
+    /// callback. No tmux server is started and the reducer lock is released
+    /// before the caller probed anything.
+    fn patrol_appserver_worker(
+        server: &mut Server,
+        thread_id: &str,
+    ) -> super::super::state::WorkerRec {
+        super::super::peer_tests::register_synthetic_peer(server, "worker", thread_id);
+        let mut state = server.state.lock().unwrap();
+        state.workers.get_mut("worker").unwrap().transport = Some(
+            super::super::peer_tests::test_appserver_transport(thread_id),
+        );
+        let worker = state.workers["worker"].clone();
+        drop(state);
+        worker
+    }
+
+    #[test]
+    fn board_idle_patrol_activity_native_thread_status_table() {
+        use super::super::name_state::AgentActivity;
+        let (mut server, root) = test_server();
+        let worker = patrol_appserver_worker(&mut server, "thread-patrol-table");
+        for (status, active_turns, expected) in [
+            (
+                serde_json::json!({"type": "idle"}),
+                serde_json::json!([]),
+                AgentActivity::Idle,
+            ),
+            (
+                serde_json::json!({"type": "notLoaded"}),
+                serde_json::json!([]),
+                AgentActivity::Unknown,
+            ),
+            (
+                serde_json::json!({"type": "systemError"}),
+                serde_json::json!([]),
+                AgentActivity::Unknown,
+            ),
+            (
+                serde_json::json!({"type": "surprise"}),
+                serde_json::json!([]),
+                AgentActivity::Unknown,
+            ),
+        ] {
+            server.appserver_thread_status = std::sync::Arc::new(move |_, thread| {
+                Ok(serde_json::json!({
+                    "thread": {"id": thread, "status": status.clone()},
+                    "activeTurns": active_turns.clone(),
+                }))
+            });
+            assert_eq!(
+                super::current_board_patrol_activity(&server, &worker).unwrap(),
+                expected,
+            );
+        }
+        // An idle thread that still reports an in-flight turn is not idle.
+        server.appserver_thread_status = std::sync::Arc::new(|_, thread| {
+            Ok(serde_json::json!({
+                "thread": {"id": thread, "status": {"type": "idle"}},
+                "activeTurns": [{"id": "turn-active"}],
+            }))
+        });
+        assert_eq!(
+            super::current_board_patrol_activity(&server, &worker).unwrap(),
+            AgentActivity::Busy,
+        );
+        // A reply without the native status type is malformed, never idle.
+        server.appserver_thread_status =
+            std::sync::Arc::new(|_, thread| Ok(serde_json::json!({"thread": {"id": thread}})));
+        assert_eq!(
+            super::current_board_patrol_activity(&server, &worker).unwrap(),
+            AgentActivity::Unknown,
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn board_idle_patrol_activity_fresh_busy_overrides_stale_cached_idle() {
+        use super::super::name_state::AgentActivity;
+        let (mut server, root) = test_server();
+        let worker = patrol_appserver_worker(&mut server, "thread-patrol-stale");
+        observe(&server, AgentActivity::Idle, "session-thread-patrol-stale");
+        let cached = {
+            let state = server.state.lock().unwrap();
+            super::super::worker_agent_facts(&server, &state, &worker)
+                .1
+                .map(|fact| fact.activity)
+        };
+        assert_eq!(cached, Some(AgentActivity::Idle));
+        server.appserver_thread_status = std::sync::Arc::new(|_, thread| {
+            Ok(serde_json::json!({
+                "thread": {"id": thread, "status": {"type": "active", "activeFlags": []}},
+            }))
+        });
+        assert_eq!(
+            super::current_board_patrol_activity(&server, &worker).unwrap(),
+            AgentActivity::Busy,
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn board_idle_patrol_activity_native_read_error_is_preserved() {
+        let (mut server, root) = test_server();
+        let worker = patrol_appserver_worker(&mut server, "thread-patrol-error");
+        server.appserver_thread_status =
+            std::sync::Arc::new(|_, _| Err("native thread read exploded".to_owned()));
+        let error = super::current_board_patrol_activity(&server, &worker).unwrap_err();
+        assert!(error.contains("native thread read exploded"), "{error}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn board_idle_patrol_activity_waiting_flags_are_never_idle() {
+        use super::super::name_state::AgentActivity;
+        let (mut server, root) = test_server();
+        let worker = patrol_appserver_worker(&mut server, "thread-patrol-flags");
+        for (flags, expected) in [
+            (serde_json::json!([]), AgentActivity::Busy),
+            (
+                serde_json::json!(["waitingOnApproval"]),
+                AgentActivity::WaitingUser,
+            ),
+            (
+                serde_json::json!(["waitingOnUserInput"]),
+                AgentActivity::WaitingUser,
+            ),
+        ] {
+            server.appserver_thread_status = std::sync::Arc::new(move |_, thread| {
+                Ok(serde_json::json!({
+                    "thread": {
+                        "id": thread,
+                        "status": {"type": "active", "activeFlags": flags.clone()},
+                    },
+                }))
+            });
+            let actual = super::current_board_patrol_activity(&server, &worker).unwrap();
+            assert_eq!(actual, expected);
+            assert_ne!(actual, AgentActivity::Idle);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Malformed optional activity fields on an otherwise idle thread must be
+    /// Unknown, never Idle or a guessed Busy/WaitingUser. Only absent fields
+    /// (or explicit null) mean "no value"; a present field of the wrong shape
+    /// is a malformed native reply.
+    #[test]
+    fn board_idle_patrol_activity_malformed_activity_fields_are_unknown() {
+        use super::super::name_state::AgentActivity;
+        let (mut server, root) = test_server();
+        let worker = patrol_appserver_worker(&mut server, "thread-patrol-strict");
+        for (label, raw) in [
+            (
+                "activeFlags object",
+                serde_json::json!({
+                    "thread": {
+                        "id": "thread-patrol-strict",
+                        "status": {"type": "idle", "activeFlags": {"waiting": true}},
+                    },
+                    "activeTurns": [],
+                }),
+            ),
+            (
+                "activeFlags non-string member",
+                serde_json::json!({
+                    "thread": {
+                        "id": "thread-patrol-strict",
+                        "status": {"type": "idle", "activeFlags": ["waitingOnApproval", 7]},
+                    },
+                    "activeTurns": [],
+                }),
+            ),
+            (
+                "unsupported flag keyword",
+                serde_json::json!({
+                    "thread": {
+                        "id": "thread-patrol-strict",
+                        "status": {"type": "idle", "activeFlags": ["waitingForApproval"]},
+                    },
+                    "activeTurns": [],
+                }),
+            ),
+            (
+                "activeTurns non-array",
+                serde_json::json!({
+                    "thread": {
+                        "id": "thread-patrol-strict",
+                        "status": {"type": "idle", "activeFlags": []},
+                    },
+                    "activeTurns": {"count": 1},
+                }),
+            ),
+            (
+                "latestTurnStatus non-string",
+                serde_json::json!({
+                    "thread": {
+                        "id": "thread-patrol-strict",
+                        "status": {"type": "idle", "activeFlags": []},
+                        "latestTurnStatus": {"type": "inProgress"},
+                    },
+                    "activeTurns": [],
+                }),
+            ),
+        ] {
+            server.appserver_thread_status = std::sync::Arc::new(move |_, _| Ok(raw.clone()));
+            let actual = super::current_board_patrol_activity(&server, &worker).unwrap();
+            assert_eq!(actual, AgentActivity::Unknown, "{label}: got {actual:?}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn board_idle_patrol_activity_missing_transport_is_unknown() {
+        use super::super::name_state::AgentActivity;
+        let (server, root) = test_server();
+        super::super::peer_tests::register_synthetic_peer(&server, "worker", "thread-none");
+        let worker = {
+            let mut state = server.state.lock().unwrap();
+            state.workers.get_mut("worker").unwrap().transport = None;
+            state.workers["worker"].clone()
+        };
+        assert_eq!(
+            super::current_board_patrol_activity(&server, &worker).unwrap(),
+            AgentActivity::Unknown,
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

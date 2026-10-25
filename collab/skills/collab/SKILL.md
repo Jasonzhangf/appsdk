@@ -16,8 +16,10 @@ Collab 只有一个 Skill。master、peer、designer、reviewer 等不建立独�
 流程，优先将有界执行交给独立 worker。peer 完工或停止前向现有 master 交回结果并申请
 下一步或 idle；reviewer/设计师同样适用。无 master 时不虚构审批者；master 不向自己申请。
 
-执行以本次 `collab context` 的 `role_brief.workflow_template` 为准：读取基础版本、
-identity 及 specialties 的来源、revision 和完整 template。未更新时使用标准身份流程。
+执行以本次 `collab context` 的 `role_brief` 为准：`workflow_template` 只提供基础版本、
+identity 及 specialties 的来源与 revision；展开后的 role_task、responsibilities、
+next_action、completion_action 从 `role_brief` 顶层读取，每个职责只出现一次。
+未更新时使用标准身份流程。
 项目 master 可覆盖身份流程，或配置 `role:<工作角色>` 流程；多个匹配专长全部有序返回，
 不以第一项静默覆盖其他项。角色被移除后，不再派发该专长模板。模板不是权限授予，
 也不自动改写已发布任务的 owner、scope、指定执行者或必需 reviewer。

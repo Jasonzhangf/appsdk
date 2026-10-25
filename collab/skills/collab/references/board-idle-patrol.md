@@ -147,7 +147,9 @@ Jenny 只在提醒到达时检查下列事实，不自行造一条手写唤醒�
   `last_actual_report_ms`、`pending_revision_count`、`remaining_batch_count`。
 - CEO workspace 的默认偏好与写作/汇报风格指引由 `collab ceo promote` 非破坏性写入
   或更新 `<workspace>/AGENTS.md` 受管段落，保留全部已有内容，引用权威偏好源
-  `~/.codex/USER.md` 而不复制其内容或个人信息，也不新建第二套 CEO Skill。目录、
+  `~/.codex/USER.md` 而不复制其内容或个人信息，也不新建第二套 CEO Skill。CEO 先读取
+  该权威源，只对用户明确确认的稳定偏好与风格习惯去重、小量更新；不沉淀单次情绪、
+  项目进度或秘密。目录、
   符号链接、损坏目标或其他非法目标显式失败，不跟随链接改写共享文件，也不写备选
   文件。若 grant 已持久但受管段落写入失败，回执标记部分成功并保留
   `CEO_GRANT_RECORDED_BUT_WORKSPACE_GUIDANCE_FAILED`，不掩盖失败。

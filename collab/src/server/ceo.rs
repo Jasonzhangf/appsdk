@@ -300,9 +300,17 @@ impl ProjectRuntimeManager {
                     granted_ms: now_ms(),
                 };
                 self.host
-                    .commit_checked(&[Event::CeoGrantSet { grant: Some(grant) }])
+                    .commit_checked(&[Event::CeoGrantSet {
+                        grant: Some(grant.clone()),
+                    }])
                     .map_err(|e| Resp::err(format!("CEO_DURABILITY_FAILED: {e}")))?;
-                Ok(self.ceo_status(Some(context), &actor))
+                // The grant is already durable. Workspace guidance is a bounded
+                // follow-up effect: a failure must be reported as partial
+                // success and must never roll back the source registration or
+                // a grant that the user already approved.
+                let mut status = self.ceo_status(Some(context), &actor);
+                self.attach_ceo_workspace_guidance(&mut status, &grant);
+                Ok(status)
             }
             CeoCommand::Clear { approval } => {
                 if approval.trim().is_empty() {
@@ -317,6 +325,7 @@ impl ProjectRuntimeManager {
                 subject,
                 body,
                 in_reply_to,
+                urgent,
             } => {
                 if current_master_holder(&source, &source.state.lock().unwrap())
                     .map_err(Resp::err)?
@@ -325,21 +334,44 @@ impl ProjectRuntimeManager {
                 {
                     return Err(Resp::err("CEO_REPLY_PROJECT_MASTER_REQUIRED"));
                 }
+                if subject.trim().is_empty() || body.trim().is_empty() {
+                    return Err(Resp::err("CEO_MESSAGE_CONTENT_REQUIRED"));
+                }
+                // A configured CEO is required in both cases; a project master
+                // must not invent a recipient when no grant exists.
                 let grant = self.ceo_grant()?;
-                let (target, to) = self.ceo_holder(&grant)?;
-                self.ceo_deliver(
-                    &source,
-                    &actor,
-                    &name,
-                    &target,
-                    &to,
-                    subject,
-                    body,
-                    in_reply_to,
-                    None,
-                    None,
-                    None,
-                )
+                match in_reply_to {
+                    // Unsolicited periodic progress: coalesce into the host's
+                    // canonical report state. The scheduler owns notification;
+                    // this handler never claims a report was sent. The configured
+                    // CEO holder must still resolve; a stale grant is not a
+                    // destination.
+                    None => {
+                        let _ = self.ceo_holder(&grant)?;
+                        self.ceo_record_unsolicited_progress(&source, subject, body, urgent)
+                    }
+                    // Solicited reply: preserve the existing durable delivery,
+                    // recipient/sender/scope checks, correlation dedup and the
+                    // obligation clear. Progress is added only after the reply
+                    // itself is durable.
+                    Some(original) => {
+                        let (target, to) = self.ceo_holder(&grant)?;
+                        let delivered = self.ceo_deliver(
+                            &source,
+                            &actor,
+                            &name,
+                            &target,
+                            &to,
+                            subject.clone(),
+                            body.clone(),
+                            Some(original),
+                            None,
+                            None,
+                            None,
+                        );
+                        self.attach_solicited_progress(delivered, &source, subject, body, urgent)
+                    }
+                }
             }
             CeoCommand::BootstrapReady {
                 operation_id,
@@ -445,6 +477,7 @@ impl ProjectRuntimeManager {
                         )
                     }
                     CeoCommand::Progress { project } => self.ceo_progress(project),
+                    CeoCommand::ReportAck { batch_id } => self.ceo_report_ack(batch_id),
                     CeoCommand::BootstrapPrepare {
                         project,
                         approval,
@@ -719,22 +752,349 @@ impl ProjectRuntimeManager {
         ))
     }
 
-    fn ceo_progress(&self, project: Option<String>) -> Result<Resp, Resp> {
-        let roots = if let Some(project) = project {
-            vec![std::fs::canonicalize(project)
-                .map_err(|e| Resp::err(format!("CEO_PROJECT_INVALID: {e}")))?]
+    /// Resolve the official central Collab Skill and user preference owner from
+    /// the current environment. This never guesses a task home and never copies
+    /// private preference content.
+    fn ceo_workspace_guidance_sources(&self) -> Result<(PathBuf, PathBuf), String> {
+        let home = std::env::var_os("HOME").ok_or_else(|| {
+            "HOME is unavailable; cannot resolve USER.md or the central Collab Skill".to_owned()
+        })?;
+        let home = PathBuf::from(home);
+        Ok((
+            home.join(".codex").join("USER.md"),
+            home.join(".agents")
+                .join("skills")
+                .join("collab")
+                .join("SKILL.md"),
+        ))
+    }
+
+    /// Attach workspace guidance to an already-authorized Promote result. The
+    /// grant is durable first; a guidance failure is partial success, never a
+    /// reason to rewrite the source registration or fall back to another file.
+    fn attach_ceo_workspace_guidance(&self, status: &mut Resp, grant: &CeoGrant) {
+        let guidance = self
+            .ceo_workspace_guidance_sources()
+            .and_then(|(preferences, skill)| {
+                crate::ceo_workspace_guidance::ensure_ceo_workspace_guidance(
+                    Path::new(&grant.workspace),
+                    &preferences,
+                    &skill,
+                )
+                .map_err(|error| error.to_string())
+            });
+        if !status.data.is_object() {
+            status.data = json!({});
+        }
+        let object = status
+            .data
+            .as_object_mut()
+            .expect("CEO status data was just ensured to be an object");
+        match guidance {
+            Ok(receipt) => {
+                object.insert(
+                    "workspace_guidance".into(),
+                    json!({
+                        "ok": true,
+                        "path": receipt.path,
+                        "action": receipt.action.as_str(),
+                    }),
+                );
+            }
+            Err(error) => {
+                object.insert(
+                    "workspace_guidance".into(),
+                    json!({"ok": false, "grant_durable": true, "error": error}),
+                );
+                status.ok = false;
+                status.error = Some(format!(
+                    "CEO_GRANT_RECORDED_BUT_WORKSPACE_GUIDANCE_FAILED: {error}"
+                ));
+            }
+        }
+    }
+
+    /// Record trimmed project progress into the host canonical report state.
+    /// Exact business content is the dedup key. Recording never clears a reply
+    /// obligation and never claims a user report.
+    fn ceo_record_progress(
+        &self,
+        source: &Arc<Server>,
+        subject: String,
+        body: String,
+        urgent: bool,
+    ) -> Result<serde_json::Value, Resp> {
+        let content = crate::ceo_report_state::CeoProgressContent::new(subject, body);
+        if content.subject.is_empty() || content.body.is_empty() {
+            return Err(Resp::err("CEO_MESSAGE_CONTENT_REQUIRED"));
+        }
+        let project = source.root.to_string_lossy().into_owned();
+        let mut state = self.host.state.lock().unwrap();
+        if let Some(error) = &state.journal_poison {
+            return Err(Resp::err(format!(
+                "CEO_AUTHORITY_STORE_UNAVAILABLE: {error}"
+            )));
+        }
+        // Probe the helper dedup on a clone so the response can state truthfully
+        // whether this call created a meaningful revision.
+        let mut probe = state.ceo_report_state.clone();
+        let recorded = probe.record_progress(project.clone(), content.clone(), urgent);
+        if recorded {
+            self.host
+                .commit_locked_checked(
+                    &mut state,
+                    &[Event::CeoProgressRecorded {
+                        project: project.clone(),
+                        content,
+                        urgent,
+                    }],
+                )
+                .map_err(|error| Resp::err(format!("CEO_PROGRESS_DURABILITY_FAILED: {error}")))?;
+        }
+        let revision = state
+            .ceo_report_state
+            .projects
+            .get(&project)
+            .map(|progress| progress.revision);
+        Ok(json!({
+            "project": project,
+            "recorded": recorded,
+            "deduplicated": !recorded,
+            "urgent": urgent,
+            "revision": revision,
+        }))
+    }
+
+    /// Unsolicited periodic progress has no immediate delivery. The scheduler
+    /// (added in the next pass) owns any notification, so this answer only
+    /// reports the durable recording outcome.
+    fn ceo_record_unsolicited_progress(
+        &self,
+        source: &Arc<Server>,
+        subject: String,
+        body: String,
+        urgent: bool,
+    ) -> Result<Resp, Resp> {
+        let mut progress = self.ceo_record_progress(source, subject, body, urgent)?;
+        if let Some(object) = progress.as_object_mut() {
+            object.insert("notified".into(), json!(false));
+            object.insert("reported".into(), json!(false));
+        }
+        Ok(Resp::data(progress))
+    }
+
+    /// Add canonical progress to a solicited reply result. A durable reply whose
+    /// source obligation clear failed is still a valid reply, so progress is
+    /// recorded and the partial failure stays visible. Hard delivery failures
+    /// record nothing.
+    fn attach_solicited_progress(
+        &self,
+        delivered: Result<Resp, Resp>,
+        source: &Arc<Server>,
+        subject: String,
+        body: String,
+        urgent: bool,
+    ) -> Result<Resp, Resp> {
+        match delivered {
+            Ok(mut response) => {
+                // The reply is already durable. If progress cannot be recorded,
+                // keep the real msg_id visible and forbid an uncertain resend.
+                match self.ceo_record_progress(source, subject, body, urgent) {
+                    Ok(progress) => merge_ceo_json_object(&mut response.data, progress),
+                    Err(progress_error) => {
+                        let error = progress_error
+                            .error
+                            .unwrap_or_else(|| "CEO_PROGRESS_RECORD_FAILED".to_owned());
+                        if let Some(object) = response.data.as_object_mut() {
+                            object.insert("progress_recorded".into(), json!(false));
+                            object.insert("progress_error".into(), json!(error));
+                        }
+                        response.ok = false;
+                        response.error = Some(format!(
+                            "CEO_REPLY_DURABLE_PROGRESS_FAILED: reply is durable; do not resend: {error}"
+                        ));
+                    }
+                }
+                Ok(response)
+            }
+            Err(mut response) => {
+                let durable = matches!(
+                    response.data.get("durable"),
+                    Some(serde_json::Value::Bool(true))
+                );
+                if durable {
+                    match self.ceo_record_progress(source, subject, body, urgent) {
+                        Ok(progress) => merge_ceo_json_object(&mut response.data, progress),
+                        Err(progress_error) => {
+                            if let Some(object) = response.data.as_object_mut() {
+                                object.insert("progress_recorded".into(), json!(false));
+                                object.insert(
+                                    "progress_error".into(),
+                                    progress_error
+                                        .error
+                                        .map_or(serde_json::Value::Null, serde_json::Value::String),
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(response)
+            }
+        }
+    }
+
+    /// Acknowledge one visible CEO batch. Only the current CEO reaches this
+    /// handler; an unknown or already-consumed batch is rejected before any
+    /// event is appended.
+    fn ceo_report_ack(&self, batch_id: String) -> Result<Resp, Resp> {
+        if batch_id.trim().is_empty() {
+            return Err(Resp::err("CEO_REPORT_BATCH_REQUIRED"));
+        }
+        let reported_ms = now_ms().max(0) as u64;
+        let mut state = self.host.state.lock().unwrap();
+        if let Some(error) = &state.journal_poison {
+            return Err(Resp::err(format!(
+                "CEO_AUTHORITY_STORE_UNAVAILABLE: {error}"
+            )));
+        }
+        if !state.ceo_report_state.batches.contains_key(&batch_id) {
+            return Err(Resp::err(
+                "CEO_REPORT_BATCH_UNKNOWN: no unacknowledged batch has this id",
+            ));
+        }
+        self.host
+            .commit_locked_checked(
+                &mut state,
+                &[Event::CeoReportBatchAcknowledged {
+                    batch_id: batch_id.clone(),
+                    reported_ms,
+                }],
+            )
+            .map_err(|error| Resp::err(format!("CEO_REPORT_ACK_DURABILITY_FAILED: {error}")))?;
+        Ok(Resp::data(json!({
+            "batch_id": batch_id,
+            "reported_ms": reported_ms,
+            "last_actual_report_ms": state.ceo_report_state.last_actual_report_ms(),
+            "pending_revision_count": state.ceo_report_state.pending_revisions().len(),
+            "remaining_batch_count": state.ceo_report_state.batch_count(),
+        })))
+    }
+
+    /// Select and prepare one report batch under a single host lock. Ordinary
+    /// suppression narrows the batch to explicit typed urgent projects only.
+    /// Reading never advances a reported watermark.
+    fn ceo_prepare_report_batch(&self, project: Option<&str>) -> Result<serde_json::Value, Resp> {
+        let policy = self
+            .host
+            .config
+            .ceo_report_policy()
+            .map_err(|error| Resp::err(format!("CEO_REPORT_POLICY_INVALID: {error}")))?;
+        let now = now_ms().max(0) as u64;
+        let mut state = self.host.state.lock().unwrap();
+        if let Some(error) = &state.journal_poison {
+            return Err(Resp::err(format!(
+                "CEO_AUTHORITY_STORE_UNAVAILABLE: {error}"
+            )));
+        }
+        let last = state.ceo_report_state.last_actual_report_ms();
+        let decision = policy.evaluate(now, last, false);
+        let pending: Vec<_> = state
+            .ceo_report_state
+            .pending_revisions()
+            .into_iter()
+            .filter(|revision| project.is_none_or(|wanted| revision.project == wanted))
+            .collect();
+        let total = pending.len();
+        let selected: Vec<_> = if decision.allowed {
+            pending
         } else {
-            self.routes
+            pending
+                .into_iter()
+                .filter(|revision| revision.urgent)
+                .collect()
+        };
+        if selected.is_empty() {
+            return Ok(json!({
+                "batch_id": serde_json::Value::Null,
+                "coverage": {},
+                "projects": [],
+                "last_actual_report_ms": last,
+                "suppressed": !decision.allowed,
+                "suppression": ceo_suppression_label(decision.suppression),
+                "next_eligible_ms": decision.next_eligible_ms,
+                "excluded_project_count": total,
+            }));
+        }
+        let coverage: std::collections::BTreeMap<String, u64> = selected
+            .iter()
+            .map(|revision| (revision.project.clone(), revision.revision))
+            .collect();
+        let urgent = !decision.allowed;
+        // The helper owns batch dedup. Ask it for the actual batch first so a
+        // deduplicated coverage reports the stored ID, then append the event
+        // only when this call created a new batch.
+        let mut probe = state.ceo_report_state.clone();
+        let prepared = probe
+            .prepare_batch(gen_msg_id(), coverage.clone(), urgent)
+            .map_err(|error| Resp::err(format!("CEO_REPORT_BATCH_PREPARE_FAILED: {error}")))?;
+        let batch_id = prepared.batch_id;
+        if !state.ceo_report_state.batches.contains_key(&batch_id) {
+            self.host
+                .commit_locked_checked(
+                    &mut state,
+                    &[Event::CeoReportBatchPrepared {
+                        batch_id: batch_id.clone(),
+                        coverage: coverage.clone(),
+                        urgent,
+                    }],
+                )
+                .map_err(|error| {
+                    Resp::err(format!("CEO_REPORT_BATCH_DURABILITY_FAILED: {error}"))
+                })?;
+        }
+        let included = selected
+            .iter()
+            .map(|revision| {
+                json!({
+                    "project": revision.project.clone(),
+                    "revision": revision.revision,
+                    "subject": revision.content.subject.clone(),
+                    "body": revision.content.body.clone(),
+                    "urgent": revision.urgent,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({
+            "batch_id": batch_id,
+            "coverage": coverage,
+            "projects": included,
+            "last_actual_report_ms": state.ceo_report_state.last_actual_report_ms(),
+            "suppressed": !decision.allowed,
+            "suppression": ceo_suppression_label(decision.suppression),
+            "next_eligible_ms": decision.next_eligible_ms,
+            "excluded_project_count": total - selected.len(),
+        }))
+    }
+
+    fn ceo_progress(&self, project: Option<String>) -> Result<Resp, Resp> {
+        let (roots, project_filter) = if let Some(project) = project {
+            let root = std::fs::canonicalize(project)
+                .map_err(|e| Resp::err(format!("CEO_PROJECT_INVALID: {e}")))?;
+            (vec![root.clone()], Some(root))
+        } else {
+            let roots = self
+                .routes
                 .lock()
                 .unwrap()
                 .values()
                 .map(|r| r.root.clone())
                 .collect::<std::collections::BTreeSet<_>>()
                 .into_iter()
-                .collect()
+                .collect();
+            (roots, None)
         };
         let mut projects = Vec::new();
-        for root in roots {
+        for root in &roots {
             let runtimes = self.ceo_project_runtimes(&root.to_string_lossy(), None)?;
             if runtimes.is_empty() {
                 projects.push(json!({"project":root,"registered":false,"master":null}));
@@ -782,8 +1142,36 @@ impl ProjectRuntimeManager {
             .values()
             .cloned()
             .collect::<Vec<_>>();
-        Ok(Resp::data(
-            json!({"projects":projects,"bootstrap_operations":operations}),
-        ))
+        let filter = project_filter
+            .as_deref()
+            .map(|path| path.to_string_lossy().into_owned());
+        let report = self.ceo_prepare_report_batch(filter.as_deref())?;
+        Ok(Resp::data(json!({
+            "projects": projects,
+            "bootstrap_operations": operations,
+            "report": report,
+        })))
+    }
+}
+
+/// Merge the object fields of `extra` into `target`. Non-object inputs are left
+/// untouched; both producers here always build JSON objects.
+fn merge_ceo_json_object(target: &mut serde_json::Value, extra: serde_json::Value) {
+    if let (Some(target), serde_json::Value::Object(extra)) = (target.as_object_mut(), extra) {
+        for (key, value) in extra {
+            target.insert(key, value);
+        }
+    }
+}
+
+/// Stable wire label for a time-policy outcome.
+fn ceo_suppression_label(
+    suppression: crate::ceo_reporting_policy::CeoReportSuppression,
+) -> &'static str {
+    use crate::ceo_reporting_policy::CeoReportSuppression;
+    match suppression {
+        CeoReportSuppression::Allowed => "allowed",
+        CeoReportSuppression::Cooldown => "cooldown",
+        CeoReportSuppression::QuietHours => "quiet-hours",
     }
 }

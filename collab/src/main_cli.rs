@@ -317,6 +317,10 @@ pub(crate) enum CeoCmd {
         subject: String,
         #[arg(long = "in-reply-to")]
         in_reply_to: Option<String>,
+        /// Mark this progress as explicitly urgent; urgent reports bypass the
+        /// ordinary hourly/quiet-window limits. Never inferred from body text.
+        #[arg(long)]
+        urgent: bool,
         #[arg(required = true, trailing_var_arg = true)]
         body: Vec<String>,
     },
@@ -325,6 +329,12 @@ pub(crate) enum CeoCmd {
         /// Limit progress to one registered project
         #[arg(long)]
         project: Option<std::path::PathBuf>,
+    },
+    /// Acknowledge a prepared CEO report batch after the report was visibly output
+    ReportAck {
+        /// Exact batch ID returned by `collab ceo progress`
+        #[arg(long = "batch-id")]
+        batch_id: String,
     },
     /// Prepare and launch one real Codex master in an existing tmux endpoint
     BootstrapMaster {

@@ -330,6 +330,18 @@ fixed command that runs for hours is still bounded work. A goal that needs
 planning, delegation, evidence review, unblocking, integration, and resource
 closure is a long-horizon goal.
 
+For clarification or help, route by question type, not by idle capacity or
+role labels. The only rule body is
+`coordination_rules.clarification_route_rule` in
+`references/workflow-templates.json`; `collab context` expands that body into
+`role_brief.responsibilities`, and there is no `role_brief.coordination_rules`
+field. Task interface, dependency, implementation-fact and progress questions
+go to the responsible owner peer; architecture, requirement interpretation and
+design trade-off questions go to the chief designer; scope, priority, resource
+and cross-peer conflict questions go to the current master; only user-held
+critical facts, new authorization or a change to an explicit hard constraint
+go to the user.
+
 The exact master and peer responsibilities are the role brief's `master` and
 `peer` templates; registration and recovery must explain that goal level and
 recommend scheduled patrols for each role's own goals, risks and resources.

@@ -49,12 +49,18 @@ releases a claim. Holder close clears obsolete wait edges and creates a
 
 Waiting is not abandonment. On each supported timer/wake or direct wake, the
 waiter must re-read the durable conflict, try any locally available resolution,
-and escalate unresolved work. An ordinary worker escalates to the current
-Collab master immediately, with the evidence it already has; a concrete
-solution or proven root cause is not required before asking for help. Do not
-wait for a fix to appear, and do not dump un-evidenced symptoms. If no current
-master exists, escalate to the task-initiating collaborator. Independent peers
-may decline a master collaboration invite. Include the blocking task,
+and escalate unresolved work. The current master is the default receiver for a
+blocked resource; when the open question is instead a task-fact or
+implementation question, route it to the responsible owner peer, and when it is
+an architecture or design trade-off, route it to the chief designer, choosing
+the receiver by question type per
+`coordination_rules.clarification_route_rule` in
+`references/workflow-templates.json`. Escalate immediately with the evidence
+already held; a concrete solution or proven root cause is not required before
+asking for help. Do not wait for a fix to appear, and do not dump un-evidenced
+symptoms. If no current master exists, escalate to the task-initiating
+collaborator. Independent peers may decline a master collaboration invite.
+Include the blocking task,
 responsible actor, deadline, attempted actions, requested decision, exact
 failing input/error or evidence path, and, when an external dependency blocks
 continuation, that dependency and the resume condition. Continue any unaffected

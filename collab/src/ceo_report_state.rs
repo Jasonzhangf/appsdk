@@ -16,6 +16,34 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// Durable automatic-notice scheduling gate for the CEO progress report.
+///
+/// This gate is stored inside the canonical report state so grant-set reset
+/// and snapshot replay preserve it as part of the one aggregate. It owns only
+/// scheduling facts: when the next 15-minute patrol evaluation may run, which
+/// meaningful typed urgent generation the current window already assessed,
+/// and the preallocated message ID reserved before the target mailbox commit.
+/// Progress content, prepared batches and actual-report history stay in their
+/// existing fields; automatic notices never pre-bind a content batch.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CeoNoticeGate {
+    /// Next earliest epoch millisecond at which the patrol may evaluate or
+    /// emit a notice. Zero means the first eligible evaluation.
+    #[serde(default)]
+    pub next_due_ms: u64,
+    /// Meaningful typed urgent generation already assessed by the current
+    /// notice window. A new generation may reassess immediately; a repeated
+    /// generation does not.
+    #[serde(default)]
+    pub urgent_generation_seen: u64,
+    /// Message ID reserved on the host before the target mailbox commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_message_id: Option<String>,
+    /// Target CEO worker ID bound to `pending_message_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_worker_id: Option<String>,
+}
+
 /// Substantive progress reported for one project.
 ///
 /// Equality of this value is the dedup key. Arrival time, message ID and reply
@@ -87,6 +115,9 @@ pub struct CeoReportBatch {
 /// projects and active work rather than by update history.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CeoReportState {
+    /// Durable scheduling gate for the automatic notice patrol.
+    #[serde(default)]
+    pub notice_gate: CeoNoticeGate,
     /// Latest known progress per project, including already reported revisions.
     #[serde(default)]
     pub projects: BTreeMap<String, CeoProjectProgress>,

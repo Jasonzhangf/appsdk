@@ -49,6 +49,79 @@ pub(crate) fn board_patrol_owned_unclosed_task_ids(
     task_ids
 }
 
+/// Resolve the stable owner only when this worker is the current carrier.
+///
+/// A stable name can outlive the session that first used it. `worker_names`
+/// keeps historical aliases, so a stale carrier must not patrol tasks assigned
+/// to the name now held by another worker. Unnamed workers keep their worker
+/// id as the owner key.
+pub(crate) fn board_patrol_current_owner_key(state: &State, worker_id: &str) -> Option<String> {
+    let worker = state.workers.get(worker_id)?;
+    let owner_key = board_patrol_owner_key(state, worker_id);
+    let holder = state
+        .name_occupancies
+        .get(&worker.cwd)
+        .and_then(|names| names.get(&owner_key))
+        .or_else(|| {
+            let mut holders = state
+                .name_occupancies
+                .values()
+                .filter_map(|names| names.get(&owner_key));
+            let first = holders.next()?;
+            if holders.all(|holder| {
+                holder.worker_id == first.worker_id && holder.session_id == first.session_id
+            }) {
+                Some(first)
+            } else {
+                None
+            }
+        });
+    match holder {
+        Some(holder) => {
+            let session_matches = worker
+                .transport
+                .as_ref()
+                .and_then(|transport| transport.session_id.as_deref())
+                .is_none_or(|session| session == holder.session_id);
+            (holder.worker_id == worker_id && session_matches).then_some(owner_key)
+        }
+        None => (owner_key == worker_id).then_some(owner_key),
+    }
+}
+
+/// Canonical unclosed, uncancelled task set for the current carrier.
+///
+/// `None` means the worker is no longer the current stable-name carrier, so it
+/// has no canonical patrol ownership at all.
+pub(crate) fn board_patrol_eligible_task_ids(
+    state: &State,
+    worker_id: &str,
+) -> Option<Vec<String>> {
+    let owner_key = board_patrol_current_owner_key(state, worker_id)?;
+    let owned = board_patrol_owned_unclosed_task_ids(state, worker_id, &owner_key);
+    Some(crate::board_patrol_policy::eligible_patrol_task_ids(
+        &owned,
+        &owner_key,
+        &state.cancelled_board_patrol_tasks,
+    ))
+}
+
+/// Attempt-time guard for a marked board-idle notice.
+///
+/// Unmarked messages are ordinary mail and always pass. A marked notice is
+/// deliverable only while its current recipient still owns at least one
+/// canonical eligible task. Cancellations committed before this check are
+/// therefore visible; an already-submitted native attempt cannot be retracted.
+pub(crate) fn board_patrol_notice_is_current(state: &State, message_id: &str) -> bool {
+    if !state.board_patrol_notice_ids.contains(message_id) {
+        return true;
+    }
+    let Some(message) = state.msgs.get(message_id) else {
+        return false;
+    };
+    board_patrol_eligible_task_ids(state, &message.to).is_some_and(|task_ids| !task_ids.is_empty())
+}
+
 impl State {
     /// Clear a persisted goal-due wake that no longer has an armed goal
     /// deadline owned by the master. Old daemons could snapshot `goal_due`
@@ -58,15 +131,15 @@ impl State {
         if !self.master_wake.goal_due {
             return false;
         }
-        let has_armed_master_goal_deadline = self
-            .notification_subscriptions
-            .values()
-            .any(|subscription| {
-                is_goal_deadline(subscription)
-                    && subscription.status == "armed"
-                    && subscription.expires_ms > now
-                    && subscription_affects_master_wake(self, subscription)
-            });
+        let has_armed_master_goal_deadline =
+            self.notification_subscriptions
+                .values()
+                .any(|subscription| {
+                    is_goal_deadline(subscription)
+                        && subscription.status == "armed"
+                        && subscription.expires_ms > now
+                        && subscription_affects_master_wake(self, subscription)
+                });
         if has_armed_master_goal_deadline {
             return false;
         }
@@ -104,9 +177,8 @@ impl State {
         let mut pane_binding_counts = std::collections::BTreeMap::new();
         for binding in &bindings {
             if binding.tmux_endpoint.is_some() {
-                let key =
-                    crate::server::global_state::installed_route_address_key(binding)
-                        .expect("validated pane binding has a route address");
+                let key = crate::server::global_state::installed_route_address_key(binding)
+                    .expect("validated pane binding has a route address");
                 *pane_binding_counts.entry(key).or_insert(0usize) += 1;
             }
         }
@@ -129,9 +201,7 @@ impl State {
                 CurrentThreadRouteReplayStatus::Installed
                 | CurrentThreadRouteReplayStatus::Tombstoned
                 | CurrentThreadRouteReplayStatus::Contested => continue,
-                CurrentThreadRouteReplayStatus::Ambiguous(_)
-                    if binding.tmux_endpoint.is_some() =>
-                {
+                CurrentThreadRouteReplayStatus::Ambiguous(_) if binding.tmux_endpoint.is_some() => {
                     // The replay projection already owns this pane. Restoring
                     // historical candidates in thread order must not evict it.
                     continue;
@@ -145,9 +215,8 @@ impl State {
                 CurrentThreadRouteReplayStatus::Missing => {}
             }
             if binding.tmux_endpoint.is_some() {
-                let key =
-                    crate::server::global_state::installed_route_address_key(&binding)
-                        .expect("validated pane binding has a route address");
+                let key = crate::server::global_state::installed_route_address_key(&binding)
+                    .expect("validated pane binding has a route address");
                 if pane_binding_counts.get(&key).copied() != Some(1) {
                     continue;
                 }
@@ -317,7 +386,10 @@ impl State {
             // Reset the idle reminder only on a real carrier change; an
             // unchanged name resolution must not recreate a reminder window.
             if obligation.from_name.as_deref() == Some(name)
-                && obligation.from_project.as_deref().is_none_or(|source|source==project_scope)
+                && obligation
+                    .from_project
+                    .as_deref()
+                    .is_none_or(|source| source == project_scope)
                 && obligation.from_worker_id != worker_id
             {
                 obligation.from_worker_id = worker_id.to_owned();
@@ -676,7 +748,10 @@ impl State {
             Event::ReplyObligationCleared { message_id } => {
                 self.reply_obligations.remove(message_id);
             }
-            Event::ReplyObligationReminded { message_id, reminded } => {
+            Event::ReplyObligationReminded {
+                message_id,
+                reminded,
+            } => {
                 if let Some(obligation) = self.reply_obligations.get_mut(message_id) {
                     obligation.reminded_idle_episode = *reminded;
                 }
@@ -1016,6 +1091,9 @@ impl State {
                 self.board_patrol_gates
                     .insert(worker_id.clone(), gate.clone());
             }
+            Event::BoardPatrolNoticeBound { message_id } => {
+                self.board_patrol_notice_ids.insert(message_id.clone());
+            }
             Event::ReducerSnapshot { .. } => {
                 return Err("reducer snapshot is replay-only".into());
             }
@@ -1168,6 +1246,11 @@ impl State {
             }
             Event::CeoGrantSet { grant } => {
                 self.ceo_grant = grant.clone();
+                // A grant belongs to one CEO identity. Clear only the notice
+                // scheduling gate so a reservation made for the previous CEO
+                // cannot be reused, while recorded progress, prepared batches
+                // and actual-report history remain canonical.
+                self.ceo_report_state.notice_gate = Default::default();
             }
             Event::CeoBootstrapSet { record } => {
                 self.ceo_bootstraps
@@ -1197,6 +1280,9 @@ impl State {
                 self.ceo_report_state
                     .acknowledge_batch(batch_id, *reported_ms)
                     .map_err(|error| error.to_string())?;
+            }
+            Event::CeoReportNoticeGateUpdated { gate } => {
+                self.ceo_report_state.notice_gate = gate.clone();
             }
             Event::CeoReportStateRestored { report_state } => {
                 self.ceo_report_state = report_state.clone();
@@ -1434,6 +1520,7 @@ impl State {
 
     pub fn drop_message(&mut self, id: &str) {
         self.msgs.remove(id);
+        self.board_patrol_notice_ids.remove(id);
         self.mailbox_name_addresses.remove(id);
         self.mailbox_handoffs
             .retain(|handoff| handoff.message_id != id);
@@ -1464,9 +1551,11 @@ impl State {
         parent_task_id: Option<&str>,
         explicit: &crate::board::WorkPolicy,
     ) -> crate::board::WorkPolicy {
-        let work_kind = work_kind.or_else(|| parent_task_id
-            .and_then(|parent|self.board_details.get(parent))
-            .and_then(|details|details.work_policy.work_kind.as_deref()));
+        let work_kind = work_kind.or_else(|| {
+            parent_task_id
+                .and_then(|parent| self.board_details.get(parent))
+                .and_then(|details| details.work_policy.work_kind.as_deref())
+        });
         let mut layers = Vec::new();
         if let Some(kind) = work_kind {
             if let Some(policy) = self.project_work_policy.get(kind) {
@@ -1478,7 +1567,9 @@ impl State {
                 if details.work_policy.work_kind.as_deref() == work_kind {
                     layers.push(details.work_policy.clone());
                 }
-                if let Some(policy) = work_kind.and_then(|kind|details.child_work_policies.get(kind)) {
+                if let Some(policy) =
+                    work_kind.and_then(|kind| details.child_work_policies.get(kind))
+                {
                     layers.push(policy.clone());
                 }
             }
@@ -1486,7 +1577,7 @@ impl State {
         layers.push(explicit.clone());
         let mut effective = crate::board::WorkPolicy::default();
         for layer in layers {
-            crate::server::overlay_work_policy(&mut effective,&layer);
+            crate::server::overlay_work_policy(&mut effective, &layer);
         }
         if effective.work_kind.is_none() {
             effective.work_kind = work_kind.map(str::to_owned);
@@ -1506,10 +1597,7 @@ impl State {
     /// One completion projection shared by read-only views and lifecycle write
     /// gates. Legacy tasks with no review-subject revision keep the previous
     /// evidence-based acceptance behavior.
-    pub fn delivery_completion_projection(
-        &self,
-        task_id: &str,
-    ) -> (bool, Vec<String>) {
+    pub fn delivery_completion_projection(&self, task_id: &str) -> (bool, Vec<String>) {
         let Some(task) = self.tasks.get(task_id) else {
             return (false, vec!["task".into()]);
         };
@@ -1517,7 +1605,7 @@ impl State {
         let Some(lifecycle) = self.task_lifecycle.get(task_id) else {
             return (false, vec!["review".into()]);
         };
-        if !crate::server::work_review_valid(self,task_id) {
+        if !crate::server::work_review_valid(self, task_id) {
             missing.push("review".into());
         }
         if lifecycle.delivered_ms.is_none() || lifecycle.delivery_evidence.is_none() {
@@ -1539,7 +1627,11 @@ impl State {
         if task.status != "closed" {
             missing.push("close".into());
         }
-        if self.cleanup_receipts.get(task_id).is_some_and(|receipt| receipt.manual_reason.is_some()) {
+        if self
+            .cleanup_receipts
+            .get(task_id)
+            .is_some_and(|receipt| receipt.manual_reason.is_some())
+        {
             missing.push("manual_termination".into());
         }
         (missing.is_empty(), missing)
@@ -1721,7 +1813,8 @@ impl State {
             })
             .collect();
         role_records.sort_by(|(left_scope, left), (right_scope, right)| {
-            (left_scope.as_str(), left.name.as_str()).cmp(&(right_scope.as_str(), right.name.as_str()))
+            (left_scope.as_str(), left.name.as_str())
+                .cmp(&(right_scope.as_str(), right.name.as_str()))
         });
         events.extend(role_records.into_iter().map(|(project_scope, record)| {
             Event::NameWorkRolesUpdated {
@@ -1733,36 +1826,36 @@ impl State {
             .workflow_templates
             .iter()
             .flat_map(|(project_scope, targets)| {
-                targets
-                    .iter()
-                    .map(move |(target, entry)| {
-                        (project_scope.clone(), target.clone(), entry.clone())
-                    })
+                targets.iter().map(move |(target, entry)| {
+                    (project_scope.clone(), target.clone(), entry.clone())
+                })
             })
             .collect();
-        template_records.sort_by(|(left_scope, left_target, _), (right_scope, right_target, _)| {
-            (left_scope.as_str(), left_target.as_str())
-                .cmp(&(right_scope.as_str(), right_target.as_str()))
-        });
+        template_records.sort_by(
+            |(left_scope, left_target, _), (right_scope, right_target, _)| {
+                (left_scope.as_str(), left_target.as_str())
+                    .cmp(&(right_scope.as_str(), right_target.as_str()))
+            },
+        );
         events.extend(
             template_records
                 .into_iter()
-                .map(|(project_scope, target, entry)| Event::WorkflowTemplateUpdated {
-                    project_scope,
-                    target,
-                    entry: Some(entry),
-                }),
+                .map(
+                    |(project_scope, target, entry)| Event::WorkflowTemplateUpdated {
+                        project_scope,
+                        target,
+                        entry: Some(entry),
+                    },
+                ),
         );
         let mut project_policies: Vec<_> = self.project_work_policy.iter().collect();
         project_policies.sort_by(|left, right| left.0.cmp(right.0));
-        events.extend(
-            project_policies
-                .into_iter()
-                .map(|(work_kind, policy)| Event::ProjectWorkPolicyUpdated {
-                    work_kind: work_kind.clone(),
-                    policy: policy.clone(),
-                }),
-        );
+        events.extend(project_policies.into_iter().map(|(work_kind, policy)| {
+            Event::ProjectWorkPolicyUpdated {
+                work_kind: work_kind.clone(),
+                policy: policy.clone(),
+            }
+        }));
         let mut recoveries: Vec<_> = self.name_recoveries.values().cloned().collect();
         recoveries.sort_by(|left, right| left.operation_id.cmp(&right.operation_id));
         events.extend(
@@ -1919,9 +2012,7 @@ impl State {
             events.push(Event::MigrationUpdated { migration });
         }
         if let Some(grant) = self.ceo_grant.clone() {
-            events.push(Event::CeoGrantSet {
-                grant: Some(grant),
-            });
+            events.push(Event::CeoGrantSet { grant: Some(grant) });
         }
         let mut bootstraps: Vec<_> = self.ceo_bootstraps.values().cloned().collect();
         bootstraps.sort_by(|a, b| a.operation_id.cmp(&b.operation_id));
@@ -2066,15 +2157,24 @@ impl State {
                 gate: gate.clone(),
             }
         }));
+        events.extend(
+            self.board_patrol_notice_ids
+                .iter()
+                .cloned()
+                .map(|message_id| Event::BoardPatrolNoticeBound { message_id }),
+        );
         // Carry the canonical CEO report state only when it is meaningful: an
-        // existing CEO grant, a pending revision, an unacknowledged batch, or a
-        // recorded actual-report time. This preserves cleared-grant outstanding
-        // progress and report history while avoiding an unused empty CEO state
-        // on every non-CEO project. The restore assigns the exact helper state.
+        // existing CEO grant, a pending revision, an unacknowledged batch, a
+        // recorded actual-report time, or a non-default notice gate. This
+        // preserves cleared-grant outstanding progress, report history and
+        // notice reservations while avoiding an unused empty CEO state on every
+        // non-CEO project. The restore assigns the exact helper state.
         let ceo_meaningful = self.ceo_grant.is_some()
             || !self.ceo_report_state.pending_revisions().is_empty()
             || self.ceo_report_state.batch_count() > 0
-            || self.ceo_report_state.last_actual_report_ms().is_some();
+            || self.ceo_report_state.last_actual_report_ms().is_some()
+            || self.ceo_report_state.notice_gate
+                != crate::ceo_report_state::CeoNoticeGate::default();
         if ceo_meaningful {
             events.push(Event::CeoReportStateRestored {
                 report_state: self.ceo_report_state.clone(),
@@ -2193,17 +2293,30 @@ mod ceo_reply_scope_tests {
 
     #[test]
     fn cross_project_name_handoff_does_not_rebind_foreign_sender() {
-        let mut state=State::default();
-        state.reply_obligations.insert("request".into(), crate::server::state::ReplyObligation {
-            message_id:"request".into(),project:"/target".into(),from_project:Some("/ceo".into()),from_ceo:true,
-            from_worker_id:"ceo-worker".into(),from_name:Some("SameName".into()),
-            recipient_worker_id:"old-master".into(),recipient_name:Some("SameName".into()),
-            policy:crate::proto::ReplyPolicy::Required,created_ms:1,reminded_idle_episode:true,
-        });
-        state.rebind_reply_obligations_for_name("/target","SameName","new-master");
-        let obligation=&state.reply_obligations["request"];
-        assert_eq!(obligation.from_worker_id,"ceo-worker","a recipient-project name cannot own the foreign sender");
-        assert_eq!(obligation.recipient_worker_id,"new-master");
+        let mut state = State::default();
+        state.reply_obligations.insert(
+            "request".into(),
+            crate::server::state::ReplyObligation {
+                message_id: "request".into(),
+                project: "/target".into(),
+                from_project: Some("/ceo".into()),
+                from_ceo: true,
+                from_worker_id: "ceo-worker".into(),
+                from_name: Some("SameName".into()),
+                recipient_worker_id: "old-master".into(),
+                recipient_name: Some("SameName".into()),
+                policy: crate::proto::ReplyPolicy::Required,
+                created_ms: 1,
+                reminded_idle_episode: true,
+            },
+        );
+        state.rebind_reply_obligations_for_name("/target", "SameName", "new-master");
+        let obligation = &state.reply_obligations["request"];
+        assert_eq!(
+            obligation.from_worker_id, "ceo-worker",
+            "a recipient-project name cannot own the foreign sender"
+        );
+        assert_eq!(obligation.recipient_worker_id, "new-master");
         assert!(!obligation.reminded_idle_episode);
     }
 }
@@ -2353,7 +2466,7 @@ mod board_patrol_state_tests {
 #[cfg(test)]
 mod ceo_report_state_wiring_tests {
     use super::*;
-    use crate::ceo_report_state::CeoProgressContent;
+    use crate::ceo_report_state::{CeoNoticeGate, CeoProgressContent};
     use std::collections::BTreeMap;
 
     fn replay_through_serde(state: &State) -> State {
@@ -2405,6 +2518,53 @@ mod ceo_report_state_wiring_tests {
         events
             .iter()
             .any(|event| matches!(event, Event::CeoReportStateRestored { .. }))
+    }
+
+    fn ceo_grant(workspace: &str) -> crate::ceo::CeoGrant {
+        crate::ceo::CeoGrant {
+            workspace: workspace.into(),
+            app_scope_id: "app".into(),
+            name: "CEO".into(),
+            granted_by: "user".into(),
+            approval: "approved".into(),
+            granted_ms: 1,
+        }
+    }
+
+    fn expected_notice_gate(next_due_ms: u64, urgent_generation_seen: u64) -> CeoNoticeGate {
+        CeoNoticeGate {
+            next_due_ms,
+            urgent_generation_seen,
+            pending_message_id: Some("notice-reserved".into()),
+            pending_worker_id: Some("ceo-worker".into()),
+        }
+    }
+
+    fn notice_gate(next_due_ms: u64, urgent_generation_seen: u64) -> Event {
+        Event::CeoReportNoticeGateUpdated {
+            gate: expected_notice_gate(next_due_ms, urgent_generation_seen),
+        }
+    }
+
+    fn assert_report_history_preserved(state: &State) {
+        assert_eq!(
+            state
+                .ceo_report_state
+                .pending_revision("proj-a")
+                .expect("progress survives grant change")
+                .revision,
+            3
+        );
+        assert_eq!(state.ceo_report_state.batch_count(), 1);
+        assert_eq!(
+            state.ceo_report_state.batches["batch-2"].coverage,
+            coverage("proj-a", 3)
+        );
+        assert_eq!(
+            state.ceo_report_state.last_actual_report_ms(),
+            Some(1_000),
+            "grant change must keep actual-report history"
+        );
     }
 
     #[test]
@@ -2523,5 +2683,82 @@ mod ceo_report_state_wiring_tests {
             })
             .expect("nonempty report state is retained without a CEO grant");
         assert!(restored.pending_revision("project-after-revoke").is_some());
+    }
+
+    #[test]
+    fn notice_gate_reservation_and_urgent_generation_survive_snapshot_replay() {
+        let mut state = State::default();
+        state.apply(&Event::CeoGrantSet {
+            grant: Some(ceo_grant("/workspace-a")),
+        });
+        state.apply(&Event::CeoProgressRecorded {
+            project: "proj-a".into(),
+            content: content("progress", "urgent"),
+            urgent: true,
+        });
+        state.apply(&notice_gate(900_000, 1));
+
+        let replayed = replay_through_serde(&state);
+
+        assert_eq!(
+            replayed.ceo_report_state.notice_gate,
+            expected_notice_gate(900_000, 1)
+        );
+        assert_eq!(replayed.ceo_report_state.urgent_generation, 1);
+        assert!(replayed
+            .ceo_report_state
+            .pending_revision("proj-a")
+            .is_some());
+    }
+
+    #[test]
+    fn nondefault_notice_gate_replays_without_grant_or_pending_progress() {
+        let mut state = State::default();
+        state.apply(&notice_gate(450_000, 7));
+
+        assert!(state.ceo_grant.is_none());
+        assert!(state.ceo_report_state.pending_revisions().is_empty());
+        assert_eq!(state.ceo_report_state.batch_count(), 0);
+        assert_eq!(state.ceo_report_state.last_actual_report_ms(), None);
+        assert!(contains_restored(&state.snapshot_events()));
+
+        let replayed = replay_through_serde(&state);
+        assert_eq!(
+            replayed.ceo_report_state.notice_gate,
+            expected_notice_gate(450_000, 7)
+        );
+    }
+
+    #[test]
+    fn grant_replace_and_clear_reset_only_notice_gate() {
+        let mut state = State::default();
+        state.apply(&Event::CeoGrantSet {
+            grant: Some(ceo_grant("/workspace-a")),
+        });
+        state.apply(&progress("proj-a", "one"));
+        state.apply(&progress("proj-a", "two"));
+        state.apply(&prepared("batch-1", "proj-a", 2));
+        state.apply(&acknowledged("batch-1", 1_000));
+        state.apply(&progress("proj-a", "three"));
+        state.apply(&prepared("batch-2", "proj-a", 3));
+        state.apply(&notice_gate(900_000, 0));
+
+        state.apply(&Event::CeoGrantSet {
+            grant: Some(ceo_grant("/workspace-b")),
+        });
+        assert_eq!(state.ceo_report_state.notice_gate, CeoNoticeGate::default());
+        assert_report_history_preserved(&state);
+
+        state.apply(&notice_gate(1_800_000, 0));
+        state.apply(&Event::CeoGrantSet { grant: None });
+        assert_eq!(state.ceo_report_state.notice_gate, CeoNoticeGate::default());
+        assert_report_history_preserved(&state);
+
+        let replayed = replay_through_serde(&state);
+        assert_eq!(
+            replayed.ceo_report_state.notice_gate,
+            CeoNoticeGate::default()
+        );
+        assert_report_history_preserved(&replayed);
     }
 }

@@ -1517,6 +1517,11 @@ pub enum Event {
         worker_id: String,
         gate: crate::board_patrol_policy::PeerBoardPatrolGate,
     },
+    /// Typed binding between a daemon-generated cue and its durable message.
+    /// Delivery revalidation uses this marker instead of parsing text.
+    BoardPatrolNoticeBound {
+        message_id: String,
+    },
     /// Compacted journal baseline. The payload is the existing snapshot event
     /// set, and `sequence`/`revision` are the exact pre-compaction counters.
     /// This record is generated only by the journal rewrite owner.
@@ -1626,6 +1631,12 @@ pub enum Event {
     CeoReportBatchAcknowledged {
         batch_id: String,
         reported_ms: u64,
+    },
+    /// Durable automatic notice gate update. The gate owns only scheduling and
+    /// reservation facts; progress, prepared batches and report time stay in
+    /// their existing canonical fields.
+    CeoReportNoticeGateUpdated {
+        gate: crate::ceo_report_state::CeoNoticeGate,
     },
     /// Snapshot replay baseline carrying the exact canonical helper state.
     CeoReportStateRestored {

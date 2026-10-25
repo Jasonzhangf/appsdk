@@ -757,7 +757,10 @@ fn longhorizon_bug_permission_failure_remains_explicit() {
     let fake_collab = fake_bin.join("collab");
     fs::write(
         &fake_collab,
-        "#!/bin/sh\nprintf '%s\\n' '{\"workers\":[],\"tasks\":[],\"subagents\":[]}'\n",
+        format!(
+            "#!/bin/sh\ncase \"$1 $2\" in\n  \"context \") printf '%s\\n' '{{\"name\":\"master-peer\",\"identity\":{{\"worker_id\":\"master-peer\",\"role\":\"master\",\"kind\":\"peer\"}},\"binding\":{{\"project_scope\":\"{}\"}}}}' ;;\n  *) printf '%s\\n' '{{\"workers\":[],\"tasks\":[],\"subagents\":[]}}' ;;\nesac\n",
+            root.canonicalize().unwrap().display()
+        ),
     )
     .unwrap();
     fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
@@ -809,7 +812,10 @@ fn longhorizon_bug_read_does_not_fall_back_to_upstream_after_local_failure() {
     let fake_collab = fake_bin.join("collab");
     fs::write(
         &fake_collab,
-        "#!/bin/sh\nprintf '%s\\n' '{\"workers\":[],\"tasks\":[],\"subagents\":[]}'\n",
+        format!(
+            "#!/bin/sh\ncase \"$1 $2\" in\n  \"context \") printf '%s\\n' '{{\"name\":\"master-peer\",\"identity\":{{\"worker_id\":\"master-peer\",\"role\":\"master\",\"kind\":\"peer\"}},\"binding\":{{\"project_scope\":\"{}\"}}}}' ;;\n  *) printf '%s\\n' '{{\"workers\":[],\"tasks\":[],\"subagents\":[]}}' ;;\nesac\n",
+            root.canonicalize().unwrap().display()
+        ),
     )
     .unwrap();
     fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();

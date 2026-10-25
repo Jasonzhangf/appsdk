@@ -296,6 +296,167 @@ esac
 }
 
 #[test]
+fn longhorizon_peer_never_runs_project_bug_backend() {
+    let root = temp_root("longhorizon-peer-bug-backend");
+    fs::create_dir_all(&root).unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let project_scope = root.canonicalize().unwrap();
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        format!(
+            r#"#!/bin/sh
+case "$1 $2" in
+  "context ")
+    if [ "$ROLE_CASE" = "master" ]; then
+      printf '%s\n' '{{"name":"master-peer","identity":{{"worker_id":"master-peer","role":"master","kind":"peer"}},"binding":{{"project_scope":"{}"}}}}'
+    else
+      printf '%s\n' '{{"name":"peer-a","identity":{{"worker_id":"peer-a","role":"peer","kind":"peer"}},"binding":{{"project_scope":"{}"}}}}'
+    fi
+    ;;
+  "status --all")
+    printf '%s\n' '{{"workers":[],"tasks":[],"subagents":[]}}'
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+"#,
+            project_scope.display(),
+            project_scope.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let invocations = root.join("bug-invocations");
+    let fake_git_bug = fake_bin.join("git-bug");
+    fs::write(
+        &fake_git_bug,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nprintf '%s\\n' 'project bug backend unavailable' >&2\nexit 126\n",
+            invocations.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_git_bug, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:/usr/bin:/bin", fake_bin.display());
+    let backend_calls = || {
+        fs::read_to_string(&invocations)
+            .map(|log| log.lines().count())
+            .unwrap_or(0)
+    };
+    let show = |role: Option<&str>, json: bool| {
+        let mut command = Command::new(binary());
+        command.args(["longhorizon", "show"]);
+        if json {
+            command.arg("--json");
+        }
+        command
+            .current_dir(&root)
+            .env("PATH", &path)
+            .env_remove("GIT_BUG_BIN")
+            .env_remove("TMUX_PANE");
+        match role {
+            Some(role) => {
+                command.env("ROLE_CASE", role);
+            }
+            None => {
+                command.env_remove("ROLE_CASE");
+            }
+        }
+        command.output().unwrap()
+    };
+
+    let peer_json = show(None, true);
+    assert!(
+        peer_json.status.success(),
+        "{}",
+        String::from_utf8_lossy(&peer_json.stderr)
+    );
+    let peer_payload: Value = serde_json::from_slice(&peer_json.stdout).unwrap();
+    assert_eq!(peer_payload["role"], "peer");
+    assert!(peer_payload["open_bugs"].as_array().unwrap().is_empty());
+    assert!(
+        peer_payload["open_bugs_error"].is_null(),
+        "peer json must not receive the project bug read error: {}",
+        peer_payload["open_bugs_error"]
+    );
+    assert_eq!(
+        backend_calls(),
+        0,
+        "peer json must not run the project bug backend"
+    );
+
+    let peer_text = show(None, false);
+    assert!(
+        peer_text.status.success(),
+        "{}",
+        String::from_utf8_lossy(&peer_text.stderr)
+    );
+    let peer_text = String::from_utf8_lossy(&peer_text.stdout).to_string();
+    assert!(!peer_text.contains("开放缺陷读取失败"), "{}", peer_text);
+    assert!(
+        !peer_text.contains("project bug backend unavailable"),
+        "{}",
+        peer_text
+    );
+    assert_eq!(
+        backend_calls(),
+        0,
+        "peer text must not run the project bug backend"
+    );
+
+    let master_json = show(Some("master"), true);
+    assert!(
+        master_json.status.success(),
+        "{}",
+        String::from_utf8_lossy(&master_json.stderr)
+    );
+    let master_payload: Value = serde_json::from_slice(&master_json.stdout).unwrap();
+    assert_eq!(master_payload["role"], "master");
+    assert!(master_payload["open_bugs"].as_array().unwrap().is_empty());
+    let master_error = master_payload["open_bugs_error"].as_str().unwrap_or("");
+    assert!(
+        master_error.contains("GIT_BUG_OPEN_READ_FAILED"),
+        "{}",
+        master_error
+    );
+    assert!(
+        master_error.contains("project bug backend unavailable"),
+        "{}",
+        master_error
+    );
+    assert_eq!(
+        backend_calls(),
+        1,
+        "master json must query the project bug backend"
+    );
+
+    let master_text = show(Some("master"), false);
+    assert!(
+        master_text.status.success(),
+        "{}",
+        String::from_utf8_lossy(&master_text.stderr)
+    );
+    let master_text = String::from_utf8_lossy(&master_text.stdout).to_string();
+    assert!(master_text.contains("开放缺陷读取失败"), "{}", master_text);
+    assert!(
+        master_text.contains("project bug backend unavailable"),
+        "{}",
+        master_text
+    );
+    assert_eq!(
+        backend_calls(),
+        2,
+        "master text must query the project bug backend"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn longhorizon_show_never_upgrades_worker_or_unknown_to_master() {
     let root = temp_root("longhorizon-role-projection");
     fs::create_dir_all(&root).unwrap();
@@ -553,22 +714,26 @@ fn longhorizon_show_never_masks_bug_read_failures() {
     fs::create_dir_all(&home).unwrap();
     let fake_bin = root.join("fake-bin");
     fs::create_dir_all(&fake_bin).unwrap();
+    let project_scope = root.canonicalize().unwrap();
     let fake_collab = fake_bin.join("collab");
     fs::write(
         &fake_collab,
-        r#"#!/bin/sh
+        format!(
+            r#"#!/bin/sh
 case "$1 $2" in
   "status --all")
-    printf '%s\n' '{"workers":[],"tasks":[],"subagents":[]}'
+    printf '%s\n' '{{"workers":[],"tasks":[],"subagents":[]}}'
     ;;
   "context ")
-    exit 1
+    printf '%s\n' '{{"name":"master-peer","identity":{{"worker_id":"master-peer","role":"master","kind":"peer"}},"binding":{{"project_scope":"{}"}}}}'
     ;;
   *)
     exit 64
     ;;
 esac
 "#,
+            project_scope.display()
+        ),
     )
     .unwrap();
     fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();

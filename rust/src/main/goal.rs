@@ -49,9 +49,18 @@ pub(super) fn longhorizon_show(root: &Path, format_json: bool) {
         Ok(status) => (Some(status), None),
         Err(error) => (None, Some(error)),
     };
-    let (bugs, open_bugs_error) = match open_bugs_json(root) {
-        Ok(bugs) => (bugs, None),
-        Err(err) => (Vec::new(), Some(err)),
+    // Open-bug records belong to the project-wide master responsibility view.
+    // An ordinary peer cannot establish a real dependency from them, so it
+    // neither runs the bug backend nor receives its read failure. The master
+    // view keeps the real error instead of hiding it.
+    let project_view = role == ExecutionRole::Master;
+    let (open_bugs, open_bugs_error) = if project_view {
+        match open_bugs_json(root) {
+            Ok(bugs) => (bugs, None),
+            Err(error) => (Vec::new(), Some(error)),
+        }
+    } else {
+        (Vec::new(), None)
     };
     let role_label = role.label();
     let charter = role.charter();
@@ -96,8 +105,7 @@ pub(super) fn longhorizon_show(root: &Path, format_json: bool) {
                     .is_some_and(|owner| Some(owner) == caller.as_deref()))
     };
     // A peer sees only its own delivery obligations and its own worker health.
-    // Project-wide merge, worker and bug lists stay with the master view.
-    let project_view = role == ExecutionRole::Master;
+    // Project-wide merge and worker lists stay with the master view.
     let merge_in_scope = |merge: &Value| {
         project_view
             || merge["owner"]
@@ -145,10 +153,6 @@ pub(super) fn longhorizon_show(root: &Path, format_json: bool) {
         .iter()
         .filter(|w| needs_intervention(w) && worker_in_scope(w))
         .collect();
-    // Bug records carry no owner, so an ordinary peer cannot establish a real
-    // dependency from this list; keep read failures explicit for every role.
-    let open_bugs: Vec<&Value> = bugs.iter().filter(|_| project_view).collect();
-
     if format_json {
         let payload = serde_json::json!({
             "role": role.role(),

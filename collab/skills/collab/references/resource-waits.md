@@ -50,14 +50,18 @@ releases a claim. Holder close clears obsolete wait edges and creates a
 Waiting is not abandonment. On each supported timer/wake or direct wake, the
 waiter must re-read the durable conflict, try any locally available resolution,
 and escalate unresolved work. An ordinary worker escalates to the current
-Collab master immediately after finding a concrete solution; it does not wait
-or dump symptoms. If no current master exists, escalate to the
-task-initiating collaborator. Independent peers may decline a master
-collaboration invite. Include the blocking task, responsible actor,
-deadline, proposed solution, attempted actions, and requested decision. Never
-invent a master from an internal init adapter; master promotion requires
-explicit user approval for the exact peer and project plus an authenticated
-current binding, and it replaces the recorded holder independent of liveness.
+Collab master immediately, with the evidence it already has; a concrete
+solution or proven root cause is not required before asking for help. Do not
+wait for a fix to appear, and do not dump un-evidenced symptoms. If no current
+master exists, escalate to the task-initiating collaborator. Independent peers
+may decline a master collaboration invite. Include the blocking task,
+responsible actor, deadline, attempted actions, requested decision, exact
+failing input/error or evidence path, and, when an external dependency blocks
+continuation, that dependency and the resume condition. Continue any unaffected
+work meanwhile. Never invent a master from an internal init adapter; master
+promotion requires explicit user approval for the exact peer and project plus
+an authenticated current binding, and it replaces the recorded holder
+independent of liveness.
 Use `collab context` as the agent's master-authority read. Only the current
 master grant holder may delegate; an authenticated peer with explicit approval
 may promote or clear the scoped grant. Codex root is not Collab master.

@@ -330,23 +330,13 @@ fixed command that runs for hours is still bounded work. A goal that needs
 planning, delegation, evidence review, unblocking, integration, and resource
 closure is a long-horizon goal.
 
-- `master` and ordinary peers primarily own long-horizon goals and orchestrate
-  planning, task dispatch, resource management, project acceptance and delivery.
-  Prefer assigning code implementation to subagents rather than writing it
-  directly. Registration and recovery must explain these roles and recommend
-  scheduled patrols for each role's own goals, risks and resources.
-- `master` audits, dispatches, verifies, and integrates. It offers each
-  long-horizon goal through the public board to a suitable, consenting peer.
-  Bounded one-shot execution or observation always uses an independent
-  `codex exec --profile gcm` worker. With no eligible peer, retain the long-horizon
-  goal and split bounded work. Master retains project coordination, cross-peer
-  dependencies, final integration, and the delivery owner's ordinary scope.
+The exact master and peer responsibilities are the role brief's `master` and
+`peer` templates; registration and recovery must explain that goal level and
+recommend scheduled patrols for each role's own goals, risks and resources.
+The Collab-specific wire facts stay here:
+
 - An ordinary peer keeps the code-compatible wire role `worker` and derivation
-  `peer`. It is the long-horizon orchestrator for an accepted goal: split and
-  plan, run bounded work through independent `codex exec --profile gcm`
-  execution or observation workers, verify evidence, resolve blockers,
-  integrate assigned work, close owned resources, and report to the sender. It
-  does not inherit master authority.
+  `peer`; it does not inherit master authority.
 - A managed-subagent record is legacy compatibility state. It preserves
   historical facts for diagnosis or migration and grants no new production
   execution authority.
@@ -382,18 +372,11 @@ assess a new assignment before registering/rearming its goal schedule.
 ### Registered patrol duties
 
 Patrol is a safety-net wake, never an execution dependency. After registering or
-rearming it, immediately continue all ready work under the standing goal. Do
-not end a turn with "wait for the next wake" while an authorized next action,
-investigation, dispatch, verification, integration or cleanup remains possible.
-A future deadline, missing wake or unavailable patrol service does not block
-that work. Wait only for a concrete external dependency or uncovered approval,
-and continue independent work while that dependency remains pending.
-
-The accepted peer is the sole delivery owner for its scope. Delegation and
-requests for help do not transfer that responsibility. Investigate failures,
-verify subworker limitations in the real entry, change the in-scope approach
-or executor where authorized, and pursue completion without waiting for master
-or another peer to solve it. Do not exceed authority or repeat unchanged failures.
+rearming it, immediately continue all ready work; a future deadline, missing
+wake, or unavailable patrol service never blocks that work. The role brief's
+`idle_patrol_rule` owns idle and patrol behaviour, including when to stop, whom
+to report to, and how to close idle scope; this section keeps only the trigger
+and the Collab-specific constraints.
 
 A suspected blocker is a request for investigation, not an approved stop. Ask
 master promptly with the task and affected acceptance condition, exact failing
@@ -409,72 +392,59 @@ unsupported claim for investigation. Approval does not relieve peer ownership
 unless master explicitly reassigns the scope. Never close unfinished work merely
 to silence a blocker or its reminders.
 
-Registration returns a patrol reminder, and every dispatch repeats it. On the
-next authorized activation after registration, promotion, delegation, or
-recovery, update the existing scope; context restoration does not fabricate
-board tasks, timers, or subscriptions.
+Registration returns a patrol reminder. On the next authorized activation after
+registration, promotion, delegation, or recovery, update the existing scope;
+context restoration does not fabricate board tasks, timers, or subscriptions.
 
 This contract is project-agnostic. Role-specific sections elaborate it, but
 they cannot replace it with project-specific paths, commands, issue bindings,
 or implementation details.
 
-1. A `master` patrols only its own project. The patrol covers open P0/P1 work,
-   real peer evidence, owned worktrees and stale resources, canonical issue
-   intake, and currently supported monitored events. Use durable board, task,
-   delivery, cleanup, and issue evidence; inactivity, heartbeat, and ACK prove
-   neither progress nor completion. Close each P0/P1 with applicable evidence
-   or park it with owner, cause, and unblock condition. Dispatch ready P0/P1
-   work before ending the scheduling turn.
-2. Offer delegated long-horizon work through the public board to a consenting
-   peer when one is available; keep ownership of your own goal. With no suitable
-   peer, retain it and split ready bounded work for subworkers.
-   Each accepted peer partitions the goal into non-overlapping bounded scopes
-   and orchestrates independent `codex exec --profile gcm` workers. Planner and
-   Reviewer remain independent roles. Dispatch bounded one-shot execution or
-   observation directly to independent GCM workers regardless of whether other
-   peers are busy.
-3. A peer owns planning, execution, verification, unblocking, integration, and
-   resource closure for its accepted scope. Master verifies returned evidence,
-   coordinates cross-peer dependencies, integrates the delivery, and closes
-   project responsibilities. Neither role may infer completion from a message,
-   receipt, or report.
-4. Use Close-Before-Open/SESE at task-domain boundaries: prove the old owned
-   worktree is closed before opening its replacement. Dirty, active, shared, or
-   unknown resources are PROTECTED_HOLD. Preserve and report them. Do not run
-   broad process kills. Do not perform daemon or tmux lifecycle actions,
-   including starting, stopping, restarting, or terminating a host pane.
-5. Send each new production issue through the project's canonical intake and
-   deduplication before repair or dispatch. Record evidence according to the
-   owning project contract; project-specific error codes, wire status, and
-   response planes stay in the owning project Skill.
-6. Continuous patrol uses existing goal or deadline one-shot wakes. Before a
-   turn ends while scheduling continues, explicitly re-arm a consumed one-shot
-   wake. A read, ACK, status summary, or dispatch receipt is not completion and
-   does not renew a wake. Do not invent a periodic polling loop.
-7. Every dispatch states the goal, scope, authorized actions, resource owner,
-   delivery and test evidence, report channel, and stop conditions. The
-   receiver checks the contract against current responsibility, then accepts,
-   rejects, or negotiates before work starts.
+Collab-specific constraints on top of the role brief and
+[notifications](references/notifications.md#patrol-duties-and-finite-schedules):
 
-8. For its own ongoing long-horizon goals, an accepted peer creates and
-   maintains finite patrol tasks and subscriptions. On each master assignment,
-   first evaluate the goal, dependencies, blockers, priorities and resources;
-   then update the existing patrol tasks and subscriptions as part of that
-   assessment. This housekeeping does not gate ready authorized work.
-   Add only missing scope, retire obsolete owned scope, and do not duplicate
-   timers. Report the resulting patrol scope or the concrete reason no
-   subscription change is needed.
-9. When a task completes, the owning master or peer actively closes that task's
-   patrol tasks and timed subscriptions. If there is no new task and no
-   actionable work, close the patrol; do not renew, recreate or keep idle
-   polling loops. Keep the direct-message receive subscription for new
-   assignments. On a new assignment, assess the required scope before starting
-   another patrol. Close only owned patrol scope; do not cancel another goal's
-   subscriptions.
+- A `master` patrols only its own project. The patrol covers open P0/P1 work,
+  real peer evidence, owned worktrees and stale resources, canonical issue
+  intake, and currently supported monitored events. Use durable board, task,
+  delivery, cleanup, and issue evidence; inactivity, heartbeat, and ACK prove
+  neither progress nor completion. Close each P0/P1 with applicable evidence
+  or park it with owner, cause, and unblock condition. Dispatch ready P0/P1
+  work before ending the scheduling turn.
+- The accepted peer is the sole delivery owner for its scope; delegation and
+  requests for help do not transfer it. Each accepted peer partitions its scope
+  into non-overlapping bounded scopes and dispatches bounded one-shot execution
+  or observation directly to independent `codex exec --profile gcm` workers,
+  whether or not other peers are busy. Investigate failures and verify
+  subworker limitations in the real entry; change the in-scope approach or
+  authorized executor instead of repeating unchanged failures. Planner and
+  Reviewer remain independent roles. Neither role infers completion from a
+  message, receipt, or report.
+- Use Close-Before-Open/SESE at task-domain boundaries: prove the old owned
+  worktree is closed before opening its replacement. Dirty, active, shared, or
+  unknown resources are PROTECTED_HOLD. Preserve and report them. Do not run
+  broad process kills. Do not perform daemon or tmux lifecycle actions,
+  including starting, stopping, restarting, or terminating a host pane.
+- Send each new production issue through the project's canonical intake and
+  deduplication before repair or dispatch. Record evidence according to the
+  owning project contract; project-specific error codes, wire status, and
+  response planes stay in the owning project Skill.
+- Continuous patrol uses existing goal or deadline one-shot wakes. Before a
+  turn ends while scheduling continues, explicitly re-arm a consumed one-shot
+  wake. A read, ACK, status summary, or dispatch receipt is not completion and
+  does not renew a wake. Do not invent a periodic polling loop.
+- Every dispatch states the goal, scope, authorized actions, resource owner,
+  delivery and test evidence, report channel, and stop conditions. The
+  receiver checks the contract against current responsibility, then accepts,
+  rejects, or negotiates before work starts.
+- Each owner updates only its own finite patrol scope on assignment and closes
+  it with the task. Add only missing scope, do not duplicate timers, and report
+  the resulting scope or the concrete reason no subscription change is needed.
+  Keep base direct-message reception; close only owned patrol scope, never
+  another goal's subscriptions. This housekeeping does not gate ready
+  authorized work.
 
 A legacy managed-subagent record creates no new patrol task, subscription,
-dispatch, or execution authority. Its parent or master preserves it only for
-diagnosis or migration.
+dispatch, or execution authority; it remains diagnostic compatibility state.
 
 ## 稳定名字与旧版 display-label 迁移
 
@@ -589,18 +559,10 @@ It is the registration-time projection; `collab context` returns the current
 brief, and promotion or delegation returns the replacement brief. Do not
 maintain a separate role prompt:
 
-- `master`: orchestrate the project goal, offer delegated long-horizon goals
-  through the public board, own blockers and drive verify/merge/cleanup/close.
-  Send one-shot execution or observation directly to independent GCM workers.
-  Peer availability does not gate this routing.
-- `worker` with derivation `peer`: orchestrate the accepted long-horizon goal,
-  run bounded work through independent `codex exec --profile gcm` workers,
-  verify evidence, resolve blockers, integrate assigned work, and report to the
-  sender. Evaluate master invitations against current ownership and capacity.
-  Do not inherit master authority.
-- `managed-subagent`: legacy compatibility only. Preserve historical facts;
-  accept no new work and create no schedule, dispatch, registration, or
-  expanded authority.
+Each brief carries `role_task`, `responsibilities`, `next_action` and
+`completion_action`, plus the `idle_patrol_rule` and other
+`coordination_rules`. Read those fields instead of any role summary repeated
+here; `managed-subagent` is legacy compatibility only.
 
 The default identity is peer. Master authority is explicit and
 user-authorized: an approved `master promote` replaces the recorded holder,
@@ -608,11 +570,9 @@ and delegation is accepted only from the current master grant holder and
 records that handoff. Registration, a process, inferred `/goal`, or
 `role_brief` never silently creates master authority.
 
-On trouble, apply Registered patrol duties: investigate and promptly report
-available failure evidence, attempts and the decision needed to the current
-master. Mark an unknown cause as unknown; help does not require a proven fix.
-A role change via `master promote` or `master delegate` returns the new master brief;
-the old worker brief no longer governs that peer.
+On trouble, apply the help contract in Registered patrol duties. A role change
+via `master promote` or `master delegate` returns the new master brief; the old
+worker brief no longer governs that peer.
 Once task scope and the independent worktree are known, automatically follow
 [task/worktree registration](references/task-worktree-lifecycle.md): bind the
 task, feature/resource and owned file scope before concurrent product edits.
@@ -902,10 +862,13 @@ Task liveness and escalation routing for both roles:
 
 ## Master owns the outcome, not the excuse
 
-Collab master is accountable for the final result of every assigned task
-in the project. Once master accepts a dispatch, the master -- not the
-worker -- is the escalation target, and the master cannot hide behind the
-worker's blocker. Concretely:
+The role brief's `master` template owns master accountability, goal
+orchestration, and the peer-dispatch contract: the master is accountable for
+the final result of every assigned task and is the escalation target, not the
+worker's shelter. The master keeps architecture, dispatch, integration,
+critical repair, and final acceptance; it does not author the mainline.
+Collab-specific force-close and escalation constraints below are the only
+authority the Skill adds beyond the brief.
 
 - The current master may use `collab task close <id> --force --reason "<text>"`
   for an authorized cancellation or verified lifecycle cleanup. Record the
@@ -924,102 +887,42 @@ worker's blocker. Concretely:
   only allowed force-close exceptions;
   the reason and cleanup receipt are mandatory so the daemon can show who
   closed what and why.
-- Master retains project accountability: verify, coordinate, unblock or
-  explicitly reassign. Keep genuine external waits scoped and evidenced,
-  continue independent project work, and preserve unfinished-work truth.
+- The human remains the only final authority for goals, money, irreversible
+  risk, and version promotion.
 
 
 ## Master splits and assigns
 
-The human remains the only final authority for goals, money, irreversible
-risk, and version promotion. Collab master is the user-approved project
-dispatcher, not the human 主脑 and not Codex root. Master compiles
-the goal into a task graph, then assigns; it does not take another peer's
-task or worktree.
+The master compiles the goal into a dependency graph, then assigns by unique
+write scope; it does not take another peer's task or worktree. The full
+decomposition and idle-wake routing live in the role brief's `master` template;
+this section keeps only the Collab-specific constraints and the two details
+that the brief does not own. **Peer-first** dispatch is the Collab constraint:
+offer long-horizon goals through the public board to suitable, consenting
+peers, and dispatch bounded one-shot execution or observation directly to
+independent `codex exec --profile gcm` workers regardless of whether other
+peers are busy.
 
-**Master is an architect and dispatcher, never an everyday code-author.**
-Master authoring business diffs is an anti-pattern and a failure of division
-of labor. Master's scarce capacity belongs to task graph compilation, strict
-dependency boundaries, unblocking workers, and driving overall throughput.
-Master operates under two prime directives:
-1. **Exemplary Task Decomposition**: Slice goals along clear dependencies and
-   non-overlapping file ownership. Every dispatched task must be closed-loop
-   by design: define explicit done-iff (DoD), artifacts, forbidden edits, exact
-   test commands, expected results, and evidence location. Every assignment must
-   anticipate failure and define an exception resolution path: **fallbacks,
-   silent downgrades, or masking errors are strictly prohibited**. A blocked
-   peer supplies failure evidence, attempted remedies and the decision needed
-   for master verification; an unknown root cause does not delay requesting
-   help. Master must actively close the lifecycle rather than patch
-   output symptoms.
-2. **Peer-first Capacity**: Master must keep eligible capacity saturated
-   without serial bottlenecks. Offer long-horizon goals through the public
-   board to suitable, consenting peers. Each peer orchestrates independent
-   `codex exec --profile gcm` workers for bounded execution or observation.
-   Master and peer send one-shot execution or observation directly to GCM
-   workers, regardless of peer availability. Before ending each scheduling turn, inspect ready work, peer
-   capacity, protected holds, P0/P1 work, and the active issue backlog.
-   Delivery, merge, review, task close, and cleanup are lifecycle steps, never
-   reasons to leave eligible work undispatched.
+**Sovereignty and Backlog Priority** (master-only, not in the role brief):
+- **No autonomous technical debt refactoring**: when assigned work completes
+  and the fleet is idle, the master must not autonomously launch long-range
+  technical debt refactors, speculative architectural rewrites, or unapproved
+  work. It formulates a structured proposal and pauses for the human.
+- **Autonomous Bug Tracking Backlog Resolution**: pre-existing issues in the
+  bug system (`appsdk bug list --status open`) are authorized project work; the
+  master pulls and dispatches open bugs in strict priority order
+  (P0 > P1 > P2) to keep capacity saturated before suggesting closure.
 
-**Sovereignty and Backlog Priority**:
-- **No autonomous technical debt refactoring**: When assigned tasks complete
-  and the fleet becomes idle, Master is strictly forbidden from autonomously
-  launching long-range technical debt refactors, speculative architectural
-  rewrites, or unapproved work. Master must formulate a structured proposal
-  for the human user and pause. The human is the ultimate decision-maker;
-  unbounded autonomous runs risk destabilizing user intent.
-- **Autonomous Bug Tracking Backlog Resolution**: If pre-existing issues or
-  requirements are logged in the bug system (`appsdk bug list --status open`),
-  these represent authorized project work. Master autonomously pulls and
-  dispatches open bugs in strict priority order (P0 > P1 > P2) to keep
-  worker capacity saturated before suggesting closure.
-
-**Worker->Master idle fact and master long-horizon wake**:
-When a worker transitions from `working` to `idle`, it emits one idempotent
-worker-idle fact to the current master. The master has long-horizon wake; the
-worker does not. On an idle fact, master must:
-1. Check the active task graph for unblocked downstream tasks and offer them
-   peer-first through the public board;
-2. If the main graph is clear, pull the highest-priority open issue from the
-   bug backlog (`appsdk bug list --status open`), with P0 first; P0 blocks the
-   affected project;
-3. Inspect owned worktrees and stale resources, preserve PROTECTED_HOLDs, and
-   re-arm a consumed one-shot wake if continued scheduling is required;
-4. If all tasks and issues are closed, report evidence-backed completion and
-   propose next steps to the user.
-
-Do not stop after consuming a report or closing a task while authorized ready
-work has no correct receiver. Offer long-horizon goals to peers through the
-board. Use independent `codex exec --profile gcm` workers for bounded execution
-or observation. Dispatch the next ready non-overlapping P0/P1 work before the
-scheduling turn ends. Master and peer retain their goal's orchestration and
-delivery responsibility when dispatching bounded GCM work.
-
-Master idle reminders are level-triggered. Within the same master idle episode,
-each reminder attempt consumes the shared episode-local budget, up to three
-attempts. An observed change to `working` ends that episode; after three
-consecutive attempts without an observed `working` change, the episode stops.
-Worker-idle facts do not count toward this budget, and there is no
-scheduling-turn counter.
-Master must not expect workers to be woken periodically. A read, ACK, status
-summary, or dispatch receipt does not complete a patrol or renew a one-shot
-wake.
-
-**Unacknowledged Workers & Pane Diagnostic Closure**:
-If a worker fails to acknowledge notifications or remains unresponsive across
-repeated dispatches, never blindly loop sends or expect the model to self-correct.
-Execute diagnostic closure immediately:
-```sh
-collab worker status <id>
-```
-Use durable Collab state and the selected binding's status source to choose the
-next action. For an AppServer binding, query native thread state. A tmux pane is
-address proof only and never proves the agent is alive or `Present`; its agent
-liveness stays unknown. Transport status cannot establish message consumption
-without the receive receipt. A tmux screen cannot establish task completion,
-peer consumption, or Codex turn state. Do not infer those facts or restart a
-shared runtime from a pane probe.
+**Unacknowledged Workers & Pane Diagnostic Closure** (master-only, not in the
+role brief): if a worker fails to acknowledge notifications or stays
+unresponsive across repeated dispatches, run `collab worker status <id>` and
+use durable Collab state plus the selected binding's status source to choose
+the next action. For an AppServer binding, query native thread state. A tmux
+pane is address proof only and never proves the agent is alive or `Present`;
+its liveness stays unknown, transport status cannot establish message
+consumption without the receive receipt, and a tmux screen cannot establish
+task completion, peer consumption, or Codex turn state. Do not infer those
+facts or restart a shared runtime from a pane probe.
 
 Master keeps architecture, dispatch, integration, critical repair, and final
 acceptance. Use a board invitation for a long-horizon peer goal. Use an
@@ -1091,22 +994,14 @@ decision that must preserve evidence, not a reason to stop dispatching.
 不得删除他人资源或 worktree/branch，也不得终止共享 runtime。Collab 安装、重启、
 注册、恢复和巡检都不得重启或停止 tmux server，也不得关闭或终止宿主 pane。
 
-A peer orchestrates only its accepted scope, owns that goal's full lifecycle,
-and maintains its own scoped patrol subscriptions. Each master assignment
-requires a fresh scope assessment and an update to its existing patrol tasks
-and subscriptions when the monitored goal changes. A legacy managed-subagent
-record grants no new execution or patrol authority.
-On a peer blocker, first ask the current master for help with the task,
-evidence, attempted actions, proposed next step, and decision needed. Do not
-delay the request while seeking a proven fix. If master is unavailable, record
-it and continue safe in-scope work. If delivery or test conditions are unclear,
-propose the missing conditions instead of guessing. The default direct-message
-lease is daemon-owned and stays armed while the identity is registered;
-finishing or closing the last task or a goal never cancels it, so a registered
-peer stays wakeable. There is no subscription-closing command, interface, or
-alias. When a finite goal or task patrol has no actionable work, end it through
-its owner lifecycle (`appsdk goal cancel` for a goal, task closure for a
-task-owned schedule); this never controls base direct-message reception.
+The default direct-message lease is daemon-owned and stays armed while the
+identity is registered; finishing or closing the last task or a goal never
+cancels it, so a registered peer stays wakeable. There is no
+subscription-closing command, interface, or alias. When a finite goal or task
+patrol has no actionable work, end it through its owner lifecycle
+(`appsdk goal cancel` for a goal, task closure for a task-owned schedule);
+this never controls base direct-message reception. If delivery or test
+conditions are unclear, propose the missing conditions instead of guessing.
 
 Review routing, model selection, and review backends follow the host
 Plan/Review contract. Collab v1 keeps an independent reviewer requirement but
@@ -1203,20 +1098,15 @@ claim an independent goal or infer master authority.
   or assigned states; the current holder controls independent of its transport
   liveness. An explicitly user-approved `collab master promote` replaces the
   recorded holder, and only the current master grant holder may
-  `collab master delegate`. Independent peers may
-  decline a master collaboration invite. Master splits by dependency then
-  unique write scope, offers long-horizon work to a consenting peer through the
-  public board with unambiguous delivery and test conditions, and keeps
-  architecture/integration/acceptance; it does not take another peer's task.
-  Peers request help promptly with available failure evidence and attempts;
-  root cause and solution need not be proven first. Apply Registered patrol
-  duties for master verification and continued ownership. Legacy managed records grant no new task
-  authority. Last owned
-  task close keeps that owner's auto-notify armed. There is no subscription-closing
-  command; end a leftover finite goal schedule with `appsdk goal cancel` and
-  keep base direct-message reception daemon-owned. Review routing and model
-  selection follow the host Plan/Review contract; Collab adds no model table. Legacy
-  managed records remain diagnostic compatibility facts only.
+  `collab master delegate`. Independent peers may decline a master
+  collaboration invite. Master split/dispatch duties are the role brief's
+  `master` template; peer help and master verification are the Registered
+  patrol duties contract. Legacy managed records grant no new task authority
+  and remain diagnostic compatibility facts only. Last owned task close keeps
+  that owner's auto-notify armed. There is no subscription-closing command; end
+  a leftover finite goal schedule with `appsdk goal cancel` and keep base
+  direct-message reception daemon-owned. Review routing and model selection
+  follow the host Plan/Review contract; Collab adds no model table.
 - Each peer owns its complete task/worktree/integration/resource/cleanup
   lifecycle. Never mutate or close another peer's work.
 - Send requested replies, authorized action results, explicit notices,

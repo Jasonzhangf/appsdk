@@ -10,6 +10,14 @@ pub const SKILL_ROOT: &str = "skills/collab";
 pub const SKILL_FILES: &[(&str, &str)] = &[
     ("SKILL.md", include_str!("../skills/collab/SKILL.md")),
     (
+        "operations.md",
+        include_str!("../skills/collab/operations.md"),
+    ),
+    (
+        "references/board-idle-patrol.md",
+        include_str!("../skills/collab/references/board-idle-patrol.md"),
+    ),
+    (
         "references/workflow-templates.json",
         include_str!("../skills/collab/references/workflow-templates.json"),
     ),
@@ -106,12 +114,48 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    const REQUIRED_SKILL_FILES: &[&str] = &[
+        "SKILL.md",
+        "operations.md",
+        "references/board-idle-patrol.md",
+        "references/workflow-templates.json",
+        "references/migration-daemon.md",
+        "references/notifications.md",
+        "references/resource-waits.md",
+        "references/task-worktree-lifecycle.md",
+        "references/verification.md",
+        "references/state-paths.md",
+        "references/stable-name-recovery.md",
+    ];
+
     fn temp_target(tag: &str) -> PathBuf {
         let n = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("collab-skills-{tag}-{}-{n}", std::process::id()))
+    }
+
+    fn source_skill_files(root: &std::path::Path) -> Vec<String> {
+        fn visit(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    visit(&path, root, out);
+                } else {
+                    out.push(
+                        path.strip_prefix(root)
+                            .unwrap()
+                            .to_string_lossy()
+                            .replace('\\', "/"),
+                    );
+                }
+            }
+        }
+        let mut out = Vec::new();
+        visit(root, root, &mut out);
+        out.sort();
+        out
     }
 
     #[test]
@@ -126,6 +170,16 @@ mod tests {
         for (rel, outcome) in &outcomes {
             assert_eq!(outcome, &InstallOutcome::Written, "expected written: {rel}");
             assert!(target.join(rel).is_file(), "missing: {rel}");
+        }
+        for required in REQUIRED_SKILL_FILES {
+            assert!(
+                SKILL_FILES.iter().any(|(rel, _)| rel == required),
+                "required skill file is not embedded: {required}"
+            );
+            assert!(
+                target.join(required).is_file(),
+                "required installed file is missing: {required}"
+            );
         }
         // A manifest that accidentally omits the new asset would otherwise
         // satisfy the self-enumerating checks above while shipping no workflow.
@@ -160,6 +214,28 @@ mod tests {
         let restored = std::fs::read_to_string(target.join("SKILL.md")).unwrap();
         assert_eq!(restored, first);
         std::fs::remove_dir_all(target).ok();
+    }
+
+    #[test]
+    fn embedded_bundle_covers_every_repo_skill_file() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(SKILL_ROOT);
+        let source = source_skill_files(&root);
+        let mut embedded = SKILL_FILES
+            .iter()
+            .map(|(rel, _)| rel.to_string())
+            .collect::<Vec<_>>();
+        embedded.sort();
+        assert_eq!(
+            source, embedded,
+            "every file under {SKILL_ROOT} must be embedded and every embed must exist"
+        );
+        for required in REQUIRED_SKILL_FILES {
+            assert_eq!(
+                SKILL_FILES.iter().filter(|(rel, _)| rel == required).count(),
+                1,
+                "required skill file must be embedded exactly once: {required}"
+            );
+        }
     }
 
     #[test]
@@ -206,7 +282,7 @@ mod tests {
             )
             .unwrap_or_else(|e| panic!("read {rel}: {e}"));
             assert_eq!(on_disk, *embedded, "drift in {rel}");
-            if *rel == "SKILL.md" {
+            if *rel == "operations.md" {
                 let normalized = embedded.split_whitespace().collect::<Vec<_>>().join(" ");
                 assert!(normalized.contains("Peer-first"));
                 assert!(normalized.contains("PROTECTED_HOLD"));
@@ -238,11 +314,48 @@ mod tests {
                     "canonical Collab contract must stay project-agnostic"
                 );
             }
+            if *rel == "SKILL.md" {
+                let normalized = embedded.split_whitespace().collect::<Vec<_>>().join(" ");
+                assert!(normalized.contains("board-idle-patrol"));
+                assert!(normalized.contains("operations.md"));
+                assert!(normalized.contains("collab ceo reply"));
+                assert!(normalized.contains("collab ceo report-ack"));
+                assert!(normalized.contains("Asia/Shanghai"));
+                assert!(
+                    !normalized.contains("RouteCodex"),
+                    "canonical Collab contract must stay project-agnostic"
+                );
+            }
+            if *rel == "references/board-idle-patrol.md" {
+                assert!(embedded.contains("collab notify cancel --task-id"));
+                assert!(embedded.contains("collab notify subscribe --event board-idle"));
+                assert!(embedded.contains("collab ceo report-ack --batch-id"));
+                assert!(embedded.contains("reported_to_user"));
+                assert!(embedded.contains("Asia/Shanghai"));
+                assert!(embedded.contains("USER.md"));
+            }
+            if *rel == "references/workflow-templates.json" {
+                let workflow: serde_json::Value = serde_json::from_str(embedded).unwrap();
+                let ceo = serde_json::to_string(&workflow["ceo_template"]).unwrap();
+                assert!(ceo.contains("Asia/Shanghai"));
+                assert!(ceo.contains("report-ack"));
+                assert!(ceo.contains("USER.md"));
+                let master =
+                    serde_json::to_string(&workflow["identity_templates"]["master"]).unwrap();
+                assert!(master.contains("worker patrol"));
+                let peer =
+                    serde_json::to_string(&workflow["identity_templates"]["peer"]).unwrap();
+                assert!(peer.contains("board idle reminder"));
+                let rules = serde_json::to_string(&workflow["coordination_rules"]).unwrap();
+                assert!(rules.contains("Board idle patrol is per task and current stable owner"));
+            }
             if *rel == "references/task-worktree-lifecycle.md" {
                 assert!(embedded.contains("PROTECTED_HOLD"));
             }
             if *rel == "references/notifications.md" {
                 assert!(embedded.contains("one-shot wake"));
+                assert!(embedded.contains("[board-idle-patrol.md](board-idle-patrol.md)"));
+                assert!(embedded.contains("core public CLI validation"));
             }
         }
     }

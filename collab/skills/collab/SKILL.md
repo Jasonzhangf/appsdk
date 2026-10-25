@@ -109,6 +109,8 @@ CEO 按项目和实质业务进展去重。非紧急汇报默认每小时最多�
 `queued`、`accepted`、`consumed` 与 `reported_to_user` 分开记录。读取
 `collab ceo progress` 不标记已向用户汇报；只有 CEO 在宿主实际输出后执行
 `collab ceo report-ack --batch-id <id>`，才提交 `reported_to_user` 的调用者声明。
+每次主动向用户报告前，先读取当前 `ceo progress`，只按其 `report` 批次组织本次报告。
+等待或断线后重新读取，不用旧批次或其他项目视图绕过当前静默与小时限制。
 该声明不独立证明用户实际收到或已读。目标接口实现验证见
 [board idle 巡检契约](references/board-idle-patrol.md#ceo-进度回报与用户报告边界)。
 

@@ -131,6 +131,8 @@ Jenny 只在提醒到达时检查下列事实，不自行造一条手写唤醒�
   `quiet_window_end_minute`，取值 `0..1439`；两者相等表示禁用安静窗口。
   `[ceo_report]` 只允许在全局配置，项目级覆盖被拒绝；`min_interval_ms` 不是可配项。
 - 四阶段事实分开：`queued`、`accepted`、`consumed` 与 `reported_to_user`。
+  每次主动报告前读取当前 `collab ceo progress`，只使用被允许的 `report` 批次；等待或
+  断线后重新读取，不以旧批次或完整项目查询视图绕过当前静默与小时限制。
   CEO 向用户实际输出后由 CEO 本人执行显式确认：
   `collab ceo report-ack --batch-id <batch-id>`。
   读取 `collab ceo progress`、准备批次、入队或传输接受都不是向用户汇报，不能改写成

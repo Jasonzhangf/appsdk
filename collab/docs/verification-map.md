@@ -1,5 +1,20 @@
 # Collab v1 verification map
 
+V2's first production increment is scoped in `design/collab-v2-production-increment.md`.
+`bootstrap_policy_public_contract` exercises the public policy producer and registration
+consumer: authorization/scope refusal, first and concurrent winner, explicit ordinary peer,
+incumbent/history, clear, retry, replay and unavailable/incomplete journal.
+`bootstrap_registration_commit_failure_preserves_unused_policy_and_no_grant` injects
+command-start/completion write failure and requires policy, identity and grant to remain
+unchanged. This is source/isolated acceptance; manager-slot activation and installed policy
+behavior require their own evidence.
+
+`dsh_post_submit_read_error_preserves_durable_message_without_retry` exercises public Send,
+durable mailbox, restart and duplicate Send after a gateway receives the request but returns
+unreadable bytes. Exactly one enqueue is allowed. `dsh_post_submit_read_error_is_unknown`
+checks the typed and displayed classification; existing connect and explicit-rejection
+controls retain known-unsent behavior. A real DSH runtime round trip is separate acceptance.
+
 Global CEO coordination is specified by `design/ceo-coordination.md` and the
 two `docs/dagpipe/collab-ceo-*.graph.json` SESE graphs. Implementation acceptance
 uses the public `ceo_public_contract` consumer plus CEO state and idle-reminder tests:

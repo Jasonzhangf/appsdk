@@ -1631,6 +1631,9 @@ pub enum Event {
     GlobalMasterGranted {
         grant: super::global_state::MasterGrant,
     },
+    GlobalBootstrapPolicySet {
+        policy: super::global_state::BootstrapPolicy,
+    },
     GlobalMasterRevoked {
         project_scope: crate::scope::ProjectScopeId,
         binding_id: crate::identity::BindingId,

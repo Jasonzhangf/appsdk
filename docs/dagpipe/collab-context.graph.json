@@ -5,6 +5,13 @@
   "inputs": [{"id": "context_request", "schema": "Object"}],
   "nodes": [
     {
+      "id": "核对首次注册预授权", "operator": "appsdk.collab_context.bootstrap_policy", "operator_version": "1",
+      "description": "authorize_first_registered_peer 通过现有 grant_approval 的明确 action、非空 authorization、未拒绝 decision 与精确 scope 创建一次性控制策略。策略动作不注册身份；既有 context operation 和 command receipt 可查询或重试。普通注册在同锁 command 中提交 binding、typed grant 和策略消费；无策略保持 peer，有历史注册或 incumbent 不追授，明确 restore_peer 消费机会而不授予。clear 不重置消费。拒绝或持久失败返回明确错误，不投影成功；完整 journal replay 保持结果。",
+      "inputs": ["durable_name_scope"], "output": {"id": "bootstrap_policy_decision", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"
+    },
+    {
       "id": "解析项目与控制范围",
       "operator": "appsdk.collab_context.resolve_root",
       "operator_version": "1",
@@ -42,7 +49,7 @@
       "operator": "appsdk.collab_context.classify_name_resolution",
       "operator_version": "1",
       "description": "用户本次明确授权的 target/name/role 意图先于普通历史解析，不被旧档案、旧 token/generation 或重复 session 否决。同项目同 agent session 按 daemon 当前 typed 名字归属幂等恢复；无当前归属时由 session 派生稳定新载体，context 自行迁移兼容旧记录，不让 agent 清理或猜测。后提交绑定收敛同 scope/session 的旧绑定与 route。同名字当前工作者 S1→S2 自动换绑；离线失去保持权后正常分配；在线其他 session 占名默认不替换，已有本次用户接管确认直接应用，不重复索取。unknown 的名字归属沿既有裁决，明确用户接管优先。内部历史冲突不暴露为 agent 的选择题；仅真实缺事实或未提供的用户意图返回准确 requires 和完整下一步操作。按明确 transport 检查当前事实；Desktop bridge 缺 executor metadata、受限控制引用或本次 agent session 时返回 missing_facts，不要求或借用历史 AppServer endpoint。不进入名字解析、占用确认或持久变更。",
-      "inputs": ["durable_name_scope"],
+      "inputs": ["bootstrap_policy_decision"],
       "output": {"id": "name_resolution_decision", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
       "output_selector": {"include": [], "exclude": [], "predicate": null},
@@ -85,7 +92,8 @@
   "edges": [
     {"from": "解析项目与控制范围", "to": "读取现有服务", "arc_id": "resolved_scope"},
     {"from": "读取现有服务", "to": "读取持久名字代理会话与占用", "arc_id": "daemon_available"},
-    {"from": "读取持久名字代理会话与占用", "to": "判定续接分配占用确认或待决", "arc_id": "durable_name_scope"},
+    {"from": "读取持久名字代理会话与占用", "to": "核对首次注册预授权", "arc_id": "durable_name_scope"},
+    {"from": "核对首次注册预授权", "to": "判定续接分配占用确认或待决", "arc_id": "bootstrap_policy_decision"},
     {"from": "判定续接分配占用确认或待决", "to": "提交名字绑定同步未关闭任务或持久待决", "arc_id": "name_resolution_decision"},
     {"from": "提交名字绑定同步未关闭任务或持久待决", "to": "生成安全环境投影", "arc_id": "name_resolution_outcome"},
     {"from": "生成安全环境投影", "to": "输出含名字归属的权威快照", "arc_id": "env_projection"}

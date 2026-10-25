@@ -463,9 +463,10 @@ fn design_graph_ids() -> [&'static str; 29] {
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 140] {
+fn design_graph_operator_names() -> [&'static str; 141] {
     [
         "collab.reply.read",
+        "appsdk.collab_context.bootstrap_policy",
         "collab.reply.classify",
         "collab.reply.commit",
         "collab.reply.notify",

@@ -441,6 +441,53 @@ fn command_completion_append_failure_leaves_incomplete_replay() {
 }
 
 #[test]
+fn bootstrap_registration_commit_failure_preserves_unused_policy_and_no_grant() {
+    for fault in [
+        CommandJournalFault::StartAppend,
+        CommandJournalFault::CompletionAppend,
+    ] {
+        let (server, root) = test_server();
+        let cwd = root.to_str().unwrap();
+        let prepared = server
+            .typed_register_envelope("first", "token-first", "%first", cwd)
+            .unwrap();
+        let crate::server::state::TypedCommand::RegisterWorker { binding, .. } = &prepared.command;
+        let policy = crate::server::global_state::BootstrapPolicy {
+            project_scope: binding.project_scope.clone(),
+            app_scope_id: binding.app_scope_id.clone(),
+            authorization: "user authorizes first registration".into(),
+            authorized_operation: "authorize-first".into(),
+            consumption: None,
+        };
+        server
+            .commit_command(
+                "authorize-first",
+                "authorize-first",
+                &[Event::GlobalBootstrapPolicySet { policy: policy.clone() }],
+                json!({"authorized":true}),
+            )
+            .unwrap();
+        let prepared = server
+            .typed_register_envelope("first", "token-first", "%first", cwd)
+            .unwrap();
+        inject_command_journal_fault(fault);
+        assert!(server.typed_dispatch(prepared).is_err());
+        let state = server.state.lock().unwrap();
+        let project = state.global.lookup_project(&policy.project_scope).unwrap();
+        assert_eq!(
+            project.bootstrap_policies.get(policy.app_scope_id.as_str()),
+            Some(&policy)
+        );
+        assert!(project.master_grants.is_empty());
+        assert!(project.runtime_bindings.is_empty());
+        assert!(state.workers.is_empty());
+        drop(state);
+        drop(server);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
 fn command_completion_sync_failure_is_explicit_and_replayable_if_marker_was_written() {
     let (server, root) = test_server();
     inject_command_journal_fault(CommandJournalFault::CompletionSync);

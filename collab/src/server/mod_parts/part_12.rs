@@ -163,20 +163,25 @@ async fn dispatch_wire_routed(
             let _guard = manager.identity_gate.lock().unwrap();
             let resolved = match native_thread_id.as_deref() {
                 Some(thread) => manager.resolve_route_by_native_thread(&session_id, thread),
-                None => project_context.as_ref()
-                    .ok_or_else(|| "PROJECT_CONTEXT_REQUIRED: session route reads require project/app scope".to_owned())
-                    .and_then(|context| manager.resolve_route_by_native_session(context, &session_id)),
+                None => project_context
+                    .as_ref()
+                    .ok_or_else(|| {
+                        "PROJECT_CONTEXT_REQUIRED: session route reads require project/app scope"
+                            .to_owned()
+                    })
+                    .and_then(|context| {
+                        manager.resolve_route_by_native_session(context, &session_id)
+                    }),
             };
-            let response =
-                match resolved {
-                    Ok(route) => match serde_json::to_value(route) {
-                        Ok(value) => Resp::data(value),
-                        Err(error) => {
-                            Resp::err(format!("ROUTE_RESOLVE_INVALID: serialize route: {error}"))
-                        }
-                    },
-                    Err(error) => Resp::err(error),
-                };
+            let response = match resolved {
+                Ok(route) => match serde_json::to_value(route) {
+                    Ok(value) => Resp::data(value),
+                    Err(error) => {
+                        Resp::err(format!("ROUTE_RESOLVE_INVALID: serialize route: {error}"))
+                    }
+                },
+                Err(error) => Resp::err(error),
+            };
             (manager.host.clone(), response)
         }
         Req::Poll {
@@ -401,7 +406,8 @@ async fn conn_task_degraded(
                 "now": iso(now_ms()),
             })),
             Ok((_, Req::Shutdown { password })) => {
-                let response = handle_host_shutdown(&host_paths, &maintenance_password, password.as_ref());
+                let response =
+                    handle_host_shutdown(&host_paths, &maintenance_password, password.as_ref());
                 close_daemon = response.ok;
                 response
             }
@@ -1057,9 +1063,18 @@ fn acquire_daemon_legacy_writer_fence(
     // project-local journals have separate ownership and are never opened.
     let legacy_host_lock = legacy_host_daemon_lock_path(host_paths);
     let host_lock = if legacy_host_lock != host_paths.lock_path() {
-        Some(acquire_legacy_writer_lock(&legacy_host_lock, "host daemon")?)
-    } else { None };
-    Ok(LegacyWriterFence { _host_lock: host_lock, _project_lock: None, project_error: None })
+        Some(acquire_legacy_writer_lock(
+            &legacy_host_lock,
+            "host daemon",
+        )?)
+    } else {
+        None
+    };
+    Ok(LegacyWriterFence {
+        _host_lock: host_lock,
+        _project_lock: None,
+        project_error: None,
+    })
 }
 
 fn acquire_legacy_writer_fence_mode(
@@ -1211,7 +1226,9 @@ async fn run_timer_scheduler<T, R, F>(
 }
 
 async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Result<()> {
-    let scope = Scope { root: std::fs::canonicalize(&scope.root)? };
+    let scope = Scope {
+        root: std::fs::canonicalize(&scope.root)?,
+    };
     host_paths.ensure_root()?;
     let sock_path = host_paths.socket_path();
     let runtime_storage_root = host_paths.app_storage_root(
@@ -1429,6 +1446,7 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
 
     // Background scheduler: bounded waits and explicitly registered notifications.
     let sched = runtime_manager.clone();
+    let cycle_manager = sched.clone();
     let (scheduler_stop, scheduler_stop_rx) = tokio::sync::mpsc::channel::<()>(1);
     let scheduler_interval_ms = sched.host.config.timers.tick_interval_ms;
     let scheduler = tokio::spawn(run_timer_scheduler(
@@ -1438,10 +1456,17 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
             crate::server::binding_lifecycle::kick(&sched);
             sched.runtimes()
         },
-        |runtimes| {
+        move |runtimes| {
+            let cycle_manager = cycle_manager.clone();
             tokio::task::spawn_blocking(move || {
                 for runtime in runtimes {
                     crate::server::timers::tick(&runtime);
+                }
+                if let Err(error) = cycle_manager.tick_ceo_report_patrol(now_ms()) {
+                    append_log(
+                        &cycle_manager.host.log_path(),
+                        &format!("CEO_REPORT_PATROL_TICK_FAILED: {error}"),
+                    );
                 }
             })
         },

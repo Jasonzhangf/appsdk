@@ -1,4 +1,5 @@
 mod binding_lifecycle;
+mod ceo_report_patrol;
 pub mod global_state;
 mod identity_context;
 pub(crate) mod keepalive;
@@ -86,6 +87,10 @@ mod dsh_channel_tests;
 #[cfg(test)]
 #[path = "ceo_state_tests.rs"]
 mod ceo_state_tests;
+
+#[cfg(test)]
+#[path = "ceo_report_patrol_tests.rs"]
+mod ceo_report_patrol_tests;
 
 #[cfg(test)]
 pub(crate) mod peer_tests;

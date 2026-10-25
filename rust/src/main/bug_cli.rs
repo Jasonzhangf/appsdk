@@ -374,6 +374,9 @@ pub(super) fn bug_intake_record_body(input: &Value) -> String {
     body
 }
 
+// Legacy bound-triage fixture builder for the historical worktree record
+// contract; ordinary intake now emits only the public receipt fields.
+#[cfg(test)]
 pub(super) fn bug_intake_triage(
     issue_id: &str,
     query: &str,
@@ -622,7 +625,6 @@ pub(super) fn bug_intake(
         )
     } else {
         let (issue_id, _record) = bug_intake_create(git_bug, root, &input, title, classification);
-        records = serde_json::json!([]);
         (issue_id, false, true, false, false, "new_confirmed")
     };
     let (matched_issue_id, matched_title, matched_classification) = if created {
@@ -652,19 +654,15 @@ pub(super) fn bug_intake(
             Some(matched_classification),
         )
     };
-    let (mut bug_triage, _bug_triage_query_binding) = bug_intake_triage(
-        &issue_id,
-        &triage_query,
-        &records,
-        triage_mode,
-        if reopened { Some(&issue_id) } else { None },
-        matched_issue_id,
-        matched_title,
-        matched_classification,
-    );
-    // The durable triage keeps the executed dedup query; the public receipt
-    // must not replay full records or retired binding digests.
-    bug_triage.as_object_mut().unwrap().remove("query_result");
+    let bug_triage = serde_json::json!({
+        "query_executed": true,
+        "query": triage_query,
+        "mode": triage_mode,
+        "reopened_from_issue_id": if reopened { Some(issue_id.as_str()) } else { None },
+        "matched_issue_id": matched_issue_id,
+        "matched_title": matched_title,
+        "matched_classification": matched_classification,
+    });
 
     println!(
         "{}",

@@ -415,6 +415,12 @@ fn board_idle_patrol_runtime_same_name_restoration_routes_only_current_carrier()
         THREAD_A,
     );
     fixture.run_public(&["notify", "cancel", "--task-id", "T1"], THREAD_A);
+    set_native_status(&fixture, THREAD_A, "notLoaded");
+    fixture.append_name_events(&[json!({"ev":"AgentPresenceObserved", "presence":{
+        "project_scope":std::fs::canonicalize(&fixture.project).unwrap(),
+        "worker_id":old_worker.as_str(), "session_id":THREAD_A,
+        "presence":"offline", "reason":"fixture old carrier stopped", "observed_ms":1
+    }})]);
 
     let restored = fixture.run_public(
         &[

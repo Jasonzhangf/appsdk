@@ -22,11 +22,48 @@ identity 及 specialties 的来源、revision 和完整 template。未更新时�
 不以第一项静默覆盖其他项。角色被移除后，不再派发该专长模板。模板不是权限授予，
 也不自动改写已发布任务的 owner、scope、指定执行者或必需 reviewer。
 
-每次获知新 peer 或角色关系变化，master 在已有授权内更新受影响模板、任务分工和
-交付接力，实际安排 ready 工作，再向用户报告生效规则并继续；用户可随时修改。
-报告采用：变化；当前分工与 scope；交付/review/后续安排/idle 负责人；本次已派任务
-或无可派原因；当前生效及可修改说明。只有超出授权、改变用户显式硬约束或关键事实
-不清时才确认受影响部分。更新正在执行的任务时，必须显式落实交接。
+新 peer 或角色变化只触发对受影响职责、依赖和交接的处理。只有实际任务需要时才改
+模板或分工策略。普通注册不要求先设置专长，不要求例行写规则或向用户汇报。
+需要用户决定、产生重要结果或用户要求汇报时，再报告变化和下一步。已有授权内直接
+推进；超出授权、改变显式硬约束或缺少关键事实时，只确认受影响部分。
+更新正在执行的任务时，必须显式落实交接。
+
+### 基本项目关系与最小派单模板
+
+master 负责项目总目标、跨 peer 依赖和最终集成。peer 负责接受的子目标，管理自己的
+执行者、验证和资源，并向派单 owner 交回结果。工作专长不是接单前置，也不授予权限。
+master 可把下列内容填入现有任务的 description；没有额外依赖时写“无”，不另建角色表：
+
+```text
+目标：<本次要交付的可用结果>
+范围：<负责的模块/路径；不包含的工作>
+权限与资源：<已授权动作；资源归属>
+依赖：<必须先满足的输入或交接；没有则写无>
+验收：<交付物/位置；可重复的验证及通过条件>
+交回：<派单 owner；需要时指定 reviewer 和集成人>
+停止条件：<什么情况只暂停受影响工作；向谁报告原错与下一步>
+```
+
+复用已有任务；没有时再发布。以下 ID、名字和 revision 均从当前回执或任务板取得：
+
+```sh
+collab board publish <task-id> --title '<目标>' --description '<填好的模板>' --delivery-condition '<交付条件>' --test-condition '<验证条件>'
+collab board dispatch <task-id> --expected-revision <revision>
+# 需要指定接收者时，用 invite 代替 dispatch：
+collab board invite <task-id> --to <peer> --expected-revision <revision>
+# peer 读取邀请后接受或明确拒绝：
+collab board respond <task-id> --accept --expected-revision <revision>
+```
+
+未指定执行者时，dispatch 在同一专长匹配层级内优先选择没有未结任务和待接邀请的
+peer，再按稳定名字排序。指定执行者保持硬约束；邀请不等于接单。无已授权 ready
+工作时保留直接收件，不制造任务、角色或定时巡检来填满 peer。
+
+首次建立普通名字占用时，daemon 向现有 master 发一条 `peer-registered` 通知。
+同名恢复和重复 context 不重复发送。真实专长变更通知相对方；真实模板更新或重置
+只通知匹配的 peer。同值更新保持静默。首次注册后又设置专长是两个真实变更，可收到
+两条通知。变更与通知同批持久化；唤醒失败不撤销已提交的变更，回执保留错误。
+通知只提示读取当前 context/任务板，不成为第二份角色状态；收件仍走现有 recv。
 
 manager（全局 CEO 或项目 master）为任何承担计划、编排或任务派发的角色创建或更新
 流程模板时，必须在该角色的 `responsibilities` 中写明：计划与派单要明确目标、范围、
@@ -48,8 +85,9 @@ collab context --workflow-target 'role:designer' --reset-workflow-template
 模板内容由 daemon journal 持久保存，换会话不丢失；重置模板后回到标准身份流程。
 若实际 context 没有该模板字段，说明当前运行版本尚未提供模板派发；保留原回执并报告
 安装/运行差异，不手工改控制状态、不虚构模板已生效，也不自行管理 daemon 生命周期。
-已运行的 peer 需要立即处理变化时，master 通过已有消息/派单通道通知其读取 context，
-不新建定时轮询。context 派发流程不等于 daemon 自动生成任务或替 agent 执行。
+daemon 已为真实角色和模板变化通知相关 peer，不再要求 master 重复手动通知。
+额外任务交接仍走已有派单通道，不新建定时轮询。context 派发流程不等于 daemon
+自动生成任务或替 agent 执行。
 
 ## 通信入口与项目目录
 
@@ -71,7 +109,7 @@ teammate 或 worker 标识；不知道这些内部标识不构成转请 master �
 | 回复原请求 | 同一发送命令，原消息确有 ID 时加 `--in-reply-to '<原消息ID>'`；没有 ID 不猜、不查内部信箱找值 |
 | DSH 收件 | gateway 将完整正文送入原生回合；直接处理和回信，不运行 `recv/ack` |
 | 非 DSH 收件 | 按本 Skill 的 `collab recv` 流程消费 |
-| 确实跨项目 | 沿下文 master-to-master 通道；普通 peer 交给自己的 master |
+| 确实跨项目 | 沿下文 master-to-master 通道；普通 peer 交给自己的 master，不把跨项目地址传给 sendmessage |
 
 需要显式固定目录时，整条命令是：
 `(cd '<已注册项目根目录>' && collab sendmessage --to 'Alice' --subject '<主题>' '<正文>')`。
@@ -84,6 +122,12 @@ Alice 等收件人不存在。若 `resolve-agent` 错误列出自己的 session 
 （例如 `/Users/…`），先回已注册项目目录，使用同一公开入口；不要重新注册、
 查 journal/route/token，或调用 `register-peer`、`resolve-agent`、`Poll/Ack` 修身份。
 在正确项目仍失败时，保留原命令、项目、错误和已有消息 ID，报告具体失败边界。
+
+宿主 `list_agents` 只枚举该宿主的子 agent，不是 Collab 项目成员目录。列表里没有
+某个名字（例如 Jenny）不能证明目标 master 不存在或没有通信通道；当前会话未注册、
+缺 master 授权和目标不可达是不同失败，分别以真实 Collab 回执判断。确实要交付资料
+给另一项目时，按上文“确实跨项目”走 master-to-master 通道，不因宿主列表无匹配就
+默认要求用户人工转发，也不自行注册、猜身份或提升 master。
 
 ## 协作请求的执行、回复与接续
 
@@ -1316,7 +1360,7 @@ master 时先取得本次启动批准。收到真实就绪握手后继续派发�
 全局 CEO 走上一节的独立授权通道，不把 CEO 称呼当作项目 master 授权。
 
 发送者在自己的项目执行 `collab context`，使用返回的当前身份和 master 授权。
-用户提供目标项目绝对路径后，可以只读查询目标当前 master；这个查询不注册身份：
+先从已有项目记录或当前上下文取得目标项目的真实根目录；只有无法唯一确定时才向用户确认绝对路径。取得后可以只读查询目标当前 master；这个查询不注册身份：
 
 ```sh
 (cd '/目标项目绝对路径' && collab master status)

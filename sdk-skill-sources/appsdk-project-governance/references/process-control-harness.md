@@ -19,11 +19,12 @@ closeout projector final state -> gaps/cleanup/memory candidates
 Harness does not call a model, produce project evidence, mutate lifecycle truth,
 or write memory automatically.
 
-## Tour and ordered review
+## Optional tour and workflow editing
 
-Use `appsdk guide tour --task <id> --mode <domain>` to inspect the generated
-workflow and let a human choose an adjacent path. Persist that choice with a
-TourProposal input when needed. Submit `appsdk guide review` in two stages:
+Use `appsdk guide tour --task <id> --mode <domain>` when explicitly inspecting
+or editing the generated workflow. It is not a required human decision before
+ordinary task execution. Persist an authorized choice with a TourProposal
+when needed. Workflow editing uses `appsdk guide review` in two stages:
 `node_review` checks and accepts node content first; only after every selected
 node has an accepted revision may `flow_review` update edges, order, or rules.
 The accepted flow patch retains node revision IDs and stays staged until the
@@ -32,12 +33,11 @@ declared source is explicitly updated and compiled.
 ## Start
 
 ```bash
-appsdk guide status --task <task-id>
 appsdk guide init --task <task-id> --mode develop --module <module-id>
-appsdk guide develop --task <task-id> --module <module-id>
 ```
 
-If status returns `GUIDANCE_SETUP_REQUIRED`, do not call compile yet:
+Use an existing valid status/intake result directly. Query status only for a
+specific missing state. If it returns `GUIDANCE_SETUP_REQUIRED`, do not call compile yet:
 
 ```bash
 appsdk guide init --task guidance-setup --mode bootstrap --module <module-id>
@@ -51,8 +51,9 @@ worktree, declares them in `.appsdk/project.json`, and runs `appsdk guide
 compile` plus `appsdk verify`. If status is only `GUIDANCE_NOT_COMPILED`,
 approved sources are already declared and compile is the next command.
 
-After an AppSDK update, or for an explicit rules refresh, a configured project
-uses the same read-only bootstrap intake:
+For an intentional rule refresh, a configured project may use the same
+read-only bootstrap intake. Refresh installed project resources only when
+needed; an unrelated SDK update does not require this sequence:
 
 ```bash
 appsdk init
@@ -75,13 +76,18 @@ Use `--mode debug` for a bug, regression, or incident. Use another declared
 domain when appropriate. `guide init` is read-only and returns:
 
 - declared AGENTS and local Skill paths to read in precedence order;
-- unresolved develop/debug questions to ask the user;
+- unresolved develop/debug questions to resolve from requirements, evidence
+  and the responsible collaborator;
 - exact `$skill-id` suggestions for declared local Skills;
 - missing commands and the next `appsdk guide` command sequence.
 
-Ask only questions still unresolved after reading the returned sources and the
-current user request. Then run the projected domain command and write the
-PlanProposal. `appsdk guide --help` lists the full command surface.
+Use the returned sources and current authorization first. For registered
+Collab work, route remaining questions through its clarification rule: peer
+facts to the owner, design to the designer, scope/resources to the master.
+Ask the user only for a user-held critical fact, new authorization or a change
+to an explicit user constraint. Continue independent work. Run another domain
+projection only when its missing context is needed, then submit the PlanProposal.
+`appsdk guide --help` lists the full command surface.
 
 `GuidanceSetupProposal` is project-level and user-approved. `PlanProposal` is
 task-level and stored in local control state. Never promote a task plan into a
@@ -115,7 +121,8 @@ failure, or reason to wait for an external AppSDK owner.
 ```
 
 Do not provide `current_node`, `next_transition`, source hashes, scope hash, or
-rule-context hash. Harness derives them.
+rule-context hash. Harness derives the current node and next transition;
+ordinary work does not create a source-identity packet.
 
 ```bash
 appsdk guide plan --task <task-id> --input plan.json
@@ -140,17 +147,18 @@ second intake truth.
 
 ```bash
 appsdk guide update --task <task-id> --input result.json
-appsdk guide next --task <task-id>
 ```
 
-Same event ID and content is idempotent. Same ID with different content fails.
+Use the update result to continue; call `guide next` only if the next action
+is not already available. Same event ID and content is idempotent. Same ID with different content fails.
 `pass` with required but absent evidence fails. Only projected step may update.
 
 ## Revision
 
-Resubmit PlanProposal with `revision_reason` when evidence, blocker, hypothesis,
-scope, owner, source, environment, rules, contracts, gates, or dependencies
-change. Old plan/events remain append-only. Never edit control files by hand.
+Resubmit PlanProposal with `revision_reason` when goal, scope, acceptance,
+key approach, declared owner or relevant dependencies materially change.
+Ordinary step evidence, scoped edits and Git commits do not by themselves
+require a new plan. Old plan/events remain append-only. Never edit control files by hand.
 
 ## Close
 

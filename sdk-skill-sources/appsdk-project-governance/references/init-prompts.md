@@ -1,222 +1,71 @@
-# AppSDK + Collab: one query, one binding
+# AppSDK 初始化与协作入口
 
-Current client: Codex only. The binding is the Codex sessionID.
+AppSDK 项目初始化、Collab 身份注册和本人目标调度是不同操作。只执行当前请求需要的入口，
+不把它们组成每次开发前的固定步骤。项目治理沿
+[bootstrap-migration](bootstrap-migration.md)；协作沿已安装的
+[Collab Skill](../../collab/SKILL.md)。
 
-## State ownership
+## 注册和恢复
 
-Global truth:
-
-```text
-~/.appsdk/projects.jsonl
-~/.appsdk/runtimes.jsonl
-~/.appsdk/communication.jsonl
-~/.collab/server.sock
-~/.collab/events.jsonl
-~/.collab/log.txt
-```
-
-Project-local `.appsdk/`, `.appsdk-control/`, and `.agent-collab/` are not the
-global truth. `.appsdk/` is the committed project contract/maps/records;
-`.appsdk-control/` is ignored local run/cache state; `.agent-collab/` is the
-project registration/reducer input. Handle them only through
-the AppSDK reset or Collab migration/reset owner. Do not inspect or edit them
-to decide whether the peer is registered.
-
-## All state
-
-Run one command:
+只有用户明确要求注册或已有身份确需恢复时，在当前项目使用：
 
 ```sh
 collab context
 ```
 
-`collab context` returns identity, liveness, tasks, inbox, `next_actions`,
-master/authority state, `role_brief`, and truth. Registration returns the brief
-effective at registration; `collab context` projects the current brief, and
-promotion or delegation returns the replacement brief. That output is the
-truth. `registered: true` ends bootstrap. If the snapshot returns
-`required_fields`, supply only those real facts once:
+daemon 选择身份和通信绑定，调用者只提供当前宿主的真实能力事实。稳定名字承载工作，
+agent sessionID 是执行载体；tmux pane/session、thread、socket 不替代工作归属。
+Desktop、TUI 和 DSH 的具体事实与收件差异沿 Collab Skill，不在本文件维护第二套宿主表。
+
+复用回执中的当前身份、角色、项目 peer/master 与本人责任；成功后直接继续。
+只有返回 required_fields 时，按对应 reason/action 补充真实缺项。不要手填旧 worker、token、
+route，或在成功回执后再固定调用 context、who、status。普通身份恢复不要求收发回环；
+显式通信维修或通信功能验收才验证受影响通路。
+
+首次注册失败时保留原错，继续不依赖协作的工作；既有身份通信失败不撤销已领任务。
+无关任务不停止。身份/route 由 Collab 管理，用户管理全局 daemon，agent 不启动、关闭、
+重启它或终止 tmux server/宿主 pane。具体恢复见
+[stable-name-recovery](../../collab/references/stable-name-recovery.md)。
+
+## master、peer 和目标
+
+注册不授予 master 权限。用户已有的明确授权不重复询问；当前名字接管或 master 变更
+仍沿 Collab 的当前授权合同。角色操作返回的新 brief 足够时，不再重复读取完整 context。
+
+master 与 peer 都编排自己的目标，区别是目标层级。长程子目标交获授权且接受的 peer；
+一次性执行/观察沿当前宿主编排入口。公开 board、模板、指定执行者/reviewer 与资源
+生命周期只在 Collab Skill 维护，不在初始化提示里复制整套派单规则。
+
+本人已接受长程目标且需要调度时，复用已有目标文件与已约定周期：
 
 ```sh
-collab context --provide '<JSON>'
-```
-
-The supplement may contain only requested `session_id`, `thread_id`,
-`endpoint`, or `namespace` facts; it never supplies a worker, approval, token,
-route, or binding. The supplement invocation returns the resulting snapshot.
-Do not choose a worker or run another identity command. If context returns an
-explicit daemon DOWN or runtime error, preserve the exact error and stop;
-daemon lifecycle maintenance is human-authorized. Do not inspect local
-environment/control paths to guess an identity. Registration and wake use the
-daemon-selected supported adapter; an AppServer binding uses its native thread.
-
-Ordinary AppSDK project initialization runs only in the canonical project main
-checkout. Agent identity bootstrap is `collab context`; it may run from the
-project or worktree, and the daemon resolves the canonical route. A Git
-worktree contains tracked `.appsdk/` files but does not inherit ignored
-`.agent-collab/` or `.appsdk-control/` state. The separate authorized AppSDK
-`--fresh --discard-legacy` reset may run from its clean non-main owner worktree
-as specified below. Inside a worktree, the same Codex sessionID/thread remains
-the same peer. Run `collab context` directly there; it reports the inherited
-identity, liveness, tasks, inbox, `next_actions`, and master/authority state.
-Never register the worktree as a second peer, promote yourself, or create a
-second route.
-
-## If required facts are missing
-
-`collab context` can return `registered: false`, `identity: null`, and
-`required_fields`. Supply only the real requested facts once with
-`collab context --provide '<JSON>'`. The supplement may contain only requested
-`session_id`, `thread_id`, `endpoint`, or `namespace` facts; it never supplies
-a worker, approval, token, route, or binding. The daemon owns identity
-creation, selection, restoration, update, registration, route publication, and
-lease restoration. Do not run AppSDK or Collab initialization to repair
-identity, and do not inspect routes or worker state to guess a binding.
-
-## Master (after user approval for the exact project + peer)
-
-```sh
-cd /abs/path/project
-collab context                  # verify sessionID binding and role
-# if required_fields are present, provide only those facts once
-# only with explicit approval for this exact peer/project; a different online
-# name holder requires the current takeover confirmation:
-collab master promote --approval "<user approval text>"
-collab context
-# only after the plan exists and long-horizon work is approved:
-appsdk goal subscribe --goal docs/goals/<feature>-plan.md --interval 10m
-appsdk goal status --json       # active/observed/collab_subscribed
-```
-
-The master then owns orchestration:
-
-1. Query `collab context` once. It must show the identity, liveness, tasks,
-   inbox, `next_actions`, `role_brief`, and master/authority state.
-2. Split the confirmed goal by dependency and unique write scope. Offer each
-   long-horizon slice through `collab board publish` and a revision-checked
-   claim or invitation. The consenting peer owns planning, independent
-   `codex exec --profile gcm` execution/observation, verification, integration,
-   and cleanup for that slice. Every assignment needs goal, scope, authorized
-   actions, resource owner, done-iff, artifacts, forbidden paths, exact tests,
-   evidence location, report channel, and stop conditions.
-3. Before execution or dispatch, run `appsdk bug intake --input <json>` and
-   bind the returned `issue_id`; read-only conversation skips this path.
-4. Route by task type from the approved graph and ready bug work: long-horizon
-   goals to consenting autonomous peers; bounded execution/observation directly
-   to independent GCM workers regardless of peer availability. Each master/peer
-   registers and manages its own goal; master does not proxy-register peer goals.
-   Do not start a new managed subagent for production work.
-5. Every patrol converges owned worktrees and stale resources, open P0/P1 work,
-   canonical issue intake, and PROTECTED_HOLD reporting. Close each P0/P1 with
-   evidence or park it with owner, cause, and unblock condition.
-6. Own blockers, re-dispatch or auditable force-close stuck tasks, integrate
-   reviewed commits on latest main, and keep source/review/merge/install/
-   restart/live-replay evidence separate.
-7. Before a patrol cycle ends, explicitly re-arm a consumed one-shot goal or
-   deadline wake when continued scheduling is required. A read, ACK, summary,
-   or dispatch receipt is not completion.
-   Close owned goal scheduling and patrols when complete or no new task and no
-   actionable work remain. Retain direct-message reception for new assignments.
-8. Remove only resources created by this round after recoverable extraction.
-   Preserve dirty, active, shared, or unknown resources and report them.
-
-Stop normal setup here. Do not run operator diagnostics, read `routes.jsonl`,
-inspect processes, or list `.agent-collab/`. If context explicitly reports
-daemon DOWN or a runtime error, preserve the exact error and stop; daemon
-lifecycle maintenance is human-authorized.
-
-## Long-horizon master initialization and timer proof
-
-The master creates the plan file before registering the timer:
-
-```sh
-appsdk goal subscribe --goal docs/goals/<feature>-plan.md --interval 10m
+appsdk goal subscribe --goal <existing-goal.md> --interval <agreed-period>
 appsdk goal status --json
-appsdk longhorizon show --json
 ```
 
-`appsdk goal status --json` must report `active: true`,
-`desired: subscribed`, `observed: subscribed`, `collab_subscribed: true`, a
-non-null `subscription_id`, and `error: null`. Command output alone is not
-timer proof. Run one short-interval live replay and record the armed
-subscription, fired deadline notification, and consumed result. The current
-implementation is a one-shot deadline; rearm it after consumption, expiry, or
-a Collab restart.
+任务/笔记/普通 timer 不是目标注册。保留真实 owner 与注册结果，master 不替 peer 持有目标。
+当前有效回执已包含所需状态时直接复用；只有存在具体缺口才补 status。不臆定 `10m`
+等周期，不把缺失巡检服务变成 ready 工作的阻塞，也不在普通目标登记时要求短周期 live replay。
+需要验证调度功能的变更才检查 armed、触发、消费与一次性重武装。目标结束或无可执行工作时
+结束本人有限调度，保留基础直达消息接收；详见
+[notifications](../../collab/references/notifications.md#patrol-duties-and-finite-schedules)。
 
-## Upstream AppSDK bug report
+## SDK 缺陷报告
 
-When a project hits a defect in AppSDK itself, do not patch around it or hide
-it in project-local state:
+本项目问题沿已有 canonical intake 去重。消费者遇到 SDK 本身缺陷时，可使用明确的上游入口：
 
 ```sh
 appsdk bug list -q "<symptom>" --json --upstream
-appsdk bug new --upstream -t "[SDK Bug] <symptom>" -m "<reproduction, expected, observed, version, commit, logs>" -l "P0,appsdk"
-appsdk bug show <id> --json --upstream
+appsdk bug new --upstream -t "[SDK Bug] <symptom>" -m "<expected; observed; reproduction; evidence>" -l "<actual-priority>,appsdk"
 ```
 
-Include the source commit, installed binary version, exact command, first failing
-layer, and whether the same path fails from a clean project. The upstream bug
-is a report and evidence record; it is not proof that the local delivery
-passed.
+已有相同问题时补充其证据，不重复创建。报告最小复现、预期/实际、首个失败层和相关证据位置；
+版本信息仅在判定源码/安装差异时补充。不要固定把所有问题标为 P0，不要求报完再 show 全文。
+给对应 owner 可行动信息即可，不粘贴完整日志或新增候选摘要包装。登记不是修复或验收完成。
 
-`--upstream` is the explicit git-bug upstream route. The report must use the
-actual symptom, reproduction, expected/observed result, version/commit,
-and relevant logs; do not turn it into a local project bug or a fallback
-workaround.
+## 显式重置
 
-## Ordinary peer
-
-```sh
-cd /abs/path/project
-collab context
-# if required_fields are present, provide only those facts once
-```
-
-Both master and peer continue as their accepted goal's orchestrator. Each
-restores or registers and manages its own goal. Do not ask master to register
-the peer's goal, infer master authority, or start a second daemon.
-
-Read master authority and endpoint reachability separately from the same
-snapshot. `master: null` means no holder is assigned. A recorded holder keeps
-authority when its endpoint is unreachable; endpoint liveness never decides
-whether another peer owns its goal.
-A worktree normally has no local `.agent-collab/`; that does not mean the peer
-is unregistered or that no master exists. A failed `collab context`, including
-`token mismatch`, is a registration problem, not evidence of no master. If it
-fails, preserve the exact error. Report the registration error to the live
-master only when the snapshot shows `endpoint_live=true`; when no live master
-exists, report it to the explicitly authorized migration/reset owner or the
-user and stop identity repair. Do not infer "no master", copy/edit identity
-state, reset, or promote yourself from the worktree.
-
-For an explicitly authorized clean epoch, the reset owners are separate. The
-AppSDK line is a reset/reinitialize operation, not ordinary initialization:
-
-```sh
-# AppSDK-owned project control plane, from a clean non-main owner worktree
-appsdk init <project> --fresh --discard-legacy
-```
-
-Collab project reset belongs to the current project's master and uses the
-current Collab reset contract. Global daemon lifecycle remains user-managed.
-AppSDK reset does not remove Collab state or require a Collab reset. Neither
-reset proves delivery, review, installation or live communication.
-
-## Identity and route reconciliation
-
-Identity creation, selection, restoration, update, route publication,
-registration, and lease restoration belong to the daemon. `collab context` and
-its one factual supplement are the only agent bootstrap. Do not copy tokens,
-edit identity state, or run separate route/status discovery for repair. If
-context explicitly reports daemon DOWN or a runtime error, preserve the exact
-error and stop.
-
-## Stale daemon, socket, or lock
-
-`~/.collab/server.sock`, `server.pid`, and `daemon.lock` are host-owned runtime
-objects. If `collab context` explicitly reports daemon DOWN or a runtime error,
-preserve the exact output and stop. Starting, stopping, or restarting the host
-daemon is user-managed maintenance. Lifecycle commands and credentials are
-outside agent guidance. Never remove lock or
-socket files by hand, use broad process-kill commands, or start a project-local
-daemon.
+普通恢复、规则升级和报错不触发重置。用户明确授权丢弃特定状态时，分别使用所属入口：
+AppSDK 治理重置沿 [bootstrap-migration](bootstrap-migration.md)，Collab 项目重置由当前
+master 沿 [migration-daemon](../../collab/references/migration-daemon.md#reset-is-explicit-discard-not-recovery) 执行。
+两者不互相删除状态，不通过手删 journal、socket、lock 或第二 daemon 绕过失败。

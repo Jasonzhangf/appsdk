@@ -16,16 +16,14 @@ or registers, updates, rearms and closes its own goal with the current AppSDK
 goal entry. A peer does not ask master to register its goal; master must not
 proxy-register or take ownership of it. Desktop/TUI placement is irrelevant to
 that responsibility. Report the real goal receipt; task/board/note/timer state
-alone does not prove registration. Use the [Collab contract](../../collab/SKILL.md#register-the-long-horizon-goal-before-dispatch)
+alone does not prove registration. Use the [Collab contract](../../collab/SKILL.md#目标编排与接续)
 for ownership, finite wake and patrol rules.
 
 Patrol is a safety-net wake, never an execution dependency. Continue ready
 authorized work immediately after subscribing or rearming. The peer retains
-sole delivery ownership for its scope. A blocker request needs original failure
-evidence, attempted remedies, unavailable authorized alternatives, the exact
-decision and resume condition. Master independently checks that evidence before
-accepting a scoped blocker; help does not transfer ownership. Continue unaffected
-work while a decision is pending. Do not close unfinished tasks to stop reminders.
+sole delivery ownership for its scope. Route questions and scoped blockers through
+the Collab Skill's clarification rule; help does not transfer ownership. Continue
+unaffected work while a decision is pending. Do not close unfinished tasks to stop reminders.
 
 For an authorized migration, reference the [migration Skill](../../appsdk-migration/SKILL.md)
 and existing evidence. A prompt grants no new role, destructive authority or

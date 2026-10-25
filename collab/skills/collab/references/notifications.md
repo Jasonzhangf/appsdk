@@ -32,8 +32,8 @@ A registration or dispatch reminder is not a schedule. It requires the role to
 reconcile its existing scope on the next authorized activation. Do not create
 empty board tasks, a fixed polling loop, or duplicate subscriptions during
 context restoration. Update tasks and subscriptions when scope changes, reuse
-an active valid subscription, and retire only the caller's obsolete
-task-scoped subscriptions by ID.
+an active valid subscription, and end obsolete owned schedules through their
+goal/task lifecycle; there is no unsubscribe-by-ID command.
 
 - Master patrol covers open buglist P0/P1 work, peer progress evidence, owned
   worktree/runtime cleanup, canonical issue intake, and currently supported
@@ -57,11 +57,11 @@ task-scoped subscriptions by ID.
   ACK, summary, or dispatch receipt is not completion.
   Rearming is a safety net, not permission to stop: immediately continue ready
   authorized work. A future deadline or absent wake is not a task dependency.
-  Apply the main Skill's Registered patrol duties for evidence-based blocker
-  requests, master verification, and continued peer delivery ownership.
+  Apply the main Skill's [clarification rule](../SKILL.md#澄清决策与阻塞)
+  for help; formal blocker verification does not transfer peer delivery ownership.
 
-Run `collab notify methods` against the current daemon before selecting an
-event or schedule. The current source defines `direct-message`,
+Use the current supported-event information; run `collab notify methods` only
+when the needed event/schedule capability is unknown or has changed. The source defines `direct-message`,
 `resource-released`, `deadline`, and `master-idle`; the loaded runtime's
 `methods` response is authoritative. An absent event requires implementation
 in its owning source, not a fake event, synthetic subject, or polling loop.
@@ -114,8 +114,10 @@ Up to three active subscriptions exist per agent.
   or lifecycle.
 - Unacknowledged notification throttling (Backpressure): To prevent notification
   storms and terminal pollution, push knocks pause when unacknowledged notifications
-  reach `max_unacked` (default 3, range 1-5). Run `collab ack <id>` or `collab ack --all`
-  to resume push delivery. Messages remain safely buffered in the durable mailbox.
+  reach `max_unacked` (default 3, range 1-5). Non-DSH `collab recv` reads and
+  consumes the pending batch; it needs no subsequent ACK. DSH gateway owns
+  consumption. Use legacy explicit ACK only for already-delivered recovery,
+  never to discard unread content. Messages remain in the durable mailbox.
 - The bound subscription event policy supplies the automatic retry window: the
   default `direct-message` batch window is 120 seconds, while an event configured
   as `immediate` has a zero retry delay. At dispatch, include eligible unsent
@@ -172,14 +174,10 @@ collab who
   `unacked_notifications`, `notifications_paused`, `suspected_offline`, and
   `active_task`.
 
-After a preview, compare its ID/subject, urgency, current task, and interruption
-cost. Read durable details only when appropriate:
-
-```sh
-collab msg <notification-id>
-collab inbox
-collab context
-```
+After a preview, use the main Skill's [receive path](../SKILL.md#收件行动与反馈).
+For a specific read-only diagnostic, choose `collab msg <id>` or `collab inbox`;
+these are alternatives, not a sequence before recv. Do not add context or ACK
+when the existing message and receipt already supply the needed facts.
 
 ## Delivery claims are separate
 

@@ -144,7 +144,7 @@ work and continue an authorized, nonconflicting task. Blocked and waiting work
 keeps its owner and resources. Resuming it rechecks execution capacity.
 Before idle and on the next activation, recheck blockers and unfinished duties.
 These are agent actions; the board adds no periodic worker wake or automatic
-execution. The [Collab Skill](skills/collab/SKILL.md#continue-the-queue-and-recheck-blockers)
+execution. The [Collab Skill](skills/collab/SKILL.md#目标编排与接续)
 defines each role's steps. Managed private queues are visible only to the child
 and its parent; the public board shows parent responsibility for public work.
 

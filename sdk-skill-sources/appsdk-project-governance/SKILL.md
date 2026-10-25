@@ -24,13 +24,11 @@ Use this Skill only when an AppSDK-managed project performs governance bootstrap
    - Upgrading an existing project to the 2026-10-16 ablated governance uses [bootstrap-migration.md](references/bootstrap-migration.md#existing-project-governance-ablation) to remove legacy SHA/freeze/identity-record calls from project docs, hooks, and gates. Never run `appsdk init --fresh` or `collab reset` merely to upgrade rules.
    - New project admission uses `appsdk prepare` -> explicit user confirmation of `.appsdk-prepare.json` -> `appsdk init` -> `appsdk verify`.
 3. **Development, review, and delivery**:
-   - Work in an exclusive clean external worktree (`/Volumes/Intel/playground/<project-key>/<task-slug>`) following the SESE Close-Before-Open lifecycle.
-   - Check affected DAG completeness and SESE closure first (`dagpipe graph validate`), then run red test -> unique owner fix -> real public-entrypoint black-box regression.
-   - Trigger one independent architecture/milestone review at the milestone integration boundary after author verification passes. Ordinary internal nodes and commits do not trigger review.
+   - Follow the host's development and delivery contract for worktrees, planning, black-box verification and independent milestone review. This Skill adds only the affected AppSDK gates; it does not define another lifecycle.
+   - Check the affected project DAG through the [DAG owner](../dagpipe-runtime/SKILL.md). Reuse valid unchanged graph evidence; a text-only edit does not require a new graph.
 4. **Collaboration ownership**:
-   - Long-horizon work belongs to a consenting peer assigned through the public Collab board. That peer orchestrates independent `codex exec --profile gcm` execution and observation workers.
-   - Master and peer each own and orchestrate their goal. One-shot execution/observation goes directly to independent GCM workers regardless of peer availability. Managed-subagent commands and records are legacy compatibility for diagnosis or migration, not a production execution surface.
-   - Fleet, patrol, worktree-hold, and one-shot rearm rules belong to the Collab Skill. This governance Skill owns AppSDK intake, DAG, gates, review, and goal commands.
+   - Apply the [Collab Skill](../collab/SKILL.md) only when explicitly enabled and registered. It owns peer/master responsibilities, clarification, task handoff and finite patrols; the host owns worker dispatch and model selection.
+   - This governance Skill owns AppSDK intake and applicable governance gates. It does not register peers or turn internal questions into human approval steps.
 
 ## Reference router (load on demand)
 

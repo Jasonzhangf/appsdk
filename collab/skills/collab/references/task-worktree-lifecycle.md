@@ -1,9 +1,9 @@
 # Task and Worktree Lifecycle
 
-Use this lifecycle automatically for multi-worker tasks once scope and worktree
-are known. Bind the semantic feature/resource and owned file paths in the task
-scope; check overlapping ownership before shared changes. Registration is not
-a prerequisite for unrelated single-worker quality checks.
+Use this reference for a concrete Collab task, board action or resource close.
+Bind the semantic feature/resource and owned paths before shared changes.
+Discussion, status questions and role settings do not require creating a task.
+Registration is not a prerequisite for independent quality checks.
 
 Engineering delivery and Collab resource close are separate. Verified delivery
 can be reported while a worktree is retained with owner and purpose recorded.
@@ -13,9 +13,7 @@ to declare tested work delivered.
 
 ```text
 latest main
-  -> clean declared configured worktree path (<base>/<project-key>/<short-slug>
-     when [worktree].base is configured; legacy
-     <project-main>/playground/<short-slug> remains valid during transition)
+  -> exclusive worktree at the project/host-contract path
   -> register owned task
   -> implement and verify
   -> task deliver {code candidate | --no-candidate read-only evidence}
@@ -45,16 +43,14 @@ accepted -> rework -> working
 Common commands:
 
 ```sh
-collab context
 collab task status [task-id]
 collab task conflicts --feature <feature-id>
 collab task register <task-id> --feature <feature-id> \
-  --worktree <configured-or-legacy-worktree> \
+  --worktree <owned-worktree> \
   --branch codex/<short-slug> --base-commit <sha> --priority p2
 collab task update <task-id> --status verifying --next "<next evidence gate>"
-collab task update <task-id> --status reviewed
 collab task deliver <task-id> --evidence "commit=<sha>; gates=pass" \
-  --worktree <configured-or-legacy-worktree>
+  --worktree <owned-worktree>
 collab task deliver <task-id> --evidence "read-only evidence; gates=pass" \
   --no-candidate
 collab task review <task-id> --accept --evidence "review gates=pass"
@@ -75,21 +71,23 @@ lease. Base reception is daemon-owned and has no subscription-closing command;
 end a leftover finite goal schedule with `appsdk goal cancel`, and let
 task-owned schedules end with task closure.
 
-- One issue owns one clean worktree. New work must use the configured
-  `[worktree].base` when set, for example
-  `<base>/<project-key>/<short-slug>`; legacy paths under
-  `<project-main>/playground/<short-slug>` remain valid during the transition.
+- Use the project/host contract's exclusive external worktree and
+  Close-Before-Open lifecycle. A legacy path accepted by the CLI does not
+  authorize a new worktree outside that contract. Reuse an existing task tree
+  only after its writer has safely handed it back; preserve its valid changes.
 - A worktree is only the task execution directory and has no identity context.
-  Run `collab context`. The CLI automatically observes runtime facts, and the
+  Reuse the current valid context. When recovery is needed, the CLI observes runtime facts and the
   daemon owns identity selection, creation, recovery, update, registration,
   and binding persistence. Use the same snapshot for this peer's task context,
   peers, and master-authority state. Never create a worktree-local peer, and never
   infer "no master" from a missing worktree directory or a failed `context`.
 - Declare task ID, owner, feature/resource ID, worktree, branch, base commit,
   priority, status, and next step before product edits.
-- Never share/reuse a worktree. Never depend on dirty main.
-- Only the owner may update, deliver, cancel, or normally close. Review and
-  exact-main integration require the task owner or current master.
+- Never have concurrent writers in one worktree. Never overwrite dirty main.
+- Only the owner may update, deliver, cancel, or normally close. A specified
+  reviewer must perform the required review; author/master cannot substitute.
+  Unspecified review and exact-main integration retain their existing owner
+  and current-master admission rules.
 - Force close exceptions are explicit and audited: the current master may close
   any task; with no current master the owner may self-close, or a registered peer
   may close a task whose owner registered transport identity is lost.
@@ -110,8 +108,8 @@ Delivery, review, and applicable integration are separate durable milestones.
 uses `--worktree`; the exact delivered candidate must resolve before
 integration. Explicit read-only work uses `--no-candidate`; a missing or
 unresolved code candidate never becomes read-only by inference. The task owner
-or current master uses `task review --accept|--rework` to record the review
-decision. Accepted read-only work reaches the typed `no_merge_required`
+or current master uses `task review --accept|--rework` under the applicable
+reviewer contract; a specified reviewer remains mandatory. Accepted read-only work reaches the typed `no_merge_required`
 disposition and has no integration milestone. For code delivery, `task
 integrated` accepts a commit reachable from `refs/heads/main` and records
 mainline evidence, but the exact delivered candidate must also be reachable
@@ -153,6 +151,35 @@ rework and redeliver it with the correct code intent. Once review and
 applicable integration are complete, the owner removes only its clean owned
 worktree, records the cleanup receipt, and closes normally.
 
+## Work roles and assignment policy
+
+The current master may set another stable name's specialties with
+`collab context --for-name '<name>' --work-roles '<complete-list>'` under
+existing authorization. Omit roles to preserve them; an explicit empty list
+clears them. Role settings do not publish a task or change master authority.
+
+Save task scope, delivery/test conditions and relevant authorization in the
+existing board task. Set a reusable work policy only when that default is needed:
+
+```sh
+collab board policy --scope project --work-kind '<kind>' --prefer-role '<role>'
+collab board policy --scope goal --id '<parent-task>' --expected-revision <observed> --executor '<name>'
+collab board policy --scope task --id '<task>' --expected-revision <observed> --reviewer '<name>'
+```
+
+Project, goal and explicit task values apply in that order per field. Child
+tasks refer to their goal task through `--parent-task`. Defaults do not silently
+rewrite already confirmed task constraints. Use `--clear-executor`,
+`--clear-reviewer` or `--clear-prefer-role` for an authorized removal; do not
+guess clearing semantics from an empty name. Do not create a second role table.
+
+A named executor/reviewer is mandatory; a preferred specialty is a selection
+hint. Within authorized selection, master may use
+`collab board dispatch '<task>' --expected-revision <observed>` for an existing
+task. Missing optional preferences do not require human input. Preserve
+explicit user constraints and handle internal scope/resource changes through
+the assigning owner and the main Skill's clarification rule.
+
 ## Public task board and read-only dashboard
 
 未关闭任务保留；负责人身份的当前绑定失效时，board 负责人显示为空，由 master 重新安排。读取不恢复旧身份、不自动关闭任务，也不修改历史 owner、资源或证据。已关闭任务保留历史负责人。board 是独立业务读取，不参与身份恢复判定。
@@ -183,8 +210,9 @@ collab board claim <task-id> --expected-revision <observed>
 ```
 
 Claim starts one pending task in the caller's own identity. A peer may claim
-its own publication or another authorized task. Read the current revision from
-`board show`. Claim atomically checks that the task is still pending and that
+its own publication or another authorized task. Read the revision from a current
+typed task/board receipt; query `board show` only when that view is missing or
+known stale. Claim atomically checks that the task is still pending and that
 the caller can start execution; it records the actual executor as owner. A
 stale or competing claim fails without taking the task. Do not update a
 pending task to `working` to bypass claim. Never claim outside the user's
@@ -200,8 +228,8 @@ collab board invite <task-id> --to <peer> --expected-revision <observed>
 Invite and respond are revision-checked. `invite` fails with
 `BOARD_STALE_REVISION` when the observed revision is old, and with
 `BOARD_PEER_BUSY` when the target already owns an unfinished task or another
-invitation. Take the revision from `collab board show`, never from a message
-body.
+invitation. Take the revision from the current typed task view, never from a
+message body; an already available valid view avoids another board read.
 
 The invited peer accepts or declines in its own identity. Accept rechecks the
 peer's other responsibilities and its live binding before ownership moves:
@@ -290,54 +318,19 @@ response:` line before retrying: a durable outcome is not a retryable failure.
 
 ## Task liveness and escalation
 
-An assigned task remains live until its actual cleanup receipt and `closed`
-state exist. The owner acts on an explicit dispatch, a bounded direct-message
-lease, a supported timer/wake, or a real external event; it does not poll on a
-schedule. When a wake arrives, inspect the task, worktree, mailbox, and
-wait/block state, then take the next actionable step. Continue execution when
-work is available, resolve a blocker when it can, and record/escalate when it
-cannot. ACKing a wake is not progress and does not satisfy liveness.
+The owner retains the task through required delivery and resource closure.
+Act on the current authorized next action or a relevant result/wake. Do not
+poll every task, worktree and mailbox after an unrelated message. Use the
+main Skill's [clarification rule](../SKILL.md#澄清决策与阻塞) for help and
+[resource-waits](resource-waits.md) for a real dependency. Unchanged waiting
+does not require repeated reports, snapshots or a new task.
 
-Route escalation by role:
-
-- An ordinary worker reports blockers to the current Collab master immediately.
-  Send original failure evidence, attempted remedies and the decision needed;
-  do not delay help until root cause or a solution is proven. Apply the main
-  Skill's Registered patrol duties for master verification. Independent peers may
-  temporarily decline a master collaboration invite to protect their own task.
-  If no current master exists, report to the collaborator that initiated the
-  task. Legacy managed records grant no new execution authority.
-- A peer becomes master only after explicit user approval for that peer and
-  project; the caller must hold an authenticated current binding. An approved
-  `collab master promote --approval` replaces any recorded holder and is
-  independent of the incumbent's or the candidate's liveness. Only the current
-  master grant holder may `collab master delegate`. An internal init adapter
-  result alone proves neither peer initialization nor master ownership; only
-  `collab context` and the returned snapshot have that authority for the
-  current agent. A dead recorded thread does not remove the current holder's
-  authority. Codex root is not Collab master.
-- Master compiles the goal into a dependency graph, then parallel unique-write
-  scopes. It publishes each long-horizon task and claims or invites a suitable
-  consenting peer only when delivery conditions (done-iff, artifacts, in/out
-  of scope, forbidden edits) and test conditions (exact commands, expected
-  results, evidence location) are unambiguous. Do not equally split a large
-  goal or share a write scope. Bounded execution or observation uses an
-  independent `codex exec --profile gcm` worker. Workers execute only the
-  approved assignment and return evidence. Report suspected blockers promptly
-  with original failure evidence and attempted remedies; do not require a
-  proven solution before asking for help. Apply the main Skill's Registered
-  patrol duties for master verification and continued peer delivery ownership.
-
-For every escalation include `task_id`, current durable status, exact blocker or
-wait target, failure evidence, attempted resolution/results, and the decision/action
-needed. Include a cause or proposed solution when known; otherwise mark it
-unknown and request help promptly. Keep the task blocked or waiting truth durable; do not create a
-duplicate task, silently release a claim, or wait without a next check and
-escalation path.
-
-Before a patrol cycle ends, preserve and report PROTECTED_HOLD resources. If
-continued scheduling is required, explicitly re-arm a consumed one-shot goal
-or deadline wake. A read, ACK, summary, or dispatch receipt is not completion.
+Record actual affected state and preserve claims; asking for help does not
+transfer ownership. A master verifies a formal blocker and arranges help or
+authorized reassignment. A known technical question can go directly to its
+owner. Never force-close unfinished work to silence reminders. Use
+[notifications](notifications.md#patrol-duties-and-finite-schedules) for a
+needed finite wake, preserving base direct-message reception.
 
 ## Lifecycle recovery
 

@@ -34,8 +34,10 @@ scope、owner、指定执行者或必需 reviewer，也不替 agent 执行任务
 
 context 从当前身份选择标准 master/peer 模板；存在项目覆盖则读取覆盖。再按当前稳定
 名字的工作角色，按序返回全部匹配的已配置专长模板。未配置的工作角色使用标准身份流程，
-不制造缺配置故障。`role_brief.workflow_template` 包含基础版本、来源、revision 和完整
-模板；旧身份与 authority 字段继续由原权限 owner 决定，operations 从同一最终 brief 投影。
+不制造缺配置故障。`role_brief.workflow_template` 仅包含版本、来源和 revision 等选择元数据；
+模板正文在 role_task、responsibilities、next_action、completion_action 中展开一次。
+身份与 authority 字段继续由原权限 owner 决定，operations 只返回当前事实触发的动作，
+不镜像静态职责。role_task 说明目标层级，next_action 说明当前续作，completion_action 说明交回终点。
 master 的 context 同时列出项目配置，供其读取后调整。
 
 ```mermaid
@@ -68,9 +70,11 @@ collab context --workflow-target 'role:designer' --reset-workflow-template
 身份查询不得夹带模板写入，互斥或缺少目标的参数在变更前拒绝。模板重置删除项目覆盖，
 恢复标准身份流程；不因模板更新让 peer 自行放弃当前工作。
 
-master 对角色变化进行一次受影响安排，按“变化、当前分工、交付接力、实际安排、执行
-状态”报告用户，然后继续。仅授权之外的 scope、显式硬约束变化或关键事实缺失才需
-确认。通知已运行 peer 立即读取新流程时，使用现有消息/派单入口，不新增周期轮询。
+master 对角色变化安排受影响工作，只报告影响后续行动的分工变化和未决事项。
+澄清规则唯一维护在基础 JSON 的 coordination_rules.clarification_route_rule，运行时展开到
+role_brief.responsibilities。常规技术选择在授权内自行决定；内部问题交负责 peer、总设计师或 master。
+仅用户独占关键事实、新授权或用户显式硬约束变化才询问人类。已有有效 context 可复用。
+通知运行中的 peer 使用现有消息入口，不新增周期轮询或无变化报告。
 
 ## 验收
 

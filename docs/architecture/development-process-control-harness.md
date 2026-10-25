@@ -39,9 +39,10 @@ technical plan.
 
 ## L2 Truth and storage
 
-Existing AppSDK project, module, artifact, review, promotion, and freeze records
-remain the sole lifecycle truth. The harness projects those records and must
-not invent a parallel lifecycle enum.
+Existing AppSDK project/module records remain the lifecycle truth. Artifact,
+promotion and freeze records apply only to their selected compilation or
+publication flow. The harness projects applicable records; it does not require
+the publication chain for ordinary development or invent another lifecycle.
 
 ```text
 .appsdk/guidance/compiled.json
@@ -74,19 +75,14 @@ execution state and never becomes a durable project rule automatically.
 | Lifecycle bridge | domain/node mapping | canonical command/gate hints | duplicate commands |
 | Closeout projector | final state/evidence | gaps, cleanup, memory candidates | automatic memory writes |
 
-## L4 Full-domain routing
+## L4 Domain routing
 
-One engine covers AppSDK as a whole. Existing governance without Guide enters
-through a read-only setup proposal before rule compilation. Configured projects
-may re-enter the same bootstrap path for a non-destructive standard-template
-upgrade review:
-
-```text
-guide status -> bootstrap setup proposal -> user approval -> guide compile
-             -> bootstrap -> migration -> governance-preflight
-             -> develop/debug -> review -> delivery
-             -> integration -> promotion -> freeze -> cleanup
-```
+Select the domain that matches the current authorized action. Bootstrap,
+migration, develop/debug, review, delivery, integration, promotion, freeze and
+cleanup are available domains, not mandatory consecutive phases. Existing
+governance may use a read-only setup proposal when Guidance is selected;
+configured projects may use the same bootstrap entry for an intentional rule
+upgrade. Reuse existing authorization rather than asking for it again.
 
 Domains select prompts and workflow contracts. They do not duplicate canonical
 commands such as `prepare`, `init`, `pin-lock`, `verify`, `compile`,
@@ -105,7 +101,7 @@ it. With compiled Guidance it returns a
 write project or task state, and the template is not activated as a rule
 source. After approval and compile, task intake
 projects only explicitly declared AGENTS and local Skill sources, their
-precedence/digests, project/module/goal context, unresolved questions, Skill
+precedence, project/module/goal context, unresolved questions, Skill
 invocation suggestions, and next commands. AppSDK does not interpret prose,
 answer questions, call a model, or persist a second intake truth.
 
@@ -118,19 +114,24 @@ installed standard template reference, the bundled AppSDK Skill, and one direct
 Skill child under each standard project-local Skill root. Discovery produces
 candidates, not active rules. The standard template remains advisory and cannot
 be declared implicitly. User approval and an explicit project declaration are
-required before compile. Markdown sources are
-then bound by path, precedence, and digest for the agent to read; AppSDK does
+required before compile; existing authorization may satisfy that requirement.
+Markdown sources are identified by path and precedence for the agent to read; AppSDK does
 not claim semantic verification of arbitrary prose. Machine contracts are JSON
 and are validated.
 
 A PlanRecord binds:
 
 - project, goal, module, task, owner, and mode;
-- project contract, goal, source commit/tree, and scope hashes;
-- declared AGENTS/Skill source paths and digests;
-- compiled guidance manifest hash.
+- current goal and declared owner;
+- declared AGENTS/Skill sources and allowed module scope.
 
-Any bound-context drift blocks updates until a PlanRevisionRecord is accepted.
+The current compiler no longer emits source digests or a manifest hash.
+`load_compiled` removes retired digest fields from old artifacts. Plan/event
+identifiers used internally for revision selection and idempotency are not an
+agent-side candidate packaging step. `context_drift` checks goal, declared
+owner and scope membership. Ordinary scoped edits or Git commits do not force
+a plan revision. Revise when the goal, scope, acceptance, key approach or
+dependencies materially change.
 
 ## L6 Severity
 
@@ -149,8 +150,8 @@ Default forbidden boundaries are narrow:
 - fabricated or empty evidence for a passing required step;
 - non-adjacent transitions;
 - overwrite/delete of plan history;
-- stale commit/tree/scope/rule-context evidence;
-- continuing an old plan after owner, scope, or rule-contract drift;
+- continuing a plan after its goal or declared owner changes, or outside its
+  permitted module scope;
 - guidance mutation from `main`;
 - claiming review, delivery, promotion, freeze, or cleanup complete before the
   corresponding required lifecycle gate passes.
@@ -186,7 +187,8 @@ retry is part of guidance.
 `guide close` reports workflow completion, remaining lifecycle gaps, evidence,
 cleanup requirements, and memory candidates. The first release never writes
 AGENTS, Skills, MEMORY, or USER files automatically. Durable-rule changes use a
-separate human-reviewed change.
+separately authorized change; current user authorization may already cover it.
+The close projection does not grant that authorization.
 
 ## L9 Human tour and process review
 

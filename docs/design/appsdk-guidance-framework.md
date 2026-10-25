@@ -43,8 +43,8 @@ IDs are invalid.
 3. validates each declared JSON guidance contract;
 4. orders sources by precedence then source ID;
 5. rejects duplicate domain, node, edge, and rule IDs;
-6. emits source digests, merged workflows/rules, and a deterministic manifest
-   hash to `.appsdk/guidance/compiled.json`.
+6. emits declared source metadata and merged workflows/rules to
+   `.appsdk/guidance/compiled.json` without source-digest or manifest-hash wrappers.
 
 Compilation is deterministic: timestamps and absolute paths are excluded. The
 same source bytes and project contract produce identical output in every
@@ -82,8 +82,8 @@ The projector validates the selected module's declared `owned_paths` and
 `contract_paths` before rule compilation. `MODULE_PATH_MISSING` returns
 `module_binding` as the first failing gate and directs the module owner to bind
 the project contract to an existing project-owned path. Ordinary `verify`
-remains independent; compile-time source hashing retains its existing hard
-failure.
+remains independent. A missing required source still fails explicitly;
+retired digest fields in older compiled artifacts are not projected to consumers.
 
 `readiness` and `reason_code` explain lifecycle state; they are not lifecycle
 nodes. Prompt commands add declared rule paths, allowed evidence, and the plan
@@ -91,7 +91,19 @@ proposal schema. They never choose technical implementation details.
 
 ### Initialization intake
 
-`guide init` is the standard entry before an agent creates a task plan. It
+Target feedback contract: resolve questions from the effective requirements,
+evidence and authorized owner first. Registered collaborators use the Collab
+clarification route; only a user-held critical fact, new authorization or an
+explicit user-constraint change requires human input. Emit each needed next
+action once and omit bootstrap source-digest wrappers.
+
+Implementation gap observed during this audit: `rust/src/guidance/intake.rs`
+still computes bootstrap digests, asks the user all unresolved questions and
+duplicates commands across `command_sequence`, `next` and `persistence`.
+The compiler's digest removal does not fix this intake path. Its owner must
+check consumers and verify the public intake before claiming this contract is live.
+
+When persistent Guidance is selected, `guide init` is the read-only task intake. It
 returns `guide_flow_required`, the selected goal/module/workflow projection,
 present declared sources in precedence order, missing optional context, exact
 `$skill-id` suggestions from a declared Skill contract or `<skill-id>/SKILL.md`
@@ -122,8 +134,8 @@ project source remains a candidate until explicit user authorization and
 declaration in the project contract. The standard template is advisory
 comparison material and is never an active rule source.
 
-Bootstrap output includes existing project/module state, candidate source paths
-and digests, Skill invocation suggestions, unresolved workflow/command/rule
+Bootstrap output includes existing project/module state, candidate source paths,
+Skill invocation suggestions, unresolved workflow/command/rule
 ownership questions, a `GuidanceSetupProposal` schema, and the post-approval
 compile/verify commands. It writes neither durable rules nor
 `.appsdk-control`. The Agent reads effective upstream rules, project AGENTS and
@@ -141,8 +153,8 @@ compile step.
 Repeated `appsdk init` refreshes `.appsdk/templates/minimal/AGENTS.md` from the
 current Bundle without overwriting the project-owned root `AGENTS.md`. A
 configured project may then request bootstrap with task `guidance-upgrade`.
-The output uses `setup_kind=template_upgrade_review`, binds the reference path,
-version, and digest, and asks the Agent to read current rules first. The
+The output uses `setup_kind=template_upgrade_review`, identifies the reference
+path and version, and asks the Agent to read current rules first. The
 proposal separates recommended changes, retained project rules, and declined
 template items. It writes no project, lifecycle, or task state before approval.
 Repeated initialization and unrelated version refreshes do not trigger a
@@ -185,7 +197,8 @@ Required proposal fields:
 ```
 
 The proposal must not contain `current_node`, `next_transition`, source hashes,
-or a rule-context hash. AppSDK derives the current node and next transition.
+or a rule-context hash. AppSDK derives the current node and next transition;
+the prohibited hash fields are not an agent-supplied admission packet.
 Nodes must form one adjacent path
 from the selected domain entry. Owner must match the node's resolved canonical
 owner. Scope must remain inside the module's owned/contract paths.

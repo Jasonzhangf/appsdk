@@ -12,7 +12,8 @@ contracts.
 - Compatibility and legacy boundaries: [describe].
 
 When persistent requirements are established, `.appsdk/requirements.json` is
-their sole source. Read it through `appsdk requirements show` and `history`.
+their sole source. Read applicable effective items through `appsdk requirements show`;
+use `history` when a relevant change needs verification. Reuse unchanged evidence.
 Requirements remain effective until the user explicitly changes or revokes
 them in the conversation. Preserve that instruction and source when applying
 a change; agent plans, task completion, review PASS and reset are not authority
@@ -82,8 +83,9 @@ current ledger version, and use the SDK review context for all applicable items.
   regressions. Optional simplification is advisory. Follow the host review
   contract; internal progress does not dispatch another review. Reuse valid
   evidence when relevant inputs are unchanged; rerun affected checks on drift.
-- Keep Collab automatic for multi-worker identity, communication and task/file
-  ownership. Check conflicts before shared writes. Failure blocks dependent
+- When explicitly enabled and registered, use Collab for multi-worker identity,
+  communication and task/file ownership. Follow its Skill; do not register as a
+  prerequisite for independent work. Check conflicts before shared writes. Failure blocks dependent
   collaboration, not independent isolated work or quality checks.
 - Long tasks and handoffs may save relevant notes; no automatic promotion to
   memory, Skills or rules. Delivery and retained-resource cleanup are separate.

@@ -1231,3 +1231,54 @@ fn finalize_preserves_unread_direct_message_payloads() {
     drop(state);
     std::fs::remove_dir_all(root).ok();
 }
+
+/// A rejected DSH wake is repaired on the recipient's bound gateway, not by
+/// making the recipient drain the mailbox with `collab recv` and not by
+/// re-sending the same body blindly.
+#[test]
+fn rejected_dsh_wake_escalation_restores_gateway_native_receive() {
+    let response = notification_send_response(
+        json!({"msg_id": "msg-dsh-rejected"}),
+        true,
+        "dsh",
+        &NotificationAttempt::Rejected("DSH_GATEWAY_ENQUEUE_TIMEOUT".into()),
+    );
+    assert!(!response.ok);
+    assert_eq!(
+        response.error.as_deref(),
+        Some("DSH_NOTIFICATION_REJECTED: DSH_GATEWAY_ENQUEUE_TIMEOUT")
+    );
+    assert_eq!(response.data["durable"], true);
+    assert_eq!(response.data["failure"], "notification_delivery_failed");
+    let escalation = response.data["escalation"]
+        .as_str()
+        .expect("a rejected dsh wake carries an escalation");
+    assert!(escalation.contains("durable"), "{escalation}");
+    assert!(
+        escalation.contains("restore") && escalation.contains("gateway native receive"),
+        "a rejected dsh wake must point at the bound gateway receive loop: {escalation}"
+    );
+    assert!(
+        !escalation.contains("collab recv"),
+        "a rejected dsh wake must not redirect the recipient to the CLI reader: {escalation}"
+    );
+    let lowered = escalation.to_ascii_lowercase();
+    assert!(
+        !lowered.contains("send a new message") && !lowered.contains("re-send"),
+        "a rejected dsh wake must not advise a blind re-send: {escalation}"
+    );
+
+    // Other transports keep their CLI-read guidance; the repair differs by
+    // transport, so the tmux wording is the control for this counterexample.
+    let tmux = notification_send_response(
+        json!({"msg_id": "msg-tmux-rejected"}),
+        true,
+        "tmux",
+        &NotificationAttempt::Rejected("TMUX_ENTER_SUBMIT_FAILED: forced".into()),
+    );
+    let tmux_escalation = tmux.data["escalation"].as_str().unwrap();
+    assert!(
+        tmux_escalation.contains("collab recv"),
+        "a rejected tmux wake keeps the durable-read repair: {tmux_escalation}"
+    );
+}

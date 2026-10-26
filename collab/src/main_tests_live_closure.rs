@@ -19,10 +19,20 @@ fn live_closure_expected_inputs_match_single_and_batch_notification_payloads() {
     assert_eq!(expected.exact.len(), 2);
     assert!(expected.exact[0].starts_with("COLLAB_NOTIFY message-1 ["));
     assert!(expected.exact[0].contains(challenge));
-    assert!(expected.exact[0].contains("READ IS NOT DONE"));
+    assert_eq!(
+        expected.exact[0].matches("collab recv").count(),
+        1,
+        "a wake carries exactly one read action: {}",
+        expected.exact[0]
+    );
     assert!(expected.exact[1].starts_with("COLLAB_NOTIFY message-1 [notification-batch]"));
     assert!(expected.exact[1].contains("message_ids=message-1"));
-    assert!(expected.exact[1].contains("READ IS NOT DONE"));
+    assert_eq!(
+        expected.exact[1].matches("collab recv").count(),
+        1,
+        "a batch wake carries exactly one read action: {}",
+        expected.exact[1]
+    );
     assert!(live_closure_item_matches_input(
         &json!({
             "turnId": "turn-1",
@@ -132,7 +142,7 @@ fn live_closure_item_correlation_accepts_multi_message_batch_entry() {
         challenge,
     )
     .unwrap();
-    let batch_input = "COLLAB_NOTIFY message-other [notification-batch] Batch wake: message_ids=message-other,message-target,message-later task_ids=none action_categories=other,appsdk-collab-live:closure-1:peer_to_peer,later. Run `collab recv` once to consume and read this durable batch; execute the actions, do not ACK-only. older_messages=2; run collab inbox | P1 ACTION: do the in-scope action the message asks for. Details: run `collab recv` once to consume and read this durable notification. | READ IS NOT DONE: never end your turn on an ACK, a read, or a summary. After handling, resume your current task; if you own none, run `appsdk longhorizon show` and take work.";
+    let batch_input = "COLLAB_NOTIFY message-other [notification-batch] Batch wake: message_ids=message-other,message-target,message-later action_categories=other,appsdk-collab-live:closure-1:peer_to_peer,later. older_messages=2 | P1 ACTION: do the in-scope action the message asks for. Read it once with `collab recv`; that consumes this durable message.";
 
     assert!(live_closure_item_matches_input(
         &json!({

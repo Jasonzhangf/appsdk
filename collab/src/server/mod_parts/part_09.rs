@@ -1101,9 +1101,105 @@ fn task_view(state: &State, task: &TaskRec) -> serde_json::Value {
     let cleanup_required = task.worktree_path.is_some();
     let cleanup_receipt = state.cleanup_receipts.get(&task.id);
     let lifecycle = state.task_lifecycle.get(&task.id);
+    // A read projects only the sections that carry a fact. A task that has not
+    // delivered shows no delivery/review/integration block instead of a page of
+    // nulls, while every field the next action needs keeps its own key.
+    let mut sections = serde_json::Map::new();
     let (delivery_complete,completion_missing) = state.delivery_completion_projection(&task.id);
     let policy = state.effective_work_policy(&task.id);
-    json!({
+    if let Some(record) = lifecycle {
+        let disposition = match (task.status.as_str(), record.delivery_kind) {
+            ("accepted", state::TaskDeliveryKind::ReadOnly) => "no_merge_required",
+            ("accepted", state::TaskDeliveryKind::Code) => "integration_required",
+            ("merged", state::TaskDeliveryKind::Code) => "integrated",
+            ("closed", state::TaskDeliveryKind::ReadOnly) => "no_merge_required",
+            ("closed", state::TaskDeliveryKind::Code) => "integrated",
+            _ => "in_progress",
+        };
+        let mut delivery = serde_json::Map::new();
+        delivery.insert("kind".into(), json!(record.delivery_kind));
+        if let Some(evidence) = &record.delivery_evidence {
+            delivery.insert("evidence".into(), json!(evidence));
+        }
+        if let Some(delivered_ms) = record.delivered_ms {
+            delivery.insert("at".into(), json!(iso(delivered_ms)));
+        }
+        let mut review = serde_json::Map::new();
+        if let Some(evidence) = &record.review_evidence {
+            review.insert("evidence".into(), json!(evidence));
+        }
+        if let Some(reviewer) = &record.reviewer {
+            review.insert("reviewer".into(), json!(reviewer));
+        }
+        if let Some(reviewed_ms) = record.reviewed_ms {
+            review.insert("at".into(), json!(iso(reviewed_ms)));
+        }
+        if let Some(required_reviewer_name) = required_work_reviewer(state,&task.id) {
+            review.insert("required_reviewer_name".into(), json!(required_reviewer_name));
+        }
+        if let Some(reviewer_name) = &record.reviewer_name {
+            review.insert("reviewer_name".into(), json!(reviewer_name));
+        }
+        review.insert("valid".into(), json!(work_review_valid(state,&task.id)));
+        if record.review_subject_revision > 0 {
+            review.insert("subject_revision".into(), json!(record.review_subject_revision));
+        }
+        if let Some(reviewed_subject_revision) = record.reviewed_subject_revision {
+            review.insert("reviewed_subject_revision".into(), json!(reviewed_subject_revision));
+        }
+        let mut integration = serde_json::Map::new();
+        if let Some(commit) = &record.integration_commit {
+            integration.insert("commit".into(), json!(commit));
+        }
+        if let Some(evidence) = &record.integration_evidence {
+            integration.insert("evidence".into(), json!(evidence));
+        }
+        if let Some(integrated_ms) = record.integrated_ms {
+            integration.insert("at".into(), json!(iso(integrated_ms)));
+        }
+        sections.insert("delivery".into(), json!(delivery));
+        sections.insert("disposition".into(), json!(disposition));
+        if !review.is_empty() {
+            sections.insert("review".into(), json!(review));
+        }
+        if !integration.is_empty() {
+            sections.insert("integration".into(), json!(integration));
+        }
+    } else if let Some(required_reviewer_name) = required_work_reviewer(state,&task.id) {
+        // A pinned reviewer is a next-step fact before any delivery exists.
+        sections.insert(
+            "review".into(),
+            json!({"required_reviewer_name": required_reviewer_name, "valid": false}),
+        );
+    }
+    if let Some(request) = state.pending_merges.get(&task.id) {
+        sections.insert("merge".into(), json!({
+            "pending": true,
+            "requested_by": request.requested_by,
+            "requested_at": iso(request.requested_ms),
+            "owner": request.owner,
+        }));
+    }
+    if cleanup_required || cleanup_receipt.is_some() {
+        sections.insert("cleanup".into(), json!({
+            "required": cleanup_required,
+            "status": if !cleanup_required {
+                "not_required"
+            } else if cleanup_receipt.is_some_and(|receipt| {
+                receipt.verification == CleanupVerification::Verified
+            }) {
+                "verified"
+            } else if cleanup_receipt.is_some() {
+                "unverified"
+            } else {
+                "pending"
+            },
+            "receipt_id": cleanup_receipt.map(|receipt| receipt.id.clone()),
+        }));
+    }
+    sections.insert("updated_at".into(), json!(iso(task.updated_ms)));
+    sections.insert("keepalive".into(), keepalive::view(state, &task.owner));
+    let mut view = json!({
         "id": task.id,
         "owner": task.owner,
         "created_by": task.created_by,
@@ -1119,58 +1215,13 @@ fn task_view(state: &State, task: &TaskRec) -> serde_json::Value {
         "child_work_policies": state.board_details.get(&task.id).map(|details|&details.child_work_policies),
         "delivery_complete": delivery_complete,
         "completion_missing": completion_missing,
-        "delivery": {
-            "kind": lifecycle.map(|record| record.delivery_kind).unwrap_or_default(),
-            "evidence": lifecycle.and_then(|record| record.delivery_evidence.clone()),
-            "at": lifecycle.and_then(|record| record.delivered_ms.map(iso)),
-        },
-        "disposition": lifecycle.map(|record| match (task.status.as_str(), record.delivery_kind) {
-            ("accepted", state::TaskDeliveryKind::ReadOnly) => "no_merge_required",
-            ("accepted", state::TaskDeliveryKind::Code) => "integration_required",
-            ("merged", state::TaskDeliveryKind::Code) => "integrated",
-            ("closed", state::TaskDeliveryKind::ReadOnly) => "no_merge_required",
-            ("closed", state::TaskDeliveryKind::Code) => "integrated",
-            _ => "in_progress",
-        }),
-        "review": {
-            "evidence": lifecycle.and_then(|record| record.review_evidence.clone()),
-            "reviewer": lifecycle.and_then(|record| record.reviewer.clone()),
-            "at": lifecycle.and_then(|record| record.reviewed_ms.map(iso)),
-            "required_reviewer_name": required_work_reviewer(state,&task.id),
-            "reviewer_name": lifecycle.and_then(|record|record.reviewer_name.clone()),
-            "subject_revision": lifecycle.map(|record|record.review_subject_revision),
-            "reviewed_subject_revision": lifecycle.and_then(|record|record.reviewed_subject_revision),
-            "valid": work_review_valid(state,&task.id),
-        },
-        "integration": {
-            "commit": lifecycle.and_then(|record| record.integration_commit.clone()),
-            "evidence": lifecycle.and_then(|record| record.integration_evidence.clone()),
-            "at": lifecycle.and_then(|record| record.integrated_ms.map(iso)),
-        },
-        "merge": state.pending_merges.get(&task.id).map(|request| json!({
-            "pending": true,
-            "requested_by": request.requested_by,
-            "requested_at": iso(request.requested_ms),
-            "owner": request.owner,
-        })).unwrap_or_else(|| json!({"pending": false})),
-        "cleanup": {
-            "required": cleanup_required,
-            "status": if !cleanup_required {
-                "not_required"
-            } else if cleanup_receipt.is_some_and(|receipt| {
-                receipt.verification == CleanupVerification::Verified
-            }) {
-                "verified"
-            } else if cleanup_receipt.is_some() {
-                "unverified"
-            } else {
-                "pending"
-            },
-            "receipt_id": cleanup_receipt.map(|receipt| receipt.id.clone()),
-        },
-        "updated_at": iso(task.updated_ms),
-        "keepalive": keepalive::view(state, &task.owner),
-    })
+    });
+    // A section that holds no fact for this task stays absent rather than
+    // appearing as null or `pending: false`.
+    if let Some(object) = view.as_object_mut() {
+        object.extend(sections);
+    }
+    view
 }
 
 fn pending_merge_views(state: &State) -> Vec<serde_json::Value> {

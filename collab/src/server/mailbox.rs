@@ -123,12 +123,6 @@ pub fn semantic_notification_category(subject: &str, mtype: &str) -> &'static st
     "system"
 }
 
-const NOTIFY_PROTOCOL: &str =
-    "READ IS NOT DONE: execute authorized actions and reply to the requester as required. \
-     Use the Collab Skill's local/cross-project reply commands. Do not reply to system reminders. \
-     Peers report to requester, not routinely to the user. After handling, resume your current task; \
-     if you own none, run `appsdk longhorizon show` and take work.";
-
 pub fn notification_text(message: &Message) -> Option<String> {
     let subject_raw = message.subject.as_deref()?;
     Some(compose_notification_with_mtype(
@@ -177,13 +171,14 @@ pub fn batch_notification_text(
         })
         .collect::<Vec<_>>()
         .join(",");
+    let older = (remaining > 0)
+        .then(|| format!(" older_messages={remaining}"))
+        .unwrap_or_default();
     // Message does not carry a typed task association. Do not infer one from
     // preview text; the durable inbox remains the source for task details.
-    let task_ids = "none";
-    let older = (remaining > 0)
-        .then(|| format!(" older_messages={remaining}; run collab inbox"))
-        .unwrap_or_default();
-    format!("Batch wake: message_ids={message_ids} task_ids={task_ids} action_categories={actions}. Read full durable details from collab inbox; execute the actions, do not ACK-only. Reply to original requesters as required, then resume your own unfinished work; peers do not routinely report to the user. System reminders and results do not automatically need replies.{older}")
+    // Identity, relevance and overflow only: the composed notification owns
+    // the single read action, and the Collab Skill owns the execution protocol.
+    format!("Batch wake: message_ids={message_ids} action_categories={actions}.{older}")
 }
 
 #[derive(Debug)]
@@ -382,12 +377,12 @@ fn compose_notification_with_mtype(
 
     let head = format!("COLLAB_NOTIFY {} [{}] ", id, subject);
     let tail = format!(
-        " | {} ACTION: {}. Details: run `collab recv` once; it consumes and prints this durable notification. | {}",
-        priority, action, NOTIFY_PROTOCOL
+        " | {} ACTION: {}. Read it once with `collab recv`; that consumes this durable message.",
+        priority, action
     );
 
-    // The protocol and action must survive a long body, so the body absorbs
-    // the truncation instead of the instructions being cut off the end.
+    // The action and the read step must survive a long body, so the body
+    // absorbs the truncation instead of the instructions being cut off.
     let fixed = head.chars().count() + tail.chars().count();
     let budget = MAX_NOTIFICATION_CHARS.saturating_sub(fixed);
     let body = if body.chars().count() > budget {

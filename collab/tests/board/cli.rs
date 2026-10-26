@@ -1613,6 +1613,17 @@ fn role_patrol_board_invitation_is_durable_without_serialized_control_state() {
             "board invitation body must mention {keyword:?}: {body}"
         );
     }
+    assert!(
+        !body_lower.contains("collab recv"),
+        "the invitation body is already the recv payload; it must not require another read: {body}"
+    );
+    assert!(
+        body.contains("collab board respond")
+            && body.contains("--accept")
+            && body.contains("--decline")
+            && body.contains("--expected-revision"),
+        "accepting or declining still carries the typed revision check: {body}"
+    );
 
     let board = fixture.run_public(&["board", "show"], THREAD_A);
     let task = board["tasks"]

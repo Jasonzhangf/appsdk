@@ -4,16 +4,58 @@ use crate::server::state::{now_ms, Event, Message};
 use std::sync::Mutex;
 
 #[test]
-fn notification_guidance_closes_the_reply_then_resumes_owned_work() {
-    let text = notification_text(&msg("reply-guidance")).unwrap();
-    assert!(text.contains("local/cross-project reply commands"));
-    assert!(text.contains("reply to the requester as required"));
-    assert!(text.contains("resume your current task"));
-    assert!(text.contains("not routinely to the user"));
-    assert!(text.contains("Do not reply to system reminders"));
-    let batch = batch_notification_text(&[], 0);
-    assert!(batch.contains("Reply to original requesters as required"));
-    assert!(batch.contains("results do not automatically need replies"));
+fn wake_text_keeps_location_action_and_one_read_action_only() {
+    let text = notification_text(&msg("minimal-wake")).unwrap();
+    assert!(
+        text.starts_with("COLLAB_NOTIFY minimal-wake [worker-idle:minimal-wake] body minimal-wake | P1 ACTION: "),
+        "{text}"
+    );
+    assert_eq!(
+        text.matches("collab recv").count(),
+        1,
+        "a plain wake carries exactly one read action: {text}"
+    );
+    for repeated_rule in [
+        "READ IS NOT DONE",
+        "resume your current task",
+        "not routinely to the user",
+        "Do not reply to system reminders",
+        "appsdk longhorizon show",
+    ] {
+        assert!(
+            !text.contains(repeated_rule),
+            "a plain wake must not repeat the generic execution protocol: {repeated_rule} in {text}"
+        );
+    }
+}
+
+#[test]
+fn batch_wake_keeps_ids_categories_and_one_read_action_only() {
+    let entries = vec![(
+        0_i64,
+        "msg-a".to_string(),
+        String::new(),
+        "direct-message".to_string(),
+        notification_text(&msg("a")).unwrap(),
+    )];
+    let batch = batch_notification_text(&entries, 2);
+    assert!(
+        batch.starts_with("Batch wake: message_ids=msg-a action_categories=worker-idle:a."),
+        "{batch}"
+    );
+    assert!(batch.contains("older_messages=2"), "{batch}");
+    for removed in ["task_ids", "collab inbox", "ACK", "resume", "Reply to"] {
+        assert!(
+            !batch.contains(removed),
+            "a batch wake must not repeat execution rules: {removed} in {batch}"
+        );
+    }
+    let composed = compose_notification("msg-a", "notification-batch", &batch);
+    assert_eq!(
+        composed.matches("collab recv").count(),
+        1,
+        "the composed batch wake carries exactly one read action: {composed}"
+    );
 }
 
 fn test_server() -> (crate::server::Server, PathBuf) {

@@ -1,3 +1,22 @@
+/// Recipient view of one consumed message. What the reader acts on stays: the
+/// durable body, sender, identity, correlation and reply obligation. Wake
+/// counters, the last attempt time and the retry marker are delivery ledger
+/// state; a successful read must not carry them per message.
+fn received_message_view(state: &State, message: &Message) -> serde_json::Value {
+    json!({
+        "id": message.id,
+        "from": message.from,
+        "to": message.to,
+        "type": message.mtype,
+        "subject": message.subject,
+        "body": message.body,
+        "in_reply_to": message.in_reply_to,
+        "created_ms": message.created_ms,
+        "state": message.state,
+        "reply_obligation": state.reply_obligations.get(&message.id),
+    })
+}
+
 fn poll_messages_with_context(
     server: &Server,
     worker_id: &str,
@@ -55,11 +74,10 @@ fn poll_messages_with_context(
                     }),
                 ));
             };
-            let messages: Vec<_> = messages.iter().map(|message| {
-                let mut view = serde_json::to_value(message).expect("message serializes");
-                view["reply_obligation"] = json!(st.reply_obligations.get(&message.id));
-                view
-            }).collect();
+            let messages: Vec<_> = messages
+                .iter()
+                .map(|message| received_message_view(&st, message))
+                .collect();
             return Some(Resp::data(json!({
                 "messages": messages,
                 "count": receipt.message_ids.len(),
@@ -129,11 +147,10 @@ fn poll_messages_with_context(
             }),
         ));
     };
-    let msgs: Vec<_> = msgs.iter().map(|message| {
-        let mut view = serde_json::to_value(message).expect("message serializes");
-        view["reply_obligation"] = json!(st.reply_obligations.get(&message.id));
-        view
-    }).collect();
+    let msgs: Vec<_> = msgs
+        .iter()
+        .map(|message| received_message_view(&st, message))
+        .collect();
     Some(Resp::data(json!({
         "messages": msgs,
         "count": msgs.len(),

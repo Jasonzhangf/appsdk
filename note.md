@@ -565,5 +565,7 @@ DSH Electron 安装器仍有 pnpm store 版本冲突，新原生插件替换未�
 新增发送 SESE 图与 manifest 绑定。7项定向单测、33项发送回归通过；
 TUI公开CLI6项、Desktop bridge公开投递与recv、DSH gateway公开投递与Poll均通过。
 固定session组合用例包含真实context续接和daemon重放，不依赖修改产品journal。
+随后补足真实retention压缩与快照重放：历史过期消息触发实际压缩，固定约束随
+未过期消息保存；会话续接后旧消息仍不可投递或消费，过期消息回收时释放对应约束。
 全部既有测试目标编译与格式检查通过；测试使用隔离协议fixture，不代表live agent推理。
 正式安装、共享daemon加载与远端交付按各自回执单独记录，不由这些结果推定。

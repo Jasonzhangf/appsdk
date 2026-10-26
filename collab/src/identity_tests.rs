@@ -1249,3 +1249,42 @@ fn tmux_endpoint_serde_round_trips() {
     let back: crate::proto::TmuxEndpoint = serde_json::from_str(&json).unwrap();
     assert_eq!(endpoint, back);
 }
+
+#[test]
+fn codex_session_anchor_retains_cross_project_refusal_without_agy_marker() {
+    let root_a = test_root("ci-cross-refusal-a");
+    let root_b = test_root("ci-cross-refusal-b");
+    std::fs::create_dir_all(root_a.join(".agent-collab")).unwrap();
+    std::fs::create_dir_all(root_b.join(".agent-collab")).unwrap();
+    let scope_a = test_scope(root_a.clone());
+    let scope_b = test_scope(root_b.clone());
+    let host_paths = HostPaths::for_state_root(root_b.join("global")).unwrap();
+
+    let foreign_codex_session = "01a1590b-7d1c-78a0-bbb8-25b83f1ad578";
+    let foreign_codex_thread = "01a1590b-7d1c-78a0-bbb8-25b83f1ad578";
+
+    // Project A registers foreign_codex_session
+    saved_identity(
+        &host_paths,
+        &scope_a,
+        "foreign-peer",
+        Some(foreign_codex_session),
+        Some(foreign_codex_thread),
+        None,
+    );
+
+    // Codex caller in Project B with inherited foreign session MUST fail cross-project
+    let codex_facts = facts(
+        Some(foreign_codex_session),
+        Some(foreign_codex_thread),
+        None,
+    );
+    let error = resolve_for_daemon_at(&host_paths, &scope_b, &codex_facts).unwrap_err();
+    assert!(
+        error.to_string().contains("IDENTITY_RESTORE_CROSS_PROJECT"),
+        "pure Codex caller must reject foreign session anchor: {error}"
+    );
+
+    std::fs::remove_dir_all(root_a).ok();
+    std::fs::remove_dir_all(root_b).ok();
+}

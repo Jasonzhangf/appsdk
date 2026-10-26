@@ -53,6 +53,10 @@ master 管项目目标，peer 管已接受的子目标，两者均负责拆分�
 与 Review 准入均沿 [codex-orchestrator](../codex-orchestrator/SKILL.md)；任务板记录
 本身不授权范围外 backlog 或生产动作。
 
+设计、规划与审查角色按
+[文件交接合同](operations.md#设计规划与审查角色的文件交接合同)产出并交接落盘文件，
+不直接执行实现。
+
 ## Register the long-horizon goal before dispatch
 
 已注册 master/peer 接受长程目标时，各自先恢复或登记本人 goal，再拆解派发。已有目标

@@ -176,7 +176,9 @@ pub(crate) fn purge_expired_storage(server: &Server, now: i64) -> usize {
     let expired: Vec<String> = st
         .msgs
         .values()
-        .filter(|message| message.created_ms <= cutoff && !st.reply_obligations.contains_key(&message.id))
+        .filter(|message| {
+            message.created_ms <= cutoff && !st.reply_obligations.contains_key(&message.id)
+        })
         .map(|message| message.id.clone())
         .collect();
     mailbox::purge_message_snapshot_files(&server.storage_root, &expired, &st);
@@ -379,24 +381,32 @@ fn retarget_owned_notification_events(
     transport: &SelectedTransport,
     now: i64,
 ) -> Vec<Event> {
-    let Some(target) = notification_target(transport) else { return Vec::new(); };
+    let Some(target) = notification_target(transport) else {
+        return Vec::new();
+    };
     let default_id = default_direct_message_id(worker_id);
-    state.notification_subscriptions.values().filter(|subscription| {
-        subscription.worker_id == worker_id && subscription.id != default_id
-            && subscription.expires_ms > now
-            && matches!(subscription.status.as_str(), "armed" | "transport-lost")
-            && (subscription.status == "transport-lost"
-                || subscription.method != transport.kind.as_str()
-                || subscription.target != target)
-    }).map(|subscription| {
-        let mut subscription = subscription.clone();
-        subscription.method = transport.kind.as_str().to_owned();
-        subscription.target = target.to_owned();
-        subscription.status = "armed".into();
-        subscription.status_reason = None;
-        subscription.updated_ms = now;
-        Event::NotificationSubscribed { subscription }
-    }).collect()
+    state
+        .notification_subscriptions
+        .values()
+        .filter(|subscription| {
+            subscription.worker_id == worker_id
+                && subscription.id != default_id
+                && subscription.expires_ms > now
+                && matches!(subscription.status.as_str(), "armed" | "transport-lost")
+                && (subscription.status == "transport-lost"
+                    || subscription.method != transport.kind.as_str()
+                    || subscription.target != target)
+        })
+        .map(|subscription| {
+            let mut subscription = subscription.clone();
+            subscription.method = transport.kind.as_str().to_owned();
+            subscription.target = target.to_owned();
+            subscription.status = "armed".into();
+            subscription.status_reason = None;
+            subscription.updated_ms = now;
+            Event::NotificationSubscribed { subscription }
+        })
+        .collect()
 }
 
 fn default_direct_message_events(
@@ -417,8 +427,12 @@ fn default_direct_message_events(
         }
         if message.wake_attempt_count > 0
             || message.retry_attempted
-            || state.notification_delivery_accepted.contains_key(&message.id)
-            || state.notification_delivery_failures.contains_key(&message.id)
+            || state
+                .notification_delivery_accepted
+                .contains_key(&message.id)
+            || state
+                .notification_delivery_failures
+                .contains_key(&message.id)
         {
             continue;
         }
@@ -439,7 +453,8 @@ fn default_direct_message_events(
                         if binding.worker_id == worker_id
                             && binding.event == "direct-message"
                             && binding.status == "armed"
-                            && binding.expires_ms > now => {
+                            && binding.expires_ms > now =>
+                    {
                         pending_direct_message_ids.insert(message.id.clone());
                     }
                     Some(binding) => {
@@ -690,7 +705,10 @@ fn attempt_tmux_notification_with_at(
 ) -> NotificationAttempt {
     let allow_retry = {
         let state = server.state.lock().unwrap();
-        state.msgs.get(message_id).is_some_and(|message| desktop_connect_retry(&state, message))
+        state
+            .msgs
+            .get(message_id)
+            .is_some_and(|message| desktop_connect_retry(&state, message))
     };
     attempt_tmux_notification_with_retry(
         server,
@@ -728,11 +746,23 @@ fn transport_log_label(transport: &SelectedTransport) -> &'static str {
 /// A prior acceptance or any later write/read uncertainty is never replayable.
 fn desktop_connect_retry(state: &State, message: &crate::server::state::Message) -> bool {
     message.state == "pending"
-        && !state.notification_delivery_accepted.contains_key(&message.id)
-        && state.workers.get(&message.to).and_then(selected_transport_for_worker)
+        && !state
+            .notification_delivery_accepted
+            .contains_key(&message.id)
+        && state
+            .workers
+            .get(&message.to)
+            .and_then(selected_transport_for_worker)
             .is_some_and(|transport| transport.kind == TransportKind::DesktopBridge)
-        && state.notification_delivery_failures.get(&message.id).is_some_and(|failure|
-            failure.retryable && failure.error.starts_with(crate::client::adapters::desktop_bridge::NOT_SUBMITTED_PREFIX))
+        && state
+            .notification_delivery_failures
+            .get(&message.id)
+            .is_some_and(|failure| {
+                failure.retryable
+                    && failure
+                        .error
+                        .starts_with(crate::client::adapters::desktop_bridge::NOT_SUBMITTED_PREFIX)
+            })
 }
 
 fn notification_method_for_worker(state: &State, worker_id: &str) -> &'static str {
@@ -772,6 +802,11 @@ fn attempt_tmux_notification_with_retry(
     if !state.scheduler_message_deliverable(message_id) {
         return NotificationAttempt::NotAttempted("scheduler admission is not deliverable".into());
     }
+    if !crate::server::state::board_patrol_notice_is_current(&state, message_id) {
+        return NotificationAttempt::NotAttempted(
+            "board patrol notice no longer has canonical eligible tasks".into(),
+        );
+    }
     let unacked_notifications = state
         .msgs
         .values()
@@ -783,8 +818,10 @@ fn attempt_tmux_notification_with_retry(
         .count();
     // Native hosts accept input while their agent is busy. Consumption of an
     // earlier message must not hold a new message outside that input boundary.
-    if !matches!(transport.kind, TransportKind::Dsh | TransportKind::DesktopBridge)
-        && unacked_notifications >= server.config.notifications.max_unacked as usize
+    if !matches!(
+        transport.kind,
+        TransportKind::Dsh | TransportKind::DesktopBridge
+    ) && unacked_notifications >= server.config.notifications.max_unacked as usize
     {
         return NotificationAttempt::NotAttempted(
             "recipient has too many unacked notifications".into(),
@@ -818,6 +855,7 @@ fn attempt_tmux_notification_with_retry(
             let message_explicit = is_explicit_notification(&state, message);
             (message.to == recipient
                 && state.scheduler_message_deliverable(&message.id)
+                && crate::server::state::board_patrol_notice_is_current(&state, &message.id)
                 && message_explicit == explicit
                 && state
                     .delivery_modes
@@ -901,6 +939,18 @@ fn attempt_tmux_notification_with_retry(
             "notification delivery window has not elapsed".into(),
         );
     }
+    // Revalidate every marked patrol cue under the same lock that commits the
+    // actual attempt. A cancellation or task transition committed before this
+    // point must prevent the attempt; an attempt already submitted cannot be
+    // retracted afterwards.
+    if !batch
+        .iter()
+        .all(|message| crate::server::state::board_patrol_notice_is_current(&state, &message.1))
+    {
+        return NotificationAttempt::NotAttempted(
+            "board patrol notice no longer has canonical eligible tasks".into(),
+        );
+    }
     server.commit_locked_reporting(
         &mut state,
         &[Event::WakeAttempted {
@@ -969,31 +1019,37 @@ fn attempt_tmux_notification_with_retry(
             let mut state = server.state.lock().unwrap();
             // A failed connect wrote none of the batch. Preserve that proof
             // for each member so recovery can resume every pending message.
-            let failed_ids = if error.starts_with(
-                crate::client::adapters::desktop_bridge::NOT_SUBMITTED_PREFIX,
-            ) {
-                batch.iter().map(|message| message.1.clone()).collect::<Vec<_>>()
+            let failed_ids = if error
+                .starts_with(crate::client::adapters::desktop_bridge::NOT_SUBMITTED_PREFIX)
+            {
+                batch
+                    .iter()
+                    .map(|message| message.1.clone())
+                    .collect::<Vec<_>>()
             } else {
                 vec![seed_id]
             };
             server.commit_locked_reporting(
                 &mut state,
-                &failed_ids.into_iter().map(|message_id| Event::NotificationDeliveryFailed {
-                    message_id,
-                    operation: if explicit {
-                        "notification.emitted".into()
-                    } else {
-                        "notification.batch_emitted".into()
-                    },
-                    error: error.clone(),
-                    failed_ms: now,
-                    retryable: matches!(
-                        crate::client::adapters::AdapterError::notification_class_from_display(
-                            &error
+                &failed_ids
+                    .into_iter()
+                    .map(|message_id| Event::NotificationDeliveryFailed {
+                        message_id,
+                        operation: if explicit {
+                            "notification.emitted".into()
+                        } else {
+                            "notification.batch_emitted".into()
+                        },
+                        error: error.clone(),
+                        failed_ms: now,
+                        retryable: matches!(
+                            crate::client::adapters::AdapterError::notification_class_from_display(
+                                &error
+                            ),
+                            crate::client::adapters::NotificationDeliveryClass::KnownNotDelivered
                         ),
-                        crate::client::adapters::NotificationDeliveryClass::KnownNotDelivered
-                    ),
-                }).collect::<Vec<_>>(),
+                    })
+                    .collect::<Vec<_>>(),
             );
             NotificationAttempt::Rejected(error)
         }
@@ -1156,13 +1212,17 @@ fn attempt_notification_detailed_with_mode_at(
         // Never let a later pre-delivery skip overwrite the class of an
         // earlier native attempt. Accepted attempts leave no failure record
         // at all; unknown and decode failures keep their non-retryable class.
-        let current_wake_accepted = state.notification_delivery_accepted.contains_key(message_id)
-            && state.msgs.get(message_id).is_some_and(|message| {
-                !state.handoff_wake_pending(message)
-            });
-        if !current_wake_accepted && !state
-            .notification_delivery_failures
+        let current_wake_accepted = state
+            .notification_delivery_accepted
             .contains_key(message_id)
+            && state
+                .msgs
+                .get(message_id)
+                .is_some_and(|message| !state.handoff_wake_pending(message));
+        if !current_wake_accepted
+            && !state
+                .notification_delivery_failures
+                .contains_key(message_id)
         {
             server.commit_locked_reporting(
                 &mut state,
@@ -1193,7 +1253,10 @@ fn notification_delivery_delay_ms(
         .and_then(|message| state.workers.get(&message.to))
         .and_then(selected_transport_for_worker)
         .is_some_and(|transport| {
-            matches!(transport.kind, TransportKind::Dsh | TransportKind::DesktopBridge)
+            matches!(
+                transport.kind,
+                TransportKind::Dsh | TransportKind::DesktopBridge
+            )
         })
     {
         return 0;

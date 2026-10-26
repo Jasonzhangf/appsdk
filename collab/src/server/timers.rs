@@ -2,7 +2,8 @@ use crate::server::global_state::{
     LedgerScanReceipt, RuntimeBindingLedgerRecord, RuntimeBindingLedgerState,
 };
 use crate::server::state::{
-    goal_deadline_key, is_goal_deadline, now_ms, Event, Message, MAX_WAKE_ATTEMPTS,
+    goal_deadline_key, is_goal_deadline, now_ms, Event, Message, NotificationSubscription,
+    MAX_WAKE_ATTEMPTS,
 };
 use crate::server::Server;
 use std::collections::{HashMap, HashSet};
@@ -118,6 +119,10 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
     if server.state.lock().unwrap().admission_frozen() {
         return;
     }
+    // The standing project-patrol resource has its own owner. Run it before the
+    // legacy finite-timer locks so the generic master-idle lifecycle never acts
+    // on it, and so the native activity read happens without holding a lock.
+    tick_standing_project_patrol_at(server, now);
     let mut lifecycle_events = Vec::new();
     {
         let mut state = server.state.lock().unwrap();
@@ -275,6 +280,12 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
         subscriptions
             .sort_by_key(|subscription| (subscription.created_ms, subscription.id.clone()));
         for subscription in subscriptions {
+            // The standing project-patrol resource is advanced by its own
+            // dedicated pass. Keep the legacy finite master-idle gates from
+            // waking it a second time or consuming its idle-episode budget.
+            if is_standing_project_patrol(subscription) {
+                continue;
+            }
             let next_trigger = next_subscription_trigger(subscription);
             let master_idle_gate_open = if subscription.event == "master-idle" {
                 match state.keepalives.get(&subscription.worker_id) {
@@ -417,6 +428,16 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
             .filter_map(|(message_id, subscription_id)| {
                 let message = state.msgs.get(message_id)?;
                 let subscription = state.notification_subscriptions.get(subscription_id)?;
+                // A standing project patrol only delivers the explicit notices
+                // it created for a due occurrence. An older message bound to
+                // the same schedule may carry uncertain input and is never
+                // replayed by the automatic timer path.
+                if is_standing_project_patrol(subscription)
+                    && state.delivery_modes.get(message_id).map(String::as_str)
+                        != Some("explicit-notification")
+                {
+                    return None;
+                }
                 // A name handoff grants one wake to the current carrier. Old
                 // acceptance, delivered state and exhausted budget are history.
                 if state.handoff_wake_pending(message) {
@@ -704,6 +725,215 @@ fn drop_unowned_ledger_classifications(
         }
     }
     dropped
+}
+
+/// Standing project patrol: a dedicated master-idle resource with the
+/// `project-patrol` subject and a fixed 15-minute interval. It is separate
+/// from finite master-idle schedules: it renews its own budget and TTL on the
+/// same id while the current master obligation is active, and it is never
+/// gated by the finite idle-episode caps, the master's own tasks, the idle
+/// clock, or an older accepted-but-unconsumed notice.
+const PROJECT_PATROL_SUBJECT: &str = "project-patrol";
+const PROJECT_PATROL_INTERVAL_MS: i64 = 900_000;
+const PROJECT_PATROL_TTL_MS: i64 = 604_800_000;
+const PROJECT_PATROL_REPEAT_HEADROOM: u32 = 100;
+
+fn is_standing_project_patrol(subscription: &NotificationSubscription) -> bool {
+    subscription.event == "master-idle"
+        && subscription.subject.as_deref() == Some(PROJECT_PATROL_SUBJECT)
+        && subscription.interval_ms == Some(PROJECT_PATROL_INTERVAL_MS)
+}
+
+fn same_standing_project_patrol(
+    current: &NotificationSubscription,
+    snapshot: &NotificationSubscription,
+) -> bool {
+    is_standing_project_patrol(current)
+        && current.id == snapshot.id
+        && current.worker_id == snapshot.worker_id
+        && current.target == snapshot.target
+        && current.method == snapshot.method
+        && current.trigger_ms == snapshot.trigger_ms
+        && current.interval_ms == snapshot.interval_ms
+        && current.created_ms == snapshot.created_ms
+}
+
+fn project_patrol_body() -> String {
+    String::from(
+        "MASTER_IDLE_WAKE subject=project-patrol. Your current activity is idle. \
+         Check current workers, unclosed board ownership and unclosed tasks, current bindings, \
+         per-task board patrol cancellations with `collab notify status` (project_board_patrol view; \
+         use `collab board show` for tasks), and real blockers. \
+         Wake only peer-owned eligible uncancelled tasks; never rearm cancelled tasks. \
+         The daemon board dispatcher performs the actual eligible peer wake from fresh board facts, \
+         so do not duplicate it with a blind manual wake. \
+         Always query the actual global CEO status with `collab ceo status`. \
+         If CEO_NOT_CONFIGURED, continue local master work. \
+         If configured and substantive progress or blockers changed, report the substantive goal, \
+         results, remaining work, blockers, and next action through `collab ceo reply`; \
+         when none remain, continue local master work. \
+         Direct-message reception is daemon-owned and must never be closed.",
+    )
+}
+
+/// Advance the standing project-patrol schedule for one due occurrence.
+///
+/// The due gate is evaluated under the state lock, the fresh native activity
+/// read happens outside it, and the typed worker, current master authority and
+/// the exact subscription occurrence are revalidated under the commit lock.
+/// Busy, unknown, waiting, offline and read-error outcomes advance the current
+/// instant by one interval so a skipped occurrence never backfills or probes
+/// every second. Every due Idle occurrence creates a new explicit-notification
+/// message id; the old accepted-but-unconsumed notice is left untouched.
+fn tick_standing_project_patrol_at(server: &Arc<Server>, now: i64) {
+    if !server.config.timers.enabled {
+        return;
+    }
+    let candidates: Vec<(NotificationSubscription, crate::server::state::WorkerRec)> = {
+        let state = server.state.lock().unwrap();
+        if state.admission_frozen() {
+            return;
+        }
+        let master_holder = match super::current_master_holder(server, &state) {
+            Ok(master_holder) => master_holder,
+            Err(error) => {
+                super::presence::append_log(
+                    &server.log_path(),
+                    &format!("PROJECT_PATROL_MASTER_SCOPE_UNKNOWN: {error}"),
+                );
+                return;
+            }
+        };
+        let Some(master_id) = master_holder else {
+            return;
+        };
+        let Some(worker) = state.workers.get(&master_id).cloned() else {
+            return;
+        };
+        let Some(transport) = super::selected_transport_for_worker(&worker) else {
+            return;
+        };
+        state
+            .notification_subscriptions
+            .values()
+            .filter(|subscription| {
+                is_standing_project_patrol(subscription)
+                    && subscription.worker_id == master_id
+                    && subscription.status == "armed"
+                    && super::subscription_matches_transport(subscription, &transport)
+                    && next_subscription_trigger(subscription).is_some_and(|trigger| trigger <= now)
+            })
+            .cloned()
+            .map(|subscription| (subscription, worker.clone()))
+            .collect()
+    };
+    for (snapshot, worker) in candidates {
+        let activity = match super::keepalive::current_board_patrol_activity(server, &worker) {
+            Ok(activity) => activity,
+            Err(error) => {
+                super::presence::append_log(
+                    &server.log_path(),
+                    &format!(
+                        "PROJECT_PATROL_ACTIVITY_READ_FAILED: {}: {error}",
+                        worker.id
+                    ),
+                );
+                crate::server::name_state::AgentActivity::Unknown
+            }
+        };
+        let message_id = {
+            let mut state = server.state.lock().unwrap();
+            if state.admission_frozen()
+                || state.workers.get(&worker.id) != Some(&worker)
+                || super::current_master_holder(server, &state)
+                    .ok()
+                    .flatten()
+                    .as_deref()
+                    != Some(worker.id.as_str())
+            {
+                continue;
+            }
+            let Some(current) = state.notification_subscriptions.get(&snapshot.id).cloned() else {
+                continue;
+            };
+            if !same_standing_project_patrol(&current, &snapshot)
+                || current.status != "armed"
+                || next_subscription_trigger(&current).is_none_or(|trigger| trigger > now)
+                || !super::selected_transport_for_worker(&worker).is_some_and(|transport| {
+                    super::subscription_matches_transport(&current, &transport)
+                })
+            {
+                continue;
+            }
+            let fired_count = if activity == crate::server::name_state::AgentActivity::Idle {
+                current.fired_count.saturating_add(1)
+            } else {
+                current.fired_count
+            };
+            let mut renewed = current.clone();
+            renewed.fired_count = fired_count;
+            renewed.trigger_ms = Some(now.saturating_add(PROJECT_PATROL_INTERVAL_MS));
+            renewed.repeat_count = renewed
+                .repeat_count
+                .max(fired_count.saturating_add(PROJECT_PATROL_REPEAT_HEADROOM));
+            renewed.expires_ms = renewed
+                .expires_ms
+                .max(now.saturating_add(PROJECT_PATROL_TTL_MS));
+            renewed.status = "armed".into();
+            renewed.updated_ms = now;
+            renewed.status_reason = None;
+            let mut events = vec![Event::NotificationSubscribed {
+                subscription: renewed,
+            }];
+            let mut message_id = None;
+            if activity == crate::server::name_state::AgentActivity::Idle {
+                let id = super::gen_msg_id();
+                events.push(Event::DeliveryMode {
+                    msg_id: id.clone(),
+                    mode: "explicit-notification".into(),
+                    source_thread_id: None,
+                });
+                events.push(Event::Sent {
+                    msg: Message {
+                        id: id.clone(),
+                        from: "collab-server".into(),
+                        to: worker.id.clone(),
+                        mtype: "notification".into(),
+                        subject: Some(format!("master-idle:{PROJECT_PATROL_SUBJECT}")),
+                        body: project_patrol_body(),
+                        in_reply_to: None,
+                        created_ms: now,
+                        state: "pending".into(),
+                        wake_attempt_count: 0,
+                        last_wake_attempt_ms: 0,
+                        retry_attempted: false,
+                    },
+                });
+                events.push(Event::WakeBound {
+                    message_id: id.clone(),
+                    subscription_id: current.id.clone(),
+                });
+                message_id = Some(id);
+            }
+            if let Err(error) = server.commit_locked_checked(&mut state, &events) {
+                super::presence::append_log(
+                    &server.log_path(),
+                    &format!("PROJECT_PATROL_COMMIT_FAILED: {error:?}"),
+                );
+                None
+            } else {
+                message_id
+            }
+        };
+        if let Some(message_id) = message_id {
+            let _ = super::attempt_notification_detailed_with_at(
+                server,
+                &message_id,
+                &snapshot.id,
+                now,
+            );
+        }
+    }
 }
 
 fn next_subscription_trigger(

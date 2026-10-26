@@ -63,6 +63,17 @@ fn call_error_with_host(root: &Path, host: &Path, request: Value) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+fn assert_route_not_duplicated(receipt: &Value) {
+    assert!(
+        receipt.get("route").is_none(),
+        "send receipt must not mirror message.route at the top level: {receipt}"
+    );
+    assert!(
+        receipt["message"]["route"].is_object(),
+        "message record must retain its durable route: {receipt}"
+    );
+}
+
 fn delivery_attempt_fields(root: &Path, message_id: &str) -> (String, String) {
     let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
     let contents = fs::read_to_string(mailbox).unwrap();

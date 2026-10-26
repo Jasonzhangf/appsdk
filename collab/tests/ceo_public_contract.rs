@@ -1452,3 +1452,165 @@ fn ceo_bootstrap_quotes_approval_profile_and_project_without_execution() {
     drop(fixture);
     std::fs::remove_dir_all(target_root).unwrap();
 }
+
+#[test]
+fn ceo_unsolicited_progress_coalesces_and_report_ack_is_one_shot() {
+    let _guard = lock_tmux();
+    let (fixture, ceo_pane) =
+        Fixture::isolated_with_pane_command("ceo-progress-batch", "sleep 600");
+    let ceo_root = fixture.root.canonicalize().unwrap();
+    let target_root = create_external_project(&fixture, "progress-target");
+    let target_pane = create_session(&fixture, "ceo-progress-target");
+
+    register_context(
+        &fixture,
+        &ceo_root,
+        &ceo_pane,
+        "ceo-progress-register",
+        false,
+    );
+    register_context(
+        &fixture,
+        &target_root,
+        &target_pane,
+        "ceo-progress-target-register",
+        false,
+    );
+
+    run_ok_at(
+        &fixture,
+        &ceo_root,
+        &ceo_pane,
+        &[
+            "ceo",
+            "promote",
+            "--approval",
+            "user explicitly approved the isolated CEO",
+        ],
+        false,
+    );
+    run_ok_at(
+        &fixture,
+        &target_root,
+        &target_pane,
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "user explicitly approved the isolated target master",
+        ],
+        false,
+    );
+
+    let first = run_ok_at(
+        &fixture,
+        &target_root,
+        &target_pane,
+        &[
+            "ceo",
+            "reply",
+            "--subject",
+            "progress",
+            "--urgent",
+            "delivered milestone",
+        ],
+        false,
+    );
+    assert_eq!(first["recorded"], true, "{first}");
+    assert_eq!(first["deduplicated"], false, "{first}");
+    assert_eq!(first["urgent"], true, "{first}");
+    assert_eq!(first["notified"], false, "{first}");
+    assert_eq!(first["reported"], false, "{first}");
+
+    let repeat = run_ok_at(
+        &fixture,
+        &target_root,
+        &target_pane,
+        &[
+            "ceo",
+            "reply",
+            "--subject",
+            "progress",
+            "--urgent",
+            "delivered milestone",
+        ],
+        false,
+    );
+    assert_eq!(repeat["recorded"], false, "{repeat}");
+    assert_eq!(repeat["deduplicated"], true, "{repeat}");
+    assert_eq!(repeat["revision"], first["revision"], "{repeat}");
+
+    // Unsolicited periodic progress is not an immediate direct message.
+    let ceo_inbox = run_ok_at(
+        &fixture,
+        &ceo_root,
+        &ceo_pane,
+        &["recv", "--timeout", "0"],
+        false,
+    );
+    assert!(
+        ceo_inbox["messages"]
+            .as_array()
+            .expect("recv messages array")
+            .iter()
+            .all(|message| message["subject"] != "progress"),
+        "unsolicited progress was delivered immediately: {ceo_inbox}"
+    );
+
+    let progress = run_ok_at(
+        &fixture,
+        &ceo_root,
+        &ceo_pane,
+        &[
+            "ceo",
+            "progress",
+            "--project",
+            target_root.to_str().unwrap(),
+        ],
+        false,
+    );
+    let report = &progress["report"];
+    let batch_id = report["batch_id"]
+        .as_str()
+        .expect("prepared batch id")
+        .to_owned();
+    let target_key = target_root.to_string_lossy().into_owned();
+    assert!(
+        report["coverage"]
+            .as_object()
+            .expect("coverage object")
+            .contains_key(&target_key),
+        "{progress}"
+    );
+    assert_eq!(report["projects"][0]["subject"], "progress", "{progress}");
+    assert_eq!(
+        report["projects"][0]["body"], "delivered milestone",
+        "{progress}"
+    );
+
+    let ack = run_ok_at(
+        &fixture,
+        &ceo_root,
+        &ceo_pane,
+        &["ceo", "report-ack", "--batch-id", &batch_id],
+        false,
+    );
+    assert_eq!(ack["batch_id"], batch_id, "{ack}");
+    assert_eq!(ack["remaining_batch_count"], 0, "{ack}");
+
+    let repeated = run_at(
+        &fixture,
+        &ceo_root,
+        &ceo_pane,
+        &["ceo", "report-ack", "--batch-id", &batch_id],
+        false,
+    );
+    assert!(
+        !repeated.status.success(),
+        "repeated acknowledgement must be rejected: {:?}",
+        repeated
+    );
+
+    drop(fixture);
+    std::fs::remove_dir_all(target_root).unwrap();
+}

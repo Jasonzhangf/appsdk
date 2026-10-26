@@ -1,3 +1,5 @@
+include!("goal_project_patrol.rs");
+
 include!("goal_subscribe_rearm.rs");
 
 #[test]
@@ -423,10 +425,8 @@ esac
     assert_eq!(previous["active"], false);
     assert_eq!(previous["collab_subscribed"], false);
     assert_eq!(previous["collab_subscription"]["id"], "sub-consumed");
-    let persisted: Value = serde_json::from_slice(
-        &fs::read(goal_test_record_path(&root)).unwrap(),
-    )
-    .unwrap();
+    let persisted: Value =
+        serde_json::from_slice(&fs::read(goal_test_record_path(&root)).unwrap()).unwrap();
     assert_eq!(persisted["subscription_id"], "sub-rearmed");
     assert_eq!(
         persisted["recovery_history"][0]["previous_record"]["subscription_id"],
@@ -565,8 +565,14 @@ fn goal_stale_lock_is_recovered_after_owner_exit() {
     fs::create_dir_all(&fake_bin).unwrap();
     fs::write(fake_bin.join("collab"), "#!/bin/sh\nexit 64\n").unwrap();
     install_goal_test_context(&fake_bin.join("collab"), &root);
-    let run_status = || Command::new(binary()).args(["goal", "status", "--json"])
-        .current_dir(&root).env("PATH", &fake_bin).output().unwrap();
+    let run_status = || {
+        Command::new(binary())
+            .args(["goal", "status", "--json"])
+            .current_dir(&root)
+            .env("PATH", &fake_bin)
+            .output()
+            .unwrap()
+    };
     let mut exited = Command::new("/bin/sh")
         .args(["-c", "exit 0"])
         .spawn()
@@ -658,10 +664,7 @@ fn goal_stale_lock_is_recovered_after_owner_exit() {
         .expect("truncated lock recovery receipt");
     assert_eq!(truncated_receipt["status"], "recovered");
     assert_eq!(truncated_receipt["original_metadata"], "pid=");
-    assert_eq!(
-        truncated_receipt["reason"],
-        "invalid or truncated metadata"
-    );
+    assert_eq!(truncated_receipt["reason"], "invalid or truncated metadata");
 
     let mut live_owner = Command::new("/bin/sh")
         .args(["-c", "sleep 2"])
@@ -757,7 +760,10 @@ fn longhorizon_bug_permission_failure_remains_explicit() {
     let fake_collab = fake_bin.join("collab");
     fs::write(
         &fake_collab,
-        "#!/bin/sh\nprintf '%s\\n' '{\"workers\":[],\"tasks\":[],\"subagents\":[]}'\n",
+        format!(
+            "#!/bin/sh\ncase \"$1 $2\" in\n  \"context \") printf '%s\\n' '{{\"name\":\"master-peer\",\"identity\":{{\"worker_id\":\"master-peer\",\"role\":\"master\",\"kind\":\"peer\"}},\"binding\":{{\"project_scope\":\"{}\"}}}}' ;;\n  *) printf '%s\\n' '{{\"workers\":[],\"tasks\":[],\"subagents\":[]}}' ;;\nesac\n",
+            root.canonicalize().unwrap().display()
+        ),
     )
     .unwrap();
     fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
@@ -809,7 +815,10 @@ fn longhorizon_bug_read_does_not_fall_back_to_upstream_after_local_failure() {
     let fake_collab = fake_bin.join("collab");
     fs::write(
         &fake_collab,
-        "#!/bin/sh\nprintf '%s\\n' '{\"workers\":[],\"tasks\":[],\"subagents\":[]}'\n",
+        format!(
+            "#!/bin/sh\ncase \"$1 $2\" in\n  \"context \") printf '%s\\n' '{{\"name\":\"master-peer\",\"identity\":{{\"worker_id\":\"master-peer\",\"role\":\"master\",\"kind\":\"peer\"}},\"binding\":{{\"project_scope\":\"{}\"}}}}' ;;\n  *) printf '%s\\n' '{{\"workers\":[],\"tasks\":[],\"subagents\":[]}}' ;;\nesac\n",
+            root.canonicalize().unwrap().display()
+        ),
     )
     .unwrap();
     fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
@@ -883,6 +892,9 @@ exit 44
     assert_eq!(block_json["status"], "blocked");
     assert_eq!(block_json["reminders_stopped"], false);
     assert_eq!(block_json["task_id"], "task-404");
+    let notice = block_json["notice"].as_str().unwrap();
+    assert!(notice.contains("appsdk bug intake --input <json>"));
+    assert!(!notice.contains("P0,cli"));
     let rule = block_json["rule"].as_str().unwrap();
     assert!(rule.contains("original failure evidence, attempted remedies"));
     assert!(rule.contains("unavailable authorized alternatives and a decision/resume condition"));
@@ -918,6 +930,63 @@ exit 44
     assert_eq!(failed.status.code(), Some(44));
     assert!(String::from_utf8_lossy(&failed.stderr).contains("COLLAB_TASK_BLOCK_FAILED"));
     assert!(!String::from_utf8_lossy(&failed.stdout).contains("\"ok\":true"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn goal_prompt_avoids_fixed_status_query_and_forced_p0_intake() {
+    let root = temp_root("goal-prompt-policy");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("long-task.md"), "# Goal\n").unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    let project_scope = root.canonicalize().unwrap();
+    fs::write(
+        &fake_collab,
+        format!(
+            r#"#!/bin/sh
+if [ "$1" = "context" ]; then
+  printf '%s\n' '{{"name":"peer-a","identity":{{"worker_id":"peer-a","role":"peer","kind":"peer"}},"binding":{{"project_scope":"{}"}}}}'
+  exit 0
+fi
+exit 64
+"#,
+            project_scope.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let prompt = Command::new(binary())
+        .args([
+            "goal",
+            "prompt",
+            "--goal",
+            "long-task.md",
+            "--interval",
+            "5m",
+        ])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        prompt.status.success(),
+        "{}",
+        String::from_utf8_lossy(&prompt.stderr)
+    );
+    let text = String::from_utf8_lossy(&prompt.stdout);
+    assert!(!text.contains("每次唤醒必查"), "{text}");
+    assert!(!text.contains("collab task status"), "{text}");
+    assert!(!text.contains("appsdk bug new --upstream"), "{text}");
+    assert!(!text.contains("P0,cli"), "{text}");
+    assert!(text.contains("appsdk bug intake --input <json>"), "{text}");
+    assert!(text.contains("按实际影响"), "{text}");
+    assert!(text.contains("master 核实后才认可阻塞"), "{text}");
+    assert!(text.contains("peer 是受托范围的唯一交付负责人"), "{text}");
 
     fs::remove_dir_all(root).unwrap();
 }

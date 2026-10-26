@@ -96,6 +96,7 @@ pub(crate) fn run(command: CeoCmd) -> anyhow::Result<()> {
         CeoCmd::Reply {
             subject,
             in_reply_to,
+            urgent,
             body,
         } => {
             let subject = required_text("subject", subject)?;
@@ -106,6 +107,7 @@ pub(crate) fn run(command: CeoCmd) -> anyhow::Result<()> {
                     subject,
                     body,
                     in_reply_to,
+                    urgent,
                 },
             )
         }
@@ -116,6 +118,10 @@ pub(crate) fn run(command: CeoCmd) -> anyhow::Result<()> {
                 .map(|path| path_text(&path))
                 .transpose()?;
             emit_ceo(authenticated(), CeoCommand::Progress { project })
+        }
+        CeoCmd::ReportAck { batch_id } => {
+            let batch_id = required_text("batch id", batch_id)?;
+            emit_ceo(authenticated(), CeoCommand::ReportAck { batch_id })
         }
         CeoCmd::BootstrapMaster {
             project,

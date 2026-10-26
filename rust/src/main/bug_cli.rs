@@ -374,6 +374,9 @@ pub(super) fn bug_intake_record_body(input: &Value) -> String {
     body
 }
 
+// Legacy bound-triage fixture builder for the historical worktree record
+// contract; ordinary intake now emits only the public receipt fields.
+#[cfg(test)]
 pub(super) fn bug_intake_triage(
     issue_id: &str,
     query: &str,
@@ -622,7 +625,6 @@ pub(super) fn bug_intake(
         )
     } else {
         let (issue_id, _record) = bug_intake_create(git_bug, root, &input, title, classification);
-        records = serde_json::json!([]);
         (issue_id, false, true, false, false, "new_confirmed")
     };
     let (matched_issue_id, matched_title, matched_classification) = if created {
@@ -652,16 +654,15 @@ pub(super) fn bug_intake(
             Some(matched_classification),
         )
     };
-    let (bug_triage, bug_triage_query_binding) = bug_intake_triage(
-        &issue_id,
-        &triage_query,
-        &records,
-        triage_mode,
-        if reopened { Some(&issue_id) } else { None },
-        matched_issue_id,
-        matched_title,
-        matched_classification,
-    );
+    let bug_triage = serde_json::json!({
+        "query_executed": true,
+        "query": triage_query,
+        "mode": triage_mode,
+        "reopened_from_issue_id": if reopened { Some(issue_id.as_str()) } else { None },
+        "matched_issue_id": matched_issue_id,
+        "matched_title": matched_title,
+        "matched_classification": matched_classification,
+    });
 
     println!(
         "{}",
@@ -674,16 +675,7 @@ pub(super) fn bug_intake(
             "reopened": reopened,
             "appended": appended,
             "governed_completion_requires_issue_id": true,
-            "bug_triage": bug_triage,
-            "bug_triage_query_binding": bug_triage_query_binding,
-            "lifecycle_binding": {
-                "worktree": "issue_id",
-                "implementation": "issue_id",
-                "test": "issue_id",
-                "review": "issue_id",
-                "merge": "issue_id",
-                "closure": "issue_id"
-            }
+            "bug_triage": bug_triage
         }))
         .unwrap()
     );

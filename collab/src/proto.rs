@@ -756,6 +756,21 @@ pub enum Req {
         repeat_count: u32,
         ttl_seconds: u64,
     },
+    NotificationCancel {
+        worker_id: String,
+        token: String,
+        #[serde(default)]
+        task_ids: Vec<String>,
+        event: String,
+        reason: Option<String>,
+        resume_condition: Option<String>,
+    },
+    NotificationBoardRearm {
+        worker_id: String,
+        token: String,
+        #[serde(default)]
+        task_ids: Vec<String>,
+    },
     NotificationStatus {
         worker_id: String,
         token: String,

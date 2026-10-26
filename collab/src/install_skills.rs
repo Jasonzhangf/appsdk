@@ -10,6 +10,14 @@ pub const SKILL_ROOT: &str = "skills/collab";
 pub const SKILL_FILES: &[(&str, &str)] = &[
     ("SKILL.md", include_str!("../skills/collab/SKILL.md")),
     (
+        "operations.md",
+        include_str!("../skills/collab/operations.md"),
+    ),
+    (
+        "references/board-idle-patrol.md",
+        include_str!("../skills/collab/references/board-idle-patrol.md"),
+    ),
+    (
         "references/workflow-templates.json",
         include_str!("../skills/collab/references/workflow-templates.json"),
     ),
@@ -114,6 +122,28 @@ mod tests {
         std::env::temp_dir().join(format!("collab-skills-{tag}-{}-{n}", std::process::id()))
     }
 
+    fn source_skill_files(root: &std::path::Path) -> Vec<String> {
+        fn visit(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    visit(&path, root, out);
+                } else {
+                    out.push(
+                        path.strip_prefix(root)
+                            .unwrap()
+                            .to_string_lossy()
+                            .replace('\\', "/"),
+                    );
+                }
+            }
+        }
+        let mut out = Vec::new();
+        visit(root, root, &mut out);
+        out.sort();
+        out
+    }
+
     #[test]
     fn install_writes_all_files_into_target() {
         let target = temp_target("write");
@@ -163,6 +193,21 @@ mod tests {
     }
 
     #[test]
+    fn embedded_bundle_covers_every_repo_skill_file() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(SKILL_ROOT);
+        let source = source_skill_files(&root);
+        let mut embedded = SKILL_FILES
+            .iter()
+            .map(|(rel, _)| rel.to_string())
+            .collect::<Vec<_>>();
+        embedded.sort();
+        assert_eq!(
+            source, embedded,
+            "every file under {SKILL_ROOT} must be embedded and every embed must exist"
+        );
+    }
+
+    #[test]
     fn empty_target_path_is_rejected() {
         let err = install(std::path::Path::new(""), false).unwrap_err();
         assert!(err.contains("non-empty path"), "{err}");
@@ -209,11 +254,14 @@ mod tests {
             // Wording belongs to the Skill owner. The installer proves that the
             // embedded bundle is the shipped repository source and installs it;
             // role and scheduling semantics are checked by their consumers.
-            if *rel == "SKILL.md" {
+            if matches!(*rel, "SKILL.md" | "operations.md") {
                 assert!(
                     !embedded.contains("RouteCodex"),
                     "canonical Collab contract must stay project-agnostic"
                 );
+            }
+            if *rel == "references/workflow-templates.json" {
+                let _: serde_json::Value = serde_json::from_str(embedded).unwrap();
             }
         }
     }

@@ -27,6 +27,7 @@ struct BootstrapSource<'a> {
     path: &'a str,
     disposition: &'a str,
     contract_path: Option<&'a str>,
+    precedence: Option<u64>,
 }
 
 fn push_bootstrap_source(
@@ -39,16 +40,18 @@ fn push_bootstrap_source(
         return;
     }
     let relative = safe_relative(candidate.path, "GUIDANCE_BOOTSTRAP_SOURCE_PATH_ESCAPE");
-    let Some(bytes) = readable_project_file(root, &relative) else {
+    if readable_project_file(root, &relative).is_none() {
         return;
-    };
+    }
     let mut source = serde_json::json!({
         "source_id": candidate.source_id,
         "kind": candidate.kind,
         "path": candidate.path,
-        "digest": digest_bytes(&bytes),
         "disposition": candidate.disposition
     });
+    if let Some(precedence) = candidate.precedence {
+        source["precedence"] = Value::Number(precedence.into());
+    }
     if candidate.disposition == "standard_reference" {
         source["required"] = Value::Bool(false);
         source["enforcement"] = Value::String("advisory".into());
@@ -130,6 +133,7 @@ fn bootstrap_sources(root: &Path, project: &Value) -> Vec<Value> {
                     path,
                     disposition: "declared",
                     contract_path: source.get("contract_path").and_then(Value::as_str),
+                    precedence: source.get("precedence").and_then(Value::as_u64),
                 },
             );
         }
@@ -144,6 +148,7 @@ fn bootstrap_sources(root: &Path, project: &Value) -> Vec<Value> {
             path: "AGENTS.md",
             disposition: "candidate",
             contract_path: None,
+            precedence: None,
         },
     );
     push_bootstrap_source(
@@ -156,6 +161,7 @@ fn bootstrap_sources(root: &Path, project: &Value) -> Vec<Value> {
             path: ".appsdk/skills/appsdk-project-governance/SKILL.md",
             disposition: "candidate",
             contract_path: Some(".appsdk/skills/appsdk-project-governance/appsdk-guidance.json"),
+            precedence: None,
         },
     );
     for (index, (skill_id, path, contract_path)) in
@@ -171,6 +177,7 @@ fn bootstrap_sources(root: &Path, project: &Value) -> Vec<Value> {
                 path: &path,
                 disposition: "candidate",
                 contract_path: contract_path.as_deref(),
+                precedence: None,
             },
         );
     }
@@ -184,6 +191,7 @@ fn bootstrap_sources(root: &Path, project: &Value) -> Vec<Value> {
             path: ".appsdk/templates/minimal/AGENTS.md",
             disposition: "standard_reference",
             contract_path: None,
+            precedence: None,
         },
     );
     sources
@@ -243,7 +251,6 @@ fn bootstrap_setup(root: &Path, project: &Value, selected_module: &Value, task: 
             serde_json::json!({
                 "path": source["path"],
                 "version": env!("APPSDK_VERSION"),
-                "digest": source["digest"],
                 "disposition": "standard_reference",
                 "enforcement": "advisory"
             })
@@ -328,35 +335,9 @@ fn bootstrap_setup(root: &Path, project: &Value, selected_module: &Value, task: 
         },
         "read_first": sources,
         "skill_commands": skill_commands,
-        "questions": [
-            {
-                "question_id": "standard_template_comparison",
-                "prompt": "Read the effective upper-level rules, local AGENTS and Skills, actual test commands, and CI/hook behavior first. Compare the actual entrypoints with the installed AppSDK standard template. Audit each difference for deletion, merge, scope reduction, or necessary addition; retain project decisions and record declined template items. Reuse valid audit evidence when no relevant resource changed.",
-                "required": true
-            },
-            {
-                "question_id": "standard_workflows",
-                "prompt": "Resolve the applicable develop, debug, review, delivery, integration and cleanup flows from the project documents and existing authorization. Ask only material unresolved questions. Promotion and freeze apply only to an explicitly selected release flow, never ordinary development.",
-                "required": true
-            },
-            {
-                "question_id": "project_commands",
-                "prompt": "Confirm the project-owned test, build, install, restart, deployed-entrypoint replay, review, merge, and cleanup commands, their evidence, the risk-based selection for ordinary changes, and the full release gate.",
-                "required": true
-            },
-            {
-                "question_id": "rule_ownership",
-                "prompt": "Confirm which facts remain in AGENTS.md, which reusable procedures belong in project-local Skills, and which nodes, edges, gates, severities, commands, and evidence contracts belong in machine guidance. Keep one owner per rule and remove confirmed duplication or unnecessary structure.",
-                "required": true
-            },
-            {
-                "question_id": "approval_boundary",
-                "prompt": "Compare recommended durable changes with the existing conversation authorization. Reuse authorization that already covers a difference, and ask the user only about uncovered durable changes. Guidance compilation is optional and is not required when Guidance is not selected.",
-                "required": true
-            }
-        ],
+        "questions": [],
         "proposal_schema": proposal_schema,
-        "agent_instruction": "Read the effective upper-level rules, local AGENTS and Skills, actual test commands, and CI/hook behavior before the advisory AppSDK template. Correct only affected contradictions and confirmed duplication at the unique owner; record material decisions in existing task notes without a separate difference ledger. Reuse existing authorization and valid audit evidence. Ask only about uncovered durable changes. Do not require Guidance compilation when Guidance is not selected. Do not modify out-of-scope project rules, contracts or runtime state.",
+        "agent_instruction": "Read the effective upper-level rules, local AGENTS and Skills, actual test commands, and CI/hook behavior before the advisory AppSDK template. Resolve internal workflow, command, ownership, and template-comparison questions through the owning peer, designer, or master. Correct only affected contradictions and confirmed duplication at the unique owner; record material decisions in existing task notes without a separate difference ledger. Reuse existing authorization and valid audit evidence. Ask the user only for a genuinely uncovered durable authorization, a human-exclusive fact, or a change to an explicit hard constraint, naming the precise missing decision and affected scope. Do not require Guidance compilation when Guidance is not selected. Do not modify out-of-scope project rules, contracts or runtime state.",
         "after_user_approval": {
             "condition": "only for uncovered durable changes; reuse existing session authorization when it covers the change",
             "actions": [
@@ -380,60 +361,8 @@ fn bootstrap_setup(root: &Path, project: &Value, selected_module: &Value, task: 
     })
 }
 
-fn questions(mode: &str, goal: &Value) -> Vec<Value> {
-    let mut values = vec![
-        serde_json::json!({
-            "question_id": "objective_confirmation",
-            "prompt": "Read declared AGENTS and Skills, then resolve the objective, non-goals and acceptance evidence from the user request and existing decisions. Ask the user only about material unresolved ambiguity; do not repeat a confirmation already given.",
-            "required": true
-        }),
-        serde_json::json!({
-            "question_id": "scope_owner_confirmation",
-            "prompt": "Confirm the module owner, allowed scope, forbidden paths, dependencies, and affected runtime entrypoint.",
-            "required": true
-        }),
-    ];
-    match mode {
-        "develop" => values.extend([
-            serde_json::json!({
-                "question_id": "requirements_confirmation",
-                "prompt": "Confirm the requirements, user-visible behavior, edge cases, and exact completion evidence before design.",
-                "required": true
-            }),
-            serde_json::json!({
-                "question_id": "architecture_confirmation",
-                "prompt": "Confirm the top-down module map, outline design, detailed design, and logical closure before implementation.",
-                "required": true
-            }),
-            serde_json::json!({
-                "question_id": "delivery_depth",
-                "prompt": "Apply the existing delivery contract and authorized acceptance depth: tests, applicable install/replay, review, merge and cleanup. Promotion and freeze belong only to an explicitly selected release. Do not ask again about already authorized delivery steps or impose release ceremony on ordinary work.",
-                "required": true
-            }),
-        ]),
-        "debug" => values.extend([
-            serde_json::json!({
-                "question_id": "failure_sample",
-                "prompt": "Confirm the exact failing sample, expected behavior, actual behavior, and reproducible entrypoint.",
-                "required": true
-            }),
-            serde_json::json!({
-                "question_id": "causal_evidence",
-                "prompt": "Confirm the active hypothesis, confirmation and falsification signals, first divergence, and forward/reversal experiment.",
-                "required": true
-            }),
-            serde_json::json!({
-                "question_id": "regression_replay",
-                "prompt": "Confirm the exact old sample and deployed entrypoint that must be replayed after the root fix.",
-                "required": true
-            }),
-        ]),
-        _ => values.push(serde_json::json!({
-            "question_id": "domain_completion",
-            "prompt": "Confirm the current domain boundary, required evidence, and the lifecycle milestone that must follow this workflow.",
-            "required": true
-        })),
-    }
+fn open_questions(goal: &Value) -> Vec<Value> {
+    let mut values = Vec::new();
     if let Some(open) = goal.get("questions").and_then(Value::as_array) {
         values.extend(open.iter().filter_map(|question| {
             if question.get("status").and_then(Value::as_str) != Some("open") {
@@ -579,7 +508,6 @@ pub(super) fn initialize(
             })
         })
         .collect::<Vec<_>>();
-    let domain_command = command(mode, task, module_id);
     serde_json::json!({
         "harness": "appsdk-development-process-control",
         "guide_flow_required": flow_required,
@@ -611,14 +539,8 @@ pub(super) fn initialize(
         "read_first": read_first,
         "missing_context": missing_context,
         "skill_commands": skill_commands(root, &compiled),
-        "questions": questions(mode, &goal),
-        "agent_instruction": "Read the declared context in precedence order. Reconcile it with the current request. Ask the user only questions still unresolved, invoke relevant Skill commands, then enter the projected guide domain and submit the PlanProposal. Do not invent answers or hashes.",
-        "command_sequence": [
-            domain_command,
-            format!("appsdk guide plan --task {} --input <plan.json>", task),
-            format!("appsdk guide next --task {}", task)
-        ],
+        "questions": open_questions(&goal),
+        "agent_instruction": "Read the declared context in precedence order. Resolve internal technical, scope, ownership, and collaboration questions through the owning Skill or Collab peer. Ask the user only for user-exclusive facts, new authorization, or hard-constraint changes. Invoke relevant Skill commands, then enter the projected guide domain and submit the PlanProposal. Do not invent answers or hashes.",
         "next": {"command": command(mode, task, module_id)},
-        "persistence": {"command": format!("appsdk guide plan --task {} --input <plan.json>", task), "truth": ".appsdk-control/guidance/<task-id>/plan.json"}
     })
 }

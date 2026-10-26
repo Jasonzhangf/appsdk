@@ -300,6 +300,38 @@ fn filter_tags(entries: Vec<Value>, wanted: &[String]) -> Vec<Value> {
         .collect()
 }
 
+fn merge_query_matches(
+    results: &mut Vec<Value>,
+    positions: &mut BTreeMap<(String, String), usize>,
+    matches: &[Value],
+    source: &str,
+) {
+    for entry in matches {
+        let id = entry["id"].as_str().unwrap();
+        let scope = entry["scope"].as_str().unwrap();
+        let key = (scope.to_string(), id.to_string());
+        if let Some(position) = positions.get(&key).copied() {
+            let result = results[position].as_object_mut().unwrap();
+            let sources = result
+                .get_mut("match_sources")
+                .unwrap()
+                .as_array_mut()
+                .unwrap();
+            if !sources.iter().any(|value| value == source) {
+                sources.push(Value::String(source.to_string()));
+            }
+            for (field, value) in entry.as_object().unwrap() {
+                result.entry(field.clone()).or_insert_with(|| value.clone());
+            }
+        } else {
+            let mut result = entry.clone();
+            result["match_sources"] = json!([source]);
+            positions.insert(key, results.len());
+            results.push(result);
+        }
+    }
+}
+
 fn query(root: &Path, text: &str, wanted_tags: &[String]) -> Value {
     let mut indexed = all_scope(root, false);
     indexed.extend(all_scope(root, true));
@@ -317,11 +349,23 @@ fn query(root: &Path, text: &str, wanted_tags: &[String]) -> Value {
     let global = filter_tags(query_scope(root, true, text), wanted_tags);
     let mut all = project.clone();
     all.extend(global.clone());
+    let lesson_matches = all
+        .iter()
+        .filter(|entry| entry["category"] == "lesson")
+        .cloned()
+        .collect::<Vec<_>>();
     let anchors = indexed
         .iter()
         .filter(|entry| entry["layer"] == 1)
         .cloned()
         .collect::<Vec<_>>();
+    let mut results = Vec::new();
+    let mut positions = BTreeMap::new();
+    merge_query_matches(&mut results, &mut positions, &anchors, "anchors");
+    merge_query_matches(&mut results, &mut positions, &exact, "exact");
+    merge_query_matches(&mut results, &mut positions, &all, "category");
+    merge_query_matches(&mut results, &mut positions, &lesson_matches, "lesson");
+    merge_query_matches(&mut results, &mut positions, &all, "keyword");
     let mut matched_ids = exact
         .iter()
         .filter_map(|entry| entry.get("id").and_then(Value::as_str))
@@ -382,13 +426,8 @@ fn query(root: &Path, text: &str, wanted_tags: &[String]) -> Value {
     json!({
         "query": text,
         "tags": wanted_tags,
-        "anchors": anchors,
-        "exact_matches": exact,
-        "node_matches": [],
-        "category_matches": all.clone(),
+        "results": results,
         "declared_related": declared_related,
-        "lesson_matches": all.iter().filter(|entry| entry["category"] == "lesson").cloned().collect::<Vec<_>>(),
-        "keyword_matches": all,
         "semantic_related": semantic_related,
         "semantic_backend": {"name":"WeMM-Embedding", "status":"candidate-only", "reason":"inference adapter is not configured"},
         "open_details": "use the detail_path returned for each match",

@@ -23,8 +23,7 @@ pub struct State {
     /// Per-project/name durable high watermark, including released names.
     pub name_occupancy_revisions: HashMap<String, HashMap<String, u64>>,
     pub task_assignments: HashMap<String, crate::server::name_state::TaskAssignment>,
-    pub name_work_roles:
-        HashMap<String, HashMap<String, crate::board::NameWorkRoles>>,
+    pub name_work_roles: HashMap<String, HashMap<String, crate::board::NameWorkRoles>>,
     /// Master-configured workflow templates keyed by project scope, then target
     /// (`master`, `peer`, or `role:<specialty>`).
     pub workflow_templates:
@@ -49,6 +48,18 @@ pub struct State {
     pub receive_receipts: HashMap<String, ReceiveReceipt>,
     pub tasks: HashMap<String, TaskRec>,
     pub board_details: HashMap<String, crate::board::BoardTaskDetails>,
+    pub cancelled_board_patrol_tasks:
+        std::collections::BTreeMap<String, crate::board_patrol_policy::TaskPatrolCancelRecord>,
+    pub board_patrol_gates:
+        std::collections::BTreeMap<String, crate::board_patrol_policy::PeerBoardPatrolGate>,
+    /// Durable cue marker for daemon-generated board-idle patrol messages.
+    /// Delivery revalidation reads this marker, never the body or subject.
+    pub board_patrol_notice_ids: std::collections::BTreeSet<String>,
+    /// Canonical CEO progress coalescing and report acknowledgement state.
+    /// Only the host runtime writes it; authorization, grant eligibility and
+    /// clock ownership belong to the later caller. Initialize with the typed
+    /// default so replay and snapshot restore the exact helper state.
+    pub ceo_report_state: crate::ceo_report_state::CeoReportState,
     pub scheduler_admissions: HashMap<String, SchedulerAdmissionRecord>,
     pub task_lifecycle: HashMap<String, TaskLifecycleRecord>,
     /// Accepted tasks awaiting a main merge, keyed by task id. Daemon-owned so
@@ -121,6 +132,12 @@ fn subscription_affects_master_wake(
 
 #[path = "../state_impl.rs"]
 mod state_impl;
+
+pub(crate) use state_impl::board_patrol_current_owner_key;
+pub(crate) use state_impl::board_patrol_eligible_task_ids;
+pub(crate) use state_impl::board_patrol_notice_is_current;
+pub(crate) use state_impl::board_patrol_owned_unclosed_task_ids;
+pub(crate) use state_impl::board_patrol_owner_key;
 
 #[cfg(test)]
 #[path = "../state_tests.rs"]

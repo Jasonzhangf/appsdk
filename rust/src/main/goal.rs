@@ -38,24 +38,46 @@ pub(super) fn longhorizon_show(root: &Path, format_json: bool) {
         .ok()
         .and_then(|context| context["identity"]["worker_id"].as_str())
         .map(str::to_owned);
-    let (record, record_error) = match context
-        .and_then(|context| goal_scope_from_context(&context, root))
-        .and_then(|scope| goal_record_read(&scope))
-    {
-        Ok(record) => (record, None),
-        Err(error) => (None, Some(error)),
+    let (record, record_error, scope) = match context.as_ref() {
+        Ok(context) => match goal_scope_from_context(context, root) {
+            Ok(scope) => match goal_record_read(&scope) {
+                Ok(record) => (record, None, Some(scope)),
+                Err(error) => (None, Some(error), Some(scope)),
+            },
+            Err(error) => (None, Some(error), None),
+        },
+        Err(error) => (None, Some(error.clone()), None),
     };
     let (status, collab_status_error) = match collab_status_all(root) {
         Ok(status) => (Some(status), None),
         Err(error) => (None, Some(error)),
     };
-    let (bugs, open_bugs_error) = match open_bugs_json(root) {
-        Ok(bugs) => (bugs, None),
-        Err(err) => (Vec::new(), Some(err)),
+    // Open-bug records belong to the project-wide master responsibility view.
+    // An ordinary peer cannot establish a real dependency from them, so it
+    // neither runs the bug backend nor receives its read failure. The master
+    // view keeps the real error instead of hiding it.
+    let project_view = role == ExecutionRole::Master;
+    let (open_bugs, open_bugs_error) = if project_view {
+        match open_bugs_json(root) {
+            Ok(bugs) => (bugs, None),
+            Err(error) => (Vec::new(), Some(error)),
+        }
+    } else {
+        (Vec::new(), None)
     };
     let role_label = role.label();
     let charter = role.charter();
     let fleet_rules = role.fleet_rules();
+    let patrol = match scope.as_ref() {
+        Some(scope) => goal_project_patrol_projection(root, scope),
+        None => serde_json::json!({
+            "applicable": false,
+            "armed": false,
+            "subscription_id": Value::Null,
+            "every_ms": Value::Null,
+            "error": Value::Null,
+        }),
+    };
 
     let goal_path = record
         .as_ref()
@@ -95,6 +117,23 @@ pub(super) fn longhorizon_show(root: &Path, format_json: bool) {
                     .as_str()
                     .is_some_and(|owner| Some(owner) == caller.as_deref()))
     };
+    // A peer sees only its own delivery obligations and its own worker health.
+    // Project-wide merge and worker lists stay with the master view.
+    let merge_in_scope = |merge: &Value| {
+        project_view
+            || merge["owner"]
+                .as_str()
+                .is_some_and(|owner| Some(owner) == caller.as_deref())
+            || merge["requested_by"]
+                .as_str()
+                .is_some_and(|by| Some(by) == caller.as_deref())
+    };
+    let worker_in_scope = |worker: &Value| {
+        project_view
+            || worker["id"]
+                .as_str()
+                .is_some_and(|id| Some(id) == caller.as_deref())
+    };
     let blocked_tasks: Vec<&Value> = tasks
         .iter()
         .filter(|t| in_goal_scope(t) && is_blocked(t))
@@ -102,6 +141,10 @@ pub(super) fn longhorizon_show(root: &Path, format_json: bool) {
     let active_tasks: Vec<&Value> = tasks
         .iter()
         .filter(|t| in_goal_scope(t) && !is_blocked(t))
+        .collect();
+    let pending_merges: Vec<&Value> = pending_merges
+        .iter()
+        .filter(|merge| merge_in_scope(merge))
         .collect();
 
     // Spare capacity means a live App Server route holding no task. A worker
@@ -119,8 +162,10 @@ pub(super) fn longhorizon_show(root: &Path, format_json: bool) {
             || worker["suspected_offline"].as_bool().unwrap_or(false)
     };
     let idle_workers: Vec<&Value> = workers.iter().filter(|w| is_idle(w)).collect();
-    let broken_workers: Vec<&Value> = workers.iter().filter(|w| needs_intervention(w)).collect();
-
+    let broken_workers: Vec<&Value> = workers
+        .iter()
+        .filter(|w| needs_intervention(w) && worker_in_scope(w))
+        .collect();
     if format_json {
         let payload = serde_json::json!({
             "role": role.role(),
@@ -138,13 +183,17 @@ pub(super) fn longhorizon_show(root: &Path, format_json: bool) {
                 "active": record.as_ref().and_then(|r| r["active"].as_bool()),
                 "registered_at": record.as_ref().and_then(|r| r["registered_at"].as_str()),
                 "objective": objective,
+                "patrol_armed": patrol["armed"].as_bool().unwrap_or(false),
+                "patrol_subscription_id": patrol["subscription_id"].clone(),
+                "patrol_every_ms": patrol["every_ms"].clone(),
+                "patrol_error": patrol["error"].clone(),
             },
             "assigned": active_tasks,
             "pending_merges": pending_merges,
             "blocked": blocked_tasks,
             "idle_workers": idle_workers,
             "workers_needing_intervention": broken_workers,
-            "open_bugs": bugs,
+            "open_bugs": open_bugs,
             "open_bugs_error": open_bugs_error,
             "collab_reachable": status.is_some(),
             "collab_status_error": collab_status_error.as_deref(),
@@ -182,6 +231,23 @@ pub(super) fn longhorizon_show(root: &Path, format_json: bool) {
                 rec["active"].as_bool().unwrap_or(false),
                 rec["registered_at"].as_str().unwrap_or("unknown")
             );
+            if patrol["applicable"].as_bool().unwrap_or(false) {
+                if patrol["armed"].as_bool().unwrap_or(false) {
+                    println!(
+                        "- 项目巡检: 已 armed ({}, 每 {} ms)",
+                        patrol["subscription_id"].as_str().unwrap_or("unknown"),
+                        patrol["every_ms"].as_i64().unwrap_or(900_000)
+                    );
+                } else {
+                    println!(
+                        "- 项目巡检: 未 armed{}",
+                        patrol["error"]
+                            .as_str()
+                            .map(|error| format!(": {}", error))
+                            .unwrap_or_default()
+                    );
+                }
+            }
         }
         _ => println!("- 未注册长程目标。先运行 `appsdk goal subscribe --goal <path.md> --interval <period>`。"),
         }
@@ -268,11 +334,11 @@ pub(super) fn longhorizon_show(root: &Path, format_json: bool) {
     if let Some(err) = open_bugs_error {
         println!("\n开放缺陷读取失败: {}", err);
     } else {
-        println!("\n开放缺陷 ({}，P0 优先):", bugs.len());
-        if bugs.is_empty() {
+        println!("\n开放缺陷 ({}):", open_bugs.len());
+        if open_bugs.is_empty() {
             println!("- 无");
         }
-        for bug in bugs.iter().take(10) {
+        for bug in open_bugs.iter().take(10) {
             let labels: Vec<&str> = bug["labels"]
                 .as_array()
                 .map(|arr| arr.iter().filter_map(Value::as_str).collect())
@@ -308,6 +374,37 @@ pub(super) fn longhorizon_show(root: &Path, format_json: bool) {
             println!("Collab 身份未验证；继续独立完成用户已授权的工作，可派独立 `codex exec --profile gcm` worker。");
             println!("仅在用户明确要求时注册；当前不获得 Collab 管理权限，不关闭其他 peer。");
         }
+    }
+}
+
+fn goal_record_apply_patrol(record: &mut Value, patrol: &Value) {
+    record["patrol_applicable"] = patrol["applicable"].clone();
+    record["patrol_armed"] = patrol["armed"].clone();
+    record["patrol_subscription_id"] = patrol["subscription_id"].clone();
+    record["patrol_every_ms"] = patrol["every_ms"].clone();
+    record["patrol_source"] = patrol["source"].clone();
+    record["patrol_checked_at"] = patrol["checked_at"].clone();
+    record["patrol_subscription"] = patrol["subscription"].clone();
+    record["patrol_error"] = patrol["error"].clone();
+}
+
+fn goal_print_patrol_status(record: &Value) {
+    if !record["patrol_applicable"].as_bool().unwrap_or(false) {
+        return;
+    }
+    if record["patrol_armed"].as_bool().unwrap_or(false) {
+        println!(
+            "- Project patrol: armed ({}, every {} ms)",
+            record["patrol_subscription_id"]
+                .as_str()
+                .unwrap_or("unknown"),
+            record["patrol_every_ms"].as_i64().unwrap_or(900_000)
+        );
+    } else {
+        println!(
+            "- Project patrol: NOT armed: {}",
+            record["patrol_error"].as_str().unwrap_or("unknown error")
+        );
     }
 }
 
@@ -403,7 +500,12 @@ where
                     GOAL_MIN_INTERVAL_MS / 60_000
                 ));
             }
-            let goal_prompt = generate_long_horizon_goal_prompt(&goal_path, &interval_str);
+            let scope = match resolve_goal_scope(root) {
+                Ok(scope) => scope,
+                Err(error) => goal_fail(format_json, &error, None),
+            };
+            let goal_prompt =
+                generate_long_horizon_goal_prompt(&goal_path, &interval_str, scope.role);
             let canonical_goal_path = goal_path
                 .canonicalize()
                 .unwrap_or_else(|_| goal_path.clone());
@@ -418,10 +520,6 @@ where
                     )
                 });
 
-            let scope = match resolve_goal_scope(root) {
-                Ok(scope) => scope,
-                Err(error) => goal_fail(format_json, &error, None),
-            };
             let owner = scope.owner.clone();
             let _goal_lock = match GoalLock::acquire(&scope) {
                 Ok(lock) => lock,
@@ -552,6 +650,8 @@ where
                                     });
                                     response["subject"] = Value::String(matched_subject);
                                 }
+                                let patrol = goal_ensure_project_patrol(root, &scope);
+                                goal_record_apply_patrol(&mut response, &patrol);
                                 if let Err(error) = goal_record_write(&scope, &response) {
                                     drop(_goal_lock);
                                     goal_fail(format_json, &error, Some(&response));
@@ -565,6 +665,7 @@ where
                                     println!("Long-horizon goal already registered:");
                                     println!("- Goal file: {}", canonical_goal_path.display());
                                     println!("- Existing Collab subscription retained");
+                                    goal_print_patrol_status(&response);
                                 }
                                 return;
                             }
@@ -765,6 +866,10 @@ where
                 }
             }
             record["revision"] = Value::Number(2.into());
+            if collab_subscribed {
+                let patrol = goal_ensure_project_patrol(root, &scope);
+                goal_record_apply_patrol(&mut record, &patrol);
+            }
             if let Err(error) = goal_record_write(&scope, &record) {
                 record["active"] = Value::Bool(false);
                 record["observed"] = Value::String("unknown".into());
@@ -792,6 +897,7 @@ where
                     interval_str, interval_str, repeat_count, ttl_seconds
                 );
                 println!("- Collab notification status: one-shot armed; rearm is explicit and verifiable");
+                goal_print_patrol_status(&record);
                 println!("\n{}", goal_prompt);
             }
         }
@@ -1282,11 +1388,12 @@ where
                     goal_path.display()
                 ));
             }
-            if let Err(error) = resolve_goal_scope(root) {
-                goal_fail(false, &error, None);
-            }
+            let role = match resolve_goal_scope(root) {
+                Ok(scope) => scope.role,
+                Err(error) => goal_fail(false, &error, None),
+            };
 
-            let prompt = generate_long_horizon_goal_prompt(&goal_path, &interval_str);
+            let prompt = generate_long_horizon_goal_prompt(&goal_path, &interval_str, role);
             println!("{}", prompt);
         }
         _ => fail(format!("UNKNOWN_GOAL_SUBCOMMAND:{}", sub)),
@@ -1371,9 +1478,9 @@ where
         let notice_title = format!("【AppSDK 任务阻塞门禁提醒】任务 '{}' 已调用 collab task block，通知策略以 Collab 响应为准。", task_id);
         let notice_body = r#"================================================================================
 【重要门禁与合规约束】
-1. AppSDK 的问题可以报 bug：若阻断由 AppSDK 框架缺陷导致（CLI 异常、verify 误报、准入阻断），
-   必须立即上报 upstream 缺陷系统：
-   appsdk bug new --upstream -t "[SDK Bug] <简述>" -m "<复现与上下文>" -l "P0,cli"
+1. AppSDK 的问题按实际影响走 canonical intake 判重：若阻断由 AppSDK 框架缺陷导致（CLI 异常、verify 误报、准入阻断），
+   不得在业务仓库 hack 规避；用 `appsdk bug intake --input <json>` 提交 original_input、classification、scope、owner、parent、acceptance 与 evidence_links，
+   优先级标签按实际影响选择，不固定 P0。
 2. 合法等待必须写清原因、责任人、解除条件和恢复触发：
    外部依赖、资源占用、凭证/批准缺失、跨 owner 决策等可以进入 waiting/blocked，
    但严禁只写“blocked”而不带恢复方案，也严禁因任务难就空等。

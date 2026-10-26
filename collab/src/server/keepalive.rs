@@ -389,6 +389,278 @@ pub(crate) fn tick_at(server: &Server, now: i64) {
         }
     }
     flush_idle_batches_if_ready(server, now);
+    board_patrol_pass_at(server, now);
+}
+
+/// Periodic board-idle patrol.
+///
+/// The due gate is evaluated before the transport read. A read then happens
+/// outside the reducer lock, and the same typed carrier, task/cancellation set
+/// and gate are revalidated before any wake is committed. Unknown or waiting
+/// hosts advance the periodic window; a transport error is logged and treated
+/// as Unknown so a failed read cannot leave the gate due for every tick.
+fn board_patrol_pass_at(server: &Server, now: i64) {
+    if !server.config.notifications.enabled {
+        return;
+    }
+    let workers: Vec<_> = {
+        let state = server.state.lock().unwrap();
+        if state.admission_frozen() {
+            return;
+        }
+        state.workers.values().cloned().collect()
+    };
+    for worker in workers {
+        board_patrol_worker_at(server, &worker, now);
+    }
+}
+
+fn board_patrol_worker_at(server: &Server, worker: &super::state::WorkerRec, now: i64) {
+    use super::name_state::AgentActivity;
+    use crate::board_patrol_policy::{evaluate_board_patrol, PatrolDecision, PatrolTriggerMode};
+
+    let candidate = {
+        let state = server.state.lock().unwrap();
+        if state.admission_frozen() {
+            return;
+        }
+        board_patrol_candidate(&state, worker, now)
+    };
+    let Some(candidate) = candidate else {
+        return;
+    };
+    let activity = match current_board_patrol_activity(server, worker) {
+        Ok(activity) => activity,
+        Err(error) => {
+            super::presence::append_log(
+                &server.log_path(),
+                &format!("BOARD_PATROL_ACTIVITY_READ_FAILED: {}: {error}", worker.id),
+            );
+            AgentActivity::Unknown
+        }
+    };
+
+    let mut state = server.state.lock().unwrap();
+    if state.admission_frozen() || state.workers.get(&worker.id) != Some(worker) {
+        return;
+    }
+    if super::state::board_patrol_current_owner_key(&state, &worker.id).as_deref()
+        != Some(candidate.owner_key.as_str())
+    {
+        return;
+    }
+    if super::state::board_patrol_eligible_task_ids(&state, &worker.id).as_deref()
+        != Some(candidate.eligible.as_slice())
+    {
+        return;
+    }
+    if state.board_patrol_gates.get(&worker.id) != candidate.gate.as_ref() {
+        return;
+    }
+    if board_patrol_name_address(&state, worker, &candidate.owner_key) != candidate.address {
+        return;
+    }
+    let idle_since_ms = state
+        .keepalives
+        .get(&worker.id)
+        .map(|record| record.idle_since_ms)
+        .filter(|idle_since| *idle_since > 0)
+        .unwrap_or(now);
+    let decision = evaluate_board_patrol(
+        &candidate.eligible,
+        &candidate.owner_key,
+        PatrolTriggerMode::PeriodicPoll,
+        activity == AgentActivity::Idle,
+        activity == AgentActivity::Busy,
+        idle_since_ms,
+        now,
+        candidate.gate.as_ref(),
+    );
+    match decision {
+        PatrolDecision::NoEligibleTasks | PatrolDecision::NotDueYet => {}
+        PatrolDecision::SkipBusy { gate } | PatrolDecision::SkipUnknown { gate } => {
+            server.commit_locked_reporting(
+                &mut state,
+                &[Event::BoardPatrolGateUpdated {
+                    worker_id: worker.id.clone(),
+                    gate,
+                }],
+            );
+        }
+        PatrolDecision::WakeDue { tasks, gate } => {
+            let Some((message_id, subscription_id, events)) = board_patrol_wake_events(
+                &state,
+                worker,
+                candidate.address.as_ref(),
+                &tasks,
+                gate,
+                now,
+            ) else {
+                return;
+            };
+            if server.commit_locked_checked(&mut state, &events).is_err() {
+                return;
+            }
+            drop(state);
+            let _ = super::attempt_notification_detailed_with_at(
+                server,
+                &message_id,
+                &subscription_id,
+                now,
+            );
+        }
+    }
+}
+
+fn board_patrol_wake_events(
+    state: &State,
+    worker: &super::state::WorkerRec,
+    address: Option<&super::name_mailbox::MailboxNameAddress>,
+    tasks: &[String],
+    gate: crate::board_patrol_policy::PeerBoardPatrolGate,
+    now: i64,
+) -> Option<(String, String, Vec<Event>)> {
+    let subscription = board_patrol_subscription(state, worker, now)?;
+    let message_id = super::gen_msg_id();
+    let message = Message {
+        id: message_id.clone(),
+        from: "collab-server".into(),
+        to: worker.id.clone(),
+        mtype: "notify".into(),
+        subject: Some("board-idle-patrol".into()),
+        body: board_patrol_body(tasks),
+        in_reply_to: None,
+        created_ms: now,
+        state: "pending".into(),
+        wake_attempt_count: 0,
+        last_wake_attempt_ms: 0,
+        retry_attempted: false,
+    };
+    let mut events = vec![
+        Event::BoardPatrolGateUpdated {
+            worker_id: worker.id.clone(),
+            gate,
+        },
+        Event::DeliveryMode {
+            msg_id: message_id.clone(),
+            mode: "explicit-notification".into(),
+            source_thread_id: None,
+        },
+        Event::BoardPatrolNoticeBound {
+            message_id: message_id.clone(),
+        },
+        Event::Sent { msg: message },
+    ];
+    if let Some(address) = address {
+        events.push(Event::MailboxNameAddressed {
+            message_id: message_id.clone(),
+            address: address.clone(),
+        });
+    }
+    events.push(Event::WakeBound {
+        message_id: message_id.clone(),
+        subscription_id: subscription.id.clone(),
+    });
+    Some((message_id, subscription.id, events))
+}
+
+struct BoardPatrolCandidate {
+    owner_key: String,
+    eligible: Vec<String>,
+    gate: Option<crate::board_patrol_policy::PeerBoardPatrolGate>,
+    address: Option<super::name_mailbox::MailboxNameAddress>,
+}
+
+fn board_patrol_candidate(
+    state: &State,
+    worker: &super::state::WorkerRec,
+    now: i64,
+) -> Option<BoardPatrolCandidate> {
+    use crate::board_patrol_policy::{evaluate_board_patrol, PatrolDecision, PatrolTriggerMode};
+
+    worker.transport.as_ref()?;
+    let owner_key = super::state::board_patrol_current_owner_key(state, &worker.id)?;
+    let eligible = super::state::board_patrol_eligible_task_ids(state, &worker.id)?;
+    if eligible.is_empty() {
+        return None;
+    }
+    let gate = state.board_patrol_gates.get(&worker.id).cloned();
+    let due_probe = evaluate_board_patrol(
+        &eligible,
+        &owner_key,
+        PatrolTriggerMode::PeriodicPoll,
+        true,
+        false,
+        now,
+        now,
+        gate.as_ref(),
+    );
+    if !matches!(due_probe, PatrolDecision::WakeDue { .. }) {
+        return None;
+    }
+    Some(BoardPatrolCandidate {
+        address: board_patrol_name_address(state, worker, &owner_key),
+        owner_key,
+        eligible,
+        gate,
+    })
+}
+
+fn board_patrol_name_address(
+    state: &State,
+    worker: &super::state::WorkerRec,
+    owner_key: &str,
+) -> Option<super::name_mailbox::MailboxNameAddress> {
+    let session_id = worker.transport.as_ref()?.session_id.as_deref();
+    let holder_matches = |holder: &super::name_state::NameOccupancy| {
+        holder.name == owner_key
+            && holder.worker_id == worker.id
+            && session_id.is_none_or(|session| session == holder.session_id)
+    };
+    if let Some(holder) = state.name_occupancy(&worker.cwd, owner_key) {
+        if holder_matches(holder) {
+            return Some(super::name_mailbox::MailboxNameAddress {
+                project_scope: worker.cwd.clone(),
+                name: owner_key.to_owned(),
+            });
+        }
+    }
+    state
+        .name_occupancies
+        .iter()
+        .find_map(|(project_scope, names)| {
+            names
+                .get(owner_key)
+                .filter(|holder| holder_matches(holder))
+                .map(|_| super::name_mailbox::MailboxNameAddress {
+                    project_scope: project_scope.clone(),
+                    name: owner_key.to_owned(),
+                })
+        })
+}
+
+fn board_patrol_subscription(
+    state: &State,
+    worker: &super::state::WorkerRec,
+    now: i64,
+) -> Option<super::state::NotificationSubscription> {
+    let transport = worker.transport.as_ref()?;
+    state
+        .notification_subscriptions
+        .values()
+        .filter(|subscription| {
+            subscription.matches(&worker.id, "direct-message", None, now)
+                && super::subscription_matches_transport(subscription, transport)
+        })
+        .min_by_key(|subscription| (subscription.created_ms, subscription.id.as_str()))
+        .cloned()
+}
+
+fn board_patrol_body(tasks: &[String]) -> String {
+    format!(
+        "Board idle patrol: you are idle while still owning open board work. Tasks: {}.\nRe-read the current tasks and blockers with `collab board show`, then continue the most useful next action. This notice is not a consumption receipt and does not close or complete any task.\nCancel patrol for a task only while waiting on the user, an external dependency, or an intentional pause: `collab notify cancel --task-id <task-id> --reason '<reason>'`.\nRearm a task after you resume or its blocker clears: `collab notify subscribe --event board-idle --task-id <task-id>`.",
+        tasks.join(", ")
+    )
 }
 
 fn reply_reminder_body(obligations: &[serde_json::Value]) -> String {
@@ -512,6 +784,147 @@ fn flush_idle_batches_if_ready(server: &Server, now: i64) {
         accumulator: state.master_wake.clone(),
     });
     server.commit_locked_reporting(&mut state, &events);
+}
+
+/// Read one worker's current activity for board-patrol wake decisions.
+///
+/// This is a single fresh read through the selected transport. It does not
+/// touch state, timers or notifications, and an Unknown or error is never
+/// capacity: the caller must verify the binding after the read before acting.
+pub(super) fn current_board_patrol_activity(
+    server: &Server,
+    worker: &super::state::WorkerRec,
+) -> Result<super::name_state::AgentActivity, String> {
+    use super::name_state::AgentActivity;
+    let Some(transport) = super::selected_transport_for_worker(worker) else {
+        return Ok(AgentActivity::Unknown);
+    };
+    match transport.kind {
+        crate::proto::TransportKind::Tmux => {
+            let Some(endpoint) = transport.tmux_endpoint.as_ref() else {
+                return Ok(AgentActivity::Unknown);
+            };
+            let observed = crate::client::adapters::tmux::observe_agent(endpoint)?;
+            Ok(match (observed.agent_presence, observed.activity) {
+                (
+                    crate::client::adapters::tmux::AgentPresence::Online,
+                    crate::client::adapters::tmux::AgentActivity::Idle,
+                ) => AgentActivity::Idle,
+                (
+                    crate::client::adapters::tmux::AgentPresence::Online,
+                    crate::client::adapters::tmux::AgentActivity::Busy,
+                ) => AgentActivity::Busy,
+                (
+                    crate::client::adapters::tmux::AgentPresence::Online,
+                    crate::client::adapters::tmux::AgentActivity::WaitingUser,
+                ) => AgentActivity::WaitingUser,
+                _ => AgentActivity::Unknown,
+            })
+        }
+        crate::proto::TransportKind::AppServer | crate::proto::TransportKind::DesktopBridge => {
+            let Some(thread_id) = transport.thread_id.as_deref() else {
+                return Ok(AgentActivity::Unknown);
+            };
+            let raw = (server.appserver_thread_status)(&transport, thread_id)?;
+            Ok(native_thread_activity(&raw))
+        }
+        crate::proto::TransportKind::Dsh => {
+            let (Some(endpoint), Some(runtime_id), Some(agent_id)) = (
+                transport.endpoint.as_deref(),
+                transport.namespace.as_deref(),
+                transport.thread_id.as_deref(),
+            ) else {
+                return Ok(AgentActivity::Unknown);
+            };
+            let facts = crate::client::adapters::dsh::activity(endpoint, runtime_id, agent_id)
+                .map_err(|error| error.to_string())?;
+            Ok(if !facts.live {
+                AgentActivity::Unknown
+            } else {
+                match facts.status.as_str() {
+                    "inactive" => AgentActivity::Idle,
+                    "running" => AgentActivity::Busy,
+                    _ => AgentActivity::Unknown,
+                }
+            })
+        }
+    }
+}
+
+/// Classify one native `thread/read` reply. Only a present, well-formed idle
+/// thread with no active flag or in-flight turn is positive idle.
+fn native_thread_activity(raw: &serde_json::Value) -> super::name_state::AgentActivity {
+    use super::name_state::AgentActivity;
+    let Some(kind) = raw
+        .pointer("/thread/status/type")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return AgentActivity::Unknown;
+    };
+    if kind == "waiting_user" {
+        return AgentActivity::WaitingUser;
+    }
+    // Optional activity fields used for idle decisions. A present field with
+    // the wrong shape is a malformed native reply and must not be guessed into
+    // Idle/Busy/WaitingUser. An absent field (or explicit null) means "no
+    // value" and is not a new error.
+    let active_flags: Vec<&str> = match raw
+        .pointer("/thread/status/activeFlags")
+        .or_else(|| raw.pointer("/activeFlags"))
+    {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(serde_json::Value::Array(flags)) => {
+            let mut strings = Vec::with_capacity(flags.len());
+            for flag in flags {
+                match flag.as_str() {
+                    Some(text) => strings.push(text),
+                    // A non-string array member makes the field malformed.
+                    None => return AgentActivity::Unknown,
+                }
+            }
+            strings
+        }
+        // Present but not a string array: malformed.
+        Some(_) => return AgentActivity::Unknown,
+    };
+    // Only the exact known native waiting flags mean WaitingUser. Any other
+    // flag string, including an empty one, is unsupported and makes the reply
+    // Unknown rather than a guessed state.
+    let mut waiting = false;
+    let mut unsupported_flag = false;
+    for flag in &active_flags {
+        if matches!(*flag, "waitingOnApproval" | "waitingOnUserInput") {
+            waiting = true;
+        } else {
+            unsupported_flag = true;
+        }
+    }
+    if unsupported_flag {
+        return AgentActivity::Unknown;
+    }
+    if waiting {
+        return AgentActivity::WaitingUser;
+    }
+    let active_turns = match raw.pointer("/activeTurns") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::Array(turns)) => !turns.is_empty(),
+        Some(_) => return AgentActivity::Unknown,
+    };
+    let turn_in_progress = match raw
+        .pointer("/thread/latestTurnStatus")
+        .or_else(|| raw.pointer("/turns/0/status"))
+    {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::String(status)) => {
+            matches!(status.as_str(), "inProgress" | "active")
+        }
+        Some(_) => return AgentActivity::Unknown,
+    };
+    match kind {
+        "idle" if !active_turns && !turn_in_progress => AgentActivity::Idle,
+        "idle" | "active" | "inProgress" => AgentActivity::Busy,
+        _ => AgentActivity::Unknown,
+    }
 }
 
 #[cfg(test)]
@@ -1245,6 +1658,717 @@ mod tests {
             batch.body
         );
         drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Seed a synthetic peer whose selected transport is a native thread read
+    /// callback. No tmux server is started and the reducer lock is released
+    /// before the caller probed anything.
+    fn patrol_appserver_worker(
+        server: &mut Server,
+        thread_id: &str,
+    ) -> super::super::state::WorkerRec {
+        super::super::peer_tests::register_synthetic_peer(server, "worker", thread_id);
+        let mut state = server.state.lock().unwrap();
+        state.workers.get_mut("worker").unwrap().transport = Some(
+            super::super::peer_tests::test_appserver_transport(thread_id),
+        );
+        let worker = state.workers["worker"].clone();
+        drop(state);
+        worker
+    }
+
+    #[test]
+    fn board_idle_patrol_activity_native_thread_status_table() {
+        use super::super::name_state::AgentActivity;
+        let (mut server, root) = test_server();
+        let worker = patrol_appserver_worker(&mut server, "thread-patrol-table");
+        for (status, active_turns, expected) in [
+            (
+                serde_json::json!({"type": "idle"}),
+                serde_json::json!([]),
+                AgentActivity::Idle,
+            ),
+            (
+                serde_json::json!({"type": "notLoaded"}),
+                serde_json::json!([]),
+                AgentActivity::Unknown,
+            ),
+            (
+                serde_json::json!({"type": "systemError"}),
+                serde_json::json!([]),
+                AgentActivity::Unknown,
+            ),
+            (
+                serde_json::json!({"type": "surprise"}),
+                serde_json::json!([]),
+                AgentActivity::Unknown,
+            ),
+        ] {
+            server.appserver_thread_status = std::sync::Arc::new(move |_, thread| {
+                Ok(serde_json::json!({
+                    "thread": {"id": thread, "status": status.clone()},
+                    "activeTurns": active_turns.clone(),
+                }))
+            });
+            assert_eq!(
+                super::current_board_patrol_activity(&server, &worker).unwrap(),
+                expected,
+            );
+        }
+        // An idle thread that still reports an in-flight turn is not idle.
+        server.appserver_thread_status = std::sync::Arc::new(|_, thread| {
+            Ok(serde_json::json!({
+                "thread": {"id": thread, "status": {"type": "idle"}},
+                "activeTurns": [{"id": "turn-active"}],
+            }))
+        });
+        assert_eq!(
+            super::current_board_patrol_activity(&server, &worker).unwrap(),
+            AgentActivity::Busy,
+        );
+        // A reply without the native status type is malformed, never idle.
+        server.appserver_thread_status =
+            std::sync::Arc::new(|_, thread| Ok(serde_json::json!({"thread": {"id": thread}})));
+        assert_eq!(
+            super::current_board_patrol_activity(&server, &worker).unwrap(),
+            AgentActivity::Unknown,
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn board_idle_patrol_activity_fresh_busy_overrides_stale_cached_idle() {
+        use super::super::name_state::AgentActivity;
+        let (mut server, root) = test_server();
+        let worker = patrol_appserver_worker(&mut server, "thread-patrol-stale");
+        observe(&server, AgentActivity::Idle, "session-thread-patrol-stale");
+        let cached = {
+            let state = server.state.lock().unwrap();
+            super::super::worker_agent_facts(&server, &state, &worker)
+                .1
+                .map(|fact| fact.activity)
+        };
+        assert_eq!(cached, Some(AgentActivity::Idle));
+        server.appserver_thread_status = std::sync::Arc::new(|_, thread| {
+            Ok(serde_json::json!({
+                "thread": {"id": thread, "status": {"type": "active", "activeFlags": []}},
+            }))
+        });
+        assert_eq!(
+            super::current_board_patrol_activity(&server, &worker).unwrap(),
+            AgentActivity::Busy,
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn board_idle_patrol_activity_native_read_error_is_preserved() {
+        let (mut server, root) = test_server();
+        let worker = patrol_appserver_worker(&mut server, "thread-patrol-error");
+        server.appserver_thread_status =
+            std::sync::Arc::new(|_, _| Err("native thread read exploded".to_owned()));
+        let error = super::current_board_patrol_activity(&server, &worker).unwrap_err();
+        assert!(error.contains("native thread read exploded"), "{error}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn board_idle_patrol_activity_waiting_flags_are_never_idle() {
+        use super::super::name_state::AgentActivity;
+        let (mut server, root) = test_server();
+        let worker = patrol_appserver_worker(&mut server, "thread-patrol-flags");
+        for (flags, expected) in [
+            (serde_json::json!([]), AgentActivity::Busy),
+            (
+                serde_json::json!(["waitingOnApproval"]),
+                AgentActivity::WaitingUser,
+            ),
+            (
+                serde_json::json!(["waitingOnUserInput"]),
+                AgentActivity::WaitingUser,
+            ),
+            (serde_json::json!([""]), AgentActivity::Unknown),
+            (
+                serde_json::json!(["waitingOnApproval", "unsupportedFlag"]),
+                AgentActivity::Unknown,
+            ),
+        ] {
+            server.appserver_thread_status = std::sync::Arc::new(move |_, thread| {
+                Ok(serde_json::json!({
+                    "thread": {
+                        "id": thread,
+                        "status": {"type": "active", "activeFlags": flags.clone()},
+                    },
+                }))
+            });
+            let actual = super::current_board_patrol_activity(&server, &worker).unwrap();
+            assert_eq!(actual, expected);
+            assert_ne!(actual, AgentActivity::Idle);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Malformed optional activity fields on an otherwise idle thread must be
+    /// Unknown, never Idle or a guessed Busy/WaitingUser. Only absent fields
+    /// (or explicit null) mean "no value"; a present field of the wrong shape
+    /// is a malformed native reply.
+    #[test]
+    fn board_idle_patrol_activity_malformed_activity_fields_are_unknown() {
+        use super::super::name_state::AgentActivity;
+        let (mut server, root) = test_server();
+        let worker = patrol_appserver_worker(&mut server, "thread-patrol-strict");
+        for (label, raw) in [
+            (
+                "activeFlags object",
+                serde_json::json!({
+                    "thread": {
+                        "id": "thread-patrol-strict",
+                        "status": {"type": "idle", "activeFlags": {"waiting": true}},
+                    },
+                    "activeTurns": [],
+                }),
+            ),
+            (
+                "activeFlags non-string member",
+                serde_json::json!({
+                    "thread": {
+                        "id": "thread-patrol-strict",
+                        "status": {"type": "idle", "activeFlags": ["waitingOnApproval", 7]},
+                    },
+                    "activeTurns": [],
+                }),
+            ),
+            (
+                "unsupported flag keyword",
+                serde_json::json!({
+                    "thread": {
+                        "id": "thread-patrol-strict",
+                        "status": {"type": "idle", "activeFlags": ["waitingForApproval"]},
+                    },
+                    "activeTurns": [],
+                }),
+            ),
+            (
+                "activeTurns non-array",
+                serde_json::json!({
+                    "thread": {
+                        "id": "thread-patrol-strict",
+                        "status": {"type": "idle", "activeFlags": []},
+                    },
+                    "activeTurns": {"count": 1},
+                }),
+            ),
+            (
+                "latestTurnStatus non-string",
+                serde_json::json!({
+                    "thread": {
+                        "id": "thread-patrol-strict",
+                        "status": {"type": "idle", "activeFlags": []},
+                        "latestTurnStatus": {"type": "inProgress"},
+                    },
+                    "activeTurns": [],
+                }),
+            ),
+        ] {
+            server.appserver_thread_status = std::sync::Arc::new(move |_, _| Ok(raw.clone()));
+            let actual = super::current_board_patrol_activity(&server, &worker).unwrap();
+            assert_eq!(actual, AgentActivity::Unknown, "{label}: got {actual:?}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn board_idle_patrol_activity_missing_transport_is_unknown() {
+        use super::super::name_state::AgentActivity;
+        let (server, root) = test_server();
+        super::super::peer_tests::register_synthetic_peer(&server, "worker", "thread-none");
+        let worker = {
+            let mut state = server.state.lock().unwrap();
+            state.workers.get_mut("worker").unwrap().transport = None;
+            state.workers["worker"].clone()
+        };
+        assert_eq!(
+            super::current_board_patrol_activity(&server, &worker).unwrap(),
+            AgentActivity::Unknown,
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn seed_board_patrol_owner(
+        server: &Server,
+        id: &str,
+        thread_id: &str,
+    ) -> super::super::state::WorkerRec {
+        let cwd = super::super::global_state::GlobalState::canonical_project_scope(&server.root)
+            .unwrap()
+            .as_str()
+            .to_owned();
+        let app = crate::identity::AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
+        let transport = super::super::peer_tests::test_appserver_transport(thread_id);
+        let response = super::super::peer_tests::seed_committed_owner(
+            server,
+            id,
+            &format!("token-{id}"),
+            &transport,
+            &cwd,
+            Some(app.clone()),
+        );
+        assert!(response.ok, "seed {id}: {response:?}");
+        super::super::commit_current_thread_route_for_runtime(server, server, id, &cwd, Some(&app))
+            .unwrap();
+        super::super::restore_registered_peer_default_leases(server);
+        server.state.lock().unwrap().workers[id].clone()
+    }
+
+    fn occupy_board_patrol_name(
+        server: &Server,
+        worker: &super::super::state::WorkerRec,
+        name: &str,
+    ) {
+        let project_scope = super::super::global_state::GlobalState::canonical_project_scope(
+            std::path::Path::new(&worker.cwd),
+        )
+        .unwrap()
+        .as_str()
+        .to_owned();
+        let session_id = worker
+            .transport
+            .as_ref()
+            .and_then(|transport| transport.session_id.clone())
+            .expect("seeded appserver transport has a session id");
+        let revision = {
+            let state = server.state.lock().unwrap();
+            state.name_occupancy_revision(&project_scope, name) + 1
+        };
+        server.commit(&[Event::NameResolutionCommitted {
+            project_scope,
+            occupancy: super::super::name_state::NameOccupancy {
+                name: name.to_owned(),
+                worker_id: worker.id.clone(),
+                session_id,
+                occupancy_revision: revision,
+                updated_ms: 1,
+            },
+            assignments: vec![],
+        }]);
+    }
+
+    fn add_board_patrol_task(
+        server: &Server,
+        task_id: &str,
+        owner_id: &str,
+        name: &str,
+        session_id: &str,
+        now: i64,
+    ) {
+        let mut state = server.state.lock().unwrap();
+        state
+            .tasks
+            .insert(task_id.to_owned(), task(task_id, owner_id, "working", now));
+        state.task_assignments.insert(
+            task_id.to_owned(),
+            super::super::name_state::TaskAssignment {
+                task_id: task_id.to_owned(),
+                name: name.to_owned(),
+                session_id: session_id.to_owned(),
+                assignment_revision: 1,
+                reflow: None,
+                updated_ms: now,
+            },
+        );
+    }
+
+    fn install_appserver_statuses(
+        server: &mut Server,
+        statuses: Vec<(String, String)>,
+    ) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        server.appserver_thread_status = Arc::new(move |_, thread| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            let status = statuses
+                .iter()
+                .find(|(id, _)| id == thread)
+                .map(|(_, status)| status.clone())
+                .unwrap_or_else(|| "idle".into());
+            Ok(serde_json::json!({
+                "thread": {"id": thread, "status": {"type": status}},
+            }))
+        });
+        calls
+    }
+
+    #[test]
+    fn board_idle_patrol_dispatch_creates_fresh_periodic_notice_without_retrying_old() {
+        let (mut server, root) = test_server();
+        let worker = seed_board_patrol_owner(&server, "alice", "thread-alice");
+        occupy_board_patrol_name(&server, &worker, "Alice");
+        add_board_patrol_task(
+            &server,
+            "T1",
+            "alice",
+            "Alice",
+            worker
+                .transport
+                .as_ref()
+                .unwrap()
+                .session_id
+                .as_deref()
+                .unwrap(),
+            1,
+        );
+        install_appserver_statuses(&mut server, vec![("thread-alice".into(), "idle".into())]);
+        let now = super::super::state::now_ms();
+        tick_at(&server, now);
+
+        let (first_id, first_state, first_wake_attempts) = {
+            let state = server.state.lock().unwrap();
+            let ids: Vec<_> = state.board_patrol_notice_ids.iter().cloned().collect();
+            assert_eq!(ids.len(), 1, "one due occurrence: {ids:?}");
+            let id = ids[0].clone();
+            let message = &state.msgs[&id];
+            assert_eq!(message.to, "alice");
+            assert_eq!(message.mtype, "notify");
+            assert_eq!(message.subject.as_deref(), Some("board-idle-patrol"));
+            assert!(message.body.contains("collab board show"));
+            assert!(message.body.contains("collab notify cancel --task-id"));
+            assert!(message
+                .body
+                .contains("collab notify subscribe --event board-idle"));
+            assert_eq!(state.delivery_modes[&id], "explicit-notification");
+            assert_eq!(
+                state.wake_bindings.get(&id),
+                Some(&super::super::default_direct_message_id("alice"))
+            );
+            assert!(state.notification_delivery_accepted.contains_key(&id));
+            assert_eq!(
+                state.board_patrol_gates["alice"].next_due_ms,
+                now + crate::board_patrol_policy::BOARD_IDLE_PATROL_INTERVAL_MS
+            );
+            (id, message.state.clone(), message.wake_attempt_count)
+        };
+
+        tick_at(
+            &server,
+            now + crate::board_patrol_policy::BOARD_IDLE_PATROL_INTERVAL_MS,
+        );
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.board_patrol_notice_ids.len(), 2);
+        let second_id = state
+            .board_patrol_notice_ids
+            .iter()
+            .find(|id| **id != first_id)
+            .expect("later occurrence has a new message id")
+            .clone();
+        assert_ne!(second_id, first_id);
+        assert!(state
+            .notification_delivery_accepted
+            .contains_key(&second_id));
+        let old = &state.msgs[&first_id];
+        assert_eq!(old.state, first_state, "old unconsumed notice is unchanged");
+        assert_eq!(old.wake_attempt_count, first_wake_attempts);
+        assert_eq!(old.wake_attempt_count, 1, "old notice is not retried");
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn board_idle_patrol_dispatch_busy_skips_and_advances_without_early_probe() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let (mut server, root) = test_server();
+        let worker = seed_board_patrol_owner(&server, "alice", "thread-alice");
+        occupy_board_patrol_name(&server, &worker, "Alice");
+        add_board_patrol_task(
+            &server,
+            "T1",
+            "alice",
+            "Alice",
+            worker
+                .transport
+                .as_ref()
+                .unwrap()
+                .session_id
+                .as_deref()
+                .unwrap(),
+            1,
+        );
+        let busy = Arc::new(AtomicBool::new(true));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        server.appserver_thread_status = Arc::new({
+            let busy = busy.clone();
+            let calls = calls.clone();
+            move |_, thread| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(serde_json::json!({
+                    "thread": {
+                        "id": thread,
+                        "status": {"type": if busy.load(Ordering::SeqCst) { "active" } else { "idle" }},
+                    },
+                }))
+            }
+        });
+        let now = super::super::state::now_ms();
+        tick_at(&server, now);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        {
+            let state = server.state.lock().unwrap();
+            assert!(state.board_patrol_notice_ids.is_empty());
+            assert_eq!(
+                state.board_patrol_gates["alice"].next_due_ms,
+                now + crate::board_patrol_policy::BOARD_IDLE_PATROL_INTERVAL_MS
+            );
+        }
+
+        busy.store(false, Ordering::SeqCst);
+        calls.store(0, Ordering::SeqCst);
+        tick_at(&server, now + 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "not due means no RPC");
+        {
+            let state = server.state.lock().unwrap();
+            assert!(state.board_patrol_notice_ids.is_empty());
+        }
+
+        tick_at(
+            &server,
+            now + crate::board_patrol_policy::BOARD_IDLE_PATROL_INTERVAL_MS,
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            server.state.lock().unwrap().board_patrol_notice_ids.len(),
+            1
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn board_idle_patrol_dispatch_read_error_skips_and_advances_without_early_probe() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let (mut server, root) = test_server();
+        let worker = seed_board_patrol_owner(&server, "alice", "thread-alice");
+        occupy_board_patrol_name(&server, &worker, "Alice");
+        add_board_patrol_task(
+            &server,
+            "T1",
+            "alice",
+            "Alice",
+            worker
+                .transport
+                .as_ref()
+                .unwrap()
+                .session_id
+                .as_deref()
+                .unwrap(),
+            1,
+        );
+        let failing = Arc::new(AtomicBool::new(true));
+        let calls = Arc::new(AtomicUsize::new(0));
+        server.appserver_thread_status = Arc::new({
+            let failing = failing.clone();
+            let calls = calls.clone();
+            move |_, thread| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                if failing.load(Ordering::SeqCst) {
+                    return Err("native thread read failed".to_owned());
+                }
+                Ok(serde_json::json!({
+                    "thread": {"id": thread, "status": {"type": "idle"}},
+                }))
+            }
+        });
+        let now = super::super::state::now_ms();
+        tick_at(&server, now);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        {
+            let state = server.state.lock().unwrap();
+            assert!(state.board_patrol_notice_ids.is_empty());
+            assert_eq!(
+                state
+                    .board_patrol_gates
+                    .get("alice")
+                    .expect("failed read still advances the gate")
+                    .next_due_ms,
+                now + crate::board_patrol_policy::BOARD_IDLE_PATROL_INTERVAL_MS
+            );
+        }
+        let log = std::fs::read_to_string(server.log_path()).unwrap_or_default();
+        assert!(
+            log.contains("BOARD_PATROL_ACTIVITY_READ_FAILED: alice: native thread read failed"),
+            "failed activity read is logged explicitly: {log}"
+        );
+
+        failing.store(false, Ordering::SeqCst);
+        calls.store(0, Ordering::SeqCst);
+        tick_at(&server, now + 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "not due means no RPC");
+        {
+            let state = server.state.lock().unwrap();
+            assert!(state.board_patrol_notice_ids.is_empty());
+        }
+
+        tick_at(
+            &server,
+            now + crate::board_patrol_policy::BOARD_IDLE_PATROL_INTERVAL_MS,
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            server.state.lock().unwrap().board_patrol_notice_ids.len(),
+            1
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn board_idle_patrol_dispatch_cancel_before_attempt_blocks_delivery() {
+        let (mut server, root) = test_server();
+        let worker = seed_board_patrol_owner(&server, "alice", "thread-alice");
+        occupy_board_patrol_name(&server, &worker, "Alice");
+        add_board_patrol_task(
+            &server,
+            "T1",
+            "alice",
+            "Alice",
+            worker
+                .transport
+                .as_ref()
+                .unwrap()
+                .session_id
+                .as_deref()
+                .unwrap(),
+            1,
+        );
+        install_appserver_statuses(&mut server, vec![("thread-alice".into(), "idle".into())]);
+        let now = super::super::state::now_ms();
+        let (message_id, subscription_id, events) = {
+            let state = server.state.lock().unwrap();
+            let gate = crate::board_patrol_policy::PeerBoardPatrolGate {
+                owner_key: "Alice".into(),
+                last_wake_ms: now,
+                last_realtime_idle_since_ms: now,
+                last_wake_tasks: vec!["T1".into()],
+                next_due_ms: now + crate::board_patrol_policy::BOARD_IDLE_PATROL_INTERVAL_MS,
+            };
+            let address = super::board_patrol_name_address(&state, &worker, "Alice");
+            super::board_patrol_wake_events(
+                &state,
+                &worker,
+                address.as_ref(),
+                &["T1".to_owned()],
+                gate,
+                now,
+            )
+            .expect("default direct-message lease exists")
+        };
+        let kinds: Vec<String> = events
+            .iter()
+            .map(|event| {
+                serde_json::to_value(event).unwrap()["ev"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "BoardPatrolGateUpdated",
+                "DeliveryMode",
+                "BoardPatrolNoticeBound",
+                "Sent",
+                "MailboxNameAddressed",
+                "WakeBound",
+            ]
+        );
+        server.commit(&events);
+        server.commit(&[Event::BoardPatrolCancelled {
+            record: crate::board_patrol_policy::TaskPatrolCancelRecord {
+                task_id: "T1".into(),
+                owner_key: "Alice".into(),
+                reason: Some("waiting on the user".into()),
+                resume_condition: Some("user answers".into()),
+                cancelled_ms: now + 1,
+            },
+        }]);
+        let attempt = super::super::attempt_notification_detailed_with_at(
+            &server,
+            &message_id,
+            &subscription_id,
+            now,
+        );
+        assert!(
+            !attempt.accepted(),
+            "cancelled patrol must not be sent: {attempt:?}"
+        );
+        let state = server.state.lock().unwrap();
+        assert!(!state
+            .notification_delivery_accepted
+            .contains_key(&message_id));
+        assert_eq!(state.msgs[&message_id].wake_attempt_count, 0);
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn board_idle_patrol_dispatch_only_current_carrier_wakes() {
+        let (mut server, root) = test_server();
+        let old = seed_board_patrol_owner(&server, "old", "thread-old");
+        let current = seed_board_patrol_owner(&server, "current", "thread-current");
+        occupy_board_patrol_name(&server, &current, "Alice");
+        let current_name_occupancies: Vec<_> = {
+            let state = server.state.lock().unwrap();
+            state
+                .name_occupancies
+                .values()
+                .flat_map(|names| names.values())
+                .filter(|occupancy| occupancy.worker_id == current.id)
+                .cloned()
+                .collect()
+        };
+        assert_eq!(
+            current_name_occupancies.len(),
+            1,
+            "fixture invariant: current worker must hold exactly one name across alias scopes, got {current_name_occupancies:?}"
+        );
+        {
+            let mut state = server.state.lock().unwrap();
+            state.worker_names.insert("old".into(), "Alice".into());
+        }
+        add_board_patrol_task(
+            &server,
+            "T1",
+            "old",
+            "Alice",
+            current
+                .transport
+                .as_ref()
+                .unwrap()
+                .session_id
+                .as_deref()
+                .unwrap(),
+            1,
+        );
+        install_appserver_statuses(
+            &mut server,
+            vec![
+                ("thread-old".into(), "idle".into()),
+                ("thread-current".into(), "idle".into()),
+            ],
+        );
+        tick_at(&server, super::super::state::now_ms());
+        let state = server.state.lock().unwrap();
+        assert!(super::super::state::board_patrol_current_owner_key(&state, "old").is_none());
+        assert_eq!(state.board_patrol_notice_ids.len(), 1);
+        let message_id = state.board_patrol_notice_ids.iter().next().unwrap();
+        assert_eq!(state.msgs[message_id].to, "current");
+        assert!(!state.msgs.values().any(|message| message.to == "old"));
+        assert!(!state.board_patrol_gates.contains_key("old"));
+        assert!(state.board_patrol_gates.contains_key("current"));
+        drop(state);
+        drop(old);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -1758,7 +1758,9 @@ decision that must preserve evidence, not a reason to stop dispatching.
 
 一个交付/resource 回收任务必须以唯一入口进入、唯一终点收口；节点内部可以是状态机，但独立功能之间不得跨节点回边改真源。
 
-**peer 可直接 merge + push，当且仅当：**
+多 peer 批次内，当前项目 master 是共享构建、完整组合构建、远端 CI 触发及批次集成提交/PR 的唯一调度 owner。peer 完成自身必要局部验证后，交本地候选提交和证据，不独立 push/开 PR；预计时间只作协调提示。当前批 CI 与下一批合流验证并行；下一批已合流、适用验证和 review 完成后，前批通过则保留结果并完成适用集成义务，前批失败则保留原错、落实修复或诊断 owner、隔离未修复失败项及其下游，并以有效 main 和已验证依赖建立下一批。失败 PR 不得合入，不沿用失败基础，不削弱 CI；独立候选继续准备。完整规则见全局 `codex-orchestrator` Skill 的 `references/delivery-contract.md`。
+
+非批次路径或 master 明确授权的单候选路径中，**peer 可直接 merge + push，当且仅当：**
 
 1. merge 前 fetch 最新 `origin/main`，确认远端 main 没有比自己主链更新的提交；
 2. 候选已 rebase/组合到该最新 main，并重跑过受影响验证 + 独立 review PASS；

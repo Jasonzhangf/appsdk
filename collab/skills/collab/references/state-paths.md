@@ -95,7 +95,7 @@ identity recovery is not authorization to discard them.
 
 ## Identity and role
 
-- The current client is Codex only. Names own project work; the registered
+- Names own project work across supported hosts; the registered
   agent sessionID is the current execution carrier. The current AppServer
   route uses its verified owner and exact agent sessionID/threadID pair.
   A tmux socket, pane, tmux session and process ID locate transport or probes;
@@ -160,7 +160,8 @@ recovery command, or start a status/route/archive hunt to repair identity. A
 conflicting claim on your tmux pane (stale, or from another worker or project)
 is replaced by the daemon inside the same `collab context` call, so it is not a
 case you adjudicate. If `collab context` fails with an explicit conflict or
-error, preserve the exact error and stop. Never edit `routes.jsonl`,
+error, preserve it and stop the affected recovery action; continue independent
+authorized work. Never edit `routes.jsonl`,
 `server.pid`, journal, mailbox, or identity files to make registration appear
 healthy.
 

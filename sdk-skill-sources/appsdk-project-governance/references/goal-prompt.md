@@ -30,5 +30,7 @@ work while a decision is pending. Do not close unfinished tasks to stop reminder
 For an authorized migration, reference the [migration Skill](../../appsdk-migration/SKILL.md)
 and existing evidence. A prompt grants no new role, destructive authority or
 daemon lifecycle permission. Keep source, installed and loaded-runtime evidence
-separate. Close owned schedules when complete or idle with no actionable work,
-and retain direct-message reception for the next assignment.
+separate. Close finite owned goal/task schedules when complete or idle with no
+actionable work, and retain direct-message reception. The current master's
+standing project patrol follows [board-idle patrol](../../collab/references/board-idle-patrol.md);
+ending one goal does not close it or override a peer's task-scoped cancellation.

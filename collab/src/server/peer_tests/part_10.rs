@@ -91,10 +91,15 @@ fn context_is_read_only_and_does_not_consume_notifications() {
         }),
         "no-live-master context must expose the user-approved promote operation"
     );
-    assert!(operations.iter().any(|operation| {
-        operation["kind"] == "next_action"
-            && operation["action"] == context.data["role_brief"]["next_action"]
-    }));
+    assert!(
+        !operations.iter().any(|operation| {
+            matches!(
+                operation["kind"].as_str(),
+                Some("responsibility" | "next_action" | "completion_action" | "notification_rule")
+            )
+        }),
+        "operations must not mirror static role_brief text: {operations:?}"
+    );
     assert_eq!(
         context.data["identity"]["transport"]["tmux_endpoint"],
         serde_json::to_value(expected_tmux_endpoint).unwrap()
@@ -126,7 +131,7 @@ fn context_is_read_only_and_does_not_consume_notifications() {
 }
 
 #[test]
-fn context_gives_an_idle_master_one_canonical_scheduling_action() {
+fn idle_master_keeps_static_guidance_in_role_brief_without_fake_task_actions() {
     let (server, root) = test_server();
     register(&server, "master", "%master");
     promote_master(&server, "master", "user-approved");
@@ -140,11 +145,10 @@ fn context_gives_an_idle_master_one_canonical_scheduling_action() {
     assert_eq!(context.data["master"]["endpoint_live"], true);
     assert_eq!(context.data["agent"]["thread_state"], "unknown");
     assert!(context.data["recorded_unusable"].is_null());
-    assert_eq!(
-        context.data["next_actions"].as_array().unwrap().len(),
-        1
-    );
-    let next_action = context.data["next_actions"][0].as_str().unwrap();
+    assert_eq!(context.data["next_actions"], serde_json::json!([]));
+    let next_action = context.data["role_brief"]["next_action"]
+        .as_str()
+        .expect("master next action");
     let next_action_lower = next_action.to_ascii_lowercase();
     assert!(
         next_action_lower.contains("long-horizon goals"),
@@ -164,19 +168,19 @@ fn context_gives_an_idle_master_one_canonical_scheduling_action() {
     );
     let operations = context.data["operations"].as_array().expect("operations");
     assert!(
-        !operations.is_empty(),
-        "master context must expose operations"
-    );
-    assert!(
         operations
             .iter()
-            .any(|operation| operation["kind"] == "next_action"
-                && operation["action"].as_str().is_some_and(|action| {
-                    let action = action.to_ascii_lowercase();
-                    action.contains("regardless of whether other peers are busy")
-                        && action.contains("protected_holds")
-                        && action.contains("re-arm")
-                }))
+            .any(|operation| operation["kind"] == "peer_lifecycle"),
+        "master context must retain the fact-triggered peer lifecycle operation"
+    );
+    assert!(
+        !operations.iter().any(|operation| {
+            matches!(
+                operation["kind"].as_str(),
+                Some("responsibility" | "next_action" | "completion_action" | "notification_rule")
+            )
+        }),
+        "operations must contain current facts, not copied role_brief text: {operations:?}"
     );
     assert!(context.data["role_brief"]["responsibilities"]
         .as_array()
@@ -191,10 +195,6 @@ fn context_gives_an_idle_master_one_canonical_scheduling_action() {
                 line.contains("converges owned worktrees") && line.contains("PROTECTED_HOLD")
             })
         }));
-    assert_eq!(
-        context.data["role_brief"]["next_action"],
-        context.data["next_actions"][0]
-    );
     assert!(!context
         .data
         .to_string()
@@ -212,10 +212,7 @@ fn master_context_routes_work_by_task_kind() {
 
     assert!(context.ok, "{}", context.error.unwrap_or_default());
     assert_eq!(context.data["identity"]["role"], "master");
-    assert_eq!(
-        context.data["next_actions"],
-        serde_json::json!([context.data["role_brief"]["next_action"].clone()])
-    );
+    assert_eq!(context.data["next_actions"], serde_json::json!([]));
     let responsibilities = context.data["role_brief"]["responsibilities"]
         .as_array()
         .expect("master responsibilities")

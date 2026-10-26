@@ -368,6 +368,23 @@ fn board_publish_is_shared_but_does_not_start_execution() {
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0]["id"], "board-one");
     assert!(!serde_json::to_string(&board).unwrap().contains("\"token\""));
+    let status = fixture.run_public(&["task", "status", "board-one"], THREAD_B);
+    assert_eq!(status["status"], "pending");
+    assert_eq!(status["owner"], master);
+    assert!(!status["completion_missing"].is_null());
+    for absent in [
+        "delivery",
+        "review",
+        "integration",
+        "merge",
+        "cleanup",
+        "keepalive",
+    ] {
+        assert!(
+            status.get(absent).is_none(),
+            "empty lifecycle or unrelated history {absent}: {status}"
+        );
+    }
     let bypass = fixture.command_public(
         &["task", "update", "board-one", "--status", "working"],
         THREAD_A,
@@ -1599,18 +1616,19 @@ fn role_patrol_board_invitation_is_durable_without_serialized_control_state() {
         .as_str()
         .expect("board invitation carries a text body");
     let body_lower = body.to_ascii_lowercase();
-    for keyword in [
-        "role task",
-        "responsibilit",
-        "orchestrat",
-        "patrol",
-        "subscription",
-        "master",
-        "block",
+    assert!(
+        !body.contains("Role task:") && !body.contains("Responsibilities:"),
+        "invitation must carry its task contract without replaying the registered role brief: {body}"
+    );
+    for required in [
+        "任务板接口",
+        "公开协议测试",
+        "接口行为通过",
+        "cargo test --test appserver_two_tui_integration",
     ] {
         assert!(
-            body_lower.contains(keyword),
-            "board invitation body must mention {keyword:?}: {body}"
+            body.contains(required),
+            "missing task contract {required}: {body}"
         );
     }
     assert!(
@@ -1648,4 +1666,75 @@ fn role_patrol_board_invitation_is_durable_without_serialized_control_state() {
     );
     assert_eq!(accepted["task"]["owner"], peer);
     assert_eq!(accepted["task"]["status"], "working");
+}
+
+#[test]
+fn recv_public_replay_keeps_payload_and_reply_without_delivery_diagnostics() {
+    let (fixture, _, peer) = setup();
+    let sent = fixture.run_public(
+        &[
+            "sendmessage",
+            "--to",
+            &peer,
+            "--subject",
+            "receipt",
+            "--reply-required",
+            "body with records and query_result",
+        ],
+        THREAD_A,
+    );
+    let id = sent["msg_id"].as_str().unwrap();
+    let first = fixture.run_public(
+        &["recv", "--receive-id", "minimal-receipt", "--timeout", "0"],
+        THREAD_B,
+    );
+    let message = first["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["id"] == id)
+        .expect("received original message");
+    assert_eq!(message["body"], "body with records and query_result");
+    assert!(!message["reply_obligation"].is_null(), "{message}");
+    for field in [
+        "wake_attempt_count",
+        "last_wake_attempt_ms",
+        "retry_attempted",
+    ] {
+        assert!(
+            message.get(field).is_none(),
+            "delivery diagnostic {field}: {message}"
+        );
+    }
+    let next = fixture.run_public(
+        &[
+            "sendmessage",
+            "--to",
+            &peer,
+            "--subject",
+            "later",
+            "leave this unread",
+        ],
+        THREAD_A,
+    );
+    let replay = fixture.run_public(
+        &["recv", "--receive-id", "minimal-receipt", "--timeout", "0"],
+        THREAD_B,
+    );
+    assert_eq!(replay["replayed"], true);
+    assert_eq!(first["messages"], replay["messages"]);
+    let later = fixture.run_public(&["msg", next["msg_id"].as_str().unwrap()], THREAD_B);
+    assert_ne!(
+        later["state"], "read",
+        "replay consumed another batch: {later}"
+    );
+    let second = fixture.run_public(
+        &["recv", "--receive-id", "minimal-next", "--timeout", "0"],
+        THREAD_B,
+    );
+    assert!(second["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|message| message["id"] == next["msg_id"]));
 }

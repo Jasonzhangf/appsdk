@@ -4,6 +4,12 @@ fn parse_json(bytes: &[u8]) -> Value {
     serde_json::from_slice(bytes).expect("collab CLI emits JSON")
 }
 
+/// Count non-overlapping occurrences of `needle` in `haystack`. Used to prove a
+/// projected duty or command appears exactly once instead of being mirrored.
+fn count_occurrences(haystack: &str, needle: &str) -> usize {
+    haystack.matches(needle).count()
+}
+
 fn ceo_wire_request(fixture: &Fixture, request: Value) -> Value {
     let mut stream = UnixStream::connect(fixture.host_state.join("server.sock")).unwrap();
     stream
@@ -534,10 +540,95 @@ fn ceo_cross_project_task_message_reply_progress_and_clear_roundtrip() {
         current["identity"]["role"], "worker",
         "global CEO must not acquire project master authority"
     );
-    assert!(
-        current["ceo_brief"]["responsibilities"].is_array(),
-        "{current}"
+    assert_eq!(
+        current["role_brief"]["role"], "worker",
+        "CEO decorator must not rewrite the project role: {current}"
     );
+    assert_eq!(
+        current["role_brief"]["authority"]["may_decline_master_invite"], true,
+        "CEO decorator must preserve the peer authority block: {current}"
+    );
+    // All four CEO prose fields live once in role_brief, after the base duties.
+    let role_brief = &current["role_brief"];
+    let role_task = role_brief["role_task"].as_str().unwrap_or_default();
+    assert!(
+        role_task.contains("The wire role remains"),
+        "base peer identity duty must stay ahead of the CEO text: {role_task}"
+    );
+    let serialized = current.to_string();
+    for (label, needle) in [
+        (
+            "role_task",
+            "Coordinate authorized goals across projects as the one host-wide CEO.",
+        ),
+        (
+            "responsibility",
+            "A ceo work-role label grants no global authority.",
+        ),
+        (
+            "next_action",
+            "Inspect project progress, act on actionable master replies",
+        ),
+        (
+            "completion_action",
+            "Collect actual master delivery reports",
+        ),
+    ] {
+        assert_eq!(
+            count_occurrences(&serialized, needle),
+            1,
+            "CEO {label} must appear once in the snapshot: {current}"
+        );
+    }
+    let operations = current["operations"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    for action in [
+        "ceo-progress",
+        "ceo-append-task",
+        "ceo-send",
+        "ceo-bootstrap",
+    ] {
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|operation| operation["action"] == action)
+                .count(),
+            1,
+            "CEO operation {action} must appear once in operations: {current}"
+        );
+    }
+    for removed in ["ceo_brief", "ceo_operations", "ceo_upstream_rule"] {
+        assert!(
+            current.get(removed).is_none(),
+            "obsolete CEO mirror {removed} is still exported: {current}"
+        );
+    }
+    assert!(
+        role_task.contains("Coordinate authorized goals across projects"),
+        "CEO role_task is missing from role_brief: {role_task}"
+    );
+    let card = &role_brief["ceo_workflow_template"];
+    assert_eq!(card["target"], "ceo", "{current}");
+    assert_eq!(card["source"], "base", "{current}");
+    assert!(card["base_version"].as_u64().is_some(), "{card}");
+    assert_eq!(card["revision"], 0, "{current}");
+    assert!(
+        card.get("template").is_none(),
+        "CEO template card must not repeat the prose body: {card}"
+    );
+    let static_next_actions: Vec<&str> = current["next_actions"]
+        .as_array()
+        .map(|items| items.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    assert!(
+        static_next_actions
+            .iter()
+            .all(|action| !action.contains("Inspect project progress, act on actionable")),
+        "CEO static next_action leaked into next_actions: {current}"
+    );
+    assert_eq!(current["ceo"]["worker_id"], ceo_id, "{current}");
     let forged = ceo_wire_request(
         &fixture,
         json!({
@@ -550,12 +641,31 @@ fn ceo_cross_project_task_message_reply_progress_and_clear_roundtrip() {
         forged["ok"], false,
         "a supplied CEO id without its credential was trusted: {forged}"
     );
-    run_ok_at(
+    let specialty_context = run_ok_at(
         &fixture,
         &target_root,
         &target_pane,
         &["context", "--work-roles", "ceo"],
         false,
+    );
+    let specialty_snapshot = &specialty_context["result"]["snapshot"];
+    assert_eq!(
+        specialty_snapshot["identity"]["role"], "worker",
+        "a ceo specialty must not change the project role: {specialty_snapshot}"
+    );
+    assert_eq!(
+        specialty_snapshot["ceo"]["is_current"], false,
+        "a ceo work-role label must not carry the global grant: {specialty_snapshot}"
+    );
+    assert!(
+        specialty_snapshot["role_brief"]
+            .get("ceo_workflow_template")
+            .is_none(),
+        "a ceo specialty must not receive the CEO workflow card: {specialty_snapshot}"
+    );
+    assert!(
+        specialty_snapshot.get("ceo_brief").is_none(),
+        "a ceo specialty must not receive CEO prose: {specialty_snapshot}"
     );
     let specialty = run_at(
         &fixture,
@@ -589,10 +699,43 @@ fn ceo_cross_project_task_message_reply_progress_and_clear_roundtrip() {
         "{master_context}"
     );
     assert!(
-        master_context["ceo_upstream_rule"]
-            .as_str()
-            .is_some_and(|rule| rule.contains("collab ceo reply")),
-        "project master is missing its upstream reply instructions: {master_context}"
+        master_context.get("ceo_upstream_rule").is_none(),
+        "obsolete ceo_upstream_rule mirror is still exported: {master_context}"
+    );
+    let master_responsibilities: Vec<&str> = master_context["role_brief"]["responsibilities"]
+        .as_array()
+        .expect("master role_brief responsibilities array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert_eq!(
+        master_responsibilities
+            .iter()
+            .filter(|rule| rule.contains("collab ceo reply"))
+            .count(),
+        1,
+        "project master upstream reply duty must appear once in role_brief: {master_context}"
+    );
+    let master_operations = master_context["operations"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        master_operations
+            .iter()
+            .filter(|op| op["action"] == "ceo-reply")
+            .count(),
+        1,
+        "project master upstream reply command must appear once in operations: {master_context}"
+    );
+    assert!(
+        master_context["next_actions"]
+            .as_array()
+            .map(|actions| actions.iter().all(|action| action
+                .as_str()
+                .is_none_or(|text| !text.contains("collab ceo reply"))))
+            .unwrap_or(true),
+        "project master upstream reply command leaked into next_actions: {master_context}"
     );
 
     let sent = run_ok_at(

@@ -43,8 +43,8 @@ IDs are invalid.
 3. validates each declared JSON guidance contract;
 4. orders sources by precedence then source ID;
 5. rejects duplicate domain, node, edge, and rule IDs;
-6. emits source digests, merged workflows/rules, and a deterministic manifest
-   hash to `.appsdk/guidance/compiled.json`.
+6. emits declared source context and merged workflows/rules to
+   `.appsdk/guidance/compiled.json`, without source digest wrappers.
 
 Compilation is deterministic: timestamps and absolute paths are excluded. The
 same source bytes and project contract produce identical output in every
@@ -91,7 +91,8 @@ proposal schema. They never choose technical implementation details.
 
 ### Initialization intake
 
-`guide init` is the standard entry before an agent creates a task plan. It
+When persistent Guidance is selected, `guide init` is the read-only intake before
+an agent creates its Guidance task plan. Advisory work does not require setup. It
 returns `guide_flow_required`, the selected goal/module/workflow projection,
 present declared sources in precedence order, missing optional context, exact
 `$skill-id` suggestions from a declared Skill contract or `<skill-id>/SKILL.md`
@@ -105,9 +106,9 @@ precise missing decision and affected scope. `next` is the single next action.
 Normal task intake never scans undeclared Skill directories and never writes
 task state. If approved guidance has not been compiled, it returns the missing
 `guide compile` and repeatable `guide init` commands. `new` and configured
-`init` print this onboarding sequence. After the Agent reads context and asks
-only declared unresolved questions, it runs the projected domain command and
-submits PlanProposal; `guide plan` is the first task-state write.
+`init` print this onboarding sequence. After resolving declared gaps through the
+responsible owner, the Agent uses another domain projection only for missing
+context and submits PlanProposal; `guide plan` is the first task-state write.
 
 When an existing `.appsdk/project.json` has no `guidance` member, `appsdk init`
 preserves that contract and all lifecycle truth, installs missing Guide bundle

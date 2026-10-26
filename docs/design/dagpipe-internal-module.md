@@ -1,4 +1,8 @@
-# DAGpipe 源码并入 AppSDK
+# DAGpipe 模块职责与导入背景
+
+本页保留一次性导入的归属决定，不是日常开发或发布清单。当前 API 见
+[DAGpipe README](../../dagpipe/README.md)，选测与交付见
+[appsdk-dev](../../.agents/skills/appsdk-dev/SKILL.md)。
 
 ## 目标与边界
 
@@ -6,28 +10,17 @@
 
 集成是一次性的源码归属迁移：从上述精确提交导入已跟踪文件，之后只在 AppSDK 主链开发和发布，不设置双向同步或独立仓库回写。DAGpipe 源仓库中未跟踪的 `.appsdk-control/` 和设计草稿不进入模块。现有项目图、AppSDK 专属 Operator、`appsdk dagpipe` 命令不搬入通用库。
 
-## 业务语义 DAG
+## 当前模块边界
 
-```mermaid
-flowchart LR
-  A[确认原始源码与现有调用] --> B[固定模块归属与版本]
-  B --> C[迁入通用图引擎源码]
-  C --> D[接通 AppSDK 本地依赖]
-  D --> E[构建独立命令与 SDK]
-  E --> F[验证现有图与真实调用]
-  F --> G[统一主链发布]
-  G --> H[回收本轮临时资源]
-```
-
-唯一入口是确认过的 DAGpipe 与 AppSDK 基线；唯一成功出口是本地和远端 AppSDK 主链一致、构建与调用证据齐全、临时资源回收。导入、编译、安装、调用失败均显式失败并保留候选，不跳到发布。取消时保留已提交设计及可审候选，按 owner 核销后才回收 worktree。
+一次性导入不是当前业务执行路径。按实际变更复用 `docs/dagpipe/` 中的对象流。
+静态图只证明拓扑与声明绑定；真实 consumer 证明执行行为。
 
 | 节点 | 唯一 owner | 输入 / 输出与证据 |
 | --- | --- | --- |
-| 确认源码 | 集成者 | 两仓 HEAD、dirty 状态、已跟踪文件与许可证元数据 |
 | 迁入通用引擎 | `dagpipe/` | `pipeline_runtime` 公开 API 与独立 `dagpipe` CLI；原有测试及示例通过 |
 | AppSDK 调用 | `rust/` | 本地 path 依赖；现有 `appsdk dagpipe validate`、fix 与 notification 入口可执行 |
 | 安装初始化 | `dagpipe/` 安装入口 | 从本仓库构建并安装同源 CLI/SDK/Skill；第二次执行保持同一归属和结果，不创建第二份真源 |
-| 发布与清理 | AppSDK 集成者 | 候选 SHA、产物哈希、review、主链和远端回执、worktree 不存在 |
+| 交付与清理 | 当前任务 owner | 宿主交付合同要求的行为、集成与自有资源清理证据 |
 
 源码登记由 `contracts/maps/module-registry.json` 的 `dagpipe-runtime` 独占
 `dagpipe/**`。该独立模块从已发布源码一次性迁入，原 `src/lib.rs` 为 3159 行；
@@ -37,13 +30,18 @@ flowchart LR
 
 ## 初始化及失败合同
 
-`appsdk init` 仍初始化项目治理与 Collab；DAGpipe 的项目图已经由 AppSDK bundle 提供，不在每次项目 init 时做全局软件安装。全局 `dagpipe` CLI、SDK 源码和 Skill 使用 AppSDK 仓库中的独立模块安装入口一次性安装或升级。安装入口必须使用本模块作为源码，不访问旧 DAGpipe checkout；已有安装位置只在确认归属后更新，冲突显式失败。重复安装不能叠加二进制或产生第二个 SDK 真源。安装不启停 Collab daemon，因为通用 DAGpipe 无常驻进程。
+`appsdk init` 负责项目治理；Collab 身份注册属于独立控制面。DAGpipe 的项目图由
+AppSDK bundle 提供，不在每次 init 时全局安装。CLI、SDK 和 Skill 使用仓内独立安装
+入口，不访问旧 checkout。目标归属冲突显式失败；重复安装不能产生第二份真源。
+DAGpipe 无常驻进程，其安装不启停 Collab daemon。
 
 成功路径需覆盖 `dagpipe graph validate` 的有效图、无效图失败，`pipeline_runtime` 的公开 consumer，和 AppSDK 的现有图验证。失败路径包括 Cargo 编译失败、静态图无效和安装目标归属冲突。未跟踪源文件、旧独立仓库发布脚本、现有 Collab 身份/路由及其他人的 worktree 均在本次修改范围之外。
 
-## 验收
+## 按改动选择验证
 
-1. `rust/Cargo.toml` 只引用仓内 `../dagpipe`；`cargo metadata` 的 `pipeline_runtime` 来源为该路径。
-2. DAGpipe 库测试、独立 CLI 的有效/无效图、AppSDK DAGpipe 测试和真实命令入口通过。
-3. 从已验候选安装独立 CLI/SDK/Skill，核对可执行文件及源码哈希；重复初始化结果可核验。
-4. 独立架构 review PASS 后组合最新 `origin/main`，合入、推送并核对两端 SHA；仅清理本任务创建的 worktree 和临时资源。
+1. 依赖变化：确认仓内 `../dagpipe` 依赖和真实 consumer。
+2. 引擎或 CLI 变化：覆盖受影响库行为、有效/无效图和 AppSDK 入口。
+3. 安装变化：隔离验证可用性、归属冲突和重复安装。
+4. 纯文档：检查语义和链接，复用未变图与有效证据。
+
+构建、安装、运行与集成分别报告。普通改动不要求重装、摘要包装或发布流程。

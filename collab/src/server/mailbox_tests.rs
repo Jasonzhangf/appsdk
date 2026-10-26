@@ -7,7 +7,9 @@ use std::sync::Mutex;
 fn wake_text_keeps_location_action_and_one_read_action_only() {
     let text = notification_text(&msg("minimal-wake")).unwrap();
     assert!(
-        text.starts_with("COLLAB_NOTIFY minimal-wake [worker-idle:minimal-wake] body minimal-wake | P1 ACTION: "),
+        text.starts_with(
+            "COLLAB_NOTIFY minimal-wake [worker-idle:minimal-wake] body minimal-wake | P1 ACTION: "
+        ),
         "{text}"
     );
     assert_eq!(

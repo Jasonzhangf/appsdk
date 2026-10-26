@@ -52,7 +52,7 @@
       "id": "输出只读任务板结果",
       "operator": "appsdk.collab_board_read.emit_result",
       "operator_version": "1",
-      "description": "输出 caller 可见的任务、空 owner、保留历史、既有回流原因或明确读取失败。成功不代表身份恢复、assignment mutation 或通知已投递。",
+      "description": "输出 caller 可见的任务、空 owner、保留历史、既有回流原因或明确读取失败。默认省略没有事实的生命周期块；指定 reviewer、审查有效性、待合并义务、未完成条件和资源清理仍可见。成功不代表身份恢复、assignment mutation 或通知已投递。",
       "inputs": ["owner_projection"],
       "output": {"id": "board_result", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},

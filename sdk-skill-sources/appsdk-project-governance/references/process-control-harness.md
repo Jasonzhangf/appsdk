@@ -19,11 +19,12 @@ closeout projector final state -> gaps/cleanup/memory candidates
 Harness does not call a model, produce project evidence, mutate lifecycle truth,
 or write memory automatically.
 
-## Tour and ordered review
+## Optional tour and workflow editing
 
 Use `appsdk guide tour --task <id> --mode <domain>` to inspect the generated
-workflow and let a human choose an adjacent path. Persist that choice with a
-TourProposal input when needed. Submit `appsdk guide review` in two stages:
+workflow when inspection or editing is requested. It is not a routine human
+approval gate. Persist an authorized choice with a TourProposal when needed.
+Submit `appsdk guide review` in two stages:
 `node_review` checks and accepts node content first; only after every selected
 node has an accepted revision may `flow_review` update edges, order, or rules.
 The accepted flow patch retains node revision IDs and stays staged until the
@@ -32,12 +33,11 @@ declared source is explicitly updated and compiled.
 ## Start
 
 ```bash
-appsdk guide status --task <task-id>
 appsdk guide init --task <task-id> --mode develop --module <module-id>
-appsdk guide develop --task <task-id> --module <module-id>
 ```
 
-If status returns `GUIDANCE_SETUP_REQUIRED`, do not call compile yet:
+Reuse a valid intake/status result; query status only for a missing fact.
+If it returns `GUIDANCE_SETUP_REQUIRED`, do not call compile yet:
 
 ```bash
 appsdk guide init --task guidance-setup --mode bootstrap --module <module-id>
@@ -51,8 +51,8 @@ worktree, declares them in `.appsdk/project.json`, and runs `appsdk guide
 compile` plus `appsdk verify`. If status is only `GUIDANCE_NOT_COMPILED`,
 approved sources are already declared and compile is the next command.
 
-After an AppSDK update, or for an explicit rules refresh, a configured project
-uses the same read-only bootstrap intake:
+For an explicit rules refresh, a configured project can use the same read-only
+bootstrap intake. Refresh installed resources only when needed:
 
 ```bash
 appsdk init
@@ -75,13 +75,17 @@ Use `--mode debug` for a bug, regression, or incident. Use another declared
 domain when appropriate. `guide init` is read-only and returns:
 
 - declared AGENTS and local Skill paths to read in precedence order;
-- unresolved develop/debug questions to ask the user;
+- only unresolved questions declared in the goal;
 - exact `$skill-id` suggestions for declared local Skills;
-- missing commands and the next `appsdk guide` command sequence.
+- `next` as the single next action, without a mirrored command sequence.
 
-Ask only questions still unresolved after reading the returned sources and the
-current user request. Then run the projected domain command and write the
-PlanProposal. `appsdk guide --help` lists the full command surface.
+Resolve questions from current requirements, evidence and authorization first.
+For registered collaboration, ask the owning peer for facts, the designer for
+design interpretation, or the master for scope/resource coordination. Ask the
+human only for a human-exclusive fact, uncovered authorization or a change to
+an explicit user constraint. Continue independent work. Use another projection
+only for missing context, then submit PlanProposal.
+`appsdk guide --help` lists the full command surface.
 
 `GuidanceSetupProposal` is project-level and user-approved. `PlanProposal` is
 task-level and stored in local control state. Never promote a task plan into a
@@ -115,7 +119,7 @@ failure, or reason to wait for an external AppSDK owner.
 ```
 
 Do not provide `current_node`, `next_transition`, source hashes, scope hash, or
-rule-context hash. Harness derives them.
+rule-context hash. Harness derives the current node and next transition.
 
 ```bash
 appsdk guide plan --task <task-id> --input plan.json
@@ -140,17 +144,18 @@ second intake truth.
 
 ```bash
 appsdk guide update --task <task-id> --input result.json
-appsdk guide next --task <task-id>
 ```
 
+Use the update result; call `guide next` only when the next action is missing.
 Same event ID and content is idempotent. Same ID with different content fails.
 `pass` with required but absent evidence fails. Only projected step may update.
 
 ## Revision
 
-Resubmit PlanProposal with `revision_reason` when evidence, blocker, hypothesis,
-scope, owner, source, environment, rules, contracts, gates, or dependencies
-change. Old plan/events remain append-only. Never edit control files by hand.
+Resubmit PlanProposal with `revision_reason` when goal, scope, acceptance,
+key approach, declared owner or relevant dependencies materially change.
+Ordinary scoped edits and Git commits do not require a revision. Old plan/events
+remain append-only. Never edit control files by hand.
 
 ## Close
 

@@ -15,6 +15,8 @@ mod board_cli;
 mod central_storage;
 #[path = "board/ceo_patrol_runtime.rs"]
 mod ceo_patrol_runtime;
+#[path = "board/context_minimality.rs"]
+mod context_minimality;
 #[path = "board/degraded_user_maintenance.rs"]
 mod degraded_user_maintenance;
 #[path = "board/name_adjudication.rs"]

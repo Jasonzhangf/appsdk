@@ -14,10 +14,12 @@ Collab 只有一个 Skill。master、peer、designer、reviewer 等不建立独�
 流程，优先将有界执行交给独立 worker。peer 完工或停止前向现有 master 交回结果并申请
 下一步或 idle；reviewer/设计师同样适用。无 master 时不虚构审批者；master 不向自己申请。
 
-执行以本次 `collab context` 的 `role_brief.workflow_template` 为准：读取基础版本、
-identity 及 specialties 的来源、revision 和完整 template。未更新时使用标准身份流程。
-项目 master 可覆盖身份流程，或配置 `role:<工作角色>` 流程；多个匹配专长全部有序返回，
-不以第一项静默覆盖其他项。角色被移除后，不再派发该专长模板。模板不是权限授予，
+执行以本次 `collab context` 的 `role_brief` 为准：有效流程正文只在 `role_task`、
+`responsibilities`、`next_action`、`completion_action` 组合输出一次。identity 和
+specialties 模板卡只含 target、source、base_version、revision；master 的
+`configured_templates` 只含当前覆盖的版本与更新元数据。未更新时使用标准身份流程。
+项目 master 可覆盖身份流程，或配置 `role:<工作角色>` 流程；多个匹配专长全部有序组合，
+不以第一项静默覆盖其他项。角色被移除后，不再组合该专长模板。模板不是权限授予，
 也不自动改写已发布任务的 owner、scope、指定执行者或必需 reviewer。
 
 新 peer 或角色变化只触发对受影响职责、依赖和交接的处理。只有实际任务需要时才改
@@ -101,7 +103,10 @@ collab context --workflow-target 'role:designer' --reset-workflow-template
 
 `--workflow-target master` 或 `peer` 更新本项目的身份流程。`role:` 后为已规范化的
 工作角色名，不是 agent 名。模板写入和角色设置分开执行；写入不会替别人注册或分配角色。
-修改后同次回执及后续 context 均返回当前投影，`operations` 使用同一有效流程。
+修改后同次回执及后续 context 均返回当前投影。`operations` 只返回当前适用命令，
+`next_actions` 只返回当前任务或本次恢复动作，不复制职责正文。authoring 仍是完整替换、
+reset、replay；调整时提交完整四字段 JSON，不读取旧正文做部分合并，也不新增原始覆盖
+正文的导出入口。
 模板内容由 daemon journal 持久保存，换会话不丢失；重置模板后回到标准身份流程。
 若实际 context 没有该模板字段，说明当前运行版本尚未提供模板派发；保留原回执并报告
 安装/运行差异，不手工改控制状态、不虚构模板已生效，也不自行管理 daemon 生命周期。
@@ -245,7 +250,7 @@ master 与 peer 收到具体执行请求，在接受邀请或开始执行前，�
 
 | 当前请求 | 直接执行的命令 | 到此为止的条件 |
 |---|---|---|
-| 用户要求注册/恢复，或当前身份确实缺失 | `collab context` | 读取 registered、identity、work_roles、role_brief、operations。已有当前有效回执就复用；仅按返回的缺失事实通过 `context --provide '<真实事实JSON>'` 补充，不猜宿主事实。 |
+| 用户要求注册/恢复，或当前身份确实缺失 | `collab context` | 读取 registered、identity、work_roles、role_brief、operations、next_actions。已有当前有效回执就复用；仅按返回的缺失事实通过 `context --provide '<真实事实JSON>'` 补充，不猜宿主事实。 |
 | 设置或修改自己的工作角色 | `collab context --work-roles '<完整角色集合，逗号分隔>'` | 检查 work_roles_update 回执；保留仍需的原角色。成功即完成角色设置，不继续创建任务或设置执行者。 |
 | 撤销自己的全部工作角色 | `collab context --work-roles ''` | 仅在用户明确要求清空时执行，不用作排障试探。 |
 | 当前 master 按用户指令给别人设置角色 | `collab context --for-name '<稳定名字>' --work-roles '<完整角色集合>'` | `--for-name` 是设置目标名字的专长，不是切换调用者身份。 |
@@ -400,6 +405,10 @@ master 和 peer 的编排功能相同，区别是目标层级：master 管理项
 worker；具体一次性编码、执行和观察由子 agent 承担。注册与恢复说明目标层级和
 职责，不用任务类型反推协作身份。
 
+常规技术选择在授权内自行决定。事实问所属 peer，设计问设计师，范围、资源和协作
+冲突问 master。只有人类专属事实、未覆盖授权或显式硬约束变化才询问用户。复用已有
+授权；等待必要答复时只暂停受影响工作，不把内部疑问转成人类审批。
+
 Choose the receiver by task kind, not by idle capacity or expected duration. A
 fixed command that runs for hours is still bounded work. A goal that needs
 planning, delegation, evidence review, unblocking, integration, and resource
@@ -470,8 +479,9 @@ verify subworker limitations in the real entry, change the in-scope approach
 or executor where authorized, and pursue completion without waiting for master
 or another peer to solve it. Do not exceed authority or repeat unchanged failures.
 
-A suspected blocker is a request for investigation, not an approved stop. Ask
-master promptly with the task and affected acceptance condition, exact failing
+A suspected blocker is a request for investigation, not an approved stop. Route
+factual questions to the owning peer and design questions to the designer. For
+scope, resource or coordination blockers, contact master with the task and affected acceptance condition, exact failing
 entry/input and original error or evidence path, attempted remedies and their
 results, why authorized alternatives cannot proceed, the external dependency,
 and the exact decision and resume condition. Separate facts from hypotheses;
@@ -484,7 +494,8 @@ unsupported claim for investigation. Approval does not relieve peer ownership
 unless master explicitly reassigns the scope. Never close unfinished work merely
 to silence a blocker or its reminders.
 
-Registration returns a patrol reminder, and every dispatch repeats it. On the
+Registration returns the effective role workflow; invitations carry their task
+contract without repeating that workflow. On the
 next authorized activation after registration, promotion, delegation, or
 recovery, update the existing scope; context restoration does not fabricate
 board tasks, timers, or subscriptions.
@@ -796,9 +807,14 @@ The AppServer supplement accepts only the scalar facts `session_id`, `thread_id`
 `endpoint`, and `namespace`. It rejects any other key. An agent never guesses,
 selects, or hunts a worker, and never supplies `worker_id`, approval, token,
 generation, binding, or project scope. Invalid or unsupported input fails
-explicitly. The returned snapshot is the complete state read: role, operations,
-peers, master, scheduling, tasks, binding, and filtered environment. `binding`
-comes from the daemon ledger when the caller has a unique binding.
+explicitly. The returned snapshot is the complete actionable state read:
+`role_brief`, current `operations` and `next_actions`, peers, master, scheduling,
+tasks, binding, and filtered environment. Default context omits terminal
+subscriptions and caller-unrelated history or ledger entries. It keeps the peer
+directory and every unclosed reply, review, merge, cleanup or patrol obligation.
+Stored history and explicit diagnostic queries remain available; context does
+not delete records or create notifications. `binding` comes from the daemon
+ledger when the caller has a unique binding.
 
 If `collab context` fails explicitly, preserve the original error and affected
 scope. Do not retry automatically, edit route/identity files, copy tokens,
@@ -918,9 +934,13 @@ run `collab context` once in its own live environment to recover current state
 and the default finite direct-message subscription. Initial registration is
 performed only when explicitly requested by the user; if it cannot complete,
 preserve the error and continue independent work without this protocol.
-Registration returns `role_brief`. Read it as the active operating contract.
-It is the registration-time projection; `collab context` returns the current
-brief, and promotion or delegation returns the replacement brief. Do not
+Registration returns `role_brief`. Read it as the active operating contract: the
+effective `role_task`, `responsibilities`, `next_action` and `completion_action`
+for the current identity and matched specialties, composed once. Template cards
+carry only source and version metadata; `operations` and `next_actions` carry
+the current commands and task or recovery actions. It is the registration-time
+projection; `collab context` returns the current brief, and promotion or
+delegation returns the replacement brief. Do not
 maintain a separate role prompt:
 
 - `master`: orchestrate the project goal, offer delegated long-horizon goals
@@ -1334,8 +1354,10 @@ collab ceo progress
 collab ceo progress --project '<目标项目根目录>'
 ```
 
-context 返回当前全局 CEO 联系方式。只有当前 grant 持有者才获 CEO 操作与职责；
-`identity.role` 和项目 `authority` 保持原义。正常会话续接沿现有稳定名字 owner 规则，
+context 返回当前全局 CEO 联系方式。只有当前 grant 持有者才获 CEO 职责与命令：
+职责并入 `role_brief` 一次，命令只在 `operations` 提供一次，不另设第二份正文或操作
+镜像；`ceo` 字段只表示 typed grant/status。`identity.role` 和项目 `authority` 保持
+原义。正常会话续接沿现有稳定名字 owner 规则，
 不能凭旧 session、消息正文或角色字符串重建权限。没有 CEO 投影或入口不受支持时，
 报告安装/运行差异，不声称已启用、不手工改状态、不管理全局 daemon 生命周期。
 
@@ -1353,7 +1375,8 @@ append-task 追加到目标项目现有 board，由当前 master 负责，并默
 持久入队、通知提交、master 已安排、交付和回报各自分开。
 
 项目 master 收到 CEO 请求后，落实授权 action，安排 ready 工作，并向 CEO 交回实际
-结果、进度或具体阻塞。使用自己的项目身份，不切到 CEO 的目录冒充其身份：
+结果、进度或具体阻塞。该上游回复职责由 `role_brief` 提供，回复命令由 `operations`
+提供；不另存第二份静态规则。使用自己的项目身份，不切到 CEO 的目录冒充其身份：
 
 ```sh
 collab ceo reply --subject '<主题>' '<普通进度或具体阻塞>'
@@ -1503,9 +1526,9 @@ tasks and drives them to verified cleanup/close during its working cycle. This
 is a task-bound inspect obligation, not a transport activation schedule: it
 does not wake idle workers and does not generate worker transport input. The
 daemon board-idle patrol is a separate wake source. If an actionable
-task is open, continue it; if an ordinary peer is blocked, first ask the current
-master for help with the available evidence and decision needed. A proven root
-cause or fix is not a prerequisite for that request. Do not leave a task
+task is open, continue it; route blockers to the appropriate owner under
+[task routing](#task-routing-and-role-responsibilities). A proven root cause or
+fix is not a prerequisite for asking for help. Do not leave a task
 at `assigned`, `working`, `blocked`, `waiting`, `delivered`, or
 `cleanup_pending` merely because the last direct message was acknowledged.
 After delivery or merge, perform the real cleanup and close the task; a
@@ -1515,7 +1538,7 @@ Enter idle only after the remaining-work and blocker checks above and the curren
 
 Escalation routing is explicit:
 
-- An ordinary worker reports blockers to the current Collab master immediately.
+- A peer reports scope, resource and coordination blockers to the current Collab master promptly.
   Do not wait for the next liveness cycle or for master to invent the fix.
   Supply available failure evidence, attempted remedies and the decision
   needed; distinguish unknown cause from verified facts. Do not delay an
@@ -1777,10 +1800,10 @@ and maintains its own scoped patrol subscriptions. Each master assignment
 requires a fresh scope assessment and an update to its existing patrol tasks
 and subscriptions when the monitored goal changes. A legacy managed-subagent
 record grants no new execution or patrol authority.
-On a peer blocker, first ask the current master for help with the task,
-evidence, attempted actions, proposed next step, and decision needed. Do not
-delay the request while seeking a proven fix. If master is unavailable, record
-it and continue safe in-scope work. If delivery or test conditions are unclear,
+For a scope, resource or coordination blocker, ask the current master for help
+with the task, evidence, attempted actions, proposed next step and decision
+needed. Facts and design questions follow the task-routing rules above. If
+master is unavailable, continue independent in-scope work. If delivery or test conditions are unclear,
 propose the missing conditions instead of guessing. The default direct-message
 lease is daemon-owned and stays armed while the identity is registered;
 finishing or closing the last task or a goal never cancels it, so a registered
@@ -1835,21 +1858,23 @@ merely because an agent enters a project.
 `collab context` is the single agent entry. It resolves the canonical root,
 connects to the existing daemon, creates a missing baseline when applicable,
 restores peer identity, re-arms the default direct-message lease, and returns the
-authoritative snapshot plus the current role's `operations`.
+authoritative snapshot with the effective `role_brief`, current `operations` and
+`next_actions`.
 
-That one snapshot is also the agent's complete state read. It carries the
-projections that used to require separate calls, so no agent flow needs to run
+That one snapshot is also the agent's complete actionable state read. It carries
+the projections that used to require separate calls, so no agent flow needs to run
 `collab who`, `collab status --all`, `collab master status`, or a shell
 `env | rg` probe first:
 
 | Snapshot field | Replaces | Contents |
 |---|---|---|
+| `role_brief` | — | the single effective role contract: `role_task`, `responsibilities`, `next_action` and `completion_action`; workflow template cards contain only source and version metadata |
 | `master` | `collab master status` | current master authority projection (holder, scope, approval) and `master_wake`; transport liveness is a separate fact |
 | `peers`, `peer_count` | `collab who` | every registered peer with role and presence |
 | `summary`, `master_wake`, `subagents` | `collab status --all` | worker/message/task/subagent counts and the scheduling state |
 | `pending_merges` | `collab status --all` | applicable durable code-delivery merge obligations; explicit read-only delivery has none |
 | `env` | `env \| rg '(COLLAB\|APPSDK\|CODEX\|HOME\|USER)'` | the identity-relevant variables of this agent's own process; credential-shaped names (`*TOKEN*`, `*KEY*`, `*SECRET*`, `*PASSWORD*`, `*CREDENTIAL*`) are dropped, so `CODEX_API_KEY` never appears |
-| `operations`, `next_actions` | — | the current role's required actions |
+| `operations`, `next_actions` | — | current applicable commands in `operations`; actual current task or recovery actions in `next_actions`; neither repeats effective role prose |
 | `requires_identity_update` | — | present only when the agent must repair its identity; see below |
 
 | Situation | Do this | Never do this |
@@ -1934,6 +1959,10 @@ through the existing authority owner.
 判定续接、分配、确认或待决 → 提交名字绑定并同步未关闭任务或持久待决 →
 生成安全环境投影 → 输出含名字归属的权威快照。binding 收敛属于现有名字提交链，
 由既有 credential/binding/route owner 完成，不另建身份选择路径。
+默认快照的 `role_brief` 只输出一次有效正文；模板卡只含来源和版本；`operations` 与
+`next_actions` 只含当前适用命令及当前任务或恢复动作。终态订阅和调用者无关历史不进入
+默认视图，peer 目录与未结义务保留，持久历史仍由显式查询读取。CEO 后置装饰遵守同一
+投影，权限仍只来自 host typed grant。
 Binding convergence makes context completion, worker status, and board admission
 read one authoritative project/app/agent binding and endpoint generation. Only
 context repairs; status and board admission are read-only consumers. Missing,
@@ -1955,7 +1984,7 @@ snapshot:
 
 | 状态/终态 | 含义 | Agent 动作 |
 | --- | --- | --- |
-| `state_snapshot` 且 `registered=true` | 注册成功；含 role/operations/master/peers/peer_count/summary/master_wake/subagents/inbox/worktrees/tasks/env | 读快照执行已注册角色的 `operations`；无需再跑 who/status/master status |
+| `state_snapshot` 且 `registered=true` | 注册成功；含 role_brief/operations/next_actions/master/peers/peer_count/summary/master_wake/subagents/inbox/worktrees/tasks/env；默认排除终态订阅和调用者无关历史，保留 peer 目录与未结义务 | 读 `role_brief` 的有效正文和 `operations` 当前命令；无需再跑 who/status/master status |
 | 历史 pane claim 与当前投递位置不符 | daemon 对齐通信位置；不由 pane 决定名字归属 | 名字续接按稳定名字合同；在线他人占名需确认，unknown 交 Jenny |
 | 名字占用 unknown | 持久 context operation 返回 `pending`；不是注册成功 | 等待同一请求裁决续接；Jenny 自身 unknown 且本次用户明确恢复并确认接管时直接接管 Jenny/master |
 | `identity_update` | daemon 缺少真实运行事实；`registered=false`，`requires_identity_update.required=true` | 按 `required_fields`/`reason`/`action` 只补实际缺项。已授权恢复意图按稳定名字合同提交；重复档案及旧绑定由 context 自行迁移。若仍泄漏裸历史冲突，保留原错作为实现缺陷，不让 agent 选旧身份或维护控制面 |

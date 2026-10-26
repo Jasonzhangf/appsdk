@@ -50,16 +50,10 @@ fn board_invite_with_selection(server: &Server, actor: String, token: String, id
     details.revision += 1;
     if first_invitation { task.status = "invited".into(); }
     task.updated_ms = now;
-    let recipient_brief = role_brief(server, &state, &to);
-    let recipient_responsibilities = recipient_brief["responsibilities"]
-        .as_array().into_iter().flatten().filter_map(serde_json::Value::as_str)
-        .collect::<Vec<_>>().join("\n- ");
-    let reminder = format!("Role task: {}\nResponsibilities:\n- {}",
-        recipient_brief["role_task"].as_str().unwrap_or_default(), recipient_responsibilities);
     let message = Message {
         id: message_id.clone(), from: actor.clone(), to: to.clone(), mtype: "request".into(),
         subject: Some(format!("task-invitation:{id}")),
-        body: format!("{}\n{}\nDelivery condition: {}\nTest condition: {}\n{}\nContinue this subgoal from status {} with its existing evidence and resources. Own its decomposition, delegation, resource management, acceptance and delivery.\nRespond using collab board respond <task-id> --accept|--decline --expected-revision <observed-revision>, taking the task ID and revision from the typed task view, not this message. Run collab board show only when you do not have the current typed revision. You may decline; an invitation alone does not transfer ownership.", details.title, details.description, details.delivery_condition, details.test_condition, reminder, details.invitation.as_ref().unwrap().original_status.as_deref().unwrap()),
+        body: format!("{}\n{}\nDelivery condition: {}\nTest condition: {}\nContinue this subgoal from status {} with its existing evidence and resources.\nRespond using collab board respond <task-id> --accept|--decline --expected-revision <observed-revision>, taking the task ID and revision from the typed task view, not this message. Run collab board show only when you do not have the current typed revision. You may decline; an invitation alone does not transfer ownership.", details.title, details.description, details.delivery_condition, details.test_condition, details.invitation.as_ref().unwrap().original_status.as_deref().unwrap()),
         in_reply_to: None, created_ms: now, state: "pending".into(),
         wake_attempt_count: 0, last_wake_attempt_ms: 0, retry_attempted: false,
     };

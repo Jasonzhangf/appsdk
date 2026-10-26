@@ -76,19 +76,18 @@ execution state and never becomes a durable project rule automatically.
 
 ## L4 Full-domain routing
 
-One engine covers AppSDK as a whole. Existing governance without Guide enters
-through a read-only setup proposal before rule compilation. Configured projects
-may re-enter the same bootstrap path for a non-destructive standard-template
-upgrade review:
+One engine exposes AppSDK domains. Guidance is optional; missing advisory setup
+does not block independent work. Projects that select persistent Guidance use a
+read-only setup proposal before compilation. Existing authorization covers its
+scope; only uncovered durable changes need user approval:
 
 ```text
-guide status -> bootstrap setup proposal -> user approval -> guide compile
-             -> bootstrap -> migration -> governance-preflight
-             -> develop/debug -> review -> delivery
-             -> integration -> promotion -> freeze -> cleanup
+selected setup -> authorized source declaration -> guide compile
+selected domain -> plan -> evidence-bearing steps -> close projection
 ```
 
-Domains select prompts and workflow contracts. They do not duplicate canonical
+Domains are capabilities, not a mandatory sequence through migration, promotion
+and freeze for ordinary work. They select workflow contracts and do not duplicate canonical
 commands such as `prepare`, `init`, `pin-lock`, `verify`, `compile`,
 `verify --review-admission`, `promote`, `publish-active`, or `freeze`.
 
@@ -105,8 +104,9 @@ it. With compiled Guidance it returns a
 write project or task state, and the template is not activated as a rule
 source. After approval and compile, task intake
 projects only explicitly declared AGENTS and local Skill sources, their
-precedence/digests, project/module/goal context, unresolved questions, Skill
-invocation suggestions, and next commands. AppSDK does not interpret prose,
+precedence, project/module/goal context, declared unresolved questions, Skill
+invocation suggestions, and one `next` action. It emits no fixed confirmation
+questions or source digest wrappers. AppSDK does not interpret prose,
 answer questions, call a model, or persist a second intake truth.
 
 ## L5 Rule context
@@ -119,18 +119,19 @@ Skill child under each standard project-local Skill root. Discovery produces
 candidates, not active rules. The standard template remains advisory and cannot
 be declared implicitly. User approval and an explicit project declaration are
 required before compile. Markdown sources are
-then bound by path, precedence, and digest for the agent to read; AppSDK does
+then bound by path and precedence for the agent to read; AppSDK does
 not claim semantic verification of arbitrary prose. Machine contracts are JSON
 and are validated.
 
 A PlanRecord binds:
 
 - project, goal, module, task, owner, and mode;
-- project contract, goal, source commit/tree, and scope hashes;
-- declared AGENTS/Skill source paths and digests;
-- compiled guidance manifest hash.
+- declared AGENTS/Skill source context;
+- the plan revision selected by the execution ledger.
 
-Any bound-context drift blocks updates until a PlanRevisionRecord is accepted.
+Goal or declared-owner changes require a plan revision. Ordinary scoped edits
+and commits do not freeze the plan. Revise for material changes in scope,
+acceptance, key approach or relevant dependencies; retain append-only history.
 
 ## L6 Severity
 
@@ -149,8 +150,7 @@ Default forbidden boundaries are narrow:
 - fabricated or empty evidence for a passing required step;
 - non-adjacent transitions;
 - overwrite/delete of plan history;
-- stale commit/tree/scope/rule-context evidence;
-- continuing an old plan after owner, scope, or rule-contract drift;
+- continuing an old plan after goal or declared-owner changes;
 - guidance mutation from `main`;
 - claiming review, delivery, promotion, freeze, or cleanup complete before the
   corresponding required lifecycle gate passes.
@@ -188,10 +188,13 @@ cleanup requirements, and memory candidates. The first release never writes
 AGENTS, Skills, MEMORY, or USER files automatically. Durable-rule changes use a
 separate human-reviewed change.
 
-## L9 Human tour and process review
+## L9 Optional tour and process review
 
-`guide tour` lets a human inspect the generated workflow and persist an explicit
-node path. `guide review` is staged over the same append-only task ledger:
+`guide tour` supports requested workflow inspection and an authorized explicit
+node path; it is not a generic human approval gate. Resolve internal facts with
+the owning peer, design interpretation with the designer and coordination with
+the master. Ask the human only for an exclusive fact, uncovered authorization or
+a user-constraint change. `guide review` is staged over the task ledger:
 `node_review` checks and accepts node-content revisions first; only after every
 selected node has an accepted revision can `flow_review` update edges, order, or
 rules. Flow patches retain the accepted node revision IDs and remain staged;

@@ -425,15 +425,23 @@ fn task_view_omits_lifecycle_sections_that_hold_no_evidence() {
     let mut state = State::default();
     register_worker(&mut state, "peer");
     let open = task("open-work", "peer");
-    state.apply_checked(&Event::TaskCreated { task: open.clone() }).unwrap();
+    state
+        .apply_checked(&Event::TaskCreated { task: open.clone() })
+        .unwrap();
 
     let view = task_view(&state, &state.tasks["open-work"]);
     assert_eq!(view["id"], "open-work");
     assert_eq!(view["owner"], "peer");
     assert_eq!(view["status"], "working");
     assert_eq!(view["completion_missing"], json!(["review"]));
-    for empty_section in ["delivery", "review", "integration", "disposition", "merge", "cleanup"]
-    {
+    for empty_section in [
+        "delivery",
+        "review",
+        "integration",
+        "disposition",
+        "merge",
+        "cleanup",
+    ] {
         assert!(
             view.get(empty_section).is_none(),
             "a task without that evidence must not project an empty {empty_section} section: {view}"
@@ -471,12 +479,17 @@ fn task_view_keeps_pending_merge_pinned_reviewer_and_outstanding_cleanup() {
 
     let pending_reviewer = task_view(&state, &state.tasks["delivered-work"]);
     assert_eq!(
-        pending_reviewer["review"]["required_reviewer_name"],
-        "Bob",
+        pending_reviewer["review"]["required_reviewer_name"], "Bob",
         "the pinned reviewer is a next-step fact even before delivery: {pending_reviewer}"
     );
-    assert!(pending_reviewer.get("delivery").is_none(), "{pending_reviewer}");
-    assert!(pending_reviewer.get("integration").is_none(), "{pending_reviewer}");
+    assert!(
+        pending_reviewer.get("delivery").is_none(),
+        "{pending_reviewer}"
+    );
+    assert!(
+        pending_reviewer.get("integration").is_none(),
+        "{pending_reviewer}"
+    );
 
     let mut delivered = state.tasks["delivered-work"].clone();
     delivered.status = "accepted".into();
@@ -509,8 +522,7 @@ fn task_view_keeps_pending_merge_pinned_reviewer_and_outstanding_cleanup() {
 
     let view = task_view(&state, &state.tasks["delivered-work"]);
     assert_eq!(
-        view["delivery"]["evidence"],
-        "self-check and black-box regression",
+        view["delivery"]["evidence"], "self-check and black-box regression",
         "{view}"
     );
     assert_eq!(view["disposition"], "integration_required", "{view}");

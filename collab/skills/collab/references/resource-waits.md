@@ -1,7 +1,7 @@
 # Resource Coordination and Waits
 
-Before mutating a shared feature, resource, mainline node, gate, integration
-lease, install target, or daemon:
+Use this only for an actual shared-resource dependency. Before a conflicting
+write to a feature, resource, gate, integration lease or install target:
 
 1. Refresh durable state and attempt the semantic claim.
 2. If occupied, persist the requester as blocked and return holder/responsible
@@ -12,8 +12,8 @@ lease, install target, or daemon:
 
 ## Bounded observation while waiting
 
-Before creating a wait, and on each timer or direct wake while waiting, inspect
-the peer you wait for with a bounded snapshot:
+Use current durable wait and task evidence first. If a concrete diagnostic gap
+requires pane text, inspect a supported peer with a bounded snapshot:
 
 ```sh
 collab snapshot <peer-id> --lines 40
@@ -29,11 +29,8 @@ collab snapshot <peer-id> --lines 40
 - If the target is an AppServer or DSH peer, snapshot is unsupported. Keep the
   existing wait contract and do not invent a substitute state claim.
 
-```sh
-collab sendmessage --to <peer> --subject resource-busy "RESOURCE_OCCUPIED ..."
-collab sendmessage --to <peer> --subject resource-free "RESOURCE_RELEASED ..."
-collab sendmessage --to <peer> --subject result-ready "The result is ready; query the mailbox."
-```
+Use the actual result or release event to resume. Do not send a second message
+merely to tell the receiver to query a result it already received.
 
 Every wait records waiter, exact blocking task, responsible actor,
 `resource_conflict`, finite deadline, resume events, and escalation path.
@@ -44,20 +41,15 @@ Timeout makes the waiter explicitly blocked and never sends a message or
 releases a claim. Holder close clears obsolete wait edges and creates a
 `RESOURCE_RELEASED` notification only for an exact matching subscription.
 
-Waiting is not abandonment. On each supported timer/wake or direct wake, the
-waiter must re-read the durable conflict, try any locally available resolution,
-and escalate unresolved work. An ordinary worker escalates to the current
-Collab master immediately after finding a concrete solution; it does not wait
-or dump symptoms. If no current master exists, escalate to the
-task-initiating collaborator. Independent peers may decline a master
-collaboration invite. Include the blocking task, responsible actor,
-deadline, proposed solution, attempted actions, and requested decision. Never
-invent a master from an internal init adapter; master promotion requires
-explicit user approval for the exact peer and project plus an authenticated
-current binding, and it replaces the recorded holder independent of liveness.
-Use `collab context` as the agent's master-authority read. Only the current
-master grant holder may delegate; an authenticated peer with explicit approval
-may promote or clear the scoped grant. Codex root is not Collab master.
+Waiting is not abandonment. On a supported wake, use current conflict evidence,
+try an authorized resolution and request help when needed. Facts go to the
+owning peer, design interpretation to the designer, and scope/resource conflicts
+to the master or task initiator when no master exists. Send the original failure,
+attempted remedies, affected dependency and needed decision. A proven solution
+is not a prerequisite for help. Continue independent work; an unanswered
+internal request is not a reason to ask the human. Ask the human only for an
+exclusive fact, uncovered authorization or changed user constraint.
+Master authority and recovery follow [migration-daemon](migration-daemon.md#master-and-deprecated-interfaces).
 
 Dirty, active, shared, or unknown resources remain PROTECTED_HOLD. Do not
 remove them or terminate their owner's process. If the wait cycle follows a

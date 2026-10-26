@@ -2,6 +2,29 @@
 // retain their task and mailbox ownership; only host.state holds the grant.
 use crate::ceo::{CeoBootstrapRecord, CeoCommand, CeoGrant};
 
+fn append_ceo_responsibilities(brief: &mut serde_json::Value, rules: &[String]) {
+    let Some(current) = brief["responsibilities"].as_array_mut() else {
+        return;
+    };
+    for rule in rules {
+        let rule = rule.trim();
+        if rule.is_empty() || current.iter().any(|item| item.as_str() == Some(rule)) {
+            continue;
+        }
+        current.push(json!(rule));
+    }
+}
+
+fn append_ceo_operation(operations: &mut serde_json::Value, operation: serde_json::Value) {
+    let Some(existing) = operations.as_array_mut() else {
+        return;
+    };
+    if existing.iter().any(|item| item["action"] == operation["action"]) {
+        return;
+    }
+    existing.push(operation);
+}
+
 impl ProjectRuntimeManager {
     fn reconcile_ceo_workspace_reset(&self, context: Option<&ProjectContext>) -> Result<(), Resp> {
         let grant = self.host.state.lock().unwrap().ceo_grant.clone();
@@ -48,49 +71,51 @@ impl ProjectRuntimeManager {
         let status = self.ceo_status(context, &actor);
         snapshot["ceo"] = status.data.clone();
         if status.data["is_current"] == true {
-            let asset: serde_json::Value = serde_json::from_str(include_str!(
-                "../../skills/collab/references/workflow-templates.json"
-            ))
-            .expect("embedded workflow templates are valid JSON");
-            let template = asset["ceo_template"].clone();
-            snapshot["ceo_brief"] = template.clone();
-            snapshot["role_brief"]["ceo_workflow_template"] =
-                json!({"source":"base","base_version":asset["base_version"],"template":template});
-            if let Some(responsibilities) =
-                snapshot["role_brief"]["responsibilities"].as_array_mut()
+            // The same snapshot can pass the inner Context and outer
+            // IdentityContext projections. The metadata card marks that the
+            // CEO prose and commands were already composed once.
+            if snapshot["role_brief"]["ceo_workflow_template"]["target"]
+                .as_str()
+                .is_some_and(|target| target == "ceo")
             {
-                if let Some(rules) = template["responsibilities"].as_array() {
-                    for rule in rules {
-                        if !responsibilities.contains(rule) {
-                            responsibilities.push(rule.clone());
-                        }
-                    }
-                }
+                return;
             }
+            let template = &workflow_template_asset().ceo_template;
+            // The effective brief is the single home for CEO prose; the card
+            // only records where that workflow text came from.
+            let brief = &mut snapshot["role_brief"];
+            append_workflow_text(brief, "role_task", Some(&template.role_task), "ceo");
+            append_ceo_responsibilities(brief, &template.responsibilities);
+            append_workflow_text(brief, "next_action", Some(&template.next_action), "ceo");
+            append_workflow_text(
+                brief,
+                "completion_action",
+                Some(&template.completion_action),
+                "ceo",
+            );
+            brief["ceo_workflow_template"] = workflow_base_card("ceo");
             let operations = json!([
                 {"action":"ceo-progress","command":"collab ceo progress"},
                 {"action":"ceo-append-task","command":"collab ceo append-task --project <root> --id <id> --title <title> --description <scope> --delivery-condition <delivery> --test-condition <acceptance>"},
                 {"action":"ceo-send","command":"collab ceo send --project <root> --subject <subject> --reply-required <body>"},
                 {"action":"ceo-bootstrap","command":"collab ceo bootstrap-master --project <root> --approval <user-approval> --tmux-socket <existing-socket> --tmux-session <existing-session>","requires_approval":true}
             ]);
-            snapshot["ceo_operations"] = operations.clone();
             if let (Some(existing), Some(extra)) =
                 (snapshot["operations"].as_array_mut(), operations.as_array())
             {
                 existing.extend(extra.iter().cloned());
             }
-            if let Some(actions) = snapshot["next_actions"].as_array_mut() {
-                actions.push(template["next_action"].clone());
-            }
         } else if snapshot["role_brief"]["role"] == "master" && !status.data["ceo"].is_null() {
             let rule="Respond to global CEO requests with actual authorized actions, progress or evidenced blockers. Arrange appended tasks on your existing board without abandoning current goals. Use collab ceo reply --subject <subject> <progress>; use --in-reply-to <original-id> only for the requested actual completion. Retain project ownership and pinned executor/reviewer constraints.";
-            snapshot["ceo_upstream_rule"] = json!(rule);
             if let Some(rules) = snapshot["role_brief"]["responsibilities"].as_array_mut() {
-                rules.push(json!(rule));
+                if !rules.iter().any(|item| item.as_str() == Some(rule)) {
+                    rules.push(json!(rule));
+                }
             }
-            if let Some(operations) = snapshot["operations"].as_array_mut() {
-                operations.push(json!({"action":"ceo-reply","command":"collab ceo reply --subject <subject> [--in-reply-to <original-id>] <actual-result>"}));
-            }
+            append_ceo_operation(
+                &mut snapshot["operations"],
+                json!({"action":"ceo-reply","command":"collab ceo reply --subject <subject> [--in-reply-to <original-id>] <actual-result>"}),
+            );
         }
     }
 }

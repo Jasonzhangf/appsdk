@@ -372,16 +372,44 @@ fn joined_role_text(values: &[&str]) -> String {
     values.join(" ").to_lowercase()
 }
 
-fn responsibility_text(snapshot: &Value) -> String {
-    joined_role_text(
-        &snapshot["operations"]
-            .as_array()
-            .expect("context operations")
-            .iter()
-            .filter(|operation| operation["kind"] == "responsibility")
-            .filter_map(|operation| operation["action"].as_str())
-            .collect::<Vec<_>>(),
-    )
+// Read the three current canonical work-role coordination rules from the
+// shipped asset so this consumer asserts delivered rule text instead of
+// brittle prose fragments that drift whenever the canonical wording changes.
+fn canonical_work_role_rules() -> Vec<String> {
+    let asset: Value = serde_json::from_str(include_str!(
+        "../../skills/collab/references/workflow-templates.json"
+    ))
+    .expect("shipped workflow-templates.json must parse");
+    let rules = &asset["coordination_rules"];
+    [
+        "work_role_assignment_rule",
+        "work_role_execution_rule",
+        "work_role_next_action",
+    ]
+    .iter()
+    .map(|key| {
+        rules[key]
+            .as_str()
+            .unwrap_or_else(|| panic!("missing canonical coordination rule {key}"))
+            .to_owned()
+    })
+    .collect()
+}
+
+fn static_operation_kinds(snapshot: &Value) -> Vec<String> {
+    snapshot["operations"]
+        .as_array()
+        .expect("context operations")
+        .iter()
+        .filter_map(|operation| operation["kind"].as_str())
+        .filter(|kind| {
+            matches!(
+                *kind,
+                "responsibility" | "next_action" | "completion_action" | "notification_rule"
+            )
+        })
+        .map(str::to_owned)
+        .collect()
 }
 
 #[test]
@@ -404,63 +432,31 @@ fn context_role_guidance_reaches_master_and_peer_with_latest_dynamic_roles() {
                 .filter_map(Value::as_str)
                 .collect::<Vec<_>>(),
         );
-        for expected in [
-            "analyze the requirement before assigning work",
-            "reuse items the user already specified or confirmed",
-            "missing or ambiguous scope",
-            "role requirements",
-            "collab context --work-roles",
-            "collab board policy",
-            "accept or execute a concrete task",
-            "identity recovery, work-role settings, discussion and status questions do not require creating a board task",
-            "latest `collab context` snapshot",
-            "current board task",
-            "role preference is a selection hint, not execution authorization",
-            "existing board claim or invite acceptance flow",
-            "specified executor is a hard constraint",
-            "the author and master cannot substitute",
-            "dynamic role change does not rewrite existing task",
-            "state the difference and obtain explicit user confirmation",
-            "continue under the confirmed requirements without asking again",
-            "read the board only when a specific task or detail is missing",
-        ] {
+        for rule in canonical_work_role_rules() {
+            let expected = rule.to_lowercase();
             assert!(
-                responsibilities.contains(expected),
-                "{label} responsibilities miss `{expected}`: {responsibilities}"
+                responsibilities.contains(expected.as_str()),
+                "{label} role_brief responsibilities miss canonical coordination rule: {responsibilities}"
             );
         }
-        let next_action = brief["next_action"]
-            .as_str()
-            .expect("role next_action")
-            .to_lowercase();
-        for expected in [
-            "role label is not authorization",
-            "existing claim or invite acceptance flow",
-            "and the specified reviewer",
-            "dynamic role change does not rewrite existing tasks",
-            "seek user confirmation only for missing critical facts",
-        ] {
-            assert!(
-                next_action.contains(expected),
-                "{label} next_action misses `{expected}`: {next_action}"
-            );
-        }
-        let operations = responsibility_text(snapshot);
         assert!(
-            operations.contains("collab context --work-roles")
-                && operations.contains("current board task"),
-            "{label} operations must derive the shared work-role rules: {operations}"
+            !brief["next_action"]
+                .as_str()
+                .expect("role next_action")
+                .to_lowercase()
+                .contains("task constraints:"),
+            "{label} common task-constraint text must live once in responsibilities, not be mirrored into next_action: {brief}"
         );
         assert!(
-            snapshot["operations"]
-                .as_array()
-                .expect("context operations")
-                .iter()
-                .any(|operation| operation["kind"] == "next_action"
-                    && operation["action"]
-                        .as_str()
-                        .is_some_and(|action| action.contains("role label is not authorization"))),
-            "{label} operations must derive the work-role next action: {snapshot}"
+            snapshot["role_brief"]["workflow_template"]["identity"]
+                .get("template")
+                .is_none(),
+            "{label} workflow_template must reference the selected source and revision without repeating its text: {snapshot}"
+        );
+        let duplicated = static_operation_kinds(snapshot);
+        assert!(
+            duplicated.is_empty(),
+            "{label} operations must contain only fact-triggered actions; static workflow text belongs once in role_brief: {duplicated:?}"
         );
     }
 

@@ -76,8 +76,9 @@ A registration or dispatch reminder is not a schedule. It requires the role to
 reconcile its existing scope on the next authorized activation. Do not create
 empty board tasks, a fixed polling loop, or duplicate subscriptions during
 context restoration. Update tasks and subscriptions when scope changes, reuse
-an active valid subscription, and retire only the caller's obsolete
-task-scoped subscriptions by ID.
+an active valid subscription, and end obsolete finite schedules through their
+goal/task lifecycle. Board-idle cancellation uses its explicit per-task owner
+control; there is no general unsubscribe-by-ID command.
 
 - Master patrol covers open buglist P0/P1 work, peer progress evidence, owned
   worktree/runtime cleanup, canonical issue intake, and currently supported
@@ -104,8 +105,8 @@ task-scoped subscriptions by ID.
   Apply the main Skill's Registered patrol duties for evidence-based blocker
   requests, master verification, and continued peer delivery ownership.
 
-Run `collab notify methods` against the current daemon before selecting an
-event or schedule. The current source defines `direct-message`,
+Reuse valid supported-event information. Run `collab notify methods` when a
+needed capability is unknown or the loaded runtime changed. The source defines `direct-message`,
 `resource-released`, `deadline`, `master-idle`, and `board-idle`; the loaded
 runtime's `methods` response is authoritative. An absent event requires
 implementation in its owning source, not a fake event, synthetic subject, or
@@ -165,8 +166,10 @@ Up to three active subscriptions exist per agent.
   or lifecycle.
 - Unacknowledged notification throttling (Backpressure): To prevent notification
   storms and terminal pollution, push knocks pause when unacknowledged notifications
-  reach `max_unacked` (default 3, range 1-5). Run `collab ack <id>` or `collab ack --all`
-  to resume push delivery. Messages remain safely buffered in the durable mailbox.
+  reach `max_unacked` (default 3, range 1-5). Non-DSH `collab recv` reads and
+  consumes the batch without a follow-up ACK; DSH gateway owns consumption.
+  Explicit ACK is for already-delivered recovery, never discarding unread content.
+  Messages remain safely buffered in the durable mailbox.
 - The bound subscription event policy supplies the automatic retry window: the
   default `direct-message` batch window is 120 seconds, while an event configured
   as `immediate` has a zero retry delay. At dispatch, include eligible unsent
@@ -213,7 +216,8 @@ collab who
 ```
 
 - `collab ack <id>` acknowledges a single notification.
-- `collab ack --all` acknowledges all unread or pending delivered notifications in one step.
+- `collab ack --all` is a legacy recovery action for already-delivered notifications;
+  do not use it to discard unread content.
 - `collab recv` reads and consumes the returned message batch atomically; a
   successful receive writes `Delivered` and `Acked` together, so a follow-up
   ACK is not required. `collab msg`, `collab inbox`, and `collab context` are
@@ -224,11 +228,7 @@ collab who
   `unacked_notifications`, `notifications_paused`, `suspected_offline`, and
   `active_task`.
 
-After a preview, compare its ID/subject, urgency, current task, and interruption
-cost. Read durable details only when appropriate:
-
-```sh
-collab msg <notification-id>
-collab inbox
-collab context
-```
+After a preview, use [the receive path](../SKILL.md#日常通信). For a specific
+read-only diagnostic choose `collab msg <id>` or `collab inbox`; they are
+alternatives, not a fixed sequence before recv. Existing body and receipt
+evidence does not require another context read or ACK.

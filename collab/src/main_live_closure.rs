@@ -319,9 +319,10 @@ pub(crate) fn live_closure_batch_input_contains_message(
     let Some((ids, rest)) = body.split_once(" action_categories=") else {
         return false;
     };
-    let (categories, _) = rest
+    let categories = rest.split_once(" | ").map_or(rest, |(body, _)| body);
+    let categories = categories
         .split_once(" older_messages=")
-        .unwrap_or((rest, ""));
+        .map_or(categories, |(categories, _)| categories);
     let categories = categories.strip_suffix('.').unwrap_or(categories);
     ids.split(',')
         .zip(categories.split(','))

@@ -11,6 +11,7 @@ const WORKFLOW_TEMPLATE_TARGET_INVALID: &str = "WORKFLOW_TEMPLATE_TARGET_INVALID
 #[derive(Debug, serde::Deserialize)]
 struct WorkflowTemplateAsset {
     base_version: u32,
+    ceo_template: crate::board::WorkflowTemplateSpec,
     identity_templates: std::collections::BTreeMap<
         String,
         crate::board::WorkflowTemplateSpec,
@@ -44,63 +45,82 @@ fn workflow_base_template(base_role: &str) -> &'static crate::board::WorkflowTem
         .expect("workflow asset must define master and peer identity templates")
 }
 
-fn workflow_base_card(
-    target: &str,
-    spec: &crate::board::WorkflowTemplateSpec,
-) -> serde_json::Value {
+fn workflow_base_card(target: &str) -> serde_json::Value {
     json!({
         "target": target,
         "source": "base",
         "base_version": workflow_template_asset().base_version,
         "revision": 0,
-        "template": spec,
     })
 }
 
-fn workflow_override_card(
-    target: &str,
-    entry: &crate::board::WorkflowTemplateOverride,
-) -> serde_json::Value {
+fn workflow_override_card(target: &str, entry: &crate::board::WorkflowTemplateOverride) -> serde_json::Value {
     json!({
         "target": target,
         "source": "master_override",
         "base_version": entry.base_version,
         "revision": entry.revision,
-        "template": entry.spec,
     })
 }
 
-/// Project the effective identity template plus the configured specialty cards
-/// for this caller. Only a master projection exposes the stored override
-/// catalog; peers see only their effective cards.
-fn workflow_template_projection(
+/// Typed effective workflow for one caller. The expanded text lives in
+/// `identity`/`specialties`; `projection` keeps only the source/revision
+/// reference so the public card no longer repeats the full template body.
+pub(crate) struct EffectiveWorkflow {
+    pub(crate) projection: serde_json::Value,
+    pub(crate) identity: crate::board::WorkflowTemplateSpec,
+    pub(crate) specialties: Vec<EffectiveSpecialty>,
+}
+
+/// One effective specialty card: its target label and expanded text.
+pub(crate) struct EffectiveSpecialty {
+    pub(crate) target: String,
+    pub(crate) spec: crate::board::WorkflowTemplateSpec,
+}
+
+/// Resolve the effective identity and specialty text for this caller, and keep
+/// a separate metadata-only projection of where each selected card came from.
+/// The expanded text is emitted once by the role owner; this projection stays
+/// a source/revision reference instead of repeating that text.
+fn effective_workflow_templates(
     state: &State,
     project_scope: &str,
     base_role: &str,
     roles: &[String],
-) -> serde_json::Value {
+) -> EffectiveWorkflow {
     let identity_role = if base_role == "master" { "master" } else { "peer" };
     let configured = state.workflow_templates.get(project_scope);
-    let identity = match configured.and_then(|targets| targets.get(identity_role)) {
-        Some(entry) => workflow_override_card(identity_role, entry),
-        None => workflow_base_card(identity_role, workflow_base_template(identity_role)),
+    let (identity, identity_card) = match configured.and_then(|targets| targets.get(identity_role)) {
+        Some(entry) => (
+            entry.spec.clone(),
+            workflow_override_card(identity_role, entry),
+        ),
+        None => (
+            workflow_base_template(identity_role).clone(),
+            workflow_base_card(identity_role),
+        ),
     };
 
     let mut roles = roles.iter().map(String::as_str).collect::<Vec<_>>();
     roles.sort_unstable();
     roles.dedup();
     let mut specialties = Vec::new();
+    let mut specialty_cards = Vec::new();
     for role in roles {
         let target = format!("role:{role}");
         if let Some(entry) = configured.and_then(|targets| targets.get(&target)) {
-            specialties.push(workflow_override_card(&target, entry));
+            specialties.push(EffectiveSpecialty {
+                target: target.clone(),
+                spec: entry.spec.clone(),
+            });
+            specialty_cards.push(workflow_override_card(&target, entry));
         }
     }
 
     let mut projection = json!({
         "base_version": workflow_template_asset().base_version,
-        "identity": identity,
-        "specialties": specialties,
+        "identity": identity_card,
+        "specialties": specialty_cards,
     });
     if identity_role == "master" {
         let mut configured_templates = serde_json::Map::new();
@@ -113,7 +133,6 @@ fn workflow_template_projection(
                     json!({
                         "base_version": entry.base_version,
                         "revision": entry.revision,
-                        "template": entry.spec,
                         "updated_by": entry.updated_by,
                         "updated_ms": entry.updated_ms,
                     }),
@@ -122,7 +141,23 @@ fn workflow_template_projection(
         }
         projection["configured_templates"] = serde_json::Value::Object(configured_templates);
     }
-    projection
+    EffectiveWorkflow {
+        projection,
+        identity,
+        specialties,
+    }
+}
+
+/// Public projection helper for tests and callers that only need the
+/// metadata-only card. The role owner consumes the typed `EffectiveWorkflow`.
+#[cfg(test)]
+fn workflow_template_projection(
+    state: &State,
+    project_scope: &str,
+    base_role: &str,
+    roles: &[String],
+) -> serde_json::Value {
+    effective_workflow_templates(state, project_scope, base_role, roles).projection
 }
 
 fn normalize_workflow_target(target: &str) -> Result<String, String> {
@@ -312,6 +347,7 @@ mod workflow_template_state_tests {
         assert_eq!(base["identity"]["base_version"], json!(1));
         assert_eq!(base["identity"]["revision"], json!(0));
         assert_eq!(base["specialties"], json!([]));
+        assert!(base["identity"].get("template").is_none());
         assert!(base.get("configured_templates").is_none());
 
         state
@@ -336,24 +372,28 @@ mod workflow_template_state_tests {
         );
         assert_eq!(projection["identity"]["source"], json!("master_override"));
         assert_eq!(projection["identity"]["revision"], json!(1));
-        assert_eq!(
-            projection["identity"]["template"]["role_task"],
-            json!("Peer override")
+        assert!(projection["identity"].get("template").is_none());
+        let effective = effective_workflow_templates(
+            &state,
+            "/project",
+            "peer",
+            &["reviewer".into(), "designer".into()],
         );
+        assert_eq!(
+            effective.identity.role_task,
+            "Peer override"
+        );
+        assert_eq!(effective.specialties.len(), 2);
+        assert_eq!(effective.specialties[0].target, "role:designer");
+        assert_eq!(effective.specialties[0].spec.role_task, "Designer task");
         let specialties = projection["specialties"]
             .as_array()
             .expect("specialty cards");
         assert_eq!(specialties.len(), 2);
         assert_eq!(specialties[0]["target"], json!("role:designer"));
-        assert_eq!(
-            specialties[0]["template"]["role_task"],
-            json!("Designer task")
-        );
+        assert!(specialties[0].get("template").is_none());
         assert_eq!(specialties[1]["target"], json!("role:reviewer"));
-        assert_eq!(
-            specialties[1]["template"]["role_task"],
-            json!("Reviewer task")
-        );
+        assert!(specialties[1].get("template").is_none());
         assert_eq!(specialties[0]["source"], json!("master_override"));
 
         let master = workflow_template_projection(&state, "/project", "master", &[]);
@@ -364,6 +404,7 @@ mod workflow_template_state_tests {
             .expect("master catalog");
         assert_eq!(catalog.len(), 3);
         assert_eq!(catalog["role:designer"]["revision"], json!(1));
+        assert!(catalog["role:designer"].get("template").is_none());
     }
 
     #[test]
@@ -463,10 +504,7 @@ mod workflow_template_state_tests {
         assert_eq!(roles, ["designer"]);
         let projection = workflow_template_projection(&state, "/project", "peer", &roles);
         assert_eq!(projection["specialties"][0]["target"], json!("role:designer"));
-        assert_eq!(
-            projection["specialties"][0]["template"]["role_task"],
-            json!("Designer task")
-        );
+        assert!(projection["specialties"][0].get("template").is_none());
     }
 
     #[test]

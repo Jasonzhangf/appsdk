@@ -82,14 +82,20 @@ fn role_contract_is_identical_across_context_workers_and_status() {
             assert_eq!(workflow["identity"]["base_version"], 1, "{workflow}");
             assert_eq!(workflow["identity"]["revision"], 0, "{workflow}");
             assert_eq!(workflow["specialties"], serde_json::json!([]), "{workflow}");
+            assert!(
+                workflow["identity"].get("template").is_none(),
+                "workflow_template references its source instead of repeating its text: {workflow}"
+            );
             for field in [
                 "role_task",
                 "responsibilities",
                 "next_action",
                 "completion_action",
             ] {
-                let value = &workflow["identity"]["template"][field];
-                assert!(!value.is_null(), "{field} must be projected: {workflow}");
+                assert!(
+                    !context.data["role_brief"][field].is_null(),
+                    "{field} must be projected once through role_brief: {workflow}"
+                );
             }
         } else {
             assert!(
@@ -2270,6 +2276,14 @@ fn role_brief_projects_identity_and_sorted_specialty_workflow_templates() {
         vec!["role:designer", "role:master", "role:reviewer"],
         "specialties follow the sorted work-role order: {workflow}"
     );
+    assert!(
+        workflow["specialties"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|card| card.get("template").is_none()),
+        "specialty cards reference their text source without embedding it: {workflow}"
+    );
 
     let brief = &peer.data["role_brief"];
     let role_task = brief["role_task"].as_str().expect("role task");
@@ -2325,36 +2339,23 @@ fn role_brief_projects_identity_and_sorted_specialty_workflow_templates() {
     );
     assert!(completion.contains("Designer specialty completion"), "{completion}");
     assert!(
-        completion.contains("Idle handoff:")
-            && completion.contains("request next work or explicit idle approval"),
-        "the fixed idle handoff survives a completion override: {completion}"
+        !completion.contains("Idle handoff:"),
+        "completion keeps the selected templates without a fixed suffix: {completion}"
     );
-
+    assert!(
+        responsibilities.iter().any(|line| line.as_str().is_some_and(|text|
+            text.contains("request next work or explicit idle approval"))),
+        "the common handoff duty remains in responsibilities: {brief}"
+    );
     let operations = peer.data["operations"].as_array().expect("operations");
-    for expected in [
-        "Designer specialty responsibility",
-        "Reviewer specialty responsibility",
-    ] {
-        assert!(
-            operations
-                .iter()
-                .any(|operation| operation["kind"] == "responsibility"
-                    && operation["action"] == expected),
-            "{expected} missing from operations: {operations:?}"
-        );
-    }
     assert!(
-        operations.iter().any(|operation| {
-            operation["kind"] == "next_action" && operation["action"].as_str() == Some(next_action)
+        !operations.iter().any(|operation| {
+            matches!(
+                operation["kind"].as_str(),
+                Some("responsibility" | "next_action" | "completion_action" | "notification_rule")
+            )
         }),
-        "operations must derive the selected next action: {operations:?}"
-    );
-    assert!(
-        operations.iter().any(|operation| {
-            operation["kind"] == "completion_action"
-                && operation["action"].as_str() == Some(completion)
-        }),
-        "operations must derive the selected completion action: {operations:?}"
+        "operations must contain facts-triggered actions, not copied workflow text: {operations:?}"
     );
 
     let master = handle_context(&server, "master".into(), "token-master".into());
@@ -2366,6 +2367,10 @@ fn role_brief_projects_identity_and_sorted_specialty_workflow_templates() {
         .expect("master catalog");
     for target in ["peer", "role:designer", "role:master", "role:reviewer"] {
         assert!(catalog.contains_key(target), "{target} missing from {catalog:?}");
+        assert!(
+            catalog[target].get("template").is_none(),
+            "the master catalog must reference templates without embedding them: {catalog:?}"
+        );
     }
     let master_completion = master.data["role_brief"]["completion_action"]
         .as_str()

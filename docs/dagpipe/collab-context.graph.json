@@ -81,7 +81,7 @@
       "id": "输出含名字归属的权威快照",
       "operator": "appsdk.collab_context.emit_snapshot",
       "operator_version": "2",
-      "description": "输出本次调用实际终态。同 session 的 native thread 或投递端点变化时，必须在成功早退前复用当前身份提交新 binding/worker transport，退休旧 route、发布新 route，并由现有 Context owner 更新有效订阅；相同事实不增加 generation，普通恢复不重新 Register 或挑战。本次调用缺任何 native 当前事实时，终态为 missing_facts，身份文件、binding、route、订阅、任务和消息保持，不发布旧端点，也不因历史注册把缺项调用报告为恢复完成。snapshot 必须区分 committed、confirmation_required、pending、stale_decision 和 explicit_failure，并包含当前名字、agent sessionID、角色、binding、任务投影和续接引用；不得把 pending 或失败投影成已注册成功。同一 role_brief owner 按当前 master/peer 身份和持久工作角色选择集中 Collab Skill 的基础版本流程及项目覆盖模板，返回完整内容、来源和版本；多个专长全部有序保留，无配置使用标准流程。模板/角色写入后的本次输出与后续 context 的 operations 均来自更新后的当前投影，不改任务归属或扩大授权。resident manager从host唯一CEO授权附加当前CEO职责/操作卡或master上游回复规则；不修改项目identity.role/authority，不从ceo工作角色名推导全局权限。",
+      "description": "输出本次调用实际终态。同 session 的 native thread 或投递端点变化时，必须在成功早退前复用当前身份提交新 binding/worker transport，退休旧 route、发布新 route，并由现有 Context owner 更新有效订阅；相同事实不增加 generation，普通恢复不重新 Register 或挑战。本次调用缺任何 native 当前事实时，终态为 missing_facts，身份文件、binding、route、订阅、任务和消息保持，不发布旧端点，也不因历史注册把缺项调用报告为恢复完成。snapshot 必须区分 committed、confirmation_required、pending、stale_decision 和 explicit_failure，并包含当前名字、agent sessionID、角色、binding、任务投影和续接引用；不得把 pending 或失败投影成已注册成功。完整有效职责仅由 role_brief 输出一次；模板卡返回来源、版本和当前覆盖元数据，不重复嵌入模板正文。operations 只返回当前适用操作，next_actions 只返回当前任务或本次结果动作。默认快照排除终态订阅、无未结责任的历史和调用者无关账目；持久历史及显式查询保留。CEO 后置装饰遵守同一规则，授权仍来自 host typed grant。",
       "inputs": ["env_projection"],
       "output": {"id": "state_snapshot", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},

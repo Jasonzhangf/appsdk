@@ -416,3 +416,122 @@ fn name_overrides_survive_compaction_but_reset_and_retirement_remove_them() {
     register_worker(&mut state, "peer");
     assert_eq!(worker_display_name(&state, "peer", false), "peer");
 }
+
+/// A task that has not reached delivery carries no delivery/review/integration
+/// section. Those keys are lifecycle evidence, so an empty default renders as
+/// nothing instead of a full block of nulls and `pending: false`.
+#[test]
+fn task_view_omits_lifecycle_sections_that_hold_no_evidence() {
+    let mut state = State::default();
+    register_worker(&mut state, "peer");
+    let open = task("open-work", "peer");
+    state
+        .apply_checked(&Event::TaskCreated { task: open.clone() })
+        .unwrap();
+
+    let view = task_view(&state, &state.tasks["open-work"]);
+    assert_eq!(view["id"], "open-work");
+    assert_eq!(view["owner"], "peer");
+    assert_eq!(view["status"], "working");
+    assert_eq!(view["completion_missing"], json!(["review"]));
+    for empty_section in [
+        "delivery",
+        "review",
+        "integration",
+        "disposition",
+        "merge",
+        "cleanup",
+    ] {
+        assert!(
+            view.get(empty_section).is_none(),
+            "a task without that evidence must not project an empty {empty_section} section: {view}"
+        );
+    }
+}
+
+/// The facts an actor needs for the next step survive the trimmed projection:
+/// a pending merge, the pinned reviewer, and cleanup that is still outstanding.
+#[test]
+fn task_view_keeps_pending_merge_pinned_reviewer_and_outstanding_cleanup() {
+    let (server, root) = test_server();
+    let mut state = server.state.lock().unwrap();
+    register_worker(&mut state, "peer");
+    let mut delivered = task("delivered-work", "peer");
+    delivered.worktree_path = Some("/tmp/delivered-work".into());
+    delivered.branch = Some("codex/delivered-work".into());
+    state
+        .apply_checked(&Event::TaskCreated { task: delivered })
+        .unwrap();
+    state
+        .apply_checked(&Event::BoardDetailsChanged {
+            task_id: "delivered-work".into(),
+            details: crate::board::BoardTaskDetails {
+                revision: 2,
+                public_visibility: true,
+                work_policy: crate::board::WorkPolicy {
+                    reviewer_name: Some("Bob".into()),
+                    ..crate::board::WorkPolicy::default()
+                },
+                ..crate::board::BoardTaskDetails::default()
+            },
+        })
+        .unwrap();
+
+    let pending_reviewer = task_view(&state, &state.tasks["delivered-work"]);
+    assert_eq!(
+        pending_reviewer["review"]["required_reviewer_name"], "Bob",
+        "the pinned reviewer is a next-step fact even before delivery: {pending_reviewer}"
+    );
+    assert!(
+        pending_reviewer.get("delivery").is_none(),
+        "{pending_reviewer}"
+    );
+    assert!(
+        pending_reviewer.get("integration").is_none(),
+        "{pending_reviewer}"
+    );
+
+    let mut delivered = state.tasks["delivered-work"].clone();
+    delivered.status = "accepted".into();
+    state
+        .apply_checked(&Event::TaskUpdated { task: delivered })
+        .unwrap();
+    let record = crate::server::state::TaskLifecycleRecord {
+        delivery_kind: crate::server::state::TaskDeliveryKind::Code,
+        delivery_evidence: Some("self-check and black-box regression".into()),
+        delivered_ms: Some(now_ms()),
+        ..crate::server::state::TaskLifecycleRecord::default()
+    };
+    state
+        .apply_checked(&Event::TaskLifecycleUpdated {
+            task_id: "delivered-work".into(),
+            record,
+        })
+        .unwrap();
+    state
+        .apply_checked(&Event::MergeRequested {
+            request: crate::server::state::PendingMerge {
+                task_id: "delivered-work".into(),
+                owner: "peer".into(),
+                requested_by: "peer".into(),
+                requested_ms: now_ms(),
+                candidate_commit: Some("candidate-commit".into()),
+            },
+        })
+        .unwrap();
+
+    let view = task_view(&state, &state.tasks["delivered-work"]);
+    assert_eq!(
+        view["delivery"]["evidence"], "self-check and black-box regression",
+        "{view}"
+    );
+    assert_eq!(view["disposition"], "integration_required", "{view}");
+    assert_eq!(view["merge"]["pending"], true, "{view}");
+    assert_eq!(view["merge"]["owner"], "peer", "{view}");
+    assert_eq!(
+        view["cleanup"]["status"], "pending",
+        "outstanding cleanup stays visible: {view}"
+    );
+    drop(state);
+    std::fs::remove_dir_all(root).ok();
+}

@@ -1393,6 +1393,74 @@ fn last_task_close_keeps_default_lease_armed_and_preserves_pending_unread_payloa
     std::fs::remove_dir_all(root).ok();
 }
 
+/// The first read and a `receive_id` replay answer from one minimal message
+/// projection. Delivery diagnostics stay in the wake ledger: a recipient that
+/// consumed the durable body must not receive per-message retry bookkeeping.
+#[test]
+fn recv_first_read_and_receive_id_replay_share_minimal_message_projection() {
+    let (server, root) = test_server();
+    server.commit(&[Event::Sent {
+        msg: Message {
+            id: "msg-minimal-projection".into(),
+            from: "writer".into(),
+            to: "reader".into(),
+            mtype: "notify".into(),
+            subject: Some("minimal projection".into()),
+            body: "durable body that must not be trimmed".into(),
+            in_reply_to: Some("msg-original-request".into()),
+            created_ms: 10,
+            state: "pending".into(),
+            wake_attempt_count: 3,
+            last_wake_attempt_ms: 99,
+            retry_attempted: true,
+        },
+    }]);
+
+    let first = poll_messages_with_context(
+        &server,
+        "reader",
+        None,
+        None,
+        Some("recv-minimal-projection"),
+    )
+    .expect("an unread durable message must be delivered");
+    assert!(first.ok, "{:?}", first.error);
+    let view = &first.data["messages"][0];
+    assert_eq!(view["id"], "msg-minimal-projection");
+    assert_eq!(view["from"], "writer");
+    assert_eq!(view["to"], "reader");
+    assert_eq!(view["type"], "notify");
+    assert_eq!(view["subject"], "minimal projection");
+    assert_eq!(view["body"], "durable body that must not be trimmed");
+    assert_eq!(view["in_reply_to"], "msg-original-request");
+    for diagnostic in [
+        "wake_attempt_count",
+        "last_wake_attempt_ms",
+        "retry_attempted",
+    ] {
+        assert!(
+            view.get(diagnostic).is_none(),
+            "recv must not expose per-message delivery diagnostics: {diagnostic} in {view}"
+        );
+    }
+
+    let replay = poll_messages_with_context(
+        &server,
+        "reader",
+        None,
+        None,
+        Some("recv-minimal-projection"),
+    )
+    .expect("the committed receive batch must replay");
+    assert_eq!(replay.data["replayed"], true);
+    assert_eq!(
+        replay.data["messages"], first.data["messages"],
+        "a receive_id replay must return the same minimal projection"
+    );
+
+    std::fs::remove_dir_all(root).ok();
+}
+
 #[test]
 fn worker_snapshot_returns_bounded_tmux_buffer_without_side_effects() {
     let (server, root) = test_server();
@@ -1767,7 +1835,7 @@ fn master_promotion_requires_user_approval_and_existing_master_delegates() {
     assert!(ordinary_text.contains("codex exec --profile gcm"));
     assert!(ordinary_text.contains("regardless of whether other peers are busy"));
     assert!(ordinary_text.contains("verify subworker evidence"));
-    assert!(ordinary_text.contains("ask the current master"));
+    assert!(ordinary_text.contains("contact the current master"));
     assert!(ordinary_text.contains("finite patrol"));
     assert!(ordinary_text.contains("subscription presence does not gate identity"));
     assert!(ordinary_text.contains("do not invent a polling interval"));

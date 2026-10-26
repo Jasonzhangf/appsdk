@@ -251,78 +251,17 @@ mod tests {
             )
             .unwrap_or_else(|e| panic!("read {rel}: {e}"));
             assert_eq!(on_disk, *embedded, "drift in {rel}");
-            if *rel == "operations.md" {
-                let normalized = embedded.split_whitespace().collect::<Vec<_>>().join(" ");
-                assert!(normalized.contains("Peer-first"));
-                assert!(normalized.contains("PROTECTED_HOLD"));
-                assert!(normalized.contains("one-shot wake"));
-                for marker in [
-                    "patrols only its own project",
-                    "open P0/P1 work",
-                    "real peer evidence",
-                    "owned worktrees and stale resources",
-                    "canonical issue intake",
-                    "currently supported monitored events",
-                    "non-overlapping bounded scopes",
-                    "Close-Before-Open/SESE",
-                    "broad process kills",
-                    "daemon or tmux lifecycle actions",
-                    "project's canonical intake and deduplication",
-                    "owning project contract",
-                    "goal or deadline one-shot wakes",
-                    "explicitly re-arm",
-                    "report channel",
-                ] {
-                    assert!(
-                        normalized.contains(marker),
-                        "compiled Skill projection is missing {marker:?}"
-                    );
-                }
+            // Wording belongs to the Skill owner. The installer proves that the
+            // embedded bundle is the shipped repository source and installs it;
+            // role and scheduling semantics are checked by their consumers.
+            if matches!(*rel, "SKILL.md" | "operations.md") {
                 assert!(
-                    !normalized.contains("RouteCodex"),
+                    !embedded.contains("RouteCodex"),
                     "canonical Collab contract must stay project-agnostic"
                 );
-            }
-            if *rel == "SKILL.md" {
-                let normalized = embedded.split_whitespace().collect::<Vec<_>>().join(" ");
-                assert!(normalized.contains("board-idle-patrol"));
-                assert!(normalized.contains("operations.md"));
-                assert!(normalized.contains("collab ceo reply"));
-                assert!(normalized.contains("collab ceo report-ack"));
-                assert!(normalized.contains("Asia/Shanghai"));
-                assert!(
-                    !normalized.contains("RouteCodex"),
-                    "canonical Collab contract must stay project-agnostic"
-                );
-            }
-            if *rel == "references/board-idle-patrol.md" {
-                assert!(embedded.contains("collab notify cancel --event board-idle"));
-                assert!(embedded.contains("collab notify subscribe --event board-idle"));
-                assert!(embedded.contains("collab ceo report-ack --batch-id"));
-                assert!(embedded.contains("reported_to_user"));
-                assert!(embedded.contains("Asia/Shanghai"));
-                assert!(embedded.contains("USER.md"));
             }
             if *rel == "references/workflow-templates.json" {
-                let workflow: serde_json::Value = serde_json::from_str(embedded).unwrap();
-                let ceo = serde_json::to_string(&workflow["ceo_template"]).unwrap();
-                assert!(ceo.contains("Asia/Shanghai"));
-                assert!(ceo.contains("report-ack"));
-                assert!(ceo.contains("USER.md"));
-                let master =
-                    serde_json::to_string(&workflow["identity_templates"]["master"]).unwrap();
-                assert!(master.contains("worker patrol"));
-                let peer = serde_json::to_string(&workflow["identity_templates"]["peer"]).unwrap();
-                assert!(peer.contains("board idle reminder"));
-                let rules = serde_json::to_string(&workflow["coordination_rules"]).unwrap();
-                assert!(rules.contains("Board idle patrol is per task and current stable owner"));
-            }
-            if *rel == "references/task-worktree-lifecycle.md" {
-                assert!(embedded.contains("PROTECTED_HOLD"));
-            }
-            if *rel == "references/notifications.md" {
-                assert!(embedded.contains("one-shot wake"));
-                assert!(embedded.contains("[board-idle-patrol.md](board-idle-patrol.md)"));
+                let _: serde_json::Value = serde_json::from_str(embedded).unwrap();
             }
         }
     }

@@ -1378,9 +1378,7 @@ fn notification_send_response(
             data["notification_error"] = json!(error);
             data["failure"] = json!("notification_delivery_failed");
             data["repair_required"] = json!(true);
-            data["escalation"] = json!(
-                "the message is durable but this wake has an ambiguous submission outcome; do not retry this wake, have the recipient run collab recv, and send a new message if another wake is needed"
-            );
+            data["escalation"] = json!(rejected_wake_escalation(notification_method));
             Resp::err_data(
                 notification_rejected_label(notification_method, &format!("{error}")),
                 data,
@@ -1409,6 +1407,19 @@ fn notification_rejected_label(notification_method: &str, error: &str) -> String
         "appserver" => format!("APPSERVER_NOTIFICATION_REJECTED: {error}"),
         "dsh" => format!("DSH_NOTIFICATION_REJECTED: {error}"),
         _ => format!("TMUX_NOTIFICATION_REJECTED: {error}"),
+    }
+}
+
+/// The repair belongs to the selected transport. A rejected dsh wake means the
+/// bound gateway's native receive loop is not delivering, so the recipient's
+/// CLI reader cannot repair it and a repeated send only reproduces the same
+/// failure. Other transports reach the peer through the durable mailbox, where
+/// an explicit read is the repair.
+fn rejected_wake_escalation(notification_method: &str) -> &'static str {
+    if notification_method == "dsh" {
+        "the message is durable but this wake has an ambiguous submission outcome; do not retry this wake or repeat the send; restore the recipient's bound gateway native receive, then let that loop consume the durable message"
+    } else {
+        "the message is durable but this wake has an ambiguous submission outcome; do not retry this wake, have the recipient run collab recv, and send a new message if another wake is needed"
     }
 }
 

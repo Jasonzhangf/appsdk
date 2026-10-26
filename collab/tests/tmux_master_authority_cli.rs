@@ -290,8 +290,8 @@ fn master_authority_tmux_unknown_holder_keeps_control_and_projection() {
         .expect("master next action");
     assert_eq!(
         context["next_actions"],
-        serde_json::json!([next_action]),
-        "idle master next_actions must project role_brief.next_action: {context}"
+        serde_json::json!([]),
+        "idle master next_actions must be empty when no task next_step exists: {context}"
     );
     let next_action_lower = next_action.to_lowercase();
     assert!(

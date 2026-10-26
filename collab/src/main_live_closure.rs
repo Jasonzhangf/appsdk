@@ -316,14 +316,14 @@ pub(crate) fn live_closure_batch_input_contains_message(
     else {
         return false;
     };
-    let Some((ids, rest)) = body.split_once(" task_ids=none action_categories=") else {
+    let Some((ids, rest)) = body.split_once(" action_categories=") else {
         return false;
     };
-    let Some((categories, _)) =
-        rest.split_once(". Run `collab recv` once to consume and read this durable batch;")
-    else {
-        return false;
-    };
+    let categories = rest.split_once(" | ").map_or(rest, |(body, _)| body);
+    let categories = categories
+        .split_once(" older_messages=")
+        .map_or(categories, |(categories, _)| categories);
+    let categories = categories.strip_suffix('.').unwrap_or(categories);
     ids.split(',')
         .zip(categories.split(','))
         .any(|(id, category)| id == message_id && category == expected_category)

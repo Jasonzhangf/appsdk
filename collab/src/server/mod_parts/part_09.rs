@@ -1101,9 +1101,104 @@ fn task_view(state: &State, task: &TaskRec) -> serde_json::Value {
     let cleanup_required = task.worktree_path.is_some();
     let cleanup_receipt = state.cleanup_receipts.get(&task.id);
     let lifecycle = state.task_lifecycle.get(&task.id);
+    // A read projects only the sections that carry a fact. A task that has not
+    // delivered shows no delivery/review/integration block instead of a page of
+    // nulls, while every field the next action needs keeps its own key.
+    let mut sections = serde_json::Map::new();
     let (delivery_complete,completion_missing) = state.delivery_completion_projection(&task.id);
     let policy = state.effective_work_policy(&task.id);
-    json!({
+    if let Some(record) = lifecycle {
+        let disposition = match (task.status.as_str(), record.delivery_kind) {
+            ("accepted", state::TaskDeliveryKind::ReadOnly) => "no_merge_required",
+            ("accepted", state::TaskDeliveryKind::Code) => "integration_required",
+            ("merged", state::TaskDeliveryKind::Code) => "integrated",
+            ("closed", state::TaskDeliveryKind::ReadOnly) => "no_merge_required",
+            ("closed", state::TaskDeliveryKind::Code) => "integrated",
+            _ => "in_progress",
+        };
+        let mut delivery = serde_json::Map::new();
+        delivery.insert("kind".into(), json!(record.delivery_kind));
+        if let Some(evidence) = &record.delivery_evidence {
+            delivery.insert("evidence".into(), json!(evidence));
+        }
+        if let Some(delivered_ms) = record.delivered_ms {
+            delivery.insert("at".into(), json!(iso(delivered_ms)));
+        }
+        let mut review = serde_json::Map::new();
+        if let Some(evidence) = &record.review_evidence {
+            review.insert("evidence".into(), json!(evidence));
+        }
+        if let Some(reviewer) = &record.reviewer {
+            review.insert("reviewer".into(), json!(reviewer));
+        }
+        if let Some(reviewed_ms) = record.reviewed_ms {
+            review.insert("at".into(), json!(iso(reviewed_ms)));
+        }
+        if let Some(required_reviewer_name) = required_work_reviewer(state,&task.id) {
+            review.insert("required_reviewer_name".into(), json!(required_reviewer_name));
+        }
+        if let Some(reviewer_name) = &record.reviewer_name {
+            review.insert("reviewer_name".into(), json!(reviewer_name));
+        }
+        review.insert("valid".into(), json!(work_review_valid(state,&task.id)));
+        if record.review_subject_revision > 0 {
+            review.insert("subject_revision".into(), json!(record.review_subject_revision));
+        }
+        if let Some(reviewed_subject_revision) = record.reviewed_subject_revision {
+            review.insert("reviewed_subject_revision".into(), json!(reviewed_subject_revision));
+        }
+        let mut integration = serde_json::Map::new();
+        if let Some(commit) = &record.integration_commit {
+            integration.insert("commit".into(), json!(commit));
+        }
+        if let Some(evidence) = &record.integration_evidence {
+            integration.insert("evidence".into(), json!(evidence));
+        }
+        if let Some(integrated_ms) = record.integrated_ms {
+            integration.insert("at".into(), json!(iso(integrated_ms)));
+        }
+        sections.insert("delivery".into(), json!(delivery));
+        sections.insert("disposition".into(), json!(disposition));
+        if !review.is_empty() {
+            sections.insert("review".into(), json!(review));
+        }
+        if !integration.is_empty() {
+            sections.insert("integration".into(), json!(integration));
+        }
+    } else if let Some(required_reviewer_name) = required_work_reviewer(state,&task.id) {
+        // A pinned reviewer is a next-step fact before any delivery exists.
+        sections.insert(
+            "review".into(),
+            json!({"required_reviewer_name": required_reviewer_name, "valid": false}),
+        );
+    }
+    if let Some(request) = state.pending_merges.get(&task.id) {
+        sections.insert("merge".into(), json!({
+            "pending": true,
+            "requested_by": request.requested_by,
+            "requested_at": iso(request.requested_ms),
+            "owner": request.owner,
+        }));
+    }
+    if cleanup_required || cleanup_receipt.is_some() {
+        sections.insert("cleanup".into(), json!({
+            "required": cleanup_required,
+            "status": if !cleanup_required {
+                "not_required"
+            } else if cleanup_receipt.is_some_and(|receipt| {
+                receipt.verification == CleanupVerification::Verified
+            }) {
+                "verified"
+            } else if cleanup_receipt.is_some() {
+                "unverified"
+            } else {
+                "pending"
+            },
+            "receipt_id": cleanup_receipt.map(|receipt| receipt.id.clone()),
+        }));
+    }
+    sections.insert("updated_at".into(), json!(iso(task.updated_ms)));
+    let mut view = json!({
         "id": task.id,
         "owner": task.owner,
         "created_by": task.created_by,
@@ -1119,58 +1214,13 @@ fn task_view(state: &State, task: &TaskRec) -> serde_json::Value {
         "child_work_policies": state.board_details.get(&task.id).map(|details|&details.child_work_policies),
         "delivery_complete": delivery_complete,
         "completion_missing": completion_missing,
-        "delivery": {
-            "kind": lifecycle.map(|record| record.delivery_kind).unwrap_or_default(),
-            "evidence": lifecycle.and_then(|record| record.delivery_evidence.clone()),
-            "at": lifecycle.and_then(|record| record.delivered_ms.map(iso)),
-        },
-        "disposition": lifecycle.map(|record| match (task.status.as_str(), record.delivery_kind) {
-            ("accepted", state::TaskDeliveryKind::ReadOnly) => "no_merge_required",
-            ("accepted", state::TaskDeliveryKind::Code) => "integration_required",
-            ("merged", state::TaskDeliveryKind::Code) => "integrated",
-            ("closed", state::TaskDeliveryKind::ReadOnly) => "no_merge_required",
-            ("closed", state::TaskDeliveryKind::Code) => "integrated",
-            _ => "in_progress",
-        }),
-        "review": {
-            "evidence": lifecycle.and_then(|record| record.review_evidence.clone()),
-            "reviewer": lifecycle.and_then(|record| record.reviewer.clone()),
-            "at": lifecycle.and_then(|record| record.reviewed_ms.map(iso)),
-            "required_reviewer_name": required_work_reviewer(state,&task.id),
-            "reviewer_name": lifecycle.and_then(|record|record.reviewer_name.clone()),
-            "subject_revision": lifecycle.map(|record|record.review_subject_revision),
-            "reviewed_subject_revision": lifecycle.and_then(|record|record.reviewed_subject_revision),
-            "valid": work_review_valid(state,&task.id),
-        },
-        "integration": {
-            "commit": lifecycle.and_then(|record| record.integration_commit.clone()),
-            "evidence": lifecycle.and_then(|record| record.integration_evidence.clone()),
-            "at": lifecycle.and_then(|record| record.integrated_ms.map(iso)),
-        },
-        "merge": state.pending_merges.get(&task.id).map(|request| json!({
-            "pending": true,
-            "requested_by": request.requested_by,
-            "requested_at": iso(request.requested_ms),
-            "owner": request.owner,
-        })).unwrap_or_else(|| json!({"pending": false})),
-        "cleanup": {
-            "required": cleanup_required,
-            "status": if !cleanup_required {
-                "not_required"
-            } else if cleanup_receipt.is_some_and(|receipt| {
-                receipt.verification == CleanupVerification::Verified
-            }) {
-                "verified"
-            } else if cleanup_receipt.is_some() {
-                "unverified"
-            } else {
-                "pending"
-            },
-            "receipt_id": cleanup_receipt.map(|receipt| receipt.id.clone()),
-        },
-        "updated_at": iso(task.updated_ms),
-        "keepalive": keepalive::view(state, &task.owner),
-    })
+    });
+    // A section that holds no fact for this task stays absent rather than
+    // appearing as null or `pending: false`.
+    if let Some(object) = view.as_object_mut() {
+        object.extend(sections);
+    }
+    view
 }
 
 fn pending_merge_views(state: &State) -> Vec<serde_json::Value> {
@@ -1271,6 +1321,17 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
         .tasks
         .values()
         .filter(|task| task.owner == worker_id)
+        // `context` is the caller's current work view. An owned closed task is
+        // history only when the existing delivery, merge and resource
+        // projections say no duty remains; explicit status/task reads still
+        // show the full record.
+        .filter(|task| {
+            if task.status != "closed" {
+                return true;
+            }
+            let (delivery_complete, _) = st.delivery_completion_projection(&task.id);
+            !delivery_complete || st.pending_merges.contains_key(&task.id)
+        })
         .map(|task| task_view(&st, task))
         .collect();
     tasks.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
@@ -1339,6 +1400,14 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
             .notification_subscriptions
             .values()
             .filter(|subscription| subscription.worker_id == worker_id)
+            // `context` is the caller's current work view. Closed or superseded
+            // subscription history stays in `notify status`, not in this read.
+            .filter(|subscription| {
+                !matches!(
+                    subscription.status.as_str(),
+                    "consumed" | "expired" | "cancelled" | "rebound"
+                )
+            })
             .collect::<Vec<_>>();
         subscriptions.sort_by_key(|subscription| (subscription.created_ms, &subscription.id));
         subscriptions
@@ -1363,13 +1432,49 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
         .collect();
     peer_snapshots.sort_by(|left, right| left.0.id.cmp(&right.0.id));
     let pending_merges = pending_merge_views(&st);
+    // The master sees the whole project queue. An ordinary peer only sees the
+    // merge views it owns or requested, so foreign obligations stay out of its
+    // default context read.
+    let applicable_pending_merges: Vec<serde_json::Value> = if role == "master" {
+        pending_merges.clone()
+    } else {
+        pending_merges
+            .iter()
+            .filter(|merge| {
+                merge["owner"].as_str() == Some(worker_id.as_str())
+                    || merge["requested_by"].as_str() == Some(worker_id.as_str())
+            })
+            .cloned()
+            .collect()
+    };
     // `collab context` is the single agent bootstrap read, so the projections
     // that `collab status --all` and `collab who` expose belong to the same
     // snapshot instead of a second call. They are captured here because `st` is
     // released before the transport probes below. Normal Context has already
     // recorded presence; completed readback does not perform that maintenance.
-    let task_count = st.tasks.len();
-    let mut subagents: Vec<crate::subagent::Record> = st.subagents.values().cloned().collect();
+    // The master keeps the project-wide counters. An ordinary peer counts only
+    // the caller-facing projection, so unrelated terminal task and managed
+    // subagent history does not change its summary.
+    let task_count = if role == "master" {
+        st.tasks.len()
+    } else {
+        tasks.len()
+    };
+    let mut subagents: Vec<crate::subagent::Record> = st
+        .subagents
+        .values()
+        .filter(|record| {
+            if role == "master" {
+                return true;
+            }
+            let caller_related = record.parent == worker_id || record.peer == worker_id;
+            // The caller's own unresolved managed records stay visible. A
+            // foreign failure never transfers responsibility, and closed
+            // caller history stays in the explicit diagnostics.
+            caller_related && record.status != "closed"
+        })
+        .cloned()
+        .collect();
     subagents.sort_by(|left, right| left.id.cmp(&right.id));
     let display_name = worker_display_name(&st, &worker.id, role == "master");
     let work_roles_by_worker: std::collections::HashMap<_, _> = st.workers.keys()
@@ -1400,12 +1505,21 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
                 })
             })
             .collect();
-        (
-            st.master_wake.clone(),
-            st.msgs.len(),
-            unread.len(),
-            messages,
-        )
+        let (master_wake, message_count) = if role == "master" {
+            (json!(st.master_wake.clone()), st.msgs.len())
+        } else {
+            // `master_wake` is the master-only scheduling ledger. An ordinary
+            // peer's message counter covers only messages it sent or received,
+            // never the whole project's historical traffic.
+            (
+                serde_json::Value::Null,
+                st.msgs
+                    .values()
+                    .filter(|message| message.from == worker_id || message.to == worker_id)
+                    .count(),
+            )
+        };
+        (master_wake, message_count, unread.len(), messages)
     };
 
     let (presence, agent) = worker_presence_with_view(server, &worker);
@@ -1470,7 +1584,7 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
         master_authority_view_with_endpoint(&st, route_scope.as_ref(), endpoint_live)
     };
     let recorded_unusable = serde_json::Value::Null;
-    let mut next_actions: Vec<String> = tasks
+    let next_actions: Vec<String> = tasks
         .iter()
         .filter_map(|task| {
             task.get("next_step")
@@ -1478,41 +1592,17 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
                 .map(str::to_owned)
         })
         .collect();
-    if next_actions.is_empty() {
-        if let Some(action) = current_role_brief["next_action"].as_str() {
-            next_actions.push(action.into());
-        }
-    }
     let operations: Vec<serde_json::Value> = {
         let mut operations = Vec::new();
-        let mut push = |kind: &str, value: Option<&str>| {
-            if let Some(action) = value.map(str::trim).filter(|value| !value.is_empty()) {
-                operations.push(json!({"kind": kind, "action": action}));
-            }
-        };
-        push("next_action", current_role_brief["next_action"].as_str());
-        if let Some(responsibilities) = current_role_brief["responsibilities"].as_array() {
-            for responsibility in responsibilities {
-                push("responsibility", responsibility.as_str());
-            }
-        }
-        push(
-            "completion_action",
-            current_role_brief["completion_action"].as_str(),
-        );
-        push(
-            "notification_rule",
-            current_role_brief["notification_rule"].as_str(),
-        );
         let master_assigned = master
             .get("worker_id")
             .and_then(serde_json::Value::as_str)
             .is_some();
-        if master_assigned && !pending_merges.is_empty() {
+        if role == "master" && !applicable_pending_merges.is_empty() {
             operations.push(json!({
                 "kind": "merge_pending",
                 "action": "for each pending merge, merge the accepted candidate on refs/heads/main, then record collab task integrated before close",
-                "pending_merges": pending_merges,
+                "pending_merges_ref": "pending_merges",
             }));
         }
         if master.get("worker_id").and_then(serde_json::Value::as_str) == Some(worker_id.as_str()) {
@@ -1598,7 +1688,7 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
         },
         "agent": agent,
         "tasks": tasks,
-        "pending_merges": pending_merges,
+        "pending_merges": applicable_pending_merges,
         "worktrees": worktrees,
         "subscriptions": subscriptions,
         "peers": peers,

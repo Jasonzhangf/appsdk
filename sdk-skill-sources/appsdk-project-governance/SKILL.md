@@ -24,13 +24,10 @@ Use this Skill only when an AppSDK-managed project performs governance bootstrap
    - Upgrading an existing project to the 2026-10-16 ablated governance uses [bootstrap-migration.md](references/bootstrap-migration.md#existing-project-governance-ablation) to remove legacy SHA/freeze/identity-record calls from project docs, hooks, and gates. Never run `appsdk init --fresh` or `collab reset` merely to upgrade rules.
    - New project admission uses `appsdk prepare` -> explicit user confirmation of `.appsdk-prepare.json` -> `appsdk init` -> `appsdk verify`.
 3. **Development, review, and delivery**:
-   - Work in an exclusive clean external worktree (`/Volumes/Intel/playground/<project-key>/<task-slug>`) following the SESE Close-Before-Open lifecycle.
-   - Check affected DAG completeness and SESE closure first (`dagpipe graph validate`), then run red test -> unique owner fix -> real public-entrypoint black-box regression.
-   - Trigger one independent architecture/milestone review at the milestone integration boundary after author verification passes. Ordinary internal nodes and commits do not trigger review.
+   - Follow the host's coding and delivery contract for worktree ownership, affected DAG, red test, public-entrypoint regression and milestone review. Pure documentation uses targeted checks; do not create another lifecycle here.
 4. **Collaboration ownership**:
-   - Long-horizon work belongs to a consenting peer assigned through the public Collab board. That peer orchestrates independent `codex exec --profile gcm` execution and observation workers.
-   - Master and peer each own and orchestrate their goal. One-shot execution/observation goes directly to independent GCM workers regardless of peer availability. Managed-subagent commands and records are legacy compatibility for diagnosis or migration, not a production execution surface.
-   - Fleet, patrol, worktree-hold, and one-shot rearm rules belong to the Collab Skill. This governance Skill owns AppSDK intake, DAG, gates, review, and goal commands.
+   - When explicitly registered, follow the [Collab Skill](../collab/SKILL.md) for goal ownership, task routing, waits and patrols. Execution and review routing follow the current host contract.
+   - This Skill owns AppSDK governance entrypoints. It does not duplicate Collab identity, role or scheduling rules.
 
 ## Reference router (load on demand)
 

@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-notification-consumption",
   "version": "0.2.0",
-  "description": "SESE consumption graph. A recipient consume request returns payloads and commits ReceiveCommitted with Delivered/Acked in the same transaction. The existing subscription owner may idempotently advance its occurrence. Consumption does not change route, transport or binding truth.",
+  "description": "SESE consumption graph. A recipient consume request returns payloads and commits ReceiveCommitted with Delivered/Acked in the same transaction. First receive and receive-id replay use one projection of the durable body, message identity, correlation and reply obligation; delivery-attempt diagnostics remain in their owner and are not part of the default receipt. The existing subscription owner may idempotently advance its occurrence. Consumption does not change route, transport or binding truth.",
   "inputs": [
     {
       "id": "recipient_consume_request",

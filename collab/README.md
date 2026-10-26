@@ -118,11 +118,14 @@ Omitting the option preserves them; an empty value clears them. The current
 master can apply a user's assignment to another name with
 `collab context --for-name Alice --work-roles designer`.
 
-`collab context` also returns master/peer instructions in `role_brief` and
-`operations`: confirm missing scope and role requirements before dispatch,
-persist the agreed assignment, and check current roles and task constraints
-on each request. Explicit user decisions are reused. Role changes apply to
-later selection; they do not rewrite existing task assignments or reviews.
+`collab context` returns one effective role body in `role_brief`; workflow
+template cards carry only source and version metadata, and `operations` /
+`next_actions` carry current commands and the current task or recovery actions.
+Use that effective role and the current task facts to confirm scope and role
+requirements before dispatch, persist the agreed assignment, and check current
+roles and task constraints on each request. Explicit user decisions are reused.
+Role changes apply to later selection; they do not rewrite existing task
+assignments or reviews.
 
 The master saves category defaults through `collab board policy --scope project
 --work-kind frontend --executor Alice --reviewer Bob`. Publish a task with
@@ -155,8 +158,9 @@ execution or occupy its slot. On completion or a blocker, inspect remaining
 work and continue an authorized, nonconflicting task. Blocked and waiting work
 keeps its owner and resources. Resuming it rechecks execution capacity.
 Before idle and on the next activation, recheck blockers and unfinished duties.
-These are agent actions; the board adds no periodic worker wake or automatic
-execution. The [Collab Skill](skills/collab/SKILL.md#continue-the-queue-and-recheck-blockers)
+These are agent actions. Daemon-driven reminders follow the
+[board-idle patrol contract](skills/collab/references/board-idle-patrol.md);
+a wake does not prove execution. The [Collab operations](skills/collab/operations.md#continue-the-queue-and-recheck-blockers)
 defines each role's steps. Managed private queues are visible only to the child
 and its parent; the public board shows parent responsibility for public work.
 
@@ -340,28 +344,31 @@ claim. Holder close moves each waiter from `waiting` to `blocked` and clears
 the obsolete wait edge. Notification occurs only for an exact active
 resource-release/deadline subscription.
 
-Manual P2P messages use `notify` and require a short subject plus a non-empty
-durable body:
+Manual peer messages use `sendmessage` and require a short subject plus a
+non-empty durable body:
 
 ```sh
 collab sendmessage --to <peer> --subject resource-busy "RESOURCE_OCCUPIED ..."
-collab sendmessage --to <peer> --subject result-ready "The result is ready; query the mailbox."
 ```
+
+Use the actual result or release event to resume. Do not send a second message
+merely to tell the recipient to query content it already received.
 
 Never type peer messages into a terminal. Without the recipient's active
 `direct-message` subscription, the message remains mailbox-only. Registration
 normally creates this subscription automatically; App Server receives the
 short message id, abbreviated subject, safe one-line original body preview,
-and submit as one queued operation. Notifications deliver only when an agent
-is idle (waiting); if the agent is working, delivery defers without burning
-wake attempts until the working->idle transition occurs. When the App Server
-thread is dead, unowned, or its registered identity has changed, the
-subscription enters its explicit unavailable state. If unacknowledged delivered notifications reach the limit
-(default 3, configurable 1..=5), push knocks pause awaiting `collab ack <id>` or
-`collab ack --all` to prevent backlog flooding and terminal pollution. When delivery
-occurs with a larger backlog, batches are capped at 3 with inbox reminders. Worker
-status, identity validity, and notification pressure can be inspected via
-`collab worker status [id]` and `collab who`.
+and submit as one queued operation. A working agent receives the due batch; it
+does not wait for an idle transition. Absent and unknown produce no App Server
+input. When the App Server thread is dead, unowned, or its registered identity
+has changed, the subscription enters its explicit unavailable state. If
+unacknowledged delivered notifications reach the limit (default 3,
+configurable 1..=5), push knocks pause for backpressure. Non-DSH consumption
+uses one `collab recv`; explicit `collab ack` remains a legacy recovery entry
+for already-delivered content and never discards unread content. When delivery
+occurs with a larger backlog, batches are capped at 3 with inbox reminders.
+Worker status, identity validity, and notification pressure can be inspected
+via `collab worker status [id]` and `collab who`.
 
 ## Explicit notifications
 

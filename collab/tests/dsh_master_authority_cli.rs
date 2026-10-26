@@ -1614,6 +1614,11 @@ fn dsh_post_submit_read_error_preserves_durable_message_without_retry() {
         before + 1
     );
     assert!(sent.to_string().contains("DSH_ENDPOINT_UNKNOWN:"), "{sent}");
+    let escalation = sent["escalation"]
+        .as_str()
+        .expect("unknown wake recovery action");
+    assert!(escalation.contains("gateway native receive"), "{sent}");
+    assert!(!escalation.contains("collab recv"), "{sent}");
     assert!(
         !sent.to_string().contains("DSH_ENDPOINT_BLOCKED:"),
         "{sent}"

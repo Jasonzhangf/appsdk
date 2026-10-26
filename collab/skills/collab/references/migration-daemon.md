@@ -26,6 +26,12 @@ tasks, resources and unconsumed messages and updates their execution binding.
 Consumed messages and closed-task history remain historical. Migration does not
 grant master authority without the user's explicit master restoration approval.
 
+Recovery does not change accepted goal ownership or require another human
+approval for authorized work. Reconcile finite goal/task schedules under
+[notifications](notifications.md#patrol-duties-and-finite-schedules). Standing
+project patrol and task-scoped cancellations remain owned by
+[board-idle patrol](board-idle-patrol.md), not by identity restoration.
+
 Every new AppServer context must carry current session/thread/endpoint/namespace
 from the calling host or this invocation's `--provide` (MCP: `provide` on each
 call). Desktop uses its current scoped bridge capability, including through

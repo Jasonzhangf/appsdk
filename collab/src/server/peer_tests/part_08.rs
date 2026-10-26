@@ -631,9 +631,13 @@ fn tmux_notification_requests_durable_receive() {
         retry_attempted: false,
     })
     .unwrap();
-    assert!(text.starts_with("COLLAB_NOTIFY message-id [release] RESOURCE_RELEASED feature=shared | P1 ACTION: the resource is free; resume the task that waited on it. Details: run `collab recv` once; it consumes and prints this durable notification. | READ IS NOT DONE:"));
+    assert!(text.starts_with("COLLAB_NOTIFY message-id [release] RESOURCE_RELEASED feature=shared | P1 ACTION: the resource is free; resume the task that waited on it. Read it once with `collab recv`; that consumes this durable message."));
     assert!(!text.contains("ACK this notice"));
-    assert!(text.contains("READ IS NOT DONE"));
+    assert_eq!(
+        text.matches("collab recv").count(),
+        1,
+        "the wake names exactly one read action: {text}"
+    );
 }
 
 #[tokio::test]
@@ -809,15 +813,24 @@ fn appserver_notification_classifies_priority_and_names_one_action() {
     assert!(!notify("deadline-notice: task due").contains("P0 ACTION:"));
     assert!(notify("Settings delivery recorded").contains("P2 ACTION: note it"));
 
-    // Every class carries the resume protocol, not just the operational ones.
+    // Every class carries the same single read action; the resume protocol
+    // stays in the Collab Skill and role brief.
     for subject in [
         "worker-idle: w1",
         "goal:plan.md",
         "Settings delivery recorded",
     ] {
-        assert!(notify(subject).contains("resume your current task"));
+        assert_eq!(
+            notify(subject).matches("collab recv").count(),
+            1,
+            "notification {subject} names exactly one read action"
+        );
     }
-    assert!(internal("goal:plan.md").contains("resume your current task"));
+    assert_eq!(
+        internal("goal:plan.md").matches("collab recv").count(),
+        1,
+        "internal notification names exactly one read action"
+    );
 }
 
 #[test]
@@ -840,8 +853,10 @@ fn appserver_notification_truncates_body_without_dropping_the_action_contract() 
 
     assert!(text.chars().count() <= 1024);
     assert!(text.contains("P1 ACTION:"));
-    assert!(text.contains("READ IS NOT DONE"));
-    assert!(text.ends_with("run `appsdk longhorizon show` and take work."));
+    assert!(
+        text.ends_with("Read it once with `collab recv`; that consumes this durable message."),
+        "the action and read step survive truncation: {text}"
+    );
 }
 
 #[test]
@@ -863,7 +878,7 @@ fn appserver_notification_abbreviates_subject_and_escapes_body_controls() {
         retry_attempted: false,
     })
     .unwrap();
-    assert!(text.starts_with("COLLAB_NOTIFY message-id [this subject is deliberately longer than forty …] line one\\nline two\\t中文 | P1 ACTION: do the in-scope action the message asks for. Details: run `collab recv` once; it consumes and prints this durable notification. | READ IS NOT DONE:"));
+    assert!(text.starts_with("COLLAB_NOTIFY message-id [this subject is deliberately longer than forty …] line one\\nline two\\t中文 | P1 ACTION: do the in-scope action the message asks for. Read it once with `collab recv`; that consumes this durable message."));
 }
 
 #[test]

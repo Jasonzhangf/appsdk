@@ -206,7 +206,11 @@ fn retire_claimant_events(
 
 /// Events that hand one tmux pane to a later registrant.
 fn pane_reclaim_events(taker: &str, previous: &RuntimeBinding) -> Result<Vec<Event>, String> {
-    retire_claimant_events(taker, previous, "tmux pane reclaimed by a later registration")
+    retire_claimant_events(
+        taker,
+        previous,
+        "tmux pane reclaimed by a later registration",
+    )
 }
 
 fn current_master_grant(
@@ -291,6 +295,7 @@ fn base_role_brief(server: &Server, state: &State, worker_id: &str) -> serde_jso
     let collaboration_reply_rule = workflow_template_rule("collaboration_reply_rule");
     let work_role_assignment_rule = workflow_template_rule("work_role_assignment_rule");
     let work_role_execution_rule = workflow_template_rule("work_role_execution_rule");
+    let work_role_next_action_rule = workflow_template_rule("work_role_next_action");
     let route_scope = server_route_scope(server, state).ok().flatten();
     if current_master_worker_id(state, route_scope.as_ref()).as_deref() == Some(worker_id) {
         return json!({
@@ -301,6 +306,7 @@ fn base_role_brief(server: &Server, state: &State, worker_id: &str) -> serde_jso
                 own_goal_rule,
                 work_role_assignment_rule,
                 work_role_execution_rule,
+                work_role_next_action_rule,
                 collaboration_reply_rule,
                 "The sendmessage reply command applies only within this project. For cross-project from=<worker>@<project>, reply from your own project with `collab master send --project <source-project> --to <source-worker> --subject <topic> <result>` and include the original message ID in the body. Discover a target master's current worker ID with the read-only `(cd <target-project> && collab master status)`; never register as another project's agent or search historical display-name bindings. Both endpoints must be current master grant holders. Current master send has no CLI reply marker or linked-reply option; do not claim body correlation clears an obligation.",
                 active_progress_rule,
@@ -375,6 +381,7 @@ fn base_role_brief(server: &Server, state: &State, worker_id: &str) -> serde_jso
             own_goal_rule,
             work_role_assignment_rule,
             work_role_execution_rule,
+            work_role_next_action_rule,
             collaboration_reply_rule,
             "The sendmessage reply command applies only within this project. Cross-project communication is master-only: forward the request and original message to your own current master; do not pass worker@project to sendmessage, change cwd to impersonate another project, or infer master authority from a work role or CEO title.",
             "As a peer, report to the requester, delegator or project master by default, not routinely to the user. Report to the user only for a direct user question or reporting request, a decision only the user can make, or a material exception affecting the user.",
@@ -393,7 +400,7 @@ fn base_role_brief(server: &Server, state: &State, worker_id: &str) -> serde_jso
             "Collab/AppSDK and tmux have independent lifecycles. Do not run broad process kills or perform daemon or tmux lifecycle actions. Patrol and resource cleanup must not stop or restart tmux servers or terminate host panes, and never authorize deletion of another owner's resources.",
             "Evaluate master collaboration requests against current ownership and capacity. Accept, decline, or negotiate conflicts explicitly; do not claim master authority, peer administration, or another peer's resources.",
             "You are the sole delivery owner for your accepted scope. Delegation or asking for help does not transfer responsibility. Investigate failures, verify subworker limitations at the real entry, and pursue authorized remedies or another executor; do not wait for master or others to solve your task, exceed authority or repeat unchanged failures.",
-            "Ask the current master promptly about a suspected blocker with task/affected acceptance, exact failing entry and original error or evidence path, attempted remedies/results, why authorized alternatives cannot proceed, external dependency, exact decision and resume condition. Separate facts from hypotheses; do not delay help until root cause is proven. This is not an approved stop: master must independently verify evidence before approving a scoped blocker. Continue independent work while awaiting a decision or if master is unavailable; preserve delivery ownership unless explicitly reassigned.",
+            "For a scope, resource, conflict or external dependency blocker that needs master coordination, contact the current master promptly with task/affected acceptance, exact failing entry and original error or evidence path, attempted remedies/results, why authorized alternatives cannot proceed, external dependency, exact decision and resume condition. Separate facts from hypotheses; do not delay help until root cause is proven. This is not an approved stop: master must independently verify evidence before approving a scoped blocker. Continue independent work while awaiting a decision or if master is unavailable; preserve delivery ownership unless explicitly reassigned.",
             "Do not wait passively and do not stop on ACK/read/summary; continue the accepted goal and report verified progress at contract points."
         ],
         "communication_recovery": communication_recovery_brief(),
@@ -406,7 +413,7 @@ fn base_role_brief(server: &Server, state: &State, worker_id: &str) -> serde_jso
             "kind": "peer",
             "parent": null
         },
-        "blocked_boundary": "A suspected blocker is not an approved stop. Request current master verification with exact failure evidence, attempted remedies, exhausted authorized alternatives and the decision/resume condition. Pause only truly dependent or unsafe actions, continue independent work, and retain delivery ownership unless explicitly reassigned. Never wait merely for a scheduled wake.",
+        "blocked_boundary": "A suspected blocker is not an approved stop. Route the question through the current workflow's clarification rules. For blockers requiring master coordination, request verification with exact failure evidence, attempted remedies, exhausted authorized alternatives and the decision/resume condition. Pause only truly dependent or unsafe actions, continue independent work, and retain delivery ownership unless explicitly reassigned. Never wait merely for a scheduled wake.",
         "notification_rule": "P0 preempts P1, P1 preempts P2. Higher priority interrupts but does not cancel your owned task."
     })
 }
@@ -434,47 +441,35 @@ fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Va
         })
         .unwrap_or_default();
     let roles = worker_work_roles(state, &project_scope, worker_id);
-    let projection = workflow_template_projection(state, &project_scope, base_role, &roles);
-    apply_workflow_template(&mut brief, &projection);
+    let workflow = effective_workflow_templates(state, &project_scope, base_role, &roles);
+    apply_workflow_template(&mut brief, &workflow);
     brief
 }
 
-fn apply_workflow_template(brief: &mut serde_json::Value, projection: &serde_json::Value) {
-    let identity = &projection["identity"]["template"];
-    brief["role_task"] = identity["role_task"].clone();
-    append_workflow_responsibilities(brief, identity["responsibilities"].as_array());
-    brief["next_action"] = identity["next_action"].clone();
-    brief["completion_action"] = identity["completion_action"].clone();
-    if let Some(specialties) = projection["specialties"].as_array() {
-        for card in specialties {
-            let label = card["target"].as_str().unwrap_or("specialty");
-            let template = &card["template"];
-            append_workflow_text(brief, "role_task", template["role_task"].as_str(), label);
-            append_workflow_responsibilities(brief, template["responsibilities"].as_array());
-            append_workflow_text(brief, "next_action", template["next_action"].as_str(), label);
-            append_workflow_text(
-                brief,
-                "completion_action",
-                template["completion_action"].as_str(),
-                label,
-            );
-        }
+fn apply_workflow_template(brief: &mut serde_json::Value, workflow: &EffectiveWorkflow) {
+    let identity = &workflow.identity;
+    brief["role_task"] = serde_json::Value::String(identity.role_task.clone());
+    append_workflow_responsibilities(brief, &identity.responsibilities);
+    brief["next_action"] = serde_json::Value::String(identity.next_action.clone());
+    brief["completion_action"] = serde_json::Value::String(identity.completion_action.clone());
+    for specialty in &workflow.specialties {
+        let template = &specialty.spec;
+        append_workflow_text(brief, "role_task", Some(&template.role_task), &specialty.target);
+        append_workflow_responsibilities(brief, &template.responsibilities);
+        append_workflow_text(
+            brief,
+            "next_action",
+            Some(&template.next_action),
+            &specialty.target,
+        );
+        append_workflow_text(
+            brief,
+            "completion_action",
+            Some(&template.completion_action),
+            &specialty.target,
+        );
     }
-    // The selected identity or specialty text may omit the fixed idle handoff.
-    // Keep it in completion so a peer cannot silently skip its master request.
-    append_workflow_text(
-        brief,
-        "completion_action",
-        Some(workflow_template_rule("idle_patrol_rule")),
-        "Idle handoff",
-    );
-    append_workflow_text(
-        brief,
-        "next_action",
-        Some(workflow_template_rule("work_role_next_action")),
-        "Task constraints",
-    );
-    brief["workflow_template"] = projection.clone();
+    brief["workflow_template"] = workflow.projection.clone();
 }
 
 fn append_workflow_text(
@@ -501,22 +496,16 @@ fn append_workflow_text(
 
 fn append_workflow_responsibilities(
     brief: &mut serde_json::Value,
-    responsibilities: Option<&Vec<serde_json::Value>>,
+    responsibilities: &[String],
 ) {
-    let Some(responsibilities) = responsibilities else {
-        return;
-    };
     let Some(current) = brief["responsibilities"].as_array_mut() else {
         return;
     };
     for responsibility in responsibilities {
-        let Some(text) = responsibility
-            .as_str()
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-        else {
+        let text = responsibility.trim();
+        if text.is_empty() {
             continue;
-        };
+        }
         current.push(serde_json::Value::String(text.to_owned()));
     }
 }

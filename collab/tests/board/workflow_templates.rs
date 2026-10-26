@@ -33,6 +33,24 @@ fn task<'a>(board: &'a Value, id: &str) -> &'a Value {
         .unwrap()
 }
 
+fn assert_no_static_workflow_operations(context: &Value) {
+    let operations = context["operations"].as_array().expect("operations");
+    let copied = operations
+        .iter()
+        .filter_map(|operation| operation["kind"].as_str())
+        .filter(|kind| {
+            matches!(
+                *kind,
+                "responsibility" | "next_action" | "completion_action" | "notification_rule"
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        copied.is_empty(),
+        "operations must contain current facts, not copied workflow text: {copied:?}"
+    );
+}
+
 /// Both standard identity baselines expose the default workflow template at
 /// base_version 1 before any master-configured override exists.
 #[test]
@@ -51,6 +69,27 @@ fn context_workflow_template_default_base_version_for_master_and_peer() {
 
     for (label, snapshot, target) in [("master", &master, "master"), ("peer", &peer, "peer")] {
         let workflow = &snapshot["role_brief"]["workflow_template"];
+        let brief = &snapshot["role_brief"];
+        let responsibilities = brief["responsibilities"].as_array().unwrap();
+        for route in [
+            "Make ordinary technical decisions autonomously",
+            "factual questions to the owning peer",
+            "design questions to the designer",
+            "scope, resources and conflicts to the current master",
+            "user-exclusive facts, genuinely new authorization or explicit hard-constraint changes",
+            "Reuse existing user authorization without asking again",
+        ] {
+            assert!(
+                responsibilities
+                    .iter()
+                    .any(|item| item.as_str().is_some_and(|text| text.contains(route))),
+                "{label}: missing clarification route {route}: {brief}"
+            );
+        }
+        assert!(!brief["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("ask the current master first with evidence when blocked"));
         assert_eq!(
             workflow["base_version"],
             json!(1),
@@ -66,29 +105,84 @@ fn context_workflow_template_default_base_version_for_master_and_peer() {
         assert_eq!(identity["source"], json!("base"), "{label}: {identity}");
         assert_eq!(identity["base_version"], json!(1), "{label}: {identity}");
         assert_eq!(identity["revision"], json!(0), "{label}: {identity}");
+        assert!(
+            identity.get("template").is_none(),
+            "{label}: the workflow card must reference its source without embedding its text: {identity}"
+        );
         for field in [
             "role_task",
             "responsibilities",
             "next_action",
             "completion_action",
         ] {
-            let value = &identity["template"][field];
             assert!(
-                !value.is_null(),
-                "{label}: identity template must expose {field}: {identity}"
+                !snapshot["role_brief"][field].is_null(),
+                "{label}: role_brief must expose effective {field} once: {snapshot}"
             );
             if field == "responsibilities" {
                 assert!(
-                    !value.as_array().expect("responsibilities array").is_empty(),
-                    "{label}: identity responsibilities must be nonempty: {identity}"
+                    !brief["responsibilities"]
+                        .as_array()
+                        .expect("responsibilities array")
+                        .is_empty(),
+                    "{label}: role_brief responsibilities must be nonempty: {snapshot}"
                 );
             } else {
                 assert!(
-                    !value.as_str().expect("template text").trim().is_empty(),
-                    "{label}: identity template {field} must be nonempty: {identity}"
+                    !brief[field]
+                        .as_str()
+                        .expect("role_brief text")
+                        .trim()
+                        .is_empty(),
+                    "{label}: role_brief {field} must be nonempty: {snapshot}"
                 );
             }
         }
+    }
+}
+
+#[test]
+fn context_identity_override_has_no_fixed_action_suffix() {
+    let fixture = master_fixture();
+    fixture.run_public(&["context"], THREAD_B);
+    for (target, thread) in [("master", THREAD_A), ("peer", THREAD_B)] {
+        let template = workflow_spec(
+            "Resolve the owned project question",
+            "Use the accepted scope and current task pins",
+            "Ask the owning peer for the missing measurement, then continue",
+            "Return the measurement to the assigned receiver",
+        );
+        let updated = fixture.run_public(
+            &[
+                "context",
+                "--workflow-target",
+                target,
+                "--workflow-template",
+                &template,
+            ],
+            THREAD_A,
+        );
+        let snapshot = if target == "master" {
+            updated
+        } else {
+            fixture.run_public(&["context"], thread)
+        };
+        let brief = &snapshot["role_brief"];
+        let selected = &brief["workflow_template"]["identity"];
+        assert_eq!(selected["source"], "master_override");
+        assert_eq!(selected["revision"], 1);
+        assert!(
+            selected.get("template").is_none(),
+            "the selected card must reference its source without embedding its text: {selected}"
+        );
+        let expected: Value = serde_json::from_str(&template).expect("workflow spec");
+        for field in ["role_task", "next_action", "completion_action"] {
+            assert_eq!(
+                brief[field], expected[field],
+                "{target}: effective {field} must preserve the selected template"
+            );
+        }
+        assert_no_static_workflow_operations(&snapshot);
     }
 }
 
@@ -142,20 +236,9 @@ fn context_workflow_template_flags_update_reaches_next_context() {
     assert_eq!(designer["source"], json!("master_override"), "{designer}");
     assert_eq!(designer["base_version"], json!(1), "{designer}");
     assert_eq!(designer["revision"], json!(1), "{designer}");
-    assert_eq!(
-        designer["template"]["role_task"],
-        json!("Draft the design proposal"),
-        "{designer}"
-    );
-    assert_eq!(
-        designer["template"]["next_action"],
-        json!("Publish the design draft"),
-        "{designer}"
-    );
-    assert_eq!(
-        designer["template"]["completion_action"],
-        json!("Report the design result"),
-        "{designer}"
+    assert!(
+        designer.get("template").is_none(),
+        "specialty card must reference its source without embedding its text: {designer}"
     );
 
     let brief = &next["role_brief"];
@@ -183,20 +266,7 @@ fn context_workflow_template_flags_update_reaches_next_context() {
             .is_some_and(|text| text.contains("Report the design result")),
         "completion_action must carry the selected specialty template: {brief}"
     );
-    let operations = next["operations"].as_array().expect("operations");
-    assert!(
-        operations.iter().any(|operation| {
-            operation["kind"] == "next_action" && operation["action"] == brief["next_action"]
-        }),
-        "operations must derive the final next_action: {operations:?}"
-    );
-    assert!(
-        operations.iter().any(|operation| {
-            operation["kind"] == "responsibility"
-                && operation["action"] == "Deliver the design draft"
-        }),
-        "operations must derive the selected specialty responsibilities: {operations:?}"
-    );
+    assert_no_static_workflow_operations(&next);
 }
 
 #[test]
@@ -242,18 +312,26 @@ fn master_preconfigured_role_template_appears_on_same_invocation_role_change() {
     assert_eq!(cards.len(), 1, "{switched}");
     assert_eq!(cards[0]["target"], json!("role:translator"), "{switched}");
     assert_eq!(cards[0]["source"], json!("master_override"), "{switched}");
-    assert_eq!(
-        cards[0]["template"]["role_task"],
-        json!("Translate the user request"),
-        "{switched}"
+    assert!(
+        cards[0].get("template").is_none(),
+        "same-invocation specialty card must reference its source instead of embedding text: {switched}"
     );
     assert!(
-        switched["next_actions"]
-            .as_array()
-            .is_some_and(|actions| actions
-                .iter()
-                .any(|action| action == &switched["role_brief"]["next_action"])),
-        "same-invocation next_actions must use the selected workflow, not the pre-mutation flow"
+        switched["role_brief"]["role_task"]
+            .as_str()
+            .is_some_and(|text| text.contains("Translate the user request")),
+        "same-invocation role_brief must use the selected workflow: {switched}"
+    );
+    assert!(
+        switched["role_brief"]["next_action"]
+            .as_str()
+            .is_some_and(|text| text.contains("Produce the translation")),
+        "same-invocation next_action must use the selected workflow: {switched}"
+    );
+    assert_eq!(
+        switched["next_actions"],
+        json!([]),
+        "a workflow role change must not fabricate a task action: {switched}"
     );
 }
 
@@ -355,10 +433,15 @@ fn workflow_template_reset_and_daemon_replay_are_public() {
         .expect("specialty cards");
     assert_eq!(cards.len(), 1, "{replayed}");
     assert_eq!(cards[0]["revision"], json!(1), "{replayed}");
-    assert_eq!(
-        cards[0]["template"]["role_task"],
-        json!("Draft the design proposal"),
-        "{replayed}"
+    assert!(
+        cards[0].get("template").is_none(),
+        "replayed specialty card must reference its source instead of embedding text: {replayed}"
+    );
+    assert!(
+        replayed["role_brief"]["role_task"]
+            .as_str()
+            .is_some_and(|text| text.contains("Draft the design proposal")),
+        "replayed role_brief must retain the selected template text: {replayed}"
     );
 
     let reset = fixture.run_public(

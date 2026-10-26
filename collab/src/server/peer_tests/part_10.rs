@@ -1373,6 +1373,7 @@ fn bulk_ack_with_empty_ids_acknowledges_all_inbox_messages() {
                 body: format!("body {i}"),
                 in_reply_to: None,
                 reply_policy: None,
+                target_session: None,
                 delivery: "immediate".into(),
             },
         );

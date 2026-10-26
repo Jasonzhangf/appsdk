@@ -3,6 +3,7 @@ include!("support/context_operation_fixture.rs");
 struct DesktopBridgeFixture {
     endpoint: String,
     sends: Arc<Mutex<Vec<String>>>,
+    received_threads: Arc<Mutex<Vec<String>>>,
     stop: Arc<AtomicBool>,
     disconnect_send: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
@@ -22,6 +23,8 @@ impl DesktopBridgeFixture {
         listener.set_nonblocking(true).unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let sends = Arc::new(Mutex::new(Vec::new()));
+        let received_threads = Arc::new(Mutex::new(Vec::new()));
+        let received = received_threads.clone();
         let stopping = stop.clone();
         let sent = sends.clone();
         let disconnect_send = Arc::new(AtomicBool::new(false));
@@ -47,6 +50,10 @@ impl DesktopBridgeFixture {
                             sent.lock()
                                 .unwrap()
                                 .push(request["text"].as_str().unwrap().to_owned());
+                            received
+                                .lock()
+                                .unwrap()
+                                .push(request["thread_id"].as_str().unwrap_or("").to_owned());
                             if disconnecting.load(Ordering::SeqCst) {
                                 continue;
                             }
@@ -74,6 +81,7 @@ impl DesktopBridgeFixture {
         Self {
             endpoint: format!("unix://{}", socket.display()),
             sends,
+            received_threads,
             stop,
             disconnect_send,
             worker: Some(worker),
@@ -974,4 +982,170 @@ fn desktop_candidate_mismatch_is_rejected_and_unknown_send_is_not_replayed() {
         .unwrap()
         .iter()
         .any(|m| m["subject"] == "unknown-bridge-result"));
+}
+
+/// An external caller with no agent facts: no session/thread, no product
+/// originator override. It still resolves project context from cwd like any
+/// real out-of-process CLI user, but it carries no Desktop bridge identity.
+fn anonymous_command(fixture: &Fixture, args: &[&str]) -> Output {
+    fixture
+        .configured_command(args, None)
+        .env_remove("CODEX_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("CODEX_INTERNAL_ORIGINATOR_OVERRIDE")
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn anonymous_cli_send_to_directory_peer_delivers_precise_thread_to_native_bridge() {
+    let fixture = Fixture::without_tmux("desktop-anon-cli");
+    let runtime = fixture.host_state.join("runtime/desktop");
+    let bridge = DesktopBridgeFixture::start_at(&fixture.root, &runtime);
+    publish_capability(&fixture, &bridge);
+
+    // 1. Existing Desktop receiver registers; its worker identity is returned.
+    let enrolled = desktop_command(&fixture, &["context"]);
+    assert!(
+        enrolled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&enrolled.stderr)
+    );
+    let enrolled: Value = serde_json::from_slice(&enrolled.stdout).unwrap();
+    let worker = enrolled["result"]["snapshot"]["identity"]["worker_id"]
+        .as_str()
+        .unwrap();
+    let desktop_session = enrolled["result"]["snapshot"]["binding"]["session_id"]
+        .as_str()
+        .unwrap();
+    let baseline_registrations = std::fs::read_to_string(fixture.project_journal())
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| event["ev"] == "Registered")
+        .count();
+
+    // 2. External process with no agent facts queries the public directory.
+    let dir = anonymous_command(&fixture, &["directory"]);
+    assert!(
+        dir.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dir.stderr)
+    );
+    let dir: Value = serde_json::from_slice(&dir.stdout).unwrap();
+    let target = dir["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["worker_id"].as_str() == Some(worker))
+        .expect("directory exposes the registered Desktop peer");
+    let peer_session = target["session_id"].as_str().unwrap();
+    assert_eq!(peer_session, desktop_session);
+    assert_eq!(
+        target["transport"]["kind"].as_str().unwrap(),
+        "desktop_bridge"
+    );
+
+    // 3. Anonymous CLI send from that external process, addressed to the
+    // directory-discovered peer and its current session. No reply obligation
+    // is allowed for an anonymous sender, and none is requested here.
+    let sent = anonymous_command(
+        &fixture,
+        &[
+            "sendmessage",
+            "--unknown-sender",
+            "--to",
+            worker,
+            "--target-session",
+            peer_session,
+            "--subject",
+            "anon-bridge-subject",
+            "anonymous bridge body must reach desktop-thread verbatim",
+        ],
+    );
+    assert!(
+        sent.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&sent.stdout),
+        String::from_utf8_lossy(&sent.stderr)
+    );
+    let sent: Value = serde_json::from_slice(&sent.stdout).unwrap();
+    assert_eq!(sent["durable"], true, "{sent}");
+    assert_eq!(
+        sent["notification"], "desktop-bridge-input-submitted",
+        "{sent}"
+    );
+
+    // 4. The actual native bridge socket receives the wake for the precise
+    // target thread. Full message content follows through the public recv API.
+    assert!(
+        wait_until(Duration::from_secs(5), || !bridge
+            .sends
+            .lock()
+            .unwrap()
+            .is_empty()),
+        "native bridge consumer never received the anonymous send"
+    );
+    let texts = bridge.sends.lock().unwrap();
+    let wake_matched = texts
+        .iter()
+        .any(|text| text.contains("anon-bridge-subject"));
+    assert!(
+        wake_matched,
+        "native bridge did not receive the message wake: {texts:?}"
+    );
+    drop(texts);
+    let threads = bridge.received_threads.lock().unwrap();
+    assert!(
+        threads.iter().any(|thread| thread == "desktop-thread"),
+        "native bridge was not addressed to the registered Desktop thread: {threads:?}"
+    );
+    drop(threads);
+
+    let received = desktop_command(
+        &fixture,
+        &[
+            "recv",
+            "--timeout",
+            "0",
+            "--receive-id",
+            "desktop-anonymous-consume",
+        ],
+    );
+    assert!(
+        received.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&received.stdout),
+        String::from_utf8_lossy(&received.stderr)
+    );
+    let received: Value = serde_json::from_slice(&received.stdout).unwrap();
+    let message = received["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["subject"] == "anon-bridge-subject")
+        .expect("Desktop recipient consumes the anonymous message through recv");
+    assert_eq!(message["from"], "unknown");
+    assert_eq!(
+        message["body"],
+        "anonymous bridge body must reach desktop-thread verbatim"
+    );
+
+    // 5. Durable message persisted with no new sender identity.
+    let journal = std::fs::read_to_string(fixture.project_journal()).unwrap();
+    let sent_event = journal
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|event| event["ev"] == "Sent" && event["msg"]["subject"] == "anon-bridge-subject")
+        .expect("durable Sent event recorded for the anonymous message");
+    assert_eq!(sent_event["msg"]["from"], "unknown", "{sent_event}");
+    let after_registrations = journal
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| event["ev"] == "Registered")
+        .count();
+    assert_eq!(
+        after_registrations, baseline_registrations,
+        "anonymous send must not register a new sender identity"
+    );
 }

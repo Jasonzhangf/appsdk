@@ -413,6 +413,55 @@ fn worker_status_summary_with_maps(
     })
 }
 
+fn handle_directory(server: &Server) -> Resp {
+    let (workers_rec, master) = {
+        let st = server.state.lock().unwrap();
+        let master = current_master_holder(server, &st).ok().flatten();
+        (st.workers.values().cloned().collect::<Vec<_>>(), master)
+    };
+    let mut targets: Vec<crate::proto::DirectoryTarget> = Vec::new();
+    for w in &workers_rec {
+        let (display_name, app_scope, identity_valid) = {
+            let st = server.state.lock().unwrap();
+            let display_name =
+                worker_display_name(&st, &w.id, master.as_deref() == Some(w.id.as_str()));
+            let proj_scope = GlobalState::canonical_project_scope(&server.root).ok();
+            let binding = proj_scope
+                .as_ref()
+                .and_then(|ps| current_worker_binding(&st, ps, None, w));
+            let app_scope = binding.map(|b| b.app_scope_id.as_str().to_owned());
+            let identity_valid = if w.transport.is_none() {
+                Some(false)
+            } else if binding.is_some() {
+                Some(true)
+            } else {
+                None
+            };
+            (display_name, app_scope, identity_valid)
+        };
+        let session_id = w.transport.as_ref().and_then(|t| t.session_id.clone());
+        let transport = w.transport.as_ref().map(|t| crate::proto::DirectoryTransport {
+            kind: t.kind.as_str().to_owned(),
+            namespace: t.namespace.clone(),
+        });
+        targets.push(crate::proto::DirectoryTarget {
+            worker_id: w.id.clone(),
+            display_name,
+            session_id,
+            app_scope,
+            transport,
+            identity_valid,
+            endpoint_live: None,
+        });
+    }
+    targets.sort_by(|a, b| a.worker_id.cmp(&b.worker_id));
+    let count = targets.len();
+    Resp::data(json!({
+        "targets": targets,
+        "count": count,
+    }))
+}
+
 // ---------- dispatch ----------
 
 fn mutation_blocked_during_migration(req: &Req) -> bool {
@@ -478,6 +527,7 @@ fn mutation_blocked_during_migration(req: &Req) -> bool {
         | Req::MasterStatus
         | Req::Role { .. }
         | Req::Workers
+        | Req::Directory
         | Req::WorkerStatus { .. }
         | Req::MasterId
         | Req::MasterRecover { .. }

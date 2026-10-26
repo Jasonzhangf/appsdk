@@ -128,6 +128,10 @@
     {
       "id": "appsdk-user-requirement-consumption",
       "path": "docs/dagpipe/user-requirement-consumption.graph.json"
+    },
+    {
+      "id": "collab-send-message",
+      "path": "docs/dagpipe/collab-send-message.graph.json"
     }
   ]
 }

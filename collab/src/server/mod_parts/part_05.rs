@@ -858,6 +858,11 @@ fn attempt_tmux_notification_with_retry(
                 && crate::server::state::board_patrol_notice_is_current(&state, &message.id)
                 && message_explicit == explicit
                 && state
+                    .target_sessions
+                    .get(&message.id)
+                    .map(|ts| transport.session_id.as_deref() == Some(ts.as_str()))
+                    .unwrap_or(true)
+                && state
                     .delivery_modes
                     .get(&message.id)
                     .map(String::as_str)
@@ -1129,6 +1134,24 @@ fn attempt_notification_detailed_with_mode_at(
                 "registered worker has no server-selected transport".into(),
             );
         };
+        if let Some(required_session) = state.target_sessions.get(message_id) {
+            if transport.session_id.as_deref() != Some(required_session.as_str()) {
+                let error = format!(
+                    "TARGET_SESSION_MISMATCH: target session changed from {required_session}"
+                );
+                server.commit_locked_reporting(
+                    &mut state,
+                    &[Event::NotificationDeliveryFailed {
+                        message_id: message_id.to_string(),
+                        operation: "notification.target_session_mismatch".into(),
+                        error: error.clone(),
+                        failed_ms: now,
+                        retryable: false,
+                    }],
+                );
+                return NotificationAttempt::NotAttempted(error);
+            }
+        }
         let source_thread_id = state
             .delivery_source_threads
             .get(message_id)

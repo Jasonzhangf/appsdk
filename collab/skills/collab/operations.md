@@ -116,13 +116,13 @@ daemon 已为真实角色和模板变化通知相关 peer，不再要求 master 
 
 ## 通信入口与项目目录
 
-普通消息默认走公开 CLI。使用成功注册时的项目根目录；业务代码可以在独占
+普通消息默认走公开 CLI。使用成功注册时的项目根目录；未注册调用者或后台脚本亦可在项目根目录下运行 `collab directory` 与 `collab sendmessage --unknown-sender`，无需先注册 peer 身份。业务代码可以在独占
 worktree 中修改，但不要为查身份或发消息切到 `~`、临时目录或收件人的项目。
 已关联的同项目 worktree 可由 Collab 解析；目录不确定时，回到已知注册项目根目录。
 已有身份和收件人时直接发送，不先重跑 context、收件或通信恢复。
 发送不等待对方空闲、上一条消息消费或回复；不要先轮询消息状态再发送下一条。
 daemon、DSH gateway 和 Desktop bridge 立即提交新消息，接受、消费与回复分别记录。
-`collab context`、`collab inbox` 和 `collab sendmessage` 都是公开 CLI，
+`collab context`、`collab inbox`、`collab directory` 和 `collab sendmessage` 都是公开 CLI，
 不是私有命令。内部控制协议与公开 CLI 的边界不同，不要把 shell 调用本身视为违规。
 同项目的 Alice、Jenny 等已注册名字就是收件地址，不需要额外的聊天、thread、
 teammate 或 worker 标识；不知道这些内部标识不构成转请 master 代发的理由。
@@ -132,12 +132,26 @@ teammate 或 worker 标识；不知道这些内部标识不构成转请 master �
 | 首次注册或明确恢复身份 | 在自己的项目运行 `collab context` |
 | 同项目发送或通知 reviewer | `collab sendmessage --to '<稳定名字或真实from>' --subject '<主题>' '<正文>'`；例如同项目 Alice 可直接用 `--to Alice`，不需要先找内部 worker ID 或让 master 转发 |
 | 回复原请求 | 同一发送命令，原消息确有 ID 时加 `--in-reply-to '<原消息ID>'`；没有 ID 不猜、不查内部信箱找值 |
+| 只读查项目通信目录（未注册可用） | `collab directory`；只读返回已知接收方白名单，不写 presence，不暴露凭据或任务细节 |
+| 匿名发送通知（未注册可用） | `collab sendmessage --unknown-sender --to '<目标peer>' [--target-session '<会话>'] --subject '<主题>' '<正文>'`；固定来源为 unknown，跳过身份获取，无回信义务 |
 | DSH 收件 | gateway 将完整正文送入原生回合；直接处理和回信，不运行 `recv/ack` |
 | 非 DSH 收件 | 按本 Skill 的 `collab recv` 流程消费 |
 | 确实跨项目 | 沿下文 master-to-master 通道；普通 peer 交给自己的 master，不把跨项目地址传给 sendmessage |
 
+### 未注册脚本与固定 Session
+
+未注册脚本可通过 `collab directory` 查询接收方 `worker_id` 及 `session_id`。发送时：
+
+- 指定 `--target-session '<session_id>'`：消息与目标会话强绑定，绑定时与异步投递时均强制校验，目标 peer 换会话后立即明确失败，不误投新会话；
+- 省略 `--target-session`：保持原有跟随 peer 当前最新会话投递语义。
+
 需要显式固定目录时，整条命令是：
-`(cd '<已注册项目根目录>' && collab sendmessage --to 'Alice' --subject '<主题>' '<正文>')`。
+
+```sh
+(cd '<接收方项目根目录>' && collab sendmessage --unknown-sender \
+  --to '<worker_id>' --target-session '<session_id>' --subject '<主题>' '<正文>')
+```
+
 CLI 正文是位置参数，不是 `--body`。DSH 若暴露 `collab_send`，它也是公开的宿主
 发送工具，JSON `body` 属于该工具参数；不要与 CLI 参数或内部控制协议混用。
 不要因一次错误在 CLI、MCP、宿主工具和内部 socket 之间试探切换。
@@ -348,7 +362,7 @@ peer 仍负责按自己的目标创建或续订所需的巡检范围。
 
 只有当前执行者已在本项目成功注册为 Collab peer，后文的协作规则才适用；各角色规则只约束该角色。master 规则还要求当前 peer 持有经明确授权的 master 权限。未注册的 `codex exec --profile gcm` worker 不因受托而成为 Collab peer，也不适用本 Skill 的协作协议。加载本 Skill、任务提到 Collab、看到 master 名称或启动多个 worker，都不代表已注册或取得 master 权限。
 
-当前项目没有注册身份、状态为 `registered=false`，或初始化无法完成时，不需要遵从本 Skill 的协作协议：独立完成用户任务，不寻找、等待或服从 Collab master，也不因注册失败而阻塞。只有用户明确要求注册时才执行初始化；失败保留原错，并继续独立工作。成功注册后的通信故障按对应故障规则处理，不抹除已有身份或职责。
+当前项目没有注册身份、状态为 `registered=false`，或初始化无法完成时，不需要遵从本 Skill 的协作协议：独立完成用户任务，不寻找、等待或服从 Collab master，也不因注册失败而阻塞。只有用户明确要求注册时才执行初始化；失败保留原错，并继续独立工作。未注册调用者或外部脚本可直接使用 `collab directory` 查询项目目录，或用 `collab sendmessage --unknown-sender` 匿名发送自通知，无需注册身份。成功注册后的通信故障按对应故障规则处理，不抹除已有身份或职责。
 
 独立开发使用全局规定的外置独占 worktree。注意共享资源冲突，不改动、回收或覆盖他人的 worktree、文件、进程与 claim；能隔离就继续，不能隔离只报告受影响操作。没有 Collab 不阻断独立任务，也不要求建立一套协作生命周期。
 

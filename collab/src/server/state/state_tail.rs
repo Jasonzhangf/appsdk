@@ -36,6 +36,7 @@ pub struct State {
     pub agent_activity:
         HashMap<String, HashMap<String, crate::server::name_state::AgentActivityRecord>>,
     pub msgs: HashMap<String, Message>,
+    pub target_sessions: HashMap<String, String>,
     /// Reply obligations keyed by the original message id. This is the single
     /// daemon-owned control record; message bodies never carry it.
     pub reply_obligations: HashMap<String, ReplyObligation>,

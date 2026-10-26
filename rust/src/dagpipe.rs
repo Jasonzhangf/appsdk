@@ -300,8 +300,12 @@ fn ensure_graph_nodes_use_registered_operators(
 mod notification;
 use notification::{register_notification_operator, validate_notification_objects};
 
-fn embedded_graph_paths() -> [(&'static str, &'static str); 32] {
+fn embedded_graph_paths() -> [(&'static str, &'static str); 33] {
     [
+        (
+            "docs/dagpipe/collab-send-message.graph.json",
+            include_str!("../../docs/dagpipe/collab-send-message.graph.json"),
+        ),
         (
             "docs/dagpipe/collab-reply-obligation.graph.json",
             include_str!("../../docs/dagpipe/collab-reply-obligation.graph.json"),
@@ -433,8 +437,9 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 32] {
     ]
 }
 
-fn design_graph_ids() -> [&'static str; 30] {
+fn design_graph_ids() -> [&'static str; 31] {
     [
+        "collab-send-message",
         "collab-reply-obligation",
         "appsdk-collab-binding-lifecycle",
         "collab-work-role-registration",
@@ -468,8 +473,13 @@ fn design_graph_ids() -> [&'static str; 30] {
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 150] {
+fn design_graph_operator_names() -> [&'static str; 155] {
     [
+        "appsdk.collab_send.classify_identity",
+        "appsdk.collab_send.resolve_recipient_route",
+        "appsdk.collab_send.commit_durable_message",
+        "appsdk.collab_send.notify_recipient",
+        "appsdk.collab_send.emit_send_result",
         "collab.reply.read",
         "appsdk.collab_context.bootstrap_policy",
         "collab.reply.classify",

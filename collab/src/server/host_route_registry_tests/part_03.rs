@@ -221,6 +221,7 @@
                     body: format!("body for {suffix}"),
                     in_reply_to: None,
                     reply_policy: None,
+                    target_session: None,
                     delivery: "immediate".into(),
                 },
             );
@@ -249,6 +250,7 @@
                 body: "cross-route delivery must fail closed".into(),
                 in_reply_to: None,
                 reply_policy: None,
+                target_session: None,
                 delivery: "immediate".into(),
             },
         );
@@ -713,6 +715,7 @@
                 body: "message retained across runtime replay".into(),
                 in_reply_to: None,
                 reply_policy: None,
+                target_session: None,
                 delivery: "immediate".into(),
             },
         );
@@ -787,6 +790,7 @@
                 body: "message sent by the replayed runtime".into(),
                 in_reply_to: None,
                 reply_policy: None,
+                target_session: None,
                 delivery: "immediate".into(),
             },
         );

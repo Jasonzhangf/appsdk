@@ -791,6 +791,10 @@ fn responsibility_effect<'a>(state: &'a State, event: &'a Event) -> Responsibili
         // Replies, acks, and system notifications still land in the target's
         // mailbox, so all of them are additions for the receiving peer.
         Event::Sent { msg } => ResponsibilityEffect::Mutates(msg.to.as_str()),
+        Event::TargetSessionBound { message_id, .. } => match state.msgs.get(message_id) {
+            Some(msg) => ResponsibilityEffect::Mutates(msg.to.as_str()),
+            None => ResponsibilityEffect::Safe,
+        },
         Event::MailboxReassigned { handoff } => {
             ResponsibilityEffect::Mutates(handoff.recipient.as_str())
         }
@@ -883,6 +887,7 @@ pub fn responsibility_preflight(st: &State, evs: &[Event]) -> Result<(), String>
             Event::Sent { msg } => {
                 simulated_msgs.insert(msg.id.clone(), msg.clone());
             }
+            Event::TargetSessionBound { .. } => {}
             Event::MailboxReassigned { handoff } => {
                 if let Some(message) = simulated_msgs.get_mut(&handoff.message_id) {
                     if message.to == handoff.previous_recipient
@@ -1391,6 +1396,11 @@ pub enum Event {
     },
     Sent {
         msg: Message,
+    },
+    /// Target session constraint bound to a message.
+    TargetSessionBound {
+        message_id: String,
+        target_session: String,
     },
     /// Durable creation of one reply obligation. Written in the same committed
     /// batch as the originating `Sent`, so a message never exists without the

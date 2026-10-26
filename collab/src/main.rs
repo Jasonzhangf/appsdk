@@ -522,6 +522,16 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             out(&v);
             Ok(())
         }
+        Cmd::Directory => {
+            let scope = Scope::resolve()?;
+            let v: serde_json::Value = client::call_with_context(
+                &scope.sock_path(),
+                &Req::Directory,
+                Some(cli_project_context(&scope.root)?),
+            )?;
+            out(&v);
+            Ok(())
+        }
         Cmd::Init => {
             let project_root = scope::project_root_for_init()?;
             if project_root.ancestors().skip(1).any(|ancestor| {
@@ -1010,6 +1020,8 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
         }
         Cmd::Send {
             to,
+            unknown_sender,
+            target_session,
             subject,
             r#type,
             in_reply_to,
@@ -1019,11 +1031,36 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             body,
         } => {
             let scope = Scope::resolve()?;
-            let ident = me(&scope)?;
             let body = body.join(" ");
             if body.is_empty() {
                 anyhow::bail!("empty message body");
             }
+            if unknown_sender {
+                if reply_required || reply_on_completion {
+                    anyhow::bail!("anonymous send cannot establish reply obligations");
+                }
+                let v: serde_json::Value = client::call_with_context(
+                    &scope.sock_path(),
+                    &Req::Send {
+                        from: "unknown".into(),
+                        worker_id: None,
+                        token: None,
+                        command: None,
+                        to,
+                        mtype: r#type,
+                        subject: Some(subject),
+                        body,
+                        in_reply_to,
+                        delivery,
+                        reply_policy: None,
+                        target_session,
+                    },
+                    Some(cli_project_context(&scope.root)?),
+                )?;
+                out(&v);
+                return Ok(());
+            }
+            let ident = me(&scope)?;
             let reply_policy = if reply_required {
                 Some(ReplyPolicy::Required)
             } else if reply_on_completion {
@@ -1047,6 +1084,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     in_reply_to,
                     delivery,
                     reply_policy,
+                    target_session,
                 },
             )?;
             out(&v);

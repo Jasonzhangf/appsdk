@@ -223,6 +223,7 @@ fn handle_authenticated_send_with_app_scope(
     delivery_mode: String,
     app_scope: Option<AppServerId>,
     reply_policy: Option<crate::proto::ReplyPolicy>,
+    target_session: Option<String>,
 ) -> Resp {
     let st = server.state.lock().unwrap();
     let Some(worker) = st.workers.get(&worker_id).cloned() else {
@@ -347,6 +348,7 @@ fn handle_authenticated_send_with_app_scope(
         false,
         None,
         reply_policy,
+        target_session,
     )
 }
 
@@ -376,6 +378,7 @@ pub(crate) fn handle_send_with_task(
         assign_task,
         managed_subagent_id,
         None,
+        None,
     )
 }
 
@@ -394,6 +397,7 @@ fn handle_send_with_task_policy(
     assign_task: bool,
     managed_subagent_id: Option<&str>,
     reply_policy: Option<crate::proto::ReplyPolicy>,
+    target_session: Option<String>,
 ) -> Resp {
     if !matches!(delivery_mode.as_str(), "immediate" | "queued") {
         return Resp::err("delivery mode must be immediate or queued");
@@ -450,6 +454,19 @@ fn handle_send_with_task_policy(
     if !st.workers.contains_key(&to) {
         let (error, data) = handoff_unresolved_recipient(&to);
         return Resp::err_data(error, data);
+    }
+    if let Some(ref required_session) = target_session {
+        let recipient_session = st
+            .workers
+            .get(&to)
+            .and_then(|w| w.transport.as_ref())
+            .and_then(|t| t.session_id.as_deref());
+        if recipient_session != Some(required_session.as_str()) {
+            return Resp::err(format!(
+                "TARGET_SESSION_MISMATCH: target worker {} current session does not match requested target session {}",
+                to, required_session
+            ));
+        }
     }
     // Durable send admission depends on the recipient record and binding.
     // Endpoint failure is reported by the notification owner after enqueue.
@@ -509,6 +526,7 @@ fn handle_send_with_task_policy(
             // when the body is identical.
             && m.in_reply_to == msg.in_reply_to
             && st.reply_obligations.get(&m.id).map(|o| o.policy) == reply_policy
+            && st.target_sessions.get(&m.id) == target_session.as_ref()
     }) {
         let managed_duplicate = assign_task
             && managed_child.as_ref().is_some_and(|child| {
@@ -630,6 +648,12 @@ fn handle_send_with_task_policy(
         mode: delivery_mode,
         source_thread_id: None,
     });
+    if let Some(ref required_session) = target_session {
+        events.push(Event::TargetSessionBound {
+            message_id: mid.clone(),
+            target_session: required_session.clone(),
+        });
+    }
     if let Some(subscription) = &subscription {
         events.push(Event::WakeBound {
             message_id: mid.clone(),

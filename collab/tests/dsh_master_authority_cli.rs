@@ -49,6 +49,7 @@ struct Gateway {
     current_runtime: Arc<Mutex<Option<String>>>,
     fail_enqueue_read: Arc<AtomicBool>,
     enqueue_attempts: Arc<AtomicU64>,
+    last_enqueue: Arc<Mutex<Option<Value>>>,
 }
 
 impl Gateway {
@@ -85,6 +86,8 @@ impl Gateway {
         let thread_read_failure = fail_enqueue_read.clone();
         let enqueue_attempts = Arc::new(AtomicU64::new(0));
         let thread_enqueues = enqueue_attempts.clone();
+        let last_enqueue = Arc::new(Mutex::new(None::<Value>));
+        let thread_last_enqueue = last_enqueue.clone();
         let handle = thread::spawn(move || {
             while !flag.load(Ordering::SeqCst) {
                 let Ok((stream, _)) = listener.accept() else {
@@ -102,6 +105,7 @@ impl Gateway {
                 let method = request["method"].as_str().unwrap_or_default();
                 if method == "enqueue" {
                     thread_enqueues.fetch_add(1, Ordering::SeqCst);
+                    *thread_last_enqueue.lock().unwrap() = Some(request.clone());
                     if thread_read_failure.load(Ordering::SeqCst) {
                         let mut stream = &stream;
                         stream
@@ -203,6 +207,7 @@ impl Gateway {
             current_runtime,
             fail_enqueue_read,
             enqueue_attempts,
+            last_enqueue,
         }
     }
 
@@ -251,6 +256,11 @@ impl Gateway {
             thread::sleep(Duration::from_millis(50));
         }
         self.is_enrolled(runtime_id, agent_id)
+    }
+
+    /// The most recent `enqueue` request this fixture consumer actually answered.
+    fn last_enqueue(&self) -> Option<Value> {
+        self.last_enqueue.lock().unwrap().clone()
     }
 
     fn shutdown(&mut self) -> thread::Result<()> {
@@ -360,6 +370,13 @@ impl Fixture {
             .env("DSH_SESSION_ID", session)
             .output()
             .unwrap()
+    }
+
+    /// Run the public CLI as an isolated external process with no inherited
+    /// agent facts. This is the unauthenticated caller, not the registered DSH
+    /// receiver, and it must rely on the read-only directory for its target.
+    fn anonymous_cli(&self, args: &[&str]) -> Output {
+        self.command(args)
     }
 
     fn registrations(&self) -> usize {
@@ -2079,5 +2096,138 @@ fn dsh_absent_binding_retires_once_without_repeated_maintenance_retry() {
     assert!(restored.status.success(), "{}", rendered(&restored));
     assert_eq!(only_identity(&fixture).0, worker);
     assert!(fixture.gateway.is_enrolled("gateway-runtime", "agentA"));
+    fixture.finish();
+}
+
+#[test]
+fn anonymous_send_to_directory_target_enqueues_registered_dsh_receiver_without_new_sender() {
+    // A registered DSH receiver owns a canonical receive loop before any
+    // anonymous traffic. The anonymous caller discovers that target through the
+    // read-only directory and delivers through the public CLI; the gateway's
+    // real Unix protocol consumer records the exact wake destination, then its
+    // enrolled Poll consumer receives the complete message from `unknown`.
+    let mut fixture = Fixture::new_requiring_enrollment();
+    fixture.start_daemon();
+    let facts = json!({"dsh":{
+        "endpoint":fixture.gateway.endpoint(),
+        "runtime_id":"gateway-runtime", "agent_id":"agentA",
+        "session_id":"agentA", "cwd":fixture.root
+    }})
+    .to_string();
+    let registered = fixture.dsh_command(&["context", "--provide", &facts], "agentA");
+    assert!(registered.status.success(), "{}", rendered(&registered));
+    let (worker, _) = only_identity(&fixture);
+    assert!(fixture.gateway.is_enrolled("gateway-runtime", "agentA"));
+    let registrations_before = fixture.registrations();
+    let senders_before = fixture.gateway.register_peer_requests().len();
+
+    // External unauthenticated caller resolves the target from the directory.
+    let directory = fixture.anonymous_cli(&["directory"]);
+    assert!(
+        directory.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&directory.stdout),
+        String::from_utf8_lossy(&directory.stderr)
+    );
+    let dir: Value = serde_json::from_slice(&directory.stdout).expect("directory JSON");
+    let targets = dir["targets"].as_array().expect("directory targets");
+    assert_eq!(
+        targets.len(),
+        1,
+        "directory must expose the registered peer: {dir}"
+    );
+    let target = &targets[0];
+    assert_eq!(target["worker_id"], worker);
+    assert_eq!(target["session_id"], "agentA");
+    assert_eq!(target["transport"]["kind"], "dsh");
+    assert_eq!(target["identity_valid"], true);
+
+    let enqueues_before = fixture.gateway.enqueue_attempts.load(Ordering::SeqCst);
+
+    // Anonymous CLI delivery reuses the registered DSH route; no sender auth.
+    let sent = fixture.anonymous_cli(&[
+        "sendmessage",
+        "--unknown-sender",
+        "--to",
+        &worker,
+        "--target-session",
+        "agentA",
+        "--subject",
+        "anonymous-directory-target",
+        "real body from an unauthenticated external process",
+    ]);
+    assert!(
+        sent.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&sent.stdout),
+        String::from_utf8_lossy(&sent.stderr)
+    );
+    let sent: Value = serde_json::from_slice(&sent.stdout).expect("sendmessage JSON");
+    assert_eq!(sent["notification"], "dsh-wake-enqueued", "{sent}");
+    let msg_id = sent["msg_id"]
+        .as_str()
+        .expect("durable message id")
+        .to_owned();
+
+    // The gateway's real Unix protocol consumer recorded exactly one enqueue.
+    assert_eq!(
+        fixture.gateway.enqueue_attempts.load(Ordering::SeqCst),
+        enqueues_before + 1
+    );
+    let enqueue = fixture
+        .gateway
+        .last_enqueue()
+        .expect("gateway must answer the real enqueue request");
+    assert_eq!(enqueue["method"], "enqueue");
+    assert_eq!(enqueue["params"]["runtimeId"], "gateway-runtime");
+    assert_eq!(enqueue["params"]["agentId"], "agentA");
+    let wake = enqueue["params"]["content"][0]["text"]
+        .as_str()
+        .expect("enqueue carries the native wake");
+    assert!(
+        wake.contains(&msg_id) && wake.contains("anonymous-directory-target"),
+        "gateway must receive this message's wake: {enqueue}"
+    );
+
+    // The gateway owns Poll/Ack. Use its actual enrolled credential at the
+    // public daemon wire rather than making the competing DSH CLI consume.
+    let binding =
+        fixture.gateway.register_peer_requests().last().unwrap()["params"]["binding"].clone();
+    let gateway_context = json!({"app_scope_id":"appserver-cli", "canonical_root":fixture.root,
+        "project_scope":fixture.root, "runtime_context":binding["runtimeContext"]});
+    let received = fixture.request(json!({"op":"Poll", "worker_id":binding["workerId"],
+        "token":binding["token"], "timeout_ms":0, "receive_id":"anonymous-dsh-consume",
+        "project_context":gateway_context}));
+    assert_ok(&received);
+    let message = received["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["id"] == msg_id)
+        .expect("enrolled DSH gateway consumes the anonymous message");
+    assert_eq!(message["from"], "unknown");
+    assert_eq!(
+        message["body"],
+        "real body from an unauthenticated external process"
+    );
+
+    // No new sender registration and no new worker identity from anonymous send.
+    assert_eq!(
+        fixture.gateway.register_peer_requests().len(),
+        senders_before,
+        "anonymous delivery must not register a new sender route"
+    );
+    assert_eq!(
+        fixture.registrations(),
+        registrations_before,
+        "anonymous delivery must not create a new identity"
+    );
+    let dir_after = fixture.anonymous_cli(&["directory"]);
+    let dir_after: Value = serde_json::from_slice(&dir_after.stdout).expect("directory JSON");
+    assert_eq!(
+        dir_after["targets"].as_array().unwrap().len(),
+        1,
+        "directory must not expose an unknown sender as a peer: {dir_after}"
+    );
     fixture.finish();
 }

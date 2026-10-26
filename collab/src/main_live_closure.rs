@@ -819,6 +819,7 @@ pub(crate) fn live_closure_probe(
                 in_reply_to: None,
                 delivery: "immediate".into(),
                 reply_policy: None,
+                target_session: None,
             },
         )?
     };

@@ -694,7 +694,13 @@ pub(crate) fn context_operation_with_intent(
         let origin = std::env::var("CODEX_INTERNAL_ORIGINATOR_OVERRIDE").unwrap_or_default();
         let desktop = origin == "Codex Desktop"
             || (origin.is_empty() && std::env::var_os("CODEX_APP_TOOLS_PIPE_PATH").is_some());
-        if desktop && !explicit_transport && facts.dsh_session_id.is_none() {
+        if desktop
+            && !explicit_transport
+            && facts.dsh_session_id.is_none()
+            && crate::host_runtime::host_runtime_facts()
+                .agy_session_id
+                .is_none()
+        {
             let candidate = crate::desktop_capability::discover(
                 host_paths.state_root(),
                 &cwd,

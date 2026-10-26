@@ -1949,3 +1949,134 @@ fn master_promotion_requires_user_approval_and_existing_master_delegates() {
     assert_eq!(target_registration.data["role_brief"]["role"], "worker");
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn master_wake_hold_requires_master_and_replaces_or_releases_the_gate() {
+    let (server, root) = test_server();
+    register_synthetic_peer(&server, "gate-master", "thread-gate-master");
+    register_synthetic_peer(&server, "gate-peer", "thread-gate-peer");
+    let promoted = super::handle_master_promote(
+        &server,
+        "gate-master".into(),
+        "token-gate-master".into(),
+        "user approved gate-master as collab master".into(),
+    );
+    assert!(promoted.ok, "{}", promoted.error.unwrap_or_default());
+
+    let rejected = super::handle_master_wake_hold(
+        &server,
+        "gate-peer".into(),
+        "token-gate-peer".into(),
+        "peer cannot hold the master ledger".into(),
+        60,
+    );
+    assert!(!rejected.ok, "{rejected:?}");
+    assert!(
+        rejected
+            .error
+            .unwrap_or_default()
+            .contains("master authority"),
+        "non-master hold must be rejected by master authority"
+    );
+
+    let before = now_ms();
+    let first = super::handle_master_wake_hold(
+        &server,
+        "gate-master".into(),
+        "token-gate-master".into(),
+        "waiting on the upstream CI gate".into(),
+        120,
+    );
+    assert!(first.ok, "{}", first.error.unwrap_or_default());
+    assert_eq!(first.data["replaced"], false);
+    assert_eq!(first.data["held_by"], "gate-master");
+    assert_eq!(first.data["reason"], "waiting on the upstream CI gate");
+    let first_until = first.data["until_ms"].as_i64().unwrap();
+    let first_held = first.data["held_ms"].as_i64().unwrap();
+    assert!(first_held >= before);
+    assert_eq!(first_until - first_held, 120_000);
+    {
+        let state = server.state.lock().unwrap();
+        let hold = state.master_wake.wake_hold.as_ref().expect("held ledger");
+        assert_eq!(hold.held_by, "gate-master");
+        assert_eq!(hold.reason, "waiting on the upstream CI gate");
+        assert_eq!(hold.until_ms, first_until);
+    }
+    let status = super::handle_master_status(&server);
+    assert_eq!(status.data["master"]["worker_id"], "gate-master");
+    assert_eq!(
+        status.data["master"]["master_wake"]["wake_hold"]["reason"],
+        "waiting on the upstream CI gate"
+    );
+
+    let replaced = super::handle_master_wake_hold(
+        &server,
+        "gate-master".into(),
+        "token-gate-master".into(),
+        "waiting on the release record".into(),
+        30,
+    );
+    assert!(replaced.ok, "{}", replaced.error.unwrap_or_default());
+    assert_eq!(replaced.data["replaced"], true);
+    let replaced_until = replaced.data["until_ms"].as_i64().unwrap();
+    let replaced_held = replaced.data["held_ms"].as_i64().unwrap();
+    assert_eq!(replaced_until - replaced_held, 30_000);
+    {
+        let state = server.state.lock().unwrap();
+        let hold = state.master_wake.wake_hold.as_ref().expect("held ledger");
+        assert_eq!(hold.reason, "waiting on the release record");
+        assert_eq!(hold.until_ms, replaced_until);
+    }
+
+    let released = super::handle_master_wake_release(
+        &server,
+        "gate-master".into(),
+        "token-gate-master".into(),
+    );
+    assert!(released.ok, "{}", released.error.unwrap_or_default());
+    assert_eq!(released.data["was_held"], true);
+    assert!(server.state.lock().unwrap().master_wake.wake_hold.is_none());
+    let status = super::handle_master_status(&server);
+    assert!(status.data["master"]["master_wake"]["wake_hold"].is_null());
+
+    let again = super::handle_master_wake_release(
+        &server,
+        "gate-master".into(),
+        "token-gate-master".into(),
+    );
+    assert!(again.ok, "{}", again.error.unwrap_or_default());
+    assert_eq!(again.data["was_held"], false);
+
+    let empty = super::handle_master_wake_hold(
+        &server,
+        "gate-master".into(),
+        "token-gate-master".into(),
+        "   ".into(),
+        60,
+    );
+    assert!(!empty.ok);
+    assert!(empty.error.unwrap_or_default().contains("REASON_EMPTY"));
+    let zero = super::handle_master_wake_hold(
+        &server,
+        "gate-master".into(),
+        "token-gate-master".into(),
+        "external gate".into(),
+        0,
+    );
+    assert!(!zero.ok);
+    assert!(zero.error.unwrap_or_default().contains("TTL_INVALID"));
+    let too_long = super::handle_master_wake_hold(
+        &server,
+        "gate-master".into(),
+        "token-gate-master".into(),
+        "x".repeat(2001),
+        60,
+    );
+    assert!(!too_long.ok);
+    assert!(too_long
+        .error
+        .unwrap_or_default()
+        .contains("REASON_TOO_LONG"));
+
+    std::fs::remove_dir_all(root).unwrap();
+}

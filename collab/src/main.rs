@@ -831,6 +831,21 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     out(&value);
                     return Ok(());
                 }
+                MasterCmd::Wake { command } => match command {
+                    MasterWakeCmd::Hold {
+                        reason,
+                        ttl_seconds,
+                    } => Req::MasterWakeHold {
+                        worker_id: ident.worker_id.clone(),
+                        token: ident.token.clone(),
+                        reason,
+                        ttl_seconds,
+                    },
+                    MasterWakeCmd::Release => Req::MasterWakeRelease {
+                        worker_id: ident.worker_id.clone(),
+                        token: ident.token.clone(),
+                    },
+                },
                 MasterCmd::Status => unreachable!("handled above"),
             };
             let v: serde_json::Value = call_project(&scope, &ident, &req)?;

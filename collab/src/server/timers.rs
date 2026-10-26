@@ -276,6 +276,14 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                 None
             }
         };
+        // A genuine external gate suppresses finite master-idle notices only.
+        // Deadlines and every other event keep their normal behavior, and the
+        // suppressed occurrence is not consumed so release resumes it.
+        let master_wake_hold_active = state
+            .master_wake
+            .wake_hold
+            .as_ref()
+            .is_some_and(|hold| now < hold.until_ms);
         let mut subscriptions: Vec<_> = state.notification_subscriptions.values().collect();
         subscriptions
             .sort_by_key(|subscription| (subscription.created_ms, subscription.id.clone()));
@@ -330,6 +338,7 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                 || !matches!(subscription.event.as_str(), "deadline" | "master-idle")
                 || !master_idle_ready
                 || !master_idle_gate_open
+                || (subscription.event == "master-idle" && master_wake_hold_active)
                 || next_trigger.is_none_or(|trigger| trigger > now)
                 || state.wake_bindings.iter().any(|(message_id, bound)| {
                     bound == &subscription.id
@@ -865,7 +874,16 @@ fn tick_standing_project_patrol_at(server: &Arc<Server>, now: i64) {
             {
                 continue;
             }
-            let fired_count = if activity == crate::server::name_state::AgentActivity::Idle {
+            // A genuine external gate suppresses the notice but still advances
+            // the standing schedule. An expired hold no longer suppresses it.
+            let hold_active = state
+                .master_wake
+                .wake_hold
+                .as_ref()
+                .is_some_and(|hold| now < hold.until_ms);
+            let should_notify =
+                activity == crate::server::name_state::AgentActivity::Idle && !hold_active;
+            let fired_count = if should_notify {
                 current.fired_count.saturating_add(1)
             } else {
                 current.fired_count
@@ -886,7 +904,7 @@ fn tick_standing_project_patrol_at(server: &Arc<Server>, now: i64) {
                 subscription: renewed,
             }];
             let mut message_id = None;
-            if activity == crate::server::name_state::AgentActivity::Idle {
+            if should_notify {
                 let id = super::gen_msg_id();
                 events.push(Event::DeliveryMode {
                     msg_id: id.clone(),

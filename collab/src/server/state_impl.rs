@@ -2315,6 +2315,7 @@ fn master_wake_snapshot_required(
 ) -> bool {
     accumulator.generation > 0
         || (!accumulator.delivery_state.is_empty() && accumulator.delivery_state != "clean")
+        || accumulator.wake_hold.is_some()
 }
 
 #[cfg(test)]

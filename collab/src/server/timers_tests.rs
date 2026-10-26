@@ -1593,3 +1593,155 @@ fn project_patrol_prompt_uses_ceo_reply_when_configured() {
     }
     std::fs::remove_dir_all(root).ok();
 }
+
+#[test]
+fn master_wake_hold_suppresses_standing_project_patrol_until_expiry_or_release() {
+    let (server, root) = test_server();
+    register_project_patrol_master(&server);
+    let base = now_ms();
+    let subscription_id = project_patrol_subscription(&server, base - 1, base + 86_400_000, 100, 0);
+
+    let held = crate::server::handle_master_wake_hold(
+        &server,
+        "master".into(),
+        "token-master".into(),
+        "external gate: release when upstream CI finishes".into(),
+        60,
+    );
+    assert!(held.ok, "{held:?}");
+
+    tick_with_idle_at(&server, base, &|_| false);
+    {
+        let state = server.state.lock().unwrap();
+        assert!(
+            subscription_messages(&state, &subscription_id).is_empty(),
+            "an active hold must suppress the standing patrol notice"
+        );
+        let subscription = &state.notification_subscriptions[&subscription_id];
+        assert_eq!(subscription.status, "armed");
+        assert_eq!(
+            subscription.trigger_ms,
+            Some(base + PROJECT_PATROL_INTERVAL_MS),
+            "the held occurrence must still advance the schedule"
+        );
+        assert_eq!(
+            subscription.fired_count, 0,
+            "a suppressed notice must not count as delivered"
+        );
+    }
+
+    let after_expiry = base + PROJECT_PATROL_INTERVAL_MS + 1;
+    tick_with_idle_at(&server, after_expiry, &|_| false);
+    {
+        let state = server.state.lock().unwrap();
+        let messages = subscription_messages(&state, &subscription_id);
+        assert_eq!(messages.len(), 1, "an expired hold must resume the patrol");
+        assert!(messages[0].body.contains("MASTER_IDLE_WAKE"));
+    }
+
+    let held = crate::server::handle_master_wake_hold(
+        &server,
+        "master".into(),
+        "token-master".into(),
+        "second external gate".into(),
+        604_800,
+    );
+    assert!(held.ok, "{held:?}");
+    let suppressed = after_expiry + PROJECT_PATROL_INTERVAL_MS + 1;
+    assert!(
+        suppressed
+            < server
+                .state
+                .lock()
+                .unwrap()
+                .master_wake
+                .wake_hold
+                .as_ref()
+                .unwrap()
+                .until_ms,
+        "fixture must tick while the repeated hold is active"
+    );
+    tick_with_idle_at(&server, suppressed, &|_| false);
+    {
+        let state = server.state.lock().unwrap();
+        assert_eq!(
+            subscription_messages(&state, &subscription_id).len(),
+            1,
+            "a repeated hold must suppress the next due notice"
+        );
+    }
+
+    let released =
+        crate::server::handle_master_wake_release(&server, "master".into(), "token-master".into());
+    assert!(released.ok, "{released:?}");
+    let resumed = suppressed + PROJECT_PATROL_INTERVAL_MS + 1;
+    tick_with_idle_at(&server, resumed, &|_| false);
+    {
+        let state = server.state.lock().unwrap();
+        assert_eq!(
+            subscription_messages(&state, &subscription_id).len(),
+            2,
+            "an explicit release must resume the standing patrol"
+        );
+    }
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn master_wake_hold_suppresses_legacy_finite_master_idle_until_release() {
+    let (mut server, root) = test_server();
+    // Keep the seeded idle observation stable; this test is about the hold
+    // gate, not the observation harness.
+    Arc::get_mut(&mut server).unwrap().config.keepalive.enabled = false;
+    register_master(&server);
+    let subscription_id = master_idle_subscription(&server, 15 * 60 * 1000);
+    let created_ms =
+        server.state.lock().unwrap().notification_subscriptions[&subscription_id].created_ms;
+    let mut record = server.state.lock().unwrap().keepalives["master"].clone();
+    record.idle_since_ms = created_ms + 1;
+    server.commit(&[Event::KeepaliveUpdated {
+        worker_id: "master".into(),
+        record,
+    }]);
+
+    let held = crate::server::handle_master_wake_hold(
+        &server,
+        "master".into(),
+        "token-master".into(),
+        "external gate".into(),
+        300,
+    );
+    assert!(held.ok, "{held:?}");
+
+    tick_with_idle(&server, &|_| false);
+    {
+        let state = server.state.lock().unwrap();
+        assert!(
+            subscription_messages(&state, &subscription_id).is_empty(),
+            "an active hold must suppress the finite master-idle notice"
+        );
+        assert_eq!(
+            state.notification_subscriptions[&subscription_id].fired_count,
+            0
+        );
+    }
+
+    let released =
+        crate::server::handle_master_wake_release(&server, "master".into(), "token-master".into());
+    assert!(released.ok, "{released:?}");
+    tick_with_idle(&server, &|_| false);
+    {
+        let state = server.state.lock().unwrap();
+        let messages = subscription_messages(&state, &subscription_id);
+        assert_eq!(
+            messages.len(),
+            1,
+            "releasing the hold must resume the finite master-idle notice"
+        );
+        assert!(messages[0]
+            .subject
+            .as_deref()
+            .is_some_and(|subject| subject.starts_with("master-idle")));
+    }
+    std::fs::remove_dir_all(root).ok();
+}

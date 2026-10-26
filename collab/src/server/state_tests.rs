@@ -277,6 +277,34 @@ fn failed_master_wake_delivery_state_replays_with_zero_generation() {
 }
 
 #[test]
+fn master_wake_hold_replays_and_survives_compaction() {
+    use crate::server::notification_state::{MasterWakeAccumulator, WakeHold};
+
+    let mut state = State::default();
+    state.apply(&Event::MasterWakeUpdated {
+        accumulator: MasterWakeAccumulator {
+            wake_hold: Some(WakeHold {
+                reason: "external gate".into(),
+                held_by: "master".into(),
+                held_ms: 1_000,
+                until_ms: 2_000,
+            }),
+            ..Default::default()
+        },
+    });
+    assert_eq!(
+        state.master_wake.wake_hold.as_ref().unwrap().reason,
+        "external gate"
+    );
+
+    let mut replayed = State::default();
+    for event in state.snapshot_events() {
+        replayed.apply(&event);
+    }
+    assert_eq!(replayed.master_wake.wake_hold, state.master_wake.wake_hold);
+}
+
+#[test]
 fn resource_release_failure_does_not_poison_master_wake_delivery_state() {
     let mut state = State::default();
     state.apply(&Event::MasterWakeSignal {

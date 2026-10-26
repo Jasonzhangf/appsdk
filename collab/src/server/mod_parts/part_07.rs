@@ -1729,6 +1729,101 @@ fn handle_master_delegate(
     }))
 }
 
+const MASTER_WAKE_HOLD_MAX_REASON_CHARS: usize = 2000;
+const MASTER_WAKE_HOLD_MAX_TTL_SECONDS: u64 = 604_800;
+
+/// Record one explicit master-idle wake hold for a genuine external gate.
+///
+/// The hold is durable guard state, not a message: it only suppresses periodic
+/// master-idle emissions while `now < until_ms`. A repeat hold replaces the
+/// previous gate. Expiry is derived from `until_ms`; no clearing timer exists.
+fn handle_master_wake_hold(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    reason: String,
+    ttl_seconds: u64,
+) -> Resp {
+    let mut state = server.state.lock().unwrap();
+    if let Err(error) = verify_master_actor(server, &state, &worker_id, &token) {
+        return error;
+    }
+    if reason.trim().is_empty() {
+        return Resp::err(
+            "MASTER_WAKE_HOLD_REASON_EMPTY: reason must describe the gate and its release condition",
+        );
+    }
+    if reason.chars().any(char::is_control) {
+        return Resp::err(
+            "MASTER_WAKE_HOLD_REASON_CONTROL_CHAR: reason must not contain control characters",
+        );
+    }
+    if reason.chars().count() > MASTER_WAKE_HOLD_MAX_REASON_CHARS {
+        return Resp::err(
+            "MASTER_WAKE_HOLD_REASON_TOO_LONG: reason must be at most 2000 characters",
+        );
+    }
+    if ttl_seconds == 0 || ttl_seconds > MASTER_WAKE_HOLD_MAX_TTL_SECONDS {
+        return Resp::err(
+            "MASTER_WAKE_HOLD_TTL_INVALID: ttl-seconds must be within 1..=604800",
+        );
+    }
+    let held_ms = now_ms();
+    let until_ms = held_ms.saturating_add((ttl_seconds as i64).saturating_mul(1000));
+    let reason = reason.trim().to_string();
+    let mut accumulator = state.master_wake.clone();
+    let replaced = accumulator.wake_hold.is_some();
+    accumulator.wake_hold = Some(notification_state::WakeHold {
+        reason: reason.clone(),
+        held_by: worker_id.clone(),
+        held_ms,
+        until_ms,
+    });
+    if let Err(error) = server.commit_locked_checked(
+        &mut state,
+        &[Event::MasterWakeUpdated {
+            accumulator: accumulator.clone(),
+        }],
+    ) {
+        return Resp::err(format!("MASTER_WAKE_HOLD_DURABILITY_FAILED: {error}"));
+    }
+    Resp::data(json!({
+        "held": true,
+        "replaced": replaced,
+        "held_by": worker_id,
+        "held_ms": held_ms,
+        "until_ms": until_ms,
+        "reason": reason,
+        "master_wake": accumulator,
+    }))
+}
+
+/// Clear the explicit wake hold. Idempotent: no hold is a successful no-op.
+fn handle_master_wake_release(server: &Server, worker_id: String, token: String) -> Resp {
+    let mut state = server.state.lock().unwrap();
+    if let Err(error) = verify_master_actor(server, &state, &worker_id, &token) {
+        return error;
+    }
+    let mut accumulator = state.master_wake.clone();
+    let was_held = accumulator.wake_hold.take().is_some();
+    if was_held {
+        if let Err(error) = server.commit_locked_checked(
+            &mut state,
+            &[Event::MasterWakeUpdated {
+                accumulator: accumulator.clone(),
+            }],
+        ) {
+            return Resp::err(format!("MASTER_WAKE_RELEASE_DURABILITY_FAILED: {error}"));
+        }
+    }
+    Resp::data(json!({
+        "released": true,
+        "was_held": was_held,
+        "held_by": worker_id,
+        "master_wake": accumulator,
+    }))
+}
+
 include!("part_07/worker_close.rs");
 
 #[cfg(test)]

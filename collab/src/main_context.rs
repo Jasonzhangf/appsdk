@@ -6,7 +6,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 static CONTEXT_CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -1224,7 +1224,14 @@ pub(crate) fn new_receive_id() -> String {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or(0);
-    format!("receive-{}-{nonce}", std::process::id())
+    new_receive_id_from_nonce(nonce)
+}
+
+static RECEIVE_ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn new_receive_id_from_nonce(nonce: u128) -> String {
+    let sequence = RECEIVE_ID_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("receive-{}-{nonce}-{sequence}", std::process::id())
 }
 
 /// The exact, copyable recovery instruction the default `recv` publishes

@@ -676,20 +676,45 @@ fn cli_project_context_uses_the_cli_app_and_exact_root() {
 
 #[test]
 fn default_recv_publishes_a_replayable_receive_identity_before_consuming() {
-    let first = new_receive_id();
-    let second = new_receive_id();
+    let independent_first = new_receive_id();
+    let independent_second = new_receive_id();
     assert_ne!(
-        first, second,
+        independent_first, independent_second,
         "each default receive owns a distinct identity"
     );
     assert!(
-        crate::identity::validate_id_for_protocol(&first).is_ok(),
+        crate::identity::validate_id_for_protocol(&independent_first).is_ok(),
         "the generated identity must satisfy protocol identifier rules"
     );
-    let banner = receive_recovery_banner(&first);
-    assert!(banner.contains(&format!("receive_id={first}")));
     assert!(
-        banner.contains(&format!("collab recv --receive-id {first}")),
+        crate::identity::validate_id_for_protocol(&independent_second).is_ok(),
+        "the generated identity must satisfy protocol identifier rules"
+    );
+
+    let same_nonce = 1_729_977_600_000_000_000;
+    let first_nonced = new_receive_id_from_nonce(same_nonce);
+    let second_nonced = new_receive_id_from_nonce(same_nonce);
+    assert_ne!(
+        first_nonced, second_nonced,
+        "each default receive owns a distinct identity"
+    );
+    assert!(
+        crate::identity::validate_id_for_protocol(&first_nonced).is_ok(),
+        "the generated identity must satisfy protocol identifier rules"
+    );
+    assert!(
+        crate::identity::validate_id_for_protocol(&second_nonced).is_ok(),
+        "the generated identity must satisfy protocol identifier rules"
+    );
+    let retained = format!("receive-{}-{same_nonce}", std::process::id());
+    assert!(
+        first_nonced.starts_with(&retained) && second_nonced.starts_with(&retained),
+        "the stable pid and nonce information must remain in each identity"
+    );
+    let banner = receive_recovery_banner(&first_nonced);
+    assert!(banner.contains(&format!("receive_id={first_nonced}")));
+    assert!(
+        banner.contains(&format!("collab recv --receive-id {first_nonced}")),
         "the default path must publish the exact replay command: {banner}"
     );
 }

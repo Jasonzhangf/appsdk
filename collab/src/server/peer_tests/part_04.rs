@@ -1835,7 +1835,7 @@ fn master_promotion_requires_user_approval_and_existing_master_delegates() {
     assert!(ordinary_text.contains("codex exec --profile gcm"));
     assert!(ordinary_text.contains("regardless of whether other peers are busy"));
     assert!(ordinary_text.contains("verify subworker evidence"));
-    assert!(ordinary_text.contains("ask the current master"));
+    assert!(ordinary_text.contains("contact the current master"));
     assert!(ordinary_text.contains("finite patrol"));
     assert!(ordinary_text.contains("subscription presence does not gate identity"));
     assert!(ordinary_text.contains("do not invent a polling interval"));

@@ -633,8 +633,8 @@ fn context_snapshot_carries_peer_status_and_scheduling_state() {
     assert_eq!(data["summary"]["subagents"], 0);
     assert!(data["summary"]["now"].is_string(), "{data}");
     assert!(
-        data["master_wake"].is_object(),
-        "the scheduling projection must travel with the context snapshot: {data}"
+        data.get("master_wake").is_some_and(|wake| wake.is_null()),
+        "master_wake must be present and stay null for an ordinary peer: {data}"
     );
     assert!(data["subagents"].is_array(), "{data}");
 

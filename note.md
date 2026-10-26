@@ -552,3 +552,18 @@ DSH Electron 安装器仍有 pnpm store 版本冲突，新原生插件替换未�
 验收使用新版 daemon 对现有插件的兼容修复，不声明完整插件 rollout 成功。
 任务证据及后续安装边界：
 `/Users/fanzhang/.collab/runs/zcam-delivery-stability-20261024/note.md`。
+
+## 2026-10-26 Collab 通信目录与匿名脚本通知
+
+新增只读 `collab directory`，从 daemon 的既有绑定投影 peer、session 与宿主路由信息，
+不要求调用者注册，不探测或写 presence。`sendmessage --unknown-sender` 跳过发件人
+身份获取，由 daemon 固定来源为 `unknown`；原认证发送沿原链。可用
+`--target-session` 固定接收会话，约束随消息持久保存并覆盖异步批次与收件，
+同 peer 续接新 session 后不投递或消费旧固定消息。普通消息仍按原语义续接。
+
+分发 Skill 入口和操作手册已补目录、匿名脚本、自通知及项目目录示例。
+新增发送 SESE 图与 manifest 绑定。7项定向单测、33项发送回归通过；
+TUI公开CLI6项、Desktop bridge公开投递与recv、DSH gateway公开投递与Poll均通过。
+固定session组合用例包含真实context续接和daemon重放，不依赖修改产品journal。
+全部既有测试目标编译与格式检查通过；测试使用隔离协议fixture，不代表live agent推理。
+正式安装、共享daemon加载与远端交付按各自回执单独记录，不由这些结果推定。

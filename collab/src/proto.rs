@@ -358,6 +358,25 @@ pub struct SelectedTransport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectoryTransport {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectoryTarget {
+    pub worker_id: String,
+    pub display_name: String,
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_scope: Option<String>,
+    pub transport: Option<DirectoryTransport>,
+    pub identity_valid: Option<bool>,
+    pub endpoint_live: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PeerLifecycleRequest {
     Create {
@@ -720,6 +739,8 @@ pub enum Req {
         /// is never inferred from a message body or metadata.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reply_policy: Option<ReplyPolicy>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_session: Option<String>,
     },
     CrossProjectSend {
         from: String,
@@ -987,6 +1008,7 @@ pub enum Req {
         worker_id: String,
     },
     Workers,
+    Directory,
     PeerLifecycle {
         request: PeerLifecycleRequest,
     },

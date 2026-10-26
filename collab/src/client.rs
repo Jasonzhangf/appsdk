@@ -1451,6 +1451,7 @@ mod tests {
             body: "authoritative mutation".into(),
             in_reply_to: None,
             reply_policy: None,
+            target_session: None,
             delivery: "immediate".into(),
         };
 

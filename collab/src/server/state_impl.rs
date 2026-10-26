@@ -741,6 +741,13 @@ impl State {
             Event::Sent { msg } => {
                 self.msgs.insert(msg.id.clone(), msg.clone());
             }
+            Event::TargetSessionBound {
+                message_id,
+                target_session,
+            } => {
+                self.target_sessions
+                    .insert(message_id.clone(), target_session.clone());
+            }
             Event::ReplyObligationSet { obligation } => {
                 self.reply_obligations
                     .insert(obligation.message_id.clone(), obligation.clone());
@@ -1527,6 +1534,7 @@ impl State {
         self.notification_delivery_failures.remove(id);
         self.notification_delivery_accepted.remove(id);
         self.notification_delivery_evidence.remove(id);
+        self.target_sessions.remove(id);
         self.delivery_modes.remove(id);
         self.delivery_source_threads.remove(id);
         self.wake_bindings.remove(id);
@@ -1977,6 +1985,12 @@ impl State {
         for msg in messages {
             let id = msg.id.clone();
             events.push(Event::Sent { msg });
+            if let Some(target_session) = self.target_sessions.get(&id) {
+                events.push(Event::TargetSessionBound {
+                    message_id: id.clone(),
+                    target_session: target_session.clone(),
+                });
+            }
             if let Some(address) = self.mailbox_name_addresses.get(&id) {
                 events.push(Event::MailboxNameAddressed {
                     message_id: id.clone(),
@@ -2197,6 +2211,17 @@ impl State {
 
     /// Unread (not yet acked) inbox of a worker, oldest first.
     pub fn inbox_of(&self, worker_id: &str) -> Vec<&Message> {
+        let current_session = self
+            .workers
+            .get(worker_id)
+            .or_else(|| {
+                self.worker_names
+                    .iter()
+                    .find(|(_, name)| name.as_str() == worker_id)
+                    .and_then(|(id, _)| self.workers.get(id))
+            })
+            .and_then(|w| w.transport.as_ref())
+            .and_then(|t| t.session_id.as_deref());
         let mut v: Vec<&Message> = self
             .msgs
             .values()
@@ -2205,6 +2230,11 @@ impl State {
                     && m.state != "read"
                     && m.state != "superseded"
                     && self.scheduler_message_deliverable(&m.id)
+                    && self
+                        .target_sessions
+                        .get(&m.id)
+                        .map(|required| current_session == Some(required.as_str()))
+                        .unwrap_or(true)
             })
             .collect();
         v.sort_by_key(|m| m.created_ms);

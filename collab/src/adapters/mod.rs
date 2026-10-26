@@ -698,6 +698,7 @@ mod legacy {
                     body: "body".into(),
                     in_reply_to: None,
                     reply_policy: None,
+                    target_session: None,
                     delivery: "immediate".into(),
                 },
                 Some(

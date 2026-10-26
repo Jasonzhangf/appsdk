@@ -843,6 +843,7 @@ fn authenticated_send(root: &Path, from: &str, to: &str, subject: &str) -> Req {
         body: "body".into(),
         in_reply_to: None,
         reply_policy: None,
+        target_session: None,
         delivery: "immediate".into(),
     }
 }

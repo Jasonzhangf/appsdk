@@ -1,0 +1,20 @@
+{
+  "id": "collab-send-message",
+  "version": "1.0.0",
+  "description": "消息发送与匿名准入 SESE 图。区分完整凭据与显式 unknown 匿名发送；服务端固定 unknown 来源，解析既有收件人与路由，统一消息校验与持久提交，按既有通知链投递，记录回执并汇入唯一出口。",
+  "inputs": [{"id": "send_request", "schema": "Object"}],
+  "nodes": [
+    {"id": "classify_identity", "operator": "appsdk.collab_send.classify_identity", "operator_version": "1", "inputs": ["send_request"], "output": {"id": "admitted_sender", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "resolve_recipient_route", "operator": "appsdk.collab_send.resolve_recipient_route", "operator_version": "1", "inputs": ["admitted_sender"], "output": {"id": "target_route", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "commit_durable_message", "operator": "appsdk.collab_send.commit_durable_message", "operator_version": "1", "inputs": ["target_route"], "output": {"id": "committed_batch", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "notify_recipient", "operator": "appsdk.collab_send.notify_recipient", "operator_version": "1", "inputs": ["committed_batch"], "output": {"id": "notification_receipt", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "emit_send_result", "operator": "appsdk.collab_send.emit_send_result", "operator_version": "1", "inputs": ["notification_receipt"], "output": {"id": "send_result", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"}
+  ],
+  "edges": [
+    {"from": "classify_identity", "to": "resolve_recipient_route", "arc_id": "admitted_sender"},
+    {"from": "resolve_recipient_route", "to": "commit_durable_message", "arc_id": "target_route"},
+    {"from": "commit_durable_message", "to": "notify_recipient", "arc_id": "committed_batch"},
+    {"from": "notify_recipient", "to": "emit_send_result", "arc_id": "notification_receipt"}
+  ],
+  "outputs": ["send_result"]
+}

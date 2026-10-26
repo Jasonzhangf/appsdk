@@ -46,23 +46,38 @@ impl AnchorObservation {
 
     fn from_env_at(host_paths: &HostPaths) -> anyhow::Result<Self> {
         let pane_hint = crate::client::adapters::tmux::pane_hint_from_env();
+        let host_facts = crate::host_runtime::host_runtime_facts();
         let tmux = crate::client::adapters::tmux::observe_caller_at(
             host_paths.state_root(),
             std::process::id(),
             pane_hint.as_deref(),
         )
         .map_err(anyhow::Error::msg)?
-        .map(|endpoint| crate::proto::TmuxCandidate {
-            endpoint,
-            cwd: std::env::current_dir()
-                .map(|path| path.to_string_lossy().into_owned())
-                .unwrap_or_default(),
+        .map(|mut endpoint| {
+            if let Some(agy_session) = host_facts.agy_session_id.as_deref() {
+                endpoint.codex_session_id = Some(agy_session.to_owned());
+                endpoint.codex_thread_id = None;
+            }
+            crate::proto::TmuxCandidate {
+                endpoint,
+                cwd: std::env::current_dir()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            }
         });
-        let session_env = std::env::var("CODEX_SESSION_ID").ok();
-        let thread_env = std::env::var("CODEX_THREAD_ID").ok();
+        let (session_id, thread_id) = if let Some(agy_session) = host_facts.agy_session_id {
+            (Some(agy_session), None)
+        } else {
+            let session_env = std::env::var("CODEX_SESSION_ID").ok();
+            let thread_env = std::env::var("CODEX_THREAD_ID").ok();
+            (
+                non_empty(session_env.as_deref()),
+                non_empty(thread_env.as_deref()),
+            )
+        };
         Ok(Self {
-            session_id: non_empty(session_env.as_deref()),
-            thread_id: non_empty(thread_env.as_deref()),
+            session_id,
+            thread_id,
             tmux,
             tmux_anchor: None,
             dsh_session_id: non_empty(std::env::var("DSH_SESSION_ID").ok().as_deref()),

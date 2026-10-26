@@ -239,11 +239,17 @@ pub fn candidate_from_env() -> Result<TmuxCandidate, String> {
         format!("TMUX_OBSERVATION_CAPABILITY_INVALID: resolve host state root: {error}")
     })?;
     let hint = pane_hint_from_env();
-    let endpoint = observe_caller_at(host_paths.state_root(), std::process::id(), hint.as_deref())?
-        .ok_or_else(|| {
-            "TMUX_OBSERVATION_UNAVAILABLE: caller ancestry does not identify a live tmux pane"
-                .to_owned()
-        })?;
+    let mut endpoint =
+        observe_caller_at(host_paths.state_root(), std::process::id(), hint.as_deref())?
+            .ok_or_else(|| {
+                "TMUX_OBSERVATION_UNAVAILABLE: caller ancestry does not identify a live tmux pane"
+                    .to_owned()
+            })?;
+    let host_facts = crate::host_runtime::host_runtime_facts();
+    if let Some(agy_session) = host_facts.agy_session_id {
+        endpoint.codex_session_id = Some(agy_session);
+        endpoint.codex_thread_id = None;
+    }
     let cwd = std::env::current_dir()
         .and_then(|path| path.canonicalize())
         .map_err(|error| format!("TMUX_OBSERVATION_INVALID: resolve cwd: {error}"))?

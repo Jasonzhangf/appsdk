@@ -341,7 +341,8 @@ impl Fixture {
             .env("HOME", self.root.join("home"))
             .env("CODEX_HOME", self.root.join("home"))
             .env("COLLAB_STATE_DIR", &self.host_state)
-            .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex TUI");
+            .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex TUI")
+            .env_remove("ANTIGRAVITY_CONVERSATION_ID");
         for (key, value) in std::env::vars_os() {
             if key.to_string_lossy().starts_with("COLLAB_TEST_") {
                 command.env(key, value);
@@ -363,7 +364,70 @@ impl Fixture {
             .env("CODEX_HOME", self.root.join("home"))
             .env("CODEX_SESSION_ID", &pane.session_anchor)
             .env("CODEX_THREAD_ID", &pane.thread_anchor)
-            .env_remove("CODEX_APP_TOOLS_PIPE_PATH");
+            .env_remove("CODEX_APP_TOOLS_PIPE_PATH")
+            .env_remove("ANTIGRAVITY_CONVERSATION_ID");
+        if let Some(hook_socket) = &self.hook_socket {
+            command.env("COLLAB_CONTEXT_CANCEL_HOOK_SOCKET", hook_socket);
+        }
+        command
+    }
+
+    pub fn ensure_agent_binaries(&self) -> (PathBuf, PathBuf) {
+        let bin_dir = self.root.join("agent_bin");
+        std::fs::create_dir_all(&bin_dir).expect("create agent_bin directory");
+        let agy = bin_dir.join("agy");
+        let codex = bin_dir.join("codex");
+        #[cfg(unix)]
+        {
+            if !agy.exists() {
+                let _ = std::os::unix::fs::symlink("/bin/sh", &agy);
+            }
+            if !codex.exists() {
+                let _ = std::os::unix::fs::symlink("/bin/sh", &codex);
+            }
+        }
+        (agy, codex)
+    }
+
+    pub fn agy_command_on_socket(&self, args: &[&str], pane: &Pane) -> Command {
+        let (agy, _) = self.ensure_agent_binaries();
+        self.ensure_pane_runner_on_socket(&self.tmux_socket, &pane.pane_id);
+        let mut command =
+            self.pane_cli_script_command_with_binary("client", &self.tmux_socket, pane, &agy);
+        command
+            .arg("--")
+            .args(["-c", "\"$@\"; s=$?; exit $s", "_", self.binary.to_str().expect("binary path")])
+            .args(args)
+            .env("HOME", self.root.join("home"))
+            .env("CODEX_HOME", self.root.join("home"))
+            .env("CODEX_SESSION_ID", &pane.session_anchor)
+            .env("CODEX_THREAD_ID", &pane.thread_anchor)
+            .env_remove("CODEX_APP_TOOLS_PIPE_PATH")
+            .env_remove("ANTIGRAVITY_CONVERSATION_ID");
+        if let Some(hook_socket) = &self.hook_socket {
+            command.env("COLLAB_CONTEXT_CANCEL_HOOK_SOCKET", hook_socket);
+        }
+        command
+    }
+
+    pub fn nested_codex_command_on_socket(&self, args: &[&str], pane: &Pane) -> Command {
+        let (agy, codex) = self.ensure_agent_binaries();
+        self.ensure_pane_runner_on_socket(&self.tmux_socket, &pane.pane_id);
+        let mut command =
+            self.pane_cli_script_command_with_binary("client", &self.tmux_socket, pane, &agy);
+        command
+            .arg("--")
+            .arg("-c")
+            .arg("\"$0\" -c '\"$@\"; s=$?; exit $s' _ \"$@\"; s=$?; exit $s")
+            .arg(&codex)
+            .arg(self.binary.to_str().expect("binary path"))
+            .args(args)
+            .env("HOME", self.root.join("home"))
+            .env("CODEX_HOME", self.root.join("home"))
+            .env("CODEX_SESSION_ID", &pane.session_anchor)
+            .env("CODEX_THREAD_ID", &pane.thread_anchor)
+            .env_remove("CODEX_APP_TOOLS_PIPE_PATH")
+            .env_remove("ANTIGRAVITY_CONVERSATION_ID");
         if let Some(hook_socket) = &self.hook_socket {
             command.env("COLLAB_CONTEXT_CANCEL_HOOK_SOCKET", hook_socket);
         }
@@ -371,6 +435,16 @@ impl Fixture {
     }
 
     fn pane_cli_script_command(&self, mode: &str, socket: &Path, pane: &Pane) -> Command {
+        self.pane_cli_script_command_with_binary(mode, socket, pane, &self.binary)
+    }
+
+    fn pane_cli_script_command_with_binary(
+        &self,
+        mode: &str,
+        socket: &Path,
+        pane: &Pane,
+        binary: &Path,
+    ) -> Command {
         let mut command = Command::new("python3");
         command
             .arg(pane_cli_script())
@@ -382,7 +456,7 @@ impl Fixture {
             .arg("--root")
             .arg(&self.root)
             .arg("--binary")
-            .arg(&self.binary)
+            .arg(binary)
             .current_dir(&self.root)
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env(
@@ -390,7 +464,8 @@ impl Fixture {
                 std::env::var_os("PATH").unwrap_or_default(),
             )
             .env("COLLAB_STATE_DIR", &self.host_state)
-            .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex TUI");
+            .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex TUI")
+            .env_remove("ANTIGRAVITY_CONVERSATION_ID");
         command
     }
 

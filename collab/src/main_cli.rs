@@ -244,8 +244,28 @@ pub(crate) enum MasterCmd {
         #[arg(trailing_var_arg = true)]
         body: Vec<String>,
     },
+    /// Hold or release periodic master-idle wakes for a genuine external gate
+    Wake {
+        #[command(subcommand)]
+        command: MasterWakeCmd,
+    },
     /// Show the current master, if any
     Status,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum MasterWakeCmd {
+    /// Suppress periodic master-idle wakes until the gate is released or the TTL expires
+    Hold {
+        /// Gate and release condition
+        #[arg(long)]
+        reason: String,
+        /// Hold duration in seconds (1..=604800)
+        #[arg(long)]
+        ttl_seconds: u64,
+    },
+    /// Release the active master-idle wake hold immediately
+    Release,
 }
 
 #[derive(Subcommand)]

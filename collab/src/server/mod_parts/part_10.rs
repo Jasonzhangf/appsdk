@@ -502,6 +502,8 @@ fn mutation_blocked_during_migration(req: &Req) -> bool {
         | Req::MasterPromote { .. }
         | Req::MasterClear { .. }
         | Req::MasterDelegate { .. }
+        | Req::MasterWakeHold { .. }
+        | Req::MasterWakeRelease { .. }
         | Req::TransferMaster { .. }
         | Req::RemoveWorker { .. }
         | Req::WorkerSnapshot { .. }
@@ -638,6 +640,12 @@ fn wire_mutation_principal(req: &Req) -> Option<(&str, &str)> {
             worker_id, token, ..
         }
         | Req::MasterDelegate {
+            worker_id, token, ..
+        }
+        | Req::MasterWakeHold {
+            worker_id, token, ..
+        }
+        | Req::MasterWakeRelease {
             worker_id, token, ..
         }
         | Req::TransferMaster {

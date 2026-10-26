@@ -582,6 +582,15 @@ fn dispatch_with_route_context_bound(
             token,
             target_id,
         } => handle_master_delegate(server, worker_id, token, target_id),
+        Req::MasterWakeHold {
+            worker_id,
+            token,
+            reason,
+            ttl_seconds,
+        } => handle_master_wake_hold(server, worker_id, token, reason, ttl_seconds),
+        Req::MasterWakeRelease { worker_id, token } => {
+            handle_master_wake_release(server, worker_id, token)
+        }
         Req::MasterStatus => handle_master_status(server),
         Req::Role { worker_id: _ } => {
             Resp::err("declared roles are removed; use collab who/context for peer identity, or collab context --work-roles for work specialties")

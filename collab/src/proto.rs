@@ -1004,6 +1004,16 @@ pub enum Req {
     },
     #[serde(alias = "RootStatus")]
     MasterStatus,
+    MasterWakeHold {
+        worker_id: String,
+        token: String,
+        reason: String,
+        ttl_seconds: u64,
+    },
+    MasterWakeRelease {
+        worker_id: String,
+        token: String,
+    },
     Role {
         worker_id: String,
     },

@@ -1641,7 +1641,7 @@ Master operates under two prime directives:
   dispatches open bugs in strict priority order (P0 > P1 > P2) to keep
   worker capacity saturated before suggesting closure.
 
-**Worker->Master idle fact and goal deadlines**:
+**Worker->Master idle fact and master long-horizon wake**:
 When a worker transitions from `working` to `idle`, it emits one idempotent
 worker-idle fact to the current master. Master and each ordinary peer own their
 own goal deadlines; only the current master owns master-idle project patrol. A

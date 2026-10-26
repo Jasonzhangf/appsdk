@@ -289,6 +289,9 @@ impl LiveAppServer {
 /// which AppServer this client uses. The daemon owns candidate self-check and
 /// transport selection.
 pub fn candidate_from_env() -> Result<Option<AppServerCandidate>, AdapterError> {
+    if crate::host_runtime::host_runtime_facts().agy_session_id.is_some() {
+        return Ok(None);
+    }
     let Some(thread_id) = std::env::var("CODEX_THREAD_ID")
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -344,26 +347,35 @@ pub(crate) fn identity_facts_from_env() -> Result<IdentityFacts, AdapterError> {
     let mut facts = IdentityFacts::default();
     facts.caller_pid = Some(std::process::id());
     facts.pane_hint = crate::client::adapters::tmux::pane_hint_from_env();
-    facts.session_id = std::env::var("CODEX_SESSION_ID")
-        .ok()
-        .filter(|value| !value.trim().is_empty());
-    facts.thread_id = std::env::var("CODEX_THREAD_ID")
-        .ok()
-        .filter(|value| !value.trim().is_empty());
 
-    let explicit_endpoint = [APPSERVER_SOCKET_ENV, "CODEX_APP_SERVER_SOCKET"]
-        .into_iter()
-        .find_map(|key| std::env::var_os(key).filter(|value| !value.is_empty()));
-    if let Some(endpoint) = explicit_endpoint.as_ref() {
-        facts.endpoint = Some(format!("unix://{}", PathBuf::from(endpoint).display()));
-    }
-    let explicit_namespace = std::env::var(APPSERVER_NAMESPACE_ENV)
-        .ok()
-        .filter(|value| !value.trim().is_empty());
-    match appserver_namespace_from_env() {
-        Ok(namespace) => facts.namespace = Some(namespace.to_owned()),
-        Err(error) if explicit_namespace.is_some() => return Err(error),
-        Err(_) => {}
+    let host_facts = crate::host_runtime::host_runtime_facts();
+    if let Some(agy_session) = host_facts.agy_session_id {
+        facts.session_id = Some(agy_session);
+        facts.thread_id = None;
+        facts.endpoint = None;
+        facts.namespace = None;
+    } else {
+        facts.session_id = std::env::var("CODEX_SESSION_ID")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        facts.thread_id = std::env::var("CODEX_THREAD_ID")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+
+        let explicit_endpoint = [APPSERVER_SOCKET_ENV, "CODEX_APP_SERVER_SOCKET"]
+            .into_iter()
+            .find_map(|key| std::env::var_os(key).filter(|value| !value.is_empty()));
+        if let Some(endpoint) = explicit_endpoint.as_ref() {
+            facts.endpoint = Some(format!("unix://{}", PathBuf::from(endpoint).display()));
+        }
+        let explicit_namespace = std::env::var(APPSERVER_NAMESPACE_ENV)
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        match appserver_namespace_from_env() {
+            Ok(namespace) => facts.namespace = Some(namespace.to_owned()),
+            Err(error) if explicit_namespace.is_some() => return Err(error),
+            Err(_) => {}
+        }
     }
 
     // Placement is observed by the daemon (or by the read-only compatibility

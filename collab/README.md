@@ -67,6 +67,15 @@ List both old and new sockets during a migration. Collab matches the caller's
 live pane ancestry, so a pane selects its own server without a caller-supplied
 socket path. Collab never reads the socket from the `TMUX` environment value.
 
+## Antigravity (AGY TUI) host integration
+
+When Collab executes under Antigravity (`ANTIGRAVITY_CONVERSATION_ID`), it identifies
+the genuine host as AGY, uses the real Antigravity conversation ID as its agent session,
+and shields foreign inherited Codex environment variables (`CODEX_SESSION_ID`,
+`CODEX_THREAD_ID`, native desktop endpoints, and namespaces). A nested Codex process
+running under AGY preserves its innermost Codex identity and fails closed on cross-project
+collisions.
+
 ## Model
 
 - Every registered identity is an equal peer. Declared `master`/`worker` roles

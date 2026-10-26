@@ -9,6 +9,7 @@ mod config;
 mod context_operation;
 mod dashboard;
 mod desktop_capability;
+pub(crate) mod host_runtime;
 mod identity;
 mod install_skills;
 pub(crate) mod migration;
@@ -141,10 +142,18 @@ fn persisted_runtime_matches_scope(scope: &Scope, ident: &Identity) -> anyhow::R
         return Ok(false);
     };
     if transport.kind == TransportKind::Tmux || runtime.native_thread_id.is_some() {
-        let Some(session) = std::env::var("CODEX_SESSION_ID").ok() else {
+        let host_facts = host_runtime::host_runtime_facts();
+        let (session, thread) = if let Some(agy_session) = host_facts.agy_session_id {
+            (Some(agy_session), None)
+        } else {
+            (
+                std::env::var("CODEX_SESSION_ID").ok(),
+                std::env::var("CODEX_THREAD_ID").ok(),
+            )
+        };
+        let Some(session) = session else {
             return Ok(false);
         };
-        let thread = std::env::var("CODEX_THREAD_ID").ok();
         {
             let persisted_thread = runtime
                 .native_thread_id

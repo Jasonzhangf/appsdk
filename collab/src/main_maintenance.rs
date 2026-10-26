@@ -9,6 +9,7 @@ pub(crate) fn user_terminal() -> anyhow::Result<File> {
         "DSH_SESSION_ID",
         "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
         "AGY_SESSION_ID",
+        "ANTIGRAVITY_CONVERSATION_ID",
     ]
     .iter()
     .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))

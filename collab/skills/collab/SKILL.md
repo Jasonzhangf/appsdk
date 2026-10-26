@@ -62,7 +62,7 @@ collab sendmessage --unknown-sender --to 'my-peer-id' \
 
 master 管项目目标，peer 管已接受的子目标，两者均负责拆分、解阻、验收和资源收口。
 长程目标经任务板邀请可用且同意接收的 peer；一次性执行或观察沿
-[统一角色路由](../codex-orchestrator/SKILL.md#codex-与-antigravity-路由)。
+[统一角色路由](../codex-orchestrator/SKILL.md#codex-路由)。
 无可用 peer 时保留长程目标并拆分 worker，不等待注册。
 
 派单使用 [Worker 合同](../codex-orchestrator/references/worker-contract.md#任务合同模板)，

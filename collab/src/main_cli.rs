@@ -554,6 +554,8 @@ pub(crate) enum Cmd {
     /// List registered peers and their local activity projection
     /// (does not report master authority; use `collab master status`)
     Who,
+    /// Read-only communication directory for current project (does not require authentication)
+    Directory,
     /// Inspect or explicitly assign collab master authority
     Master {
         #[command(subcommand)]
@@ -619,6 +621,12 @@ pub(crate) enum Cmd {
     Send {
         #[arg(long)]
         to: String,
+        /// Explicit anonymous sender; skips authentication and sender validation
+        #[arg(long)]
+        unknown_sender: bool,
+        /// Fixed target session constraint; prevents delivery if recipient changes sessions
+        #[arg(long)]
+        target_session: Option<String>,
         /// Short topic shown in the notification preview
         #[arg(long)]
         subject: String,
@@ -629,10 +637,10 @@ pub(crate) enum Cmd {
         #[arg(long, default_value = "immediate")]
         delivery: String,
         /// Track an obligation: the recipient must reply to this message.
-        #[arg(long, conflicts_with = "reply_on_completion")]
+        #[arg(long, conflicts_with_all = ["reply_on_completion", "unknown_sender"])]
         reply_required: bool,
         /// Track an obligation: reply once the delegated work is complete.
-        #[arg(long, conflicts_with = "reply_required")]
+        #[arg(long, conflicts_with_all = ["reply_required", "unknown_sender"])]
         reply_on_completion: bool,
         #[arg(trailing_var_arg = true)]
         body: Vec<String>,

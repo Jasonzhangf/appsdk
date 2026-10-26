@@ -17,6 +17,8 @@ mod central_storage;
 mod ceo_patrol_runtime;
 #[path = "board/degraded_user_maintenance.rs"]
 mod degraded_user_maintenance;
+#[path = "board/directory_unknown_cli.rs"]
+mod directory_unknown_cli;
 #[path = "board/name_adjudication.rs"]
 mod name_adjudication;
 #[path = "board/name_confirmed_takeover.rs"]

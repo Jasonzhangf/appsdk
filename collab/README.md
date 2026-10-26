@@ -97,6 +97,9 @@ collisions.
   subject and durable body. Use
   it for resource occupancy/release or a direct peer notice; it never creates
   an inferred task, progress, ACK, or continuation loop.
+- Unregistered scripts can query the communication directory via `collab directory`
+  and send anonymous notifications using `collab sendmessage --unknown-sender --to <peer> [--target-session <session>]`.
+  The daemon enforces fixed target-session constraints both at binding and delivery.
 - Registration creates one seven-day reusable `direct-message` lease for the
   peer; each message still has its own bounded attempt lifetime.
   Explicit subscriptions remain available for exact resources, deadlines, and

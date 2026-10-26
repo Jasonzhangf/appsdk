@@ -1,6 +1,6 @@
 ---
 name: collab
-description: "仅约束已成功注册 Collab 的 peer；master 权限需另行授权。未注册、注册失败或无法注册时独立完成，不适用协作协议。用户明确要求注册时才初始化。"
+description: "未注册调用者可只读查询项目通信目录与匿名发送自通知；已注册 peer 执行协作协议与任务分工；master 权限需另行授权。未注册无需遵守 peer 协作规程。"
 ---
 
 # Collab
@@ -10,7 +10,8 @@ description: "仅约束已成功注册 Collab 的 peer；master 权限需另行�
 
 ## 适用身份
 
-只有在当前项目成功注册的 peer 才执行本协议；master 还须有当前项目的明确授权。
+未注册调用者可直接使用 `collab directory` 查询通信目录与 `collab sendmessage --unknown-sender` 匿名发送通知，无需初始化身份或遵守 peer 协作规程。
+协作协议与任务分工仅约束在当前项目成功注册的 peer；master 还须有当前项目的明确授权。
 加载 Skill、多个 worker 同时运行、看到历史名字或收到普通派单，都不产生注册或
 master 权限。只有用户要求注册时才初始化；未注册或初始化失败时保留原错，独立完成
 可做任务，不寻找或等待 master。
@@ -29,6 +30,23 @@ cwd 确定，稳定名字承接工作；sessionID 承载当前执行，tmux pane
 | 向另一项目交付资料或消息 | 先读 [操作手册](operations.md#cross-project-master-communication) 的跨项目章节；源项目当前 master 用 `master send`，目标以 `collab master status` 取当前 `master.worker_id`，普通 peer 交本项目 master 处理 |
 | 收件与消费 | 非 DSH 用 `collab recv`；DSH gateway 独占 Poll/Ack，直接处理原生完整正文，不运行 recv/ack |
 | 只读查消息 | `collab msg <真实消息ID>` 或 `collab inbox`；只读查询不等于消费 |
+| 只读查项目通信目录（未注册可用） | `collab directory`；只读返回已知接收方白名单，不写 presence，不暴露凭据或任务细节 |
+| 匿名发送通知（未注册可用） | `collab sendmessage --unknown-sender --to '<目标peer>' [--target-session '<会话>'] --subject '<主题>' '<正文>'`；固定来源为 unknown，跳过身份获取，无回信义务 |
+
+### 未注册脚本自通知
+
+未注册的外部脚本或后台工作进程无需先注册 peer 即可向项目内 peer 发送通知，不适用 peer 协作规程。目录查询和脚本发送都在接收方所属项目根目录运行。
+
+peer 可先运行 `collab directory` 查询自己的 `worker_id` 与 `session_id`，写入后台脚本完成自通知：
+
+- 固定目标 session：指定 `--target-session '<session_id>'`。daemon 在绑定及异步投递时均校验目标 session，peer 换会话后旧脚本明确失败，不误投新会话。
+- 跟随 peer 当前会话：省略 `--target-session`，投递时自动跟随 peer 最新有效会话。
+
+```sh
+# 例：固定 session 脚本
+collab sendmessage --unknown-sender --to 'my-peer-id' \
+  --target-session 'session-123' --subject 'build-finished' '构建完成'
+```
 
 收到明确请求后处理并按实际回传通道回复，再接续本人未完任务。发送、入队、消费、
 回复和完成分别判断；不因超时盲重发，不发无请求的常规心跳、ACK 或进度消息。

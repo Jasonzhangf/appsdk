@@ -124,18 +124,9 @@ fn dispatch_with_route_context_bound(
             in_reply_to,
             delivery,
             reply_policy,
-        } => {
-            let Some(worker_id) = worker_id else {
-                return Resp::err(
-                    "LEGACY_SEND_REJECTED: authenticated sender binding and route scope are required",
-                );
-            };
-            let Some(token) = token else {
-                return Resp::err(
-                    "LEGACY_SEND_REJECTED: authenticated sender binding and route scope are required",
-                );
-            };
-            handle_authenticated_send_with_app_scope(
+            target_session,
+        } => match (worker_id, token) {
+            (Some(worker_id), Some(token)) => handle_authenticated_send_with_app_scope(
                 server,
                 from,
                 worker_id,
@@ -149,8 +140,38 @@ fn dispatch_with_route_context_bound(
                 delivery,
                 app_scope,
                 reply_policy,
-            )
-        }
+                target_session,
+            ),
+            (None, None) => {
+                if command.is_some() {
+                    return Resp::err(
+                        "ANONYMOUS_SEND_REJECTED: anonymous send cannot carry command envelope",
+                    );
+                }
+                if reply_policy.is_some() {
+                    return Resp::err(
+                        "ANONYMOUS_SEND_REJECTED: anonymous send cannot establish reply obligations",
+                    );
+                }
+                handle_send_with_task_policy(
+                    server,
+                    "unknown".into(),
+                    to,
+                    mtype,
+                    subject,
+                    body,
+                    in_reply_to,
+                    delivery,
+                    false,
+                    None,
+                    None,
+                    target_session,
+                )
+            }
+            _ => Resp::err(
+                "LEGACY_SEND_REJECTED: authenticated sender binding and route scope are required",
+            ),
+        },
         Req::LiveClosureDaemonSend {
             worker_id,
             token,
@@ -390,6 +411,8 @@ fn dispatch_with_route_context_bound(
             let consumed = st.receive_receipts.values().any(|receipt| {
                 receipt.message_ids.iter().any(|received| received == &msg_id)
             });
+            let target_session = st.target_sessions.get(&msg_id).cloned();
+            let delivery_failure = st.notification_delivery_failures.get(&msg_id).cloned();
             drop(st);
             match msg {
                 Some(m) => Resp::data(json!({
@@ -400,6 +423,8 @@ fn dispatch_with_route_context_bound(
                     "wake_transport_evidence": transport_evidence,
                     "consumed_by_recv": consumed,
                     "reply_obligation": reply_obligation,
+                    "target_session": target_session,
+                    "notification_delivery_failure": delivery_failure,
                 })),
                 None => Resp::err(format!("message {} not found", msg_id)),
             }
@@ -561,6 +586,7 @@ fn dispatch_with_route_context_bound(
         Req::Role { worker_id: _ } => {
             Resp::err("declared roles are removed; use collab who/context for peer identity, or collab context --work-roles for work specialties")
         }
+        Req::Directory => handle_directory(server),
         Req::Workers => {
             record_ordinary_peer_presence_edges(server, None);
             let (workers_rec, tasks_map, msgs_map, keepalives_map, role_briefs) = {
@@ -1087,6 +1113,10 @@ pub(crate) fn validate_request_context_with_register_approval(
         .validate()
         .map_err(|error| format!("PROJECT_CONTEXT_INVALID: {error}"))?;
     let registry = HostRouteRegistry::for_server(server)?;
+    let resident_scope = GlobalState::canonical_project_scope(&server.root)
+        .map_err(|error| format!("PROJECT_SCOPE_UNKNOWN: {error}"))?;
+    let is_resident_project = project_context.canonical_root == resident_scope.as_str()
+        && project_context.project_scope == resident_scope;
     let route_scope = RouteScope {
         app_scope_id: project_context.app_scope_id.clone(),
         project_scope_id: project_context.project_scope.clone(),
@@ -1115,12 +1145,27 @@ pub(crate) fn validate_request_context_with_register_approval(
             }
         }
         None => {
-            // Registration is the one operation that may create the first
-            // app route for any initialized project. It still has to carry an
-            // explicit app scope, use the exact canonical project root, and
-            // prove that the project opted into Collab with its marker.
             if let Req::Register { cwd, .. } = req {
                 validate_project_registration_cwd(cwd, Path::new(&project_context.canonical_root))?;
+            } else if is_resident_project
+                && (matches!(req, Req::Directory)
+                    || matches!(
+                        req,
+                        Req::Send {
+                            worker_id: None,
+                            token: None,
+                            ..
+                        }
+                    ))
+            {
+                let root = Path::new(&project_context.canonical_root);
+                if !root.join(".agent-collab").is_dir() {
+                    return Err(format!(
+                        "PROJECT_SCOPE_UNKNOWN: project {} is not initialized for Collab",
+                        root.display()
+                    ));
+                }
+                reject_linked_worktree_registration(root)?;
             } else {
                 return Err(format!(
                     "PROJECT_SCOPE_UNKNOWN: no host route is registered for {}",

@@ -638,13 +638,25 @@ pub(crate) fn build_name_resolution_events(
                     .notification_subscriptions
                     .values()
                     .filter(|s| {
-                        handoff_worker_ids.iter().any(|worker_id| *worker_id == s.worker_id)
-                            && s.event == "deadline"
+                        if !handoff_worker_ids
+                            .iter()
+                            .any(|worker_id| *worker_id == s.worker_id)
+                        {
+                            return false;
+                        }
+                        let goal_deadline = s.event == "deadline"
                             && s.subject
                                 .as_deref()
                                 .is_some_and(|subject| subject.starts_with("goal:"))
-                            && matches!(s.status.as_str(), "armed" | "transport-lost" | "consumed")
-                            && s.expires_ms > occupancy.updated_ms
+                            && matches!(
+                                s.status.as_str(),
+                                "armed" | "transport-lost" | "consumed"
+                            );
+                        let project_patrol = super::is_exact_project_patrol(s)
+                            && matches!(s.status.as_str(), "armed" | "cancelled");
+                        let not_expired =
+                            s.status == "cancelled" || s.expires_ms > occupancy.updated_ms;
+                        (goal_deadline || project_patrol) && not_expired
                     })
                     .cloned()
                     .collect();

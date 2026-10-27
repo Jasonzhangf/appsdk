@@ -29,15 +29,18 @@ pub(crate) enum NotifyCmd {
         #[arg(long, default_value_t = 604_800)]
         ttl_seconds: u64,
     },
-    /// Cancel board-idle patrol for caller-owned unclosed tasks
+    /// Cancel caller-owned board-idle tasks or the current master's exact project patrol
     Cancel {
-        /// Task IDs to cancel; omitted cancels all caller-owned unclosed tasks
+        /// Board task IDs; only valid with --event board-idle
         #[arg(long = "task-id")]
         task_ids: Vec<String>,
+        /// board-idle (default) or master-idle project-patrol
         #[arg(long, default_value = "board-idle")]
         event: String,
+        /// Durable cancellation reason shown in notify status
         #[arg(long)]
         reason: Option<String>,
+        /// Condition that restores the patrol
         #[arg(long = "resume-condition")]
         resume_condition: Option<String>,
     },

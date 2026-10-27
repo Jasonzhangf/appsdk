@@ -595,6 +595,24 @@ or implementation details.
     隔离公开入口/native 与有限 timer 兼容验收；这不等于生产 daemon 启用或真实
     peer 消费恢复推理已验证。使用前按运行 daemon 的实际构建核实
     `collab notify methods` 与 `collab notify status`。
+12. 当前 master 可取消本人的常驻项目巡检，入口为
+    `collab notify cancel --event master-idle [--reason <text>] [--resume-condition <text>]`。
+    它只作用于 `master-idle`、subject `project-patrol`、interval `900000` 的精确订阅；
+    只有当前 master 可调用，其他 owner 或旧载体返回 `PROJECT_PATROL_MASTER_REQUIRED`，
+    没有该订阅返回 `PROJECT_PATROL_NOT_FOUND`。此入口拒绝 `--task-id`。取消要求项目已在
+    `ceo_report_state.projects[<canonical project>].revision` 记录至少一次进度，且没有
+    closed/cancelled 以外、又不具备有效 `TaskRec.wait` 的未关闭项目任务；只把等待记录
+    存在的 waiting 任务视为豁免，不用 `waiting_user`。不满足时返回
+    `PROJECT_PATROL_CANCEL_NOT_ELIGIBLE`，并带
+    `PROJECT_PATROL_PROGRESS_NOT_RECORDED` 或 `PROJECT_PATROL_WORK_REMAINS`。成功回执
+    返回原订阅 ID、`status=cancelled`、`changed=true`，并结束该订阅未接受的 pending
+    唤醒；重复取消返回同一 ID、`changed=false`，原因与时间不变。显式精确
+    `collab notify subscribe --event master-idle --subject project-patrol --every-ms 900000`
+    恢复原 ID 为 `rearmed`；新增项目任务或等待释放会自动 rearm 同一订阅。同稳定名字
+    换会话保留 cancelled。`collab notify status` 的 `project_patrol` 只读投影给出
+    `armed`/`cancelled`/`missing`；direct-message 租约始终独立保留，peer board idle
+    取消语义不变。这些入口已在当前源码实现；是否在运行 daemon 生效仍须按实际构建
+    核实 `collab notify methods` 与 `collab notify status`。
 
 A legacy managed-subagent record creates no new patrol task, subscription,
 dispatch, or execution authority. Its parent or master preserves it only for
@@ -2237,8 +2255,12 @@ The user-confirmed board idle patrol contract is
 [board-idle-patrol.md](references/board-idle-patrol.md). It requires Jenny default
 arming, real-time idle notification where connected, a 15-minute busy-skipping
 check otherwise, per-task owner cancellation, and CEO progress deduplication with
-`Asia/Shanghai` quiet hours. The entry points exist in the current source and
-passed this round's isolated public CLI/native and finite-timer compatibility
-acceptance. That is not proof that a production daemon is enabled or that
-production peer consumption and inference resumption are verified; verify
-`collab notify methods` and `collab notify status` on the running daemon.
+`Asia/Shanghai` quiet hours. The current master may cancel its exact standing
+project patrol with `collab notify cancel --event master-idle`; the cancel
+requires a recorded `ceo_report_state` revision, rejects actionable unclosed
+project tasks, is idempotent, and is reversed only by an explicit exact
+subscribe or a relevant project-work transition. The entry points exist in the
+current source. The master-cancel entry has public black-box test definitions;
+that is not proof that a production daemon is enabled or that production peer
+consumption and inference resumption are verified. Verify `collab notify
+methods` and `collab notify status` on the running daemon.

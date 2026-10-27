@@ -99,15 +99,20 @@ board 任务且正态 idle 时应唤醒本人，由本人继续推理并判断�
 
 peer 可取消本人 board 巡检，任务与基本收件仍保留。取消按任务和当前稳定 owner
 持久保存；新任务不恢复旧任务取消，同稳定名字换会话保留取消。恢复使用明确入口。
+当前 master 也可取消本人的常驻项目巡检：`collab notify cancel --event master-idle`
+只在项目已有 `ceo_report_state` 进度且无可执行未关闭项目任务时成功，成功回执返回
+原订阅 ID 与 `status=cancelled`；重复取消幂等。显式精确订阅或项目工作变化会 rearm
+同一订阅，direct-message 始终独立保留，peer board idle 取消语义不变。`notify status`
+的 `project_patrol` 只读投影给出 armed/cancelled/missing。
 目标命令、回执和 CEO 回报边界见
 [board idle 巡检契约](references/board-idle-patrol.md)。
 
 这是 2026-10-25 用户确认的契约。`collab notify cancel --event board-idle`、
-`collab notify subscribe --event board-idle` 与 `collab notify status` 已在当前源码
-实现。本轮隔离公开入口/native 与有限 timer 兼容验收已通过；这不等于生产 daemon
-启用或生产 peer 消费或恢复推理已验证。使用前先按运行 daemon 的实际构建核实
-`collab notify methods` 与 `collab notify status`；其能力或状态不满足时只停受影响
-自动巡检，已授权工作仍继续。
+`collab notify subscribe --event board-idle` 与 `collab notify status` 已在当前
+源码实现。`collab notify cancel --event master-idle` 也已在当前源码实现，并定义了
+对应的公开黑盒用例；这不等于生产 daemon 启用或生产 peer 消费或恢复推理已验证。
+使用前先按运行 daemon 的实际构建核实 `collab notify methods` 与
+`collab notify status`；其能力或状态不满足时只停受影响自动巡检，已授权工作仍继续。
 
 巡检只提供兜底唤醒，不是执行前提。登记后立即推进 ready 工作，结果或资源变化后按
 统一调度规则自检并补位。peer 保留本人范围的交付责任；遇到受限步骤先按已有授权

@@ -829,7 +829,6 @@ fn tick_standing_project_patrol_at(server: &Arc<Server>, now: i64) {
                 is_standing_project_patrol(subscription)
                     && subscription.worker_id == master_id
                     && subscription.status == "armed"
-                    && subscription.expires_ms > now
                     && super::subscription_matches_transport(subscription, &transport)
                     && next_subscription_trigger(subscription).is_some_and(|trigger| trigger <= now)
             })
@@ -868,7 +867,6 @@ fn tick_standing_project_patrol_at(server: &Arc<Server>, now: i64) {
             };
             if !same_standing_project_patrol(&current, &snapshot)
                 || current.status != "armed"
-                || current.expires_ms <= now
                 || next_subscription_trigger(&current).is_none_or(|trigger| trigger > now)
                 || !super::selected_transport_for_worker(&worker).is_some_and(|transport| {
                     super::subscription_matches_transport(&current, &transport)

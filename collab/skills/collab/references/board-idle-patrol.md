@@ -19,8 +19,9 @@ owner 是 core 实现与项目 DAG。
   `900000` 毫秒。反复 ensure/renew 复用同一订阅，续期其 TTL 与有限出现预算，不并排
   新建第二份。`appsdk longhorizon show` 是只读投影，读取成功不证明已 arm。有限
   goal/task 定时器按各自生命周期到期关闭；单个 goal 结束不得因此关闭这条常驻项目
-  巡检义务。若项目巡检被显式取消，按已实现控制保持取消，不由 ensure 自动恢复。当前
-  没有公开命令取消这条 `master-idle` 项目巡检订阅，文档不承诺这样的 cancel API。
+  巡检义务。若项目巡检被显式取消，按已实现控制保持取消，不由 ensure 自动恢复；
+  当前 master 可用 `collab notify cancel --event master-idle` 显式取消，详见下文
+  「Master 取消与恢复项目巡检」。
 - Jenny 每次巡检提醒都检查本项目 worker 的活动状态、未关闭 board 任务、当前绑定及
   按任务取消状态。busy 的 worker 跳过；idle 且仍持有未取消任务的 worker 应收到
   继续本人任务的提醒。没有未关闭任务时不发 board idle 提醒。
@@ -67,17 +68,17 @@ collab notify status
 ```
 
 `notify cancel` 的 `--event` 默认就是 `board-idle`；这里显式写出，避免把其他事件
-误当成可取消对象。
+误当成可取消对象。`--event master-idle` 是另一条独立入口，只作用于当前 master 的
+常驻项目巡检，规则见下一节。
 
 - `collab notify cancel --event board-idle` 只作用于调用者本人持有的未关闭 board
   任务的巡检。省略 `--task-id` 时取消调用者当前持有的全部未关闭 board 任务的巡检；
   指定 `--task-id` 时仅取消指定任务的巡检。未指定任务时不做隐式全局关闭。
 - 指定任务时先校验全部 ID 均属于本人当前持有的未关闭任务；任一非本人任务返回
   `BOARD_PATROL_TASK_OWNER_REQUIRED`，整次不写入任何取消记录（原子失败）。
-- 尝试取消 `direct-message`、`deadline`、`resource-released` 或 `master-idle` 返回
+- 尝试取消 `direct-message`、`deadline` 或 `resource-released` 返回
   `NOTIFY_CANCEL_SCOPE_FORBIDDEN`。基础 direct-message 租约由 daemon 独占管理，
-  有限 goal 调度用 `appsdk goal cancel`，任务 deadline 随任务关闭。这条路径不提供
-  取消 `master-idle` 项目巡检的 API。
+  有限 goal 调度用 `appsdk goal cancel`，任务 deadline 随任务关闭。
 - `collab notify subscribe --event board-idle` 是明确的恢复入口：指定 `--task-id` 时
   只移除调用者本人这些未关闭任务的取消状态；省略 `--task-id` 时恢复调用者当前全部
   已取消且仍未关闭的任务。新任务按新任务范围初始化，不借新任务恢复已取消的旧任务
@@ -98,6 +99,49 @@ collab notify status
   项目内 peer 的取消状态。普通 peer 只收到本人视图，不能读取项目总表。
 - peer 的按任务取消由 daemon 在选任务时应用。master 的读取权限不授予替其他 owner
   取消、恢复或覆盖取消的权限。
+
+## Master 取消与恢复项目巡检
+
+当前 master 可以取消本人的常驻项目巡检。这与 peer 的按任务 board idle 取消是两条
+独立控制，互不清除对方的取消记录。
+
+公开入口（当前源码实现）：
+
+```text
+collab notify cancel --event master-idle [--reason <text>] [--resume-condition <text>]
+collab notify subscribe --event master-idle --subject project-patrol --every-ms 900000 --repeat-count <n> --ttl-seconds <n>
+collab notify status
+```
+
+- 只有当前 master 能取消本项目精确的项目巡检，即 `master-idle`、subject
+  `project-patrol`、interval `900000` 的订阅。其他 owner、其他项目或旧会话载体调用
+  返回 `PROJECT_PATROL_MASTER_REQUIRED`。没有可取消的精确订阅返回
+  `PROJECT_PATROL_NOT_FOUND`。
+- `--event master-idle` 不接受 `--task-id`。带任务 ID 的取消属于 board idle，
+  误用会被拒绝。
+- 取消要求项目已写入可持久审计的进度：`ceo_report_state.projects[<canonical project>]
+  .revision >= 1`。没有该进度返回 `PROJECT_PATROL_PROGRESS_NOT_RECORDED`。项目内还有
+  closed/cancelled 以外、且不具备有效 `TaskRec.wait` 的未关闭任务时返回
+  `PROJECT_PATROL_WORK_REMAINS`；两者都属于 `PROJECT_PATROL_CANCEL_NOT_ELIGIBLE`，
+  回执列出阻塞任务与等待任务。
+- 合格判断只把 `TaskRec.wait` 存在且任务状态为 waiting 的未关闭任务当作等待；不把
+  `waiting_user` 等投影字段当作阻塞豁免。仍有需要推进的任务时不能取消。取消成功会
+  写入原因、恢复条件和取消时间，并结束该订阅尚未接受的 pending 唤醒。
+- 取消成功返回同一订阅 ID、`status=cancelled`、`changed=true`。重复取消幂等：
+  返回同一 ID、`status=cancelled`、`changed=false`，原因、恢复条件和时间不变，也不
+  写入新事件。
+- 显式精确订阅是恢复入口：同一 `master-idle`、subject `project-patrol`、interval
+  `900000` 的订阅把 cancelled 记录重新置为 armed，返回原 ID 和 `status=rearmed`，
+  不新建第二条记录。其他 subject 或 interval 不匹配该记录。
+- 取消后，新增项目任务、任务重新变为可执行或 `TaskRec.wait` 释放会触发 daemon 自动
+  rearm 同一订阅。真实恢复由项目工作变化驱动，不由 ensure 或 `longhorizon show`
+  无条件重建。
+- 同稳定名字换会话或 `collab context` 恢复身份时，cancelled 项目巡检随当前 master
+  的载体搬迁并保持 cancelled；新载体继承原记录，不丢失也不自动变为 armed。
+- direct-message 租约始终独立保留。取消项目巡检不影响直发消息的收发。
+- `collab notify status` 在 master 视图返回 `project_patrol`，字段含 `status`
+  （`armed`、`cancelled` 或 `missing`）、`subscription_id`、`reason`、
+  `eligibility` 等。它只投影状态，不改变控制记录。
 
 ## Jenny 每次巡检的检查项
 
@@ -193,5 +237,9 @@ flowchart TD
 任务结束对应巡检；unknown 不产生终端输入；`collab notify status` 的 `board_patrol`
 字段为 `owner_key`/`cancelled_tasks`/`eligible_task_ids`/`interval_ms`/
 `periodic_fallback`/`realtime_connected`，且不虚构 `armed_tasks` 或 context 投影；
+master 取消项目巡检后返回原 ID 且 `status=cancelled`，重复取消幂等，`notify status`
+的 `project_patrol` 同步为 cancelled；未上报进度或有可执行任务时取消被拒并给出具体
+错误码；显式精确订阅恢复原 ID；新项目任务或等待释放自动 rearm；同稳定名字换会话
+保留 cancelled；peer board idle 取消不受 master 项目巡检 rearm 影响；
 CEO 去重、小时限制、安静窗口与紧急穿透；`report-ack` 只由 CEO 在向用户输出后提交；
 重启保留未确认批次。

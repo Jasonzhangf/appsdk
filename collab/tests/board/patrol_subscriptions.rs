@@ -755,6 +755,133 @@ fn appsdk_goals_arm_only_master_project_patrol() {
     );
     assert_eq!(still_standing[0]["id"].as_str(), Some(patrol_id.as_str()));
     assert_eq!(still_standing[0]["status"], "armed", "{after_peer_cancel}");
+
+    // A cancelled standing project patrol is a durable decision, not a missing
+    // resource. The real AppSDK consumer must report the cancelled source and
+    // must not rebuild an armed patrol behind the master's back.
+    let promoted = fixture.run_public(
+        &[
+            "ceo",
+            "promote",
+            "--approval",
+            "fixture user records durable project progress",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(promoted["is_current"], true, "{promoted}");
+    let progress = fixture.run_public(
+        &[
+            "ceo",
+            "reply",
+            "--subject",
+            "appsdk-goal-patrol-progress",
+            "--urgent",
+            "no actionable project work remains",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(progress["recorded"], true, "{progress}");
+    assert!(
+        progress["revision"]
+            .as_u64()
+            .is_some_and(|revision| revision >= 1),
+        "the CEO reply must record a durable project revision: {progress}"
+    );
+    let cancelled_patrol = fixture.run_public(
+        &[
+            "notify",
+            "cancel",
+            "--event",
+            "master-idle",
+            "--reason",
+            "fixture no actionable project work",
+            "--resume-condition",
+            "new project work or a durable wait release",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(
+        cancelled_patrol["status"], "cancelled",
+        "{cancelled_patrol}"
+    );
+    assert_eq!(cancelled_patrol["changed"], true, "{cancelled_patrol}");
+    assert_eq!(
+        cancelled_patrol["subscription_id"].as_str(),
+        Some(patrol_id.as_str()),
+        "{cancelled_patrol}"
+    );
+
+    let cancelled_goal = goal(
+        THREAD_A,
+        &[
+            "goal",
+            "subscribe",
+            "--goal",
+            "master.md",
+            "--interval",
+            "5m",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        cancelled_goal["patrol_source"], "cancelled",
+        "{cancelled_goal}"
+    );
+    assert_eq!(
+        cancelled_goal["patrol_status"], "cancelled",
+        "{cancelled_goal}"
+    );
+    assert_eq!(cancelled_goal["patrol_armed"], false, "{cancelled_goal}");
+    assert_eq!(
+        cancelled_goal["patrol_subscription_id"].as_str(),
+        Some(patrol_id.as_str()),
+        "{cancelled_goal}"
+    );
+    let cancelled_status = fixture.run_public(&["notify", "status"], THREAD_A);
+    assert_eq!(
+        cancelled_status["project_patrol"]["status"], "cancelled",
+        "{cancelled_status}"
+    );
+    assert_eq!(
+        cancelled_status["project_patrol"]["subscription_id"].as_str(),
+        Some(patrol_id.as_str()),
+        "{cancelled_status}"
+    );
+    let cancelled_records = project_patrols(&cancelled_status);
+    assert_eq!(
+        cancelled_records.len(),
+        1,
+        "the consumer must not duplicate the cancelled patrol: {cancelled_status}"
+    );
+    assert_eq!(
+        cancelled_records[0]["status"], "cancelled",
+        "{cancelled_status}"
+    );
+
+    // The same durable record is restored by an explicit exact subscribe.
+    let restored_patrol = fixture.run_public(
+        &[
+            "notify",
+            "subscribe",
+            "--event",
+            "master-idle",
+            "--subject",
+            "project-patrol",
+            "--every-ms",
+            "900000",
+            "--repeat-count",
+            "100",
+            "--ttl-seconds",
+            "604800",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(restored_patrol["status"], "rearmed", "{restored_patrol}");
+    assert_eq!(
+        restored_patrol["subscription"]["id"].as_str(),
+        Some(patrol_id.as_str()),
+        "{restored_patrol}"
+    );
 }
 
 #[test]

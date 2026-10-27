@@ -26,6 +26,94 @@ pub(crate) fn board_patrol_owner_key(state: &State, worker_id: &str) -> String {
         .unwrap_or_else(|| worker_id.to_owned())
 }
 
+fn rearm_cancelled_project_patrol(
+    state: &mut State,
+    created: bool,
+    previous: Option<&TaskRec>,
+    task: &TaskRec,
+    event_ms: i64,
+) {
+    if task_status_is_terminal(&task.status) {
+        return;
+    }
+    let became_actionable = crate::server::keepalive::actionable(&task.status)
+        && !previous.is_some_and(|previous| {
+            crate::server::keepalive::actionable(&previous.status)
+        });
+    let wait_released =
+        previous.and_then(|previous| previous.wait.as_ref()).is_some() && task.wait.is_none();
+    if !created && !became_actionable && !wait_released {
+        return;
+    }
+    let subscription_ids: Vec<String> = state
+        .notification_subscriptions
+        .values()
+        .filter(|subscription| {
+            crate::server::is_exact_project_patrol(subscription)
+                && subscription.status == "cancelled"
+                && state
+                    .global
+                    .projects
+                    .values()
+                    .any(|project| {
+                        project.master_grants.values().any(|grant| {
+                            grant.agent_id.as_str() == subscription.worker_id
+                                && state
+                                    .global
+                                    .lookup_master_grant(&grant.project_scope, &grant.binding_id)
+                                    .is_some_and(|current| current == grant)
+                                && state
+                                    .global
+                                    .lookup_binding_for(
+                                        &crate::scope::RouteScope {
+                                            app_scope_id: grant.app_scope_id.clone(),
+                                            project_scope_id: grant.project_scope.clone(),
+                                        },
+                                        &grant.binding_id,
+                                    )
+                                    .is_some_and(|binding| {
+                                        binding.endpoint_generation == grant.endpoint_generation
+                                            && binding.agent_id == grant.agent_id
+                                    })
+                        })
+                    })
+        })
+        .map(|subscription| subscription.id.clone())
+        .collect();
+    for subscription_id in subscription_ids {
+        let Some(subscription) = state
+            .notification_subscriptions
+            .get_mut(&subscription_id)
+        else {
+            continue;
+        };
+        let Some(worker) = state.workers.get(&subscription.worker_id).cloned() else {
+            continue;
+        };
+        let Some(transport) = crate::server::selected_transport_for_worker(&worker) else {
+            continue;
+        };
+        let Some(target) = crate::server::notification_target(&transport) else {
+            continue;
+        };
+        subscription.method = transport.kind.as_str().to_owned();
+        subscription.target = target.to_owned();
+        subscription.status = "armed".into();
+        subscription.status_reason = None;
+        subscription.trigger_ms =
+            Some(event_ms.saturating_add(crate::board_patrol_policy::BOARD_IDLE_PATROL_INTERVAL_MS));
+        subscription.repeat_count = subscription
+            .repeat_count
+            .max(subscription.fired_count.saturating_add(100));
+        subscription.expires_ms = subscription
+            .expires_ms
+            .max(event_ms.saturating_add(
+                (crate::server::MAX_NOTIFICATION_TTL_SECONDS as i64) * 1000,
+            ));
+        subscription.updated_ms = event_ms;
+    }
+}
+
 pub(crate) fn board_patrol_owned_unclosed_task_ids(
     state: &State,
     worker_id: &str,
@@ -1105,6 +1193,8 @@ impl State {
                 return Err("reducer snapshot is replay-only".into());
             }
             Event::TaskCreated { task } | Event::TaskUpdated { task } => {
+                let created = matches!(ev, Event::TaskCreated { .. });
+                let previous_task = self.tasks.get(&task.id).cloned();
                 let cancellation_owner = self
                     .cancelled_board_patrol_tasks
                     .get(&task.id)
@@ -1136,6 +1226,17 @@ impl State {
                     }
                 }
                 self.tasks.insert(task.id.clone(), task.clone());
+                rearm_cancelled_project_patrol(
+                    self,
+                    created,
+                    previous_task.as_ref(),
+                    task,
+                    if task.updated_ms > 0 {
+                        task.updated_ms
+                    } else {
+                        task.created_ms
+                    },
+                );
             }
             Event::NameResolutionCommitted {
                 project_scope,

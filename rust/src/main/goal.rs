@@ -186,6 +186,8 @@ pub(super) fn longhorizon_show(root: &Path, format_json: bool) {
                 "patrol_armed": patrol["armed"].as_bool().unwrap_or(false),
                 "patrol_subscription_id": patrol["subscription_id"].clone(),
                 "patrol_every_ms": patrol["every_ms"].clone(),
+                "patrol_status": patrol["status"].clone(),
+                "patrol_source": patrol["source"].clone(),
                 "patrol_error": patrol["error"].clone(),
             },
             "assigned": active_tasks,
@@ -382,6 +384,7 @@ fn goal_record_apply_patrol(record: &mut Value, patrol: &Value) {
     record["patrol_armed"] = patrol["armed"].clone();
     record["patrol_subscription_id"] = patrol["subscription_id"].clone();
     record["patrol_every_ms"] = patrol["every_ms"].clone();
+    record["patrol_status"] = patrol["status"].clone();
     record["patrol_source"] = patrol["source"].clone();
     record["patrol_checked_at"] = patrol["checked_at"].clone();
     record["patrol_subscription"] = patrol["subscription"].clone();

@@ -71,6 +71,40 @@ fn me(scope: &Scope) -> anyhow::Result<Identity> {
     Ok(ident)
 }
 
+fn msg_caller(scope: &Scope) -> anyhow::Result<Identity> {
+    me(scope).map_err(|error| {
+        let detail = error.to_string();
+        if detail.starts_with("ROUTE_RESOLVE_AMBIGUOUS:")
+            || detail.starts_with("IDENTITY_RESTORE_AMBIGUOUS:")
+        {
+            anyhow::anyhow!(
+                "CALLER_ROUTE_AMBIGUOUS: caller session matches multiple registered routes in this project/app; next: run `collab context` from the canonical current project root to reconcile the caller route before retrying. cause: {detail}"
+            )
+        } else if detail.starts_with("ROUTE_RESOLVE_NOT_FOUND:")
+            || detail.starts_with("ROUTE_RESOLVE_INVALID:")
+            || detail.starts_with("ROUTE_RESOLVE_STALE_INDEX:")
+            || detail.starts_with("SESSION_THREAD_BINDING_STALE:")
+            || detail.starts_with("BOARD_STALE_IDENTITY:")
+            || detail.contains("identity has no registered runtime binding")
+            || detail.starts_with("IDENTITY_RESTORE_CROSS_PROJECT:")
+        {
+            anyhow::anyhow!(
+                "CALLER_ROUTE_NOT_FOUND: caller has no current registered route in this project/app; next: run `collab context` from the canonical current project root to restore the caller route, then retry. cause: {detail}"
+            )
+        } else if detail.starts_with("BOARD_IDENTITY_REQUIRED:")
+            || detail.starts_with("IDENTITY_INFORMATION_REQUIRED:")
+            || detail.starts_with("IDENTITY_CONTEXT_INVALID:")
+            || detail.starts_with("COLLAB_CONTEXT_UNRESOLVED:")
+        {
+            anyhow::anyhow!(
+                "CALLER_IDENTITY_REQUIRED: caller has no identifiable session or stored Collab identity for this project; next: run `collab context` from the current project root to establish the caller identity, then retry. cause: {detail}"
+            )
+        } else {
+            error
+        }
+    })
+}
+
 /// Registered project operations never bootstrap identity or launch the daemon.
 fn registered_project_identity(scope: &Scope) -> anyhow::Result<Identity> {
     registered_project_identity_with_provide(scope, None)
@@ -1493,7 +1527,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
         }
         Cmd::Msg { msg_id } => {
             let scope = Scope::resolve()?;
-            let ident = me(&scope)?;
+            let ident = msg_caller(&scope)?;
             let v: serde_json::Value = call_project(&scope, &ident, &Req::MsgStatus { msg_id })?;
             out(&v);
             Ok(())

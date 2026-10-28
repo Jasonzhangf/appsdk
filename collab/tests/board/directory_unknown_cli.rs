@@ -1,5 +1,173 @@
 use super::*;
 
+fn failed_cli_text(output: &Output) -> String {
+    format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+#[test]
+fn msg_reports_missing_caller_identity_before_target_lookup() {
+    let fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    let sent = fixture.run_public(
+        &[
+            "sendmessage",
+            "--to",
+            "Bob",
+            "--subject",
+            "caller identity target",
+            "existing body",
+        ],
+        THREAD_A,
+    );
+    let msg_id = sent["msg_id"].as_str().expect("send returns msg_id");
+
+    for target in [msg_id, "m-does-not-exist"] {
+        let output = fixture.command_without_native_facts(&["msg", target]);
+        assert!(!output.status.success(), "msg without a caller must fail");
+        let text = failed_cli_text(&output);
+        assert!(
+            text.contains("CALLER_IDENTITY_REQUIRED"),
+            "missing caller identity must be explicit: {text}"
+        );
+        assert!(
+            text.contains("caller") && text.contains("collab context"),
+            "caller error must name the subject and recovery action: {text}"
+        );
+        assert!(
+            !text.contains("MESSAGE_NOT_FOUND") && !text.contains("target message"),
+            "caller failure must not be reported as target absence: {text}"
+        );
+    }
+}
+
+#[test]
+fn msg_reports_unregistered_caller_route_before_target_lookup() {
+    const UNREGISTERED_THREAD: &str = "01a0d63a-0000-7000-8000-000000000001";
+    let fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    let sent = fixture.run_public(
+        &[
+            "sendmessage",
+            "--to",
+            "Bob",
+            "--subject",
+            "route target",
+            "existing body",
+        ],
+        THREAD_A,
+    );
+    let msg_id = sent["msg_id"].as_str().expect("send returns msg_id");
+
+    for target in [msg_id, "m-does-not-exist"] {
+        let output = fixture.command_public(&["msg", target], UNREGISTERED_THREAD);
+        assert!(!output.status.success(), "unregistered caller must fail");
+        let text = failed_cli_text(&output);
+        assert!(
+            text.contains("CALLER_ROUTE_NOT_FOUND"),
+            "unregistered caller route must be explicit: {text}"
+        );
+        assert!(
+            text.contains("caller") && text.contains("collab context"),
+            "route error must name the subject and recovery action: {text}"
+        );
+        assert!(
+            !text.contains("MESSAGE_NOT_FOUND") && !text.contains("target message"),
+            "caller route failure must not be reported as target absence: {text}"
+        );
+    }
+}
+
+#[test]
+fn msg_distinguishes_target_absence_and_private_messages_from_caller_errors() {
+    let fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+
+    let missing = fixture.command_public(&["msg", "m-does-not-exist"], THREAD_A);
+    assert!(!missing.status.success(), "missing target must fail");
+    let missing_text = failed_cli_text(&missing);
+    assert!(
+        missing_text.contains("MESSAGE_NOT_FOUND"),
+        "registered caller must receive target absence: {missing_text}"
+    );
+    assert!(
+        missing_text.contains("message") && missing_text.contains("inbox"),
+        "target absence must name what is missing and the next action: {missing_text}"
+    );
+    assert!(
+        !missing_text.contains("CALLER_IDENTITY_REQUIRED")
+            && !missing_text.contains("CALLER_ROUTE_NOT_FOUND"),
+        "target absence must not blame the caller: {missing_text}"
+    );
+
+    let sent = fixture.run_public(
+        &[
+            "sendmessage",
+            "--unknown-sender",
+            "--to",
+            "Bob",
+            "--subject",
+            "private-subject-marker",
+            "private-body-marker",
+        ],
+        THREAD_A,
+    );
+    let private_id = sent["msg_id"].as_str().expect("send returns msg_id");
+    let denied = fixture.command_public(&["msg", private_id], THREAD_A);
+    assert!(!denied.status.success(), "non-participant must fail");
+    let denied_text = failed_cli_text(&denied);
+    assert!(
+        denied_text.contains("CALLER_NOT_PERMITTED"),
+        "non-participant must receive a caller permission error: {denied_text}"
+    );
+    assert!(
+        denied_text.contains("caller") && denied_text.contains("message"),
+        "permission error must name the subject and target: {denied_text}"
+    );
+    for leaked in ["private-subject-marker", "private-body-marker", "unknown"] {
+        assert!(
+            !denied_text.contains(leaked),
+            "permission error leaked {leaked:?}: {denied_text}"
+        );
+    }
+}
+
+#[test]
+fn msg_returns_existing_success_shape_to_sender_and_recipient() {
+    let fixture = AppFixture::new();
+    let alice = fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    let sent = fixture.run_public(
+        &[
+            "sendmessage",
+            "--to",
+            "Bob",
+            "--subject",
+            "participant-visible",
+            "participant body",
+        ],
+        THREAD_A,
+    );
+    let msg_id = sent["msg_id"].as_str().expect("send returns msg_id");
+
+    for thread in [THREAD_A, THREAD_B] {
+        let queried = fixture.run_public(&["msg", msg_id], thread);
+        assert_eq!(queried["id"], msg_id);
+        assert_eq!(queried["from"], alice["identity"]["worker_id"]);
+        assert_eq!(queried["subject"], "participant-visible");
+        assert_eq!(queried["body"], "participant body");
+        assert!(queried.get("state").is_some());
+        assert!(queried.get("consumed_by_recv").is_some());
+        assert!(queried.get("notification_delivery_failure").is_some());
+    }
+}
+
 #[test]
 fn unauthenticated_directory_query_empty_and_free_of_presence_side_effects() {
     let fixture = AppFixture::new();

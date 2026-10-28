@@ -584,6 +584,7 @@ fn project_reset_clears_only_owned_channel_defaults_and_message_control() {
     state.apply(&Event::ConversationDefaultSet {
         default: ConversationDefault {
             channel: "qqbot".into(),
+            channel_instance: "qqbot".into(),
             conversation: "u1:session".into(),
             project_scope: "/project-a".into(),
             target_address: "project-a.Bob".into(),
@@ -594,6 +595,7 @@ fn project_reset_clears_only_owned_channel_defaults_and_message_control() {
     state.apply(&Event::ConversationDefaultSet {
         default: ConversationDefault {
             channel: "qqbot".into(),
+            channel_instance: "qqbot".into(),
             conversation: "u2:session".into(),
             project_scope: "/project-b".into(),
             target_address: "project-b.Bob".into(),
@@ -654,8 +656,12 @@ fn project_reset_clears_only_owned_channel_defaults_and_message_control() {
 
     crate::server::project_reset::clear_project(&mut state, "/project-a", true, &[]);
 
-    assert!(!state.conversation_defaults.contains_key("qqbot:u1:session"));
-    assert!(state.conversation_defaults.contains_key("qqbot:u2:session"));
+    assert!(!state
+        .conversation_defaults
+        .contains_key("qqbot:qqbot:u1:session"));
+    assert!(state
+        .conversation_defaults
+        .contains_key("qqbot:qqbot:u2:session"));
     assert!(state.channel_envelopes.is_empty());
     assert!(state.platform_event_index.is_empty());
     assert!(state.channel_reply_routes.is_empty());

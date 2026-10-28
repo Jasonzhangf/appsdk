@@ -151,9 +151,14 @@ pub enum StagedInbound {
 
 /// Save one inbound attachment completely before returning its published path.
 /// The caller must only put `Published` descriptors into the envelope.
+///
+/// The destination is owned by the full typed channel identity, so two
+/// conversations with the same platform ID never share a file. A directory is
+/// reused only when its recorded identity matches the same event; sanitized or
+/// truncated ID collisions allocate a sibling instead of overwriting.
 pub fn stage_inbound_attachment(
     authorized_root: &std::path::Path,
-    platform_message_id: &str,
+    envelope: &ChannelEnvelope,
     index: usize,
     original_name: &str,
     media_type: &str,
@@ -167,26 +172,41 @@ pub fn stage_inbound_attachment(
         Ok(root) => root,
         Err(error) => return failed(format!("ATTACHMENT_ROOT_UNAVAILABLE: {error}")),
     };
-    let dir = root
+    let namespace = root
         .join("inbound")
-        .join(safe_path_segment(platform_message_id));
-    if let Err(error) = std::fs::create_dir_all(&dir) {
+        .join(safe_path_segment(&envelope.source_channel))
+        .join(safe_path_segment(&envelope.channel_instance))
+        .join(safe_path_segment(&envelope.external_conversation));
+    if let Err(error) = std::fs::create_dir_all(&namespace) {
         return failed(format!("ATTACHMENT_SAVE_FAILED: {error}"));
     }
+    let identity = InboundAttachmentIdentity::from_envelope(envelope);
+    let dir = match allocate_event_directory(&namespace, &identity) {
+        Ok(dir) => dir,
+        Err(error) => return failed(error),
+    };
     let file_name = format!("{index}-{}", safe_path_segment(original_name));
     let path = dir.join(file_name);
-    // Write through an explicit handle so a partial write is detected before
-    // the path is published.
-    let write = || -> std::io::Result<()> {
-        use std::io::Write;
-        let mut file = std::fs::File::create(&path)?;
-        file.write_all(bytes)?;
-        file.sync_all()
-    };
-    if let Err(error) = write() {
-        // Do not leave a half-written file that later looks published.
-        std::fs::remove_file(&path).ok();
-        return failed(format!("ATTACHMENT_SAVE_FAILED: {error}"));
+    // `create_new` never truncates an already published file. A replay of the
+    // same event therefore reuses the original bytes.
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(mut file) => {
+            use std::io::Write;
+            let write = file.write_all(bytes).and_then(|()| file.sync_all());
+            if let Err(error) = write {
+                // Do not leave a half-written file that later looks published.
+                std::fs::remove_file(&path).ok();
+                return failed(format!("ATTACHMENT_SAVE_FAILED: {error}"));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Same event identity and attachment slot: reuse the published file.
+        }
+        Err(error) => return failed(format!("ATTACHMENT_SAVE_FAILED: {error}")),
     }
     let canonical = match std::fs::canonicalize(&path) {
         Ok(path) => path,
@@ -197,6 +217,69 @@ pub fn stage_inbound_attachment(
         display_name: original_name.to_owned(),
         media_type: media_type.to_owned(),
     })
+}
+
+/// Typed identity recorded inside every event directory. It distinguishes a
+/// true replay from another event whose sanitized or truncated ID collides.
+#[derive(Debug, Serialize, Deserialize)]
+struct InboundAttachmentIdentity {
+    source_channel: String,
+    channel_instance: String,
+    external_user: String,
+    external_conversation: String,
+    platform_message_id: String,
+}
+
+impl InboundAttachmentIdentity {
+    fn from_envelope(envelope: &ChannelEnvelope) -> Self {
+        Self {
+            source_channel: envelope.source_channel.clone(),
+            channel_instance: envelope.channel_instance.clone(),
+            external_user: envelope.external_user.clone(),
+            external_conversation: envelope.external_conversation.clone(),
+            platform_message_id: envelope.platform_message_id.clone(),
+        }
+    }
+}
+
+const EVENT_IDENTITY_FILE: &str = "event-identity.json";
+
+fn allocate_event_directory(
+    namespace: &std::path::Path,
+    identity: &InboundAttachmentIdentity,
+) -> Result<std::path::PathBuf, String> {
+    let payload =
+        serde_json::to_vec(identity).map_err(|error| format!("ATTACHMENT_SAVE_FAILED: {error}"))?;
+    let base = safe_path_segment(&identity.platform_message_id);
+    for attempt in 0..1000usize {
+        let name = if attempt == 0 {
+            base.clone()
+        } else {
+            format!("{base}-{}", attempt + 1)
+        };
+        let candidate = namespace.join(name);
+        match std::fs::create_dir(&candidate) {
+            Ok(()) => {
+                let record = candidate.join(EVENT_IDENTITY_FILE);
+                if let Err(error) = std::fs::write(&record, &payload) {
+                    std::fs::remove_dir_all(&candidate).ok();
+                    return Err(format!("ATTACHMENT_SAVE_FAILED: {error}"));
+                }
+                return Ok(candidate);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let record = candidate.join(EVENT_IDENTITY_FILE);
+                match std::fs::read(&record) {
+                    Ok(existing) if existing == payload => return Ok(candidate),
+                    // Same sanitized segment but another event (or an unknown
+                    // legacy directory): keep looking for a free sibling.
+                    _ => continue,
+                }
+            }
+            Err(error) => return Err(format!("ATTACHMENT_SAVE_FAILED: {error}")),
+        }
+    }
+    Err("ATTACHMENT_SAVE_FAILED: attachment namespace is exhausted".into())
 }
 
 #[cfg(test)]
@@ -221,7 +304,16 @@ mod tests {
         let root = temp_root("publish");
         let staged = stage_inbound_attachment(
             &root,
-            "../../platform/../../id",
+            &ChannelEnvelope {
+                source_channel: "qqbot".into(),
+                channel_instance: "qqbot@host".into(),
+                external_user: "u1".into(),
+                external_conversation: "u1:session".into(),
+                platform_message_id: "../../platform/../../id".into(),
+                reply_route: "qqbot://u1/session".into(),
+                recipient_address: "agent".into(),
+                attachments: Vec::new(),
+            },
             0,
             "../报告 file.pdf",
             "application/pdf",
@@ -234,7 +326,13 @@ mod tests {
         let path = std::path::Path::new(&descriptor.local_path);
         assert!(path.is_absolute());
         assert!(path.starts_with(&canonical_root));
+        // The path is fully under the namespace; the hostile platform id never
+        // escapes into the directory tree.
+        assert!(descriptor
+            .local_path
+            .contains("/inbound/qqbot/qqbot_host/u1_session/"));
         assert!(!descriptor.local_path.contains(".."));
+        assert!(!descriptor.local_path.contains("/../../"));
         // Original name is display-only; the safe segment is what reached disk.
         assert_eq!(descriptor.display_name, "../报告 file.pdf");
         assert_eq!(std::fs::read(path).unwrap(), b"payload");
@@ -251,8 +349,23 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let staged =
-            stage_inbound_attachment(&missing, "platform-1", 0, "photo.jpg", "image/jpeg", b"x");
+        let staged = stage_inbound_attachment(
+            &missing,
+            &ChannelEnvelope {
+                source_channel: "qqbot".into(),
+                channel_instance: "qqbot@host".into(),
+                external_user: "u1".into(),
+                external_conversation: "u1:session".into(),
+                platform_message_id: "platform-1".into(),
+                reply_route: "qqbot://u1/session".into(),
+                recipient_address: "agent".into(),
+                attachments: Vec::new(),
+            },
+            0,
+            "photo.jpg",
+            "image/jpeg",
+            b"x",
+        );
         let StagedInbound::Failed {
             display_name,
             error,
@@ -262,5 +375,152 @@ mod tests {
         };
         assert_eq!(display_name, "photo.jpg");
         assert!(error.contains("ATTACHMENT_ROOT_UNAVAILABLE"), "{error}");
+    }
+
+    #[test]
+    fn same_platform_event_id_in_two_conversations_preserves_both_files() {
+        let root = temp_root("conversation-isolation");
+        let envelope_a = ChannelEnvelope {
+            source_channel: "qqbot".into(),
+            channel_instance: "qqbot@host".into(),
+            external_user: "u1".into(),
+            external_conversation: "u1:session".into(),
+            platform_message_id: "same-event".into(),
+            reply_route: "qqbot://u1/session".into(),
+            recipient_address: "agent".into(),
+            attachments: Vec::new(),
+        };
+        let mut envelope_b = envelope_a.clone();
+        envelope_b.external_conversation = "u2:session".into();
+        envelope_b.reply_route = "qqbot://u2/session".into();
+        let first =
+            stage_inbound_attachment(&root, &envelope_a, 0, "photo.jpg", "image/jpeg", b"first");
+        let second =
+            stage_inbound_attachment(&root, &envelope_b, 0, "photo.jpg", "image/jpeg", b"second");
+        let StagedInbound::Published(first) = first else {
+            panic!("expected a published attachment: {first:?}");
+        };
+        let StagedInbound::Published(second) = second else {
+            panic!("expected a published attachment: {second:?}");
+        };
+        assert_ne!(
+            first.local_path, second.local_path,
+            "different conversations must not share one attachment destination"
+        );
+        assert_eq!(std::fs::read(&first.local_path).unwrap(), b"first");
+        assert_eq!(std::fs::read(&second.local_path).unwrap(), b"second");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn sanitized_and_truncated_event_ids_do_not_overwrite_each_other() {
+        let root = temp_root("sanitize-collision");
+        let mut published = Vec::new();
+        for event_id in ["a/b", "a?b"] {
+            let staged = stage_inbound_attachment(
+                &root,
+                &ChannelEnvelope {
+                    source_channel: "qqbot".into(),
+                    channel_instance: "qqbot@host".into(),
+                    external_user: "u1".into(),
+                    external_conversation: "u1:session".into(),
+                    platform_message_id: event_id.into(),
+                    reply_route: "qqbot://u1/session".into(),
+                    recipient_address: "agent".into(),
+                    attachments: Vec::new(),
+                },
+                0,
+                "f.bin",
+                "application/octet-stream",
+                event_id.as_bytes(),
+            );
+            let StagedInbound::Published(descriptor) = staged else {
+                panic!("expected a published attachment: {staged:?}");
+            };
+            published.push(descriptor);
+        }
+        let long_prefix = "x".repeat(96);
+        for suffix in ["a", "b"] {
+            let event_id = format!("{long_prefix}-{suffix}");
+            let staged = stage_inbound_attachment(
+                &root,
+                &ChannelEnvelope {
+                    source_channel: "qqbot".into(),
+                    channel_instance: "qqbot@host".into(),
+                    external_user: "u1".into(),
+                    external_conversation: "u1:session".into(),
+                    platform_message_id: event_id.clone(),
+                    reply_route: "qqbot://u1/session".into(),
+                    recipient_address: "agent".into(),
+                    attachments: Vec::new(),
+                },
+                0,
+                "f.bin",
+                "application/octet-stream",
+                suffix.as_bytes(),
+            );
+            let StagedInbound::Published(descriptor) = staged else {
+                panic!("expected a published attachment: {staged:?}");
+            };
+            published.push(descriptor);
+        }
+        let unique: std::collections::BTreeSet<_> = published
+            .iter()
+            .map(|item| item.local_path.clone())
+            .collect();
+        assert_eq!(
+            unique.len(),
+            published.len(),
+            "sanitized or truncated event ids must not share one destination: {published:?}"
+        );
+        assert_eq!(std::fs::read(&published[0].local_path).unwrap(), b"a/b");
+        assert_eq!(std::fs::read(&published[1].local_path).unwrap(), b"a?b");
+        assert_eq!(std::fs::read(&published[2].local_path).unwrap(), b"a");
+        assert_eq!(std::fs::read(&published[3].local_path).unwrap(), b"b");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn repeated_staging_of_the_same_event_reuses_the_published_bytes() {
+        let root = temp_root("repeat");
+        let envelope = ChannelEnvelope {
+            source_channel: "qqbot".into(),
+            channel_instance: "qqbot@host".into(),
+            external_user: "u1".into(),
+            external_conversation: "u1:session".into(),
+            platform_message_id: "event-1".into(),
+            reply_route: "qqbot://u1/session".into(),
+            recipient_address: "agent".into(),
+            attachments: Vec::new(),
+        };
+        let first = stage_inbound_attachment(
+            &root,
+            &envelope,
+            0,
+            "f.bin",
+            "application/octet-stream",
+            b"original",
+        );
+        let StagedInbound::Published(first) = first else {
+            panic!("expected a published attachment: {first:?}");
+        };
+        let second = stage_inbound_attachment(
+            &root,
+            &envelope,
+            0,
+            "f.bin",
+            "application/octet-stream",
+            b"replacement",
+        );
+        let StagedInbound::Published(second) = second else {
+            panic!("expected a published attachment: {second:?}");
+        };
+        assert_eq!(first.local_path, second.local_path);
+        assert_eq!(
+            std::fs::read(&first.local_path).unwrap(),
+            b"original",
+            "a repeated save must never truncate an already published attachment"
+        );
+        std::fs::remove_dir_all(root).ok();
     }
 }

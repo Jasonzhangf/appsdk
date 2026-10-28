@@ -500,11 +500,17 @@ fn handle_default_set(
     worker_id: String,
     token: String,
     channel: String,
+    channel_instance: String,
     conversation: String,
     target_address: String,
 ) -> Resp {
     if channel != "qqbot" {
         return Resp::err("UNSUPPORTED_CHANNEL: only the qqbot channel owns conversation defaults");
+    }
+    if channel_instance.trim().is_empty() {
+        return Resp::err(
+            "CHANNEL_INSTANCE_REQUIRED: a default is owned by one exact channel instance",
+        );
     }
     if conversation.trim().is_empty() {
         return Resp::err("CONVERSATION_REQUIRED: a nonempty conversation key is required");
@@ -517,17 +523,32 @@ fn handle_default_set(
         return Resp::err("token mismatch: identity does not own this worker_id");
     }
     // Resolve before any mutation: a failed switch must preserve the old target.
-    let (resolved_worker, _name_address) = match resolve_send_name_address(server, &st, target_address.clone())
-    {
+    let (resolved_worker, name_address) = match resolve_send_name_address(
+        server,
+        &st,
+        target_address.clone(),
+    ) {
         Ok(resolved) => resolved,
         Err(error) => return Resp::err(format!("DEFAULT_TARGET_UNRESOLVED: {error}")),
     };
+    // Inbound routing re-resolves the stored address through the same shared
+    // owner. A raw worker id has no stable inbound meaning, so it is rejected
+    // here instead of persisting a default that later fails.
+    if name_address.is_none() {
+        return Resp::err(format!(
+            "DEFAULT_TARGET_UNRESOLVED: {target_address} is not a stable name or typed CEO address"
+        ));
+    }
     if !st.workers.contains_key(&resolved_worker) {
         return Resp::err(format!(
             "DEFAULT_TARGET_UNRESOLVED: {target_address} does not resolve to a registered worker"
         ));
     }
-    let key = crate::server::conversation_default::conversation_default_key(&channel, &conversation);
+    let key = crate::server::conversation_default::conversation_default_key(
+        &channel,
+        &channel_instance,
+        &conversation,
+    );
     let project_scope = match server_route_scope(server, &st) {
         Ok(Some(route)) => route.project_scope_id.as_str().to_owned(),
         Ok(None) => {
@@ -544,6 +565,7 @@ fn handle_default_set(
         .unwrap_or(0);
     let default = crate::server::conversation_default::ConversationDefault {
         channel: channel.clone(),
+        channel_instance: channel_instance.clone(),
         conversation: conversation.clone(),
         project_scope,
         target_address,
@@ -556,10 +578,20 @@ fn handle_default_set(
     Resp::data(json!({ "default": default }))
 }
 
-fn handle_default_show(server: &Server, channel: String, conversation: String) -> Resp {
+fn handle_default_show(
+    server: &Server,
+    channel: String,
+    channel_instance: String,
+    conversation: String,
+) -> Resp {
     let st = server.state.lock().unwrap();
-    let default =
-        crate::server::conversation_default::lookup_default(&st, &channel, &conversation).cloned();
+    let default = crate::server::conversation_default::lookup_default(
+        &st,
+        &channel,
+        &channel_instance,
+        &conversation,
+    )
+    .cloned();
     Resp::data(json!({ "default": default }))
 }
 

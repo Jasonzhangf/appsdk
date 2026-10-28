@@ -55,29 +55,44 @@ fn parse_project_qualified_ci(target: &str) -> Option<(String, String)> {
     Some((project.to_owned(), name.to_owned()))
 }
 
+/// One resolved stable-name target. `name` is the canonical stored spelling,
+/// never the caller's case, so a mailbox address keeps the real name.
+pub(crate) struct ResolvedNamedTarget {
+    pub worker_id: String,
+    pub name: String,
+}
+
+/// Resolve a stable name in one project. All case-folded matches are collected
+/// before selecting one, so `Bob` and `BOB` in different occupancies are an
+/// explicit ambiguity instead of an arbitrary first match.
 fn resolve_name_case_insensitive(
     state: &crate::server::state::State,
     project_scope: &str,
     requested: &str,
-) -> Result<String, String> {
-    let mut matches: Vec<String> = state
+) -> Result<ResolvedNamedTarget, String> {
+    let mut matches: Vec<(String, String)> = state
         .name_occupancies
         .get(project_scope)
         .map(|names| {
             names
                 .iter()
                 .filter(|(name, _)| name.eq_ignore_ascii_case(requested))
-                .map(|(_, holder)| holder.worker_id.clone())
+                .map(|(name, holder)| (name.clone(), holder.worker_id.clone()))
                 .collect()
         })
         .unwrap_or_default();
-    matches.sort();
-    matches.dedup();
+    // One worker may hold two case-folded spellings of the same name; that is
+    // still one holder. Only distinct holders make the address ambiguous.
+    matches.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+    matches.dedup_by(|a, b| a.1 == b.1);
     match matches.len() {
         0 => Err(format!(
             "NAME_ADDRESS_UNOCCUPIED: {requested} has no current holder in this project"
         )),
-        1 => Ok(matches.remove(0)),
+        1 => {
+            let (name, worker_id) = matches.remove(0);
+            Ok(ResolvedNamedTarget { worker_id, name })
+        }
         _ => Err(format!(
             "NAME_ADDRESS_AMBIGUOUS: {requested} folds to multiple current holders"
         )),
@@ -117,6 +132,40 @@ fn resolve_ceo_holder(
     Ok(holder.worker_id.clone())
 }
 
+/// The single case-insensitive stable-address resolver shared by `sendmessage`,
+/// `default` and channel-inbound routing. `ceo` and a bare current project key
+/// both resolve through the typed CEO grant. Unknown non-name text returns
+/// `None` so each caller can apply its own raw-target rule.
+pub(crate) fn resolve_named_target(
+    state: &crate::server::state::State,
+    project_scope: &str,
+    project_key: &str,
+    address: &str,
+) -> Result<Option<ResolvedNamedTarget>, String> {
+    if address.eq_ignore_ascii_case("ceo") || address.eq_ignore_ascii_case(project_key) {
+        let worker_id = resolve_ceo_holder(state, project_scope)?;
+        let name = state
+            .ceo_grant
+            .as_ref()
+            .map(|grant| grant.name.clone())
+            .unwrap_or_else(|| "ceo".to_owned());
+        return Ok(Some(ResolvedNamedTarget { worker_id, name }));
+    }
+    let requested = if is_known_name(address) {
+        address.to_owned()
+    } else if let Some((project, name)) = parse_project_qualified_ci(address) {
+        if !project.eq_ignore_ascii_case(project_key) {
+            return Err(format!(
+                "CROSS_PROJECT_ADDRESS_UNSUPPORTED: {project} is not the current project key {project_key}"
+            ));
+        }
+        name
+    } else {
+        return Ok(None);
+    };
+    resolve_name_case_insensitive(state, project_scope, &requested).map(Some)
+}
+
 /// Resolve one address string (explicit or default) to a deliverable local
 /// worker. Project scope, name and `ceo` matching are all case-insensitive.
 fn resolve_address(
@@ -126,17 +175,9 @@ fn resolve_address(
     address: &str,
 ) -> Result<String, String> {
     let project_scope = route.project_scope_id.as_str();
-    let worker_id = if address.eq_ignore_ascii_case("ceo") {
-        resolve_ceo_holder(state, project_scope)?
-    } else if let Some((project, name)) = parse_project_qualified_ci(address) {
-        if !project.eq_ignore_ascii_case(project_key) {
-            return Err(format!(
-                "CROSS_PROJECT_ADDRESS_UNSUPPORTED: {project} is not the current project key {project_key}"
-            ));
-        }
-        resolve_name_case_insensitive(state, project_scope, &name)?
-    } else {
-        resolve_name_case_insensitive(state, project_scope, address)?
+    let worker_id = match resolve_named_target(state, project_scope, project_key, address)? {
+        Some(target) => target.worker_id,
+        None => resolve_name_case_insensitive(state, project_scope, address)?.worker_id,
     };
     // The resolved target must be reachable on this route scope; an unresolved
     // binding is an explicit non-deliverable result, not a silent success.
@@ -151,6 +192,7 @@ pub(crate) fn resolve_channel_inbound_target(
     server: &Server,
     state: &crate::server::state::State,
     channel: &str,
+    channel_instance: &str,
     conversation: &str,
     body: &str,
     explicit_to: &str,
@@ -179,12 +221,17 @@ pub(crate) fn resolve_channel_inbound_target(
         });
     }
 
-    let default = crate::server::conversation_default::lookup_default(state, channel, conversation)
-        .cloned()
-        .ok_or_else(|| {
-            "CHANNEL_DEFAULT_MISSING: this conversation has no default target; send an explicit [address]"
-                .to_string()
-        })?;
+    let default = crate::server::conversation_default::lookup_default(
+        state,
+        channel,
+        channel_instance,
+        conversation,
+    )
+    .cloned()
+    .ok_or_else(|| {
+        "CHANNEL_DEFAULT_MISSING: this conversation has no default target; send an explicit [address]"
+            .to_string()
+    })?;
     let to = resolve_address(state, &route, &project_key, &default.target_address)?;
     Ok(ResolvedInbound {
         to,

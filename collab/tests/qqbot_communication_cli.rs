@@ -92,6 +92,16 @@ fn qqbot_new_send_syntax_is_accepted_by_the_parser() {
 }
 
 #[test]
+fn qqbot_new_send_syntax_must_not_be_rejected_as_missing_subject() {
+    let output = run(&["sendmessage", "Bob", "--content", "hello"]);
+    let err = stderr(&output);
+    assert!(
+        !err.contains("MESSAGE_SUBJECT_REQUIRED"),
+        "the documented sendmessage form must not need --subject: {err}"
+    );
+}
+
+#[test]
 fn qqbot_bare_default_without_conversation_context_is_rejected() {
     let output = run(&["default", "project.Bob"]);
     assert!(!output.status.success());

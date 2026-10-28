@@ -602,6 +602,7 @@ fn dispatch_with_route_context_bound(
             worker_id,
             token,
             channel,
+            channel_instance,
             conversation,
             target_address,
         } => handle_default_set(
@@ -609,13 +610,15 @@ fn dispatch_with_route_context_bound(
             worker_id,
             token,
             channel,
+            channel_instance,
             conversation,
             target_address,
         ),
         Req::DefaultShow {
             channel,
+            channel_instance,
             conversation,
-        } => handle_default_show(server, channel, conversation),
+        } => handle_default_show(server, channel, channel_instance, conversation),
         Req::Workers => {
             record_ordinary_peer_presence_edges(server, None);
             let (workers_rec, tasks_map, msgs_map, keepalives_map, role_briefs) = {

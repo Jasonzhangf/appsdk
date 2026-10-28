@@ -59,6 +59,26 @@ fn removed_identity_selectors_are_rejected() {
 }
 
 #[test]
+fn sendmessage_positional_address_before_content_parses_exact_target_and_body() {
+    let cli = Cli::try_parse_from(["collab", "sendmessage", "Bob", "--content", "hello"])
+        .expect("documented sendmessage form must parse");
+    let Cmd::Send {
+        to,
+        content,
+        subject,
+        body,
+        ..
+    } = cli.cmd
+    else {
+        panic!("expected the send command");
+    };
+    assert_eq!(to, None);
+    assert_eq!(content.as_deref(), Some("hello"));
+    assert_eq!(subject, None);
+    assert_eq!(body, vec!["Bob".to_owned()]);
+}
+
+#[test]
 fn cli_rejects_managed_subagent_start_before_resolving_collab_context() {
     let error = run(Cmd::Subagent {
         command: subagent::Action::Start {
@@ -1179,7 +1199,8 @@ mod qqbot_lifecycle_tests {
         conversation: &str,
         target_address: &str,
     ) -> u64 {
-        let key = conversation_default_key(channel, conversation);
+        let channel_instance = "qqbot@host";
+        let key = conversation_default_key(channel, channel_instance, conversation);
         let revision = state
             .conversation_defaults
             .get(&key)
@@ -1187,6 +1208,7 @@ mod qqbot_lifecycle_tests {
             .unwrap_or(0);
         let default = ConversationDefault {
             channel: channel.to_owned(),
+            channel_instance: channel_instance.to_owned(),
             conversation: conversation.to_owned(),
             project_scope: "/project".into(),
             target_address: target_address.to_owned(),
@@ -1201,20 +1223,20 @@ mod qqbot_lifecycle_tests {
     fn per_conversation_default_is_isolated_and_switched_atomically() {
         let mut state = new_state();
         // Two QQ conversations for two external users start with no default.
-        assert!(lookup_default(&state, "qqbot", "u1:session").is_none());
-        assert!(lookup_default(&state, "qqbot", "u2:session").is_none());
+        assert!(lookup_default(&state, "qqbot", "qqbot@host", "u1:session").is_none());
+        assert!(lookup_default(&state, "qqbot", "qqbot@host", "u2:session").is_none());
 
         // User 1 sets its default to Alice; user 2's default must be unaffected.
         default_for(&mut state, "qqbot", "u1:session", "project.Alice");
         default_for(&mut state, "qqbot", "u2:session", "project.Bob");
         assert_eq!(
-            lookup_default(&state, "qqbot", "u1:session")
+            lookup_default(&state, "qqbot", "qqbot@host", "u1:session")
                 .unwrap()
                 .target_address,
             "project.Alice"
         );
         assert_eq!(
-            lookup_default(&state, "qqbot", "u2:session")
+            lookup_default(&state, "qqbot", "qqbot@host", "u2:session")
                 .unwrap()
                 .target_address,
             "project.Bob"
@@ -1223,13 +1245,13 @@ mod qqbot_lifecycle_tests {
         // Switching user 1 to Jenny must not disturb user 2.
         default_for(&mut state, "qqbot", "u1:session", "project.Jenny");
         assert_eq!(
-            lookup_default(&state, "qqbot", "u1:session")
+            lookup_default(&state, "qqbot", "qqbot@host", "u1:session")
                 .unwrap()
                 .target_address,
             "project.Jenny"
         );
         assert_eq!(
-            lookup_default(&state, "qqbot", "u2:session")
+            lookup_default(&state, "qqbot", "qqbot@host", "u2:session")
                 .unwrap()
                 .target_address,
             "project.Bob",
@@ -1237,13 +1259,13 @@ mod qqbot_lifecycle_tests {
         );
         // Each accepted switch advances its own revision monotonically.
         assert_eq!(
-            lookup_default(&state, "qqbot", "u1:session")
+            lookup_default(&state, "qqbot", "qqbot@host", "u1:session")
                 .unwrap()
                 .revision,
             2
         );
         assert_eq!(
-            lookup_default(&state, "qqbot", "u2:session")
+            lookup_default(&state, "qqbot", "qqbot@host", "u2:session")
                 .unwrap()
                 .revision,
             1
@@ -1362,7 +1384,7 @@ mod qqbot_lifecycle_tests {
             replayed.apply(&event);
         }
         assert_eq!(
-            lookup_default(&replayed, "qqbot", "u1:session")
+            lookup_default(&replayed, "qqbot", "qqbot@host", "u1:session")
                 .unwrap()
                 .target_address,
             "project.Bob"

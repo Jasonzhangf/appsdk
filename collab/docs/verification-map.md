@@ -167,14 +167,19 @@ separate from that evidence.
   fields, authorized-root file reads, platform upload and an explicit
   sent/failed/uncertain result without blind replay.
 - `qqbot_communication_cli` is the socket-free public CLI contract:
-  `sendmessage <address> --content` parses, `--content` and a positional body
-  are mutually exclusive, a legacy positional body still requires `--subject`,
-  `list` is recognized, and a plain terminal `default` without channel
-  context is rejected with `CONVERSATION_CONTEXT_MISSING`.
+  `sendmessage <address> --content` parses and is not rejected as a missing
+  subject, `--content` and a positional body are mutually exclusive, a legacy
+  positional body still requires `--subject`, `list` is recognized, and a plain
+  terminal `default` without channel context is rejected with
+  `CONVERSATION_CONTEXT_MISSING`. The daemon-backed
+  `new_send_syntax_and_legacy_send_reach_exact_target` case reuses the existing
+  public send/receive path.
 - `crate::tests::qqbot_lifecycle_tests` covers per-conversation default
-  isolation (switching A never moves B), platform event idempotency (the first
-  durable message wins), and the outbound attachment boundary (must be an
-  in-root readable regular file).
+  isolation (switching A never moves B and two channel instances with the same
+  conversation key stay independent across snapshot replay), platform event
+  idempotency (the first durable message wins while distinct event IDs and
+  conversations stay separate), and the outbound attachment boundary (must be
+  an in-root readable regular file).
 - `server::peer_tests::qqbot_leading_address_*` and
   `server::peer_tests::qqbot_mid_body_*` cover the leading `[project.name]` /
   `[ceo]` routing increment: an explicit address wins, a mid-body bracket stays
@@ -185,10 +190,19 @@ separate from that evidence.
 - `server::peer_tests::qqbot_default_switch_is_isolated_and_failed_switch_keeps_the_old_target`
   exercises the real `handle_default_set` owner: two conversations stay
   isolated and an unresolved switch preserves the previous target.
+  `qqbot_two_channel_instances_with_same_conversation_switch_independently_and_replay`
+  proves the instance part of the durable key, and
+  `qqbot_bare_project_default_routes_unaddressed_inbound_to_typed_ceo` proves a
+  persisted bare project key re-resolves through the shared typed CEO owner.
+- `server::peer_tests::qqbot_send_fold_conflict_is_ambiguous_without_a_message`
+  extends the case-folded conflict fixture to `sendmessage` and `default`: both
+  reject with `NAME_ADDRESS_AMBIGUOUS` and write no message or default.
 - `server::channel_envelope::tests` cover inbound attachment staging: a path is
   published only after a complete save under the authorized root, unsafe
-  platform ids/names are turned into safe path segments, and a failed save
-  reports the display name without publishing a path.
+  platform ids/names are turned into safe path segments, two conversations with
+  one platform ID get separate destinations, sanitized/truncated ID collisions
+  allocate siblings instead of overwriting, a repeated save reuses the original
+  bytes, and a failed save reports the display name without publishing a path.
 - `server::adapters::qqbot::tests` cover the outbound boundary: a text-only
   message needs no attachment root, a path mentioned in the body is never read,
   and only a typed attachment is resolved inside the authorized root.

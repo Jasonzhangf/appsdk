@@ -675,7 +675,8 @@ pub(crate) enum Cmd {
         /// Track an obligation: reply once the delegated work is complete.
         #[arg(long, conflicts_with_all = ["reply_required", "unknown_sender"])]
         reply_on_completion: bool,
-        #[arg(trailing_var_arg = true)]
+        /// Legacy positional body. The new `<address> --content <正文>` form
+        /// keeps the address here for the send owner to normalize.
         body: Vec<String>,
     },
     /// Set or inspect the default delivery target for one external conversation
@@ -690,6 +691,10 @@ pub(crate) enum Cmd {
         /// together with `--conversation`; a plain terminal has neither.
         #[arg(long)]
         channel: Option<String>,
+        /// Distinct connection of that channel family, e.g. `qqbot@host`.
+        /// Defaults to `--channel` for a single-instance channel.
+        #[arg(long)]
+        channel_instance: Option<String>,
         /// Stable external conversation key, e.g. `<user>:<session>`.
         #[arg(long)]
         conversation: Option<String>,

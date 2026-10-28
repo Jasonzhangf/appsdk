@@ -547,6 +547,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
         Cmd::Default {
             target,
             channel,
+            channel_instance,
             conversation,
         } => {
             let (Some(channel), Some(conversation)) = (channel, conversation) else {
@@ -556,6 +557,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     "CONVERSATION_CONTEXT_MISSING: default requires --channel and --conversation from the active channel session"
                 );
             };
+            let channel_instance = channel_instance.unwrap_or_else(|| channel.clone());
             let scope = Scope::resolve()?;
             match target {
                 None => {
@@ -563,6 +565,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                         &scope.sock_path(),
                         &Req::DefaultShow {
                             channel,
+                            channel_instance,
                             conversation,
                         },
                         Some(cli_project_context(&scope.root)?),
@@ -578,6 +581,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                             worker_id: ident.worker_id.clone(),
                             token: ident.token.clone(),
                             channel,
+                            channel_instance,
                             conversation,
                             target_address,
                         },

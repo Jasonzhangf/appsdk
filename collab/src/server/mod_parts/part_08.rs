@@ -173,63 +173,26 @@ fn resolve_send_name_address(
     let current_key = canonical_project_key(&server.root).ok_or_else(|| {
         "NAME_ADDRESS_SCOPE_MISSING: current project key is unavailable".to_string()
     })?;
-    // `ceo` and a bare current project key both resolve through the typed CEO
-    // grant. A fixed-pool name, a display label or the project master never
-    // substitutes for that grant.
-    if target.eq_ignore_ascii_case("ceo") || target.eq_ignore_ascii_case(&current_key) {
-        let worker_id = resolve_ceo_holder(state, project_scope)?;
-        authoritative_send_binding(state, &route, &worker_id).map_err(str::to_owned)?;
-        let name = state
-            .ceo_grant
-            .as_ref()
-            .map(|grant| grant.name.clone())
-            .unwrap_or_else(|| "ceo".to_owned());
-        return Ok((
-            worker_id,
-            Some(name_mailbox::MailboxNameAddress {
-                project_scope: project_scope.into(),
-                name,
-            }),
-        ));
-    }
-    let (qualified_project, requested_name) = if is_known_name(&target) {
-        (None, target.clone())
-    } else {
-        // Project-qualified addresses (`<project>.<name>`) are parsed from the
-        // right by validating the suffix as a legal stable name, so a project
-        // key or name containing dots is never split naively.
-        match parse_project_qualified_ci(&target) {
-            Some((project, name)) => (Some(project), name),
-            None => return Ok((target, None)),
+    // `sendmessage`, `default` and channel-inbound routing share one address
+    // owner. It resolves `ceo`/bare project keys through the typed grant and
+    // rejects case-folded ambiguity instead of selecting the first holder.
+    match resolve_named_target(state, project_scope, &current_key, &target)? {
+        Some(resolved) => {
+            authoritative_send_binding(state, &route, &resolved.worker_id)
+                .map_err(str::to_owned)?;
+            Ok((
+                resolved.worker_id,
+                Some(name_mailbox::MailboxNameAddress {
+                    project_scope: project_scope.into(),
+                    name: resolved.name,
+                }),
+            ))
         }
-    };
-    if let Some(project_key) = qualified_project {
-        if !project_key.eq_ignore_ascii_case(&current_key) {
-            return Err(format!(
-                "CROSS_PROJECT_ADDRESS_UNSUPPORTED: {project_key} is not the current project key {current_key}"
-            ));
-        }
+        // Raw worker IDs keep their legacy direct-send meaning. Conversation
+        // defaults reject them because inbound has no stable way to re-resolve
+        // an arbitrary ID.
+        None => Ok((target, None)),
     }
-    let (canonical_name, worker_id) = state
-        .name_occupancies
-        .get(project_scope)
-        .and_then(|names| {
-            names
-                .iter()
-                .find(|(name, _)| name.eq_ignore_ascii_case(&requested_name))
-                .map(|(name, holder)| (name.clone(), holder.worker_id.clone()))
-        })
-        .ok_or_else(|| {
-            format!("NAME_ADDRESS_UNOCCUPIED: {requested_name} has no current holder in this project")
-        })?;
-    authoritative_send_binding(state, &route, &worker_id).map_err(str::to_owned)?;
-    Ok((
-        worker_id,
-        Some(name_mailbox::MailboxNameAddress {
-            project_scope: project_scope.into(),
-            name: canonical_name,
-        }),
-    ))
 }
 
 /// Parse `<project>.<name>` only when the rightmost segment is a legal stable
@@ -339,6 +302,7 @@ pub(crate) fn handle_channel_inbound(
             server,
             &st,
             &envelope.source_channel,
+            &envelope.channel_instance,
             &envelope.external_conversation,
             &body,
             &to,
@@ -741,8 +705,13 @@ fn handle_send_with_task_policy(
         last_wake_attempt_ms: 0,
         retry_attempted: false,
     };
+    // A typed channel event is deduplicated only by its platform event
+    // identity (checked above). The ordinary body shortcut must not fold two
+    // distinct platform events, or one conversation's reply route would be
+    // reused for another event with the same text.
     if let Some(existing) = st.msgs.values().find(|m| {
-        m.from == from
+        channel_envelope.is_none()
+            && m.from == from
             && m.to == to
             && m.mtype == mtype
             && m.subject == msg.subject

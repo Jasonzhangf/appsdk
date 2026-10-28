@@ -43,7 +43,8 @@ pub struct State {
     pub mailbox_name_addresses: HashMap<String, crate::server::name_mailbox::MailboxNameAddress>,
     pub mailbox_handoffs: Vec<crate::server::name_mailbox::MailboxHandoff>,
     /// Per-external-conversation default delivery target, keyed by
-    /// `<channel>:<conversation>`. Control state only; never grants identity.
+    /// `<channel>:<channel-instance>:<conversation>`. Control state only;
+    /// never grants identity.
     pub conversation_defaults:
         std::collections::HashMap<String, crate::server::conversation_default::ConversationDefault>,
     /// Typed channel envelopes keyed by the Collab inbound message id.

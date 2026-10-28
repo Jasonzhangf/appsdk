@@ -1040,8 +1040,10 @@ pub enum Req {
     DefaultSet {
         worker_id: String,
         token: String,
-        /// Channel instance, e.g. `qqbot`.
+        /// Channel family, e.g. `qqbot`.
         channel: String,
+        /// Distinct channel connection, e.g. `qqbot@host`.
+        channel_instance: String,
         /// Stable external conversation key, e.g. `<user-id>:<session-id>`.
         conversation: String,
         /// Project-qualified or stable-name target address.
@@ -1050,6 +1052,7 @@ pub enum Req {
     /// Read the default delivery target for one external conversation.
     DefaultShow {
         channel: String,
+        channel_instance: String,
         conversation: String,
     },
     PeerLifecycle {

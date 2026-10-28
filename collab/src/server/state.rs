@@ -252,6 +252,14 @@ pub struct NotificationSubscription {
     pub updated_ms: i64,
     #[serde(default)]
     pub status_reason: Option<String>,
+    /// Standing project-patrol episode start. Legacy subscriptions decode it
+    /// as unknown and must earn a fresh trusted interval.
+    #[serde(default)]
+    pub patrol_idle_since_ms: Option<i64>,
+    /// Last durable project-patrol push committed for this idle episode. It
+    /// advances only after the message and scheduling events commit.
+    #[serde(default)]
+    pub patrol_last_push_ms: i64,
 }
 
 pub fn default_repeat_count() -> u32 {

@@ -110,3 +110,75 @@ fn master_status_without_registered_cwd_fails_closed_before_daemon_call() {
 
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn master_status_workspace_uses_registered_canonical_project() {
+    let root = temp_root("workspace-root");
+    let project_root = root.join("project");
+    let state_root = root.join("host-state");
+    std::fs::create_dir_all(&project_root).unwrap();
+    register_route(&project_root, &state_root);
+    let canonical_root = project_root
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    // A linked worktree or symlinked caller path is not the registered root.
+    let caller_root = root.join("linked-worktree");
+    std::os::unix::fs::symlink(&project_root, &caller_root).unwrap();
+
+    let socket = state_root.join("server.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let expected_root = canonical_root.clone();
+    let responder = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(&stream)
+            .read_line(&mut line)
+            .unwrap();
+        let request: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(request["op"], "MasterStatus");
+        assert_eq!(
+            request["project_context"]["canonical_root"], expected_root,
+            "the registered project root must win over the caller path"
+        );
+        let response = json!({
+            "ok": true,
+            "master": {
+                "worker_id": "master-peer",
+                "workspace": {
+                    "project_root": expected_root,
+                    "activity": "idle",
+                    "idle_since_ms": 1_000,
+                    "idle_duration_ms": 60_000,
+                    "observed_ms": 61_000
+                }
+            }
+        });
+        stream
+            .write_all(serde_json::to_string(&response).unwrap().as_bytes())
+            .unwrap();
+        request
+    });
+
+    let output = cli_output(&caller_root, &state_root);
+    responder.join().unwrap();
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        result["master"]["workspace"]["project_root"],
+        canonical_root
+    );
+    assert_ne!(
+        result["master"]["workspace"]["project_root"],
+        caller_root.to_string_lossy().as_ref(),
+        "the CLI must not substitute the caller path for the bound project root"
+    );
+
+    std::fs::remove_dir_all(root).unwrap();
+}

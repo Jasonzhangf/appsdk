@@ -1,4 +1,5 @@
 use super::name_state::{AgentActivity, AgentActivityRecord, AgentPresence, AgentPresenceRecord};
+use super::observation_epoch::first_observation_since_start;
 use super::state::Event;
 use super::{GlobalState, Server};
 use crate::client::adapters::tmux::{self, AgentObservation};
@@ -61,19 +62,51 @@ pub(super) fn tick_with_observer(
             reason: observed.reason.clone(),
             observed_ms: now,
         };
+        let old_activity = {
+            let state = server.state.lock().unwrap();
+            state
+                .agent_activity
+                .get(scope.as_str())
+                .and_then(|workers| workers.get(&worker.id))
+                .cloned()
+        };
+        let activity_kind = match observed.activity {
+            tmux::AgentActivity::Busy => AgentActivity::Busy,
+            tmux::AgentActivity::Idle => AgentActivity::Idle,
+            tmux::AgentActivity::WaitingUser => AgentActivity::WaitingUser,
+            tmux::AgentActivity::Unknown => AgentActivity::Unknown,
+        };
+        let positive_online_idle =
+            presence.presence == AgentPresence::Online && activity_kind == AgentActivity::Idle;
+        let idle_since_ms = if positive_online_idle {
+            // A trusted interval must not survive the observation boundary
+            // after a daemon restart: the first live sample starts a fresh one.
+            let is_first =
+                first_observation_since_start(&server.root, &format!("activity:{}", worker.id));
+            match old_activity.as_ref() {
+                Some(old)
+                    if !is_first
+                        && old.session_id == presence.session_id
+                        && old.activity == AgentActivity::Idle
+                        && old.observed_ms <= now
+                        && old.idle_since_ms.is_some_and(|start| now >= start) =>
+                {
+                    old.idle_since_ms
+                }
+                _ => Some(now),
+            }
+        } else {
+            None
+        };
         let activity = AgentActivityRecord {
             project_scope: scope.as_str().into(),
             worker_id: worker.id.clone(),
             session_id: session.into(),
-            activity: match observed.activity {
-                tmux::AgentActivity::Busy => AgentActivity::Busy,
-                tmux::AgentActivity::Idle => AgentActivity::Idle,
-                tmux::AgentActivity::WaitingUser => AgentActivity::WaitingUser,
-                tmux::AgentActivity::Unknown => AgentActivity::Unknown,
-            },
+            activity: activity_kind,
             background: observed.background,
             reason: observed.reason,
             observed_ms: now,
+            idle_since_ms,
         };
         let mut state = server.state.lock().unwrap();
         let current = state
@@ -105,15 +138,12 @@ pub(super) fn tick_with_observer(
             }
             events.push(Event::AgentPresenceObserved { presence });
         }
-        let old_activity = state
-            .agent_activity
-            .get(scope.as_str())
-            .and_then(|workers| workers.get(&worker.id));
-        if old_activity.is_none_or(|old| {
+        if old_activity.as_ref().is_none_or(|old| {
             old.session_id != activity.session_id
                 || old.activity != activity.activity
                 || old.background != activity.background
                 || old.reason != activity.reason
+                || old.idle_since_ms != activity.idle_since_ms
         }) {
             events.push(Event::AgentActivityObserved { activity });
         }

@@ -2,12 +2,20 @@
 /// event, subject, and interval are ensured idempotently; every other
 /// subscription keeps the ordinary finite-schedule semantics.
 const PROJECT_PATROL_SUBJECT: &str = "project-patrol";
-const PROJECT_PATROL_INTERVAL_MS: i64 = 900_000;
+const PROJECT_PATROL_TARGET_INTERVAL_MS: i64 = 1_500_000;
+const PROJECT_PATROL_COMPAT_INTERVAL_MS: i64 = 900_000;
+
+pub(crate) fn is_project_patrol_interval(interval_ms: Option<i64>) -> bool {
+    matches!(
+        interval_ms,
+        Some(PROJECT_PATROL_TARGET_INTERVAL_MS | PROJECT_PATROL_COMPAT_INTERVAL_MS)
+    )
+}
 
 pub(crate) fn is_exact_project_patrol(subscription: &NotificationSubscription) -> bool {
     subscription.event == "master-idle"
         && subscription.subject.as_deref() == Some(PROJECT_PATROL_SUBJECT)
-        && subscription.interval_ms == Some(PROJECT_PATROL_INTERVAL_MS)
+        && is_project_patrol_interval(subscription.interval_ms)
 }
 
 /// The current master's one standing project patrol record.
@@ -236,9 +244,8 @@ fn handle_notification_subscribe(
     }
     if event == "master-idle"
         && subject.as_deref() == Some(PROJECT_PATROL_SUBJECT)
-        && interval_ms == Some(crate::board_patrol_policy::BOARD_IDLE_PATROL_INTERVAL_MS)
-        && trigger_ms.is_none()
-        && trigger_times_ms.is_empty()
+        && is_project_patrol_interval(interval_ms)
+        && trigger_ms.is_none() && trigger_times_ms.is_empty()
         && (1..=crate::server::state::MAX_NOTIFICATION_REPEATS).contains(&repeat_count)
     {
         let existing =
@@ -250,7 +257,10 @@ fn handle_notification_subscribe(
             if was_cancelled {
                 existing.status = "armed".into();
                 existing.status_reason = None;
-                existing.trigger_ms = Some(now.saturating_add(PROJECT_PATROL_INTERVAL_MS));
+                existing.interval_ms = interval_ms;
+                existing.trigger_ms = Some(now.saturating_add(
+                    interval_ms.unwrap_or(PROJECT_PATROL_TARGET_INTERVAL_MS),
+                ));
                 existing.repeat_count = existing
                     .repeat_count
                     .max(existing.fired_count.saturating_add(100));
@@ -293,8 +303,10 @@ fn handle_notification_subscribe(
         if trigger_ms.is_some() || !trigger_times_ms.is_empty() {
             return Resp::err("master-idle requires a recurring interval, not an absolute trigger");
         }
-        if !matches!(interval_ms, Some(900_000 | 3_600_000)) {
-            return Resp::err("master-idle interval must be exactly 900000 or 3600000 ms");
+        if !is_project_patrol_interval(interval_ms) && !matches!(interval_ms, Some(3_600_000)) {
+            return Resp::err(
+                "master-idle interval must be project-patrol 1500000, compatibility 900000, or 3600000 ms",
+            );
         }
         if repeat_count == 0 || repeat_count > crate::server::state::MAX_NOTIFICATION_REPEATS {
             return Resp::err("repeat_count must be between 1 and 100");
@@ -359,6 +371,8 @@ fn handle_notification_subscribe(
         created_ms: now,
         updated_ms: now,
         status_reason: None,
+        patrol_idle_since_ms: None,
+        patrol_last_push_ms: 0,
     };
     if let Err(error) = server.commit_locked(
         &mut state,
@@ -511,6 +525,14 @@ fn handle_notification_status(server: &Server, worker_id: String, token: String)
                 "method": subscription.method,
                 "target": subscription.target,
                 "interval_ms": subscription.interval_ms,
+                "target_interval_ms": PROJECT_PATROL_TARGET_INTERVAL_MS,
+                "cadence_runtime_gap": if subscription.interval_ms
+                    == Some(PROJECT_PATROL_COMPAT_INTERVAL_MS)
+                {
+                    json!("PATROL_CADENCE_RUNTIME_GAP")
+                } else {
+                    serde_json::Value::Null
+                },
                 "reason": subscription.status_reason,
                 "updated_ms": subscription.updated_ms,
                 "eligibility": eligibility,
@@ -525,7 +547,9 @@ fn handle_notification_status(server: &Server, worker_id: String, token: String)
                 "subject": PROJECT_PATROL_SUBJECT,
                 "method": serde_json::Value::Null,
                 "target": serde_json::Value::Null,
-                "interval_ms": PROJECT_PATROL_INTERVAL_MS,
+                "interval_ms": PROJECT_PATROL_TARGET_INTERVAL_MS,
+                "target_interval_ms": PROJECT_PATROL_TARGET_INTERVAL_MS,
+                "cadence_runtime_gap": serde_json::Value::Null,
                 "reason": serde_json::Value::Null,
                 "updated_ms": serde_json::Value::Null,
                 "eligibility": eligibility,
@@ -965,6 +989,8 @@ fn handle_goal_schedule_reconcile(
             created_ms: now,
             updated_ms: now,
             status_reason: None,
+            patrol_idle_since_ms: None,
+            patrol_last_push_ms: 0,
         };
         events.push(Event::NotificationSubscribed {
             subscription: subscription.clone(),

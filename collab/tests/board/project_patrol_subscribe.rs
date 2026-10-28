@@ -8,6 +8,21 @@ const PATROL_SUBSCRIBE: [&str; 12] = [
     "--subject",
     "project-patrol",
     "--every-ms",
+    "1500000",
+    "--repeat-count",
+    "100",
+    "--ttl-seconds",
+    "604800",
+];
+
+const COMPAT_PATROL_SUBSCRIBE: [&str; 12] = [
+    "notify",
+    "subscribe",
+    "--event",
+    "master-idle",
+    "--subject",
+    "project-patrol",
+    "--every-ms",
     "900000",
     "--repeat-count",
     "100",
@@ -47,6 +62,10 @@ fn subscribe_patrol(fixture: &AppFixture) -> Value {
 
 fn subscribe_patrol_on(fixture: &AppFixture, thread: &str) -> Value {
     fixture.run_public(&PATROL_SUBSCRIBE, thread)
+}
+
+fn subscribe_compat_patrol(fixture: &AppFixture) -> Value {
+    fixture.run_public(&COMPAT_PATROL_SUBSCRIBE, THREAD_A)
 }
 
 fn record_project_progress(fixture: &AppFixture) {
@@ -126,9 +145,7 @@ fn project_patrol_subscriptions(status: &Value) -> Vec<Value> {
         .into_iter()
         .flatten()
         .filter(|subscription| {
-            subscription["event"] == "master-idle"
-                && subscription["subject"] == "project-patrol"
-                && subscription["interval_ms"] == 900_000
+            subscription["event"] == "master-idle" && subscription["subject"] == "project-patrol"
         })
         .cloned()
         .collect()
@@ -164,7 +181,7 @@ fn current_master_exact_project_patrol_subscribe_is_idempotent() {
     assert_eq!(first["subscription"]["worker_id"], master_id);
     assert_eq!(first["subscription"]["event"], "master-idle");
     assert_eq!(first["subscription"]["subject"], "project-patrol");
-    assert_eq!(first["subscription"]["interval_ms"], 900000);
+    assert_eq!(first["subscription"]["interval_ms"], 1_500_000);
     assert_eq!(first["subscription"]["status"], "armed");
     assert_ne!(first["deduplicated"], true, "{first}");
 
@@ -180,12 +197,31 @@ fn current_master_exact_project_patrol_subscribe_is_idempotent() {
         .filter(|subscription| {
             subscription["event"] == "master-idle"
                 && subscription["subject"] == "project-patrol"
-                && subscription["interval_ms"] == 900000
+                && subscription["interval_ms"] == 1_500_000
         })
         .collect();
     assert_eq!(patrol.len(), 1, "one armed patrol resource: {status}");
     assert_eq!(patrol[0]["id"], first_id);
     assert_eq!(patrol[0]["status"], "armed");
+}
+
+#[test]
+fn compatibility_project_patrol_projects_runtime_cadence_gap() {
+    let fixture = AppFixture::new();
+    restore_master(&fixture);
+
+    let compat = subscribe_compat_patrol(&fixture);
+    assert_eq!(compat["subscription"]["interval_ms"], 900_000, "{compat}");
+
+    let status = fixture.run_public(&["notify", "status"], THREAD_A);
+    let patrol = &status["project_patrol"];
+    assert_eq!(patrol["status"], "armed", "{status}");
+    assert_eq!(patrol["interval_ms"], 900_000, "{status}");
+    assert_eq!(patrol["target_interval_ms"], 1_500_000, "{status}");
+    assert_eq!(
+        patrol["cadence_runtime_gap"], "PATROL_CADENCE_RUNTIME_GAP",
+        "{status}"
+    );
 }
 
 #[test]
@@ -310,7 +346,12 @@ fn current_master_cancel_projects_status_repeats_idempotently_and_exact_subscrib
     assert_eq!(projection["reason"], reason, "{status}");
     assert_eq!(projection["event"], "master-idle", "{status}");
     assert_eq!(projection["subject"], "project-patrol", "{status}");
-    assert_eq!(projection["interval_ms"], 900_000, "{status}");
+    assert_eq!(projection["interval_ms"], 1_500_000, "{status}");
+    assert_eq!(projection["target_interval_ms"], 1_500_000, "{status}");
+    assert!(
+        projection["cadence_runtime_gap"].is_null(),
+        "target cadence must not report a runtime gap: {status}"
+    );
     assert_eq!(projection["eligibility"]["eligible"], true, "{status}");
     assert!(
         projection["eligibility"]["progress_revision"]

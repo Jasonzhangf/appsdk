@@ -9,6 +9,7 @@ pub(crate) mod name_state;
 pub(crate) mod name_stewardship;
 pub mod notification_contract;
 pub mod notification_state;
+mod observation_epoch;
 pub(crate) mod operation_journal;
 mod peer_lifecycle;
 pub mod presence;

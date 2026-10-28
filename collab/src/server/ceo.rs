@@ -1122,13 +1122,22 @@ impl ProjectRuntimeManager {
         for root in &roots {
             let runtimes = self.ceo_project_runtimes(&root.to_string_lossy(), None)?;
             if runtimes.is_empty() {
-                projects.push(json!({"project":root,"registered":false,"master":null}));
+                projects.push(json!({
+                    "project":root,
+                    "registered":false,
+                    "master":null,
+                    "workspace": unknown_workspace_view(Some(
+                        root.to_string_lossy().into_owned(),
+                    )),
+                }));
                 continue;
             }
             for runtime in runtimes {
                 let state = runtime.state.lock().unwrap();
                 let master = current_master_holder(&runtime, &state).map_err(Resp::err)?;
                 let scope = server_route_scope(&runtime, &state).map_err(Resp::err)?;
+                let workspace =
+                    workspace_idle_view(&runtime, &state, master.as_deref(), now_ms());
                 let mut counts = std::collections::BTreeMap::<String, usize>::new();
                 let mut tasks = Vec::new();
                 for task in state.tasks.values().filter(|t| {
@@ -1155,7 +1164,7 @@ impl ProjectRuntimeManager {
                     .filter(|o| o.from_ceo)
                     .cloned()
                     .collect::<Vec<_>>();
-                projects.push(json!({"project":root,"app_scope_id":scope.as_ref().map(|s|s.app_scope_id.as_str()),"registered":true,"master":master,"tasks":tasks,"task_counts":counts,"pending_replies":pending}));
+                projects.push(json!({"project":root,"app_scope_id":scope.as_ref().map(|s|s.app_scope_id.as_str()),"registered":true,"master":master,"workspace":workspace,"tasks":tasks,"task_counts":counts,"pending_replies":pending}));
             }
         }
         let operations = self

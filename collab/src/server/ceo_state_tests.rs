@@ -523,3 +523,92 @@ fn ceo_promote_guidance_preserves_user_content_and_reports_partial_failure() {
         status.error
     );
 }
+
+#[test]
+fn ceo_progress_projects_expose_canonical_master_workspace_idle() {
+    let (server, root) = super::peer_tests::test_server();
+    let transport = super::peer_tests::test_appserver_transport("thread-master");
+    let app = crate::identity::AppServerId::new("appserver-cli").unwrap();
+    let cwd = server.root.display().to_string();
+    let registered = super::peer_tests::seed_committed_owner(
+        &server,
+        "master",
+        "token-master",
+        &transport,
+        &cwd,
+        Some(app.clone()),
+    );
+    assert!(registered.ok, "master registration failed: {registered:?}");
+    super::commit_current_thread_route_for_runtime(&server, &server, "master", &cwd, Some(&app))
+        .expect("master native thread route must commit");
+    super::restore_registered_peer_default_leases(&server);
+    let promoted = super::handle_master_promote(
+        &server,
+        "master".into(),
+        "token-master".into(),
+        "user-approved".into(),
+    );
+    assert!(promoted.ok, "master promotion failed: {promoted:?}");
+
+    let scope =
+        super::GlobalState::canonical_project_scope(&server.root).expect("canonical project scope");
+    let session = server
+        .state
+        .lock()
+        .unwrap()
+        .workers
+        .get("master")
+        .and_then(|worker| worker.transport.as_ref())
+        .and_then(|transport| transport.session_id.clone())
+        .expect("master transport session");
+    let now = super::now_ms();
+    server.commit(&[
+        Event::AgentPresenceObserved {
+            presence: super::name_state::AgentPresenceRecord {
+                project_scope: scope.as_str().into(),
+                worker_id: "master".into(),
+                session_id: session.clone(),
+                presence: super::name_state::AgentPresence::Online,
+                reason: "ceo progress fixture".into(),
+                observed_ms: now,
+            },
+        },
+        Event::AgentActivityObserved {
+            activity: super::name_state::AgentActivityRecord {
+                project_scope: scope.as_str().into(),
+                worker_id: "master".into(),
+                session_id: session,
+                activity: super::name_state::AgentActivity::Idle,
+                background: false,
+                reason: "ceo progress fixture".into(),
+                observed_ms: now,
+                idle_since_ms: Some(now - 60_000),
+            },
+        },
+    ]);
+
+    let server = std::sync::Arc::new(server);
+    let manager = super::ProjectRuntimeManager::new(server.clone(), &server.host_paths)
+        .expect("build manager without a listener");
+    let response = manager
+        .ceo_progress(Some(root.display().to_string()))
+        .expect("ceo progress reads the registered project");
+    assert!(response.ok, "ceo progress failed: {response:?}");
+    let project = response.data["projects"]
+        .as_array()
+        .and_then(|projects| {
+            projects
+                .iter()
+                .find(|project| project["project"].as_str() == Some(scope.as_str()))
+        })
+        .expect("progress includes the canonical project");
+    let workspace = &project["workspace"];
+    assert_eq!(workspace["project_root"], scope.as_str());
+    assert_eq!(workspace["activity"], "idle");
+    assert_eq!(workspace["idle_since_ms"], now - 60_000);
+    assert!(
+        workspace["idle_duration_ms"].as_i64().unwrap() >= 60_000,
+        "idle duration derives from the trusted start: {workspace}"
+    );
+    std::fs::remove_dir_all(root).ok();
+}

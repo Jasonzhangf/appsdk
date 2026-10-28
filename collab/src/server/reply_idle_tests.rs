@@ -39,6 +39,7 @@ fn observe(server: &Server, worker_id: &str, activity: AgentActivity, session: &
                 background: false,
                 reason: "fixture".into(),
                 observed_ms: 1,
+                idle_since_ms: None,
             },
         },
     ]);

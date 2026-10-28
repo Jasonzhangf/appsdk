@@ -965,6 +965,8 @@ fn a_dsh_subscription_is_armed_under_the_dsh_method() {
         created_ms: 0,
         updated_ms: 0,
         status_reason: None,
+        patrol_idle_since_ms: None,
+        patrol_last_push_ms: 0,
     };
     assert_eq!(subscription.method, "dsh");
     assert!(

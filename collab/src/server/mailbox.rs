@@ -152,8 +152,6 @@ pub(super) fn automatic_retry_eligible(message: &Message, retry_delay_ms: i64, n
         || now.saturating_sub(message.last_wake_attempt_ms) >= retry_delay_ms
 }
 
-
-
 fn preview_for_text(text: &str) -> Option<String> {
     let mut preview_width = 80;
     let tail = text

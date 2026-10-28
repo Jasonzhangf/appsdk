@@ -533,14 +533,11 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::List => {
-            // `list` is the same read-only directory projection; the address
-            // fields are what make the entries copyable delivery targets.
-            let scope = Scope::resolve()?;
-            let v: serde_json::Value = client::call_with_context(
-                &scope.sock_path(),
-                &Req::Directory,
-                Some(cli_project_context(&scope.root)?),
-            )?;
+            // Host-wide read-only directory. `list` must work from any cwd and
+            // needs no project scope; its addresses and project_roots are the
+            // single delivery source for channel adapters.
+            let host = crate::scope::HostPaths::resolve()?;
+            let v: serde_json::Value = client::call(&host.socket_path(), &Req::DirectoryAll)?;
             out(&v);
             Ok(())
         }

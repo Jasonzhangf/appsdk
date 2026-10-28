@@ -39,22 +39,6 @@ fn parse_leading_address(body: &str) -> Option<LeadingAddress> {
     })
 }
 
-fn is_known_name(name: &str) -> bool {
-    name.eq_ignore_ascii_case("Jenny")
-        || name_resolution::ORDINARY_NAME_POOL
-            .iter()
-            .any(|candidate| candidate.eq_ignore_ascii_case(name))
-}
-
-/// Parse `<project>.<name>` from the right, matching the name case-insensitively.
-fn parse_project_qualified_ci(target: &str) -> Option<(String, String)> {
-    let (project, name) = target.rsplit_once('.')?;
-    if project.is_empty() || !is_known_name(name) {
-        return None;
-    }
-    Some((project.to_owned(), name.to_owned()))
-}
-
 /// One resolved stable-name target. `name` is the canonical stored spelling,
 /// never the caller's case, so a mailbox address keeps the real name.
 pub(crate) struct ResolvedNamedTarget {
@@ -151,19 +135,27 @@ pub(crate) fn resolve_named_target(
             .unwrap_or_else(|| "ceo".to_owned());
         return Ok(Some(ResolvedNamedTarget { worker_id, name }));
     }
-    let requested = if is_known_name(address) {
-        address.to_owned()
-    } else if let Some((project, name)) = parse_project_qualified_ci(address) {
+    // Project-qualified addresses are structural: split from the right so a
+    // project key may itself contain dots. The name is resolved only against
+    // current occupancies; no display-name or fixed name list participates.
+    if let Some((project, name)) = address.rsplit_once('.') {
+        if project.is_empty() || name.is_empty() {
+            return Ok(None);
+        }
         if !project.eq_ignore_ascii_case(project_key) {
             return Err(format!(
                 "CROSS_PROJECT_ADDRESS_UNSUPPORTED: {project} is not the current project key {project_key}"
             ));
         }
-        name
-    } else {
+        return resolve_name_case_insensitive(state, project_scope, name).map(Some);
+    }
+    // A registered worker ID keeps its legacy direct-send meaning. Any other
+    // bare value is a stable name and must be resolved through the occupancy
+    // owner, so a typo cannot silently become a raw target.
+    if state.workers.contains_key(address) {
         return Ok(None);
-    };
-    resolve_name_case_insensitive(state, project_scope, &requested).map(Some)
+    }
+    resolve_name_case_insensitive(state, project_scope, address).map(Some)
 }
 
 /// Resolve one address string (explicit or default) to a deliverable local

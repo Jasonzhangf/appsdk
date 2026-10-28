@@ -51,7 +51,9 @@ fn batch_wake_keeps_ids_categories_and_one_read_action_only() {
     ];
     let batch = batch_notification_text(&entries, 2);
     assert!(
-        batch.starts_with("Batch wake: message_ids=msg-a,msg-b last=user-question entries=msg-a:worker-idle:a"),
+        batch.starts_with(
+            "Batch wake: message_ids=msg-a,msg-b last=user-question entries=msg-a:worker-idle:a"
+        ),
         "{batch}"
     );
     assert!(

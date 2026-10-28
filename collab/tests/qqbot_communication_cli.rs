@@ -44,6 +44,21 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+fn run_in(dir: &std::path::Path, args: &[&str]) -> Output {
+    Command::new(binary())
+        .args(args)
+        .current_dir(dir)
+        .env("COLLAB_STATE_DIR", isolated_state_root())
+        .env("CODEX_HOME", isolated_state_root())
+        .env_remove("CODEX_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env_remove("COLLAB_WORKER")
+        .output()
+        .expect("run collab CLI")
+}
+
 #[test]
 fn qqbot_send_content_and_positional_body_are_mutually_exclusive() {
     let output = run(&[
@@ -119,5 +134,29 @@ fn qqbot_list_is_a_recognized_read_only_command() {
     assert!(
         !err.contains("unrecognized subcommand") && !err.contains("unexpected argument"),
         "list must be a recognized command: {err}"
+    );
+}
+
+#[test]
+fn qqbot_list_is_global_and_needs_no_project_scope() {
+    let dir = isolated_state_root();
+    let output = run_in(&dir, &["list"]);
+    let err = stderr(&output);
+    // A non-project cwd proves `list` is host-wide. Without a daemon the
+    // command must reach the socket and report DAEMON_UNKNOWN, never fail at
+    // project-scope or `.agent-collab` discovery.
+    assert!(
+        !err.contains("no .agent-collab found"),
+        "list must not require a project root: {err}"
+    );
+    assert!(
+        !err.contains("PROJECT_CONTEXT_REQUIRED"),
+        "list must not require a project context: {err}"
+    );
+    assert!(
+        output.status.success()
+            || err.contains("DAEMON_UNKNOWN")
+            || err.contains("DAEMON_UNAVAILABLE"),
+        "list must reach the host socket: {err}"
     );
 }

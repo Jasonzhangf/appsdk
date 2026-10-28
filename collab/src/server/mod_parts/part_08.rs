@@ -12,7 +12,6 @@ pub(crate) fn scope_view(route_scope: Option<&RouteScope>) -> serde_json::Value 
         None => serde_json::Value::Null,
     }
 }
-
 /// The single daemon-owned authority projection shared by `status`, `context`
 /// and the board. It reads only the current typed grant for the exact route
 /// scope and reports the holder, that scope, and the grant metadata. The
@@ -192,17 +191,6 @@ fn resolve_send_name_address(
         // defaults reject them because inbound has no stable way to re-resolve
         // an arbitrary ID.
         None => Ok((target, None)),
-    }
-}
-
-/// Parse `<project>.<name>` only when the rightmost segment is a legal stable
-/// name. Names never contain dots, so this never splits a name by dot.
-fn parse_project_qualified_name(target: &str) -> Option<(String, String)> {
-    let (project, name) = target.rsplit_once('.')?;
-    if name == "Jenny" || name_resolution::ORDINARY_NAME_POOL.contains(&name) {
-        Some((project.to_owned(), name.to_owned()))
-    } else {
-        None
     }
 }
 
@@ -1998,24 +1986,4 @@ fn task_integration_authorized(
             .flatten()
             .as_deref()
             == Some(worker_id)
-}
-
-#[cfg(test)]
-mod qqbot_address_tests {
-    use super::*;
-
-    #[test]
-    fn project_qualified_address_parses_without_splitting_a_dotted_name() {
-        assert_eq!(
-            parse_project_qualified_name("appsdk.Jenny"),
-            Some(("appsdk".to_owned(), "Jenny".to_owned()))
-        );
-        assert_eq!(
-            parse_project_qualified_name("my.project.Alice"),
-            Some(("my.project".to_owned(), "Alice".to_owned())),
-            "a dotted project key must not be split naively"
-        );
-        assert_eq!(parse_project_qualified_name("plain.address"), None);
-        assert_eq!(parse_project_qualified_name("worker-id-1"), None);
-    }
 }

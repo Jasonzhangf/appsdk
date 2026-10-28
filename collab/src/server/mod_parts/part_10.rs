@@ -422,7 +422,7 @@ fn worker_status_summary_with_maps(
     })
 }
 
-fn handle_directory(server: &Server) -> Resp {
+fn directory_targets(server: &Server) -> Vec<crate::proto::DirectoryTarget> {
     let (workers_rec, master) = {
         let st = server.state.lock().unwrap();
         let master = current_master_holder(server, &st).ok().flatten();
@@ -483,16 +483,97 @@ fn handle_directory(server: &Server) -> Resp {
             endpoint_live: None,
             project: project_key.clone(),
             address,
+            project_root: Some(server.root.to_string_lossy().into_owned()),
             channel_type,
             deliverable,
         });
     }
     targets.sort_by(|a, b| a.worker_id.cmp(&b.worker_id));
+    targets
+}
+
+fn handle_directory(server: &Server) -> Resp {
+    let targets = directory_targets(server);
     let count = targets.len();
     Resp::data(json!({
         "targets": targets,
         "count": count,
     }))
+}
+
+impl ProjectRuntimeManager {
+    /// Host-wide read-only directory. Every registered route is materialized
+    /// once and projected with the same fields as per-project `collab list`.
+    /// Failed routes are reported in `errors` while remaining targets stay
+    /// visible, so one stale route cannot hide the whole live directory.
+    fn directory_all(&self) -> Resp {
+        let routes = {
+            let routes = self.routes.lock().unwrap();
+            routes
+                .iter()
+                .map(|(key, route)| {
+                    (key.clone(), route.root.clone(), route.storage_root.clone())
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut runtimes: Vec<Arc<Server>> = Vec::new();
+        let mut errors: Vec<String> = Vec::new();
+        for (key, root, storage_root) in routes {
+            match self.ensure_runtime(&key, &root, &storage_root) {
+                Ok(runtime) => {
+                    if !runtimes.iter().any(|existing| Arc::ptr_eq(existing, &runtime)) {
+                        runtimes.push(runtime);
+                    }
+                }
+                Err(error) => errors.push(format!("{}: {error}", key.1)),
+            }
+        }
+        if !runtimes.iter().any(|existing| Arc::ptr_eq(existing, &self.host)) {
+            runtimes.push(self.host.clone());
+        }
+        let mut targets: Vec<crate::proto::DirectoryTarget> = Vec::new();
+        for runtime in runtimes {
+            targets.extend(directory_targets(&runtime));
+        }
+        // Prefer the CLI app scope for a worker that appears under more than
+        // one app scope. `sendmessage` resolves through that scope, so a
+        // directory entry from another host family must not shadow it.
+        let scope_rank = |target: &crate::proto::DirectoryTarget| {
+            if target.app_scope.as_deref() == Some(crate::identity::CLI_APP_SERVER_ID) {
+                0
+            } else if target.app_scope.is_none() {
+                1
+            } else {
+                2
+            }
+        };
+        targets.sort_by(|a, b| {
+            (
+                a.project_root.as_deref(),
+                scope_rank(a),
+                &a.worker_id,
+            )
+                .cmp(&(
+                    b.project_root.as_deref(),
+                    scope_rank(b),
+                    &b.worker_id,
+                ))
+        });
+        targets.dedup_by(|a, b| a.project_root == b.project_root && a.worker_id == b.worker_id);
+        let mut project_roots: Vec<String> = targets
+            .iter()
+            .filter_map(|target| target.project_root.clone())
+            .collect();
+        project_roots.sort();
+        project_roots.dedup();
+        Resp::data(json!({
+            "targets": targets,
+            "count": targets.len(),
+            "project_roots": project_roots,
+            "scope": "host",
+            "errors": errors,
+        }))
+    }
 }
 
 fn handle_default_set(
@@ -664,6 +745,7 @@ fn mutation_blocked_during_migration(req: &Req) -> bool {
         | Req::Role { .. }
         | Req::Workers
         | Req::Directory
+        | Req::DirectoryAll
         | Req::DefaultShow { .. }
         | Req::WorkerStatus { .. }
         | Req::MasterId

@@ -25,7 +25,7 @@ fn name_address_current_holder_and_id_compatibility() {
     let route = server_route_scope(&server, &server.state.lock().unwrap())
         .unwrap()
         .unwrap();
-    for name in ["Alice", "Jenny"] {
+    for name in ["Alice", "Jenny", "Xavier"] {
         for (revision, worker) in [(1, "w1"), (2, "w2")] {
             {
                 let mut state = server.state.lock().unwrap();
@@ -78,12 +78,22 @@ fn name_address_current_holder_and_id_compatibility() {
             state.msgs[response.data["msg_id"].as_str().unwrap()].to,
             "w1"
         );
-        assert_eq!(state.msgs.len(), 5);
-        assert_eq!(state.msgs.values().filter(|m| m.to == "w1").count(), 3);
+        assert_eq!(state.msgs.len(), 7);
+        assert_eq!(state.msgs.values().filter(|m| m.to == "w1").count(), 4);
+    }
+    let project_key = canonical_project_key(&server.root).unwrap();
+    let response = send(&server, &format!("{project_key}.Xavier"), "project custom name");
+    assert!(response.ok, "{:?}", response.error);
+    {
+        let state = server.state.lock().unwrap();
+        assert_eq!(
+            state.msgs[response.data["msg_id"].as_str().unwrap()].to,
+            "w2"
+        );
     }
     let missing = send(&server, "Tina", "unoccupied");
     assert!(!missing.ok);
     assert!(missing.error.unwrap().contains("NAME_ADDRESS_UNOCCUPIED"));
-    assert_eq!(server.state.lock().unwrap().msgs.len(), 5);
+    assert_eq!(server.state.lock().unwrap().msgs.len(), 8);
     std::fs::remove_dir_all(root).unwrap();
 }

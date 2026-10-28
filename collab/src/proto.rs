@@ -382,6 +382,11 @@ pub struct DirectoryTarget {
     /// currently owns a stable name. Absent when the target has no stable name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub address: Option<String>,
+    /// Canonical project root that owns this address. A channel adapter uses
+    /// this root to send the message through the target project's own route
+    /// instead of guessing a cwd from the address text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_root: Option<String>,
     /// Channel/transport family this target is reachable through.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_type: Option<String>,
@@ -1034,6 +1039,8 @@ pub enum Req {
     },
     Workers,
     Directory,
+    /// Host-wide, read-only directory across every registered project.
+    DirectoryAll,
     /// Persist the default delivery target for one external conversation.
     /// The conversation key is owned by the channel adapter, so a plain
     /// terminal without a trusted QQ conversation context cannot mutate it.

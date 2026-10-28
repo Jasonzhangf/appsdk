@@ -598,6 +598,7 @@ fn dispatch_with_route_context_bound(
             Resp::err("declared roles are removed; use collab who/context for peer identity, or collab context --work-roles for work specialties")
         }
         Req::Directory => handle_directory(server),
+        Req::DirectoryAll => Resp::err("DIRECTORY_ALL_HOST_REQUIRED"),
         Req::DefaultSet {
             worker_id,
             token,
@@ -911,6 +912,7 @@ fn request_requires_project_context(req: &Req) -> bool {
     !matches!(
         req,
         Req::Ping
+            | Req::DirectoryAll
             | Req::RouteResolve { .. }
             | Req::RouteResolvePaneRecovery { .. }
             | Req::RouteResolveNative { .. }

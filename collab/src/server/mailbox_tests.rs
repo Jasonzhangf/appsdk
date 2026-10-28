@@ -52,7 +52,7 @@ fn batch_wake_keeps_ids_categories_and_one_read_action_only() {
     let batch = batch_notification_text(&entries, 2);
     assert!(
         batch.starts_with(
-            "Batch wake: message_ids=msg-a,msg-b last=user-question entries=msg-a:worker-idle:a"
+            "Batch wake: message_ids=msg-a,msg-b last=user-question entries=msg-a:worker-idle:a=body a;"
         ),
         "{batch}"
     );
@@ -73,6 +73,22 @@ fn batch_wake_keeps_ids_categories_and_one_read_action_only() {
         1,
         "the composed batch wake carries exactly one read action: {composed}"
     );
+}
+
+#[test]
+fn content_first_title_is_derived_from_the_first_non_empty_body_line() {
+    assert_eq!(
+        notification_subject_from_body("\n  第一行标题  \n第二行正文").as_deref(),
+        Some("第一行标题")
+    );
+    assert_eq!(
+        notification_subject_from_body(&"x".repeat(80))
+            .unwrap()
+            .chars()
+            .count(),
+        48
+    );
+    assert_eq!(notification_subject_from_body(" \n\t "), None);
 }
 
 fn test_server() -> (crate::server::Server, PathBuf) {

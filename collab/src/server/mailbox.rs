@@ -45,6 +45,16 @@ fn abbreviated_subject(subject: &str) -> Option<String> {
     Some(abbreviated)
 }
 
+/// Derive a stable notification title when a content-first sender omits the
+/// legacy `--subject` field. The first non-empty line stays recognizable while
+/// the complete body remains untouched in the durable message.
+pub fn notification_subject_from_body(body: &str) -> Option<String> {
+    body.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .and_then(abbreviated_subject)
+}
+
 pub fn visible_body(body: &str) -> String {
     let mut visible = String::with_capacity(body.len());
     for ch in body.chars() {
@@ -154,12 +164,15 @@ pub(super) fn automatic_retry_eligible(message: &Message, retry_delay_ms: i64, n
 
 fn preview_for_text(text: &str) -> Option<String> {
     let mut preview_width = 80;
-    let tail = text
+    let head = text.strip_prefix("COLLAB_NOTIFY ")?;
+    let (_, head) = head.split_once(' ')?;
+    let (_, tail) = head.strip_prefix('[')?.split_once("] ")?;
+    let tail = tail
         .split_once(" | P1 ACTION:")
-        .or_else(|| text.split_once(" | P0 ACTION:"))
-        .or_else(|| text.split_once(" | P2 ACTION:"))
+        .or_else(|| tail.split_once(" | P0 ACTION:"))
+        .or_else(|| tail.split_once(" | P2 ACTION:"))
         .map(|(body, _)| body.to_string())
-        .unwrap_or_else(|| text.to_string());
+        .unwrap_or_else(|| tail.to_string());
     if tail.chars().count() <= preview_width {
         return Some(tail);
     }
@@ -181,26 +194,13 @@ pub fn batch_notification_text(
     let entries = batch
         .iter()
         .map(|(_, id, _, _, text)| {
-            let category = text
+            let title = text
                 .split_once('[')
                 .and_then(|(_, rest)| rest.split_once(']'))
                 .map(|(subject, _)| subject)
                 .unwrap_or("notification");
-            let raw_preview = preview_for_text(text)
-                .map(|preview| {
-                    preview
-                        .strip_prefix("COLLAB_NOTIFY")
-                        .unwrap_or(&preview)
-                        .trim_start()
-                        .to_string()
-                })
-                .unwrap_or_else(|| "…".to_string());
-            // Preview is the visible body excerpt after the id/subject head.
-            let preview = raw_preview
-                .split_once(']')
-                .map(|(_, rest)| rest.trim_start().to_string())
-                .unwrap_or_else(|| raw_preview.clone());
-            format!("{id}:{category}={preview}")
+            let preview = preview_for_text(text).unwrap_or_else(|| "…".to_string());
+            format!("{id}:{title}={preview}")
         })
         .collect::<Vec<_>>()
         .join(";");

@@ -889,7 +889,11 @@ fn batch_excludes_messages_after_first_window_and_never_replays() {
     assert!(calls.borrow()[0].contains(&first));
     assert!(calls.borrow()[0].contains("message_ids=message-owner"));
     assert!(!calls.borrow()[0].contains("second"));
-    assert!(calls.borrow()[0].contains("action_categories="));
+    assert!(
+        calls.borrow()[0].contains("entries=message-owner:"),
+        "{}",
+        calls.borrow()[0]
+    );
     assert_eq!(server.state.lock().unwrap().msgs["second"].state, "pending");
     assert!(!super::super::attempt_notification_with_default(
         &server,

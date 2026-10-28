@@ -1131,12 +1131,15 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 Some(content) => content,
                 None => positional_body,
             };
-            if body.trim().is_empty() {
+            if body.trim().is_empty() && in_reply_to.is_none() {
                 anyhow::bail!("empty message body");
             }
             let subject = match subject {
                 Some(subject) if !subject.trim().is_empty() => subject,
-                _ if content_provided => "notify".to_owned(),
+                _ if content_provided => server::mailbox::notification_subject_from_body(&body)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("MESSAGE_SUBJECT_REQUIRED: content has no usable title")
+                    })?,
                 _ => anyhow::bail!("MESSAGE_SUBJECT_REQUIRED: sendmessage requires --subject"),
             };
             let scope = Scope::resolve()?;

@@ -620,9 +620,9 @@ fn new_send_syntax_and_legacy_send_reach_exact_target() {
         alice_messages.iter().any(|message| {
             message["id"] == new_id
                 && message["body"] == "new syntax body"
-                && message["subject"] == "notify"
+                && message["subject"] == "new syntax body"
         }),
-        "new syntax must fix the ordinary notification subject: {alice}"
+        "new syntax must derive a recognizable notification title: {alice}"
     );
 
     let bob = fixture.run_public(

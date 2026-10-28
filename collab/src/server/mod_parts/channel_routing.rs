@@ -149,13 +149,22 @@ pub(crate) fn resolve_named_target(
         }
         return resolve_name_case_insensitive(state, project_scope, name).map(Some);
     }
-    // A registered worker ID keeps its legacy direct-send meaning. Any other
-    // bare value is a stable name and must be resolved through the occupancy
-    // owner, so a typo cannot silently become a raw target.
+    // A raw worker ID keeps its legacy direct-send meaning even for the typed
+    // not-registered failure path. A bare stable name is resolved only when it
+    // names a current holder; other bare values remain raw targets for the
+    // existing admission and handoff checks.
     if state.workers.contains_key(address) {
         return Ok(None);
     }
-    resolve_name_case_insensitive(state, project_scope, address).map(Some)
+    let name_like = state
+        .name_occupancies
+        .get(project_scope)
+        .is_some_and(|names| names.keys().any(|name| name.eq_ignore_ascii_case(address)));
+    if name_like {
+        resolve_name_case_insensitive(state, project_scope, address).map(Some)
+    } else {
+        Ok(None)
+    }
 }
 
 /// Resolve one address string (explicit or default) to a deliverable local
@@ -231,4 +240,3 @@ pub(crate) fn resolve_channel_inbound_target(
         body: body.to_owned(),
     })
 }
-

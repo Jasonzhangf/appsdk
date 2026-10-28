@@ -656,7 +656,8 @@ pub(crate) enum Cmd {
         #[arg(long)]
         target_session: Option<String>,
         /// Short topic shown in the notification preview. In the new
-        /// `--content` form the daemon fixes a standard notification subject.
+        /// `--content` form the daemon derives it from the first non-empty
+        /// body line.
         #[arg(long)]
         subject: Option<String>,
         /// New send syntax: plain body of the message. Mutually exclusive with

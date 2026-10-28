@@ -93,7 +93,12 @@ fn name_address_current_holder_and_id_compatibility() {
     }
     let missing = send(&server, "Tina", "unoccupied");
     assert!(!missing.ok);
-    assert!(missing.error.unwrap().contains("NAME_ADDRESS_UNOCCUPIED"));
+    assert!(
+        missing
+            .error
+            .unwrap()
+            .contains("HANDOFF_TARGET_UNRESOLVED")
+    );
     assert_eq!(server.state.lock().unwrap().msgs.len(), 8);
     std::fs::remove_dir_all(root).unwrap();
 }

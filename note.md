@@ -569,3 +569,25 @@ TUI公开CLI6项、Desktop bridge公开投递与recv、DSH gateway公开投递�
 未过期消息保存；会话续接后旧消息仍不可投递或消费，过期消息回收时释放对应约束。
 全部既有测试目标编译与格式检查通过；测试使用隔离协议fixture，不代表live agent推理。
 正式安装、共享daemon加载与远端交付按各自回执单独记录，不由这些结果推定。
+
+## 2026-10-28 master-workspace-idle-30m-20261027 交付
+
+- 核心 `15b83266`：可信连续 idle 严格超过 30 分钟才首次推送；同段重复至少 30 分钟；
+  busy/waiting_user/offline/unknown 不产生输入或补发；board-idle 与 standing
+  project-patrol 共用同一 due 规则。
+- 扩展 `020318e4`：standing project-patrol 目标节奏 1500000ms（20-30 分钟窗口，
+  默认 25 分钟），900000ms 仅兼容旧订阅；四项巡检与 canonical project root
+  workspace 同步到官方 skill/operations/reference 和 installer projection。
+- 本轮补正：复用旧 900000ms 订阅时，`goal_ensure_project_patrol` 与
+  `goal_project_patrol_projection` 投影实际 `every_ms`、`target_every_ms` 和
+  `cadence_runtime_gap`，不再把 15 分钟运行节奏报告成 25 分钟。
+- 受影响测试：workspace_idle 3、timers 64、board_patrol_policy_contract 22、
+  master_status_cli 3、ceo_public_contract 10、appserver_two_tui project_patrol
+  15 通过/1 忽略、install_skills 8、cadence gap 1；cargo fmt 与 git diff --check 通过。
+- 独立 Review（gpt-6.1-sol）：无 P0/P1。遗留 P2：keepalive 巡检未使用
+  name_monitor 最新可信 idle episode（busy→idle 跨 poll 可能复用旧 episode）；
+  timers 的持久化 patrol_idle_since_ms 重启后未走 first_observation_since_start；
+  name_monitor 端点变化同 session 时 idle 起点未失效；时钟回退按旧 observed_ms
+  判断，未跟踪最新样本。上述 P2 不阻断当前源码候选，后续单独修复。
+- live 安装、共享 daemon 加载与真实会话激活未验证（UNVERIFIED）；未执行
+  daemon 安装/重启或 tmux 生命周期操作。

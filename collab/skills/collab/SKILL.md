@@ -23,6 +23,8 @@ cwd 确定，稳定名字承接工作；sessionID 承载当前执行，tmux pane
 
 ## 日常通信
 
+先按[轻协作与请求边界](../codex-orchestrator/references/orchestration.md#轻协作与请求边界)判断是否需要通信。可自行取得的事实和范围内决定直接处理；board 与结果文件足以推进时不再催报、催读或互答 ACK。只有实际交接、依赖变化、明确答复义务或必需决定才发送消息；完成本人义务后无需例行申请 idle。
+
 | 任务 | 入口与边界 |
 |---|---|
 | 恢复当前已注册身份和状态 | 在本项目实际环境运行 `collab context`；仅给当前宿主的真实 runtime 信息 |
@@ -32,6 +34,18 @@ cwd 确定，稳定名字承接工作；sessionID 承载当前执行，tmux pane
 | 只读查消息 | `collab msg <真实消息ID>` 或 `collab inbox`；只读查询不等于消费 |
 | 只读查项目通信目录（未注册可用） | `collab directory`；只读返回已知接收方白名单，不写 presence，不暴露凭据或任务细节 |
 | 匿名发送通知（未注册可用） | `collab sendmessage --unknown-sender --to '<目标peer>' [--target-session '<会话>'] --subject '<主题>' '<正文>'`；固定来源为 unknown，跳过身份获取，无回信义务 |
+
+### 收件与继续工作
+
+Collab 消息由 daemon 按当前绑定投递通知。非 DSH 宿主收到通知后执行一次
+`collab recv`，处理收到的消息，再继续本人可执行的工作。没有通知时，不运行
+`recv --timeout`、`inbox` 或后台循环来等消息，也不反复向用户汇报“正在等待”。
+等待子 agent 或构建的规则不改变 Collab 收件方式。
+
+委托或请求其他 peer 后，继续推进、验证或接管已授权的独立工作。只有确有外部
+依赖且没有其他可执行动作时，记录具体阻塞和下一动作，结束当前回合，待通知或新
+信息到达后再继续；不推断对方正在工作。通知未到或传输失败时报告真实状态，不把
+消息自动到达当作已验证事实。
 
 ### 未注册脚本自通知
 
@@ -60,6 +74,14 @@ collab sendmessage --unknown-sender --to 'my-peer-id' \
 
 ## Task routing and role responsibilities
 
+master 对项目、peer 对受托目标都是最终审核人和责任人；日常推进开发/验收/集成、P0/P1
+清除及自有资源和闲置 worktree 释放。board 空或一次任务交回不代表责任结束；有已授权
+缺口就继续，真实阻塞只停受影响工作。CEO 直接读 board 监督，不依赖例行报告；项目状态
+只面向 CEO，技术文件交回不增加汇报链。确实需要用户专属事实、新授权或硬约束决定时
+可以直接询问用户，说明证据和受影响范围，其余工作继续。完整责任与阻塞证明见
+[负责人日常推进与最终验收](../codex-orchestrator/references/orchestration.md#负责人日常推进与最终验收)，
+独立 review 不能被负责人自验替代。
+
 master 管项目目标，peer 管已接受的子目标，两者均负责拆分、解阻、验收和资源收口。
 长程目标经任务板邀请可用且同意接收的 peer；一次性执行或观察沿
 [统一角色路由](../codex-orchestrator/SKILL.md#codex-路由)。
@@ -70,6 +92,14 @@ master 管项目目标，peer 管已接受的子目标，两者均负责拆分�
 集成分工。范围内投入和预算边界不另设一套。Planner/Reviewer 模型、并发调度、接管
 与 Review 准入均沿 [codex-orchestrator](../codex-orchestrator/SKILL.md)；任务板记录
 本身不授权范围外 backlog 或生产动作。
+
+父子 agent 的派单、续派、返工、换负责人及结果交回使用
+[统一文件模板](../codex-orchestrator/references/worker-contract.md#任务合同模板)。
+设计、规划和审查者亲自写清关键决定，消息只传可读路径和必要差异，不复制报告全文。
+
+通过 Collab 编排的独立子任务必须在现有 board 中维护父子关系、当前状态与合同/结果
+引用；实际执行的一次性 worker 由注册编排者跟踪，不额外注册。普通查询与通知不建任务。
+操作见[文档目录与 board](operations.md#文档目录与-board-父子任务跟踪)。
 
 设计、规划与审查角色按
 [文件交接合同](operations.md#设计规划与审查角色的文件交接合同)产出并交接落盘文件，
@@ -87,9 +117,13 @@ master 不代持或代登记 peer goal，旧 runtime 拒绝 peer 时记录具体
 ## Registered patrol duties
 
 项目 Jenny/master 默认承担本项目 worker 巡检。初始化或恢复本人 longhorizon 后，
-须确保本人常驻项目巡检已 armed；它是一条 `master-idle` 订阅，subject
-`project-patrol`、interval `900000` 毫秒，ensure/renew 复用同一订阅而不并排新建。
-有限 goal/task 定时器按生命周期关闭，但单个 goal 结束不关闭这条常驻巡检义务。
+项目存在可推进的未关闭任务或 worker 正在执行时，须确保持续巡检 armed，并复用同一
+订阅而不并排新建计时器。有任务时必须持续巡检，任务恢复可执行、收到新任务或等待输入
+解除后立即重新开启。没有任务进展且已向 CEO 或需求方上报，或正在等待用户/外部输入且
+该状态已上报时，可以停止本人有限巡检；记录原因、涉及任务和恢复条件，保留 direct-message。
+停止可用当前 master 的 `collab notify cancel --event master-idle` 显式取消，条件与回执
+见下文契约及 [board idle 巡检契约](references/board-idle-patrol.md)。任务集合为空只表示
+没有对应 worker 唤醒对象；负责人仍须检查项目目标、缺陷和资源收口，不能据此结束项目职责。
 每次提醒检查 worker 的 busy/idle、board 任务和按任务取消状态。当前 master 用
 `collab notify status` 的 `project_board_patrol` 只读视图检查 peer 取消；该读取不授予
 替 peer 恢复或覆盖取消的权限。peer 持有未关闭
@@ -125,9 +159,34 @@ master 检查必要证据，不用 ACK 或自报完成代替验收。
 
 ## CEO 与项目进度
 
-全局 CEO 只由 daemon 的 typed grant 授权；工作角色 `ceo` 不授予全局权限。项目
-master 有 CEO 时通过现有 `collab ceo reply` 路由回报目标、已验收结果、剩余工作、
-阻塞和下一动作；无 CEO 时明确报告 `CEO_NOT_CONFIGURED`，继续本项目工作。
+CEO 负责检查与用户即时沟通的通道是否已安装、完成登录、绑定真实用户且可双向通信。
+用户指定的 QQBot 通道可用后，紧急事件、工作汇报和需要用户决定的仲裁请求通过该即时
+通道发送；无变化不例行发送，普通汇报继续遵守已有频率和静默约束。不可把“Skill 已
+安装”“扫码页已打开”或发送入队当作实际送达。保留真实发送回执，用户决定须关联原任务
+与具体问题，不能由沉默推断批准。
+
+通道未连接、登录过期或发送失败时如实记录原错和待发送事项，通过当前可用用户会话
+说明缺口，不谎称已通知，也不让无关已授权工作停下。仅向用户确认或登录后明确绑定的
+目标发送，不猜 QQ 号、收件人或凭据，不把 secret 写进文档。通道 Skill/CLI 的实际入口
+核实后再填写，不凭空编造登录与发送命令。
+
+master 和 peer 的项目进度、风险、阻塞与完成状态唯一汇报对象是当前获授权 CEO，由 CEO
+面向用户。父子任务的结果文件交回、指定独立审查和必需的执行协调继续按合同处理，不是
+新增进度汇报层级。CEO 通道不可用时记录该路径缺口并继续独立工作，不把项目停在“等
+用户安排”。
+
+全局 CEO 只由 daemon 的 typed grant 授权；工作角色 `ceo` 不授予全局权限。CEO 在自身
+已授权 workspace 使用 `collab ceo progress`（可加 `--project '<项目根>'`）直接巡检各
+项目公开 board。读取 `projects[].tasks`、父子关系、状态、验收/合并/清理缺口、下一步
+和文档路径，不等待 master 例行汇报。master/peer 及时维护 board 与文档；取消“master
+周期汇报→CEO 再汇总”的循环，不发例行进度消息。明确请求仍须回复，需 CEO 决策的权限、
+范围、资源冲突和紧急异常仍按授权通道提出。无 CEO 时明确报告 `CEO_NOT_CONFIGURED`，
+继续本项目工作。
+
+CEO 复用自身已有巡检调度查看 board；仅处理实质进展、停滞、失败、责任缺口和所需决定，
+无变化安静，不向 master 例行催报，不新建每项目汇报循环。当前 `progress.projects` 的
+board 读取已存在；`progress.report` 仍由旧 master 进度记录驱动，不等同 board 变更汇总。
+未改程序前不得宣称 board 自动触发 CEO 用户报告，也不得伪造 report-ack。
 
 CEO 按项目和实质业务进展去重。非紧急汇报默认每小时最多一次，安静窗口默认
 `Asia/Shanghai` 每日 `[00:00, 08:00)`；窗口内累计，结束后合并唤醒。显式

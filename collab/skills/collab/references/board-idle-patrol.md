@@ -13,15 +13,20 @@ owner 是 core 实现与项目 DAG。
 
 ## 默认责任与触发
 
+- master 与 peer 的负责人职责沿
+  [日常推进与最终验收](../../codex-orchestrator/references/orchestration.md#负责人日常推进与最终验收)。
+  `tasks=[]`、`eligible_task_ids=[]` 或本轮无需唤醒，只说明 daemon 没有对应投递对象，
+  不证明开发、P0/P1、集成交付和资源/worktree 已经收口。负责人仍须基于项目事实发现并
+  推进授权内工作；项目状态只向获授权 CEO 汇报。
 - 每个项目的 Jenny（当前获授权 master）负责本项目 worker 巡检。初始化或恢复本人
-  longhorizon 后，须确保本人常驻项目巡检已 armed；复用有效订阅，不重复创建。
-  这条常驻巡检是当前 master 的 `master-idle` 订阅，subject `project-patrol`、interval
-  `900000` 毫秒。反复 ensure/renew 复用同一订阅，续期其 TTL 与有限出现预算，不并排
-  新建第二份。`appsdk longhorizon show` 是只读投影，读取成功不证明已 arm。有限
-  goal/task 定时器按各自生命周期到期关闭；单个 goal 结束不得因此关闭这条常驻项目
-  巡检义务。若项目巡检被显式取消，按已实现控制保持取消，不由 ensure 自动恢复；
-  当前 master 可用 `collab notify cancel --event master-idle` 显式取消，详见下文
-  「Master 取消与恢复项目巡检」。
+  longhorizon 后，按当前任务状态维护巡检。存在可推进的未关闭任务或 worker 正在执行时，
+  必须持续巡检并复用有效订阅；收到新任务、任务恢复可执行或等待输入解除后立即重新
+  开启。没有任务进展或等待用户/外部输入，且已向 CEO 或需求方上报时，可以停止本人
+  有限巡检；记录原因、涉及任务和恢复条件，保留 direct-message。不得用停止巡检代替
+  任务关闭、阻塞上报或交付。停止用当前 master 的
+  `collab notify cancel --event master-idle` 显式执行，条件与回执见下文
+  「Master 取消与恢复项目巡检」。`appsdk longhorizon show` 是只读投影，读取成功不
+  证明已 arm。
 - Jenny 每次巡检提醒都检查本项目 worker 的活动状态、未关闭 board 任务、当前绑定及
   按任务取消状态。busy 的 worker 跳过；idle 且仍持有未取消任务的 worker 应收到
   继续本人任务的提醒。没有未关闭任务时不发 board idle 提醒。
@@ -153,14 +158,22 @@ Jenny 只在提醒到达时检查下列事实，不自行造一条手写唤醒�
 2. 读取每个 owner 的当前宿主状态；busy 跳过，unknown/offline/cold 记录缺口。
 3. 对正态 idle 且仍有未取消任务的 owner，daemon 会产出继续提醒；Jenny 核对任务与
    取消入口，不重复 arm，也不覆盖 peer 的取消。
-4. 存在 CEO 且本项目有实质进展或阻塞变化时，向 CEO 回报项目进度。
+4. 将实质进展、阻塞和下一责任人更新到现有 board 并引用任务文档；CEO 自行读取，不发
+   例行进度报告。需 CEO 决定或明确请求回复时才沿已有通道处理。
 5. busy 跳过不补发；unknown 不产生传输输入；无未关闭任务时不发 board idle 提醒。
+
+以上是 daemon 的提醒资格检查，不是项目负责人的工作完成检查。Jenny 还须执行负责人
+日常检查，peer 接到唤醒后同样承担自身范围检查；发现真实缺口先落盘并更新 board 再
+推进。常规分支、优先级和验证路径由负责人判断，只有实际阻塞才交 CEO 所需决定，不等待
+用户派工。复用未变证据，不在每个周期重跑全量测试或扫描他人资源。
 
 ## CEO 进度回报与用户报告边界
 
-- 项目 master 通过现有项目 master 到 CEO 路由回报事实：目标、已验收结果、剩余工作、
-  具体阻塞、下一动作及需要用户决定的事项。无 CEO 时不假造接收者，继续本项目工作。
-- 目标入口为 `collab ceo reply --subject '<主题>' '<普通进度或具体阻塞>'`，
+- CEO 在自身 workspace 用 `collab ceo progress` 主动读取各项目公开 board，master/peer
+  维护父子任务与专用文档；取消 master 例行汇报循环。沿本人已有巡检，无变化保持安静。
+  公开 board 读取已实现，board 变化自动驱动旧 report 汇总尚未实现；下列限流/回执是现存
+  消息报告链语义，不是要求恢复例行汇报。
+- 明确请求回复或需 CEO 决定时入口为 `collab ceo reply --subject '<主题>' '<具体待决事项及证据>'`，
   紧急回报加 `--urgent`。紧急只由该 typed 参数或用户明确指定决定；`--urgent` 是
   唯一 typed 紧急入口，正文关键词、普通 P1 阻塞或 ACK 都不升级。
 - 不带 `--in-reply-to` 的普通进度走非紧急汇总：按项目与实质业务进展去重合并，
@@ -175,6 +188,10 @@ Jenny 只在提醒到达时检查下列事实，不自行造一条手写唤醒�
   `quiet_window_end_minute`，取值 `0..1439`；两者相等表示禁用安静窗口。
   `[ceo_report]` 只允许在全局配置，项目级覆盖被拒绝；`min_interval_ms` 不是可配项。
 - 四阶段事实分开：`queued`、`accepted`、`consumed` 与 `reported_to_user`。
+  `ceo-report-due` 由 daemon 调度，不额外 arm 同 subject 的 deadline；重复 arm 会
+  增加独立提醒，deadline 不能通过 `collab notify cancel` 撤销。调度器通常每 15 分钟
+  检查，普通报告受一小时最小间隔和静默窗口约束；明确紧急进展可按策略提前处理。
+  收到提醒后按批次报告，并在实际报告后执行 `report-ack`，不要再续订。
   每次主动报告前读取当前 `collab ceo progress`，只使用被允许的 `report` 批次；等待或
   断线后重新读取，不以旧批次或完整项目查询视图绕过当前静默与小时限制。
   CEO 向用户实际输出后由 CEO 本人执行显式确认：

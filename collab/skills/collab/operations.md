@@ -11,8 +11,11 @@ Collab 只有一个 Skill。master、peer、designer、reviewer 等不建立独�
 
 标准流程唯一资源为 [workflow-templates.json](references/workflow-templates.json)，
 基础版本为 1，只有 `master`、`peer` 两种身份模板。各自管理自己的目标、任务和执行
-流程，优先将有界执行交给独立 worker。peer 完工或停止前向现有 master 交回结果并申请
-下一步或 idle；reviewer/设计师同样适用。无 master 时不虚构审批者；master 不向自己申请。
+流程，优先将有界执行交给独立 worker。peer 按文件和 board 交回结果，继续已授权工作；
+当前任务收口后，先按[负责人日常检查](../codex-orchestrator/references/orchestration.md#负责人日常推进与最终验收)
+检查项目交付、P0/P1 和资源/worktree；发现授权内缺口即自行建单推进，不能仅因 board 空
+进入 idle。真实阻塞才暂停相关工作，不例行请求下一步或 idle 批准。用户明确要求逐次
+审批时沿该要求执行；不以 idle 逃避未完交付、集成或清理。
 
 执行以本次 `collab context` 的 `role_brief` 为准：有效流程正文只在 `role_task`、
 `responsibilities`、`next_action`、`completion_action` 组合输出一次。identity 和
@@ -24,30 +27,53 @@ specialties 模板卡只含 target、source、base_version、revision；master �
 
 新 peer 或角色变化只触发对受影响职责、依赖和交接的处理。只有实际任务需要时才改
 模板或分工策略。普通注册不要求先设置专长，不要求例行写规则或向用户汇报。
-需要用户决定、产生重要结果或用户要求汇报时，再报告变化和下一步。已有授权内直接
-推进；超出授权、改变显式硬约束或缺少关键事实时，只确认受影响部分。
+项目状态仅向当前获授权 CEO 汇报；必要用户专属决定由 CEO 向用户提出。已有授权内直接
+推进；超出授权、改变显式硬约束或缺少关键事实时，只暂停并提出受影响部分的具体决定。
 更新正在执行的任务时，必须显式落实交接。
 
 ### 基本项目关系与最小派单模板
 
 master 负责项目总目标、跨 peer 依赖和最终集成。peer 负责接受的子目标，管理自己的
 执行者、验证和资源，并向派单 owner 交回结果。工作专长不是接单前置，也不授予权限。
-master 可把下列内容填入现有任务的 description；没有额外依赖时写“无”，不另建角色表：
+派单、续派和责任转移统一使用
+[任务合同模板](../codex-orchestrator/references/worker-contract.md#任务合同模板)落盘，
+确认接收者可读，再把路径填入现有任务 description。此处不维护第二份模板；Collab 特有的
+父/子任务 ID、当前 owner 和状态沿下节 board 回执填写。消息只带文件路径、必要差异和接收者。
 
-```text
-目标：<本次要交付的可用结果>
-范围：<负责的模块/路径；不包含的工作>
-权限与资源：<已授权动作；资源归属>
-依赖：<必须先满足的输入或交接；没有则写无>
-验收：<交付物/位置；可重复的验证及通过条件>
-交回：<派单 owner；需要时指定 reviewer 和集成人>
-停止条件：<什么情况只暂停受影响工作；向谁报告原错与下一步>
+结果、返工和换负责人按
+[统一交回模板](../codex-orchestrator/references/worker-contract.md#回报与命名)落盘，
+给出实际产物、验收证据、未完成项、资源及下一责任人；不靠口头“完成”交接。只读
+Planner/Reviewer 的完整结果由宿主保存，沿既有任务记录引用，不改变其访问权限或 Review
+JSON 格式。
+
+### 文档目录与 board 父子任务跟踪
+
+每个目标使用独占记录目录，默认
+`/Volumes/Intel/playground/<project-key>/.worker-runs/<父任务ID>/`，或本任务已有的等价
+专用目录。父任务保存总计划，子任务目录保存 `task.md`、详细设计引用、`result.md` 和必要
+证据；Planner/Reviewer 文件由宿主保存。路径必须真实、接收者可访问，不把秘密写入文档。
+
+通过 Collab 编排的每个独立委托用 `--parent-task` 挂到真实父任务；先落盘文档再发布，
+已有子任务续派/返工直接更新。description 写合同/结果绝对路径、实际执行者、范围和交回人；
+delivery/test 条件引用文件中的具体验收。父任务必须存在且调用者可见。一次性 GCM worker
+无需注册，由注册编排者保留子任务 owner 和 tracking 责任，不把未注册 worker 虚填为 Collab
+executor。普通查询、信息通知或每条命令不建任务，不为本来独立执行的工作初始化 Collab。
+
+```sh
+collab board publish <child-id> --parent-task <parent-id> --title '<本次交付>' --description '合同：<绝对路径>/task.md；结果：<绝对路径>/result.md；执行：<worker标识>；交回：<owner>' --delivery-condition '<文件中交付物和验收条目>' --test-condition '<真实验证动作及通过标准>'
+# 按 publish/show 的当前 typed 回执取 revision，仅由获授权 owner 更新：
+collab board update <child-id> --expected-revision <observed-revision> --status working --next '按<合同路径>执行；结果写<结果路径>'
 ```
+
+进度、失败和结果到达时由 owner 更新现有记录，附结果和证据路径、缺口、下一负责人。
+沿既有 review/merge/cleanup 生命周期关闭，不把 worker 退出当整体完成；父子任务关联不
+等于自动完成汇总，父 owner 核对各项义务后收口。状态以 board 为准，文档负责设计和证据；
+不用文档或消息伪造 board 状态，不直接改 journal。
 
 复用已有任务；没有时再发布。以下 ID、名字和 revision 均从当前回执或任务板取得：
 
 ```sh
-collab board publish <task-id> --title '<目标>' --description '<填好的模板>' --delivery-condition '<交付条件>' --test-condition '<验证条件>'
+collab board publish <task-id> --title '<目标>' --description '<合同路径、执行者与交回人>' --delivery-condition '<交付条件>' --test-condition '<验证条件>'
 collab board dispatch <task-id> --expected-revision <revision>
 # 需要指定接收者时，用 invite 代替 dispatch：
 collab board invite <task-id> --to <peer> --expected-revision <revision>
@@ -57,7 +83,8 @@ collab board respond <task-id> --accept --expected-revision <revision>
 
 未指定执行者时，dispatch 在同一专长匹配层级内优先选择没有未结任务和待接邀请的
 peer，再按稳定名字排序。指定执行者保持硬约束；邀请不等于接单。无已授权 ready
-工作时保留直接收件，不制造任务、角色或定时巡检来填满 peer。
+工作时先完成负责人日常检查；真实缺口自行补入任务并推进，不把空 board 当完成。无
+实际可推进项时保留既有事件/巡检和直接收件，不制造任务、角色或新轮询填满 peer。
 
 首次建立普通名字占用时，daemon 向现有 master 发一条 `peer-registered` 通知。
 同名恢复和重复 context 不重复发送。真实专长变更通知相对方；真实模板更新或重置
@@ -76,6 +103,11 @@ manager（全局 CEO 或项目 master）为任何承担计划、编排或任务�
 
 总设计师、架构师、规划师、reviewer 及承担同类职责的角色共同适用本合同，不依赖特定
 英文角色名。执行 worker 不被假设具备设计者同等判断力、项目背景或继承父会话。
+
+这些角色须亲自把工作计划写到 worker 无需猜测即可执行的程度，不能只给方向，也不能把
+详细设计、派单模板和关键文案再交 worker 代写。Planner/架构师写清已接受方案、实际步骤、
+允许/禁止和交付验收；reviewer 写清定位、理由、修复要求和复验条件，缺架构决定则交设计
+owner 补齐。worker 只按落盘合同执行，不负责补关键设计；上述角色不代做具体实现。
 
 - 设计和规划必须产出可直接执行的详细设计文件并落盘，不只是给方向。内容按任务实际
   需要明确目标、现状与输入、模块/接口/数据流、操作顺序、依赖、允许与禁止的路径和
@@ -97,7 +129,7 @@ manager（全局 CEO 或项目 master）为任何承担计划、编排或任务�
 模板更新沿用 `context`，仅当前项目 master 可执行，正文为四字段 JSON：
 
 ```sh
-collab context --workflow-target 'role:designer' --workflow-template '{"role_task":"负责已授权设计工作","responsibilities":["不假设 worker 具备同等判断力、项目背景或父上下文","产出并落盘可直接执行的详细设计文件，写明输入、步骤、允许与禁止动作、依赖、停止与升级条件、交付物位置和可重复验收","确认接收者可访问文件，按文件路径交接，消息只带摘要","不直接实现，只读检查与文案落盘除外","提交设计给指定 reviewer"],"next_action":"落盘详细设计文件，确认接收者可访问后按路径交接，交给指定 reviewer","completion_action":"交回设计文件与验收证据，向当前 master 申请后续安排或 idle"}'
+collab context --workflow-target 'role:designer' --workflow-template '{"role_task":"负责受托目标的设计与最终验收","responsibilities":["不假设 worker 具备同等判断力、项目背景或父上下文","亲自落盘详细设计、步骤、允许与禁止动作及验收，按可读文件路径交接","不直接实现，只读检查与文案落盘除外","保留指定独立审查，亲自接受最终结果，不外包责任","日常核对开发交付、P0/P1及资源/worktree；有授权缺口自行推进，真实阻塞才暂停","项目状态只向获授权CEO汇报，文件交回不另建汇报链"],"next_action":"完成设计交接和必要审查后，继续负责人日常检查；board空不等待用户派工","completion_action":"更新文件与board，亲自验收；继续未完项目责任，只有真实阻塞才等待，不例行申请idle"}'
 collab context --workflow-target 'role:designer' --reset-workflow-template
 ```
 
@@ -170,6 +202,11 @@ Alice 等收件人不存在。若 `resolve-agent` 错误列出自己的 session 
 
 ## 协作请求的执行、回复与接续
 
+是否请求他人先按[轻协作边界](../codex-orchestrator/references/orchestration.md#轻协作与请求边界)
+判断：先自行读取可访问资料并处理范围内决定，只为必要且无法自行补齐的事实/决定或实际
+归属冲突发一次具体请求。board 或结果文件足够时不再例行通知、催报或催读；下文回复合同
+只处理已有真实请求，不要求制造请求。
+
 收到通知后读取完整原消息，区分请求中的 action、回复要求和普通信息。有已授权 action
 就实际落实并向原请求方回复结果、证据或具体阻塞；不要只读通知、ACK，或只向用户总结。
 无 action 但要求答复时，直接回答原问题；仅普通信息且未要求回复时，不自动回“收到”。
@@ -198,14 +235,17 @@ collab sendmessage --to '<原消息from>' --subject '<结果>' --in-reply-to '<�
 这些参数属于项目内 `sendmessage`；跨项目 `master send` 尚未接入回复标记。
 
 交回协作结果后，立即接续自己原来的未完任务。先核对待回复要求、协作请求和本人任务，
-落实当前可执行动作；确无可继续工作时，按当前流程交回并申请下一步或 idle。
+落实当前可执行动作；当前任务收口后先检查负责人日常责任，有开发、P0/P1、资源清理或
+有依据的改进缺口就继续推进。真实无可推进项时保持既有事件/巡检与必要收件，不以空
+board 结束职责或等待用户派工，也不例行申请 idle。
 完成后回复尚待外部条件时保留标记并说明
 等待条件，不能伪造完成答复；也不能因为一个协作请求已交回就结束自己的工作。
 收到 daemon 待回复提醒时，读取其引用的原消息，按原回复要求处理，不把提醒再当新任务，
 不对提醒本身回“收到”。daemon 仅追踪待回复标记，不替 agent 生成业务答复或判定任务完成。
 
-peer 默认向请求方、委托者或所属 master 回报，不向用户输出例行进度或结案报告。
-用户直接提问、明确要求报告、必须由用户决定或影响用户的重大异常时，才向用户说明。
+master 和 peer 的项目状态唯一向当前获授权 CEO 汇报，由 CEO 面向用户，不另发面向用户
+或 master 的例行进度/结案报告。原任务的文件交回和明确问题答复仍交原接收者，不把执行
+交接改成新增汇报链；用户专属决定经 CEO 提出，其他授权内判断自行完成。
 
 ## 工作角色与用户指定分工
 
@@ -573,13 +613,16 @@ or implementation details.
    another patrol. Close only owned patrol scope; do not cancel another goal's
    subscriptions.
 10. 每个项目的 Jenny（当前获授权 master）默认承担本项目 worker 巡检。初始化或恢复
-    本人 longhorizon 后，确保本项目常驻巡检已 armed；它是当前 master 的 `master-idle`
-    订阅，subject `project-patrol`、interval `900000` 毫秒，ensure/renew 复用同一
-    订阅，不重复创建。`appsdk longhorizon show` 是只读投影，读取成功不证明已 arm。
-    有限 goal/task 定时器按生命周期关闭，单个 goal 结束不关闭这条常驻项目巡检义务。
+    本人 longhorizon 后，按当前任务状态维护巡检。项目存在可推进的未关闭任务或
+    worker 正在执行时，必须保持巡检并复用有效入口，不重复创建；任务恢复可执行、
+    收到新任务或等待输入解除后立即重新开启。没有任务进展且已向 CEO 或需求方上报，
+    或正在等待用户/外部输入且该状态已上报时，可以停止本人有限巡检，并记录原因、
+    涉及任务和恢复条件。停止通过下一项 `collab notify cancel --event master-idle` 的
+    公开入口显式执行，不自行声称已取消。不得用停止巡检代替任务关闭、阻塞上报或
+    交付。`appsdk longhorizon show` 是只读投影，读取成功不证明已 arm。
     每次巡检提醒检查 worker 活动、未关闭 board 任务、当前绑定和按任务取消状态；
-    存在全局 CEO 时按 [board idle 巡检契约](references/board-idle-patrol.md)回报本项目
-    实质进度。
+    存在全局 CEO 时由 CEO 直接读取 board，master/peer 维护事实和文档，不发例行进度
+    报告；具体规则见 [board idle 巡检契约](references/board-idle-patrol.md)。
 11. 已持有未关闭 board 任务的 peer 在正态 online+idle 时由本人巡检唤醒继续推理；
     busy 跳过且不补发；unknown、offline、cold 或 waiting_user 产生零传输输入。
     peer 可仅取消本人任务的 board-idle 巡检，入口为
@@ -1386,6 +1429,18 @@ collab ceo progress
 collab ceo progress --project '<目标项目根目录>'
 ```
 
+CEO 巡检直接读取上述 `progress` 的 `projects[].tasks` 和 `task_counts`，按
+`parent_task_id` 对齐父子目标，检查 owner、当前状态、下一动作、未结
+review/merge/cleanup、阻塞及合同/结果文件路径；只在具体缺口需核实证据时读文件。
+不从更新时间推断实际进展，不把缺字段当已完成，也不另造 CEO 任务表。公开 board 不包含
+受限私有子队列；需要 CEO 跨项目跟踪的子任务由注册编排者发布到现有公开 board，不能为
+可见性泄漏秘密。
+
+master 不再例行向 CEO 报进度；由 CEO 复用本人已有巡检主动读 board，相关 peer 维护
+事实和文档即可。明确的 CEO 请求、待决事项或紧急例外仍按已有通道处理。当前程序的
+`report` 汇总仍读取旧进度记录，与 `projects` 直接读取 board 是两条不同路径；board
+变化自动生成用户报告尚需对应 owner 修复，不能靠文案宣称已实现。
+
 context 返回当前全局 CEO 联系方式。只有当前 grant 持有者才获 CEO 职责与命令：
 职责并入 `role_brief` 一次，命令只在 `operations` 提供一次，不另设第二份正文或操作
 镜像；`ceo` 字段只表示 typed grant/status。`identity.role` 和项目 `authority` 保持
@@ -1406,12 +1461,13 @@ append-task 追加到目标项目现有 board，由当前 master 负责，并默
 不要另建 CEO 业务任务表，也不要把发送消息当作任务板已写入。回执只证明其实际字段：
 持久入队、通知提交、master 已安排、交付和回报各自分开。
 
-项目 master 收到 CEO 请求后，落实授权 action，安排 ready 工作，并向 CEO 交回实际
-结果、进度或具体阻塞。该上游回复职责由 `role_brief` 提供，回复命令由 `operations`
-提供；不另存第二份静态规则。使用自己的项目身份，不切到 CEO 的目录冒充其身份：
+项目 master 收到明确 CEO 请求后，落实授权 action，安排 ready 工作，并按该请求约定
+交回实际结果或具体待决事项，不进行例行进度回报。该上游回复职责由 `role_brief`
+提供，回复命令由 `operations` 提供；不另存第二份静态规则。使用自己的项目身份，
+不切到 CEO 的目录冒充其身份：
 
 ```sh
-collab ceo reply --subject '<主题>' '<普通进度或具体阻塞>'
+collab ceo reply --subject '<待决事项>' '<需要CEO决定的范围、证据及选项>'
 collab ceo reply --subject '<完成主题>' --in-reply-to '<原请求ID>' '<实际交付与证据>'
 ```
 
@@ -1419,10 +1475,12 @@ collab ceo reply --subject '<完成主题>' --in-reply-to '<原请求ID>' '<实�
 回复仍用原请求 ID，`ceo reply` 将结果交给现任 CEO，不手工改历史发送者或回复标记。
 真正完成后才以原请求 ID 回复；daemon
 在正确 master 的回信持久送达后清除精确原标记。收到 pending-reply idle 提醒时处理
-原请求，不回复提醒本身。回交后继续自己的任务；无可执行工作时按既有流程交回/申请
-idle。项目 master 不因全局 CEO 存在而放弃本项目交付责任。
+原请求，不回复提醒本身。回交后继续已授权任务；本人义务完成且无可执行工作时，
+更新结果和 board 后进入 idle，不例行申请批准。项目 master 不因全局 CEO 存在而放弃
+本项目交付责任。
 
-Jenny 巡检向 CEO 上报本项目实质进度时使用同一 `collab ceo reply` 入口，可用
+例行项目进度由 CEO 读取 board，Jenny 不再主动重复上报。需 CEO 决定或明确请求回复时
+使用同一 `collab ceo reply` 入口，可用
 `--urgent` 标记明确紧急。`--urgent` 是唯一 typed 紧急入口，可立即穿透限流与安静
 窗口；正文关键词、普通 P1 阻塞或 ACK 不升级紧急。不带 `--in-reply-to` 的普通进度
 走非紧急汇总，与带 `--in-reply-to` 的请求回复（保留真实投递与回复义务语义）区别
@@ -1566,7 +1624,13 @@ at `assigned`, `working`, `blocked`, `waiting`, `delivered`, or
 After delivery or merge, perform the real cleanup and close the task; a
 reminder does not create a second task or a duplicate dispatch. After closing
 or recording a blocker, inspect the board and continue the next eligible task.
-Enter idle only after the remaining-work and blocker checks above and the current workflow's completion handoff/idle-request procedure.
+After a task handoff, perform the accountable-owner project check before waiting:
+development/delivery, unresolved P0/P1, owned resources/worktrees and evidenced
+improvements. Advance authorized gaps even if the board was empty. Only genuine
+blockers pause affected actions; preserve project responsibility and current
+event/patrol reception when no evidenced action exists. Do not wait for user
+assignments or request routine idle approval; project status goes only to the
+authorized CEO.
 
 Escalation routing is explicit:
 

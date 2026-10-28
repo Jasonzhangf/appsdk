@@ -740,7 +740,21 @@ pub(super) fn goal_check_subscription_owner(
 
 pub(super) const PROJECT_PATROL_EVENT: &str = "master-idle";
 pub(super) const PROJECT_PATROL_SUBJECT: &str = "project-patrol";
-pub(super) const PROJECT_PATROL_EVERY_MS: i64 = 900_000;
+pub(super) const PROJECT_PATROL_EVERY_MS: i64 = 1_500_000;
+pub(super) const PROJECT_PATROL_COMPAT_EVERY_MS: i64 = 900_000;
+pub(super) const PROJECT_PATROL_EVERY_MS_STR: &str = "1500000";
+
+fn is_project_patrol_interval(interval_ms: Option<i64>) -> bool {
+    matches!(
+        interval_ms,
+        Some(PROJECT_PATROL_EVERY_MS | PROJECT_PATROL_COMPAT_EVERY_MS)
+    )
+}
+
+pub(super) fn project_patrol_cadence_gap(interval_ms: Option<i64>) -> Option<&'static str> {
+    (interval_ms == Some(PROJECT_PATROL_COMPAT_EVERY_MS))
+        .then_some("PATROL_CADENCE_RUNTIME_GAP")
+}
 
 fn goal_notify_subscriptions(root: &Path) -> Result<Vec<Value>, String> {
     let mut command = Command::new("collab");
@@ -779,7 +793,7 @@ fn goal_patrol_subscription_is_usable(
 ) -> Option<String> {
     if goal_check_subscription_owner(scope, subscription).is_err()
         || subscription["event"].as_str() != Some(PROJECT_PATROL_EVENT)
-        || subscription["interval_ms"].as_i64() != Some(PROJECT_PATROL_EVERY_MS)
+        || !is_project_patrol_interval(subscription["interval_ms"].as_i64())
         || subscription["status"].as_str() != Some("armed")
         || subscription["subject"].as_str() != Some(PROJECT_PATROL_SUBJECT)
     {
@@ -816,7 +830,7 @@ fn goal_project_patrol_record(
         .filter_map(|subscription| {
             if goal_check_subscription_owner(scope, &subscription).is_err()
                 || subscription["event"].as_str() != Some(PROJECT_PATROL_EVENT)
-                || subscription["interval_ms"].as_i64() != Some(PROJECT_PATROL_EVERY_MS)
+                || !is_project_patrol_interval(subscription["interval_ms"].as_i64())
                 || subscription["subject"].as_str() != Some(PROJECT_PATROL_SUBJECT)
             {
                 return None;
@@ -870,7 +884,7 @@ fn goal_project_patrol_subscribe(
             "--subject",
             PROJECT_PATROL_SUBJECT,
             "--every-ms",
-            "900000",
+            PROJECT_PATROL_EVERY_MS_STR,
             "--repeat-count",
             "100",
             "--ttl-seconds",

@@ -327,6 +327,8 @@ fn notification_subscription_transport_must_match_tmux_or_appserver_kind() {
         created_ms: 0,
         updated_ms: 0,
         status_reason: None,
+        patrol_idle_since_ms: None,
+        patrol_last_push_ms: 0,
     };
     assert!(subscription_matches_transport(
         &subscription("tmux"),
@@ -1361,6 +1363,8 @@ fn appserver_subscription_is_bound_to_the_selected_thread() {
         fired_count: 0,
         status: "armed".into(),
         status_reason: None,
+        patrol_idle_since_ms: None,
+        patrol_last_push_ms: 0,
         created_ms: 0,
         updated_ms: 0,
         expires_ms: i64::MAX,

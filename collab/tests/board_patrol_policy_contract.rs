@@ -38,6 +38,8 @@ fn gate(owner_key: &str, next_due_ms: i64) -> PeerBoardPatrolGate {
         last_realtime_idle_since_ms: 100,
         last_wake_tasks: Vec::new(),
         next_due_ms,
+        idle_episode_start_ms: None,
+        last_poll_idle: false,
     }
 }
 
@@ -54,6 +56,78 @@ fn assert_no_wake(decision: &PatrolDecision) {
     assert!(
         !matches!(decision, PatrolDecision::WakeDue { .. }),
         "expected no wake, got {decision:?}"
+    );
+}
+
+const REMINDER_INTERVAL_MS: i64 = 1_800_000;
+
+#[test]
+fn board_idle_requires_trusted_30m_and_30m_between_pushes() {
+    let tasks = vec![id("T1")];
+    let idle_since = 100_000;
+    let open_gate = gate("jenny", 0);
+
+    for now in [idle_since + 1_799_999, idle_since + REMINDER_INTERVAL_MS] {
+        let decision = evaluate_board_patrol(
+            &tasks,
+            "jenny",
+            PatrolTriggerMode::PeriodicPoll,
+            true,
+            false,
+            idle_since,
+            now,
+            Some(&open_gate),
+        );
+        assert_no_wake(&decision);
+    }
+
+    let first = evaluate_board_patrol(
+        &tasks,
+        "jenny",
+        PatrolTriggerMode::PeriodicPoll,
+        true,
+        false,
+        idle_since,
+        idle_since + REMINDER_INTERVAL_MS + 1,
+        Some(&open_gate),
+    );
+    let PatrolDecision::WakeDue {
+        gate: pushed_gate, ..
+    } = &first
+    else {
+        panic!("30m00s+1ms must be the first eligible push: {first:?}");
+    };
+
+    let just_before_next = evaluate_board_patrol(
+        &tasks,
+        "jenny",
+        PatrolTriggerMode::PeriodicPoll,
+        true,
+        false,
+        idle_since,
+        idle_since + REMINDER_INTERVAL_MS + 1 + REMINDER_INTERVAL_MS - 1,
+        Some(pushed_gate),
+    );
+    assert_no_wake(&just_before_next);
+
+    let next = evaluate_board_patrol(
+        &tasks,
+        "jenny",
+        PatrolTriggerMode::PeriodicPoll,
+        true,
+        false,
+        idle_since,
+        idle_since + REMINDER_INTERVAL_MS + 1 + REMINDER_INTERVAL_MS,
+        Some(pushed_gate),
+    );
+    assert_wake(
+        &next,
+        &tasks,
+        idle_since
+            + REMINDER_INTERVAL_MS
+            + 1
+            + REMINDER_INTERVAL_MS
+            + BOARD_IDLE_PATROL_INTERVAL_MS,
     );
 }
 
@@ -167,22 +241,19 @@ fn rearm_removes_only_callers_records() {
 
 #[test]
 fn periodic_wakes_on_positive_idle_at_due() {
+    let now = 2_000_000;
     let decision = evaluate_board_patrol(
         &[id("T1")],
         "jenny",
         PatrolTriggerMode::PeriodicPoll,
         true,
         false,
-        100,
-        1_000,
+        now - REMINDER_INTERVAL_MS - 1,
+        now,
         None,
     );
 
-    assert_wake(
-        &decision,
-        &[id("T1")],
-        1_000 + BOARD_IDLE_PATROL_INTERVAL_MS,
-    );
+    assert_wake(&decision, &[id("T1")], now + BOARD_IDLE_PATROL_INTERVAL_MS);
 }
 
 #[test]
@@ -214,41 +285,57 @@ fn periodic_busy_skip_advances_deadline_and_never_wakes_early() {
         1_000 + 60_000,
         Some(&gate),
     );
-    assert_eq!(early, PatrolDecision::NotDueYet);
+    assert!(matches!(early, PatrolDecision::NotDueYet { .. }));
 }
 
 #[test]
 fn periodic_due_wakes_again_with_unchanged_idle_since() {
+    let now = 2_000_000;
+    let idle_since = now - REMINDER_INTERVAL_MS - 1;
     let due = evaluate_board_patrol(
         &[id("T1")],
         "jenny",
         PatrolTriggerMode::PeriodicPoll,
         true,
         false,
-        100,
-        1_000,
+        idle_since,
+        now,
         None,
     );
     let PatrolDecision::WakeDue { gate, .. } = due else {
         panic!("expected WakeDue, got {due:?}");
     };
 
-    // Same idle episode and same task list: at the next due instant the
-    // periodic fallback still wakes again; no pending-notice suppression.
+    // The next periodic deadline is only 15 minutes later, which must not
+    // produce a second push inside the 30-minute interval.
+    let early = evaluate_board_patrol(
+        &[id("T1")],
+        "jenny",
+        PatrolTriggerMode::PeriodicPoll,
+        true,
+        false,
+        idle_since,
+        gate.next_due_ms,
+        Some(&gate),
+    );
+    assert!(matches!(early, PatrolDecision::NotDueYet { .. }));
+
+    // A full 30 minutes after the last committed push may push again.
+    let again_at = gate.last_wake_ms + REMINDER_INTERVAL_MS;
     let again = evaluate_board_patrol(
         &[id("T1")],
         "jenny",
         PatrolTriggerMode::PeriodicPoll,
         true,
         false,
-        100,
-        gate.next_due_ms,
+        idle_since,
+        again_at,
         Some(&gate),
     );
     assert_wake(
         &again,
         &[id("T1")],
-        gate.next_due_ms + BOARD_IDLE_PATROL_INTERVAL_MS,
+        again_at + BOARD_IDLE_PATROL_INTERVAL_MS,
     );
 }
 
@@ -279,7 +366,7 @@ fn periodic_unknown_advances_poll_window() {
         1_001,
         Some(&gate),
     );
-    assert_eq!(next_tick, PatrolDecision::NotDueYet);
+    assert!(matches!(next_tick, PatrolDecision::NotDueYet { .. }));
 }
 
 #[test]
@@ -308,6 +395,7 @@ fn periodic_unknown_waiting_and_offline_never_wake() {
 
 #[test]
 fn periodic_different_owner_discards_old_gate_identity() {
+    let now = 2_000_000;
     let old_gate = gate("other", 1_000 + BOARD_IDLE_PATROL_INTERVAL_MS);
     let decision = evaluate_board_patrol(
         &[id("T1")],
@@ -315,21 +403,18 @@ fn periodic_different_owner_discards_old_gate_identity() {
         PatrolTriggerMode::PeriodicPoll,
         true,
         false,
-        100,
-        1_000,
+        now - REMINDER_INTERVAL_MS - 1,
+        now,
         Some(&old_gate),
     );
-    assert_wake(
-        &decision,
-        &[id("T1")],
-        1_000 + BOARD_IDLE_PATROL_INTERVAL_MS,
-    );
+    assert_wake(&decision, &[id("T1")], now + BOARD_IDLE_PATROL_INTERVAL_MS);
 }
 
 #[test]
 fn realtime_wakes_independently_of_periodic_deadline() {
     // The periodic deadline is far away, but a genuine realtime event with a
-    // newer idle episode still wakes.
+    // trusted idle episode older than 30 minutes still wakes.
+    let now = 2_000_000;
     let old_gate = gate("jenny", 1_000 + BOARD_IDLE_PATROL_INTERVAL_MS);
     let decision = evaluate_board_patrol(
         &[id("T1")],
@@ -337,27 +422,25 @@ fn realtime_wakes_independently_of_periodic_deadline() {
         PatrolTriggerMode::RealtimeEvent,
         true,
         false,
-        200,
-        1_000,
+        now - REMINDER_INTERVAL_MS - 1,
+        now,
         Some(&old_gate),
     );
-    assert_wake(
-        &decision,
-        &[id("T1")],
-        1_000 + BOARD_IDLE_PATROL_INTERVAL_MS,
-    );
+    assert_wake(&decision, &[id("T1")], now + BOARD_IDLE_PATROL_INTERVAL_MS);
 }
 
 #[test]
 fn realtime_duplicate_same_idle_and_tasks_coalesces() {
+    let now = 2_000_000;
+    let idle_since = now - REMINDER_INTERVAL_MS - 1;
     let first = evaluate_board_patrol(
         &[id("T1")],
         "jenny",
         PatrolTriggerMode::RealtimeEvent,
         true,
         false,
-        100,
-        1_000,
+        idle_since,
+        now,
         None,
     );
     let PatrolDecision::WakeDue { gate, .. } = first else {
@@ -370,43 +453,60 @@ fn realtime_duplicate_same_idle_and_tasks_coalesces() {
         PatrolTriggerMode::RealtimeEvent,
         true,
         false,
-        100,
-        1_001,
+        idle_since,
+        now + 1,
         Some(&gate),
     );
-    assert_eq!(duplicate, PatrolDecision::NotDueYet);
+    assert!(matches!(duplicate, PatrolDecision::NotDueYet { .. }));
 }
 
 #[test]
 fn realtime_new_task_on_positive_idle_wakes() {
+    let now = 2_000_000;
+    let idle_since = now - REMINDER_INTERVAL_MS - 1;
     let first = evaluate_board_patrol(
         &[id("T1")],
         "jenny",
         PatrolTriggerMode::RealtimeEvent,
         true,
         false,
-        100,
-        1_000,
+        idle_since,
+        now,
         None,
     );
     let PatrolDecision::WakeDue { gate, .. } = first else {
         panic!("expected WakeDue, got {first:?}");
     };
 
+    // A new task does not bypass the 30-minute interval after the last push.
+    let immediate = evaluate_board_patrol(
+        &[id("T1"), id("T2")],
+        "jenny",
+        PatrolTriggerMode::RealtimeEvent,
+        true,
+        false,
+        idle_since,
+        now + 1,
+        Some(&gate),
+    );
+    assert!(matches!(immediate, PatrolDecision::NotDueYet { .. }));
+
+    // Once the interval elapses the new task becomes eligible.
+    let due_at = gate.last_wake_ms + REMINDER_INTERVAL_MS;
     let new_task = evaluate_board_patrol(
         &[id("T1"), id("T2")],
         "jenny",
         PatrolTriggerMode::RealtimeEvent,
         true,
         false,
-        100,
-        1_001,
+        idle_since,
+        due_at,
         Some(&gate),
     );
     assert_wake(
         &new_task,
         &[id("T1"), id("T2")],
-        1_001 + BOARD_IDLE_PATROL_INTERVAL_MS,
+        due_at + BOARD_IDLE_PATROL_INTERVAL_MS,
     );
 }
 
@@ -436,6 +536,7 @@ fn realtime_busy_and_unknown_never_wake() {
 
 #[test]
 fn realtime_different_owner_discards_old_gate() {
+    let now = 2_000_000;
     let old_gate = gate("other", 1_000 + BOARD_IDLE_PATROL_INTERVAL_MS);
     let decision = evaluate_board_patrol(
         &[id("T1")],
@@ -443,15 +544,11 @@ fn realtime_different_owner_discards_old_gate() {
         PatrolTriggerMode::RealtimeEvent,
         true,
         false,
-        100,
-        1_000,
+        now - REMINDER_INTERVAL_MS - 1,
+        now,
         Some(&old_gate),
     );
-    assert_wake(
-        &decision,
-        &[id("T1")],
-        1_000 + BOARD_IDLE_PATROL_INTERVAL_MS,
-    );
+    assert_wake(&decision, &[id("T1")], now + BOARD_IDLE_PATROL_INTERVAL_MS);
 }
 
 #[test]
@@ -505,9 +602,14 @@ fn serde_roundtrips_records_gate_and_decisions() {
         serde_json::from_value(value).expect("deserialize gate");
     assert_eq!(decoded_gate.last_wake_tasks, vec![id("T1")]);
 
-    let json_decision =
-        serde_json::to_value(PatrolDecision::NotDueYet).expect("serialize decision");
+    let json_decision = serde_json::to_value(PatrolDecision::NotDueYet {
+        gate: decoded_gate.clone(),
+    })
+    .expect("serialize decision");
     let decoded_decision: PatrolDecision =
         serde_json::from_value(json_decision).expect("deserialize decision");
-    assert_eq!(decoded_decision, PatrolDecision::NotDueYet);
+    assert_eq!(
+        decoded_decision,
+        PatrolDecision::NotDueYet { gate: decoded_gate }
+    );
 }

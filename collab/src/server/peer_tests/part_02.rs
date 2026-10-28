@@ -605,6 +605,8 @@ fn goal_reconcile_does_not_close_master_idle_or_direct_reception() {
                 created_ms: now_ms() - 900_000,
                 updated_ms: now_ms(),
                 status_reason: None,
+                patrol_idle_since_ms: None,
+                patrol_last_push_ms: 0,
             },
         },
         Event::Sent {

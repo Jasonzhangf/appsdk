@@ -1,7 +1,7 @@
 {
   "id": "collab-ceo-coordination",
-  "version": "1.2.0",
-  "description": "全局 CEO 请求与进度报告单入口单出口。认证来源与全局授权，解析目标项目当前 master 与 CEO 工作区，提交所属 owner 的授权/任务/消息/回复标记，并初始化非破坏性 CEO 工作区偏好指引。进度按项目与实质变化去重合并；普通心跳、重复文本、更新时间或仅 ACK 不产生用户报告。非紧急用户报告每小时至多一次，默认 Asia/Shanghai 00:00（含）至 08:00（不含）静默；静默期接收、去重、累计，08:00 后合并为一次，不逐条补发。typed urgent 是唯一例外，立即穿透小时与静默限制；普通 P1 不自动升级，正文关键词不参与判定。后台到期调度只发送无正文、可持久的提醒并唤醒 native CEO，不生成或预绑定报告批次；CEO 在宿主锁内读取当前进度，准备精确正文与覆盖，真实用户入口输出后由调用方显式 ACK 推进已报告水位。prepare、读取或 flush 不等于用户已收到报告；queued、accepted、consumed 只记录投递证据，不等于 user report confirmed。无 CEO 授权或无待报告内容时返回明确无报告结果；周期重触发在图外，不构成回边。状态跨 daemon 重启持久保留。对应设计 docs/design/collab-board-patrol-ceo-reporting.md。",
+  "version": "1.3.0",
+  "description": "全局 CEO 请求与进度报告单入口单出口。认证来源与全局授权，解析目标项目当前 master 与 CEO 工作区，提交所属 owner 的授权/任务/消息/回复标记，并初始化非破坏性 CEO 工作区偏好指引。ceo progress 的项目读取投影在每个 projects[] 项增加同形的仅读 workspace 事实（project_root、activity、idle_since_ms、idle_duration_ms、observed_ms），根目录取该项目 binding 的 canonical project scope，不取调用者 cwd；无 master 或未知活动时 activity=unknown、idle_since_ms=null、idle_duration_ms=0，读取不推进 report 水位，也不改变本图 report/ack 终点。进度按项目与实质变化去重合并；普通心跳、重复文本、更新时间或仅 ACK 不产生用户报告。非紧急用户报告每小时至多一次，默认 Asia/Shanghai 00:00（含）至 08:00（不含）静默；静默期接收、去重、累计，08:00 后合并为一次，不逐条补发。typed urgent 是唯一例外，立即穿透小时与静默限制；普通 P1 不自动升级，正文关键词不参与判定。后台到期调度只发送无正文、可持久的提醒并唤醒 native CEO，不生成或预绑定报告批次；CEO 在宿主锁内读取当前进度，准备精确正文与覆盖，真实用户入口输出后由调用方显式 ACK 推进已报告水位。prepare、读取或 flush 不等于用户已收到报告；queued、accepted、consumed 只记录投递证据，不等于 user report confirmed。无 CEO 授权或无待报告内容时返回明确无报告结果；周期重触发在图外，不构成回边。状态跨 daemon 重启持久保留。对应设计 docs/design/collab-board-patrol-ceo-reporting.md。",
   "inputs": [{"id": "ceo_request", "schema": "Object"}],
   "nodes": [
     {
@@ -19,7 +19,7 @@
       "id": "解析项目与CEO工作区",
       "operator": "collab.ceo.resolve",
       "operator_version": "1",
-      "description": "解析已注册项目当前 master、当前 CEO grant 与 workspace。无 CEO 时返回明确未配置，不虚构接收者，项目 master 继续本项目工作。workspace 指引只增补受管段落，保留用户已有 AGENTS.md 内容与其他规则；目标不支持时明确失败，不静默改写到替代文件。稳定用户偏好引用用户真源，不复制，不记录秘密或一次情绪。",
+      "description": "解析已注册项目当前 master、当前 CEO grant 与 workspace。无 CEO 时返回明确未配置，不虚构接收者，项目 master 继续本项目工作。workspace 指引只增补受管段落，保留用户已有 AGENTS.md 内容与其他规则；目标不支持时明确失败，不静默改写到替代文件。项目进度读取的 workspace activity 只复用 typed agent activity 与 master binding：project_root 取 binding 的 canonical project scope，不取调用者 cwd；不把 CEO workspace、日志、task 状态或旧 keepalive 当作空闲事实，读取不推进报告水位。稳定用户偏好引用用户真源，不复制，不记录秘密或一次情绪。",
       "inputs": ["authenticated_request"],
       "output": {"id": "resolved_request", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},

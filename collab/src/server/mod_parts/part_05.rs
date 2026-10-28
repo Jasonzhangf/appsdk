@@ -539,6 +539,8 @@ fn default_direct_message_events(
                     created_ms: now,
                     updated_ms: now,
                     status_reason: None,
+                    patrol_idle_since_ms: None,
+                    patrol_last_push_ms: 0,
                 },
             });
         }
@@ -580,6 +582,8 @@ fn default_direct_message_events(
                 created_ms: now,
                 updated_ms: now,
                 status_reason: None,
+                patrol_idle_since_ms: None,
+                patrol_last_push_ms: 0,
             },
         });
         for message_id in std::mem::take(&mut pending_direct_message_ids).into_iter() {
@@ -611,6 +615,8 @@ fn default_direct_message_events(
             created_ms: now,
             updated_ms: now,
             status_reason: None,
+            patrol_idle_since_ms: None,
+            patrol_last_push_ms: 0,
         },
     });
     for message_id in std::mem::take(&mut pending_direct_message_ids).into_iter() {

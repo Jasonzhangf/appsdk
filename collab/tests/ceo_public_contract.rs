@@ -1052,6 +1052,136 @@ fn ceo_cross_project_task_message_reply_progress_and_clear_roundtrip() {
 }
 
 #[test]
+fn ceo_progress_projects_expose_canonical_master_workspace_idle() {
+    let _guard = lock_tmux();
+    let (fixture, ceo_pane) =
+        Fixture::isolated_with_pane_command("ceo-workspace-idle", "sleep 600");
+    let ceo_root = fixture.root.canonicalize().unwrap();
+    let target_root = create_external_project(&fixture, "workspace-idle");
+    let target_pane = create_session(&fixture, "ceo-workspace-idle-target");
+    register_context(
+        &fixture,
+        &ceo_root,
+        &ceo_pane,
+        "ceo-workspace-idle-register",
+        false,
+    );
+    register_context(
+        &fixture,
+        &target_root,
+        &target_pane,
+        "target-workspace-idle-register",
+        false,
+    );
+    run_ok_at(
+        &fixture,
+        &ceo_root,
+        &ceo_pane,
+        &[
+            "ceo",
+            "promote",
+            "--approval",
+            "user explicitly approved the isolated CEO",
+        ],
+        false,
+    );
+    run_ok_at(
+        &fixture,
+        &target_root,
+        &target_pane,
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "user explicitly approved the isolated master",
+        ],
+        false,
+    );
+
+    let canonical_target = target_root.to_string_lossy().into_owned();
+    let status = run_ok_at(
+        &fixture,
+        &target_root,
+        &target_pane,
+        &["master", "status"],
+        false,
+    );
+    let progress = run_ok_at(
+        &fixture,
+        &ceo_root,
+        &ceo_pane,
+        &["ceo", "progress", "--project", &canonical_target],
+        false,
+    );
+    let project = progress["projects"]
+        .as_array()
+        .and_then(|projects| {
+            projects
+                .iter()
+                .find(|project| project["project"].as_str() == Some(canonical_target.as_str()))
+        })
+        .unwrap_or_else(|| panic!("progress must list the canonical project: {progress}"));
+    assert_eq!(project["registered"], true, "{project}");
+    let status_workspace = &status["master"]["workspace"];
+    assert_eq!(
+        status_workspace, &project["workspace"],
+        "master status and ceo progress must project the same workspace fact"
+    );
+    assert_eq!(
+        project["workspace"]["project_root"], canonical_target,
+        "the workspace root comes from the registered project scope"
+    );
+    assert!(
+        project["workspace"]["idle_duration_ms"].as_i64().is_some(),
+        "the projection reports a numeric idle duration: {project}"
+    );
+
+    // An unregistered project keeps its explicit `registered:false` answer and
+    // never fabricates an activity fact.
+    let empty_root = create_external_project(&fixture, "workspace-idle-empty");
+    let canonical_empty = empty_root.to_string_lossy().into_owned();
+    let empty = run_ok_at(
+        &fixture,
+        &ceo_root,
+        &ceo_pane,
+        &["ceo", "progress", "--project", &canonical_empty],
+        false,
+    );
+    let empty_project = &empty["projects"][0];
+    assert_eq!(empty_project["registered"], false, "{empty}");
+    assert_eq!(
+        empty_project["workspace"]["project_root"], canonical_empty,
+        "{empty}"
+    );
+    assert_eq!(empty_project["workspace"]["activity"], "unknown", "{empty}");
+    assert_eq!(
+        empty_project["workspace"]["idle_since_ms"],
+        Value::Null,
+        "{empty}"
+    );
+    assert_eq!(empty_project["workspace"]["idle_duration_ms"], 0, "{empty}");
+
+    // Reading progress is a projection. It must not advance the report
+    // acknowledgement watermark.
+    let watermark = progress["report"]["last_actual_report_ms"].clone();
+    let repeated = run_ok_at(
+        &fixture,
+        &ceo_root,
+        &ceo_pane,
+        &["ceo", "progress", "--project", &canonical_target],
+        false,
+    );
+    assert_eq!(
+        repeated["report"]["last_actual_report_ms"], watermark,
+        "reading progress must not advance the CEO report watermark: {repeated}"
+    );
+
+    drop(fixture);
+    std::fs::remove_dir_all(target_root).unwrap();
+    std::fs::remove_dir_all(empty_root).unwrap();
+}
+
+#[test]
 fn ceo_append_task_without_target_master_is_rejected_without_task_or_message() {
     let _guard = lock_tmux();
     let (fixture, ceo_pane) = Fixture::isolated_with_pane_command("ceo-no-master", "sleep 600");

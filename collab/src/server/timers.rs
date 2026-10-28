@@ -737,20 +737,52 @@ fn drop_unowned_ledger_classifications(
 }
 
 /// Standing project patrol: a dedicated master-idle resource with the
-/// `project-patrol` subject and a fixed 15-minute interval. It is separate
+/// `project-patrol` subject and a 25-minute target interval. The legacy
+/// 15-minute interval remains accepted as a compatibility fallback so an
+/// already-armed record can be upgraded by the goal owner without a second
+/// patrol. It is separate
 /// from finite master-idle schedules: it renews its own budget and TTL on the
 /// same id while the current master obligation is active, and it is never
 /// gated by the finite idle-episode caps, the master's own tasks, the idle
 /// clock, or an older accepted-but-unconsumed notice.
 const PROJECT_PATROL_SUBJECT: &str = "project-patrol";
-const PROJECT_PATROL_INTERVAL_MS: i64 = 900_000;
+const PROJECT_PATROL_TARGET_INTERVAL_MS: i64 = 1_500_000;
+const PROJECT_PATROL_COMPAT_INTERVAL_MS: i64 = 900_000;
 const PROJECT_PATROL_TTL_MS: i64 = 604_800_000;
 const PROJECT_PATROL_REPEAT_HEADROOM: u32 = 100;
+const PROJECT_PATROL_TRUSTED_IDLE_MS: i64 = 1_800_000;
+
+fn is_project_patrol_interval(interval_ms: Option<i64>) -> bool {
+    matches!(
+        interval_ms,
+        Some(PROJECT_PATROL_TARGET_INTERVAL_MS | PROJECT_PATROL_COMPAT_INTERVAL_MS)
+    )
+}
+
+#[cfg(test)]
+fn seed_project_patrol_episode(
+    server: &Server,
+    subscription_id: &str,
+    idle_since_ms: i64,
+    last_push_ms: i64,
+) {
+    // The seeded episode models a poll this process already made, so the
+    // restart guard must not discard it.
+    let _ = super::observation_epoch::first_observation_since_start(
+        &server.root,
+        &format!("project-patrol:{subscription_id}"),
+    );
+    let mut subscription =
+        server.state.lock().unwrap().notification_subscriptions[subscription_id].clone();
+    subscription.patrol_idle_since_ms = Some(idle_since_ms);
+    subscription.patrol_last_push_ms = last_push_ms;
+    server.commit(&[Event::NotificationSubscribed { subscription }]);
+}
 
 fn is_standing_project_patrol(subscription: &NotificationSubscription) -> bool {
     subscription.event == "master-idle"
         && subscription.subject.as_deref() == Some(PROJECT_PATROL_SUBJECT)
-        && subscription.interval_ms == Some(PROJECT_PATROL_INTERVAL_MS)
+        && is_project_patrol_interval(subscription.interval_ms)
 }
 
 fn same_standing_project_patrol(
@@ -770,7 +802,9 @@ fn same_standing_project_patrol(
 fn project_patrol_body() -> String {
     String::from(
         "MASTER_IDLE_WAKE subject=project-patrol. Your current activity is idle. \
-         Check current workers, unclosed board ownership and unclosed tasks, current bindings, \
+         Audit four items before acting: (1) unresolved P0/P1 items; (2) unfinished or ready work; \
+         (3) owned worktree and resource release; (4) peer/worker idle facts and whether each idle \
+         reason is reasonable. Check current workers, unclosed board ownership and unclosed tasks, current bindings, \
          per-task board patrol cancellations with `collab notify status` (project_board_patrol view; \
          use `collab board show` for tasks), and real blockers. \
          Wake only peer-owned eligible uncancelled tasks; never rearm cancelled tasks. \
@@ -883,8 +917,21 @@ fn tick_standing_project_patrol_at(server: &Arc<Server>, now: i64) {
                 .wake_hold
                 .as_ref()
                 .is_some_and(|hold| now < hold.until_ms);
-            let should_notify =
-                activity == crate::server::name_state::AgentActivity::Idle && !hold_active;
+            let is_idle = activity == crate::server::name_state::AgentActivity::Idle;
+            let idle_since_ms = if is_idle {
+                current
+                    .patrol_idle_since_ms
+                    .filter(|start| *start > 0 && *start <= now)
+                    .or(Some(now))
+            } else {
+                None
+            };
+            let last_push_ms = current.patrol_last_push_ms;
+            let due = idle_since_ms.is_some_and(|start| {
+                now > start + PROJECT_PATROL_TRUSTED_IDLE_MS
+                    && (last_push_ms == 0 || now - last_push_ms >= PROJECT_PATROL_TRUSTED_IDLE_MS)
+            });
+            let should_notify = due && !hold_active;
             let fired_count = if should_notify {
                 current.fired_count.saturating_add(1)
             } else {
@@ -892,7 +939,11 @@ fn tick_standing_project_patrol_at(server: &Arc<Server>, now: i64) {
             };
             let mut renewed = current.clone();
             renewed.fired_count = fired_count;
-            renewed.trigger_ms = Some(now.saturating_add(PROJECT_PATROL_INTERVAL_MS));
+            renewed.trigger_ms = Some(now.saturating_add(
+                current
+                    .interval_ms
+                    .unwrap_or(PROJECT_PATROL_TARGET_INTERVAL_MS),
+            ));
             renewed.repeat_count = renewed
                 .repeat_count
                 .max(fired_count.saturating_add(PROJECT_PATROL_REPEAT_HEADROOM));
@@ -902,6 +953,8 @@ fn tick_standing_project_patrol_at(server: &Arc<Server>, now: i64) {
             renewed.status = "armed".into();
             renewed.updated_ms = now;
             renewed.status_reason = None;
+            renewed.patrol_idle_since_ms = idle_since_ms;
+            renewed.patrol_last_push_ms = if should_notify { now } else { last_push_ms };
             let mut events = vec![Event::NotificationSubscribed {
                 subscription: renewed,
             }];
@@ -935,15 +988,16 @@ fn tick_standing_project_patrol_at(server: &Arc<Server>, now: i64) {
                 });
                 message_id = Some(id);
             }
-            if let Err(error) = server.commit_locked_checked(&mut state, &events) {
+            let committed = if let Err(error) = server.commit_locked_checked(&mut state, &events) {
                 super::presence::append_log(
                     &server.log_path(),
                     &format!("PROJECT_PATROL_COMMIT_FAILED: {error:?}"),
                 );
-                None
+                false
             } else {
-                message_id
-            }
+                true
+            };
+            committed.then_some(message_id).flatten()
         };
         if let Some(message_id) = message_id {
             let _ = super::attempt_notification_detailed_with_at(

@@ -1,18 +1,22 @@
 {
   "id": "collab-send-message",
   "version": "1.0.0",
-  "description": "消息发送与匿名准入 SESE 图。区分完整凭据与显式 unknown 匿名发送；服务端固定 unknown 来源，解析既有收件人与路由，统一消息校验与持久提交，按既有通知链投递，记录回执并汇入唯一出口。",
+  "description": "消息发送与匿名准入 SESE 图。区分完整凭据与显式 unknown 匿名发送；归一化新 `sendmessage <地址> --content` 与旧 `--to/--subject` 语法（--content 与位置正文互斥拒绝），解析项目限定地址或稳定名字到真实收件人，复用原消息 typed 回复 route 并在显式地址不一致时拒绝，统一消息校验与持久提交，按既有通知链投递，记录回执并汇入唯一出口。",
   "inputs": [{"id": "send_request", "schema": "Object"}],
   "nodes": [
     {"id": "classify_identity", "operator": "appsdk.collab_send.classify_identity", "operator_version": "1", "inputs": ["send_request"], "output": {"id": "admitted_sender", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
-    {"id": "resolve_recipient_route", "operator": "appsdk.collab_send.resolve_recipient_route", "operator_version": "1", "inputs": ["admitted_sender"], "output": {"id": "target_route", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
-    {"id": "commit_durable_message", "operator": "appsdk.collab_send.commit_durable_message", "operator_version": "1", "inputs": ["target_route"], "output": {"id": "committed_batch", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "classify_address_form", "operator": "appsdk.collab_send.classify_address_form", "operator_version": "1", "inputs": ["admitted_sender"], "output": {"id": "normalized_request", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "resolve_recipient_route", "operator": "appsdk.collab_send.resolve_recipient_route", "operator_version": "1", "inputs": ["normalized_request"], "output": {"id": "target_route", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "resolve_reply_route", "operator": "appsdk.collab_send.resolve_reply_route", "operator_version": "1", "inputs": ["target_route"], "output": {"id": "reply_consistent_route", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "commit_durable_message", "operator": "appsdk.collab_send.commit_durable_message", "operator_version": "1", "inputs": ["reply_consistent_route"], "output": {"id": "committed_batch", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
     {"id": "notify_recipient", "operator": "appsdk.collab_send.notify_recipient", "operator_version": "1", "inputs": ["committed_batch"], "output": {"id": "notification_receipt", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
     {"id": "emit_send_result", "operator": "appsdk.collab_send.emit_send_result", "operator_version": "1", "inputs": ["notification_receipt"], "output": {"id": "send_result", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"}
   ],
   "edges": [
-    {"from": "classify_identity", "to": "resolve_recipient_route", "arc_id": "admitted_sender"},
-    {"from": "resolve_recipient_route", "to": "commit_durable_message", "arc_id": "target_route"},
+    {"from": "classify_identity", "to": "classify_address_form", "arc_id": "admitted_sender"},
+    {"from": "classify_address_form", "to": "resolve_recipient_route", "arc_id": "normalized_request"},
+    {"from": "resolve_recipient_route", "to": "resolve_reply_route", "arc_id": "target_route"},
+    {"from": "resolve_reply_route", "to": "commit_durable_message", "arc_id": "reply_consistent_route"},
     {"from": "commit_durable_message", "to": "notify_recipient", "arc_id": "committed_batch"},
     {"from": "notify_recipient", "to": "emit_send_result", "arc_id": "notification_receipt"}
   ],

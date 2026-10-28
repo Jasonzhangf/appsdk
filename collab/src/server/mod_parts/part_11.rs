@@ -167,6 +167,7 @@ fn dispatch_with_route_context_bound(
                     None,
                     None,
                     target_session,
+                    None,
                 )
             }
             _ => Resp::err(
@@ -597,6 +598,24 @@ fn dispatch_with_route_context_bound(
             Resp::err("declared roles are removed; use collab who/context for peer identity, or collab context --work-roles for work specialties")
         }
         Req::Directory => handle_directory(server),
+        Req::DefaultSet {
+            worker_id,
+            token,
+            channel,
+            conversation,
+            target_address,
+        } => handle_default_set(
+            server,
+            worker_id,
+            token,
+            channel,
+            conversation,
+            target_address,
+        ),
+        Req::DefaultShow {
+            channel,
+            conversation,
+        } => handle_default_show(server, channel, conversation),
         Req::Workers => {
             record_ordinary_peer_presence_edges(server, None);
             let (workers_rec, tasks_map, msgs_map, keepalives_map, role_briefs) = {

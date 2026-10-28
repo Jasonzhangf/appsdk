@@ -25,6 +25,7 @@ pub struct Config {
     pub retention: Retention,
     pub worktree: Worktree,
     pub tmux: Tmux,
+    pub qqbot: QqBot,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -38,6 +39,7 @@ impl Default for Config {
             retention: Retention::default(),
             worktree: Worktree::default(),
             tmux: Tmux::default(),
+            qqbot: QqBot::default(),
         }
     }
 }
@@ -60,6 +62,44 @@ impl Default for Tmux {
         Self {
             endpoints: Vec::new(),
         }
+    }
+}
+
+/// QQBot adapter configuration. No attachment root is assumed by default; the
+/// platform runtime owner must configure an explicit absolute directory before
+/// outbound attachments can be read.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct QqBot {
+    /// Single authorized root for files that the daemon may read and upload.
+    pub attachments_root: Option<PathBuf>,
+}
+impl Default for QqBot {
+    fn default() -> Self {
+        Self {
+            attachments_root: None,
+        }
+    }
+}
+impl QqBot {
+    /// Resolve the configured attachment root. Absence is an explicit
+    /// unavailability, not a fallback to the home directory or repository.
+    pub fn authorized_attachments_root(&self) -> Result<Option<PathBuf>, String> {
+        let Some(root) = self.attachments_root.as_ref() else {
+            return Ok(None);
+        };
+        if !root.is_absolute() {
+            return Err("qqbot.attachments_root must be an absolute path".into());
+        }
+        let canonical = root
+            .canonicalize()
+            .map_err(|error| format!("qqbot.attachments_root cannot be canonicalized: {error}"))?;
+        let metadata = std::fs::metadata(&canonical)
+            .map_err(|error| format!("qqbot.attachments_root cannot be read: {error}"))?;
+        if !metadata.is_dir() {
+            return Err("qqbot.attachments_root must be a directory".into());
+        }
+        Ok(Some(canonical))
     }
 }
 

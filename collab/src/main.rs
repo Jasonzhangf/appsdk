@@ -532,6 +532,61 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             out(&v);
             Ok(())
         }
+        Cmd::List => {
+            // `list` is the same read-only directory projection; the address
+            // fields are what make the entries copyable delivery targets.
+            let scope = Scope::resolve()?;
+            let v: serde_json::Value = client::call_with_context(
+                &scope.sock_path(),
+                &Req::Directory,
+                Some(cli_project_context(&scope.root)?),
+            )?;
+            out(&v);
+            Ok(())
+        }
+        Cmd::Default {
+            target,
+            channel,
+            conversation,
+        } => {
+            let (Some(channel), Some(conversation)) = (channel, conversation) else {
+                // A plain terminal has no channel-owned conversation context.
+                // Refuse rather than mutate a global default for every user.
+                anyhow::bail!(
+                    "CONVERSATION_CONTEXT_MISSING: default requires --channel and --conversation from the active channel session"
+                );
+            };
+            let scope = Scope::resolve()?;
+            match target {
+                None => {
+                    let v: serde_json::Value = client::call_with_context(
+                        &scope.sock_path(),
+                        &Req::DefaultShow {
+                            channel,
+                            conversation,
+                        },
+                        Some(cli_project_context(&scope.root)?),
+                    )?;
+                    out(&v);
+                }
+                Some(target_address) => {
+                    let ident = me(&scope)?;
+                    let v: serde_json::Value = call_project(
+                        &scope,
+                        &ident,
+                        &Req::DefaultSet {
+                            worker_id: ident.worker_id.clone(),
+                            token: ident.token.clone(),
+                            channel,
+                            conversation,
+                            target_address,
+                        },
+                    )?;
+                    out(&v);
+                }
+            }
+            Ok(())
+        }
         Cmd::Init => {
             let project_root = scope::project_root_for_init()?;
             if project_root.ancestors().skip(1).any(|ancestor| {
@@ -1038,6 +1093,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             unknown_sender,
             target_session,
             subject,
+            content,
             r#type,
             in_reply_to,
             delivery,
@@ -1045,12 +1101,50 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             reply_on_completion,
             body,
         } => {
-            let scope = Scope::resolve()?;
-            let body = body.join(" ");
-            if body.is_empty() {
+            let mut body_words = body;
+            let content_provided = content.is_some();
+            let target = match to {
+                Some(to) => to,
+                None if body_words.is_empty() && content_provided && in_reply_to.is_some() => {
+                    // The daemon derives the external channel route from the
+                    // linked inbound message. The empty wire target is only a
+                    // request to resolve that typed route.
+                    String::new()
+                }
+                None => {
+                    if body_words.is_empty() {
+                        anyhow::bail!(
+                            "SEND_TARGET_REQUIRED: sendmessage requires --to or a positional address"
+                        );
+                    }
+                    body_words.remove(0)
+                }
+            };
+            let positional_body = body_words.join(" ");
+            if content_provided && !positional_body.is_empty() {
+                anyhow::bail!(
+                    "SEND_SYNTAX_CONFLICT: provide either --content or a positional body, not both"
+                );
+            }
+            let body = match content {
+                Some(content) => content,
+                None => positional_body,
+            };
+            if body.trim().is_empty() {
                 anyhow::bail!("empty message body");
             }
+            let subject = match subject {
+                Some(subject) if !subject.trim().is_empty() => subject,
+                _ if content_provided => "notify".to_owned(),
+                _ => anyhow::bail!("MESSAGE_SUBJECT_REQUIRED: sendmessage requires --subject"),
+            };
+            let scope = Scope::resolve()?;
             if unknown_sender {
+                if target.is_empty() {
+                    anyhow::bail!(
+                        "ANONYMOUS_REPLY_REJECTED: an anonymous sender cannot use an original channel reply route"
+                    );
+                }
                 if reply_required || reply_on_completion {
                     anyhow::bail!("anonymous send cannot establish reply obligations");
                 }
@@ -1061,7 +1155,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                         worker_id: None,
                         token: None,
                         command: None,
-                        to,
+                        to: target,
                         mtype: r#type,
                         subject: Some(subject),
                         body,
@@ -1092,7 +1186,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     worker_id: Some(ident.worker_id.clone()),
                     token: Some(ident.token.clone()),
                     command: Some(command),
-                    to,
+                    to: target,
                     mtype: r#type,
                     subject: Some(subject),
                     body,

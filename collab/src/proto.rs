@@ -374,6 +374,21 @@ pub struct DirectoryTarget {
     pub transport: Option<DirectoryTransport>,
     pub identity_valid: Option<bool>,
     pub endpoint_live: Option<bool>,
+    /// Canonical project key this target belongs to. Derived from the
+    /// registered project root; never from display text or cwd guesses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// Copyable project-qualified address `<project>.<name>` for a target that
+    /// currently owns a stable name. Absent when the target has no stable name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+    /// Channel/transport family this target is reachable through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_type: Option<String>,
+    /// Honest deliverability projection: `unknown` unless the daemon can prove
+    /// liveness, `unavailable` when the identity is known to be invalid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deliverable: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1019,6 +1034,24 @@ pub enum Req {
     },
     Workers,
     Directory,
+    /// Persist the default delivery target for one external conversation.
+    /// The conversation key is owned by the channel adapter, so a plain
+    /// terminal without a trusted QQ conversation context cannot mutate it.
+    DefaultSet {
+        worker_id: String,
+        token: String,
+        /// Channel instance, e.g. `qqbot`.
+        channel: String,
+        /// Stable external conversation key, e.g. `<user-id>:<session-id>`.
+        conversation: String,
+        /// Project-qualified or stable-name target address.
+        target_address: String,
+    },
+    /// Read the default delivery target for one external conversation.
+    DefaultShow {
+        channel: String,
+        conversation: String,
+    },
     PeerLifecycle {
         request: PeerLifecycleRequest,
     },

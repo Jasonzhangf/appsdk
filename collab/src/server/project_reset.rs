@@ -133,6 +133,22 @@ pub(super) fn clear_project(
     state.reply_obligations.retain(|message_id, obligation| {
         obligation.project != scope && !dropped_messages.contains(message_id)
     });
+    state
+        .conversation_defaults
+        .retain(|_, default| default.project_scope != scope);
+    let remaining_messages: HashSet<String> = state.msgs.keys().cloned().collect();
+    state
+        .channel_envelopes
+        .retain(|message_id, _| remaining_messages.contains(message_id));
+    state
+        .platform_event_index
+        .retain(|_, message_id| remaining_messages.contains(message_id));
+    state
+        .channel_reply_routes
+        .retain(|message_id, _| remaining_messages.contains(message_id));
+    state
+        .channel_delivery_results
+        .retain(|message_id, _| remaining_messages.contains(message_id));
     state.tasks.retain(|id, _| !tasks.contains(id));
     state.board_details.retain(|id, _| !tasks.contains(id));
     state.task_lifecycle.retain(|id, _| !tasks.contains(id));

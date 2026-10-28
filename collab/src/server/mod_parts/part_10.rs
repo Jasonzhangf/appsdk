@@ -3,7 +3,7 @@
 /// counters, the last attempt time and the retry marker are delivery ledger
 /// state; a successful read must not carry them per message.
 fn received_message_view(state: &State, message: &Message) -> serde_json::Value {
-    json!({
+    let mut view = json!({
         "id": message.id,
         "from": message.from,
         "to": message.to,
@@ -14,7 +14,16 @@ fn received_message_view(state: &State, message: &Message) -> serde_json::Value 
         "created_ms": message.created_ms,
         "state": message.state,
         "reply_obligation": state.reply_obligations.get(&message.id),
-    })
+    });
+    // Typed channel facts (QQBot sender, immutable reply route, attachments)
+    // are projected to the reader who can already read the message; old
+    // journals without an envelope simply omit the field.
+    if let Some(channel) = state.channel_envelopes.get(&message.id) {
+        if let Ok(value) = serde_json::to_value(channel) {
+            view["channel"] = value;
+        }
+    }
+    view
 }
 
 fn poll_messages_with_context(
@@ -419,9 +428,13 @@ fn handle_directory(server: &Server) -> Resp {
         let master = current_master_holder(server, &st).ok().flatten();
         (st.workers.values().cloned().collect::<Vec<_>>(), master)
     };
+    let project_key = canonical_project_key(&server.root);
+    let project_scope = GlobalState::canonical_project_scope(&server.root)
+        .ok()
+        .map(|scope| scope.as_str().to_owned());
     let mut targets: Vec<crate::proto::DirectoryTarget> = Vec::new();
     for w in &workers_rec {
-        let (display_name, app_scope, identity_valid) = {
+        let (display_name, app_scope, identity_valid, stable_name) = {
             let st = server.state.lock().unwrap();
             let display_name =
                 worker_display_name(&st, &w.id, master.as_deref() == Some(w.id.as_str()));
@@ -437,13 +450,29 @@ fn handle_directory(server: &Server) -> Resp {
             } else {
                 None
             };
-            (display_name, app_scope, identity_valid)
+            let stable_name = project_scope
+                .as_deref()
+                .and_then(|scope| stable_name_for_worker(&st, scope, &w.id));
+            (display_name, app_scope, identity_valid, stable_name)
         };
         let session_id = w.transport.as_ref().and_then(|t| t.session_id.clone());
         let transport = w.transport.as_ref().map(|t| crate::proto::DirectoryTransport {
             kind: t.kind.as_str().to_owned(),
             namespace: t.namespace.clone(),
         });
+        let channel_type = transport
+            .as_ref()
+            .map(|t| t.kind.clone())
+            .or_else(|| Some("unknown".to_owned()));
+        let deliverable = if identity_valid == Some(false) {
+            Some("unavailable".to_owned())
+        } else {
+            Some("unknown".to_owned())
+        };
+        let address = match (project_key.as_ref(), stable_name) {
+            (Some(project_key), Some(name)) => Some(format!("{project_key}.{name}")),
+            _ => None,
+        };
         targets.push(crate::proto::DirectoryTarget {
             worker_id: w.id.clone(),
             display_name,
@@ -452,6 +481,10 @@ fn handle_directory(server: &Server) -> Resp {
             transport,
             identity_valid,
             endpoint_live: None,
+            project: project_key.clone(),
+            address,
+            channel_type,
+            deliverable,
         });
     }
     targets.sort_by(|a, b| a.worker_id.cmp(&b.worker_id));
@@ -460,6 +493,74 @@ fn handle_directory(server: &Server) -> Resp {
         "targets": targets,
         "count": count,
     }))
+}
+
+fn handle_default_set(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    channel: String,
+    conversation: String,
+    target_address: String,
+) -> Resp {
+    if channel != "qqbot" {
+        return Resp::err("UNSUPPORTED_CHANNEL: only the qqbot channel owns conversation defaults");
+    }
+    if conversation.trim().is_empty() {
+        return Resp::err("CONVERSATION_REQUIRED: a nonempty conversation key is required");
+    }
+    let mut st = server.state.lock().unwrap();
+    let Some(worker) = st.workers.get(&worker_id).cloned() else {
+        return Resp::err(format!("worker {worker_id} not registered"));
+    };
+    if worker.token != token {
+        return Resp::err("token mismatch: identity does not own this worker_id");
+    }
+    // Resolve before any mutation: a failed switch must preserve the old target.
+    let (resolved_worker, _name_address) = match resolve_send_name_address(server, &st, target_address.clone())
+    {
+        Ok(resolved) => resolved,
+        Err(error) => return Resp::err(format!("DEFAULT_TARGET_UNRESOLVED: {error}")),
+    };
+    if !st.workers.contains_key(&resolved_worker) {
+        return Resp::err(format!(
+            "DEFAULT_TARGET_UNRESOLVED: {target_address} does not resolve to a registered worker"
+        ));
+    }
+    let key = crate::server::conversation_default::conversation_default_key(&channel, &conversation);
+    let project_scope = match server_route_scope(server, &st) {
+        Ok(Some(route)) => route.project_scope_id.as_str().to_owned(),
+        Ok(None) => {
+            return Resp::err(
+                "DEFAULT_PROJECT_SCOPE_MISSING: the current project route is unavailable",
+            )
+        }
+        Err(error) => return Resp::err(error),
+    };
+    let revision = st
+        .conversation_defaults
+        .get(&key)
+        .map(|default| default.revision)
+        .unwrap_or(0);
+    let default = crate::server::conversation_default::ConversationDefault {
+        channel: channel.clone(),
+        conversation: conversation.clone(),
+        project_scope,
+        target_address,
+        revision: revision + 1,
+        updated_ms: now_ms(),
+    };
+    if let Err(error) = server.commit_locked(&mut st, &[Event::ConversationDefaultSet { default: default.clone() }]) {
+        return Resp::err(format!("DEFAULT_DURABILITY_FAILED: {error}"));
+    }
+    Resp::data(json!({ "default": default }))
+}
+
+fn handle_default_show(server: &Server, channel: String, conversation: String) -> Resp {
+    let st = server.state.lock().unwrap();
+    let default =
+        crate::server::conversation_default::lookup_default(&st, &channel, &conversation).cloned();
+    Resp::data(json!({ "default": default }))
 }
 
 // ---------- dispatch ----------
@@ -511,6 +612,7 @@ fn mutation_blocked_during_migration(req: &Req) -> bool {
         | Req::WorkerName { .. }
         | Req::WorkRolesSet { .. }
         | Req::WorkflowTemplateSet { .. }
+        | Req::DefaultSet { .. }
         | Req::ResetBindings { .. } => true,
         Req::Register { .. }
         | Req::IdentityContext { .. }
@@ -530,6 +632,7 @@ fn mutation_blocked_during_migration(req: &Req) -> bool {
         | Req::Role { .. }
         | Req::Workers
         | Req::Directory
+        | Req::DefaultShow { .. }
         | Req::WorkerStatus { .. }
         | Req::MasterId
         | Req::MasterRecover { .. }
@@ -565,6 +668,9 @@ fn wire_mutation_principal(req: &Req) -> Option<(&str, &str)> {
         | Req::WorkerName { worker_id, token, .. }
         | Req::WorkRolesSet { worker_id, token, .. }
         | Req::WorkflowTemplateSet {
+            worker_id, token, ..
+        }
+        | Req::DefaultSet {
             worker_id, token, ..
         }
         | Req::Register {

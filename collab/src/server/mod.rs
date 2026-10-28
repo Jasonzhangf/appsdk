@@ -1,5 +1,8 @@
 mod binding_lifecycle;
 mod ceo_report_patrol;
+pub(crate) mod channel_delivery;
+pub(crate) mod channel_envelope;
+pub(crate) mod conversation_default;
 pub mod global_state;
 mod identity_context;
 pub(crate) mod keepalive;
@@ -103,6 +106,7 @@ include!("mod_parts/part_05.rs");
 include!("mod_parts/part_06.rs");
 include!("mod_parts/part_07.rs");
 include!("mod_parts/part_08.rs");
+include!("mod_parts/channel_routing.rs");
 include!("mod_parts/part_09.rs");
 include!("mod_parts/part_10.rs");
 include!("mod_parts/part_11.rs");

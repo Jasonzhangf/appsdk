@@ -154,3 +154,46 @@ separate from that evidence.
 - `server::peer_tests::managed_direct_dispatch_accepts_master_and_continues_after_blocked`: retained compatibility path for historical managed records; busy and unrelated peers are rejected and blocked ownership remains intact.
 - `server::peer_tests::master_name_uses_authority_when_read_projection_is_peer`: Jenny derives from scoped authority while lifecycle Read keeps its narrow peer role.
 - `peer_lifecycle_cli::verified_public_create_can_be_bound_and_read_back_as_managed`: actual MCP Send by an ordinary parent, child Working and blocked-next dispatch through the public CLI.
+
+## QQBot communication lifecycle (source/isolated)
+
+- `docs/dagpipe/collab-send-message.graph.json` adds explicit address-form
+  classification (new `--content` and legacy `--to/--subject`) and typed
+  reply-route resolution to the existing send SESE chain.
+- `docs/dagpipe/collab-qqbot-inbound.graph.json` covers platform event ingest,
+  address/default resolution, attachment save-then-publish, typed
+  `ChannelEnvelope` commit and the single receive result.
+- `docs/dagpipe/collab-qqbot-outbound.graph.json` covers formal attachment
+  fields, authorized-root file reads, platform upload and an explicit
+  sent/failed/uncertain result without blind replay.
+- `qqbot_communication_cli` is the socket-free public CLI contract:
+  `sendmessage <address> --content` parses, `--content` and a positional body
+  are mutually exclusive, a legacy positional body still requires `--subject`,
+  `list` is recognized, and a plain terminal `default` without channel
+  context is rejected with `CONVERSATION_CONTEXT_MISSING`.
+- `crate::tests::qqbot_lifecycle_tests` covers per-conversation default
+  isolation (switching A never moves B), platform event idempotency (the first
+  durable message wins), and the outbound attachment boundary (must be an
+  in-root readable regular file).
+- `server::peer_tests::qqbot_leading_address_*` and
+  `server::peer_tests::qqbot_mid_body_*` cover the leading `[project.name]` /
+  `[ceo]` routing increment: an explicit address wins, a mid-body bracket stays
+  plain text, case folding is applied, a fold conflict is ambiguous, and a
+  failed explicit address never falls back to or mutates the conversation
+  default. `[ceo]` requires the typed CEO grant, not a role label or the
+  project master.
+- `server::peer_tests::qqbot_default_switch_is_isolated_and_failed_switch_keeps_the_old_target`
+  exercises the real `handle_default_set` owner: two conversations stay
+  isolated and an unresolved switch preserves the previous target.
+- `server::channel_envelope::tests` cover inbound attachment staging: a path is
+  published only after a complete save under the authorized root, unsafe
+  platform ids/names are turned into safe path segments, and a failed save
+  reports the display name without publishing a path.
+- `server::adapters::qqbot::tests` cover the outbound boundary: a text-only
+  message needs no attachment root, a path mentioned in the body is never read,
+  and only a typed attachment is resolved inside the authorized root.
+- Daemon-backed end-to-end cases (list address delivery, reply route after a
+  default switch, inbound image/file publication, outbound upload bytes and
+  uncertain no-replay) require a socket-capable environment and the external
+  QQ SDK upload/receipt fields. Adapter wiring remains with Bob; graph
+  validity and unit/reducer pass are not a substitute for those live cases.

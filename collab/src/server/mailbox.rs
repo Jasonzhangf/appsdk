@@ -45,6 +45,16 @@ fn abbreviated_subject(subject: &str) -> Option<String> {
     Some(abbreviated)
 }
 
+/// Derive a stable notification title when a content-first sender omits the
+/// legacy `--subject` field. The first non-empty line stays recognizable while
+/// the complete body remains untouched in the durable message.
+pub fn notification_subject_from_body(body: &str) -> Option<String> {
+    body.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .and_then(abbreviated_subject)
+}
+
 pub fn visible_body(body: &str) -> String {
     let mut visible = String::with_capacity(body.len());
     for ch in body.chars() {
@@ -152,6 +162,26 @@ pub(super) fn automatic_retry_eligible(message: &Message, retry_delay_ms: i64, n
         || now.saturating_sub(message.last_wake_attempt_ms) >= retry_delay_ms
 }
 
+fn preview_for_text(text: &str) -> Option<String> {
+    let mut preview_width = 80;
+    let head = text.strip_prefix("COLLAB_NOTIFY ")?;
+    let (_, head) = head.split_once(' ')?;
+    let (_, tail) = head.strip_prefix('[')?.split_once("] ")?;
+    let tail = tail
+        .split_once(" | P1 ACTION:")
+        .or_else(|| tail.split_once(" | P0 ACTION:"))
+        .or_else(|| tail.split_once(" | P2 ACTION:"))
+        .map(|(body, _)| body.to_string())
+        .unwrap_or_else(|| tail.to_string());
+    if tail.chars().count() <= preview_width {
+        return Some(tail);
+    }
+    preview_width -= 1;
+    let mut preview = tail.chars().take(preview_width).collect::<String>();
+    preview.push('…');
+    Some(preview)
+}
+
 pub fn batch_notification_text(
     batch: &[(i64, String, String, String, String)],
     remaining: usize,
@@ -161,16 +191,28 @@ pub fn batch_notification_text(
         .map(|(_, id, _, _, _)| id.as_str())
         .collect::<Vec<_>>()
         .join(",");
-    let actions = batch
+    let entries = batch
         .iter()
+        .map(|(_, id, _, _, text)| {
+            let title = text
+                .split_once('[')
+                .and_then(|(_, rest)| rest.split_once(']'))
+                .map(|(subject, _)| subject)
+                .unwrap_or("notification");
+            let preview = preview_for_text(text).unwrap_or_else(|| "…".to_string());
+            format!("{id}:{title}={preview}")
+        })
+        .collect::<Vec<_>>()
+        .join(";");
+    let last = batch
+        .last()
         .map(|(_, _, _, _, text)| {
             text.split_once('[')
                 .and_then(|(_, rest)| rest.split_once(']'))
                 .map(|(subject, _)| subject)
                 .unwrap_or("notification")
         })
-        .collect::<Vec<_>>()
-        .join(",");
+        .unwrap_or("notification");
     let older = (remaining > 0)
         .then(|| format!(" older_messages={remaining}"))
         .unwrap_or_default();
@@ -178,7 +220,7 @@ pub fn batch_notification_text(
     // preview text; the durable inbox remains the source for task details.
     // Identity, relevance and overflow only: the composed notification owns
     // the single read action, and the Collab Skill owns the execution protocol.
-    format!("Batch wake: message_ids={message_ids} action_categories={actions}.{older}")
+    format!("Batch wake: message_ids={message_ids} last={last} entries={entries}.{older}")
 }
 
 #[derive(Debug)]

@@ -652,6 +652,32 @@ impl State {
                     self.worker_names.remove(worker_id);
                 }
             },
+            Event::ConversationDefaultSet { default } => {
+                self.conversation_defaults
+                    .insert(default.key(), default.clone());
+            }
+            Event::ChannelEnvelopeRecorded {
+                message_id,
+                idempotency_key,
+                envelope,
+            } => {
+                // Duplicate platform events are idempotent: the first durable
+                // message wins and no second envelope is written.
+                if self.platform_event_index.contains_key(idempotency_key) {
+                    return Ok(());
+                }
+                self.platform_event_index
+                    .insert(idempotency_key.clone(), message_id.clone());
+                self.channel_envelopes
+                    .insert(message_id.clone(), envelope.clone());
+            }
+            Event::ChannelReplyRouteBound { message_id, route } => {
+                self.channel_reply_routes.insert(message_id.clone(), route.clone());
+            }
+            Event::ChannelDeliveryResultRecorded { result } => {
+                self.channel_delivery_results
+                    .insert(result.message_id.clone(), result.clone());
+            }
             Event::LegacyWorkerRemoved { worker_id } => {
                 self.workers.remove(worker_id);
                 self.worker_names.remove(worker_id);
@@ -1641,6 +1667,10 @@ impl State {
         self.delivery_modes.remove(id);
         self.delivery_source_threads.remove(id);
         self.wake_bindings.remove(id);
+        self.channel_envelopes.remove(id);
+        self.platform_event_index.retain(|_, message_id| message_id != id);
+        self.channel_reply_routes.remove(id);
+        self.channel_delivery_results.remove(id);
     }
 
     /// Persisted work specialities for one stable name. Session carriers and
@@ -2114,6 +2144,43 @@ impl State {
                 });
             }
         }
+        let mut defaults: Vec<_> = self.conversation_defaults.values().cloned().collect();
+        defaults.sort_by(|a, b| a.key().cmp(&b.key()));
+        events.extend(
+            defaults
+                .into_iter()
+                .map(|default| Event::ConversationDefaultSet { default }),
+        );
+        let mut envelopes: Vec<_> = self.channel_envelopes.iter().collect();
+        envelopes.sort_by(|a, b| a.0.cmp(b.0));
+        events.extend(envelopes.into_iter().map(|(message_id, envelope)| {
+            Event::ChannelEnvelopeRecorded {
+                message_id: message_id.clone(),
+                idempotency_key: crate::server::channel_envelope::platform_event_key(
+                    &envelope.channel_instance,
+                    &envelope.external_conversation,
+                    &envelope.platform_message_id,
+                ),
+                envelope: envelope.clone(),
+            }
+        }));
+        let mut reply_routes: Vec<_> = self.channel_reply_routes.iter().collect();
+        reply_routes.sort_by(|a, b| a.0.cmp(b.0));
+        events.extend(
+            reply_routes
+                .into_iter()
+                .map(|(message_id, route)| Event::ChannelReplyRouteBound {
+                    message_id: message_id.clone(),
+                    route: route.clone(),
+                }),
+        );
+        let mut delivery_results: Vec<_> = self.channel_delivery_results.values().cloned().collect();
+        delivery_results.sort_by(|a, b| a.message_id.cmp(&b.message_id));
+        events.extend(
+            delivery_results
+                .into_iter()
+                .map(|result| Event::ChannelDeliveryResultRecorded { result }),
+        );
         // Unsettled obligations survive compaction. They follow the message
         // rows above so a restored journal has the original message first.
         let mut obligations: Vec<_> = self.reply_obligations.values().cloned().collect();

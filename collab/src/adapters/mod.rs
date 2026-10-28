@@ -14,6 +14,7 @@
 pub mod codex_app_server;
 pub mod desktop_bridge;
 pub mod dsh;
+pub mod qqbot;
 pub mod tmux;
 
 pub use codex_app_server::{candidate_from_env, immediate_notify, verify_candidate};

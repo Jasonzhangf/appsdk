@@ -304,29 +304,35 @@ pub(crate) fn live_closure_notification_category(notification: &str) -> Option<&
 pub(crate) fn live_closure_batch_input_contains_message(
     observed: &str,
     message_id: &str,
-    expected_category: &str,
+    expected_title: &str,
     xml_escaped: bool,
 ) -> bool {
-    let expected_category = if xml_escaped {
-        client::adapters::codex_app_server::escape_delegated_text(expected_category)
+    let expected_title = if xml_escaped {
+        client::adapters::codex_app_server::escape_delegated_text(expected_title)
     } else {
-        expected_category.to_owned()
+        expected_title.to_owned()
     };
     let Some((_, body)) = observed.split_once(" [notification-batch] Batch wake: message_ids=")
     else {
         return false;
     };
-    let Some((ids, rest)) = body.split_once(" action_categories=") else {
+    let Some((_, entries)) = body.split_once(" entries=") else {
         return false;
     };
-    let categories = rest.split_once(" | ").map_or(rest, |(body, _)| body);
-    let categories = categories
+    let entries = entries.split_once(" | ").map_or(entries, |(body, _)| body);
+    let entries = entries
         .split_once(" older_messages=")
-        .map_or(categories, |(categories, _)| categories);
-    let categories = categories.strip_suffix('.').unwrap_or(categories);
-    ids.split(',')
-        .zip(categories.split(','))
-        .any(|(id, category)| id == message_id && category == expected_category)
+        .map_or(entries, |(entries, _)| entries);
+    let entries = entries.strip_suffix('.').unwrap_or(entries);
+    entries.split(';').any(|entry| {
+        let Some((id, rest)) = entry.split_once(':') else {
+            return false;
+        };
+        let Some((title, _)) = rest.split_once('=') else {
+            return false;
+        };
+        id == message_id && title == expected_title
+    })
 }
 
 #[cfg(test)]

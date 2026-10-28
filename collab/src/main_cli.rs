@@ -579,6 +579,9 @@ pub(crate) enum Cmd {
     Who,
     /// Read-only communication directory for current project (does not require authentication)
     Directory,
+    /// List copyable project-qualified delivery addresses with channel and
+    /// honest deliverability. Same read-only source as `collab directory`.
+    List,
     /// Inspect or explicitly assign collab master authority
     Master {
         #[command(subcommand)]
@@ -642,17 +645,25 @@ pub(crate) enum Cmd {
     /// Send a message to another worker
     #[command(alias = "sendmessage")]
     Send {
+        /// Recipient address. Optional when the new positional `<address>
+        /// --content <正文>` form is used.
         #[arg(long)]
-        to: String,
+        to: Option<String>,
         /// Explicit anonymous sender; skips authentication and sender validation
         #[arg(long)]
         unknown_sender: bool,
         /// Fixed target session constraint; prevents delivery if recipient changes sessions
         #[arg(long)]
         target_session: Option<String>,
-        /// Short topic shown in the notification preview
+        /// Short topic shown in the notification preview. In the new
+        /// `--content` form the daemon derives it from the first non-empty
+        /// body line.
         #[arg(long)]
-        subject: String,
+        subject: Option<String>,
+        /// New send syntax: plain body of the message. Mutually exclusive with
+        /// the legacy positional `<body>` form.
+        #[arg(long)]
+        content: Option<String>,
         #[arg(long, default_value = "notify")]
         r#type: String,
         #[arg(long)]
@@ -665,8 +676,29 @@ pub(crate) enum Cmd {
         /// Track an obligation: reply once the delegated work is complete.
         #[arg(long, conflicts_with_all = ["reply_required", "unknown_sender"])]
         reply_on_completion: bool,
-        #[arg(trailing_var_arg = true)]
+        /// Legacy positional body. The new `<address> --content <正文>` form
+        /// keeps the address here for the send owner to normalize.
         body: Vec<String>,
+    },
+    /// Set or inspect the default delivery target for one external conversation
+    /// (e.g. a QQ session). Without a trusted conversation context a terminal
+    /// cannot mutate the default; use `collab list` to discover addresses.
+    Default {
+        /// Address form: `<name>` resolves the project CEO entry, `<name.Jenny>`
+        /// targets an explicit agent. With no `target` the command prints the
+        /// current default for the active conversation context.
+        target: Option<String>,
+        /// Channel instance that owns this conversation, e.g. `qqbot`. Required
+        /// together with `--conversation`; a plain terminal has neither.
+        #[arg(long)]
+        channel: Option<String>,
+        /// Distinct connection of that channel family, e.g. `qqbot@host`.
+        /// Defaults to `--channel` for a single-instance channel.
+        #[arg(long)]
+        channel_instance: Option<String>,
+        /// Stable external conversation key, e.g. `<user>:<session>`.
+        #[arg(long)]
+        conversation: Option<String>,
     },
     /// Discover and explicitly subscribe to finite notifications
     Notify {

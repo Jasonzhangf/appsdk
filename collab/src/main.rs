@@ -532,6 +532,62 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             out(&v);
             Ok(())
         }
+        Cmd::List => {
+            // Host-wide read-only directory. `list` must work from any cwd and
+            // needs no project scope; its addresses and project_roots are the
+            // single delivery source for channel adapters.
+            let host = crate::scope::HostPaths::resolve()?;
+            let v: serde_json::Value = client::call(&host.socket_path(), &Req::DirectoryAll)?;
+            out(&v);
+            Ok(())
+        }
+        Cmd::Default {
+            target,
+            channel,
+            channel_instance,
+            conversation,
+        } => {
+            let (Some(channel), Some(conversation)) = (channel, conversation) else {
+                // A plain terminal has no channel-owned conversation context.
+                // Refuse rather than mutate a global default for every user.
+                anyhow::bail!(
+                    "CONVERSATION_CONTEXT_MISSING: default requires --channel and --conversation from the active channel session"
+                );
+            };
+            let channel_instance = channel_instance.unwrap_or_else(|| channel.clone());
+            let scope = Scope::resolve()?;
+            match target {
+                None => {
+                    let v: serde_json::Value = client::call_with_context(
+                        &scope.sock_path(),
+                        &Req::DefaultShow {
+                            channel,
+                            channel_instance,
+                            conversation,
+                        },
+                        Some(cli_project_context(&scope.root)?),
+                    )?;
+                    out(&v);
+                }
+                Some(target_address) => {
+                    let ident = me(&scope)?;
+                    let v: serde_json::Value = call_project(
+                        &scope,
+                        &ident,
+                        &Req::DefaultSet {
+                            worker_id: ident.worker_id.clone(),
+                            token: ident.token.clone(),
+                            channel,
+                            channel_instance,
+                            conversation,
+                            target_address,
+                        },
+                    )?;
+                    out(&v);
+                }
+            }
+            Ok(())
+        }
         Cmd::Init => {
             let project_root = scope::project_root_for_init()?;
             if project_root.ancestors().skip(1).any(|ancestor| {
@@ -1038,6 +1094,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             unknown_sender,
             target_session,
             subject,
+            content,
             r#type,
             in_reply_to,
             delivery,
@@ -1045,12 +1102,53 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             reply_on_completion,
             body,
         } => {
-            let scope = Scope::resolve()?;
-            let body = body.join(" ");
-            if body.is_empty() {
+            let mut body_words = body;
+            let content_provided = content.is_some();
+            let target = match to {
+                Some(to) => to,
+                None if body_words.is_empty() && content_provided && in_reply_to.is_some() => {
+                    // The daemon derives the external channel route from the
+                    // linked inbound message. The empty wire target is only a
+                    // request to resolve that typed route.
+                    String::new()
+                }
+                None => {
+                    if body_words.is_empty() {
+                        anyhow::bail!(
+                            "SEND_TARGET_REQUIRED: sendmessage requires --to or a positional address"
+                        );
+                    }
+                    body_words.remove(0)
+                }
+            };
+            let positional_body = body_words.join(" ");
+            if content_provided && !positional_body.is_empty() {
+                anyhow::bail!(
+                    "SEND_SYNTAX_CONFLICT: provide either --content or a positional body, not both"
+                );
+            }
+            let body = match content {
+                Some(content) => content,
+                None => positional_body,
+            };
+            if body.trim().is_empty() && in_reply_to.is_none() {
                 anyhow::bail!("empty message body");
             }
+            let subject = match subject {
+                Some(subject) if !subject.trim().is_empty() => subject,
+                _ if content_provided => server::mailbox::notification_subject_from_body(&body)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("MESSAGE_SUBJECT_REQUIRED: content has no usable title")
+                    })?,
+                _ => anyhow::bail!("MESSAGE_SUBJECT_REQUIRED: sendmessage requires --subject"),
+            };
+            let scope = Scope::resolve()?;
             if unknown_sender {
+                if target.is_empty() {
+                    anyhow::bail!(
+                        "ANONYMOUS_REPLY_REJECTED: an anonymous sender cannot use an original channel reply route"
+                    );
+                }
                 if reply_required || reply_on_completion {
                     anyhow::bail!("anonymous send cannot establish reply obligations");
                 }
@@ -1061,7 +1159,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                         worker_id: None,
                         token: None,
                         command: None,
-                        to,
+                        to: target,
                         mtype: r#type,
                         subject: Some(subject),
                         body,
@@ -1092,7 +1190,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     worker_id: Some(ident.worker_id.clone()),
                     token: Some(ident.token.clone()),
                     command: Some(command),
-                    to,
+                    to: target,
                     mtype: r#type,
                     subject: Some(subject),
                     body,

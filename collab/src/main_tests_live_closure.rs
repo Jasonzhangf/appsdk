@@ -142,11 +142,18 @@ fn live_closure_item_correlation_accepts_multi_message_batch_entry() {
         challenge,
     )
     .unwrap();
-    let batch_input = "COLLAB_NOTIFY message-other [notification-batch] Batch wake: message_ids=message-other,message-target,message-later action_categories=other,appsdk-collab-live:closure-1:peer_to_peer,later. older_messages=2 | P1 ACTION: do the in-scope action the message asks for. Read it once with `collab recv`; that consumes this durable message.";
+    let batch_input = "COLLAB_NOTIFY message-other [notification-batch] Batch wake: message_ids=message-other,message-target,message-later last=later entries=message-other:other=other;message-target:appsdk-collab-live:closure-1:peer_to_peer=appsdk-collab-live:closure-1:peer_to_peer;message-later:later=later. older_messages=2 | P1 ACTION: do the in-scope action the message asks for. Read it once with `collab recv`; that consumes this durable message.";
 
     let last_entry = batch_input
-        .replace(",message-later", "")
-        .replace(",later. older_messages=2", ".");
+        .replace(
+            "message_ids=message-other,message-target,message-later",
+            "message_ids=message-target",
+        )
+        .replace(
+            "entries=message-other:other=other;message-target:appsdk-collab-live:closure-1:peer_to_peer=appsdk-collab-live:closure-1:peer_to_peer;message-later:later=later.",
+            "entries=message-target:appsdk-collab-live:closure-1:peer_to_peer=appsdk-collab-live:closure-1:peer_to_peer.",
+        )
+        .replace(" older_messages=2", "");
     assert!(live_closure_item_matches_input(
         &json!({
             "turnId": "turn-target",
@@ -183,8 +190,8 @@ fn live_closure_item_correlation_accepts_multi_message_batch_entry() {
     ));
 
     let mismatched = batch_input.replace(
-        "other,appsdk-collab-live:closure-1:peer_to_peer,later",
-        "other,appsdk-collab-live:other,later",
+        "message-target:appsdk-collab-live:closure-1:peer_to_peer=",
+        "message-target:appsdk-collab-live:other=",
     );
     assert!(!live_closure_item_matches_input(
         &json!({

@@ -1041,6 +1041,442 @@ fn send_without_subscription_is_mailbox_only_and_deduplicated() {
 }
 
 #[test]
+fn qqbot_inbound_duplicate_platform_event_commits_one_message() {
+    use crate::server::channel_envelope::ChannelEnvelope;
+
+    let (mut server, root) = test_server();
+    server.config.notifications.enabled = false;
+    server.appserver_notification_sink = Arc::new(|_, _, _, _, _, _| {
+        Err("QQBOT_SINK_UNEXPECTED: inbound tests disable notification sinks".into())
+    });
+    register_synthetic_peer(&server, "agent", "qqbot-agent");
+    // Registration supplies a default wake lease. These lifecycle tests exercise
+    // durable channel routing, not the wake transport, so keep sends mailbox-only.
+    server.state.lock().unwrap().notification_subscriptions.clear();
+    let envelope = ChannelEnvelope {
+        source_channel: "qqbot".into(),
+        channel_instance: "qqbot@host".into(),
+        external_user: "u1".into(),
+        external_conversation: "u1:session".into(),
+        platform_message_id: "platform-msg-1".into(),
+        reply_route: "qqbot://u1/session".into(),
+        recipient_address: "agent".into(),
+        attachments: Vec::new(),
+    };
+    let first = handle_channel_inbound(
+        &server,
+        "external:qqbot".into(),
+        "agent".into(),
+        "QQBot inbound".into(),
+        "hello".into(),
+        envelope.clone(),
+    );
+    assert!(first.ok, "{first:?}");
+    let first_id = first.data["msg_id"].as_str().unwrap().to_owned();
+    let second = handle_channel_inbound(
+        &server,
+        "external:qqbot".into(),
+        "agent".into(),
+        "QQBot inbound".into(),
+        "hello".into(),
+        envelope,
+    );
+    assert!(second.ok, "{second:?}");
+    assert_eq!(second.data["deduplicated"], true);
+    assert_eq!(second.data["msg_id"], first_id);
+    let st = server.state.lock().unwrap();
+    assert_eq!(st.msgs.len(), 1);
+    assert_eq!(st.channel_envelopes.len(), 1);
+    assert_eq!(st.platform_event_index.len(), 1);
+    assert!(st.channel_envelopes.contains_key(&first_id));
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn qqbot_same_text_with_different_platform_events_commits_separate_messages() {
+    use crate::server::channel_envelope::ChannelEnvelope;
+
+    let (mut server, root) = test_server();
+    server.config.notifications.enabled = false;
+    server.appserver_notification_sink = Arc::new(|_, _, _, _, _, _| {
+        Err("QQBOT_SINK_UNEXPECTED: inbound tests disable notification sinks".into())
+    });
+    register_synthetic_peer(&server, "agent", "qqbot-agent");
+    server.state.lock().unwrap().notification_subscriptions.clear();
+
+    let first = handle_channel_inbound(
+        &server,
+        "external:qqbot".into(),
+        "agent".into(),
+        "QQBot inbound".into(),
+        "same text".into(),
+        ChannelEnvelope {
+            source_channel: "qqbot".into(),
+            channel_instance: "qqbot@host".into(),
+            external_user: "u1".into(),
+            external_conversation: "u1:session".into(),
+            platform_message_id: "event-a".into(),
+            reply_route: "qqbot://u1/session".into(),
+            recipient_address: "agent".into(),
+            attachments: Vec::new(),
+        },
+    );
+    assert!(first.ok, "{first:?}");
+    let first_id = first.data["msg_id"].as_str().unwrap().to_owned();
+    let second = handle_channel_inbound(
+        &server,
+        "external:qqbot".into(),
+        "agent".into(),
+        "QQBot inbound".into(),
+        "same text".into(),
+        ChannelEnvelope {
+            source_channel: "qqbot".into(),
+            channel_instance: "qqbot@host".into(),
+            external_user: "u1".into(),
+            external_conversation: "u1:session".into(),
+            platform_message_id: "event-b".into(),
+            reply_route: "qqbot://u1/session".into(),
+            recipient_address: "agent".into(),
+            attachments: Vec::new(),
+        },
+    );
+    assert!(second.ok, "{second:?}");
+    assert_ne!(
+        second.data["msg_id"], first_id,
+        "distinct platform event ids must not be folded by body dedup"
+    );
+
+    let replayed = {
+        drop(server.state.lock().unwrap());
+        replay(&root).unwrap()
+    };
+    assert_eq!(replayed.msgs.len(), 2);
+    assert_eq!(replayed.channel_envelopes.len(), 2);
+    assert_eq!(
+        replayed.platform_event_index.len(),
+        2,
+        "{:?}",
+        replayed.platform_event_index
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn qqbot_same_text_from_different_conversations_keeps_each_reply_route() {
+    use crate::server::channel_envelope::ChannelEnvelope;
+
+    let (mut server, root) = test_server();
+    server.config.notifications.enabled = false;
+    server.appserver_notification_sink = Arc::new(|_, _, _, _, _, _| {
+        Err("QQBOT_SINK_UNEXPECTED: inbound tests disable notification sinks".into())
+    });
+    register_synthetic_peer(&server, "agent", "qqbot-agent");
+    server.state.lock().unwrap().notification_subscriptions.clear();
+
+    let first = handle_channel_inbound(
+        &server,
+        "external:qqbot".into(),
+        "agent".into(),
+        "QQBot inbound".into(),
+        "identical body".into(),
+        ChannelEnvelope {
+            source_channel: "qqbot".into(),
+            channel_instance: "qqbot@host".into(),
+            external_user: "u1".into(),
+            external_conversation: "u1:session".into(),
+            platform_message_id: "event-1".into(),
+            reply_route: "qqbot://u1/session".into(),
+            recipient_address: "agent".into(),
+            attachments: Vec::new(),
+        },
+    );
+    assert!(first.ok, "{first:?}");
+    let first_id = first.data["msg_id"].as_str().unwrap().to_owned();
+    let second = handle_channel_inbound(
+        &server,
+        "external:qqbot".into(),
+        "agent".into(),
+        "QQBot inbound".into(),
+        "identical body".into(),
+        ChannelEnvelope {
+            source_channel: "qqbot".into(),
+            channel_instance: "qqbot@host".into(),
+            external_user: "u2".into(),
+            external_conversation: "u2:session".into(),
+            platform_message_id: "event-2".into(),
+            reply_route: "qqbot://u2/session".into(),
+            recipient_address: "agent".into(),
+            attachments: Vec::new(),
+        },
+    );
+    assert!(second.ok, "{second:?}");
+    let second_id = second.data["msg_id"].as_str().unwrap().to_owned();
+    assert_ne!(second_id, first_id);
+
+    let st = server.state.lock().unwrap();
+    assert_eq!(st.msgs.len(), 2);
+    assert_eq!(st.channel_envelopes[&first_id].reply_route, "qqbot://u1/session");
+    assert_eq!(st.channel_envelopes[&second_id].reply_route, "qqbot://u2/session");
+    assert!(st.platform_event_index.contains_key("qqbot@host:u1:session:event-1"));
+    assert!(st.platform_event_index.contains_key("qqbot@host:u2:session:event-2"));
+    drop(st);
+
+    let first_reply = handle_send_with_task(
+        &server,
+        "agent".into(),
+        String::new(),
+        "notify".into(),
+        Some("reply".into()),
+        "answer one".into(),
+        Some(first_id),
+        "immediate".into(),
+        false,
+        None,
+    );
+    assert!(first_reply.ok, "{first_reply:?}");
+    let first_reply_id = first_reply.data["msg_id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        server.state.lock().unwrap().msgs[&first_reply_id].to,
+        "qqbot://u1/session"
+    );
+    let second_reply = handle_send_with_task(
+        &server,
+        "agent".into(),
+        String::new(),
+        "notify".into(),
+        Some("reply".into()),
+        "answer two".into(),
+        Some(second_id),
+        "immediate".into(),
+        false,
+        None,
+    );
+    assert!(second_reply.ok, "{second_reply:?}");
+    let second_reply_id = second_reply.data["msg_id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        server.state.lock().unwrap().msgs[&second_reply_id].to,
+        "qqbot://u2/session"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn qqbot_reply_uses_original_route_after_default_switch_and_rejects_third_party() {
+    use crate::server::channel_envelope::ChannelEnvelope;
+    use crate::server::conversation_default::ConversationDefault;
+
+    let (mut server, root) = test_server();
+    server.config.notifications.enabled = false;
+    server.appserver_notification_sink = Arc::new(|_, _, _, _, _, _| {
+        Err("QQBOT_SINK_UNEXPECTED: reply tests disable notification sinks".into())
+    });
+    register_synthetic_peer(&server, "agent", "qqbot-agent");
+    register_synthetic_peer(&server, "other", "qqbot-other");
+    // Registration supplies default wake leases; typed channel replies are
+    // mail-delivered here, so remove the subscriptions to keep sends mailbox-only.
+    server.state.lock().unwrap().notification_subscriptions.clear();
+    let envelope = ChannelEnvelope {
+        source_channel: "qqbot".into(),
+        channel_instance: "qqbot@host".into(),
+        external_user: "u1".into(),
+        external_conversation: "u1:session".into(),
+        platform_message_id: "platform-msg-reply".into(),
+        reply_route: "qqbot://u1/session".into(),
+        recipient_address: "agent".into(),
+        attachments: Vec::new(),
+    };
+    let inbound = handle_channel_inbound(
+        &server,
+        "external:qqbot".into(),
+        "agent".into(),
+        "QQBot inbound".into(),
+        "request".into(),
+        envelope,
+    );
+    assert!(inbound.ok, "{inbound:?}");
+    let inbound_id = inbound.data["msg_id"].as_str().unwrap().to_owned();
+
+    // The recipient can reply without registering a QQ binding or naming a
+    // target. The original route is copied into the reply message.
+    let first_reply = handle_send_with_task(
+        &server,
+        "agent".into(),
+        String::new(),
+        "notify".into(),
+        Some("reply".into()),
+        "first answer".into(),
+        Some(inbound_id.clone()),
+        "immediate".into(),
+        false,
+        None,
+    );
+    assert!(first_reply.ok, "{first_reply:?}");
+    let first_reply_id = first_reply.data["msg_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        server.state.lock().unwrap().msgs[&first_reply_id].to,
+        "qqbot://u1/session"
+    );
+
+    // A later default belongs to future inbound routing only.
+    server.commit(&[Event::ConversationDefaultSet {
+        default: ConversationDefault {
+            channel: "qqbot".into(),
+            channel_instance: "qqbot@host".into(),
+            conversation: "u1:session".into(),
+            project_scope: root.display().to_string(),
+            target_address: "other".into(),
+            revision: 1,
+            updated_ms: now_ms(),
+        },
+    }]);
+    let second_reply = handle_send_with_task(
+        &server,
+        "agent".into(),
+        String::new(),
+        "notify".into(),
+        Some("reply".into()),
+        "second answer".into(),
+        Some(inbound_id.clone()),
+        "immediate".into(),
+        false,
+        None,
+    );
+    assert!(second_reply.ok, "{second_reply:?}");
+    let second_reply_id = second_reply.data["msg_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let st = server.state.lock().unwrap();
+    assert_eq!(
+        st.channel_reply_routes[&second_reply_id].reply_route,
+        "qqbot://u1/session"
+    );
+    assert_eq!(
+        st.msgs[&second_reply_id].to,
+        "qqbot://u1/session"
+    );
+    drop(st);
+
+    let wrong_route = handle_send_with_task(
+        &server,
+        "agent".into(),
+        "other".into(),
+        "notify".into(),
+        Some("reply".into()),
+        "wrong route".into(),
+        Some(inbound_id.clone()),
+        "immediate".into(),
+        false,
+        None,
+    );
+    assert!(!wrong_route.ok);
+    assert!(wrong_route
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("CHANNEL_REPLY_ROUTE_MISMATCH"));
+
+    let third_party = handle_send_with_task(
+        &server,
+        "other".into(),
+        String::new(),
+        "notify".into(),
+        Some("reply".into()),
+        "not mine".into(),
+        Some(inbound_id),
+        "immediate".into(),
+        false,
+        None,
+    );
+    assert!(!third_party.ok);
+    assert!(third_party
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("CHANNEL_REPLY_FORBIDDEN"));
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn qqbot_uncertain_delivery_is_separate_from_message_state() {
+    use crate::server::channel_delivery::{
+        record_channel_delivery_result, ChannelDeliveryResult, ChannelDeliveryStatus,
+    };
+
+    let (mut server, root) = test_server();
+    server.config.notifications.enabled = false;
+    register_synthetic_peer(&server, "sender", "qqbot-sender");
+    register_synthetic_peer(&server, "recipient", "qqbot-recipient");
+    // Delivery-result tests exercise durable state, not the wake transport.
+    server.state.lock().unwrap().notification_subscriptions.clear();
+    let sent = handle_send(
+        &server,
+        "sender".into(),
+        "recipient".into(),
+        "notify".into(),
+        Some("result".into()),
+        "body".into(),
+        None,
+        "immediate".into(),
+    );
+    assert!(sent.ok, "{sent:?}");
+    let message_id = sent.data["msg_id"].as_str().unwrap().to_owned();
+    let uncertain = record_channel_delivery_result(
+        &server,
+        ChannelDeliveryResult {
+            message_id: message_id.clone(),
+            channel_instance: "qqbot@host".into(),
+            status: ChannelDeliveryStatus::Uncertain,
+            platform_message_id: None,
+            error: Some("response lost after submit".into()),
+            updated_ms: 0,
+        },
+    );
+    assert!(uncertain.ok, "{uncertain:?}");
+    let st = server.state.lock().unwrap();
+    assert_eq!(st.msgs[&message_id].state, "pending");
+    assert_eq!(
+        st.channel_delivery_results[&message_id].status,
+        ChannelDeliveryStatus::Uncertain
+    );
+    drop(st);
+
+    let accepted = record_channel_delivery_result(
+        &server,
+        ChannelDeliveryResult {
+            message_id: message_id.clone(),
+            channel_instance: "qqbot@host".into(),
+            status: ChannelDeliveryStatus::Accepted,
+            platform_message_id: Some("platform-msg-out-1".into()),
+            error: None,
+            updated_ms: 0,
+        },
+    );
+    assert!(accepted.ok, "{accepted:?}");
+    let downgrade = record_channel_delivery_result(
+        &server,
+        ChannelDeliveryResult {
+            message_id,
+            channel_instance: "qqbot@host".into(),
+            status: ChannelDeliveryStatus::Uncertain,
+            platform_message_id: None,
+            error: Some("late retry".into()),
+            updated_ms: 0,
+        },
+    );
+    assert!(!downgrade.ok);
+    assert!(downgrade
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("CHANNEL_DELIVERY_ACCEPTED_FINAL"));
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn explicit_peer_notification_accepts_arbitrary_durable_body() {
     let (server, root) = test_server();
     register(&server, "sender", "%sender");
@@ -1496,6 +1932,618 @@ fn explicit_send_repairs_stale_default_direct_message_before_wake() {
             .notification_subscriptions["sub-default-direct-message-recipient"]
             .target,
         "mismatched-thread-recipient"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+// ---- QQBot leading-address routing ---------------------------------------
+
+fn routing_project_scope(server: &Server) -> String {
+    GlobalState::canonical_project_scope(&server.root)
+        .unwrap()
+        .as_str()
+        .to_owned()
+}
+
+fn routing_project_key(server: &Server) -> String {
+    server
+        .root
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn routing_seat(server: &Server, name: &str, worker: &str) {
+    let scope = routing_project_scope(server);
+    let mut st = server.state.lock().unwrap();
+    let session = st
+        .workers
+        .get(worker)
+        .and_then(|w| w.transport.as_ref())
+        .and_then(|t| t.session_id.clone())
+        .unwrap_or_else(|| format!("session-{worker}"));
+    st.name_occupancies
+        .entry(scope.clone())
+        .or_default()
+        .insert(
+            name.to_owned(),
+            crate::server::name_state::NameOccupancy {
+                name: name.to_owned(),
+                worker_id: worker.to_owned(),
+                session_id: session,
+                occupancy_revision: 1,
+                updated_ms: now_ms(),
+            },
+        );
+}
+
+fn routing_envelope(conversation: &str, msg_id: &str) -> crate::server::channel_envelope::ChannelEnvelope
+{
+    crate::server::channel_envelope::ChannelEnvelope {
+        source_channel: "qqbot".into(),
+        channel_instance: "qqbot@host".into(),
+        external_user: "u1".into(),
+        external_conversation: conversation.into(),
+        platform_message_id: msg_id.into(),
+        reply_route: format!("qqbot://{conversation}"),
+        recipient_address: String::new(),
+        attachments: Vec::new(),
+    }
+}
+
+fn routing_set_default(server: &Server, conversation: &str, target: &str) {
+    let scope = routing_project_scope(server);
+    let revision = {
+        let st = server.state.lock().unwrap();
+        st.conversation_defaults
+            .get(&crate::server::conversation_default::conversation_default_key(
+                "qqbot",
+                "qqbot@host",
+                conversation,
+            ))
+            .map(|default| default.revision)
+            .unwrap_or(0)
+    };
+    server.commit(&[Event::ConversationDefaultSet {
+        default: crate::server::conversation_default::ConversationDefault {
+            channel: "qqbot".into(),
+            channel_instance: "qqbot@host".into(),
+            conversation: conversation.into(),
+            project_scope: scope,
+            target_address: target.into(),
+            revision: revision + 1,
+            updated_ms: now_ms(),
+        },
+    }]);
+}
+
+fn routing_fixture(workers: &[(&str, &str)]) -> (Server, std::path::PathBuf) {
+    let (server, root) = test_server();
+    for (id, thread) in workers {
+        assert!(register_synthetic_peer(&server, id, thread).ok);
+    }
+    let mut st = server.state.lock().unwrap();
+    st.notification_subscriptions.clear();
+    st.name_occupancies.clear();
+    drop(st);
+    (server, root)
+}
+
+#[test]
+fn qqbot_leading_address_routes_explicit_peer_and_strips_bracket() {
+    let (server, root) = routing_fixture(&[("alice-id", "t-alice"), ("bob-id", "t-bob")]);
+    routing_seat(&server, "Alice", "alice-id");
+    routing_seat(&server, "Bob", "bob-id");
+    // A default exists so a fallback would be observable.
+    routing_set_default(&server, "u1:session", "Alice");
+
+    let project = routing_project_key(&server);
+    let body = format!("[{project}.Bob] please handle this");
+    let response = handle_channel_inbound(
+        &server,
+        "external:qqbot".into(),
+        String::new(),
+        "QQBot inbound".into(),
+        body,
+        routing_envelope("u1:session", "platform-1"),
+    );
+    assert!(response.ok, "{response:?}");
+    let id = response.data["msg_id"].as_str().unwrap().to_owned();
+    let st = server.state.lock().unwrap();
+    assert_eq!(st.msgs[&id].to, "bob-id", "explicit address must win");
+    assert!(
+        st.msgs[&id].body.contains("消息：please handle this"),
+        "leading address is stripped from the body: {}",
+        st.msgs[&id].body
+    );
+    assert!(!st.msgs[&id].body.contains(&format!("[{project}.Bob]")));
+    assert_eq!(
+        st.channel_envelopes[&id].recipient_address,
+        format!("{project}.Bob")
+    );
+    // The explicit address must not move the default.
+    let default =
+        crate::server::conversation_default::lookup_default(&st, "qqbot", "qqbot@host", "u1:session")
+            .unwrap();
+    assert_eq!(default.target_address, "Alice");
+    drop(st);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn qqbot_leading_address_match_is_case_insensitive() {
+    let (server, root) = routing_fixture(&[("bob-id", "t-bob")]);
+    routing_seat(&server, "Bob", "bob-id");
+    let project = routing_project_key(&server);
+    let body = format!(
+        "[{}.{}] hi",
+        project.to_uppercase(),
+        "bob".to_uppercase()
+    );
+    let response = handle_channel_inbound(
+        &server,
+        "external:qqbot".into(),
+        String::new(),
+        "QQBot inbound".into(),
+        body,
+        routing_envelope("u1:session", "platform-ci"),
+    );
+    assert!(response.ok, "{response:?}");
+    let id = response.data["msg_id"].as_str().unwrap().to_owned();
+    assert_eq!(server.state.lock().unwrap().msgs[&id].to, "bob-id");
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn qqbot_mid_body_address_and_missing_leading_address_use_the_default() {
+    let (server, root) = routing_fixture(&[("alice-id", "t-alice"), ("bob-id", "t-bob")]);
+    routing_seat(&server, "Alice", "alice-id");
+    routing_seat(&server, "Bob", "bob-id");
+    routing_set_default(&server, "u1:session", "Alice");
+    let project = routing_project_key(&server);
+
+    let body = format!("please ping [{project}.Bob] later");
+    let response = handle_channel_inbound(
+        &server,
+        "external:qqbot".into(),
+        String::new(),
+        "QQBot inbound".into(),
+        body.clone(),
+        routing_envelope("u1:session", "platform-mid"),
+    );
+    assert!(response.ok, "{response:?}");
+    let id = response.data["msg_id"].as_str().unwrap().to_owned();
+    let st = server.state.lock().unwrap();
+    assert_eq!(
+        st.msgs[&id].to, "alice-id",
+        "a mid-body bracket is plain text; the default wins"
+    );
+    assert!(
+        st.msgs[&id].body.contains(&format!("[{project}.Bob]")),
+        "mid-body address must stay untouched: {}",
+        st.msgs[&id].body
+    );
+    drop(st);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn qqbot_invalid_leading_address_never_falls_back_or_mutates_default() {
+    let (server, root) = routing_fixture(&[("alice-id", "t-alice")]);
+    routing_seat(&server, "Alice", "alice-id");
+    routing_set_default(&server, "u1:session", "Alice");
+    let project = routing_project_key(&server);
+
+    let response = handle_channel_inbound(
+        &server,
+        "external:qqbot".into(),
+        String::new(),
+        "QQBot inbound".into(),
+        format!("[{project}.Noah] unknown target"),
+        routing_envelope("u1:session", "platform-bad"),
+    );
+    assert!(!response.ok);
+    assert!(
+        response
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("NAME_ADDRESS_UNOCCUPIED"),
+        "{response:?}"
+    );
+    let st = server.state.lock().unwrap();
+    assert!(st.msgs.is_empty(), "no default fallback delivery");
+    assert_eq!(
+        crate::server::conversation_default::lookup_default(&st, "qqbot", "qqbot@host", "u1:session")
+            .unwrap()
+            .target_address,
+        "Alice",
+        "a failed explicit address must not mutate the default"
+    );
+    drop(st);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn qqbot_ceo_leading_address_requires_a_typed_grant_not_the_master() {
+    use crate::ceo::CeoGrant;
+
+    let (server, root) = routing_fixture(&[("ceo-id", "t-ceo"), ("master-id", "t-master")]);
+    routing_seat(&server, "CEO", "ceo-id");
+    routing_seat(&server, "Jenny", "master-id");
+    let scope = routing_project_scope(&server);
+
+    // Without a grant, [ceo] must fail explicitly and never route to master.
+    let missing = handle_channel_inbound(
+        &server,
+        "external:qqbot".into(),
+        String::new(),
+        "QQBot inbound".into(),
+        "[ceo] arbitrate this".into(),
+        routing_envelope("u1:session", "platform-ceo-missing"),
+    );
+    assert!(!missing.ok);
+    assert!(
+        missing
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("CHANNEL_CEO_GRANT_MISSING"),
+        "{missing:?}"
+    );
+    assert!(server.state.lock().unwrap().msgs.is_empty());
+
+    server.commit(&[Event::CeoGrantSet {
+        grant: Some(CeoGrant {
+            workspace: scope,
+            app_scope_id: "tui-default".into(),
+            name: "CEO".into(),
+            granted_by: "user".into(),
+            approval: "approved".into(),
+            granted_ms: 1,
+        }),
+    }]);
+    let routed = handle_channel_inbound(
+        &server,
+        "external:qqbot".into(),
+        String::new(),
+        "QQBot inbound".into(),
+        "[CEO] arbitrate this".into(),
+        routing_envelope("u1:session", "platform-ceo"),
+    );
+    assert!(routed.ok, "{routed:?}");
+    let id = routed.data["msg_id"].as_str().unwrap().to_owned();
+    assert_eq!(server.state.lock().unwrap().msgs[&id].to, "ceo-id");
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn qqbot_leading_address_fold_conflict_is_ambiguous() {
+    let (server, root) = routing_fixture(&[("bob-id", "t-bob"), ("other-id", "t-other")]);
+    routing_seat(&server, "Bob", "bob-id");
+    routing_seat(&server, "BOB", "other-id");
+    routing_set_default(&server, "u1:session", "Bob");
+    let project = routing_project_key(&server);
+
+    let response = handle_channel_inbound(
+        &server,
+        "external:qqbot".into(),
+        String::new(),
+        "QQBot inbound".into(),
+        format!("[{project}.Bob] ambiguous"),
+        routing_envelope("u1:session", "platform-fold"),
+    );
+    assert!(!response.ok);
+    assert!(
+        response
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("NAME_ADDRESS_AMBIGUOUS"),
+        "{response:?}"
+    );
+    assert!(
+        server.state.lock().unwrap().msgs.is_empty(),
+        "a fold conflict must not pick an arbitrary target or the default"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn qqbot_send_fold_conflict_is_ambiguous_without_a_message() {
+    let (server, root) = routing_fixture(&[("bob-id", "t-bob"), ("other-id", "t-other")]);
+    routing_seat(&server, "Bob", "bob-id");
+    routing_seat(&server, "BOB", "other-id");
+    let token = server.state.lock().unwrap().workers["bob-id"].token.clone();
+
+    let response = handle_send(
+        &server,
+        "bob-id".into(),
+        "Bob".into(),
+        "notify".into(),
+        Some("ambiguous send".into()),
+        "must not pick one holder".into(),
+        None,
+        "immediate".into(),
+    );
+    assert!(!response.ok, "fold conflict must reject before any message: {response:?}");
+    assert!(
+        response
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("NAME_ADDRESS_AMBIGUOUS"),
+        "{response:?}"
+    );
+    assert!(
+        server.state.lock().unwrap().msgs.is_empty(),
+        "a fold conflict must never select an arbitrary holder"
+    );
+
+    let default = handle_default_set(
+        &server,
+        "bob-id".into(),
+        token,
+        "qqbot".into(),
+        "qqbot@host".into(),
+        "u1:session".into(),
+        "Bob".into(),
+    );
+    assert!(!default.ok, "fold conflict must reject default mutation: {default:?}");
+    assert!(
+        default
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("NAME_ADDRESS_AMBIGUOUS"),
+        "{default:?}"
+    );
+    assert!(
+        crate::server::conversation_default::lookup_default(
+            &server.state.lock().unwrap(),
+            "qqbot",
+            "qqbot@host",
+            "u1:session"
+        )
+        .is_none(),
+        "a fold conflict must not persist any default"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn qqbot_bare_project_default_routes_unaddressed_inbound_to_typed_ceo() {
+    use crate::ceo::CeoGrant;
+
+    let (server, root) = routing_fixture(&[("ceo-id", "t-ceo")]);
+    routing_seat(&server, "CEO", "ceo-id");
+    let scope = routing_project_scope(&server);
+    let token = server.state.lock().unwrap().workers["ceo-id"].token.clone();
+    server.commit(&[Event::CeoGrantSet {
+        grant: Some(CeoGrant {
+            workspace: scope,
+            app_scope_id: "tui-default".into(),
+            name: "CEO".into(),
+            granted_by: "user".into(),
+            approval: "approved".into(),
+            granted_ms: 1,
+        }),
+    }]);
+    let project = routing_project_key(&server);
+
+    let switched = handle_default_set(
+        &server,
+        "ceo-id".into(),
+        token,
+        "qqbot".into(),
+        "qqbot@host".into(),
+        "u1:session".into(),
+        project.clone(),
+    );
+    assert!(switched.ok, "{switched:?}");
+    assert_eq!(
+        crate::server::conversation_default::lookup_default(
+            &server.state.lock().unwrap(),
+            "qqbot",
+            "qqbot@host",
+            "u1:session"
+        )
+        .unwrap()
+        .target_address,
+        project
+    );
+
+    let inbound = handle_channel_inbound(
+        &server,
+        "external:qqbot".into(),
+        String::new(),
+        "QQBot inbound".into(),
+        "unaddressed".into(),
+        routing_envelope("u1:session", "platform-default-ceo"),
+    );
+    assert!(inbound.ok, "a bare project default must route inbound: {inbound:?}");
+    let id = inbound.data["msg_id"].as_str().unwrap().to_owned();
+    let st = server.state.lock().unwrap();
+    assert_eq!(st.msgs[&id].to, "ceo-id");
+    assert_eq!(st.channel_envelopes[&id].recipient_address, project);
+    assert_eq!(
+        st.channel_envelopes[&id].reply_route,
+        "qqbot://u1:session",
+        "the original QQ route must be preserved for the unaddressed message"
+    );
+    drop(st);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn qqbot_default_switch_is_isolated_and_failed_switch_keeps_the_old_target() {
+    let (server, root) = routing_fixture(&[("alice-id", "t-alice"), ("bob-id", "t-bob")]);
+    routing_seat(&server, "Alice", "alice-id");
+    routing_seat(&server, "Bob", "bob-id");
+    let token = server.state.lock().unwrap().workers["alice-id"]
+        .token
+        .clone();
+
+    let set = |conversation: &str, target: &str| {
+        handle_default_set(
+            &server,
+            "alice-id".into(),
+            token.clone(),
+            "qqbot".into(),
+            "qqbot@host".into(),
+            conversation.into(),
+            target.into(),
+        )
+    };
+    assert!(set("u1:session", "Alice").ok);
+    assert!(set("u2:session", "Bob").ok);
+    assert!(set("u1:session", "Bob").ok);
+
+    // A failed switch on u1 must keep its previous target and never touch u2.
+    let failed = set("u1:session", "Noah");
+    assert!(!failed.ok);
+    assert!(
+        failed
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("DEFAULT_TARGET_UNRESOLVED"),
+        "{failed:?}"
+    );
+    let st = server.state.lock().unwrap();
+    assert_eq!(
+        crate::server::conversation_default::lookup_default(&st, "qqbot", "qqbot@host", "u1:session")
+            .unwrap()
+            .target_address,
+        "Bob"
+    );
+    assert_eq!(
+        crate::server::conversation_default::lookup_default(&st, "qqbot", "qqbot@host", "u2:session")
+            .unwrap()
+            .target_address,
+        "Bob"
+    );
+    drop(st);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn qqbot_two_channel_instances_with_same_conversation_switch_independently_and_replay() {
+    let (server, root) = routing_fixture(&[("alice-id", "t-alice"), ("bob-id", "t-bob")]);
+    routing_seat(&server, "Alice", "alice-id");
+    routing_seat(&server, "Bob", "bob-id");
+    let token = server.state.lock().unwrap().workers["alice-id"]
+        .token
+        .clone();
+
+    let set_a = handle_default_set(
+        &server,
+        "alice-id".into(),
+        token.clone(),
+        "qqbot".into(),
+        "qqbot@a".into(),
+        "u1:session".into(),
+        "Alice".into(),
+    );
+    assert!(set_a.ok, "{set_a:?}");
+    let set_b = handle_default_set(
+        &server,
+        "alice-id".into(),
+        token,
+        "qqbot".into(),
+        "qqbot@b".into(),
+        "u1:session".into(),
+        "Bob".into(),
+    );
+    assert!(set_b.ok, "{set_b:?}");
+
+    {
+        let st = server.state.lock().unwrap();
+        assert_eq!(
+            crate::server::conversation_default::lookup_default(
+                &st,
+                "qqbot",
+                "qqbot@a",
+                "u1:session"
+            )
+                .unwrap()
+                .target_address,
+            "Alice"
+        );
+        assert_eq!(
+            crate::server::conversation_default::lookup_default(
+                &st,
+                "qqbot",
+                "qqbot@b",
+                "u1:session"
+            )
+                .unwrap()
+                .target_address,
+            "Bob",
+            "each channel instance must own its own conversation default"
+        );
+    }
+
+    let mut envelope_a = routing_envelope("u1:session", "platform-instance-a");
+    envelope_a.channel_instance = "qqbot@a".into();
+    let inbound_a = handle_channel_inbound(
+        &server,
+        "external:qqbot".into(),
+        String::new(),
+        "QQBot inbound".into(),
+        "unaddressed for instance a".into(),
+        envelope_a,
+    );
+    assert!(inbound_a.ok, "{inbound_a:?}");
+    let id_a = inbound_a.data["msg_id"].as_str().unwrap().to_owned();
+    let mut envelope_b = routing_envelope("u1:session", "platform-instance-b");
+    envelope_b.channel_instance = "qqbot@b".into();
+    let inbound_b = handle_channel_inbound(
+        &server,
+        "external:qqbot".into(),
+        String::new(),
+        "QQBot inbound".into(),
+        "unaddressed for instance b".into(),
+        envelope_b,
+    );
+    assert!(inbound_b.ok, "{inbound_b:?}");
+    let id_b = inbound_b.data["msg_id"].as_str().unwrap().to_owned();
+    {
+        let st = server.state.lock().unwrap();
+        assert_eq!(
+            st.msgs[&id_a].to, "alice-id",
+            "instance a must keep routing to its own default"
+        );
+        assert_eq!(
+            st.msgs[&id_b].to, "bob-id",
+            "instance b must keep routing to its own default"
+        );
+    }
+
+    drop(server);
+    let replayed = replay(&root).unwrap();
+    assert_eq!(
+        crate::server::conversation_default::lookup_default(
+            &replayed,
+            "qqbot",
+            "qqbot@a",
+            "u1:session"
+        )
+        .unwrap()
+        .target_address,
+        "Alice"
+    );
+    assert_eq!(
+        crate::server::conversation_default::lookup_default(
+            &replayed,
+            "qqbot",
+            "qqbot@b",
+            "u1:session"
+        )
+        .unwrap()
+        .target_address,
+        "Bob"
     );
     std::fs::remove_dir_all(root).ok();
 }

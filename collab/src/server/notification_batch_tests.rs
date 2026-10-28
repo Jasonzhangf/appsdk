@@ -111,6 +111,24 @@ fn queue_message(
     message_id: &str,
     created_ms: i64,
 ) {
+    queue_message_with_body(
+        server,
+        worker_id,
+        subscription_id,
+        message_id,
+        created_ms,
+        format!("DETAIL-{message_id}"),
+    );
+}
+
+fn queue_message_with_body(
+    server: &Server,
+    worker_id: &str,
+    subscription_id: &str,
+    message_id: &str,
+    created_ms: i64,
+    body: String,
+) {
     server.commit(&[
         Event::Sent {
             msg: Message {
@@ -119,7 +137,7 @@ fn queue_message(
                 to: worker_id.into(),
                 mtype: "notify".into(),
                 subject: Some(format!("topic-{message_id}")),
-                body: format!("DETAIL-{message_id}"),
+                body,
                 in_reply_to: None,
                 created_ms,
                 state: "pending".into(),
@@ -688,12 +706,15 @@ fn automatic_batch_does_not_cross_the_first_notice_window() {
     let (mut server, root) = test_server();
     let subscription_id = register_and_subscribe(&server, "recipient");
     let now = now_ms();
-    queue_message(
+    let long_body = format!("DETAIL-old-notice-{}", "x".repeat(200));
+    // A body long enough that the compact wake preview cannot carry it in full.
+    queue_message_with_body(
         &server,
         "recipient",
         &subscription_id,
         "old-notice",
         now - 120_001,
+        long_body.clone(),
     );
     queue_message(&server, "recipient", &subscription_id, "late-notice", now);
 
@@ -720,6 +741,10 @@ fn automatic_batch_does_not_cross_the_first_notice_window() {
         !text.contains("late-notice"),
         "a notice arriving after the first 120-second window must remain pending"
     );
+    assert!(
+        !text.contains(&long_body),
+        "the batch wake carries a compact preview while full details stay in JSONL: {text}"
+    );
     let state = server.state.lock().unwrap();
     assert_eq!(state.msgs["old-notice"].state, "pending");
     assert_eq!(state.msgs["old-notice"].wake_attempt_count, 1);
@@ -728,11 +753,11 @@ fn automatic_batch_does_not_cross_the_first_notice_window() {
     let mailbox =
         std::fs::read_to_string(root.join(".agent-collab/mailbox/recipient-recipient.jsonl"))
             .unwrap();
-    assert!(mailbox.contains("DETAIL-old-notice"));
+    assert!(mailbox.contains(&long_body));
     assert!(mailbox.contains("DETAIL-late-notice"));
     assert!(
-        !text.contains("DETAIL-old-notice") && !text.contains("DETAIL-late-notice"),
-        "batch wake must carry task summary while full details stay in JSONL"
+        text.contains("old-notice:topic-old-notice=DETAIL-old-notice-"),
+        "the batch wake must still carry the task summary preview: {text}"
     );
     std::fs::remove_dir_all(root).unwrap();
 }

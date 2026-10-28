@@ -21,6 +21,7 @@ fn dispatch_with_route_context_bound(
         );
     }
     let unaccepted_resource_task = match &req {
+        Req::TaskClose { force: true, .. } => None,
         Req::TaskRelocate { task_id, .. }
         | Req::TaskWait { task_id, .. }
         | Req::TaskDeliver { task_id, .. }

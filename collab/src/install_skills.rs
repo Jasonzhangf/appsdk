@@ -265,4 +265,36 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn installer_projects_patrol_and_workspace_rules() {
+        let target = temp_target("patrol-projection");
+        install(&target, false).unwrap();
+        for relative in [
+            "SKILL.md",
+            "operations.md",
+            "references/board-idle-patrol.md",
+        ] {
+            let body = std::fs::read_to_string(target.join(relative)).unwrap();
+            assert!(
+                body.contains("1500000"),
+                "{relative} must project the 25-minute target cadence"
+            );
+            assert!(
+                body.contains("PATROL_CADENCE_RUNTIME_GAP"),
+                "{relative} must name the compatibility cadence gap"
+            );
+            for fact in ["P0/P1", "ready", "worktree", "idle 原因"] {
+                assert!(
+                    body.contains(fact),
+                    "{relative} must project patrol check {fact}"
+                );
+            }
+            assert!(
+                body.contains("canonical project root"),
+                "{relative} must project canonical master workspace"
+            );
+        }
+        std::fs::remove_dir_all(target).ok();
+    }
 }

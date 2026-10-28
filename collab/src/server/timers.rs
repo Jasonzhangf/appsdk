@@ -939,11 +939,13 @@ fn tick_standing_project_patrol_at(server: &Arc<Server>, now: i64) {
             };
             let mut renewed = current.clone();
             renewed.fired_count = fired_count;
-            renewed.trigger_ms = Some(now.saturating_add(
-                current
-                    .interval_ms
-                    .unwrap_or(PROJECT_PATROL_TARGET_INTERVAL_MS),
-            ));
+            renewed.trigger_ms = Some(
+                now.saturating_add(
+                    current
+                        .interval_ms
+                        .unwrap_or(PROJECT_PATROL_TARGET_INTERVAL_MS),
+                ),
+            );
             renewed.repeat_count = renewed
                 .repeat_count
                 .max(fired_count.saturating_add(PROJECT_PATROL_REPEAT_HEADROOM));

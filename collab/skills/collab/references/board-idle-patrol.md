@@ -15,24 +15,30 @@ owner 是 core 实现与项目 DAG。
 
 - 每个项目的 Jenny（当前获授权 master）负责本项目 worker 巡检。初始化或恢复本人
   longhorizon 后，须确保本人常驻项目巡检已 armed；复用有效订阅，不重复创建。
-  这条常驻巡检是当前 master 的 `master-idle` 订阅，subject `project-patrol`、interval
-  `900000` 毫秒。反复 ensure/renew 复用同一订阅，续期其 TTL 与有限出现预算，不并排
-  新建第二份。`appsdk longhorizon show` 是只读投影，读取成功不证明已 arm。有限
+  这条常驻巡检是当前 master 的 `master-idle` 订阅，subject `project-patrol`、目标
+  interval `1500000` 毫秒（20-30 分钟窗口，默认 25 分钟）。反复 ensure/renew 复用
+  同一订阅，续期其 TTL 与有限出现预算，不并排新建第二份。`900000` 只兼容已存在的旧
+  订阅；`collab notify status` 的 `project_patrol.cadence_runtime_gap` 为
+  `PATROL_CADENCE_RUNTIME_GAP` 时，运行节奏未达目标，须如实报告。
+  `appsdk longhorizon show` 是只读投影，读取成功不证明已 arm。有限
   goal/task 定时器按各自生命周期到期关闭；单个 goal 结束不得因此关闭这条常驻项目
   巡检义务。若项目巡检被显式取消，按已实现控制保持取消，不由 ensure 自动恢复；
   当前 master 可用 `collab notify cancel --event master-idle` 显式取消，详见下文
   「Master 取消与恢复项目巡检」。
-- Jenny 每次巡检提醒都检查本项目 worker 的活动状态、未关闭 board 任务、当前绑定及
-  按任务取消状态。busy 的 worker 跳过；idle 且仍持有未取消任务的 worker 应收到
-  继续本人任务的提醒。没有未关闭任务时不发 board idle 提醒。
+- Jenny 每次巡检提醒都先检查四项：未解决的 P0/P1；未完成任务或 ready 工作；自有
+  worktree 与资源释放；peer/worker 的 busy/idle 及 idle 原因是否合理。随后检查本
+  项目 worker 的活动状态、未关闭 board 任务、当前绑定及按任务取消状态。busy 的
+  worker 跳过；idle 且仍持有未取消任务的 worker 应收到继续本人任务的提醒。没有
+  未关闭任务时不发 board idle 提醒。
 - board 任务的持有关系由任务板 owner 决定，不依赖 `active_task` 单个投影字段。
   blocked 或等待依赖的任务仍可能持有。提醒让 peer 自己复核阻塞与下一步；
   daemon 不解释业务依赖，也不将唤醒等同于任务可执行或完成。
 - 实时状态事件可用且已接通时，在进入 idle 或 idle 时获得任务后及时判断并提醒。
   同一持续 idle 阶段中重复的实时事件可合并为一次提醒；已有待处理提醒时不叠加
   同批内容。当前 `collab notify status` 返回 `realtime_connected: false`，说明实时
-  事件流尚未接通；以下 15 分钟兜底就是当前实际行为。
-- 没有接通实时事件时，默认每 15 分钟检查一次。15 分钟 tick 只负责发现 due，不单独
+  事件流尚未接通；以下周期 tick 就是当前实际行为。master 常驻巡检目标是 25 分钟，
+  仍可按兼容记录 15 分钟 tick；board idle 按任务兜底为 15 分钟 tick。
+- 周期 tick 只负责发现 due，不单独
   构成推送理由。首次提醒要求可信连续空闲严格超过 1,800,000 ms：29m59s 不推，恰好
   30m00s 也不推，30m00s+1ms 才可首次推。同一空闲阶段首次推送后，后续推送以最后一次
   已持久提交的提醒时间为准，间隔至少 1,800,000 ms；恰好 1,800,000 ms 可再推。tick
@@ -49,7 +55,7 @@ owner 是 core 实现与项目 DAG。
   才产生合格唤醒；缓存、`idle_since` 未刷新或 unknown→idle 的推断都不算 idle。
   `waiting_user` 不当作 idle 自动确认；cold、offline、unknown 显式报告观测或绑定
   缺口，不盲目输入。发送前刷新状态；使用既有绑定适配器，不切换传输绕过失败。
-  事件能力不等于常驻事件订阅；没有真实当前状态时用 15 分钟检查，不用缓存推断。
+  事件能力不等于常驻事件订阅；没有真实当前状态时用周期 tick 检查，不用缓存推断。
 
 ## Peer 何时与如何取消
 
@@ -116,12 +122,13 @@ collab notify status
 
 ```text
 collab notify cancel --event master-idle [--reason <text>] [--resume-condition <text>]
-collab notify subscribe --event master-idle --subject project-patrol --every-ms 900000 --repeat-count <n> --ttl-seconds <n>
+collab notify subscribe --event master-idle --subject project-patrol --every-ms 1500000 --repeat-count <n> --ttl-seconds <n>
 collab notify status
 ```
 
 - 只有当前 master 能取消本项目精确的项目巡检，即 `master-idle`、subject
-  `project-patrol`、interval `900000` 的订阅。其他 owner、其他项目或旧会话载体调用
+  `project-patrol`、目标 interval `1500000`（兼容旧 `900000`）的订阅。其他 owner、
+  其他项目或旧会话载体调用
   返回 `PROJECT_PATROL_MASTER_REQUIRED`。没有可取消的精确订阅返回
   `PROJECT_PATROL_NOT_FOUND`。
 - `--event master-idle` 不接受 `--task-id`。带任务 ID 的取消属于 board idle，
@@ -137,8 +144,9 @@ collab notify status
 - 取消成功返回同一订阅 ID、`status=cancelled`、`changed=true`。重复取消幂等：
   返回同一 ID、`status=cancelled`、`changed=false`，原因、恢复条件和时间不变，也不
   写入新事件。
-- 显式精确订阅是恢复入口：同一 `master-idle`、subject `project-patrol`、interval
-  `900000` 的订阅把 cancelled 记录重新置为 armed，返回原 ID 和 `status=rearmed`，
+- 显式精确订阅是恢复入口：同一 `master-idle`、subject `project-patrol`、目标
+  interval `1500000`（兼容旧 `900000`）的订阅把 cancelled 记录重新置为 armed，
+  返回原 ID 和 `status=rearmed`，
   不新建第二条记录。其他 subject 或 interval 不匹配该记录。
 - 取消后，新增项目任务、任务重新变为可执行或 `TaskRec.wait` 释放会触发 daemon 自动
   rearm 同一订阅。真实恢复由项目工作变化驱动，不由 ensure 或 `longhorizon show`
@@ -148,7 +156,9 @@ collab notify status
 - direct-message 租约始终独立保留。取消项目巡检不影响直发消息的收发。
 - `collab notify status` 在 master 视图返回 `project_patrol`，字段含 `status`
   （`armed`、`cancelled` 或 `missing`）、`subscription_id`、`reason`、
-  `eligibility` 等。它只投影状态，不改变控制记录。
+  `interval_ms`、`target_interval_ms`、`cadence_runtime_gap`、`eligibility` 等。
+  它只投影状态，不改变控制记录。`collab master status` 与 `collab ceo progress`
+  的 `workspace` 使用当前 master 绑定注册的 canonical project root。
 
 ## Jenny 每次巡检的检查项
 
@@ -213,7 +223,7 @@ Jenny 只在提醒到达时检查下列事实，不自行造一条手写唤醒�
 
 ```mermaid
 flowchart TD
-  S([实时事件或15分钟检查]):::boundary --> A[读取当前owner、board任务和巡检状态]:::action
+  S([实时事件或周期tick]):::boundary --> A[读取四项巡检事实、owner、board任务和巡检状态]:::action
   A --> B{仍持有任务且未取消？}:::decision
   B -->|否| Q[本轮跳过]:::action
   B -->|是| C[读取当前宿主活动状态]:::action
@@ -239,7 +249,8 @@ flowchart TD
 只产生一次有效提醒；peer 取消后任务保留且同范围不自动 rearm；新任务不恢复旧取消
 任务；同稳定名字换会话保留取消；任务转交后新 owner 不受旧取消影响；其他 owner
 提交取消原子失败；基本消息仍可收到；Jenny 初始化或恢复后本人项目巡检确实 armed；
-`master-idle` / subject `project-patrol` / interval `900000` 的常驻巡检幂等续期且不因
+`master-idle` / subject `project-patrol` / 目标 interval `1500000`（兼容 `900000`）
+的常驻巡检幂等续期且不因
 单个 goal 结束被关闭；Jenny idle 时调度仍运行；每次巡检检查 worker idle；关闭或转交
 任务结束对应巡检；unknown 不产生终端输入；`collab notify status` 的 `board_patrol`
 字段为 `owner_key`/`cancelled_tasks`/`eligible_task_ids`/`interval_ms`/

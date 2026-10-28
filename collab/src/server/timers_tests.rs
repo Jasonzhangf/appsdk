@@ -1,4 +1,4 @@
-use super::*;
+use super::{seed_project_patrol_episode, *};
 use crate::proto::SelectedTransport;
 use crate::server::keepalive::Record;
 use crate::server::state::{
@@ -181,6 +181,8 @@ fn master_idle_subscription(server: &Server, interval_ms: i64) -> String {
             created_ms: now - interval_ms,
             updated_ms: now,
             status_reason: None,
+            patrol_idle_since_ms: None,
+            patrol_last_push_ms: 0,
         },
     }]);
     id
@@ -213,6 +215,8 @@ fn subscribe(
             created_ms: now_ms(),
             updated_ms: now_ms(),
             status_reason: None,
+            patrol_idle_since_ms: None,
+            patrol_last_push_ms: 0,
         },
     }]);
     id
@@ -240,6 +244,8 @@ fn periodic_deadline_subscription(server: &Server, worker_id: &str, subject: &st
             created_ms: now - 600_000,
             updated_ms: now,
             status_reason: None,
+            patrol_idle_since_ms: None,
+            patrol_last_push_ms: 0,
         },
     }]);
     id
@@ -1233,6 +1239,16 @@ fn project_patrol_subscription(
     repeat_count: u32,
     fired_count: u32,
 ) -> String {
+    project_patrol_subscription_unseeded(server, trigger_ms, expires_ms, repeat_count, fired_count)
+}
+
+fn project_patrol_subscription_unseeded(
+    server: &Server,
+    trigger_ms: i64,
+    expires_ms: i64,
+    repeat_count: u32,
+    fired_count: u32,
+) -> String {
     let now = now_ms();
     let id = format!("sub-project-patrol-{now}");
     let (target, method) = subscription_target(server, "master");
@@ -1254,9 +1270,123 @@ fn project_patrol_subscription(
             created_ms: now - PROJECT_PATROL_INTERVAL_MS,
             updated_ms: now,
             status_reason: None,
+            patrol_idle_since_ms: None,
+            patrol_last_push_ms: 0,
         },
     }]);
     id
+}
+
+#[test]
+fn project_patrol_requires_trusted_30m_and_30m_between_pushes() {
+    let (mut server, root) = test_server();
+    register_project_patrol_master(&server);
+    let base = now_ms();
+    let minute = 60_000;
+    let subscription_id =
+        project_patrol_subscription_unseeded(&server, base, base + 86_400_000, 100, 0);
+    let bodies = |server: &Server| project_patrol_bodies(server, &subscription_id);
+
+    tick_with_idle_at(&server, base, &|_| false);
+    assert!(
+        bodies(&server).is_empty(),
+        "a fresh idle poll is not a wake"
+    );
+    assert_eq!(
+        server.state.lock().unwrap().notification_subscriptions[&subscription_id].trigger_ms,
+        Some(base + 15 * minute),
+        "a quiet poll only advances the next detection window"
+    );
+
+    tick_with_idle_at(&server, base + 15 * minute, &|_| false);
+    assert!(
+        bodies(&server).is_empty(),
+        "29m59s of detection still cannot push"
+    );
+    tick_with_idle_at(&server, base + 30 * minute, &|_| false);
+    assert!(
+        bodies(&server).is_empty(),
+        "exactly 30m00s of trusted idle is not yet due"
+    );
+    tick_with_idle_at(&server, base + 45 * minute + 1, &|_| false);
+    assert_eq!(
+        bodies(&server).len(),
+        1,
+        "the first due tick after 30m creates one durable notice"
+    );
+
+    tick_with_idle_at(&server, base + 60 * minute + 1, &|_| false);
+    assert_eq!(
+        bodies(&server).len(),
+        1,
+        "a 15-minute detection gap does not create a second push"
+    );
+    tick_with_idle_at(&server, base + 75 * minute + 1, &|_| false);
+    assert_eq!(
+        bodies(&server).len(),
+        2,
+        "the same idle episode may push again after 30m"
+    );
+
+    let native_status = Arc::new(Mutex::new("working".to_string()));
+    install_project_patrol_thread_status(&mut server, Arc::clone(&native_status));
+    let busy_at = base + 90 * minute + 1;
+    tick_with_idle_at(&server, busy_at, &|_| false);
+    assert_eq!(
+        bodies(&server).len(),
+        2,
+        "busy detection advances without pushing or backfilling"
+    );
+    *native_status.lock().unwrap() = "idle".into();
+    tick_with_idle_at(&server, base + 105 * minute + 1, &|_| false);
+    assert_eq!(
+        bodies(&server).len(),
+        2,
+        "a new idle episode does not inherit the old trusted start"
+    );
+    tick_with_idle_at(&server, base + 135 * minute + 2, &|_| false);
+    assert_eq!(
+        bodies(&server).len(),
+        3,
+        "the new idle episode pushes only after its own 30 minutes"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn project_patrol_first_poll_after_restart_ignores_persisted_episode() {
+    let (server, root) = test_server();
+    register_project_patrol_master(&server);
+    let base = now_ms();
+    let subscription_id =
+        project_patrol_subscription_unseeded(&server, base, base + 86_400_000, 100, 0);
+    // A legacy subscription without the typed patrol episode field must not
+    // be backfilled from an older snapshot; the first post-restart poll
+    // starts a fresh trusted interval.
+    {
+        let mut subscription =
+            server.state.lock().unwrap().notification_subscriptions[&subscription_id].clone();
+        subscription.patrol_idle_since_ms = None;
+        server.commit(&[Event::NotificationSubscribed { subscription }]);
+    }
+    tick_with_idle_at(&server, base, &|_| false);
+    assert!(
+        project_patrol_bodies(&server, &subscription_id).is_empty(),
+        "a legacy subscription without a typed episode must not fire on the first poll"
+    );
+    assert_eq!(
+        server.state.lock().unwrap().notification_subscriptions[&subscription_id]
+            .patrol_idle_since_ms,
+        Some(base),
+        "the first post-restart observation starts a fresh trusted episode"
+    );
+    tick_with_idle_at(&server, base + 1_800_001, &|_| false);
+    assert_eq!(
+        project_patrol_bodies(&server, &subscription_id).len(),
+        1,
+        "the fresh episode becomes due only after its own 30 minutes"
+    );
+    std::fs::remove_dir_all(root).ok();
 }
 
 fn set_master_activity(server: &Server, observed: &str, idle_since_ms: i64) {
@@ -1362,6 +1492,7 @@ fn project_patrol_wakes_with_master_tasks_old_notice_and_idle_caps() {
         worker_id: "master".into(),
         record,
     }]);
+    seed_project_patrol_episode(&server, &subscription_id, now - 1_800_001, 0);
 
     let old_message_id = "old-project-patrol-notice".to_string();
     server.commit(&[
@@ -1480,11 +1611,27 @@ fn project_patrol_skips_non_idle_and_advances_without_catch_up() {
             );
         }
 
+        // The first idle detection starts the trusted interval; the same
+        // episode must still wait a full 30 minutes before its first push.
         tick_with_idle_at(&server, base + PROJECT_PATROL_INTERVAL_MS, &|_| false);
         {
             let state = server.state.lock().unwrap();
+            assert!(
+                subscription_messages(&state, &subscription_id).is_empty(),
+                "{observed}: 15 minutes of new idle must not push"
+            );
+        }
+        tick_with_idle_at(&server, base + 3 * PROJECT_PATROL_INTERVAL_MS + 1, &|_| {
+            false
+        });
+        {
+            let state = server.state.lock().unwrap();
             let messages = subscription_messages(&state, &subscription_id);
-            assert_eq!(messages.len(), 1, "{observed}: next interval must wake");
+            assert_eq!(
+                messages.len(),
+                1,
+                "{observed}: 30 minutes of continuous idle must wake once"
+            );
             assert!(messages[0].body.contains("MASTER_IDLE_WAKE"));
             assert_eq!(
                 state.notification_subscriptions[&subscription_id].fired_count, 1,
@@ -1501,7 +1648,8 @@ fn project_patrol_renews_finite_budget_and_ttl_on_same_subscription() {
     register_project_patrol_master(&server);
     let base = now_ms();
     let subscription_id = project_patrol_subscription(&server, base - 1, base + 1_000, 2, 1);
-    set_master_activity(&server, "idle", 0);
+    set_master_activity(&server, "idle", base - 1_800_001);
+    seed_project_patrol_episode(&server, &subscription_id, base - 1_800_001, 0);
 
     tick_with_idle_at(&server, base, &|_| false);
 
@@ -1526,7 +1674,9 @@ fn project_patrol_renews_finite_budget_and_ttl_on_same_subscription() {
         );
     }
 
-    for _ in 0..120 {
+    // The trusted gate pushes at most once per 30 minutes, so reaching the old
+    // 100-occurrence budget needs more 15-minute polls than the pre-gate test.
+    for _ in 0..260 {
         at = at.saturating_add(PROJECT_PATROL_INTERVAL_MS);
         tick_with_idle_at(&server, at, &|_| false);
     }
@@ -1577,6 +1727,7 @@ fn project_patrol_prompt_uses_ceo_reply_when_configured() {
     register_project_patrol_master(&server);
     let now = now_ms();
     let subscription_id = project_patrol_subscription(&server, now - 1, now + 86_400_000, 100, 0);
+    seed_project_patrol_episode(&server, &subscription_id, now - 1_800_001, 0);
 
     tick_with_idle_at(&server, now, &|_| false);
 
@@ -1604,6 +1755,7 @@ fn master_wake_hold_suppresses_standing_project_patrol_until_expiry_or_release()
     register_project_patrol_master(&server);
     let base = now_ms();
     let subscription_id = project_patrol_subscription(&server, base - 1, base + 86_400_000, 100, 0);
+    seed_project_patrol_episode(&server, &subscription_id, base - 1_800_001, 0);
 
     let held = crate::server::handle_master_wake_hold(
         &server,

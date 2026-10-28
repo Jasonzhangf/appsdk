@@ -460,12 +460,23 @@ fn board_patrol_worker_at(server: &Server, worker: &super::state::WorkerRec, now
     if board_patrol_name_address(&state, worker, &candidate.owner_key) != candidate.address {
         return;
     }
-    let idle_since_ms = state
-        .keepalives
-        .get(&worker.id)
-        .map(|record| record.idle_since_ms)
-        .filter(|idle_since| *idle_since > 0)
-        .unwrap_or(now);
+    // Board patrol owns its own trusted episode, tracked on the gate. A fresh
+    // idle poll seeds the start; a continuous idle poll extends it; a
+    // non-idle poll contributes no trusted start. The gate is the durable
+    // typed owner: a persisted `idle_episode_start_ms` survives a daemon
+    // restart because it was recorded by the new schema and is never
+    // backfilled from an older snapshot.
+    let idle_since_ms = if activity == AgentActivity::Idle {
+        candidate
+            .gate
+            .as_ref()
+            .filter(|gate| gate.last_poll_idle)
+            .and_then(|gate| gate.idle_episode_start_ms)
+            .filter(|start| *start > 0 && *start <= now)
+            .unwrap_or(now)
+    } else {
+        0
+    };
     let decision = evaluate_board_patrol(
         &candidate.eligible,
         &candidate.owner_key,
@@ -477,7 +488,18 @@ fn board_patrol_worker_at(server: &Server, worker: &super::state::WorkerRec, now
         candidate.gate.as_ref(),
     );
     match decision {
-        PatrolDecision::NoEligibleTasks | PatrolDecision::NotDueYet => {}
+        PatrolDecision::NoEligibleTasks => {}
+        PatrolDecision::NotDueYet { gate } => {
+            if candidate.gate.as_ref() != Some(&gate) {
+                server.commit_locked_reporting(
+                    &mut state,
+                    &[Event::BoardPatrolGateUpdated {
+                        worker_id: worker.id.clone(),
+                        gate,
+                    }],
+                );
+            }
+        }
         PatrolDecision::SkipBusy { gate } | PatrolDecision::SkipUnknown { gate } => {
             server.commit_locked_reporting(
                 &mut state,
@@ -576,8 +598,6 @@ fn board_patrol_candidate(
     worker: &super::state::WorkerRec,
     now: i64,
 ) -> Option<BoardPatrolCandidate> {
-    use crate::board_patrol_policy::{evaluate_board_patrol, PatrolDecision, PatrolTriggerMode};
-
     worker.transport.as_ref()?;
     let owner_key = super::state::board_patrol_current_owner_key(state, &worker.id)?;
     let eligible = super::state::board_patrol_eligible_task_ids(state, &worker.id)?;
@@ -585,17 +605,9 @@ fn board_patrol_candidate(
         return None;
     }
     let gate = state.board_patrol_gates.get(&worker.id).cloned();
-    let due_probe = evaluate_board_patrol(
-        &eligible,
-        &owner_key,
-        PatrolTriggerMode::PeriodicPoll,
-        true,
-        false,
-        now,
-        now,
-        gate.as_ref(),
-    );
-    if !matches!(due_probe, PatrolDecision::WakeDue { .. }) {
+    // The periodic window alone decides whether a fresh activity read is
+    // worth doing. The trusted idle duration is evaluated after that read.
+    if gate.as_ref().is_some_and(|gate| now < gate.next_due_ms) {
         return None;
     }
     Some(BoardPatrolCandidate {
@@ -1023,6 +1035,7 @@ mod tests {
                     background: false,
                     reason: "fixture".into(),
                     observed_ms: 1,
+                    idle_since_ms: None,
                 },
             },
         ]);
@@ -1979,6 +1992,33 @@ mod tests {
         );
     }
 
+    fn seed_board_patrol_trusted_gate(
+        server: &Server,
+        worker_id: &str,
+        owner_key: &str,
+        tasks: &[&str],
+        now: i64,
+    ) {
+        // The seeded episode models a poll this process already made, so the
+        // restart guard must not discard it.
+        super::super::observation_epoch::first_observation_since_start(
+            &server.root,
+            &format!("board-patrol:{worker_id}"),
+        );
+        server.commit(&[Event::BoardPatrolGateUpdated {
+            worker_id: worker_id.into(),
+            gate: crate::board_patrol_policy::PeerBoardPatrolGate {
+                owner_key: owner_key.into(),
+                last_wake_ms: 0,
+                last_realtime_idle_since_ms: i64::MIN,
+                last_wake_tasks: tasks.iter().map(|task| (*task).to_owned()).collect(),
+                next_due_ms: now,
+                idle_episode_start_ms: Some(now - 1_800_000 - 1),
+                last_poll_idle: true,
+            },
+        }]);
+    }
+
     fn install_appserver_statuses(
         server: &mut Server,
         statuses: Vec<(String, String)>,
@@ -2002,6 +2042,66 @@ mod tests {
     }
 
     #[test]
+    fn board_idle_patrol_first_poll_after_restart_starts_a_fresh_episode() {
+        let (mut server, root) = test_server();
+        let worker = seed_board_patrol_owner(&server, "alice", "thread-alice");
+        occupy_board_patrol_name(&server, &worker, "Alice");
+        add_board_patrol_task(
+            &server,
+            "T1",
+            "alice",
+            "Alice",
+            worker
+                .transport
+                .as_ref()
+                .unwrap()
+                .session_id
+                .as_deref()
+                .unwrap(),
+            1,
+        );
+        install_appserver_statuses(&mut server, vec![("thread-alice".into(), "idle".into())]);
+        let now = super::super::state::now_ms();
+        // A legacy gate persisted before this daemon started has no typed
+        // episode field. It must not be backfilled from an older snapshot;
+        // the first post-restart poll starts a fresh trusted interval.
+        server.commit(&[Event::BoardPatrolGateUpdated {
+            worker_id: "alice".into(),
+            gate: crate::board_patrol_policy::PeerBoardPatrolGate {
+                owner_key: "Alice".into(),
+                last_wake_ms: 0,
+                last_realtime_idle_since_ms: i64::MIN,
+                last_wake_tasks: vec!["T1".into()],
+                next_due_ms: now,
+                idle_episode_start_ms: None,
+                last_poll_idle: false,
+            },
+        }]);
+        tick_at(&server, now);
+        {
+            let state = server.state.lock().unwrap();
+            assert!(
+                state.board_patrol_notice_ids.is_empty(),
+                "a pre-restart episode must not fire on the first poll"
+            );
+            let gate = &state.board_patrol_gates["alice"];
+            assert_eq!(
+                gate.idle_episode_start_ms,
+                Some(now),
+                "the first post-restart poll starts a fresh trusted episode"
+            );
+            assert!(gate.last_poll_idle);
+        }
+        tick_at(&server, now + 1_800_001);
+        assert_eq!(
+            server.state.lock().unwrap().board_patrol_notice_ids.len(),
+            1,
+            "the fresh episode becomes due only after its own 30 minutes"
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn board_idle_patrol_dispatch_creates_fresh_periodic_notice_without_retrying_old() {
         let (mut server, root) = test_server();
         let worker = seed_board_patrol_owner(&server, "alice", "thread-alice");
@@ -2022,6 +2122,7 @@ mod tests {
         );
         install_appserver_statuses(&mut server, vec![("thread-alice".into(), "idle".into())]);
         let now = super::super::state::now_ms();
+        seed_board_patrol_trusted_gate(&server, "alice", "Alice", &["T1"], now);
         tick_at(&server, now);
 
         let (first_id, first_state, first_wake_attempts) = {
@@ -2053,7 +2154,7 @@ mod tests {
 
         tick_at(
             &server,
-            now + crate::board_patrol_policy::BOARD_IDLE_PATROL_INTERVAL_MS,
+            now + 2 * crate::board_patrol_policy::BOARD_IDLE_PATROL_INTERVAL_MS,
         );
         let state = server.state.lock().unwrap();
         assert_eq!(state.board_patrol_notice_ids.len(), 2);
@@ -2112,6 +2213,7 @@ mod tests {
             }
         });
         let now = super::super::state::now_ms();
+        seed_board_patrol_trusted_gate(&server, "alice", "Alice", &["T1"], now);
         tick_at(&server, now);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         {
@@ -2134,9 +2236,22 @@ mod tests {
 
         tick_at(
             &server,
-            now + crate::board_patrol_policy::BOARD_IDLE_PATROL_INTERVAL_MS,
+            // The busy skip cleared the trusted episode, so this idle read
+            // starts a fresh interval.
+            now + 4 * crate::board_patrol_policy::BOARD_IDLE_PATROL_INTERVAL_MS + 2,
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(server
+            .state
+            .lock()
+            .unwrap()
+            .board_patrol_notice_ids
+            .is_empty());
+        tick_at(
+            &server,
+            now + 6 * crate::board_patrol_policy::BOARD_IDLE_PATROL_INTERVAL_MS + 3,
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(
             server.state.lock().unwrap().board_patrol_notice_ids.len(),
             1
@@ -2181,6 +2296,7 @@ mod tests {
             }
         });
         let now = super::super::state::now_ms();
+        seed_board_patrol_trusted_gate(&server, "alice", "Alice", &["T1"], now);
         tick_at(&server, now);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         {
@@ -2212,9 +2328,20 @@ mod tests {
 
         tick_at(
             &server,
-            now + crate::board_patrol_policy::BOARD_IDLE_PATROL_INTERVAL_MS,
+            now + 4 * crate::board_patrol_policy::BOARD_IDLE_PATROL_INTERVAL_MS + 2,
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(server
+            .state
+            .lock()
+            .unwrap()
+            .board_patrol_notice_ids
+            .is_empty());
+        tick_at(
+            &server,
+            now + 6 * crate::board_patrol_policy::BOARD_IDLE_PATROL_INTERVAL_MS + 3,
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(
             server.state.lock().unwrap().board_patrol_notice_ids.len(),
             1
@@ -2251,6 +2378,8 @@ mod tests {
                 last_realtime_idle_since_ms: now,
                 last_wake_tasks: vec!["T1".into()],
                 next_due_ms: now + crate::board_patrol_policy::BOARD_IDLE_PATROL_INTERVAL_MS,
+                idle_episode_start_ms: Some(now),
+                last_poll_idle: true,
             };
             let address = super::board_patrol_name_address(&state, &worker, "Alice");
             super::board_patrol_wake_events(
@@ -2350,6 +2479,13 @@ mod tests {
                 .as_deref()
                 .unwrap(),
             1,
+        );
+        seed_board_patrol_trusted_gate(
+            &server,
+            "current",
+            "Alice",
+            &["T1"],
+            super::super::state::now_ms(),
         );
         install_appserver_statuses(
             &mut server,

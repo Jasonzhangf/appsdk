@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-stewardship-patrol",
-  "version": "0.3.0",
-  "description": "One authorized Collab stewardship patrol activation reads current role, task, capacity, worktree, resource, P0/P1, and issue facts; classifies actionable work and protected holds; then routes by work horizon, not by a peer-first rule: a durable long-horizon subgoal goes to an available authorized peer that owns that subgoal as its own orchestrator, while one-shot execution or observation goes to a `codex exec --profile gcm` subworker (the declared host fallback applies only when gcm is unavailable). A peer is not a universal first hop and is not a direct execution worker; the master does not take over a peer's goal. Execute through the public board or the one-shot worker; verify behavior and closure or an explicit park; then make one final scheduling decision: re-arm one consumed one-shot goal/deadline occurrence with `appsdk goal subscribe`, or reconcile the owned goal/task to ended when no actionable work remains. Every failure or ambiguous ownership state reaches the same result sink without becoming success. Direct-message reception is daemon-owned and never closed by patrol termination. The same activation kind also covers one task-owner board idle patrol. A wake is eligible only when the owner holds an unclosed board task, that task scope is not cancelled, and host activity is positively idle. Busy skips this round without queueing or later backfill. Unknown, cold, offline and waiting_user never become a wake merely because they are not busy. A cancelled old task stays cancelled when new work arrives; new work is evaluated on its own scope. Realtime events and the 15-minute fallback share one owner, cancellation state and delivery path. When a global CEO exists, Jenny hands substantive project progress to the current CEO; without a CEO the project continues and no recipient is invented. Urgency is a typed flag only and is never inferred from body keywords.",
+  "version": "0.4.0",
+  "description": "One authorized Collab stewardship patrol activation reads current role, task, capacity, worktree, resource, P0/P1, and issue facts; classifies actionable work and protected holds; then routes by work horizon, not by a peer-first rule: a durable long-horizon subgoal goes to an available authorized peer that owns that subgoal as its own orchestrator, while one-shot execution or observation goes to a `codex exec --profile gcm` subworker (the declared host fallback applies only when gcm is unavailable). A peer is not a universal first hop and is not a direct execution worker; the master does not take over a peer's goal. Execute through the public board or the one-shot worker; verify behavior and closure or an explicit park; then make one final scheduling decision: re-arm one consumed one-shot goal/deadline occurrence with `appsdk goal subscribe`, or reconcile the owned goal/task to ended when no actionable work remains. Every failure or ambiguous ownership state reaches the same result sink without becoming success. Direct-message reception is daemon-owned and never closed by patrol termination. The same activation kind also covers one task-owner board idle patrol and the standing master project patrol. A wake is eligible only when the owner holds an unclosed board task, that task scope is not cancelled, host activity is positively idle, and the trusted idle episode has exceeded 1,800,000 ms (strictly; exactly 30m00s is not due) with no committed push in this episode, or at least 1,800,000 ms since the last committed push. The 15-minute tick only discovers due work; it never creates a message by itself and never backfills a missed period. Busy skips this round without queueing or later backfill. Unknown, cold, offline and waiting_user never become a wake merely because they are not busy. A cancelled old task stays cancelled when new work arrives; new work is evaluated on its own scope. Realtime events and the 15-minute fallback share one owner, cancellation state and delivery path. When a global CEO exists, Jenny hands substantive project progress to the current CEO; without a CEO the project continues and no recipient is invented. Urgency is a typed flag only and is never inferred from body keywords.",
   "inputs": [
     {
       "id": "authorized_patrol_activation",
@@ -13,7 +13,7 @@
       "id": "read_current_facts",
       "operator": "appsdk.collab_stewardship.read_current_facts",
       "operator_version": "1",
-      "description": "读取当前项目所有未关闭 board 任务（closed 与 cancelled 以外）及其中归属于本次巡检 owner 的任务，读取稳定名字、当前 session 载体、每个 task scope 的 board 巡检取消状态和原因，并读取宿主活动的 typed 事实 busy/idle/waiting_user/unknown、实时事件能力、15 分钟兜底调度、当前 CEO 是否存在和项目实质进度。活动不得由 task 状态、tmux 界面或历史缓存推断。",
+      "description": "读取当前项目所有未关闭 board 任务（closed 与 cancelled 以外）及其中归属于本次巡检 owner 的任务，读取稳定名字、当前 session 载体、每个 task scope 的 board 巡检取消状态和原因，并读取宿主活动的 typed 事实 busy/idle/waiting_user/unknown、AgentActivityRecord 的可信 idle_since_ms、实时事件能力、15 分钟兜底调度、当前 CEO 是否存在和项目实质进度。活动不得由 task 状态、tmux 界面或历史缓存推断；observed_ms 只是采样时间，不能充当可信 idle 起点。",
       "inputs": ["authorized_patrol_activation"],
       "output": {"id": "current_facts", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
@@ -24,7 +24,7 @@
       "id": "classify_work_and_holds",
       "operator": "appsdk.collab_stewardship.classify_work_and_holds",
       "operator_version": "1",
-      "description": "只有同时满足持有未关闭任务、该 task scope 巡检未取消、宿主活动为正向 idle 时才分类为可唤醒。busy 本轮跳过，不排队也不补发。unknown、cold、offline 和 waiting_user 记录具体缺口，不发送唤醒，也不因不是 busy 就当 idle。已取消 scope 不因新任务到来而恢复唤醒；新任务按自身 scope 单独判断。不得按正文关键词判定紧急性。",
+      "description": "只有同时满足持有未关闭任务、该 task scope 巡检未取消、宿主活动为正向 idle 且可信连续 idle 已严格超过 1,800,000 ms（29m59s 与恰好 30m00s 都不推，30m00s+1ms 才首次推）时才分类为可唤醒。同一空闲阶段首次推送后，后续推送以最后一次已持久提交的提醒时间为准，间隔至少 1,800,000 ms（恰好 1,800,000 ms 可再推）。busy 本轮跳过，不排队也不补发。unknown、cold、offline 和 waiting_user 记录具体缺口，不发送唤醒，也不因不是 busy 就当 idle。15 分钟 tick 只发现到期，不能单独触发消息，不补发漏掉的周期。已取消 scope 不因新任务到来而恢复唤醒；新任务按自身 scope 单独判断。不得按正文关键词判定紧急性。",
       "inputs": ["current_facts"],
       "output": {"id": "classified_patrol_work", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
@@ -46,7 +46,7 @@
       "id": "execute_authorized_work",
       "operator": "appsdk.collab_stewardship.execute_authorized_work",
       "operator_version": "1",
-      "description": "通过既有绑定投递 board idle 唤醒，每个 idle 周期与 task scope 只提醒一次，合并已有待处理提醒。实时事件与 15 分钟兜底共用同一去重与取消状态。有实质项目进度时提交给当前 CEO；普通心跳、重复文本和仅 ACK 不提交。typed urgent 只按显式标记透传，不从正文升级。",
+      "description": "通过既有绑定投递 board idle 唤醒，每个 idle 周期与 task scope 只提醒一次，合并已有待处理提醒。只有 durable 消息与调度事件成功持久提交后才推进本阶段最后提醒时间；检测、宿主采样、busy skip、unknown skip、传输尝试或读取 status 均不推进它。实时事件与 15 分钟兜底共用同一去重与取消状态。有实质项目进度时提交给当前 CEO；普通心跳、重复文本和仅 ACK 不提交。typed urgent 只按显式标记透传，不从正文升级。",
       "inputs": ["owner_decision"],
       "output": {"id": "execution_outcome", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},

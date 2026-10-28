@@ -740,7 +740,20 @@ pub(super) fn goal_check_subscription_owner(
 
 pub(super) const PROJECT_PATROL_EVENT: &str = "master-idle";
 pub(super) const PROJECT_PATROL_SUBJECT: &str = "project-patrol";
-pub(super) const PROJECT_PATROL_EVERY_MS: i64 = 900_000;
+pub(super) const PROJECT_PATROL_EVERY_MS: i64 = 1_500_000;
+pub(super) const PROJECT_PATROL_COMPAT_EVERY_MS: i64 = 900_000;
+pub(super) const PROJECT_PATROL_EVERY_MS_STR: &str = "1500000";
+
+fn is_project_patrol_interval(interval_ms: Option<i64>) -> bool {
+    matches!(
+        interval_ms,
+        Some(PROJECT_PATROL_EVERY_MS | PROJECT_PATROL_COMPAT_EVERY_MS)
+    )
+}
+
+pub(super) fn project_patrol_cadence_gap(interval_ms: Option<i64>) -> Option<&'static str> {
+    (interval_ms == Some(PROJECT_PATROL_COMPAT_EVERY_MS)).then_some("PATROL_CADENCE_RUNTIME_GAP")
+}
 
 fn goal_notify_subscriptions(root: &Path) -> Result<Vec<Value>, String> {
     let mut command = Command::new("collab");
@@ -779,7 +792,7 @@ fn goal_patrol_subscription_is_usable(
 ) -> Option<String> {
     if goal_check_subscription_owner(scope, subscription).is_err()
         || subscription["event"].as_str() != Some(PROJECT_PATROL_EVENT)
-        || subscription["interval_ms"].as_i64() != Some(PROJECT_PATROL_EVERY_MS)
+        || !is_project_patrol_interval(subscription["interval_ms"].as_i64())
         || subscription["status"].as_str() != Some("armed")
         || subscription["subject"].as_str() != Some(PROJECT_PATROL_SUBJECT)
     {
@@ -816,7 +829,7 @@ fn goal_project_patrol_record(
         .filter_map(|subscription| {
             if goal_check_subscription_owner(scope, &subscription).is_err()
                 || subscription["event"].as_str() != Some(PROJECT_PATROL_EVENT)
-                || subscription["interval_ms"].as_i64() != Some(PROJECT_PATROL_EVERY_MS)
+                || !is_project_patrol_interval(subscription["interval_ms"].as_i64())
                 || subscription["subject"].as_str() != Some(PROJECT_PATROL_SUBJECT)
             {
                 return None;
@@ -870,7 +883,7 @@ fn goal_project_patrol_subscribe(
             "--subject",
             PROJECT_PATROL_SUBJECT,
             "--every-ms",
-            "900000",
+            PROJECT_PATROL_EVERY_MS_STR,
             "--repeat-count",
             "100",
             "--ttl-seconds",
@@ -933,11 +946,14 @@ pub(super) fn goal_ensure_project_patrol(root: &Path, scope: &GoalScope) -> Valu
             if goal_patrol_subscription_is_usable(scope, &subscription, goal_now_ms())
                 .is_some() =>
         {
+            let actual = subscription["interval_ms"].as_i64();
             serde_json::json!({
                 "applicable": true,
                 "armed": true,
                 "subscription_id": subscription_id,
-                "every_ms": PROJECT_PATROL_EVERY_MS,
+                "every_ms": actual.unwrap_or(PROJECT_PATROL_EVERY_MS),
+                "target_every_ms": PROJECT_PATROL_EVERY_MS,
+                "cadence_runtime_gap": project_patrol_cadence_gap(actual),
                 "source": "reused",
                 "status": "armed",
                 "checked_at": now,
@@ -1034,11 +1050,14 @@ pub(super) fn goal_project_patrol_projection(root: &Path, scope: &GoalScope) -> 
             if goal_patrol_subscription_is_usable(scope, &subscription, goal_now_ms())
                 .is_some() =>
         {
+            let actual = subscription["interval_ms"].as_i64();
             serde_json::json!({
                 "applicable": true,
                 "armed": true,
                 "subscription_id": subscription_id,
-                "every_ms": PROJECT_PATROL_EVERY_MS,
+                "every_ms": actual.unwrap_or(PROJECT_PATROL_EVERY_MS),
+                "target_every_ms": PROJECT_PATROL_EVERY_MS,
+                "cadence_runtime_gap": project_patrol_cadence_gap(actual),
                 "subject": subscription["subject"].clone(),
                 "status": "armed",
                 "source": "reused",
@@ -1302,5 +1321,18 @@ mod tests {
 
         drop(second);
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn patrol_cadence_gap_marks_only_legacy_interval() {
+        assert_eq!(
+            project_patrol_cadence_gap(Some(PROJECT_PATROL_COMPAT_EVERY_MS)),
+            Some("PATROL_CADENCE_RUNTIME_GAP")
+        );
+        assert_eq!(
+            project_patrol_cadence_gap(Some(PROJECT_PATROL_EVERY_MS)),
+            None
+        );
+        assert_eq!(project_patrol_cadence_gap(None), None);
     }
 }

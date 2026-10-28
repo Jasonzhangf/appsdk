@@ -997,6 +997,8 @@ impl State {
                 if let Some(subscription) = self.notification_subscriptions.get_mut(subscription_id)
                 {
                     subscription.target = target.clone();
+                    subscription.patrol_idle_since_ms = None;
+                    subscription.patrol_last_push_ms = 0;
                     subscription.updated_ms = *updated_ms;
                 }
             }
@@ -2544,6 +2546,8 @@ mod board_patrol_state_tests {
             last_realtime_idle_since_ms: 90,
             last_wake_tasks: vec!["task-a".into()],
             next_due_ms: 900_100,
+            idle_episode_start_ms: None,
+            last_poll_idle: false,
         }
     }
 

@@ -96,6 +96,8 @@ fn register_and_subscribe(server: &Server, worker_id: &str) -> String {
                 created_ms: now,
                 updated_ms: now,
                 status_reason: None,
+                patrol_idle_since_ms: None,
+                patrol_last_push_ms: 0,
             },
         },
     ]);
@@ -1025,6 +1027,8 @@ fn owned_subscription(worker_id: &str, id: &str, status: &str) -> NotificationSu
         created_ms: 100,
         updated_ms: 1_500,
         status_reason: (status == "cancelled").then(|| EXPLICIT_UNSUBSCRIBE_REASON.into()),
+        patrol_idle_since_ms: None,
+        patrol_last_push_ms: 0,
     }
 }
 

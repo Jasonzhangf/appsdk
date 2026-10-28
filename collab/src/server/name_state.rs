@@ -178,6 +178,12 @@ pub struct AgentActivityRecord {
     pub background: bool,
     pub reason: String,
     pub observed_ms: i64,
+    /// Trusted continuous online-idle start for the current binding/session/
+    /// generation. `None` means the current observation is not part of a
+    /// trusted idle interval. Legacy journals omit this field and never
+    /// backfill an interval from `observed_ms`.
+    #[serde(default)]
+    pub idle_since_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

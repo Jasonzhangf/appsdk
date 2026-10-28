@@ -242,6 +242,7 @@ fn name_resolution_atomically_replays_with_assignments_and_snapshot_records() {
             background: false,
             reason: "generation-active".into(),
             observed_ms: 32,
+            idle_since_ms: None,
         },
     });
 
@@ -445,6 +446,7 @@ fn project_reset_clears_new_project_state() {
             background: false,
             reason: "generation-active".into(),
             observed_ms: 50,
+            idle_since_ms: None,
         },
     });
 

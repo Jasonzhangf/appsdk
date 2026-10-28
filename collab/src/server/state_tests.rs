@@ -181,6 +181,8 @@ fn skipped_busy_master_wake_delivery_state_replays_with_zero_generation() {
             created_ms: 1,
             updated_ms: 1,
             status_reason: None,
+            patrol_idle_since_ms: None,
+            patrol_last_push_ms: 0,
         },
     });
     state.apply(&Event::NotificationSkipped {
@@ -229,6 +231,8 @@ fn failed_master_wake_delivery_state_replays_with_zero_generation() {
             created_ms: 1,
             updated_ms: 1,
             status_reason: None,
+            patrol_idle_since_ms: None,
+            patrol_last_push_ms: 0,
         },
     });
     state.apply(&Event::Sent {
@@ -330,6 +334,8 @@ fn resource_release_failure_does_not_poison_master_wake_delivery_state() {
             created_ms: 1,
             updated_ms: 1,
             status_reason: None,
+            patrol_idle_since_ms: None,
+            patrol_last_push_ms: 0,
         },
     });
     state.apply(&Event::Sent {
@@ -388,6 +394,8 @@ fn worker_deadline_failure_does_not_poison_master_wake_delivery_state() {
             created_ms: 1,
             updated_ms: 1,
             status_reason: None,
+            patrol_idle_since_ms: None,
+            patrol_last_push_ms: 0,
         },
     });
     state.apply(&Event::Sent {
@@ -444,6 +452,8 @@ fn worker_deadline_skip_does_not_poison_master_wake_delivery_state() {
             created_ms: 1,
             updated_ms: 1,
             status_reason: None,
+            patrol_idle_since_ms: None,
+            patrol_last_push_ms: 0,
         },
     });
     state.apply(&Event::NotificationSkipped {
@@ -569,6 +579,8 @@ fn master_wake_accumulator_coalesces_generated_signals_until_decision() {
             created_ms: 1,
             updated_ms: 1,
             status_reason: None,
+            patrol_idle_since_ms: None,
+            patrol_last_push_ms: 0,
         },
     });
     state.apply(&Event::WakeBound {
@@ -594,6 +606,8 @@ fn master_wake_accumulator_coalesces_generated_signals_until_decision() {
             created_ms: 1,
             updated_ms: 1,
             status_reason: None,
+            patrol_idle_since_ms: None,
+            patrol_last_push_ms: 0,
         },
     );
     state.apply(&Event::Delivered {
@@ -684,6 +698,8 @@ fn delivered_master_wake_uses_current_typed_grant() {
             created_ms: 1,
             updated_ms: 1,
             status_reason: None,
+            patrol_idle_since_ms: None,
+            patrol_last_push_ms: 0,
         },
     });
     state.apply(&Event::WakeBound {
@@ -816,6 +832,8 @@ fn delivered_master_wake_is_scoped_to_subscription_route() {
             created_ms: 1,
             updated_ms: 1,
             status_reason: None,
+            patrol_idle_since_ms: None,
+            patrol_last_push_ms: 0,
         },
     });
     state.apply(&Event::WakeBound {
@@ -875,6 +893,8 @@ fn consuming_a_master_goal_deadline_clears_goal_due() {
             created_ms: 1,
             updated_ms: 1,
             status_reason: None,
+            patrol_idle_since_ms: None,
+            patrol_last_push_ms: 0,
         },
     });
     state.apply(&Event::MasterWakeSignal {
@@ -922,6 +942,8 @@ fn recv_style_ack_clears_master_goal_due() {
             created_ms: 1,
             updated_ms: 1,
             status_reason: None,
+            patrol_idle_since_ms: None,
+            patrol_last_push_ms: 0,
         },
     });
     state.apply(&Event::MasterWakeSignal {
@@ -979,6 +1001,8 @@ fn delivering_a_master_goal_deadline_clears_goal_due_latch() {
             created_ms: 1,
             updated_ms: 1,
             status_reason: None,
+            patrol_idle_since_ms: None,
+            patrol_last_push_ms: 0,
         },
     });
     state.apply(&Event::MasterWakeSignal {
@@ -1053,6 +1077,8 @@ fn older_goal_deadline_acceptance_does_not_clear_a_newer_master_goal_due_latch()
             created_ms: 1,
             updated_ms: 1,
             status_reason: None,
+            patrol_idle_since_ms: None,
+            patrol_last_push_ms: 0,
         },
     };
     let send = |id: &str, subscription_id: &str| {
@@ -1147,6 +1173,8 @@ fn master_goal_due_is_kept_while_an_armed_goal_deadline_exists() {
             created_ms: 1,
             updated_ms: 1,
             status_reason: None,
+            patrol_idle_since_ms: None,
+            patrol_last_push_ms: 0,
         },
     });
     state.apply(&Event::MasterWakeSignal {

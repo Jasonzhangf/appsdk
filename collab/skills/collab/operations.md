@@ -574,12 +574,19 @@ or implementation details.
    subscriptions.
 10. 每个项目的 Jenny（当前获授权 master）默认承担本项目 worker 巡检。初始化或恢复
     本人 longhorizon 后，确保本项目常驻巡检已 armed；它是当前 master 的 `master-idle`
-    订阅，subject `project-patrol`、interval `900000` 毫秒，ensure/renew 复用同一
-    订阅，不重复创建。`appsdk longhorizon show` 是只读投影，读取成功不证明已 arm。
+    订阅，subject `project-patrol`、目标 interval `1500000` 毫秒（20-30 分钟窗口，
+    默认 25 分钟），ensure/renew 复用同一订阅，不重复创建。`900000` 只兼容已存在的
+    旧订阅；`collab notify status` 的 `project_patrol.cadence_runtime_gap` 为
+    `PATROL_CADENCE_RUNTIME_GAP` 时，报告运行节奏未达目标，不声称已对齐。
+    `appsdk longhorizon show` 是只读投影，读取成功不证明已 arm。
     有限 goal/task 定时器按生命周期关闭，单个 goal 结束不关闭这条常驻项目巡检义务。
-    每次巡检提醒检查 worker 活动、未关闭 board 任务、当前绑定和按任务取消状态；
+    每次巡检提醒先检查四项：未解决的 P0/P1；未完成任务或 ready 工作；自有 worktree
+    与资源释放；peer/worker 的 busy/idle 及 idle 原因是否合理。然后再检查未关闭
+    board 任务、当前绑定和按任务取消状态。15 分钟 tick 只检测 due，可信连续 idle
+    严格超过 30 分钟才首次推送，同一 idle 阶段重复推送至少间隔 30 分钟；
     存在全局 CEO 时按 [board idle 巡检契约](references/board-idle-patrol.md)回报本项目
-    实质进度。
+    实质进度。`collab master status` 与 `collab ceo progress` 的 `workspace` 必须是
+    当前 master 绑定注册的 canonical project root。
 11. 已持有未关闭 board 任务的 peer 在正态 online+idle 时由本人巡检唤醒继续推理；
     busy 跳过且不补发；unknown、offline、cold 或 waiting_user 产生零传输输入。
     peer 可仅取消本人任务的 board-idle 巡检，入口为
@@ -597,7 +604,8 @@ or implementation details.
     `collab notify methods` 与 `collab notify status`。
 12. 当前 master 可取消本人的常驻项目巡检，入口为
     `collab notify cancel --event master-idle [--reason <text>] [--resume-condition <text>]`。
-    它只作用于 `master-idle`、subject `project-patrol`、interval `900000` 的精确订阅；
+    它只作用于 `master-idle`、subject `project-patrol`、目标 interval `1500000`
+    （兼容旧 `900000`）的精确订阅；
     只有当前 master 可调用，其他 owner 或旧载体返回 `PROJECT_PATROL_MASTER_REQUIRED`，
     没有该订阅返回 `PROJECT_PATROL_NOT_FOUND`。此入口拒绝 `--task-id`。取消要求项目已在
     `ceo_report_state.projects[<canonical project>].revision` 记录至少一次进度，且没有
@@ -607,11 +615,12 @@ or implementation details.
     `PROJECT_PATROL_PROGRESS_NOT_RECORDED` 或 `PROJECT_PATROL_WORK_REMAINS`。成功回执
     返回原订阅 ID、`status=cancelled`、`changed=true`，并结束该订阅未接受的 pending
     唤醒；重复取消返回同一 ID、`changed=false`，原因与时间不变。显式精确
-    `collab notify subscribe --event master-idle --subject project-patrol --every-ms 900000`
+    `collab notify subscribe --event master-idle --subject project-patrol --every-ms 1500000`
     恢复原 ID 为 `rearmed`；新增项目任务或等待释放会自动 rearm 同一订阅。同稳定名字
     换会话保留 cancelled。`collab notify status` 的 `project_patrol` 只读投影给出
-    `armed`/`cancelled`/`missing`；direct-message 租约始终独立保留，peer board idle
-    取消语义不变。这些入口已在当前源码实现；是否在运行 daemon 生效仍须按实际构建
+    `armed`/`cancelled`/`missing`、`interval_ms`、`target_interval_ms` 和
+    `cadence_runtime_gap`；direct-message 租约始终独立保留，peer board idle 取消
+    语义不变。这些入口已在当前源码实现；是否在运行 daemon 生效仍须按实际构建
     核实 `collab notify methods` 与 `collab notify status`。
 
 A legacy managed-subagent record creates no new patrol task, subscription,

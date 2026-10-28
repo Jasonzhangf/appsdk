@@ -44,6 +44,74 @@ pub(crate) fn master_authority_view_with_endpoint(
     })
 }
 
+/// The single read-only workspace-idle projection shared by `master status`
+/// and `ceo progress`.
+///
+/// It reports the trusted continuous online-idle fact from the typed activity
+/// owner. The canonical project root comes from the daemon's registered
+/// project scope, never from the caller's cwd. When there is no master, no
+/// current session match, or no typed activity, the fact is `unknown` with a
+/// null idle start and a zero duration. The projection never mutates state, so
+/// reading it cannot advance the CEO report watermark.
+pub(crate) fn workspace_idle_view(
+    server: &Server,
+    state: &State,
+    master_id: Option<&str>,
+    now: i64,
+) -> serde_json::Value {
+    let project_root = GlobalState::canonical_project_scope(&server.root)
+        .ok()
+        .map(|scope| scope.as_str().to_owned());
+    let Some(project_root) = project_root else {
+        return unknown_workspace_view(None);
+    };
+    let Some(master_id) = master_id else {
+        return unknown_workspace_view(Some(project_root));
+    };
+    let Some(worker) = state.workers.get(master_id) else {
+        return unknown_workspace_view(Some(project_root));
+    };
+    let (presence, activity) = worker_agent_facts(server, state, worker);
+    let presence = presence.map(|fact| fact.presence);
+    let activity_kind = activity.map(|fact| fact.activity);
+    let label = match (presence, activity_kind) {
+        (Some(crate::server::name_state::AgentPresence::Offline), _) => "unknown",
+        (_, Some(crate::server::name_state::AgentActivity::Busy)) => "busy",
+        (_, Some(crate::server::name_state::AgentActivity::Idle)) => "idle",
+        (_, Some(crate::server::name_state::AgentActivity::WaitingUser)) => "waiting_user",
+        _ => "unknown",
+    };
+    let trusted_idle = presence == Some(crate::server::name_state::AgentPresence::Online)
+        && activity_kind == Some(crate::server::name_state::AgentActivity::Idle);
+    let idle_since_ms = trusted_idle
+        .then(|| {
+            activity
+                .and_then(|fact| fact.idle_since_ms)
+                .filter(|start| *start > 0 && *start <= now)
+        })
+        .flatten();
+    let idle_duration_ms = idle_since_ms
+        .map(|start| now.saturating_sub(start))
+        .unwrap_or(0);
+    json!({
+        "project_root": project_root,
+        "activity": label,
+        "idle_since_ms": idle_since_ms,
+        "idle_duration_ms": idle_duration_ms,
+        "observed_ms": activity.map(|fact| fact.observed_ms),
+    })
+}
+
+fn unknown_workspace_view(project_root: Option<String>) -> serde_json::Value {
+    json!({
+        "project_root": project_root,
+        "activity": "unknown",
+        "idle_since_ms": serde_json::Value::Null,
+        "idle_duration_ms": 0,
+        "observed_ms": serde_json::Value::Null,
+    })
+}
+
 fn prune_master_wake_idle_capacity(server: &Server) {
     let (live_idle_workers, live_idle_subagents) = {
         let state = server.state.lock().unwrap();
@@ -121,7 +189,17 @@ fn handle_master_status(server: &Server) -> Resp {
         .as_ref()
         .and_then(|worker| worker_identity_and_endpoint(server, worker).1);
     let state = server.state.lock().unwrap();
-    let master = master_authority_view_with_endpoint(&state, route_scope.as_ref(), endpoint_live);
+    let workspace = workspace_idle_view(
+        server,
+        &state,
+        holder.as_ref().map(|worker| worker.id.as_str()),
+        now_ms(),
+    );
+    let mut master =
+        master_authority_view_with_endpoint(&state, route_scope.as_ref(), endpoint_live);
+    if let Some(master_object) = master.as_object_mut() {
+        master_object.insert("workspace".into(), workspace);
+    }
     Resp::data(json!({
         "master": master,
         "scope": scope_view(route_scope.as_ref()),
@@ -159,6 +237,10 @@ pub(crate) fn handle_send(
 #[cfg(test)]
 #[path = "../name_address_tests.rs"]
 mod name_address_tests;
+
+#[cfg(test)]
+#[path = "../workspace_idle_tests.rs"]
+mod workspace_idle_tests;
 
 fn resolve_send_name_address(
     server: &Server,

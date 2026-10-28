@@ -33,17 +33,30 @@ fn wake_text_keeps_location_action_and_one_read_action_only() {
 
 #[test]
 fn batch_wake_keeps_ids_categories_and_one_read_action_only() {
-    let entries = vec![(
-        0_i64,
-        "msg-a".to_string(),
-        String::new(),
-        "direct-message".to_string(),
-        notification_text(&msg("a")).unwrap(),
-    )];
+    let entries = vec![
+        (
+            0_i64,
+            "msg-a".to_string(),
+            String::new(),
+            "direct-message".to_string(),
+            notification_text(&msg("a")).unwrap(),
+        ),
+        (
+            1_i64,
+            "msg-b".to_string(),
+            String::new(),
+            "notify".to_string(),
+            compose_notification("msg-b", "user-question", "用户问了一个需要区分的具体问题"),
+        ),
+    ];
     let batch = batch_notification_text(&entries, 2);
     assert!(
-        batch.starts_with("Batch wake: message_ids=msg-a action_categories=worker-idle:a."),
+        batch.starts_with("Batch wake: message_ids=msg-a,msg-b last=user-question entries=msg-a:worker-idle:a"),
         "{batch}"
+    );
+    assert!(
+        batch.contains("msg-b:user-question=用户问了一个需要区分的具体问题"),
+        "each batch entry must carry its own title and a faithful preview: {batch}"
     );
     assert!(batch.contains("older_messages=2"), "{batch}");
     for removed in ["task_ids", "collab inbox", "ACK", "resume", "Reply to"] {

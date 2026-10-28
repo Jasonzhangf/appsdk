@@ -1599,3 +1599,191 @@ fn same_session_carrier_reclaim_is_scoped_and_self_idempotent() {
         .any(|binding| binding.agent_id.as_str() == "carrier-c"));
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// A publisher-owned pending task with no bound worktree can be cancelled
+/// through the owner-local update path. The `pending -> cancelled` edge is the
+/// only legal unaccepted cancellation and must persist through journal replay.
+#[test]
+fn pending_task_without_worktree_transitions_to_cancelled() {
+    let (server, root) = test_server();
+    assert!(register_synthetic_peer(&server, "publisher", "thread-pending-cancel").ok);
+    let now = now_ms();
+    server.commit(&[Event::TaskCreated {
+        task: TaskRec {
+            id: "pending-cancel".into(),
+            owner: "publisher".into(),
+            created_by: "publisher".into(),
+            feature_id: None,
+            worktree_path: None,
+            branch: None,
+            base_commit: None,
+            priority: default_priority(),
+            status: "pending".into(),
+            next_step: None,
+            wait: None,
+            created_ms: now,
+            updated_ms: now,
+        },
+    }]);
+
+    let cancelled = handle_task_update(
+        &server,
+        "publisher".into(),
+        "token-publisher".into(),
+        "pending-cancel".into(),
+        Some("cancelled".into()),
+        None,
+    );
+    assert!(cancelled.ok, "{cancelled:?}");
+    assert_eq!(cancelled.data["status"], "cancelled");
+    assert_eq!(
+        server.state.lock().unwrap().tasks["pending-cancel"].status,
+        "cancelled"
+    );
+
+    let replayed = replay(&root).unwrap();
+    assert_eq!(replayed.tasks["pending-cancel"].status, "cancelled");
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// Publisher-owned pending work remains claimable by its publisher, and once
+/// claimed is no longer claimable by another registered peer at the advanced
+/// revision. This guards `board_claim`, which the fix intentionally leaves
+/// unchanged.
+#[test]
+fn publisher_claims_pending_task_and_non_publisher_cannot_reclaim() {
+    let (server, root) = test_server();
+    assert!(register_synthetic_peer(&server, "publisher", "thread-pub-claim").ok);
+    assert!(register_synthetic_peer(&server, "other", "thread-other-claim").ok);
+
+    let published = handle_board_command(
+        &server,
+        "publisher".into(),
+        "token-publisher".into(),
+        crate::board::BoardCommand::Publish {
+            id: "publisher-pending".into(),
+            title: "publisher pending".into(),
+            description: "claim regression".into(),
+            delivery_condition: "claim works".into(),
+            test_condition: "green".into(),
+            priority: "p1".into(),
+            work_kind: None,
+            parent_task: None,
+            prefer_role: None,
+            executor: None,
+            reviewer: None,
+        },
+    );
+    assert!(published.ok, "{published:?}");
+    assert_eq!(published.data["task"]["status"], "pending");
+    assert_eq!(published.data["task"]["owner"], "publisher");
+
+    let claimed = handle_board_command(
+        &server,
+        "publisher".into(),
+        "token-publisher".into(),
+        crate::board::BoardCommand::Claim {
+            id: "publisher-pending".into(),
+            expected_revision: 1,
+        },
+    );
+    assert!(claimed.ok, "{claimed:?}");
+    assert_eq!(claimed.data["task"]["status"], "working");
+    assert_eq!(claimed.data["task"]["owner"], "publisher");
+
+    let non_publisher = handle_board_command(
+        &server,
+        "other".into(),
+        "token-other".into(),
+        crate::board::BoardCommand::Claim {
+            id: "publisher-pending".into(),
+            expected_revision: 2,
+        },
+    );
+    assert!(!non_publisher.ok, "{non_publisher:?}");
+    assert_eq!(
+        non_publisher.error.as_deref(),
+        Some("BOARD_TASK_NOT_PENDING: only pending publisher-owned work may be claimed")
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// A private (non-public) pending task owned by its creator is claimable only
+/// by its publisher. `board_claim` rejects every other actor with
+/// `BOARD_PRIVATE_TASK` before the pending/ownership checks. The task is seeded
+/// directly so the claim entry itself is exercised; this guards the privacy
+/// branch that the two-line lifecycle fix intentionally leaves unchanged.
+#[test]
+fn non_publisher_cannot_claim_private_pending_task() {
+    let (server, root) = test_server();
+    assert!(register_synthetic_peer(&server, "publisher", "thread-private-claim").ok);
+    assert!(register_synthetic_peer(&server, "other", "thread-private-other").ok);
+    let now = now_ms();
+    server.commit(&[
+        Event::TaskCreated {
+            task: TaskRec {
+                id: "private-pending".into(),
+                owner: "publisher".into(),
+                created_by: "publisher".into(),
+                feature_id: None,
+                worktree_path: None,
+                branch: None,
+                base_commit: None,
+                priority: default_priority(),
+                status: "pending".into(),
+                next_step: None,
+                wait: None,
+                created_ms: now,
+                updated_ms: now,
+            },
+        },
+        Event::BoardDetailsChanged {
+            task_id: "private-pending".into(),
+            details: crate::board::BoardTaskDetails {
+                public_visibility: false,
+                revision: 1,
+                ..Default::default()
+            },
+        },
+    ]);
+
+    let rejected = board_claim(
+        &server,
+        "other".into(),
+        "token-other".into(),
+        "private-pending".into(),
+        1,
+    );
+    assert!(
+        !rejected.ok,
+        "non-publisher must not claim private work: {rejected:?}"
+    );
+    assert_eq!(
+        rejected.error.as_deref(),
+        Some("BOARD_PRIVATE_TASK: private queue work is claimable only by its publisher")
+    );
+    assert_eq!(
+        server.state.lock().unwrap().tasks["private-pending"].status,
+        "pending",
+        "a rejected private claim must not mutate the task"
+    );
+
+    let claimed = board_claim(
+        &server,
+        "publisher".into(),
+        "token-publisher".into(),
+        "private-pending".into(),
+        1,
+    );
+    assert!(
+        claimed.ok,
+        "publisher must claim own private pending work: {claimed:?}"
+    );
+    assert_eq!(claimed.data["task"]["status"], "working");
+    assert_eq!(claimed.data["task"]["owner"], "publisher");
+    assert_eq!(
+        server.state.lock().unwrap().tasks["private-pending"].status,
+        "working"
+    );
+    std::fs::remove_dir_all(root).ok();
+}

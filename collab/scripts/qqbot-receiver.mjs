@@ -19,6 +19,9 @@ const positiveDuration = (value, fallback) => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 };
 const MESSAGE_BATCH_WINDOW_MS = positiveDuration(process.env.QQBOT_BATCH_WINDOW_MS, 30000);
+// Keep the merge window at 30s: the user fixed QQBot to merge text and images
+// arriving within half a minute (m1793235637968-261). Override per session
+// through QQBOT_BATCH_WINDOW_MS when a different cadence is wanted.
 // The sliding window starts 30s after the last message. The cap only stops a
 // continuous stream from batching forever, so it must exceed the quiet window.
 const MESSAGE_BATCH_MAX_WAIT_MS = positiveDuration(process.env.QQBOT_BATCH_MAX_WAIT_MS, 60000);
@@ -364,6 +367,222 @@ const composeBatchBody = (bodies) =>
     .filter((body) => body.length > 0)
     .join("\n\n");
 
+const buildChannelEnvelope = (batch) => ({
+  source_channel: "qqbot",
+  channel_instance: "qqbot",
+  external_user: batch.messages[0]?.record?.senderId ?? "",
+  external_conversation: String(batch.sessionTargetId ?? ""),
+  // The platform message id is the durable idempotency key. Use the first
+  // platform event in arrival order instead of the generated batch id so a
+  // replayed event maps to the same durable delivery across a receiver restart.
+  platform_message_id: String(batch.messages[0]?.record?.messageId ?? ""),
+  reply_route: `qqbot://${batch.replyTarget?.scope ?? ""}/${batch.replyTarget?.targetId ?? ""}`,
+  recipient_address: String(batch.sendToAddress ?? ""),
+  attachments: batch.messages.flatMap((item) =>
+    (item.record?.attachments ?? []).map((attachment) => ({
+      local_path: attachment.path ?? attachment.local_path ?? "",
+      display_name: attachment.filename ?? attachment.display_name ?? "",
+      media_type: attachment.contentType ?? attachment.media_type ?? "",
+    })),
+  ),
+});
+
+// Groups messages that arrive within a trailing window. A flush is deferred
+// while an inbound message is still being processed, so an attachment download
+// never silently splits one conversation burst into two deliveries. When a
+// deferred batch's quiet deadline was extended by a later message, processing
+// completion re-arms the timer instead of flushing that new tail into a second
+// delivery.
+const createBatchQueue = ({ windowMs, maxWaitMs, flush, now = Date.now }) => {
+  const batches = new Map();
+  let counter = 0;
+  let inflight = 0;
+  const deferredQuiet = new Set();
+  const deferredMax = new Set();
+  const fired = new Set();
+  const flushPromises = new Set();
+
+  const clearTimers = (batch) => {
+    if (batch.timer) clearTimeout(batch.timer);
+    if (batch.maxTimer) clearTimeout(batch.maxTimer);
+    batch.timer = null;
+    batch.maxTimer = null;
+  };
+
+  const startFlush = (batch) => {
+    if (!batch || fired.has(batch.batchId)) return;
+    fired.add(batch.batchId);
+    deferredQuiet.delete(batch);
+    deferredMax.delete(batch);
+    batches.delete(batch.key);
+    clearTimers(batch);
+    const promise = Promise.resolve()
+      .then(() => flush(batch))
+      .catch(() => {
+        // Timer-driven flushes must not surface as unhandled rejections.
+        // Shutdown drains await the settled promise via flushAll.
+      });
+    flushPromises.add(promise);
+    void promise.finally(() => flushPromises.delete(promise));
+  };
+
+  const quietFired = (batch) => {
+    batch.timer = null;
+    if (fired.has(batch.batchId)) return;
+    if (inflight > 0) {
+      deferredQuiet.add(batch);
+      return;
+    }
+    startFlush(batch);
+  };
+
+  const maxFired = (batch) => {
+    batch.maxTimer = null;
+    if (fired.has(batch.batchId)) return;
+    if (inflight > 0) {
+      deferredMax.add(batch);
+      return;
+    }
+    startFlush(batch);
+  };
+
+  const beginMessage = () => {
+    inflight += 1;
+  };
+
+  const endMessage = () => {
+    inflight = Math.max(0, inflight - 1);
+    if (inflight !== 0) return;
+    // The hard cap is a flush obligation: once reached, delivery no longer
+    // waits for the trailing quiet window.
+    for (const batch of [...deferredMax]) {
+      deferredMax.delete(batch);
+      startFlush(batch);
+    }
+    for (const batch of [...deferredQuiet]) {
+      deferredQuiet.delete(batch);
+      if (now() >= batch.quietDeadlineMs) {
+        startFlush(batch);
+      } else {
+        if (batch.timer) clearTimeout(batch.timer);
+        batch.timer = setTimeout(
+          () => quietFired(batch),
+          Math.max(0, batch.quietDeadlineMs - now()),
+        );
+      }
+    }
+  };
+
+  const enqueue = (item, routeInfo, receivedAtMs = now()) => {
+    const key = `${routeInfo.projectRoot}\u0000${routeInfo.sendToAddress}\u0000${routeInfo.sessionTargetId}`;
+    let batch = batches.get(key);
+    if (!batch) {
+      batch = {
+        key,
+        batchId: `qqbot-batch-${now()}-${++counter}`,
+        projectRoot: routeInfo.projectRoot,
+        sendToAddress: routeInfo.sendToAddress,
+        deliveryAddress: routeInfo.deliveryAddress,
+        resolvedAddress: routeInfo.resolvedAddress,
+        resolvedWorkerId: routeInfo.resolvedWorkerId,
+        sessionTargetId: routeInfo.sessionTargetId,
+        routeSource: routeInfo.routeSource,
+        messages: [],
+        replyTarget: routeInfo.replyTarget,
+        newlyBound: false,
+        flushing: false,
+        timer: null,
+        maxTimer: null,
+        quietDeadlineMs: receivedAtMs + windowMs,
+        maxDeadlineMs: receivedAtMs + maxWaitMs,
+      };
+      batches.set(key, batch);
+      batch.maxTimer = setTimeout(
+        () => maxFired(batch),
+        Math.max(0, batch.maxDeadlineMs - now()),
+      );
+    }
+    batch.messages.push(item);
+    batch.replyTarget = routeInfo.replyTarget;
+    batch.newlyBound = batch.newlyBound || routeInfo.newlyBound;
+    batch.routeSource = routeInfo.routeSource;
+    batch.quietDeadlineMs = receivedAtMs + windowMs;
+    if (batch.timer) clearTimeout(batch.timer);
+    batch.timer = setTimeout(
+      () => quietFired(batch),
+      Math.max(0, batch.quietDeadlineMs - now()),
+    );
+    return batch;
+  };
+
+  const flushAll = async () => {
+    for (const batch of [...batches.values()]) startFlush(batch);
+    await Promise.all([...flushPromises]);
+  };
+
+  return {
+    beginMessage,
+    endMessage,
+    enqueue,
+    flushAll,
+    get size() {
+      return batches.size;
+    },
+  };
+};
+
+// Serializes inbound SDK message callbacks while guaranteeing batch membership
+// is reserved at the synchronous callback boundary, not after async work. This
+// is the single path used by the receiver; tests drive it directly.
+//
+// Boundary contract (P1-1 / P1-2):
+// - `admit` runs synchronously at the callback boundary. A message is either
+//   admitted here or rejected; once admitted it is reserved and cannot be
+//   dropped. Dedup/ignore that need no reservation stay before `reserve`.
+// - `reserve`/`release` bracket the whole async process, including every early
+//   return, and must always be paired.
+// - `shuttingDown` is sampled only at admission. Work admitted before shutdown
+//   runs to delivery or explicit failure; work arriving after shutdown is
+//   rejected with `onReject` rather than silently dropped.
+const createInboundSerial = ({
+  admit,
+  reserve = () => {},
+  release = () => {},
+  process,
+  onReject = () => {},
+  onError = () => {},
+}) => {
+  let shuttingDown = false;
+  let serial = Promise.resolve();
+
+  const handleMessage = (message, receivedAtMs) => {
+    if (shuttingDown) {
+      onReject(message, "SHUTDOWN_IN_PROGRESS");
+      return;
+    }
+    if (!admit(message)) return;
+    reserve();
+    serial = serial
+      .then(() => process(message, receivedAtMs))
+      .catch((error) => onError(error, message))
+      .finally(() => release());
+    return serial;
+  };
+
+  const drain = () => {
+    shuttingDown = true;
+    return serial.catch(() => {});
+  };
+
+  return {
+    handleMessage,
+    drain,
+    get shuttingDown() {
+      return shuttingDown;
+    },
+  };
+};
+
 const statePayload = (value, pid, updatedAt) => ({
   ...value,
   pid,
@@ -395,8 +614,6 @@ async function startReceiver() {
     return targets;
   };
 
-  const batches = new Map();
-  let batchCounter = 0;
   const appendInboxRecord = (record) =>
     fs.appendFileSync(path.join(state, "inbox.jsonl"), JSON.stringify(record) + "\n", {
       mode: 0o600,
@@ -405,16 +622,17 @@ async function startReceiver() {
     fs.appendFileSync(path.join(state, "receipts.jsonl"), JSON.stringify(record) + "\n", {
       mode: 0o600,
     });
-
   const flushBatch = async (batch) => {
     if (!batch || batch.flushing) return;
     batch.flushing = true;
     if (batch.timer) clearTimeout(batch.timer);
     if (batch.maxTimer) clearTimeout(batch.maxTimer);
-    batches.delete(batch.key);
 
+    // Saved attachment paths travel in the typed envelope; the body carries
+    // only user text and attachment failures, so the daemon projection does
+    // not list each successful path twice.
     const combinedBody = composeBatchBody(
-      batch.messages.map((item) => item.routedBody),
+      batch.messages.map((item) => item.deliveryBody),
     );
     let deliveryStatus = "failed";
     let deliveryError = null;
@@ -431,6 +649,8 @@ async function startReceiver() {
             batch.sendToAddress,
             "--content",
             combinedBody,
+            "--channel-envelope",
+            JSON.stringify(buildChannelEnvelope(batch)),
           ],
           batch.projectRoot,
         );
@@ -518,40 +738,14 @@ async function startReceiver() {
     });
   };
 
-  const enqueueBatch = (item, routeInfo) => {
-    const key = `${routeInfo.projectRoot}\u0000${routeInfo.sendToAddress}\u0000${routeInfo.sessionTargetId}`;
-    let batch = batches.get(key);
-    if (!batch) {
-      batch = {
-        key,
-        batchId: `qqbot-batch-${Date.now()}-${++batchCounter}`,
-        projectRoot: routeInfo.projectRoot,
-        sendToAddress: routeInfo.sendToAddress,
-        deliveryAddress: routeInfo.deliveryAddress,
-        resolvedAddress: routeInfo.resolvedAddress,
-        resolvedWorkerId: routeInfo.resolvedWorkerId,
-        sessionTargetId: routeInfo.sessionTargetId,
-        routeSource: routeInfo.routeSource,
-        messages: [],
-        replyTarget: routeInfo.replyTarget,
-        newlyBound: false,
-        flushing: false,
-        timer: null,
-        maxTimer: null,
-      };
-      batches.set(key, batch);
-      batch.maxTimer = setTimeout(() => {
-        void flushBatch(batch);
-      }, MESSAGE_BATCH_MAX_WAIT_MS);
-    }
-    batch.messages.push(item);
-    batch.replyTarget = routeInfo.replyTarget;
-    batch.newlyBound = batch.newlyBound || routeInfo.newlyBound;
-    batch.routeSource = routeInfo.routeSource;
-    if (batch.timer) clearTimeout(batch.timer);
-    batch.timer = setTimeout(() => {
-      void flushBatch(batch);
-    }, MESSAGE_BATCH_WINDOW_MS);
+  const queue = createBatchQueue({
+    windowMs: MESSAGE_BATCH_WINDOW_MS,
+    maxWaitMs: MESSAGE_BATCH_MAX_WAIT_MS,
+    flush: flushBatch,
+  });
+
+  const enqueueBatch = (item, routeInfo, receivedAtMs) => {
+    const batch = queue.enqueue(item, routeInfo, receivedAtMs);
     status({
       event: "message_batched",
       connected: true,
@@ -565,195 +759,143 @@ async function startReceiver() {
     });
   };
 
-  const flushAllBatches = async () => {
-    const pending = [...batches.values()];
-    await Promise.all(pending.map((batch) => flushBatch(batch)));
-  };
-
   bot.on("ready", () => status({ event: "ready", connected: true, targetBound: !!target }));
   bot.on("resumed", () => status({ event: "resumed", connected: true, targetBound: !!target }));
   bot.on("error", (error) =>
     status({ event: "error", code: error.code ?? "SDK_ERROR" }),
   );
 
-  let serial = Promise.resolve();
-  bot.on("message", (_ctx, message) => {
-    serial = serial
-      .then(async () => {
-        if (message.kind !== "c2c" || seen.has(message.messageId)) return;
-        seen.add(message.messageId);
-        let newlyBound = false;
-        if (!target) {
-          if (Date.now() > bindUntil) {
-            status({ event: "binding_window_expired", connected: true });
-            return;
-          }
-          target = { scope: message.replyTarget.scope, targetId: message.replyTarget.targetId };
-          write("target.json", target);
-          newlyBound = true;
-        }
-        if (
-          message.replyTarget.scope !== target.scope ||
-          message.replyTarget.targetId !== target.targetId
-        ) {
-          return;
-        }
+  const processInboundMessage = async (message, receivedAtMs) => {
+    let newlyBound = false;
+    if (!target) {
+      if (Date.now() > bindUntil) {
+        status({ event: "binding_window_expired", connected: true });
+        return;
+      }
+      target = { scope: message.replyTarget.scope, targetId: message.replyTarget.targetId };
+      write("target.json", target);
+      newlyBound = true;
+    }
+    if (
+      message.replyTarget.scope !== target.scope ||
+      message.replyTarget.targetId !== target.targetId
+    ) {
+      return;
+    }
 
-        const owner = JSON.parse(
-          fs.readFileSync(path.join(state, "channel-owner.json"), "utf8"),
-        );
-        const sessionTargetId = target?.targetId ?? null;
-        const leading = parseLeadingAddress(message.content);
-        const routedAddress = leading ? leading.address : null;
-        const baseBody = leading ? leading.body : String(message.content ?? "");
-        let routedBody = "";
+    const owner = JSON.parse(
+      fs.readFileSync(path.join(state, "channel-owner.json"), "utf8"),
+    );
+    const sessionTargetId = target?.targetId ?? null;
+    const leading = parseLeadingAddress(message.content);
+    const routedAddress = leading ? leading.address : null;
+    const baseBody = leading ? leading.body : String(message.content ?? "");
+    let routedBody = "";
 
+    try {
+      const attachmentResult = await processInboundAttachments(
+        message.attachments,
+        state,
+        sessionTargetId,
+        message.messageId,
+      );
+      routedBody = buildRoutedBody(
+        baseBody,
+        attachmentResult.saved,
+        attachmentResult.failed,
+      );
+      const deliveryBody =
+        buildRoutedBody(baseBody, [], attachmentResult.failed) ||
+        (attachmentResult.saved.length > 0 ? "（附件）" : "");
+      if (!routedBody && !deliveryBody) {
+        status({ event: "ignored_empty", connected: true, targetBound: true });
+        return;
+      }
+      const targets = await activeTargets();
+      const route = await resolveInboundRoute({
+        leading,
+        targets,
+        lookupCeo: () => ceoRoute(owner.owner_project),
+        lookupDefault: () =>
+          conversationDefault(owner.owner_project, sessionTargetId),
+      });
+      const deliveryTarget = route.target ?? null;
+      const deliveryAddress = deliveryTarget?.address || null;
+      const resolvedAddress =
+        route.resolvedAddress ?? deliveryTarget?.resolvedAddress ?? null;
+      const resolvedWorkerId =
+        route.resolvedWorkerId ?? deliveryTarget?.resolvedWorkerId ?? null;
+      const routingError = route.error ?? null;
+      status({
+        event: "route_debug",
+        ownerProject: owner.owner_project,
+        sessionTargetId,
+        activeCount: targets.length,
+        activeAddresses: targets.map((entry) => entry.address || entry.worker_id),
+        routeSource: route.source,
+        deliveryAddress,
+        routedTo: deliveryAddress,
+        resolvedAddress,
+        resolvedWorkerId,
+        routingError,
+      });
+
+      if (!deliveryTarget) {
+        const deliveryError = routingError ?? "NO_DELIVERY_TARGET";
+        appendInboxRecord({
+          source: "QQBot",
+          receivedAt: new Date().toISOString(),
+          messageId: message.messageId,
+          senderId: message.senderId,
+          replyChannel: "QQBot",
+          routedOwner: owner.owner_worker_id,
+          ownerGeneration: owner.generation,
+          content: message.content,
+          routedAddress,
+          routedBody,
+          attachments: [],
+          attachmentErrors: [],
+          deliveryAddress: null,
+          routedTo: null,
+          resolvedAddress: null,
+          resolvedWorkerId: null,
+          collabMessageId: null,
+          deliveryStatus: "failed",
+          deliveryError,
+        });
         try {
-          const attachmentResult = await processInboundAttachments(
-            message.attachments,
-            state,
-            sessionTargetId,
-            message.messageId,
+          const response = await bot.sendText(
+            message.replyTarget,
+            `投递失败：${routedAddress ? `[${routedAddress}]` : "默认/CEO"}，${deliveryError}`,
           );
-          routedBody = buildRoutedBody(
-            baseBody,
-            attachmentResult.saved,
-            attachmentResult.failed,
-          );
-          if (!routedBody) {
-            status({ event: "ignored_empty", connected: true, targetBound: true });
-            return;
-          }
-          const targets = await activeTargets();
-          const route = await resolveInboundRoute({
-            leading,
-            targets,
-            lookupCeo: () => ceoRoute(owner.owner_project),
-            lookupDefault: () =>
-              conversationDefault(owner.owner_project, sessionTargetId),
+          appendReceiptRecord({
+            at: new Date().toISOString(),
+            inboundId: message.messageId,
+            deliveryStatus: "failed",
+            deliveryError,
+            response,
           });
-          const deliveryTarget = route.target ?? null;
-          const deliveryAddress = deliveryTarget?.address || null;
-          const resolvedAddress =
-            route.resolvedAddress ?? deliveryTarget?.resolvedAddress ?? null;
-          const resolvedWorkerId =
-            route.resolvedWorkerId ?? deliveryTarget?.resolvedWorkerId ?? null;
-          const routingError = route.error ?? null;
+        } catch (sendError) {
           status({
-            event: "route_debug",
-            ownerProject: owner.owner_project,
-            sessionTargetId,
-            activeCount: targets.length,
-            activeAddresses: targets.map((entry) => entry.address || entry.worker_id),
-            routeSource: route.source,
-            deliveryAddress,
-            routedTo: deliveryAddress,
-            resolvedAddress,
-            resolvedWorkerId,
-            routingError,
+            event: "failure_confirmation_failed",
+            code: sendError.code ?? "SDK_ERROR",
+            connected: true,
+            targetBound: true,
           });
+        }
+        status({
+          event: "local_notification_failed",
+          connected: true,
+          targetBound: true,
+          routedAddress: routedAddress ?? null,
+          message: deliveryError,
+        });
+        return;
+      }
 
-          if (!deliveryTarget) {
-            const deliveryError = routingError ?? "NO_DELIVERY_TARGET";
-            appendInboxRecord({
-              source: "QQBot",
-              receivedAt: new Date().toISOString(),
-              messageId: message.messageId,
-              senderId: message.senderId,
-              replyChannel: "QQBot",
-              routedOwner: owner.owner_worker_id,
-              ownerGeneration: owner.generation,
-              content: message.content,
-              routedAddress,
-              routedBody,
-              attachments: [],
-              attachmentErrors: [],
-              deliveryAddress: null,
-              routedTo: null,
-              resolvedAddress: null,
-              resolvedWorkerId: null,
-              collabMessageId: null,
-              deliveryStatus: "failed",
-              deliveryError,
-            });
-            try {
-              const response = await bot.sendText(
-                message.replyTarget,
-                `投递失败：${routedAddress ? `[${routedAddress}]` : "默认/CEO"}，${deliveryError}`,
-              );
-              appendReceiptRecord({
-                at: new Date().toISOString(),
-                inboundId: message.messageId,
-                deliveryStatus: "failed",
-                deliveryError,
-                response,
-              });
-            } catch (sendError) {
-              status({
-                event: "failure_confirmation_failed",
-                code: sendError.code ?? "SDK_ERROR",
-                connected: true,
-                targetBound: true,
-              });
-            }
-            status({
-              event: "local_notification_failed",
-              connected: true,
-              targetBound: true,
-              routedAddress: routedAddress ?? null,
-              message: deliveryError,
-            });
-            return;
-          }
-
-          enqueueBatch(
-            {
-              record: {
-                source: "QQBot",
-                receivedAt: new Date().toISOString(),
-                messageId: message.messageId,
-                senderId: message.senderId,
-                replyChannel: "QQBot",
-                routedOwner: owner.owner_worker_id,
-                ownerGeneration: owner.generation,
-                content: message.content,
-                routedAddress,
-                routedBody,
-                attachments: attachmentResult.saved.map((attachment) => ({
-                  path: attachment.path,
-                  filename: attachment.filename,
-                  contentType: attachment.contentType,
-                  size: attachment.size,
-                })),
-                attachmentErrors: attachmentResult.failed,
-                deliveryAddress,
-                routedTo: deliveryAddress,
-                resolvedAddress,
-                resolvedWorkerId,
-              },
-              routedBody,
-              attachmentCount: attachmentResult.saved.length,
-              attachmentErrorCount: attachmentResult.failed.length,
-              attachmentPaths: attachmentResult.saved.map(
-                (attachment) => attachment.path,
-              ),
-              attachmentErrors: attachmentResult.failed,
-            },
-            {
-              projectRoot: deliveryTarget.project_root,
-              sendToAddress: resolvedAddress ?? deliveryAddress,
-              deliveryAddress,
-              resolvedAddress,
-              resolvedWorkerId,
-              sessionTargetId,
-              replyTarget: message.replyTarget,
-              newlyBound,
-              routeSource: route.source,
-            },
-          );
-        } catch (error) {
-          const deliveryError = String(error.stderr || error.message || error).slice(0, 1200);
-          const record = {
+      enqueueBatch(
+        {
+          record: {
             source: "QQBot",
             receivedAt: new Date().toISOString(),
             messageId: message.messageId,
@@ -764,57 +906,122 @@ async function startReceiver() {
             content: message.content,
             routedAddress,
             routedBody,
-            deliveryAddress: null,
-            routedTo: null,
-            deliveryStatus: "failed",
-            deliveryError,
-          };
-          fs.appendFileSync(path.join(state, "inbox.jsonl"), JSON.stringify(record) + "\n", {
-            mode: 0o600,
-          });
-          try {
-            const response = await bot.sendText(
-              message.replyTarget,
-              `投递失败：${routedAddress ? `[${routedAddress}]` : "默认/CEO"}，${deliveryError}`,
-            );
-            fs.appendFileSync(
-              path.join(state, "receipts.jsonl"),
-              JSON.stringify({
-                at: new Date().toISOString(),
-                inboundId: message.messageId,
-                deliveryStatus: "failed",
-                response,
-              }) + "\n",
-              { mode: 0o600 },
-            );
-          } catch (sendError) {
-            status({
-              event: "failure_confirmation_failed",
-              code: sendError.code ?? "SDK_ERROR",
-              connected: true,
-              targetBound: true,
-            });
-          }
-          status({
-            event: "local_notification_failed",
-            code: error.code ?? "NOTIFY_ERROR",
-            connected: true,
-            targetBound: true,
-            routedAddress: routedAddress ?? null,
-            message: deliveryError,
-          });
-        }
-      })
-      .catch((error) =>
-        status({
-          event: "message_processing_failed",
-          code: error.code ?? "SDK_ERROR",
-          connected: true,
-          targetBound: !!target,
-        }),
+            attachments: attachmentResult.saved.map((attachment) => ({
+              path: attachment.path,
+              filename: attachment.filename,
+              contentType: attachment.contentType,
+              size: attachment.size,
+            })),
+            attachmentErrors: attachmentResult.failed,
+            deliveryAddress,
+            routedTo: deliveryAddress,
+            resolvedAddress,
+            resolvedWorkerId,
+          },
+          routedBody,
+          deliveryBody,
+          attachmentCount: attachmentResult.saved.length,
+          attachmentErrorCount: attachmentResult.failed.length,
+          attachmentPaths: attachmentResult.saved.map(
+            (attachment) => attachment.path,
+          ),
+          attachmentErrors: attachmentResult.failed,
+        },
+        {
+          projectRoot: deliveryTarget.project_root,
+          sendToAddress: resolvedAddress ?? deliveryAddress,
+          deliveryAddress,
+          resolvedAddress,
+          resolvedWorkerId,
+          sessionTargetId,
+          replyTarget: message.replyTarget,
+          newlyBound,
+          routeSource: route.source,
+        },
+        receivedAtMs,
       );
-    return serial;
+    } catch (error) {
+      const deliveryError = String(error.stderr || error.message || error).slice(0, 1200);
+      const record = {
+        source: "QQBot",
+        receivedAt: new Date().toISOString(),
+        messageId: message.messageId,
+        senderId: message.senderId,
+        replyChannel: "QQBot",
+        routedOwner: owner.owner_worker_id,
+        ownerGeneration: owner.generation,
+        content: message.content,
+        routedAddress,
+        routedBody,
+        deliveryAddress: null,
+        routedTo: null,
+        deliveryStatus: "failed",
+        deliveryError,
+      };
+      fs.appendFileSync(path.join(state, "inbox.jsonl"), JSON.stringify(record) + "\n", {
+        mode: 0o600,
+      });
+      try {
+        const response = await bot.sendText(
+          message.replyTarget,
+          `投递失败：${routedAddress ? `[${routedAddress}]` : "默认/CEO"}，${deliveryError}`,
+        );
+        fs.appendFileSync(
+          path.join(state, "receipts.jsonl"),
+          JSON.stringify({
+            at: new Date().toISOString(),
+            inboundId: message.messageId,
+            deliveryStatus: "failed",
+            response,
+          }) + "\n",
+          { mode: 0o600 },
+        );
+      } catch (sendError) {
+        status({
+          event: "failure_confirmation_failed",
+          code: sendError.code ?? "SDK_ERROR",
+          connected: true,
+          targetBound: true,
+        });
+      }
+      status({
+        event: "local_notification_failed",
+        code: error.code ?? "NOTIFY_ERROR",
+        connected: true,
+        targetBound: true,
+        routedAddress: routedAddress ?? null,
+        message: deliveryError,
+      });
+    }
+  };
+
+  const inbound = createInboundSerial({
+    admit: (message) => {
+      if (message.kind !== "c2c") return false;
+      if (seen.has(message.messageId)) return false;
+      seen.add(message.messageId);
+      return true;
+    },
+    reserve: () => queue.beginMessage(),
+    release: () => queue.endMessage(),
+    process: processInboundMessage,
+    onReject: (message) =>
+      status({
+        event: "message_rejected_after_shutdown",
+        connected: true,
+        targetBound: !!target,
+        messageId: message.messageId ?? null,
+      }),
+    onError: (error) =>
+      status({
+        event: "message_processing_failed",
+        code: error.code ?? "SDK_ERROR",
+        connected: true,
+        targetBound: !!target,
+      }),
   });
+
+  bot.on("message", (_ctx, message) => inbound.handleMessage(message, Date.now()));
 
   const recordFatal = (kind, error) => {
     const safe = String(error?.stack || error?.message || error).slice(0, 1200);
@@ -827,13 +1034,17 @@ async function startReceiver() {
   process.on("unhandledRejection", (reason) => recordFatal("unhandled_rejection", reason));
   process.on("uncaughtException", (error) => recordFatal("uncaught_exception", error));
 
-  let shuttingDown = false;
   for (const signal of ["SIGINT", "SIGTERM"]) {
     process.on(signal, () => {
-      if (shuttingDown) return;
-      shuttingDown = true;
+      if (inbound.shuttingDown) return;
       status({ event: "stopping", connected: false });
-      void flushAllBatches()
+      // Drain every already-admitted message callback to its delivery or
+      // explicit-failure endpoint first, then flush all remaining batches,
+      // then stop the bot. Messages received after shutdown are rejected at
+      // the admission boundary instead of being silently dropped.
+      void inbound
+        .drain()
+        .then(() => queue.flushAll())
         .catch((error) => recordFatal("flush_on_shutdown_failed", error))
         .finally(() => {
           try {
@@ -855,6 +1066,9 @@ async function startReceiver() {
 export {
   processInboundAttachments,
   buildRoutedBody,
+  buildChannelEnvelope,
+  createBatchQueue,
+  createInboundSerial,
   extensionForAttachment,
   composeBatchBody,
 };

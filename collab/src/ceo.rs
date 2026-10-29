@@ -70,6 +70,13 @@ pub enum CeoCommand {
         #[serde(default)]
         urgent: bool,
     },
+    /// Durable direct delivery from the current project master to the CEO
+    /// mailbox. Unlike an uncorrelated `Reply`, this never coalesces into
+    /// unsolicited progress.
+    DirectMessage {
+        subject: String,
+        body: String,
+    },
     Progress {
         project: Option<String>,
     },

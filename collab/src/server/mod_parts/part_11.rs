@@ -174,6 +174,13 @@ fn dispatch_with_route_context_bound(
                 "LEGACY_SEND_REJECTED: authenticated sender binding and route scope are required",
             ),
         },
+        Req::ChannelInbound {
+            from,
+            to,
+            subject,
+            body,
+            envelope,
+        } => handle_channel_inbound(server, from, to, subject, body, envelope),
         Req::LiveClosureDaemonSend {
             worker_id,
             token,

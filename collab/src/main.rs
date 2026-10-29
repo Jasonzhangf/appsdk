@@ -36,8 +36,8 @@ use main_cli::*;
 
 mod main_context;
 use main_context::*;
-mod main_maintenance;
 mod main_autostart;
+mod main_maintenance;
 
 #[cfg(feature = "context-cancel-test-hooks")]
 mod context_cancel_test_hooks;
@@ -69,6 +69,22 @@ fn wait_for_daemon(sock: &std::path::Path, timeout: std::time::Duration) -> bool
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
+}
+
+fn supervised_up_started(
+    plist: &std::path::Path,
+    sock: &std::path::Path,
+    was_running: bool,
+    daemon_ready: bool,
+) -> anyhow::Result<bool> {
+    if !daemon_ready {
+        anyhow::bail!(
+            "SUPERVISED_DAEMON_NOT_READY: launchd accepted the login agent ({}) but the daemon did not become reachable at {} within 5s; no detached replacement was started",
+            plist.display(),
+            sock.display()
+        );
+    }
+    Ok(!was_running)
 }
 
 /// Use a retained credential for ordinary commands. Only context reconciles
@@ -1077,8 +1093,13 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             // result says which happened.
             let service_record = main_autostart::write_service_record(&scope.root);
             let autostart = main_autostart::install_and_load();
-            let supervised = match &autostart {
-                Ok(_) => wait_for_daemon(&sock, std::time::Duration::from_secs(5)),
+            let started = match &autostart {
+                Ok(path) => supervised_up_started(
+                    path,
+                    &sock,
+                    was_running,
+                    wait_for_daemon(&sock, std::time::Duration::from_secs(5)),
+                )?,
                 Err(error) => {
                     let message = error.to_string();
                     if message.contains("AUTOSTART_UNAVAILABLE") {
@@ -1087,7 +1108,10 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                         // start is the only option. Report it as unsupervised
                         // instead of pretending autostart was installed.
                         client::ensure_server(&sock)?;
-                        false
+                        // `ensure_server` succeeds only after the daemon is
+                        // reachable. Do not infer success from the earlier
+                        // liveness observation alone.
+                        true
                     } else {
                         // A real launchd, plist, or permission failure must not
                         // be masked by a detached substitute. Surface the
@@ -1096,10 +1120,11 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     }
                 }
             };
+            let supervised = autostart.is_ok();
             out(&json!({
                 "ok": true,
                 "server": sock,
-                "started": !was_running,
+                "started": started,
                 "supervised": supervised,
                 "service_record": match &service_record {
                     Ok(path) => json!({"bound": true, "path": path}),
@@ -1143,12 +1168,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     Some(entered)
                 }
             };
-            let _: Value = client::call(
-                &scope.sock_path(),
-                &Req::Shutdown {
-                    password,
-                },
-            )?;
+            let _: Value = client::call(&scope.sock_path(), &Req::Shutdown { password })?;
             // Do NOT `launchctl unload -w` here: that is a persistent disable
             // that would also cancel the next login. The daemon exits cleanly,
             // so the RunAtLoad/KeepAlive(SuccessfulExit=false) job stays

@@ -5,12 +5,13 @@ use crate::scope;
 
 pub const LAUNCH_AGENT_LABEL: &str = "com.appsdk.collab";
 pub const LAUNCH_AGENTS_DIR: &str = "Library/LaunchAgents";
+pub const AUTOSTART_LABEL_ENV: &str = "COLLAB_AUTOSTART_LABEL";
 
 /// Label used for the login agent. Overridable so an isolated end-to-end run
 /// can register a throwaway label (for example `com.appsdk.collab.e2e.<pid>`)
 /// and never collide with, or restart, the real login agent.
 fn launch_agent_label() -> String {
-    std::env::var("COLLAB_AUTOSTART_LABEL").unwrap_or_else(|_| LAUNCH_AGENT_LABEL.to_string())
+    std::env::var(AUTOSTART_LABEL_ENV).unwrap_or_else(|_| LAUNCH_AGENT_LABEL.to_string())
 }
 
 fn launch_agent_path() -> PathBuf {
@@ -45,6 +46,14 @@ fn render_plist(collab_bin: &Path) -> String {
         .unwrap_or_else(|_| "/tmp/collab-serve.log".to_string());
     let home = std::env::var("HOME").unwrap_or_default();
     let label = launch_agent_label();
+    let state_dir = std::env::var_os(scope::COLLAB_STATE_DIR_ENV).map(|value| {
+        format!(
+            "        <key>{}</key>\n        <string>{}</string>",
+            scope::COLLAB_STATE_DIR_ENV,
+            value.to_string_lossy()
+        )
+    });
+    let state_dir = state_dir.as_deref().unwrap_or_default();
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -62,6 +71,7 @@ fn render_plist(collab_bin: &Path) -> String {
     <dict>
         <key>HOME</key>
         <string>{home}</string>
+{state_dir}
     </dict>
     <key>RunAtLoad</key>
     <true/>
@@ -83,7 +93,24 @@ fn render_plist(collab_bin: &Path) -> String {
         bin = collab_bin.display(),
         log = log_path,
         home = home,
+        state_dir = state_dir,
     )
+}
+
+/// A supervised login agent owns the single default host state root. An
+/// explicitly overridden state root is allowed only for the throwaway-label
+/// seam used by isolated end-to-end runs, so a real login install never
+/// registers a second daemon for an isolated runtime.
+fn validate_state_override() -> anyhow::Result<()> {
+    if std::env::var_os(scope::COLLAB_STATE_DIR_ENV).is_some()
+        && std::env::var_os(AUTOSTART_LABEL_ENV).is_none()
+    {
+        anyhow::bail!(
+            "AUTOSTART_UNAVAILABLE: {} is set, so this is an isolated Collab instance; login autostart is only installed for the default host state root",
+            scope::COLLAB_STATE_DIR_ENV
+        );
+    }
+    Ok(())
 }
 
 /// Write the durable service record binding the supervised daemon to the
@@ -114,22 +141,15 @@ pub fn install_and_load() -> anyhow::Result<PathBuf> {
         anyhow::bail!("AUTOSTART_UNAVAILABLE: login autostart is only implemented on macOS");
     }
 
-    // The login agent must own the single real host daemon. An explicitly
-    // overridden state root is an isolated instance (tests, temporary runs);
-    // registering it for login autostart would make two daemons compete for one
-    // login session and would outlive the caller that started it.
-    if std::env::var_os(scope::COLLAB_STATE_DIR_ENV).is_some() {
-        anyhow::bail!(
-            "AUTOSTART_UNAVAILABLE: {} is set, so this is an isolated Collab instance; login autostart is only installed for the default host state root",
-            scope::COLLAB_STATE_DIR_ENV
-        );
-    }
+    validate_state_override()?;
     let collab_bin = collab_bin_path();
     let plist = render_plist(&collab_bin);
     let path = launch_agent_path();
     std::fs::create_dir_all(path.parent().expect("LaunchAgents dir"))?;
     // launchd opens StandardOutPath/StandardErrorPath before the daemon runs,
     // so the host state root must already exist or the agent fails to start.
+    // `render_plist` derives the log path from this same override, keeping the
+    // isolated supervised daemon out of the default-root legacy fence.
     std::fs::create_dir_all(scope::HostPaths::resolve()?.state_root())?;
     std::fs::write(&path, plist)?;
     if is_loaded() {
@@ -167,9 +187,7 @@ pub fn install_and_load() -> anyhow::Result<PathBuf> {
 /// launchd rejection is surfaced as an error instead of a silent success.
 fn start_loaded_job() -> anyhow::Result<()> {
     let label = launch_agent_label();
-    let output = Command::new("launchctl")
-        .args(["start", &label])
-        .output()?;
+    let output = Command::new("launchctl").args(["start", &label]).output()?;
     if !output.status.success() {
         anyhow::bail!(
             "launchctl start failed for {} ({}): {}{}",
@@ -204,7 +222,9 @@ pub fn is_running() -> bool {
     }
     let label = launch_agent_label();
     let output = Command::new("launchctl").args(["list", &label]).output();
-    let Ok(output) = output else { return false; };
+    let Ok(output) = output else {
+        return false;
+    };
     if !output.status.success() {
         return false;
     }
@@ -225,10 +245,47 @@ fn launchctl_list_reports_pid(text: &str) -> bool {
 mod plist_tests {
     use super::*;
 
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &Path) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn set_value(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     #[test]
     fn plist_runs_serve_service_at_load() {
         let plist = render_plist(Path::new("/usr/local/bin/collab"));
-        assert!(plist.contains("<key>RunAtLoad</key>\n    <true/>"), "{plist}");
+        assert!(
+            plist.contains("<key>RunAtLoad</key>\n    <true/>"),
+            "{plist}"
+        );
         assert!(plist.contains("<string>serve</string>"), "{plist}");
         assert!(plist.contains("<string>--service</string>"), "{plist}");
         assert!(plist.contains(LAUNCH_AGENT_LABEL), "{plist}");
@@ -245,7 +302,10 @@ mod plist_tests {
             "{plist}"
         );
         // Guard against the old always-restart boolean form coming back.
-        assert!(!plist.contains("<key>KeepAlive</key>\n    <true/>"), "{plist}");
+        assert!(
+            !plist.contains("<key>KeepAlive</key>\n    <true/>"),
+            "{plist}"
+        );
     }
 
     #[test]
@@ -276,8 +336,69 @@ mod plist_tests {
         assert!(!launchctl_list_reports_pid(
             "{\n\t\"Label\" = \"com.appsdk.collab\";\n\t\"LastExitStatus\" = 0;\n}\n"
         ));
-        assert!(!launchctl_list_reports_pid(
-            "{\n\t\"PID\" = \"-\";\n}\n"
+        assert!(!launchctl_list_reports_pid("{\n\t\"PID\" = \"-\";\n}\n"));
+    }
+
+    #[test]
+    fn isolated_label_passes_the_state_root_into_the_plist() {
+        let _guard = crate::scope::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root = std::env::temp_dir().join(format!(
+            "collab-autostart-state-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
+        let home = root.join("home");
+        let state = root.join("state");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        let _home = EnvGuard::set("HOME", &home);
+        let _state = EnvGuard::set(scope::COLLAB_STATE_DIR_ENV, &state);
+        let _label =
+            EnvGuard::set_value(AUTOSTART_LABEL_ENV, "com.appsdk.collab.e2e.state-root-test");
+
+        let plist = render_plist(Path::new("/tmp/collab"));
+        assert!(
+            plist.contains(&format!(
+                "<key>{}</key>\n        <string>{}</string>",
+                scope::COLLAB_STATE_DIR_ENV,
+                state.display()
+            )),
+            "{plist}"
+        );
+        assert!(
+            plist.contains(&format!(
+                "<string>{}</string>",
+                state.join("serve.log").display()
+            )),
+            "{plist}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn state_root_override_requires_an_isolated_label() {
+        let _guard = crate::scope::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state = std::env::temp_dir().join(format!(
+            "collab-autostart-state-reject-{}",
+            std::process::id()
+        ));
+        let _state = EnvGuard::set(scope::COLLAB_STATE_DIR_ENV, &state);
+        let _label = EnvGuard::remove(AUTOSTART_LABEL_ENV);
+
+        let error = validate_state_override().unwrap_err();
+        assert!(
+            error.to_string().starts_with("AUTOSTART_UNAVAILABLE:"),
+            "{error:#}"
+        );
+
+        std::env::set_var(AUTOSTART_LABEL_ENV, "com.appsdk.collab.e2e.allowed");
+        validate_state_override().expect("an isolated label permits an isolated state root");
     }
 }

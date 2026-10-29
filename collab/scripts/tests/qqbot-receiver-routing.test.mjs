@@ -5,6 +5,7 @@ import {
   buildRoutedBody,
   composeBatchBody,
   createBatchQueue,
+  createInboundSerial,
   extensionForAttachment,
   matchCeoTarget,
   parseLeadingAddress,
@@ -306,4 +307,138 @@ test("shutdown drain waits for asynchronous flush completion", async () => {
   queue.enqueue({ routedBody: "a", record: { senderId: "sender-1" } }, queueRoute);
   await queue.flushAll();
   assert.equal(completed, true, "flushAll must not resolve before flush finishes");
+});
+
+// P1-1: a message received while an earlier attachment download is still
+// running must reserve its batch slot at the synchronous callback boundary.
+// Otherwise the in-flight counter drops to zero when the download completes and
+// the already-received tail is split into a second batch.
+test("a message received during a blocked download stays in the same batch", async () => {
+  const flushed = [];
+  let releaseB;
+  const gateB = new Promise((resolve) => {
+    releaseB = resolve;
+  });
+  const queue = createBatchQueue({
+    windowMs: 50,
+    maxWaitMs: 5000,
+    flush: (batch) => flushed.push(batch.messages.map((message) => message.routedBody)),
+  });
+  const inbound = createInboundSerial({
+    admit: () => true,
+    reserve: () => queue.beginMessage(),
+    release: () => queue.endMessage(),
+    process: async (message, receivedAtMs) => {
+      if (message.routedBody === "B") await gateB;
+      queue.enqueue(
+        { routedBody: message.routedBody, record: { senderId: "sender-1" } },
+        queueRoute,
+        receivedAtMs,
+      );
+    },
+  });
+
+  inbound.handleMessage({ routedBody: "A" }, Date.now());
+  await delay(10);
+  inbound.handleMessage({ routedBody: "B" }, Date.now()); // reserved, then blocked in the download
+  await delay(10);
+  inbound.handleMessage({ routedBody: "C" }, Date.now()); // arrives during B and waits behind it
+  await delay(70); // A's quiet window elapses while B/C are still reserved
+
+  assert.deepEqual(flushed, [], "the batch must stay open for the reserved tail");
+
+  releaseB();
+  await delay(20);
+
+  assert.deepEqual(
+    flushed,
+    [["A", "B", "C"]],
+    "A/B/C were all received inside the window and must merge",
+  );
+});
+
+// P1-2: a callback admitted before SIGTERM must drain to delivery instead of
+// being silently returned because shuttingDown flipped mid-flight.
+test("shutdown drains an already-admitted callback instead of dropping it", async () => {
+  const flushed = [];
+  let releaseA;
+  const gateA = new Promise((resolve) => {
+    releaseA = resolve;
+  });
+  const queue = createBatchQueue({
+    windowMs: 10000,
+    maxWaitMs: 20000,
+    flush: (batch) => flushed.push(batch.messages.map((message) => message.routedBody)),
+  });
+  const inbound = createInboundSerial({
+    admit: () => true,
+    reserve: () => queue.beginMessage(),
+    release: () => queue.endMessage(),
+    process: async (message, receivedAtMs) => {
+      if (message.routedBody === "A") await gateA;
+      queue.enqueue(
+        { routedBody: message.routedBody, record: { senderId: "sender-1" } },
+        queueRoute,
+        receivedAtMs,
+      );
+    },
+  });
+
+  inbound.handleMessage({ routedBody: "A" }, Date.now());
+  await delay(10); // A admitted and blocked in its download
+  inbound.handleMessage({ routedBody: "B" }, Date.now()); // admitted before shutdown, waiting in serial
+  await delay(10);
+  const drain = inbound.drain(); // SIGTERM begins after B was admitted
+  releaseA();
+  await drain;
+  await queue.flushAll();
+
+  assert.deepEqual(
+    flushed,
+    [["A", "B"]],
+    "B was received before shutdown and must reach delivery",
+  );
+});
+
+test("a message that arrives after shutdown is rejected, not queued", async () => {
+  const processed = [];
+  const rejected = [];
+  const queue = createBatchQueue({ windowMs: 10000, maxWaitMs: 20000, flush: () => {} });
+  const inbound = createInboundSerial({
+    admit: () => true,
+    reserve: () => queue.beginMessage(),
+    release: () => queue.endMessage(),
+    process: async (message) => {
+      processed.push(message.routedBody);
+    },
+    onReject: (message, reason) => rejected.push(reason),
+  });
+
+  inbound.drain();
+  inbound.handleMessage({ routedBody: "late" });
+  await delay(5);
+
+  assert.deepEqual(processed, [], "post-shutdown messages must not be processed");
+  assert.deepEqual(rejected, ["SHUTDOWN_IN_PROGRESS"]);
+});
+
+test("duplicate messages are ignored at the boundary without reserving", () => {
+  const seen = new Set(["dup-1"]);
+  let reserved = 0;
+  const inbound = createInboundSerial({
+    admit: (message) => {
+      if (seen.has(message.messageId)) return false;
+      seen.add(message.messageId);
+      return true;
+    },
+    reserve: () => {
+      reserved += 1;
+    },
+    release: () => {},
+    process: async () => {},
+  });
+
+  inbound.handleMessage({ messageId: "dup-1" });
+
+  assert.equal(reserved, 0, "a deduped message must not reserve a batch slot");
 });

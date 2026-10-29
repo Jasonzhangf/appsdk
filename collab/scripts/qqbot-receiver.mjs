@@ -531,6 +531,58 @@ const createBatchQueue = ({ windowMs, maxWaitMs, flush, now = Date.now }) => {
   };
 };
 
+// Serializes inbound SDK message callbacks while guaranteeing batch membership
+// is reserved at the synchronous callback boundary, not after async work. This
+// is the single path used by the receiver; tests drive it directly.
+//
+// Boundary contract (P1-1 / P1-2):
+// - `admit` runs synchronously at the callback boundary. A message is either
+//   admitted here or rejected; once admitted it is reserved and cannot be
+//   dropped. Dedup/ignore that need no reservation stay before `reserve`.
+// - `reserve`/`release` bracket the whole async process, including every early
+//   return, and must always be paired.
+// - `shuttingDown` is sampled only at admission. Work admitted before shutdown
+//   runs to delivery or explicit failure; work arriving after shutdown is
+//   rejected with `onReject` rather than silently dropped.
+const createInboundSerial = ({
+  admit,
+  reserve = () => {},
+  release = () => {},
+  process,
+  onReject = () => {},
+  onError = () => {},
+}) => {
+  let shuttingDown = false;
+  let serial = Promise.resolve();
+
+  const handleMessage = (message, receivedAtMs) => {
+    if (shuttingDown) {
+      onReject(message, "SHUTDOWN_IN_PROGRESS");
+      return;
+    }
+    if (!admit(message)) return;
+    reserve();
+    serial = serial
+      .then(() => process(message, receivedAtMs))
+      .catch((error) => onError(error, message))
+      .finally(() => release());
+    return serial;
+  };
+
+  const drain = () => {
+    shuttingDown = true;
+    return serial.catch(() => {});
+  };
+
+  return {
+    handleMessage,
+    drain,
+    get shuttingDown() {
+      return shuttingDown;
+    },
+  };
+};
+
 const statePayload = (value, pid, updatedAt) => ({
   ...value,
   pid,
@@ -713,193 +765,137 @@ async function startReceiver() {
     status({ event: "error", code: error.code ?? "SDK_ERROR" }),
   );
 
-  let shuttingDown = false;
-  let serial = Promise.resolve();
-  bot.on("message", (_ctx, message) => {
-    const receivedAtMs = Date.now();
-    serial = serial
-      .then(async () => {
-        if (shuttingDown) return;
-        if (message.kind !== "c2c" || seen.has(message.messageId)) return;
-        seen.add(message.messageId);
-        let newlyBound = false;
-        if (!target) {
-          if (Date.now() > bindUntil) {
-            status({ event: "binding_window_expired", connected: true });
-            return;
-          }
-          target = { scope: message.replyTarget.scope, targetId: message.replyTarget.targetId };
-          write("target.json", target);
-          newlyBound = true;
-        }
-        if (
-          message.replyTarget.scope !== target.scope ||
-          message.replyTarget.targetId !== target.targetId
-        ) {
-          return;
-        }
+  const processInboundMessage = async (message, receivedAtMs) => {
+    let newlyBound = false;
+    if (!target) {
+      if (Date.now() > bindUntil) {
+        status({ event: "binding_window_expired", connected: true });
+        return;
+      }
+      target = { scope: message.replyTarget.scope, targetId: message.replyTarget.targetId };
+      write("target.json", target);
+      newlyBound = true;
+    }
+    if (
+      message.replyTarget.scope !== target.scope ||
+      message.replyTarget.targetId !== target.targetId
+    ) {
+      return;
+    }
 
-        const owner = JSON.parse(
-          fs.readFileSync(path.join(state, "channel-owner.json"), "utf8"),
-        );
-        const sessionTargetId = target?.targetId ?? null;
-        const leading = parseLeadingAddress(message.content);
-        const routedAddress = leading ? leading.address : null;
-        const baseBody = leading ? leading.body : String(message.content ?? "");
-        let routedBody = "";
+    const owner = JSON.parse(
+      fs.readFileSync(path.join(state, "channel-owner.json"), "utf8"),
+    );
+    const sessionTargetId = target?.targetId ?? null;
+    const leading = parseLeadingAddress(message.content);
+    const routedAddress = leading ? leading.address : null;
+    const baseBody = leading ? leading.body : String(message.content ?? "");
+    let routedBody = "";
 
-        queue.beginMessage();
+    try {
+      const attachmentResult = await processInboundAttachments(
+        message.attachments,
+        state,
+        sessionTargetId,
+        message.messageId,
+      );
+      routedBody = buildRoutedBody(
+        baseBody,
+        attachmentResult.saved,
+        attachmentResult.failed,
+      );
+      const deliveryBody =
+        buildRoutedBody(baseBody, [], attachmentResult.failed) ||
+        (attachmentResult.saved.length > 0 ? "（附件）" : "");
+      if (!routedBody && !deliveryBody) {
+        status({ event: "ignored_empty", connected: true, targetBound: true });
+        return;
+      }
+      const targets = await activeTargets();
+      const route = await resolveInboundRoute({
+        leading,
+        targets,
+        lookupCeo: () => ceoRoute(owner.owner_project),
+        lookupDefault: () =>
+          conversationDefault(owner.owner_project, sessionTargetId),
+      });
+      const deliveryTarget = route.target ?? null;
+      const deliveryAddress = deliveryTarget?.address || null;
+      const resolvedAddress =
+        route.resolvedAddress ?? deliveryTarget?.resolvedAddress ?? null;
+      const resolvedWorkerId =
+        route.resolvedWorkerId ?? deliveryTarget?.resolvedWorkerId ?? null;
+      const routingError = route.error ?? null;
+      status({
+        event: "route_debug",
+        ownerProject: owner.owner_project,
+        sessionTargetId,
+        activeCount: targets.length,
+        activeAddresses: targets.map((entry) => entry.address || entry.worker_id),
+        routeSource: route.source,
+        deliveryAddress,
+        routedTo: deliveryAddress,
+        resolvedAddress,
+        resolvedWorkerId,
+        routingError,
+      });
+
+      if (!deliveryTarget) {
+        const deliveryError = routingError ?? "NO_DELIVERY_TARGET";
+        appendInboxRecord({
+          source: "QQBot",
+          receivedAt: new Date().toISOString(),
+          messageId: message.messageId,
+          senderId: message.senderId,
+          replyChannel: "QQBot",
+          routedOwner: owner.owner_worker_id,
+          ownerGeneration: owner.generation,
+          content: message.content,
+          routedAddress,
+          routedBody,
+          attachments: [],
+          attachmentErrors: [],
+          deliveryAddress: null,
+          routedTo: null,
+          resolvedAddress: null,
+          resolvedWorkerId: null,
+          collabMessageId: null,
+          deliveryStatus: "failed",
+          deliveryError,
+        });
         try {
-          const attachmentResult = await processInboundAttachments(
-            message.attachments,
-            state,
-            sessionTargetId,
-            message.messageId,
+          const response = await bot.sendText(
+            message.replyTarget,
+            `投递失败：${routedAddress ? `[${routedAddress}]` : "默认/CEO"}，${deliveryError}`,
           );
-          routedBody = buildRoutedBody(
-            baseBody,
-            attachmentResult.saved,
-            attachmentResult.failed,
-          );
-          const deliveryBody =
-            buildRoutedBody(baseBody, [], attachmentResult.failed) ||
-            (attachmentResult.saved.length > 0 ? "（附件）" : "");
-          if (!routedBody && !deliveryBody) {
-            status({ event: "ignored_empty", connected: true, targetBound: true });
-            return;
-          }
-          const targets = await activeTargets();
-          const route = await resolveInboundRoute({
-            leading,
-            targets,
-            lookupCeo: () => ceoRoute(owner.owner_project),
-            lookupDefault: () =>
-              conversationDefault(owner.owner_project, sessionTargetId),
+          appendReceiptRecord({
+            at: new Date().toISOString(),
+            inboundId: message.messageId,
+            deliveryStatus: "failed",
+            deliveryError,
+            response,
           });
-          const deliveryTarget = route.target ?? null;
-          const deliveryAddress = deliveryTarget?.address || null;
-          const resolvedAddress =
-            route.resolvedAddress ?? deliveryTarget?.resolvedAddress ?? null;
-          const resolvedWorkerId =
-            route.resolvedWorkerId ?? deliveryTarget?.resolvedWorkerId ?? null;
-          const routingError = route.error ?? null;
+        } catch (sendError) {
           status({
-            event: "route_debug",
-            ownerProject: owner.owner_project,
-            sessionTargetId,
-            activeCount: targets.length,
-            activeAddresses: targets.map((entry) => entry.address || entry.worker_id),
-            routeSource: route.source,
-            deliveryAddress,
-            routedTo: deliveryAddress,
-            resolvedAddress,
-            resolvedWorkerId,
-            routingError,
+            event: "failure_confirmation_failed",
+            code: sendError.code ?? "SDK_ERROR",
+            connected: true,
+            targetBound: true,
           });
+        }
+        status({
+          event: "local_notification_failed",
+          connected: true,
+          targetBound: true,
+          routedAddress: routedAddress ?? null,
+          message: deliveryError,
+        });
+        return;
+      }
 
-          if (!deliveryTarget) {
-            const deliveryError = routingError ?? "NO_DELIVERY_TARGET";
-            appendInboxRecord({
-              source: "QQBot",
-              receivedAt: new Date().toISOString(),
-              messageId: message.messageId,
-              senderId: message.senderId,
-              replyChannel: "QQBot",
-              routedOwner: owner.owner_worker_id,
-              ownerGeneration: owner.generation,
-              content: message.content,
-              routedAddress,
-              routedBody,
-              attachments: [],
-              attachmentErrors: [],
-              deliveryAddress: null,
-              routedTo: null,
-              resolvedAddress: null,
-              resolvedWorkerId: null,
-              collabMessageId: null,
-              deliveryStatus: "failed",
-              deliveryError,
-            });
-            try {
-              const response = await bot.sendText(
-                message.replyTarget,
-                `投递失败：${routedAddress ? `[${routedAddress}]` : "默认/CEO"}，${deliveryError}`,
-              );
-              appendReceiptRecord({
-                at: new Date().toISOString(),
-                inboundId: message.messageId,
-                deliveryStatus: "failed",
-                deliveryError,
-                response,
-              });
-            } catch (sendError) {
-              status({
-                event: "failure_confirmation_failed",
-                code: sendError.code ?? "SDK_ERROR",
-                connected: true,
-                targetBound: true,
-              });
-            }
-            status({
-              event: "local_notification_failed",
-              connected: true,
-              targetBound: true,
-              routedAddress: routedAddress ?? null,
-              message: deliveryError,
-            });
-            return;
-          }
-
-          enqueueBatch(
-            {
-              record: {
-                source: "QQBot",
-                receivedAt: new Date().toISOString(),
-                messageId: message.messageId,
-                senderId: message.senderId,
-                replyChannel: "QQBot",
-                routedOwner: owner.owner_worker_id,
-                ownerGeneration: owner.generation,
-                content: message.content,
-                routedAddress,
-                routedBody,
-                attachments: attachmentResult.saved.map((attachment) => ({
-                  path: attachment.path,
-                  filename: attachment.filename,
-                  contentType: attachment.contentType,
-                  size: attachment.size,
-                })),
-                attachmentErrors: attachmentResult.failed,
-                deliveryAddress,
-                routedTo: deliveryAddress,
-                resolvedAddress,
-                resolvedWorkerId,
-              },
-              routedBody,
-              deliveryBody,
-              attachmentCount: attachmentResult.saved.length,
-              attachmentErrorCount: attachmentResult.failed.length,
-              attachmentPaths: attachmentResult.saved.map(
-                (attachment) => attachment.path,
-              ),
-              attachmentErrors: attachmentResult.failed,
-            },
-            {
-              projectRoot: deliveryTarget.project_root,
-              sendToAddress: resolvedAddress ?? deliveryAddress,
-              deliveryAddress,
-              resolvedAddress,
-              resolvedWorkerId,
-              sessionTargetId,
-              replyTarget: message.replyTarget,
-              newlyBound,
-              routeSource: route.source,
-            },
-            receivedAtMs,
-          );
-        } catch (error) {
-          const deliveryError = String(error.stderr || error.message || error).slice(0, 1200);
-          const record = {
+      enqueueBatch(
+        {
+          record: {
             source: "QQBot",
             receivedAt: new Date().toISOString(),
             messageId: message.messageId,
@@ -910,59 +906,122 @@ async function startReceiver() {
             content: message.content,
             routedAddress,
             routedBody,
-            deliveryAddress: null,
-            routedTo: null,
-            deliveryStatus: "failed",
-            deliveryError,
-          };
-          fs.appendFileSync(path.join(state, "inbox.jsonl"), JSON.stringify(record) + "\n", {
-            mode: 0o600,
-          });
-          try {
-            const response = await bot.sendText(
-              message.replyTarget,
-              `投递失败：${routedAddress ? `[${routedAddress}]` : "默认/CEO"}，${deliveryError}`,
-            );
-            fs.appendFileSync(
-              path.join(state, "receipts.jsonl"),
-              JSON.stringify({
-                at: new Date().toISOString(),
-                inboundId: message.messageId,
-                deliveryStatus: "failed",
-                response,
-              }) + "\n",
-              { mode: 0o600 },
-            );
-          } catch (sendError) {
-            status({
-              event: "failure_confirmation_failed",
-              code: sendError.code ?? "SDK_ERROR",
-              connected: true,
-              targetBound: true,
-            });
-          }
-          status({
-            event: "local_notification_failed",
-            code: error.code ?? "NOTIFY_ERROR",
-            connected: true,
-            targetBound: true,
-            routedAddress: routedAddress ?? null,
-            message: deliveryError,
-          });
-        } finally {
-          queue.endMessage();
-        }
-      })
-      .catch((error) =>
-        status({
-          event: "message_processing_failed",
-          code: error.code ?? "SDK_ERROR",
-          connected: true,
-          targetBound: !!target,
-        }),
+            attachments: attachmentResult.saved.map((attachment) => ({
+              path: attachment.path,
+              filename: attachment.filename,
+              contentType: attachment.contentType,
+              size: attachment.size,
+            })),
+            attachmentErrors: attachmentResult.failed,
+            deliveryAddress,
+            routedTo: deliveryAddress,
+            resolvedAddress,
+            resolvedWorkerId,
+          },
+          routedBody,
+          deliveryBody,
+          attachmentCount: attachmentResult.saved.length,
+          attachmentErrorCount: attachmentResult.failed.length,
+          attachmentPaths: attachmentResult.saved.map(
+            (attachment) => attachment.path,
+          ),
+          attachmentErrors: attachmentResult.failed,
+        },
+        {
+          projectRoot: deliveryTarget.project_root,
+          sendToAddress: resolvedAddress ?? deliveryAddress,
+          deliveryAddress,
+          resolvedAddress,
+          resolvedWorkerId,
+          sessionTargetId,
+          replyTarget: message.replyTarget,
+          newlyBound,
+          routeSource: route.source,
+        },
+        receivedAtMs,
       );
-    return serial;
+    } catch (error) {
+      const deliveryError = String(error.stderr || error.message || error).slice(0, 1200);
+      const record = {
+        source: "QQBot",
+        receivedAt: new Date().toISOString(),
+        messageId: message.messageId,
+        senderId: message.senderId,
+        replyChannel: "QQBot",
+        routedOwner: owner.owner_worker_id,
+        ownerGeneration: owner.generation,
+        content: message.content,
+        routedAddress,
+        routedBody,
+        deliveryAddress: null,
+        routedTo: null,
+        deliveryStatus: "failed",
+        deliveryError,
+      };
+      fs.appendFileSync(path.join(state, "inbox.jsonl"), JSON.stringify(record) + "\n", {
+        mode: 0o600,
+      });
+      try {
+        const response = await bot.sendText(
+          message.replyTarget,
+          `投递失败：${routedAddress ? `[${routedAddress}]` : "默认/CEO"}，${deliveryError}`,
+        );
+        fs.appendFileSync(
+          path.join(state, "receipts.jsonl"),
+          JSON.stringify({
+            at: new Date().toISOString(),
+            inboundId: message.messageId,
+            deliveryStatus: "failed",
+            response,
+          }) + "\n",
+          { mode: 0o600 },
+        );
+      } catch (sendError) {
+        status({
+          event: "failure_confirmation_failed",
+          code: sendError.code ?? "SDK_ERROR",
+          connected: true,
+          targetBound: true,
+        });
+      }
+      status({
+        event: "local_notification_failed",
+        code: error.code ?? "NOTIFY_ERROR",
+        connected: true,
+        targetBound: true,
+        routedAddress: routedAddress ?? null,
+        message: deliveryError,
+      });
+    }
+  };
+
+  const inbound = createInboundSerial({
+    admit: (message) => {
+      if (message.kind !== "c2c") return false;
+      if (seen.has(message.messageId)) return false;
+      seen.add(message.messageId);
+      return true;
+    },
+    reserve: () => queue.beginMessage(),
+    release: () => queue.endMessage(),
+    process: processInboundMessage,
+    onReject: (message) =>
+      status({
+        event: "message_rejected_after_shutdown",
+        connected: true,
+        targetBound: !!target,
+        messageId: message.messageId ?? null,
+      }),
+    onError: (error) =>
+      status({
+        event: "message_processing_failed",
+        code: error.code ?? "SDK_ERROR",
+        connected: true,
+        targetBound: !!target,
+      }),
   });
+
+  bot.on("message", (_ctx, message) => inbound.handleMessage(message, Date.now()));
 
   const recordFatal = (kind, error) => {
     const safe = String(error?.stack || error?.message || error).slice(0, 1200);
@@ -977,13 +1036,14 @@ async function startReceiver() {
 
   for (const signal of ["SIGINT", "SIGTERM"]) {
     process.on(signal, () => {
-      if (shuttingDown) return;
-      shuttingDown = true;
+      if (inbound.shuttingDown) return;
       status({ event: "stopping", connected: false });
-      // Drain in-flight message processing first so a pending download can
-      // still join its open batch, then flush everything still queued.
-      void serial
-        .catch(() => {})
+      // Drain every already-admitted message callback to its delivery or
+      // explicit-failure endpoint first, then flush all remaining batches,
+      // then stop the bot. Messages received after shutdown are rejected at
+      // the admission boundary instead of being silently dropped.
+      void inbound
+        .drain()
         .then(() => queue.flushAll())
         .catch((error) => recordFatal("flush_on_shutdown_failed", error))
         .finally(() => {
@@ -1008,6 +1068,7 @@ export {
   buildRoutedBody,
   buildChannelEnvelope,
   createBatchQueue,
+  createInboundSerial,
   extensionForAttachment,
   composeBatchBody,
 };

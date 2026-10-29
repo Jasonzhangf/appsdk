@@ -1017,13 +1017,17 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 scope::lifecycle_project_root()?
             };
             let scope = Scope { root };
+            let service_host_paths = scope.host_paths().ok();
             if service {
                 // Only one host daemon may run. When another daemon still owns
                 // the legacy writer fence, starting here would fail and launchd
                 // would restart us in a loop, so report the conflict and exit.
                 // The fix is for the user to stop the running daemon once; the
                 // supervised start then takes over at the next login or load.
-                if server::legacy_host_daemon_present() {
+                if service_host_paths
+                    .as_ref()
+                    .is_some_and(server::legacy_host_daemon_present)
+                {
                     out(&json!({
                         "ok": false,
                         "service": "another-daemon-running",

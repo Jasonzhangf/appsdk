@@ -1238,16 +1238,35 @@ fn validate_wire_route_principals(
 /// may register its exact canonical root with the resident daemon even when it
 /// is not the daemon's startup project. Operations for that route remain
 /// explicitly not-ready until a project reducer/journal owner is available.
+/// Shutdown is authenticated only when a maintenance password is configured.
+///
+/// `None` means no password is set, so a shutdown request is accepted without
+/// a password. A configured password must match exactly. An unreadable or
+/// malformed config is treated as a failure by the callers, never as "no
+/// password", so a broken config cannot open the shutdown path.
+fn password_allows_shutdown(
+    expected: Option<&str>,
+    entered: Option<&crate::proto::MaintenancePassword>,
+) -> bool {
+    match expected {
+        None => true,
+        Some(expected) => entered.is_some_and(|value| value.expose() == expected),
+    }
+}
+
 fn handle_user_shutdown(server: &Server, password: Option<&crate::proto::MaintenancePassword>) -> Resp {
-    handle_host_shutdown(&server.host_paths, &server.config.maintenance.password, password)
+    match crate::config::maintenance_password_opt() {
+        Ok(expected) => handle_host_shutdown(&server.host_paths, expected.as_deref(), password),
+        Err(_) => Resp::err("MAINTENANCE_AUTHENTICATION_FAILED"),
+    }
 }
 
 fn handle_host_shutdown(
     host_paths: &HostPaths,
-    expected_password: &str,
+    expected_password: Option<&str>,
     password: Option<&crate::proto::MaintenancePassword>,
 ) -> Resp {
-    if !password.is_some_and(|value| value.expose() == expected_password) {
+    if !password_allows_shutdown(expected_password, password) {
         return Resp::err("MAINTENANCE_AUTHENTICATION_FAILED");
     }
     if let Err(error) = std::fs::write(host_paths.state_root().join("DOWN"), b"user stopped\n") {
@@ -1271,8 +1290,13 @@ pub(crate) fn validate_request_context_with_register_approval(
     register_approval: Option<&RegisterApprovalProof>,
 ) -> Result<(), String> {
     if let Req::Shutdown { password } = req {
-        if !password.as_ref().is_some_and(|value| value.expose() == server.config.maintenance.password) {
-            return Err("MAINTENANCE_AUTHENTICATION_FAILED".into());
+        match crate::config::maintenance_password_opt() {
+            Ok(expected) => {
+                if !password_allows_shutdown(expected.as_deref(), password.as_ref()) {
+                    return Err("MAINTENANCE_AUTHENTICATION_FAILED".into());
+                }
+            }
+            Err(_) => return Err("MAINTENANCE_AUTHENTICATION_FAILED".into()),
         }
         return match project_context {
             Some(context) => validate_host_operator_route(server, context),
@@ -1432,4 +1456,81 @@ fn validate_register_cwd(cwd: &str, expected_root: &Path) -> Result<(), String> 
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod password_shutdown_tests {
+    use super::*;
+
+    #[test]
+    fn password_allows_shutdown_none_allows_any() {
+        assert!(password_allows_shutdown(None, None));
+        let entered = crate::proto::MaintenancePassword::new("anything");
+        assert!(password_allows_shutdown(None, Some(&entered)));
+    }
+
+    #[test]
+    fn password_allows_shutdown_some_requires_exact_match() {
+        assert!(!password_allows_shutdown(Some("admin"), None));
+        let wrong = crate::proto::MaintenancePassword::new("wrong");
+        assert!(!password_allows_shutdown(Some("admin"), Some(&wrong)));
+        let right = crate::proto::MaintenancePassword::new("admin");
+        assert!(password_allows_shutdown(Some("admin"), Some(&right)));
+    }
+
+    #[test]
+    fn handle_host_shutdown_none_writes_down() {
+        let root = std::env::temp_dir().join(format!(
+            "collab-psh-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        host_paths.ensure_root().unwrap();
+        let response = handle_host_shutdown(&host_paths, None, None);
+        assert!(response.ok, "{response:?}");
+        assert!(host_paths.state_root().join("DOWN").is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn handle_host_shutdown_wrong_password_rejected_without_down() {
+        let root = std::env::temp_dir().join(format!(
+            "collab-psh-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        host_paths.ensure_root().unwrap();
+        let wrong = crate::proto::MaintenancePassword::new("wrong");
+        let response = handle_host_shutdown(&host_paths, Some("admin"), Some(&wrong));
+        assert!(!response.ok, "{response:?}");
+        assert!(!host_paths.state_root().join("DOWN").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn handle_host_shutdown_correct_password_writes_down() {
+        let root = std::env::temp_dir().join(format!(
+            "collab-psh-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        host_paths.ensure_root().unwrap();
+        let right = crate::proto::MaintenancePassword::new("admin");
+        let response = handle_host_shutdown(&host_paths, Some("admin"), Some(&right));
+        assert!(response.ok, "{response:?}");
+        assert!(host_paths.state_root().join("DOWN").is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

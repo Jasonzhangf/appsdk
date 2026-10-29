@@ -546,13 +546,22 @@ pub(crate) enum Cmd {
     Init,
     /// User service runtime entrypoint
     #[command(hide = true)]
-    Serve,
+    Serve {
+        /// Run as a supervised host service: resolve the canonical project
+        /// root from the durable service record instead of the process cwd.
+        #[arg(long)]
+        service: bool,
+    },
     /// User maintenance entrypoint
     #[command(hide = true)]
     Up,
     /// User maintenance entrypoint
     #[command(hide = true)]
     Down,
+    /// Install the per-user LaunchAgent and load it so the daemon autostarts
+    /// on login and recovers after crashes.
+    #[command(hide = true)]
+    InstallAutostart,
     /// Show server summary (pass --all to aggregate all workers, tasks, subagents)
     Status {
         #[arg(long)]

@@ -382,7 +382,7 @@ async fn conn_task_degraded(
     project_replay_failure: Arc<str>,
     stream: tokio::net::UnixStream,
     host_paths: HostPaths,
-    maintenance_password: Arc<str>,
+    maintenance_password: Option<String>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
     user_shutdown: tokio::sync::mpsc::Sender<()>,
 ) {
@@ -408,7 +408,7 @@ async fn conn_task_degraded(
             })),
             Ok((_, Req::Shutdown { password })) => {
                 let response =
-                    handle_host_shutdown(&host_paths, &maintenance_password, password.as_ref());
+                    handle_host_shutdown(&host_paths, maintenance_password.as_deref(), password.as_ref());
                 close_daemon = response.ok;
                 response
             }
@@ -962,6 +962,33 @@ pub(crate) fn acquire_reset_lock(
     acquire_daemon_lock(lock_path, socket_path)
 }
 
+/// True when some other host daemon still owns the pre-host-state writer lock.
+///
+/// Every daemon keeps this legacy lock for its whole lifetime as a fence against
+/// binaries released before the host-scoped state directory existed. A second
+/// daemon cannot start while the fence is held, so a supervised start must report
+/// the conflict and exit instead of letting launchd restart it forever.
+pub fn legacy_host_daemon_present(host_paths: &HostPaths) -> bool {
+    let lock_path = legacy_host_daemon_lock_path(host_paths);
+    let Ok(file) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&lock_path)
+    else {
+        // Fail closed: an unreadable fence is treated as held so the service
+        // does not start a second writer.
+        return true;
+    };
+    use std::os::unix::io::AsRawFd;
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc != 0 {
+        return true;
+    }
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+    false
+}
+
 fn acquire_legacy_writer_lock(
     lock_path: &Path,
     description: &str,
@@ -1271,7 +1298,8 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
         Ok(state) => state,
         Err(error) => {
             let project_replay_failure = format!("{error:#}");
-            let maintenance_password: Arc<str> = crate::config::maintenance_password()?.into();
+            let maintenance_password: Option<String> =
+                crate::config::maintenance_password_opt()?;
             append_log(
                 &host_paths.log_path(),
                 &format!("project replay failed; entering query-only degraded mode: {project_replay_failure}"),

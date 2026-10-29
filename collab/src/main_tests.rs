@@ -3,6 +3,30 @@ use crate::proto::{SelectedTransport, TransportKind};
 use std::io::BufRead;
 use std::time::{Duration, Instant};
 
+#[test]
+fn supervised_up_rejects_a_launchd_accepted_but_unready_daemon() {
+    let plist = std::path::Path::new("/tmp/com.appsdk.collab.e2e.plist");
+    let sock = std::path::Path::new("/tmp/com.appsdk.collab.e2e.sock");
+    let error = supervised_up_started(plist, sock, false, false).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .starts_with("SUPERVISED_DAEMON_NOT_READY:"),
+        "{error:#}"
+    );
+    assert!(error.to_string().contains(plist.to_str().unwrap()));
+    assert!(error.to_string().contains(sock.to_str().unwrap()));
+
+    assert!(
+        !supervised_up_started(plist, sock, true, true).expect("ready daemon must start"),
+        "a ready daemon that was already running must report started=false"
+    );
+    assert!(
+        supervised_up_started(plist, sock, false, true).expect("ready daemon must start"),
+        "a ready daemon that was not running must report started=true"
+    );
+}
+
 fn test_root(name: &str) -> std::path::PathBuf {
     let root = std::env::temp_dir().join(format!(
         "cm-{name}-{}-{}",

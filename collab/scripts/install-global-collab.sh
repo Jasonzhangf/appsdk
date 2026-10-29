@@ -35,4 +35,16 @@ trap - EXIT HUP INT TERM
   --target "$HOME/.agents/skills/collab" \
   --force
 
+# Install and load the per-user LaunchAgent so the daemon autostarts on login.
+# On macOS this is a required part of the delivery, so a launchd failure must
+# fail the install instead of leaving the binary installed without autostart.
+case "$(uname -s)" in
+  Darwin)
+    "$bin_dir/collab" install-autostart
+    ;;
+  *)
+    printf 'autostart=skipped: launchd is macOS-only (uname -s = %s)\n' "$(uname -s)" >&2
+    ;;
+esac
+
 printf 'version=%s\n' "$("$bin_dir/collab" --version)"

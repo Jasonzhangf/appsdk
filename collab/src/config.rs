@@ -46,6 +46,37 @@ impl Default for Config {
 
 pub const DEFAULT_MAINTENANCE_PASSWORD: &str = "admin";
 
+/// Read the user-only maintenance password as an optional value.
+///
+/// `None` means no maintenance password is configured: daemon lifecycle
+/// commands such as stop do not require authentication, and the supervised
+/// service is free to auto-restart. A non-empty configured password means
+/// lifecycle mutating commands must verify it. This is a pure read; it never
+/// migrates, writes, or merges project overrides.
+pub fn maintenance_password_opt() -> Result<Option<String>> {
+    let path = path()?;
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let parsed: toml::Value =
+        toml::from_str(&text).map_err(|_| anyhow::anyhow!("invalid ~/.appsdk/config.toml"))?;
+    let Some(maintenance) = parsed.get("maintenance") else {
+        return Ok(None);
+    };
+    let Some(value) = maintenance.get("password") else {
+        return Ok(None);
+    };
+    let password = value
+        .as_str()
+        .context("maintenance.password must be a string")?;
+    if password.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(password.to_owned()))
+}
+
 /// Host-wide tmux socket endpoints Collab may observe.
 ///
 /// The socket path is host placement data. It must not come from the caller's

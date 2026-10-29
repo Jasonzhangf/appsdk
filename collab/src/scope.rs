@@ -536,6 +536,43 @@ pub fn lifecycle_project_root() -> anyhow::Result<PathBuf> {
     validate_project_root(std::env::current_dir()?)
 }
 
+/// Read the canonical project root bound to the supervised host service.
+///
+/// A login-supervised daemon has no guaranteed project cwd, so `collab serve
+/// --service` resolves the recorded scope root from the host state root
+/// instead of guessing from the environment. Returns `None` when no service
+/// record exists yet (the first `collab up` / `context` creates it).
+pub fn service_scope_root() -> anyhow::Result<Option<PathBuf>> {
+    let host_paths = HostPaths::resolve()?;
+    let record_path = host_paths.state_root().join("service-record.json");
+    let text = match std::fs::read_to_string(&record_path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    #[derive(Deserialize)]
+    struct ServiceRecord {
+        service_scope_root: PathBuf,
+    }
+    let record: ServiceRecord = serde_json::from_str(&text)
+        .map_err(|error| anyhow::anyhow!("invalid service record {}: {error}", record_path.display()))?;
+    Ok(Some(record.service_scope_root))
+}
+
+/// Scope root for a supervised daemon that has no recorded project binding.
+///
+/// A login-supervised daemon serves the whole host, so it must not depend on a
+/// project directory that can disappear. `$HOME` is the stable host-neutral
+/// default: it always exists, it is where `~/.appsdk/config.toml` lives, and it
+/// does not belong to any task worktree.
+pub fn service_default_root() -> anyhow::Result<PathBuf> {
+    let Some(home) = std::env::var_os(HOME_ENV) else {
+        anyhow::bail!("HOME unavailable");
+    };
+    let root = PathBuf::from(home);
+    validate_project_root(root)
+}
+
 /// Resolve the exact destination for `collab init`. Initialization binds to
 /// the process cwd.
 pub fn project_root_for_init() -> anyhow::Result<PathBuf> {

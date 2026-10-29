@@ -36,6 +36,7 @@ use main_cli::*;
 
 mod main_context;
 use main_context::*;
+mod main_autostart;
 mod main_maintenance;
 
 #[cfg(feature = "context-cancel-test-hooks")]
@@ -54,6 +55,36 @@ struct Cli {
 
 fn out<T: serde::Serialize>(v: &T) {
     println!("{}", serde_json::to_string_pretty(v).unwrap());
+}
+
+/// Poll the daemon socket until it answers, bounded by `timeout`.
+fn wait_for_daemon(sock: &std::path::Path, timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if client::alive(sock) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+fn supervised_up_started(
+    plist: &std::path::Path,
+    sock: &std::path::Path,
+    was_running: bool,
+    daemon_ready: bool,
+) -> anyhow::Result<bool> {
+    if !daemon_ready {
+        anyhow::bail!(
+            "SUPERVISED_DAEMON_NOT_READY: launchd accepted the login agent ({}) but the daemon did not become reachable at {} within 5s; no detached replacement was started",
+            plist.display(),
+            sock.display()
+        );
+    }
+    Ok(!was_running)
 }
 
 /// Use a retained credential for ordinary commands. Only context reconciles
@@ -957,10 +988,97 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             }));
             Ok(())
         }
-        Cmd::Serve => {
-            let scope = Scope {
-                root: scope::lifecycle_project_root()?,
+        Cmd::Serve { service } => {
+            let root = if service {
+                // A login-supervised daemon (launchd RunAtLoad) has no project
+                // cwd, so it resolves its scope from the host state root. Every
+                // case that cannot start must still exit 0, or launchd would
+                // relaunch us in a tight crash-loop:
+                //   * no service record yet: start on the host default root, so
+                //     a clean install autostarts without a manual `collab up`;
+                //   * a record whose project directory is gone (cleaned-up
+                //     worktree): fall back to the host default root, and say so;
+                //   * an unparseable record: report and exit 0.
+                let recorded = match scope::service_scope_root() {
+                    Ok(record) => record,
+                    Err(error) => {
+                        // A malformed record cannot be repaired by relaunching;
+                        // exit 0 so launchd does not spin, and surface the
+                        // reason in the log.
+                        out(&json!({
+                            "ok": false,
+                            "service": "record-invalid",
+                            "reason": format!("{error:#}"),
+                        }));
+                        return Ok(());
+                    }
+                };
+                let root = match recorded {
+                    Some(root) if root.is_dir() => root,
+                    stale => {
+                        let fallback = scope::service_default_root()?;
+                        out(&json!({
+                            "ok": true,
+                            "service": "default-root",
+                            "reason": match &stale {
+                                Some(root) => format!(
+                                    "SERVICE_RECORD_STALE: recorded root {} is gone",
+                                    root.display()
+                                ),
+                                None => {
+                                    "SERVICE_RECORD_MISSING: no project binding recorded"
+                                        .to_string()
+                                }
+                            },
+                            "root": fallback,
+                        }));
+                        fallback
+                    }
+                };
+                let probe = Scope { root: root.clone() };
+                if client::alive(&probe.sock_path()) {
+                    out(&json!({
+                        "ok": true,
+                        "service": "already-running",
+                        "server": probe.sock_path(),
+                    }));
+                    return Ok(());
+                }
+                root
+            } else {
+                scope::lifecycle_project_root()?
             };
+            let scope = Scope { root };
+            let service_host_paths = scope.host_paths().ok();
+            if service {
+                // Only one host daemon may run. When another daemon still owns
+                // the legacy writer fence, starting here would fail and launchd
+                // would restart us in a loop, so report the conflict and exit.
+                // The fix is for the user to stop the running daemon once; the
+                // supervised start then takes over at the next login or load.
+                if service_host_paths
+                    .as_ref()
+                    .is_some_and(server::legacy_host_daemon_present)
+                {
+                    out(&json!({
+                        "ok": false,
+                        "service": "another-daemon-running",
+                        "reason": "DAEMON_MIGRATION_REQUIRED: another Collab daemon holds the host writer lock; stop it before the supervised daemon can start",
+                    }));
+                    return Ok(());
+                }
+                // The host DOWN marker records that the user stopped the daemon
+                // in a previous session. A supervised start is a new session
+                // (login, boot, or an explicit authorized load), so the marker
+                // must not keep ordinary clients locked out until a manual
+                // `collab up`. Only this entry point clears it; ordinary clients
+                // still refuse to talk to a stopped daemon.
+                if let Ok(host_paths) = scope.host_paths() {
+                    if std::fs::remove_file(host_paths.state_root().join("DOWN")).is_ok() {
+                        out(&json!({"ok": true, "service": "down-marker-cleared"}));
+                    }
+                }
+            }
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(server::run(scope))
         }
@@ -981,25 +1099,107 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             );
             let sock = scope.sock_path();
             let was_running = client::alive(&sock);
-            client::ensure_server(&sock)?;
-            out(&json!({"ok": true, "server": sock, "started": !was_running}));
+            // Bind the supervised daemon to this project, then let launchd own
+            // the start. Loading the agent before spawning anything is what
+            // makes the supervisor own the daemon: a detached `serve` spawned
+            // first would make the supervised child exit as "already-running",
+            // leaving crash recovery with no process to observe. Only when
+            // launchd cannot run the agent (for example a non-macOS host, or an
+            // isolated state root) does `up` start a detached daemon, and the
+            // result says which happened.
+            let service_record = main_autostart::write_service_record(&scope.root);
+            let autostart = main_autostart::install_and_load();
+            let started = match &autostart {
+                Ok(path) => supervised_up_started(
+                    path,
+                    &sock,
+                    was_running,
+                    wait_for_daemon(&sock, std::time::Duration::from_secs(5)),
+                )?,
+                Err(error) => {
+                    let message = error.to_string();
+                    if message.contains("AUTOSTART_UNAVAILABLE") {
+                        // An isolated instance (explicit state root) or a
+                        // non-macOS host has no login supervisor, so a detached
+                        // start is the only option. Report it as unsupervised
+                        // instead of pretending autostart was installed.
+                        client::ensure_server(&sock)?;
+                        // `ensure_server` succeeds only after the daemon is
+                        // reachable. Do not infer success from the earlier
+                        // liveness observation alone.
+                        true
+                    } else {
+                        // A real launchd, plist, or permission failure must not
+                        // be masked by a detached substitute. Surface the
+                        // original error so `up` exits non-zero.
+                        return Err(anyhow::anyhow!("{}", message));
+                    }
+                }
+            };
+            let supervised = autostart.is_ok();
+            out(&json!({
+                "ok": true,
+                "server": sock,
+                "started": started,
+                "supervised": supervised,
+                "service_record": match &service_record {
+                    Ok(path) => json!({"bound": true, "path": path}),
+                    Err(error) => json!({"bound": false, "error": format!("{error:#}")}),
+                },
+                "autostart": match &autostart {
+                    Ok(path) => json!({
+                        "installed": true,
+                        "plist": path,
+                        "loaded": main_autostart::is_loaded(),
+                        "running": main_autostart::is_running(),
+                    }),
+                    Err(error) => json!({
+                        "installed": false,
+                        "supervised": false,
+                        "error": format!("{error:#}"),
+                    }),
+                },
+            }));
             Ok(())
         }
         Cmd::Down => {
-            let password = main_maintenance::read_password()?;
-            if password.expose() != config::maintenance_password()? {
-                anyhow::bail!("MAINTENANCE_AUTHENTICATION_FAILED");
-            }
             let scope = Scope {
                 root: scope::lifecycle_project_root()?,
             };
-            let _: Value = client::call(
-                &scope.sock_path(),
-                &Req::Shutdown {
-                    password: Some(password),
-                },
-            )?;
+            let configured = config::maintenance_password_opt()?;
+            let password = match configured {
+                None => {
+                    // No password is configured, so there is nothing to verify.
+                    // Still require a human terminal: a daemon that agents can
+                    // stop without a password is a lifecycle safety hole. Only
+                    // the password prompt is skipped, not the user-only gate.
+                    let _terminal = main_maintenance::user_terminal()?;
+                    None
+                }
+                Some(expected) => {
+                    let entered = main_maintenance::read_password()?;
+                    if entered.expose() != expected {
+                        anyhow::bail!("MAINTENANCE_AUTHENTICATION_FAILED");
+                    }
+                    Some(entered)
+                }
+            };
+            let _: Value = client::call(&scope.sock_path(), &Req::Shutdown { password })?;
+            // Do NOT `launchctl unload -w` here: that is a persistent disable
+            // that would also cancel the next login. The daemon exits cleanly,
+            // so the RunAtLoad/KeepAlive(SuccessfulExit=false) job stays
+            // stopped for this session and resumes automatically on next login.
             out(&json!({"ok": true, "down": true, "server": scope.sock_path()}));
+            Ok(())
+        }
+        Cmd::InstallAutostart => {
+            let path = main_autostart::install_and_load()?;
+            out(&json!({
+                "ok": true,
+                "plist": path,
+                "loaded": main_autostart::is_loaded(),
+                "running": main_autostart::is_running(),
+            }));
             Ok(())
         }
         Cmd::Status { all } => {

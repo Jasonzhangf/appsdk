@@ -37,6 +37,8 @@ use main_cli::*;
 mod main_context;
 use main_context::*;
 mod main_maintenance;
+mod main_autostart;
+use main_autostart::*;
 
 #[cfg(feature = "context-cancel-test-hooks")]
 mod context_cancel_test_hooks;
@@ -941,10 +943,17 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             }));
             Ok(())
         }
-        Cmd::Serve => {
-            let scope = Scope {
-                root: scope::lifecycle_project_root()?,
+        Cmd::Serve { service } => {
+            let root = if service {
+                scope::service_scope_root()?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "SERVICE_RECORD_MISSING: run `collab up` from an initialized project first"
+                    )
+                })?
+            } else {
+                scope::lifecycle_project_root()?
             };
+            let scope = Scope { root };
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(server::run(scope))
         }
@@ -970,20 +979,33 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Down => {
-            let password = main_maintenance::read_password()?;
-            if password.expose() != config::maintenance_password()? {
-                anyhow::bail!("MAINTENANCE_AUTHENTICATION_FAILED");
-            }
             let scope = Scope {
                 root: scope::lifecycle_project_root()?,
+            };
+            let configured = config::maintenance_password_opt()?;
+            let password = match configured {
+                None => None,
+                Some(expected) => {
+                    let entered = main_maintenance::read_password()?;
+                    if entered.expose() != expected {
+                        anyhow::bail!("MAINTENANCE_AUTHENTICATION_FAILED");
+                    }
+                    Some(entered)
+                }
             };
             let _: Value = client::call(
                 &scope.sock_path(),
                 &Req::Shutdown {
-                    password: Some(password),
+                    password,
                 },
             )?;
+            main_autostart::unload_job()?;
             out(&json!({"ok": true, "down": true, "server": scope.sock_path()}));
+            Ok(())
+        }
+        Cmd::InstallAutostart => {
+            let path = main_autostart::install_and_load()?;
+            out(&json!({"ok": true, "plist": path, "loaded": main_autostart::is_loaded()}));
             Ok(())
         }
         Cmd::Status { all } => {

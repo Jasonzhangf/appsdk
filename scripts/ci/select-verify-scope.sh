@@ -145,6 +145,12 @@ while IFS= read -r path; do
     scripts/tests/test-windows-appsdk-reset.ps1)
       windows_appsdk=true
       ;;
+    scripts/check-worktree-limit.sh|scripts/install-project-commit-gate.sh|scripts/tests/test-worktree-commit-gate.sh)
+      # The worktree-limit commit gate, its installer, and the isolated
+      # real-Git fixture are validated by the dedicated workflow-contract job
+      # instead of fanning out the whole repository.
+      workflow_contract=true
+      ;;
     rust/release-version|rust/Cargo.toml|rust/Cargo.lock|rust/build.rs|contracts/sdk-bundle.manifest.json|contracts/migrations/*|templates/minimal/.appsdk/project.json|templates/minimal/.appsdk/sdk.lock)
       app_sdk_full=true
       resources=true

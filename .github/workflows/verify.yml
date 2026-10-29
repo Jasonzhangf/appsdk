@@ -62,6 +62,13 @@ jobs:
         run: bash -n scripts/ci/select-verify-scope.sh
       - name: Verify workflow selector contract
         run: bash scripts/tests/test-verify-selector.sh
+      - name: Check worktree gate and installer syntax
+        run: |
+          bash -n scripts/check-worktree-limit.sh
+          bash -n scripts/install-project-commit-gate.sh
+          bash -n scripts/tests/test-worktree-commit-gate.sh
+      - name: Verify worktree commit gate
+        run: bash scripts/tests/test-worktree-commit-gate.sh
 
   npm:
     name: npm packages

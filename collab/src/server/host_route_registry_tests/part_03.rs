@@ -1667,41 +1667,17 @@
 
     #[tokio::test]
     async fn empty_registry_admits_only_exact_cli_host_operator_shutdown() {
-        // Shutdown authorization reads the live `~/.appsdk/config.toml`, so pin
-        // HOME to a temp config with a known password. Without this the test
-        // would depend on whatever the developer has configured.
-        struct HomeGuard {
-            previous: Option<std::ffi::OsString>,
-            dir: std::path::PathBuf,
-        }
-        impl Drop for HomeGuard {
-            fn drop(&mut self) {
-                match self.previous.take() {
-                    Some(value) => std::env::set_var("HOME", value),
-                    None => std::env::remove_var("HOME"),
-                }
-                let _ = std::fs::remove_dir_all(&self.dir);
-            }
-        }
-        let home = std::env::temp_dir().join(format!(
-            "collab-maint-home-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(home.join(".appsdk")).unwrap();
-        std::fs::write(
-            home.join(".appsdk/config.toml"),
-            "[maintenance]\npassword = \"admin\"\n",
-        )
-        .unwrap();
-        let _home = HomeGuard {
-            previous: std::env::var_os("HOME"),
-            dir: home.clone(),
-        };
-        std::env::set_var("HOME", &home);
+        // Shutdown authorization reads the live `~/.appsdk/config.toml`. Do not
+        // override HOME here: that mutates process-wide state and races every
+        // parallel test that resolves its own config or state paths. Instead
+        // adapt to the configured password (or its absence) so the assertions
+        // stay deterministic on any host. The exact-reject/accept matching is
+        // covered by the bind-free `password_shutdown_tests` and by the
+        // `lifecycle_boundary_cli` fixtures, which configure HOME per child.
+        let configured = crate::config::maintenance_password_opt().unwrap();
+        let accepted_password = configured
+            .as_ref()
+            .map(|value| crate::proto::MaintenancePassword::new(value.clone()));
 
         let (server, root, journal_path) = test_server();
         let resident_context = context_with_app(&root, crate::identity::CLI_APP_SERVER_ID);
@@ -1712,7 +1688,7 @@
         let response = dispatch_wire(
             server.clone(),
             Some(resident_context.clone()),
-            Req::Shutdown { password: Some(crate::proto::MaintenancePassword::new(server.config.maintenance.password.clone())) },
+            Req::Shutdown { password: accepted_password.clone() },
         )
         .await;
         assert!(response.ok, "{response:?}");
@@ -1732,7 +1708,7 @@
         std::fs::create_dir_all(&wrong_root).unwrap();
         let wrong_root_error = validate_request_context(
             &server,
-            &Req::Shutdown { password: Some(crate::proto::MaintenancePassword::new(server.config.maintenance.password.clone())) },
+            &Req::Shutdown { password: accepted_password.clone() },
             Some(&context_with_app(
                 &wrong_root,
                 crate::identity::CLI_APP_SERVER_ID,
@@ -1743,19 +1719,22 @@
 
         let wrong_app_error = validate_request_context(
             &server,
-            &Req::Shutdown { password: Some(crate::proto::MaintenancePassword::new(server.config.maintenance.password.clone())) },
+            &Req::Shutdown { password: accepted_password.clone() },
             Some(&context_with_app(&root, "other-app")),
         )
         .unwrap_err();
         assert!(wrong_app_error.starts_with("PROJECT_SCOPE_UNKNOWN:"));
 
-        let non_operator_error = validate_request_context(
-            &server,
-            &Req::Shutdown { password: None },
-            Some(&resident_context),
-        )
-        .unwrap_err();
-        assert!(non_operator_error.starts_with("MAINTENANCE_AUTHENTICATION_FAILED"));
+        if configured.is_some() {
+            // A configured password must not be bypassed by omitting it.
+            let non_operator_error = validate_request_context(
+                &server,
+                &Req::Shutdown { password: None },
+                Some(&resident_context),
+            )
+            .unwrap_err();
+            assert!(non_operator_error.starts_with("MAINTENANCE_AUTHENTICATION_FAILED"));
+        }
 
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_dir_all(wrong_root).unwrap();

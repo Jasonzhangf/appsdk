@@ -35,6 +35,7 @@ fn render_plist(collab_bin: &Path) -> String {
     let log_path = scope::HostPaths::resolve()
         .map(|p| p.state_root().join("serve.log").display().to_string())
         .unwrap_or_else(|_| "/tmp/collab-serve.log".to_string());
+    let home = std::env::var("HOME").unwrap_or_default();
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -48,6 +49,11 @@ fn render_plist(collab_bin: &Path) -> String {
         <string>serve</string>
         <string>--service</string>
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>{home}</string>
+    </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -67,6 +73,7 @@ fn render_plist(collab_bin: &Path) -> String {
         label = LAUNCH_AGENT_LABEL,
         bin = collab_bin.display(),
         log = log_path,
+        home = home,
     )
 }
 
@@ -91,14 +98,43 @@ pub fn write_service_record(root: &Path) -> anyhow::Result<()> {
 /// and after crashes. Idempotent: overwrites an existing plist and reuses the
 /// loaded job if present.
 pub fn install_and_load() -> anyhow::Result<PathBuf> {
+    // The login agent must own the single real host daemon. An explicitly
+    // overridden state root is an isolated instance (tests, temporary runs);
+    // registering it for login autostart would make two daemons compete for one
+    // login session and would outlive the caller that started it.
+    if std::env::var_os(scope::COLLAB_STATE_DIR_ENV).is_some() {
+        anyhow::bail!(
+            "AUTOSTART_UNAVAILABLE: {} is set, so this is an isolated Collab instance; login autostart is only installed for the default host state root",
+            scope::COLLAB_STATE_DIR_ENV
+        );
+    }
     let collab_bin = collab_bin_path();
     let plist = render_plist(&collab_bin);
     let path = launch_agent_path();
     std::fs::create_dir_all(path.parent().expect("LaunchAgents dir"))?;
+    // launchd opens StandardOutPath/StandardErrorPath before the daemon runs,
+    // so the host state root must already exist or the agent fails to start.
+    std::fs::create_dir_all(scope::HostPaths::resolve()?.state_root())?;
     std::fs::write(&path, plist)?;
-    let _: std::process::ExitStatus = Command::new("launchctl")
+    if is_loaded() {
+        // The agent is already loaded for this login session; rewriting the
+        // plist is enough and must not restart the running daemon.
+        return Ok(path);
+    }
+    let output = Command::new("launchctl")
         .args(["load", "-w", &path.display().to_string()])
-        .status()?;
+        .output()?;
+    if !output.status.success() {
+        // Report the real launchd failure instead of claiming the autostart
+        // was installed.
+        anyhow::bail!(
+            "launchctl load failed for {} ({}): {}{}",
+            path.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim(),
+        );
+    }
     Ok(path)
 }
 
@@ -138,5 +174,21 @@ mod plist_tests {
         );
         // Guard against the old always-restart boolean form coming back.
         assert!(!plist.contains("<key>KeepAlive</key>\n    <true/>"), "{plist}");
+    }
+
+    #[test]
+    fn plist_pins_the_installing_users_home() {
+        // The agent must resolve the same host state root and configuration as
+        // the installer, rather than whatever HOME launchd happens to give it.
+        let home = std::env::var("HOME").expect("HOME");
+        let plist = render_plist(Path::new("/usr/local/bin/collab"));
+        assert!(
+            plist.contains("<key>EnvironmentVariables</key>\n    <dict>"),
+            "{plist}"
+        );
+        assert!(
+            plist.contains(&format!("<key>HOME</key>\n        <string>{home}</string>")),
+            "{plist}"
+        );
     }
 }

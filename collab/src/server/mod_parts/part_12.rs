@@ -962,6 +962,31 @@ pub(crate) fn acquire_reset_lock(
     acquire_daemon_lock(lock_path, socket_path)
 }
 
+/// True when some other host daemon still owns the pre-host-state writer lock.
+///
+/// Every daemon keeps this legacy lock for its whole lifetime as a fence against
+/// binaries released before the host-scoped state directory existed. A second
+/// daemon cannot start while the fence is held, so a supervised start must report
+/// the conflict and exit instead of letting launchd restart it forever.
+pub fn legacy_host_daemon_present() -> bool {
+    let Ok(file) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(LEGACY_HOST_DAEMON_LOCK_PATH)
+    else {
+        // Fail closed: an unreadable fence is treated as held so the service
+        // does not start a second writer.
+        return true;
+    };
+    use std::os::unix::io::AsRawFd;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+        return false;
+    }
+    true
+}
+
 fn acquire_legacy_writer_lock(
     lock_path: &Path,
     description: &str,

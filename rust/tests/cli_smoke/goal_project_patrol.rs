@@ -135,12 +135,12 @@ fn goal_project_patrol_master_arms_persists_and_reuses_schedule() {
     assert_eq!(receipt["patrol_armed"], true);
     assert_eq!(receipt["patrol_subscription_id"], "sub-patrol-1");
     assert_eq!(receipt["patrol_source"], "armed");
-    assert_eq!(receipt["patrol_every_ms"], 900_000);
+    assert_eq!(receipt["patrol_every_ms"], 1_500_000);
     let calls = fs::read_to_string(root.join("notify-subscribe-calls")).unwrap();
     assert_eq!(calls.lines().count(), 1);
     assert!(calls.contains("--event master-idle"));
     assert!(calls.contains("--subject project-patrol"));
-    assert!(calls.contains("--every-ms 900000"));
+    assert!(calls.contains("--every-ms 1500000"));
     let persisted: Value =
         serde_json::from_slice(&fs::read(goal_test_record_path(&root)).unwrap()).unwrap();
     assert_eq!(persisted["patrol_armed"], true);

@@ -1077,11 +1077,25 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             // result says which happened.
             let service_record = main_autostart::write_service_record(&scope.root);
             let autostart = main_autostart::install_and_load();
-            let supervised = autostart.is_ok()
-                && wait_for_daemon(&sock, std::time::Duration::from_secs(5));
-            if !supervised {
-                client::ensure_server(&sock)?;
-            }
+            let supervised = match &autostart {
+                Ok(_) => wait_for_daemon(&sock, std::time::Duration::from_secs(5)),
+                Err(error) => {
+                    let message = error.to_string();
+                    if message.contains("AUTOSTART_UNAVAILABLE") {
+                        // An isolated instance (explicit state root) or a
+                        // non-macOS host has no login supervisor, so a detached
+                        // start is the only option. Report it as unsupervised
+                        // instead of pretending autostart was installed.
+                        client::ensure_server(&sock)?;
+                        false
+                    } else {
+                        // A real launchd, plist, or permission failure must not
+                        // be masked by a detached substitute. Surface the
+                        // original error so `up` exits non-zero.
+                        return Err(anyhow::anyhow!("{}", message));
+                    }
+                }
+            };
             out(&json!({
                 "ok": true,
                 "server": sock,
@@ -1096,8 +1110,13 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                         "installed": true,
                         "plist": path,
                         "loaded": main_autostart::is_loaded(),
+                        "running": main_autostart::is_running(),
                     }),
-                    Err(error) => json!({"installed": false, "error": format!("{error:#}")}),
+                    Err(error) => json!({
+                        "installed": false,
+                        "supervised": false,
+                        "error": format!("{error:#}"),
+                    }),
                 },
             }));
             Ok(())
@@ -1139,7 +1158,12 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
         }
         Cmd::InstallAutostart => {
             let path = main_autostart::install_and_load()?;
-            out(&json!({"ok": true, "plist": path, "loaded": main_autostart::is_loaded()}));
+            out(&json!({
+                "ok": true,
+                "plist": path,
+                "loaded": main_autostart::is_loaded(),
+                "running": main_autostart::is_running(),
+            }));
             Ok(())
         }
         Cmd::Status { all } => {

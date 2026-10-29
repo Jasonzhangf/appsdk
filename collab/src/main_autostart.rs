@@ -6,11 +6,19 @@ use crate::scope;
 pub const LAUNCH_AGENT_LABEL: &str = "com.appsdk.collab";
 pub const LAUNCH_AGENTS_DIR: &str = "Library/LaunchAgents";
 
+/// Label used for the login agent. Overridable so an isolated end-to-end run
+/// can register a throwaway label (for example `com.appsdk.collab.e2e.<pid>`)
+/// and never collide with, or restart, the real login agent.
+fn launch_agent_label() -> String {
+    std::env::var("COLLAB_AUTOSTART_LABEL").unwrap_or_else(|_| LAUNCH_AGENT_LABEL.to_string())
+}
+
 fn launch_agent_path() -> PathBuf {
     let home = std::env::var_os("HOME").expect("HOME must be set");
+    let label = launch_agent_label();
     Path::new(&home)
         .join(LAUNCH_AGENTS_DIR)
-        .join(format!("{LAUNCH_AGENT_LABEL}.plist"))
+        .join(format!("{label}.plist"))
 }
 
 /// Resolve the user"s installed `collab` binary: prefer `cargo bin`, fall back
@@ -36,6 +44,7 @@ fn render_plist(collab_bin: &Path) -> String {
         .map(|p| p.state_root().join("serve.log").display().to_string())
         .unwrap_or_else(|_| "/tmp/collab-serve.log".to_string());
     let home = std::env::var("HOME").unwrap_or_default();
+    let label = launch_agent_label();
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -70,7 +79,7 @@ fn render_plist(collab_bin: &Path) -> String {
 </dict>
 </plist>
 "#,
-        label = LAUNCH_AGENT_LABEL,
+        label = label,
         bin = collab_bin.display(),
         log = log_path,
         home = home,
@@ -98,6 +107,13 @@ pub fn write_service_record(root: &Path) -> anyhow::Result<()> {
 /// and after crashes. Idempotent: overwrites an existing plist and reuses the
 /// loaded job if present.
 pub fn install_and_load() -> anyhow::Result<PathBuf> {
+    // login autostart is a macOS LaunchAgent feature only. A non-macOS host has
+    // no supervisor to own crash recovery, so report it as unavailable rather
+    // than fail on the missing `launchctl` binary.
+    if cfg!(not(target_os = "macos")) {
+        anyhow::bail!("AUTOSTART_UNAVAILABLE: login autostart is only implemented on macOS");
+    }
+
     // The login agent must own the single real host daemon. An explicitly
     // overridden state root is an isolated instance (tests, temporary runs);
     // registering it for login autostart would make two daemons compete for one
@@ -117,8 +133,14 @@ pub fn install_and_load() -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(scope::HostPaths::resolve()?.state_root())?;
     std::fs::write(&path, plist)?;
     if is_loaded() {
-        // The agent is already loaded for this login session; rewriting the
-        // plist is enough and must not restart the running daemon.
+        // The agent is already loaded for this login session. A clean
+        // `collab down` leaves the job loaded but stopped, so launchd would
+        // have no child to relaunch after a crash. Resume the loaded job here;
+        // a job that is already running is left untouched so the live daemon
+        // is never replaced.
+        if !is_running() {
+            start_loaded_job()?;
+        }
         return Ok(path);
     }
     let output = Command::new("launchctl")
@@ -138,15 +160,65 @@ pub fn install_and_load() -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
+/// Start a loaded-but-stopped LaunchAgent job without killing a running one.
+///
+/// `launchctl start <label>` resumes the job in place, unlike
+/// `launchctl kickstart -k` which first kills an existing instance. A real
+/// launchd rejection is surfaced as an error instead of a silent success.
+fn start_loaded_job() -> anyhow::Result<()> {
+    let label = launch_agent_label();
+    let output = Command::new("launchctl")
+        .args(["start", &label])
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "launchctl start failed for {} ({}): {}{}",
+            label,
+            output.status,
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim(),
+        );
+    }
+    Ok(())
+}
+
 /// Returns true when the LaunchAgent job is currently loaded.
 pub fn is_loaded() -> bool {
     let path = launch_agent_path();
     if !path.exists() {
         return false;
     }
-    let label = LAUNCH_AGENT_LABEL;
-    let output = Command::new("launchctl").args(["list", label]).output();
+    let label = launch_agent_label();
+    let output = Command::new("launchctl").args(["list", &label]).output();
     matches!(output, Ok(o) if o.status.success())
+}
+
+/// Returns true when the loaded LaunchAgent job currently has a running PID.
+///
+/// `launchctl list <label>` prints the job as a dictionary such as
+/// `"PID" = 69610;` while it runs, and omits the `PID` entry (or prints
+/// `"PID" = "-";`) when the job is loaded but stopped.
+pub fn is_running() -> bool {
+    if !is_loaded() {
+        return false;
+    }
+    let label = launch_agent_label();
+    let output = Command::new("launchctl").args(["list", &label]).output();
+    let Ok(output) = output else { return false; };
+    if !output.status.success() {
+        return false;
+    }
+    launchctl_list_reports_pid(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn launchctl_list_reports_pid(text: &str) -> bool {
+    text.lines().any(|line| {
+        let line = line.trim();
+        line.starts_with("\"PID\"")
+            && line
+                .split_once('=')
+                .is_some_and(|(_, value)| value.chars().any(|c| c.is_ascii_digit()))
+    })
 }
 
 #[cfg(test)]
@@ -190,5 +262,22 @@ mod plist_tests {
             plist.contains(&format!("<key>HOME</key>\n        <string>{home}</string>")),
             "{plist}"
         );
+    }
+
+    #[test]
+    fn running_is_detected_from_the_launchd_pid_entry() {
+        // `launchctl list <label>` prints a dictionary. A running job carries a
+        // numeric PID; a loaded-but-stopped job (after a clean `collab down`)
+        // omits it or uses "-". A parser that only checks for a non-empty line
+        // would always report "running" and never resume a stopped job.
+        assert!(launchctl_list_reports_pid(
+            "{\n\t\"Label\" = \"com.appsdk.collab\";\n\t\"PID\" = 69610;\n}\n"
+        ));
+        assert!(!launchctl_list_reports_pid(
+            "{\n\t\"Label\" = \"com.appsdk.collab\";\n\t\"LastExitStatus\" = 0;\n}\n"
+        ));
+        assert!(!launchctl_list_reports_pid(
+            "{\n\t\"PID\" = \"-\";\n}\n"
+        ));
     }
 }

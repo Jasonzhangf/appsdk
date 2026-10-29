@@ -35,4 +35,8 @@ trap - EXIT HUP INT TERM
   --target "$HOME/.agents/skills/collab" \
   --force
 
+# Install and load the per-user LaunchAgent so the daemon autostarts on login.
+# Best effort: an unavailable launchd must not fail the install of the binary.
+"$bin_dir/collab" install-autostart || true
+
 printf 'version=%s\n' "$("$bin_dir/collab" --version)"

@@ -382,7 +382,7 @@ async fn conn_task_degraded(
     project_replay_failure: Arc<str>,
     stream: tokio::net::UnixStream,
     host_paths: HostPaths,
-    maintenance_password: Arc<str>,
+    maintenance_password: Option<String>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
     user_shutdown: tokio::sync::mpsc::Sender<()>,
 ) {
@@ -408,7 +408,7 @@ async fn conn_task_degraded(
             })),
             Ok((_, Req::Shutdown { password })) => {
                 let response =
-                    handle_host_shutdown(&host_paths, &maintenance_password, password.as_ref());
+                    handle_host_shutdown(&host_paths, maintenance_password.as_deref(), password.as_ref());
                 close_daemon = response.ok;
                 response
             }
@@ -1271,7 +1271,8 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
         Ok(state) => state,
         Err(error) => {
             let project_replay_failure = format!("{error:#}");
-            let maintenance_password: Arc<str> = crate::config::maintenance_password()?.into();
+            let maintenance_password: Option<String> =
+                crate::config::maintenance_password_opt()?;
             append_log(
                 &host_paths.log_path(),
                 &format!("project replay failed; entering query-only degraded mode: {project_replay_failure}"),

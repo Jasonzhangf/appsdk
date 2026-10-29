@@ -1667,6 +1667,42 @@
 
     #[tokio::test]
     async fn empty_registry_admits_only_exact_cli_host_operator_shutdown() {
+        // Shutdown authorization reads the live `~/.appsdk/config.toml`, so pin
+        // HOME to a temp config with a known password. Without this the test
+        // would depend on whatever the developer has configured.
+        struct HomeGuard {
+            previous: Option<std::ffi::OsString>,
+            dir: std::path::PathBuf,
+        }
+        impl Drop for HomeGuard {
+            fn drop(&mut self) {
+                match self.previous.take() {
+                    Some(value) => std::env::set_var("HOME", value),
+                    None => std::env::remove_var("HOME"),
+                }
+                let _ = std::fs::remove_dir_all(&self.dir);
+            }
+        }
+        let home = std::env::temp_dir().join(format!(
+            "collab-maint-home-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(home.join(".appsdk")).unwrap();
+        std::fs::write(
+            home.join(".appsdk/config.toml"),
+            "[maintenance]\npassword = \"admin\"\n",
+        )
+        .unwrap();
+        let _home = HomeGuard {
+            previous: std::env::var_os("HOME"),
+            dir: home.clone(),
+        };
+        std::env::set_var("HOME", &home);
+
         let (server, root, journal_path) = test_server();
         let resident_context = context_with_app(&root, crate::identity::CLI_APP_SERVER_ID);
         let before_journal = std::fs::read(&journal_path).unwrap();

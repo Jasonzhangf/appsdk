@@ -406,17 +406,25 @@ fn run_pty(fixture: &IsolatedDaemon, input: &[u8]) -> Output {
         .expect("start pty down command");
     let mut stdout = child.stdout.take().unwrap();
     let mut prefix = Vec::new();
-    while !prefix.ends_with(b"Password: ") {
+    let mut prompted = false;
+    loop {
+        if prefix.ends_with(b"Password: ") {
+            prompted = true;
+            break;
+        }
         let mut byte = [0];
         if stdout.read(&mut byte).unwrap() == 0 {
             break;
         }
         prefix.push(byte[0]);
     }
-    {
+    // Only feed a password when the daemon actually prompted. With no
+    // configured password `down` never prompts, so the process may already be
+    // gone and writing to its stdin would fail.
+    if prompted {
         let mut stdin = child.stdin.take().unwrap();
-        stdin.write_all(input).unwrap();
-        stdin.flush().unwrap();
+        let _ = stdin.write_all(input);
+        let _ = stdin.flush();
     }
     child.stdout = Some(stdout);
     let mut output = child.wait_with_output().unwrap();
@@ -677,17 +685,43 @@ fn context_does_not_start_for_absent_or_stale_endpoints() {
 }
 
 #[test]
-fn legacy_or_unauthenticated_shutdown_is_rejected_without_events_or_marker() {
-    let fixture = IsolatedDaemon::start(None);
-    let event_path = fixture.host.join("events.jsonl");
-    let before_events = std::fs::read(&event_path).unwrap_or_default();
+fn unauthenticated_shutdown_is_allowed_when_no_password_is_configured() {
+    // With no `[maintenance] password` set, shutdown requires no credentials.
+    // Each request stops the daemon, so give every case its own isolated child.
     for request in [
         json!({"op":"Shutdown","operator":true}),
         json!({"op":"Shutdown"}),
         json!({"op":"Shutdown","password":"wrong-password"}),
     ] {
-        let response = wire_request(&fixture.socket(), &fixture.root, request);
-        assert_eq!(response["ok"], false, "{response}");
+        let mut fixture = IsolatedDaemon::start(None);
+        let event_path = fixture.host.join("events.jsonl");
+        let before_events = std::fs::read(&event_path).unwrap_or_default();
+        let response = wire_request(&fixture.socket(), &fixture.root, request.clone());
+        assert_eq!(response["ok"], true, "{request} -> {response}");
+        assert!(
+            fixture.host.join("DOWN").exists(),
+            "{request} must stop the daemon"
+        );
+        assert_eq!(
+            std::fs::read(&event_path).unwrap_or_default(),
+            before_events,
+            "shutdown must not emit a lifecycle event"
+        );
+        fixture.wait_for_exit();
+    }
+}
+
+#[test]
+fn shutdown_with_wrong_password_is_rejected_when_a_password_is_configured() {
+    let mut fixture = IsolatedDaemon::start(Some("lifecycle-secret"));
+    let event_path = fixture.host.join("events.jsonl");
+    let before_events = std::fs::read(&event_path).unwrap_or_default();
+    for request in [
+        json!({"op":"Shutdown"}),
+        json!({"op":"Shutdown","password":"wrong-password"}),
+    ] {
+        let response = wire_request(&fixture.socket(), &fixture.root, request.clone());
+        assert_eq!(response["ok"], false, "{request} -> {response}");
         assert!(!fixture.host.join("DOWN").exists());
         assert_eq!(
             std::fs::read(&event_path).unwrap_or_default(),
@@ -695,6 +729,14 @@ fn legacy_or_unauthenticated_shutdown_is_rejected_without_events_or_marker() {
         );
         ping(&fixture.socket()).expect("daemon remains alive after rejected shutdown");
     }
+    let response = wire_request(
+        &fixture.socket(),
+        &fixture.root,
+        json!({"op":"Shutdown","password":"lifecycle-secret"}),
+    );
+    assert_eq!(response["ok"], true, "{response}");
+    assert!(fixture.host.join("DOWN").exists());
+    fixture.wait_for_exit();
 }
 
 #[test]
@@ -720,19 +762,24 @@ fn pty_password_rejects_default_for_custom_config_and_never_echoes_it() {
 }
 
 #[test]
-fn pty_default_user_password_stops_only_the_owned_daemon() {
+fn pty_down_without_password_stops_the_owned_daemon_without_prompting() {
     let mut fixture = IsolatedDaemon::start(None);
-    let output = run_pty(&fixture, b"admin\n");
+    // No `[maintenance] password` is configured, so `down` must never prompt.
+    // Feeding bytes would only reach the child if a prompt appeared; run_pty
+    // tolerates the absent prompt and treats the process exit as the outcome.
+    let output = run_pty(&fixture, b"\n");
     assert!(output.status.success(), "{}", output_text(&output));
-    assert_no_text(&output, &["admin"]);
     fixture.wait_for_exit();
     assert!(fixture.host.join("DOWN").is_file());
+    let _ = std::fs::remove_dir_all(&fixture.root);
 }
 
 #[test]
 fn pty_eof_and_cancel_do_not_stop_or_mutate_the_daemon() {
     for input in [b"\x04".to_vec(), b"\x03".to_vec()] {
-        let fixture = IsolatedDaemon::start(None);
+        // A configured password makes `down` prompt, so EOF / Ctrl-C cancels.
+        // With no password there is no prompt and nothing to cancel.
+        let fixture = IsolatedDaemon::start(Some("admin"));
         let before_events = std::fs::read(fixture.host.join("events.jsonl")).unwrap_or_default();
         let output = run_pty(&fixture, &input);
         assert!(!output.status.success(), "{}", output_text(&output));

@@ -975,6 +975,12 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             let sock = scope.sock_path();
             let was_running = client::alive(&sock);
             client::ensure_server(&sock)?;
+            // Bind the supervised daemon to this project and install the
+            // per-user LaunchAgent so it autostarts on login. This is best
+            // effort: the daemon is already up, so a launchd failure here must
+            // not report `up` as failed.
+            let _ = main_autostart::write_service_record(&scope.root);
+            let _ = main_autostart::install_and_load();
             out(&json!({"ok": true, "server": sock, "started": !was_running}));
             Ok(())
         }
@@ -984,7 +990,14 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             };
             let configured = config::maintenance_password_opt()?;
             let password = match configured {
-                None => None,
+                None => {
+                    // No password is configured, so there is nothing to verify.
+                    // Still require a human terminal: a daemon that agents can
+                    // stop without a password is a lifecycle safety hole. Only
+                    // the password prompt is skipped, not the user-only gate.
+                    let _terminal = main_maintenance::user_terminal()?;
+                    None
+                }
                 Some(expected) => {
                     let entered = main_maintenance::read_password()?;
                     if entered.expose() != expected {

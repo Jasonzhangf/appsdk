@@ -90,7 +90,7 @@ async fn concurrent_degraded_shutdown_notifications_coalesce() {
             Arc::from("fixture replay error"),
             server,
             paths.clone(),
-            Arc::from("fixture-only"),
+            Some("fixture-only".to_string()),
             receiver.clone(),
             sender.clone(),
         )));

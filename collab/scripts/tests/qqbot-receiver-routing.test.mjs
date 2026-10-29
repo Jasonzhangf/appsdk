@@ -171,12 +171,13 @@ test("channel envelope keeps the external reply route and attachments typed", ()
         {
           record: {
             senderId: "sender-1",
+            messageId: "platform-event-1",
             attachments: [
               { path: "/tmp/a.png", filename: "a.png", contentType: "image/png" },
             ],
           },
         },
-        { record: { senderId: "sender-1", attachments: [] } },
+        { record: { senderId: "sender-1", messageId: "platform-event-2", attachments: [] } },
       ],
     }),
     {
@@ -184,7 +185,7 @@ test("channel envelope keeps the external reply route and attachments typed", ()
       channel_instance: "qqbot",
       external_user: "sender-1",
       external_conversation: "conversation-42",
-      platform_message_id: "qqbot-batch-1",
+      platform_message_id: "platform-event-1",
       reply_route: "qqbot://c2c/conversation-42",
       recipient_address: "appsdk.Bob",
       attachments: [
@@ -219,6 +220,48 @@ test("an in-flight attachment keeps its open batch from flushing too early", asy
     flushed[0].messages.map((message) => message.routedBody),
     ["text", "image"],
   );
+});
+
+test("a later message extends the quiet deadline instead of splitting the tail", async () => {
+  const flushed = [];
+  const queue = createBatchQueue({
+    windowMs: 40,
+    maxWaitMs: 2000,
+    flush: (batch) => flushed.push(batch.messages.map((message) => message.routedBody)),
+  });
+
+  queue.enqueue({ routedBody: "first", record: { senderId: "sender-1" } }, queueRoute);
+  queue.beginMessage();
+  await delay(55);
+
+  queue.enqueue({ routedBody: "second", record: { senderId: "sender-1" } }, queueRoute);
+  queue.endMessage();
+  await delay(10);
+  assert.equal(flushed.length, 0, "an extended quiet deadline must not flush early");
+
+  await delay(60);
+  assert.deepEqual(flushed, [["first", "second"]]);
+});
+
+test("platform message id stays stable across receiver restarts", () => {
+  const record = { senderId: "sender-1", messageId: "platform-event-stable" };
+  const first = buildChannelEnvelope({
+    batchId: "qqbot-batch-100-1",
+    sessionTargetId: "conversation-42",
+    sendToAddress: "appsdk.Bob",
+    replyTarget: { scope: "c2c", targetId: "conversation-42" },
+    messages: [{ record }],
+  });
+  const replay = buildChannelEnvelope({
+    batchId: "qqbot-batch-999-7",
+    sessionTargetId: "conversation-42",
+    sendToAddress: "appsdk.Bob",
+    replyTarget: { scope: "c2c", targetId: "conversation-42" },
+    messages: [{ record }],
+  });
+  assert.equal(first.platform_message_id, "platform-event-stable");
+  assert.equal(replay.platform_message_id, "platform-event-stable");
+  assert.notEqual(first.platform_message_id, first.batchId);
 });
 
 test("the trailing window is measured from receipt, not processing completion", async () => {

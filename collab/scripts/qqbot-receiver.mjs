@@ -19,6 +19,9 @@ const positiveDuration = (value, fallback) => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 };
 const MESSAGE_BATCH_WINDOW_MS = positiveDuration(process.env.QQBOT_BATCH_WINDOW_MS, 30000);
+// Keep the merge window at 30s: the user fixed QQBot to merge text and images
+// arriving within half a minute (m1793235637968-261). Override per session
+// through QQBOT_BATCH_WINDOW_MS when a different cadence is wanted.
 // The sliding window starts 30s after the last message. The cap only stops a
 // continuous stream from batching forever, so it must exceed the quiet window.
 const MESSAGE_BATCH_MAX_WAIT_MS = positiveDuration(process.env.QQBOT_BATCH_MAX_WAIT_MS, 60000);
@@ -369,7 +372,10 @@ const buildChannelEnvelope = (batch) => ({
   channel_instance: "qqbot",
   external_user: batch.messages[0]?.record?.senderId ?? "",
   external_conversation: String(batch.sessionTargetId ?? ""),
-  platform_message_id: String(batch.batchId ?? ""),
+  // The platform message id is the durable idempotency key. Use the first
+  // platform event in arrival order instead of the generated batch id so a
+  // replayed event maps to the same durable delivery across a receiver restart.
+  platform_message_id: String(batch.messages[0]?.record?.messageId ?? ""),
   reply_route: `qqbot://${batch.replyTarget?.scope ?? ""}/${batch.replyTarget?.targetId ?? ""}`,
   recipient_address: String(batch.sendToAddress ?? ""),
   attachments: batch.messages.flatMap((item) =>
@@ -383,28 +389,33 @@ const buildChannelEnvelope = (batch) => ({
 
 // Groups messages that arrive within a trailing window. A flush is deferred
 // while an inbound message is still being processed, so an attachment download
-// never silently splits one conversation burst into two deliveries.
+// never silently splits one conversation burst into two deliveries. When a
+// deferred batch's quiet deadline was extended by a later message, processing
+// completion re-arms the timer instead of flushing that new tail into a second
+// delivery.
 const createBatchQueue = ({ windowMs, maxWaitMs, flush, now = Date.now }) => {
   const batches = new Map();
   let counter = 0;
   let inflight = 0;
-  const deferred = new Set();
+  const deferredQuiet = new Set();
+  const deferredMax = new Set();
   const fired = new Set();
   const flushPromises = new Set();
 
-  const runFlush = (batch) => {
-    if (!batch || fired.has(batch.batchId)) return;
-    if (inflight > 0) {
-      deferred.add(batch);
-      return;
-    }
-    fired.add(batch.batchId);
-    deferred.delete(batch);
-    batches.delete(batch.key);
+  const clearTimers = (batch) => {
     if (batch.timer) clearTimeout(batch.timer);
     if (batch.maxTimer) clearTimeout(batch.maxTimer);
     batch.timer = null;
     batch.maxTimer = null;
+  };
+
+  const startFlush = (batch) => {
+    if (!batch || fired.has(batch.batchId)) return;
+    fired.add(batch.batchId);
+    deferredQuiet.delete(batch);
+    deferredMax.delete(batch);
+    batches.delete(batch.key);
+    clearTimers(batch);
     const promise = Promise.resolve()
       .then(() => flush(batch))
       .catch(() => {
@@ -415,16 +426,49 @@ const createBatchQueue = ({ windowMs, maxWaitMs, flush, now = Date.now }) => {
     void promise.finally(() => flushPromises.delete(promise));
   };
 
+  const quietFired = (batch) => {
+    batch.timer = null;
+    if (fired.has(batch.batchId)) return;
+    if (inflight > 0) {
+      deferredQuiet.add(batch);
+      return;
+    }
+    startFlush(batch);
+  };
+
+  const maxFired = (batch) => {
+    batch.maxTimer = null;
+    if (fired.has(batch.batchId)) return;
+    if (inflight > 0) {
+      deferredMax.add(batch);
+      return;
+    }
+    startFlush(batch);
+  };
+
   const beginMessage = () => {
     inflight += 1;
   };
 
   const endMessage = () => {
     inflight = Math.max(0, inflight - 1);
-    if (inflight === 0) {
-      for (const batch of [...deferred]) {
-        deferred.delete(batch);
-        runFlush(batch);
+    if (inflight !== 0) return;
+    // The hard cap is a flush obligation: once reached, delivery no longer
+    // waits for the trailing quiet window.
+    for (const batch of [...deferredMax]) {
+      deferredMax.delete(batch);
+      startFlush(batch);
+    }
+    for (const batch of [...deferredQuiet]) {
+      deferredQuiet.delete(batch);
+      if (now() >= batch.quietDeadlineMs) {
+        startFlush(batch);
+      } else {
+        if (batch.timer) clearTimeout(batch.timer);
+        batch.timer = setTimeout(
+          () => quietFired(batch),
+          Math.max(0, batch.quietDeadlineMs - now()),
+        );
       }
     }
   };
@@ -449,27 +493,30 @@ const createBatchQueue = ({ windowMs, maxWaitMs, flush, now = Date.now }) => {
         flushing: false,
         timer: null,
         maxTimer: null,
+        quietDeadlineMs: receivedAtMs + windowMs,
+        maxDeadlineMs: receivedAtMs + maxWaitMs,
       };
       batches.set(key, batch);
       batch.maxTimer = setTimeout(
-        () => runFlush(batch),
-        Math.max(0, receivedAtMs + maxWaitMs - now()),
+        () => maxFired(batch),
+        Math.max(0, batch.maxDeadlineMs - now()),
       );
     }
     batch.messages.push(item);
     batch.replyTarget = routeInfo.replyTarget;
     batch.newlyBound = batch.newlyBound || routeInfo.newlyBound;
     batch.routeSource = routeInfo.routeSource;
+    batch.quietDeadlineMs = receivedAtMs + windowMs;
     if (batch.timer) clearTimeout(batch.timer);
     batch.timer = setTimeout(
-      () => runFlush(batch),
-      Math.max(0, receivedAtMs + windowMs - now()),
+      () => quietFired(batch),
+      Math.max(0, batch.quietDeadlineMs - now()),
     );
     return batch;
   };
 
   const flushAll = async () => {
-    for (const batch of [...batches.values()]) runFlush(batch);
+    for (const batch of [...batches.values()]) startFlush(batch);
     await Promise.all([...flushPromises]);
   };
 
@@ -669,6 +716,7 @@ async function startReceiver() {
   let shuttingDown = false;
   let serial = Promise.resolve();
   bot.on("message", (_ctx, message) => {
+    const receivedAtMs = Date.now();
     serial = serial
       .then(async () => {
         if (shuttingDown) return;
@@ -700,7 +748,6 @@ async function startReceiver() {
         const baseBody = leading ? leading.body : String(message.content ?? "");
         let routedBody = "";
 
-        const receivedAtMs = Date.now();
         queue.beginMessage();
         try {
           const attachmentResult = await processInboundAttachments(

@@ -126,6 +126,17 @@ expect_only "workflow_contract"
 run_scenario "selector-script" "push" "branch" "1" "scripts/ci/select-verify-scope.sh"
 expect_only "workflow_contract"
 
+# The worktree-limit commit gate, installer, and fixture select the same
+# contract job and do not fan out the whole repository.
+run_scenario "worktree-gate-check" "push" "branch" "1" "scripts/check-worktree-limit.sh"
+expect_only "workflow_contract"
+
+run_scenario "worktree-gate-installer" "push" "branch" "1" "scripts/install-project-commit-gate.sh"
+expect_only "workflow_contract"
+
+run_scenario "worktree-gate-fixture" "push" "branch" "1" "scripts/tests/test-worktree-commit-gate.sh"
+expect_only "workflow_contract"
+
 # 3. registry_home_cli target: two-test Ubuntu target plus native Windows AppSDK.
 run_scenario "registry-home-cli" "push" "branch" "1" "rust/tests/registry_home_cli.rs"
 expect_true "rust_registry_home_cli"

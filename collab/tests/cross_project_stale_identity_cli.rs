@@ -449,14 +449,20 @@ fn cross_project_request(
     })
 }
 
-fn message_status(fixture: &Fixture, target_context: &Value, msg_id: &str) -> Value {
-    wire_request(
-        &fixture.host_state.join("server.sock"),
-        &json!({
-            "op": "MsgStatus",
-            "msg_id": msg_id,
-            "project_context": target_context
-        }),
+fn message_status(
+    fixture: &Fixture,
+    target_root: &Path,
+    target_pane: &Pane,
+    msg_id: &str,
+) -> Value {
+    // `collab msg` is the public read owner; it attaches the caller runtime
+    // identity the daemon now requires before the target lookup.
+    run_ok_at(
+        fixture,
+        target_root,
+        target_pane,
+        &["msg", msg_id],
+        false,
     )
 }
 
@@ -613,7 +619,7 @@ fn cross_project_route_projection_loss_preserves_binding_and_durable_enqueue() {
         .expect("durable message id")
         .to_owned();
 
-    let pending = message_status(&fixture, &target_context, &msg_id);
+    let pending = message_status(&fixture, &target_root, &target_pane, &msg_id);
     assert_eq!(pending["state"], "pending", "{pending}");
     assert_eq!(pending["consumed_by_recv"], false, "{pending}");
     assert_eq!(pending["to"], target_id, "{pending}");
@@ -628,7 +634,7 @@ fn cross_project_route_projection_loss_preserves_binding_and_durable_enqueue() {
 
     fixture.stop_daemon();
     fixture.restart_daemon();
-    let replayed = message_status(&fixture, &target_context, &msg_id);
+    let replayed = message_status(&fixture, &target_root, &target_pane, &msg_id);
     assert_eq!(replayed["id"], msg_id, "{replayed}");
     assert_eq!(replayed["state"], "pending", "{replayed}");
     assert_eq!(replayed["consumed_by_recv"], false, "{replayed}");
@@ -698,4 +704,174 @@ fn cross_project_route_projection_loss_preserves_binding_and_durable_enqueue() {
     fixture.stop_daemon();
     std::fs::remove_dir_all(&target_root).expect("remove isolated target project");
     std::fs::remove_dir_all(&dead_root).expect("remove isolated dead project");
+}
+
+fn address_for(listed: &Value, worker_id: &str) -> String {
+    listed["targets"]
+        .as_array()
+        .expect("directory targets")
+        .iter()
+        .find(|target| target["worker_id"] == worker_id && target.get("address").is_some())
+        .and_then(|target| target["address"].as_str())
+        .map(str::to_owned)
+        .unwrap_or_else(|| panic!("address for {worker_id} missing from {listed}"))
+}
+
+/// One public `send` command and one host-wide `list` source cover local and
+/// cross-project delivery. Authorization stays inside the daemon and the
+/// failure names the current master so a caller knows who may send.
+#[test]
+fn unified_send_and_global_list_share_one_address_source() {
+    let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (fixture, source_pane) = Fixture::isolated_with_pane_command("unified-send", "sleep 600");
+    let source_root = fixture.root.canonicalize().unwrap();
+    let target_root = create_external_project(&fixture, "unified-target");
+    let target_pane = create_session(&fixture, "unified-target");
+    let peer_pane = create_session(&fixture, "unified-peer");
+
+    let source = register_context(&fixture, &source_root, &source_pane, "source", false);
+    let peer = register_context(&fixture, &source_root, &peer_pane, "source-peer", false);
+    let target = register_context(&fixture, &target_root, &target_pane, "target", false);
+    let (source_id, _) = identity(&source);
+    let (peer_id, _) = identity(&peer);
+    let (target_id, _) = identity(&target);
+    for (root, pane) in [(&source_root, &source_pane), (&target_root, &target_pane)] {
+        run_ok_at(
+            &fixture,
+            root,
+            pane,
+            &[
+                "master",
+                "promote",
+                "--approval",
+                "user approved isolated unified master",
+            ],
+            false,
+        );
+    }
+
+    // `list` is host-wide and must work outside any initialized project.
+    let neutral = std::env::temp_dir();
+    let listed = {
+        let output = command_at(&fixture, &neutral, &source_pane, &["list"], false)
+            .output()
+            .expect("run collab list outside a project");
+        assert!(
+            output.status.success(),
+            "collab list from {} failed: stdout={} stderr={}",
+            neutral.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        parse_json(&output.stdout)
+    };
+    let target_address = address_for(&listed, &target_id);
+    let peer_address = address_for(&listed, &peer_id);
+    assert!(target_address.contains('.'), "{listed}");
+
+    // One send command reaches the current master of another project.
+    let sent = run_ok_at(
+        &fixture,
+        &source_root,
+        &source_pane,
+        &[
+            "send",
+            "--to",
+            &target_address,
+            "--subject",
+            "action",
+            "--content",
+            "return the result",
+        ],
+        false,
+    );
+    assert_eq!(sent["durable"], true, "{sent}");
+    let received = run_ok_at(
+        &fixture,
+        &target_root,
+        &target_pane,
+        &["recv", "--timeout", "0"],
+        false,
+    );
+    let request = received["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["id"] == sent["msg_id"])
+        .expect("cross-project request consumed");
+    assert_eq!(request["body"], "return the result");
+
+    // The same command reaches a local peer; the subject is derived from the
+    // content so a caller only needs an address and a body.
+    let local = run_ok_at(
+        &fixture,
+        &source_root,
+        &source_pane,
+        &["send", "--to", &peer_address, "--content", "local handoff body"],
+        false,
+    );
+    assert_eq!(local["durable"], true, "{local}");
+    let peer_inbox = run_ok_at(
+        &fixture,
+        &source_root,
+        &peer_pane,
+        &["recv", "--timeout", "0"],
+        false,
+    );
+    assert!(
+        peer_inbox["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["id"] == local["msg_id"]),
+        "{peer_inbox}"
+    );
+
+    // A non-master peer gets an explicit permission error that names the
+    // current master, and nothing is persisted.
+    let denied = command_at(
+        &fixture,
+        &source_root,
+        &peer_pane,
+        &[
+            "send",
+            "--to",
+            &target_address,
+            "--subject",
+            "denied",
+            "--content",
+            "must not enqueue",
+        ],
+        false,
+    )
+    .output()
+    .expect("run unauthorized cross-project send");
+    assert!(
+        !denied.status.success(),
+        "unauthorized send succeeded: {}",
+        String::from_utf8_lossy(&denied.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&denied.stderr);
+    assert!(stderr.contains("PERMISSION_DENIED"), "{stderr}");
+    assert!(
+        stderr.contains(&source_id),
+        "permission error must name the current master: {stderr}"
+    );
+    let after = run_ok_at(
+        &fixture,
+        &target_root,
+        &target_pane,
+        &["recv", "--timeout", "0"],
+        false,
+    );
+    assert!(
+        !after["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["subject"] == "denied"),
+        "{after}"
+    );
+    drop(fixture);
+    std::fs::remove_dir_all(target_root).expect("remove isolated target project");
 }

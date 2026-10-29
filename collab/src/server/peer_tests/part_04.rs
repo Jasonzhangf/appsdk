@@ -110,6 +110,7 @@ fn typed_waiting_user_projects_to_worker_status_without_becoming_idle() {
                 project_scope: scope.as_str().into(), worker_id: worker.id.clone(),
                 session_id: session.clone(), activity, background: false,
                 reason: "controlled approval prompt".into(), observed_ms: now_ms(),
+                idle_since_ms: None,
             } },
         ]);
         let response = dispatch(&server, Req::WorkerStatus { worker_id: Some(worker.id.clone()) });
@@ -886,6 +887,8 @@ fn lifecycle_close_retires_a_route_less_missing_tmux_target() {
             method: "tmux".into(),
             status: "armed".into(),
             status_reason: None,
+            patrol_idle_since_ms: None,
+            patrol_last_push_ms: 0,
             created_ms: now,
             updated_ms: now,
             fired_count: 0,

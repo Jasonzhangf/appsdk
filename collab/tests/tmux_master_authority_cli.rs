@@ -1369,3 +1369,330 @@ fn master_authority_public_wire_rejects_bad_token_scope_and_generation_without_s
     assert_eq!(task["owner"], worker_id, "{task}");
     assert_eq!(task["next_step"], "stay put", "{task}");
 }
+
+fn run_pane_without_thread(fixture: &Fixture, args: &[&str], pane: &Pane) -> Value {
+    let mut command = fixture.configured_command(args, Some(pane), "Codex TUI");
+    command.env_remove("CODEX_THREAD_ID");
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "collab {:?} failed: stdout={} stderr={}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("collab CLI emits JSON")
+}
+
+fn registered_pane_master_without_thread(fixture: &Fixture, pane: &Pane) -> Value {
+    let label = format!(
+        "pane-patrol-master-{}-{}",
+        pane.server_pid,
+        pane.pane_id.trim_start_matches('%')
+    );
+    let mut command =
+        fixture.configured_command(&["context", "--op", &label], Some(pane), "Codex TUI");
+    command.env_remove("CODEX_THREAD_ID");
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "pane-only participant setup failed: {} {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["ok"], true, "{value}");
+    assert_eq!(value["result"]["outcome"], "completed", "{value}");
+    value["result"]["snapshot"].clone()
+}
+
+fn context_pane_without_thread(fixture: &Fixture, pane: &Pane) -> Value {
+    let mut command = fixture.configured_command(&["context"], Some(pane), "Codex TUI");
+    command.env_remove("CODEX_THREAD_ID");
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "pane-only context failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    value
+        .get("result")
+        .and_then(|result| result.get("snapshot"))
+        .cloned()
+        .unwrap_or(value)
+}
+
+#[test]
+fn tmux_attached_master_rearms_cancelled_project_patrol_on_project_work() {
+    let (fixture, pane) = single_pane_fixture("patrol-cancel-rearm");
+    let registered = registered_pane_master_without_thread(&fixture, &pane);
+    let worker = registered["identity"]["worker_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        registered["identity"]["runtime"]["native_thread_id"].is_null(),
+        "the fixture must register a tmux carrier without a native thread: {registered}"
+    );
+
+    run_pane_without_thread(
+        &fixture,
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "fixture user assigns the tmux session project master",
+        ],
+        &pane,
+    );
+    let armed = run_pane_without_thread(
+        &fixture,
+        &[
+            "notify",
+            "subscribe",
+            "--event",
+            "master-idle",
+            "--subject",
+            "project-patrol",
+            "--every-ms",
+            "900000",
+            "--repeat-count",
+            "100",
+            "--ttl-seconds",
+            "604800",
+        ],
+        &pane,
+    );
+    let patrol_id = armed["subscription"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(armed["subscription"]["worker_id"], worker, "{armed}");
+    assert_eq!(armed["subscription"]["method"], "tmux", "{armed}");
+    assert_eq!(
+        armed["subscription"]["target"], pane.pane_id,
+        "a tmux carrier without a native thread keeps the pane id as its patrol target: {armed}"
+    );
+
+    run_pane_without_thread(
+        &fixture,
+        &[
+            "ceo",
+            "promote",
+            "--approval",
+            "fixture user promotes the master to record project progress",
+        ],
+        &pane,
+    );
+    let progress = run_pane_without_thread(
+        &fixture,
+        &[
+            "ceo",
+            "reply",
+            "--subject",
+            "project-patrol-progress",
+            "--urgent",
+            "no actionable project work remains",
+        ],
+        &pane,
+    );
+    assert_eq!(progress["recorded"], true, "{progress}");
+
+    let cancelled = run_pane_without_thread(
+        &fixture,
+        &[
+            "notify",
+            "cancel",
+            "--event",
+            "master-idle",
+            "--reason",
+            "fixture no actionable project work",
+            "--resume-condition",
+            "new project work or a durable wait release",
+        ],
+        &pane,
+    );
+    assert_eq!(
+        cancelled["subscription_id"].as_str(),
+        Some(patrol_id.as_str()),
+        "{cancelled}"
+    );
+    assert_eq!(cancelled["status"], "cancelled", "{cancelled}");
+
+    run_pane_without_thread(
+        &fixture,
+        &[
+            "task",
+            "register",
+            "TMUX-PATROL-WORK",
+            "--feature",
+            "tmux-patrol-resource",
+        ],
+        &pane,
+    );
+    let rearmed = run_pane_without_thread(&fixture, &["notify", "status"], &pane);
+    assert_eq!(
+        rearmed["project_patrol"]["status"], "armed",
+        "the tmux-attached master must rearm on new project work: {rearmed}"
+    );
+    assert_eq!(
+        rearmed["project_patrol"]["subscription_id"].as_str(),
+        Some(patrol_id.as_str()),
+        "{rearmed}"
+    );
+}
+
+#[test]
+fn cancelled_project_patrol_follows_endpoint_move_after_context_recovery_and_rearms() {
+    let (fixture, first) = single_pane_fixture("patrol-cancel-endpoint-move");
+    let registered = registered_pane_master_without_thread(&fixture, &first);
+    let worker = registered["identity"]["worker_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        registered["identity"]["runtime"]["native_thread_id"].is_null(),
+        "the fixture must register a tmux carrier without a native thread: {registered}"
+    );
+
+    run_pane_without_thread(
+        &fixture,
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "fixture user assigns the tmux session project master",
+        ],
+        &first,
+    );
+    let armed = run_pane_without_thread(
+        &fixture,
+        &[
+            "notify",
+            "subscribe",
+            "--event",
+            "master-idle",
+            "--subject",
+            "project-patrol",
+            "--every-ms",
+            "900000",
+            "--repeat-count",
+            "100",
+            "--ttl-seconds",
+            "604800",
+        ],
+        &first,
+    );
+    let patrol_id = armed["subscription"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        armed["subscription"]["target"], first.pane_id,
+        "initial tmux patrol follows pane A: {armed}"
+    );
+
+    run_pane_without_thread(
+        &fixture,
+        &[
+            "ceo",
+            "promote",
+            "--approval",
+            "fixture user promotes the master to record project progress",
+        ],
+        &first,
+    );
+    let progress = run_pane_without_thread(
+        &fixture,
+        &[
+            "ceo",
+            "reply",
+            "--subject",
+            "project-patrol-endpoint-progress",
+            "--urgent",
+            "no actionable project work remains",
+        ],
+        &first,
+    );
+    assert_eq!(progress["recorded"], true, "{progress}");
+
+    let cancelled = run_pane_without_thread(
+        &fixture,
+        &[
+            "notify",
+            "cancel",
+            "--event",
+            "master-idle",
+            "--reason",
+            "fixture no actionable project work before moving panes",
+            "--resume-condition",
+            "new project work or a durable wait release",
+        ],
+        &first,
+    );
+    assert_eq!(
+        cancelled["subscription_id"].as_str(),
+        Some(patrol_id.as_str()),
+        "{cancelled}"
+    );
+    assert_eq!(cancelled["status"], "cancelled", "{cancelled}");
+
+    let created = tmux(
+        &fixture.tmux_socket,
+        &[
+            "split-window",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            &first.pane_id,
+            "sleep 600",
+        ],
+    );
+    let pane_id = String::from_utf8(created.stdout).unwrap().trim().to_owned();
+    let second = Pane {
+        pane_id,
+        server_pid: first.server_pid,
+        session_anchor: first.session_anchor.clone(),
+        thread_anchor: first.thread_anchor.clone(),
+    };
+
+    let restored = context_pane_without_thread(&fixture, &second);
+    assert_eq!(restored["identity"]["worker_id"], worker, "{restored}");
+    assert_eq!(
+        restored["binding"]["tmux_endpoint"]["pane_id"], second.pane_id,
+        "context recovery moves the binding to pane B: {restored}"
+    );
+    let after_restore = run_pane_without_thread(&fixture, &["notify", "status"], &second);
+    assert_eq!(
+        after_restore["project_patrol"]["status"], "cancelled",
+        "ordinary context recovery must not rearm the cancelled patrol: {after_restore}"
+    );
+    assert_eq!(
+        after_restore["project_patrol"]["target"], second.pane_id,
+        "the cancelled patrol must follow the current pane after context recovery: {after_restore}"
+    );
+
+    run_pane_without_thread(
+        &fixture,
+        &[
+            "task",
+            "register",
+            "TMUX-PATROL-MOVED-WORK",
+            "--feature",
+            "tmux-patrol-endpoint-move",
+        ],
+        &second,
+    );
+    let rearmed = run_pane_without_thread(&fixture, &["notify", "status"], &second);
+    assert_eq!(
+        rearmed["project_patrol"]["status"], "armed",
+        "the moved master must rearm on new project work: {rearmed}"
+    );
+    assert_eq!(
+        rearmed["project_patrol"]["subscription_id"].as_str(),
+        Some(patrol_id.as_str()),
+        "{rearmed}"
+    );
+    assert_eq!(
+        rearmed["project_patrol"]["target"], second.pane_id,
+        "rearmed patrol stays at the current pane B: {rearmed}"
+    );
+}

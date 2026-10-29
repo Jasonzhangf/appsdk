@@ -42,6 +42,24 @@ pub struct State {
     pub reply_obligations: HashMap<String, ReplyObligation>,
     pub mailbox_name_addresses: HashMap<String, crate::server::name_mailbox::MailboxNameAddress>,
     pub mailbox_handoffs: Vec<crate::server::name_mailbox::MailboxHandoff>,
+    /// Per-external-conversation default delivery target, keyed by
+    /// `<channel>:<channel-instance>:<conversation>`. Control state only;
+    /// never grants identity.
+    pub conversation_defaults:
+        std::collections::HashMap<String, crate::server::conversation_default::ConversationDefault>,
+    /// Typed channel envelopes keyed by the Collab inbound message id.
+    pub channel_envelopes:
+        std::collections::HashMap<String, crate::server::channel_envelope::ChannelEnvelope>,
+    /// Platform event idempotency index: event key -> Collab message id.
+    pub platform_event_index: std::collections::HashMap<String, String>,
+    /// Immutable QQ route for each committed agent reply, keyed by the Collab
+    /// outbound message id.
+    pub channel_reply_routes:
+        std::collections::HashMap<String, crate::server::channel_envelope::ChannelReplyRoute>,
+    /// Platform send outcome keyed by the Collab outbound message id. Never
+    /// projected into `Message.state`.
+    pub channel_delivery_results:
+        std::collections::HashMap<String, crate::server::channel_delivery::ChannelDeliveryResult>,
     pub notification_delivery_failures: HashMap<String, NotificationDeliveryFailure>,
     /// Last native attempt accepted for a durable message, if any.
     pub notification_delivery_accepted: HashMap<String, i64>,

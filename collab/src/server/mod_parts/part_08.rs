@@ -12,7 +12,6 @@ pub(crate) fn scope_view(route_scope: Option<&RouteScope>) -> serde_json::Value 
         None => serde_json::Value::Null,
     }
 }
-
 /// The single daemon-owned authority projection shared by `status`, `context`
 /// and the board. It reads only the current typed grant for the exact route
 /// scope and reports the holder, that scope, and the grant metadata. The
@@ -42,6 +41,74 @@ pub(crate) fn master_authority_view_with_endpoint(
         "endpoint_generation": grant.endpoint_generation,
         "boundary": grant.boundary,
         "master_wake": state.master_wake,
+    })
+}
+
+/// The single read-only workspace-idle projection shared by `master status`
+/// and `ceo progress`.
+///
+/// It reports the trusted continuous online-idle fact from the typed activity
+/// owner. The canonical project root comes from the daemon's registered
+/// project scope, never from the caller's cwd. When there is no master, no
+/// current session match, or no typed activity, the fact is `unknown` with a
+/// null idle start and a zero duration. The projection never mutates state, so
+/// reading it cannot advance the CEO report watermark.
+pub(crate) fn workspace_idle_view(
+    server: &Server,
+    state: &State,
+    master_id: Option<&str>,
+    now: i64,
+) -> serde_json::Value {
+    let project_root = GlobalState::canonical_project_scope(&server.root)
+        .ok()
+        .map(|scope| scope.as_str().to_owned());
+    let Some(project_root) = project_root else {
+        return unknown_workspace_view(None);
+    };
+    let Some(master_id) = master_id else {
+        return unknown_workspace_view(Some(project_root));
+    };
+    let Some(worker) = state.workers.get(master_id) else {
+        return unknown_workspace_view(Some(project_root));
+    };
+    let (presence, activity) = worker_agent_facts(server, state, worker);
+    let presence = presence.map(|fact| fact.presence);
+    let activity_kind = activity.map(|fact| fact.activity);
+    let label = match (presence, activity_kind) {
+        (Some(crate::server::name_state::AgentPresence::Offline), _) => "unknown",
+        (_, Some(crate::server::name_state::AgentActivity::Busy)) => "busy",
+        (_, Some(crate::server::name_state::AgentActivity::Idle)) => "idle",
+        (_, Some(crate::server::name_state::AgentActivity::WaitingUser)) => "waiting_user",
+        _ => "unknown",
+    };
+    let trusted_idle = presence == Some(crate::server::name_state::AgentPresence::Online)
+        && activity_kind == Some(crate::server::name_state::AgentActivity::Idle);
+    let idle_since_ms = trusted_idle
+        .then(|| {
+            activity
+                .and_then(|fact| fact.idle_since_ms)
+                .filter(|start| *start > 0 && *start <= now)
+        })
+        .flatten();
+    let idle_duration_ms = idle_since_ms
+        .map(|start| now.saturating_sub(start))
+        .unwrap_or(0);
+    json!({
+        "project_root": project_root,
+        "activity": label,
+        "idle_since_ms": idle_since_ms,
+        "idle_duration_ms": idle_duration_ms,
+        "observed_ms": activity.map(|fact| fact.observed_ms),
+    })
+}
+
+fn unknown_workspace_view(project_root: Option<String>) -> serde_json::Value {
+    json!({
+        "project_root": project_root,
+        "activity": "unknown",
+        "idle_since_ms": serde_json::Value::Null,
+        "idle_duration_ms": 0,
+        "observed_ms": serde_json::Value::Null,
     })
 }
 
@@ -122,7 +189,17 @@ fn handle_master_status(server: &Server) -> Resp {
         .as_ref()
         .and_then(|worker| worker_identity_and_endpoint(server, worker).1);
     let state = server.state.lock().unwrap();
-    let master = master_authority_view_with_endpoint(&state, route_scope.as_ref(), endpoint_live);
+    let workspace = workspace_idle_view(
+        server,
+        &state,
+        holder.as_ref().map(|worker| worker.id.as_str()),
+        now_ms(),
+    );
+    let mut master =
+        master_authority_view_with_endpoint(&state, route_scope.as_ref(), endpoint_live);
+    if let Some(master_object) = master.as_object_mut() {
+        master_object.insert("workspace".into(), workspace);
+    }
     Resp::data(json!({
         "master": master,
         "scope": scope_view(route_scope.as_ref()),
@@ -161,32 +238,60 @@ pub(crate) fn handle_send(
 #[path = "../name_address_tests.rs"]
 mod name_address_tests;
 
+#[cfg(test)]
+#[path = "../workspace_idle_tests.rs"]
+mod workspace_idle_tests;
+
 fn resolve_send_name_address(
     server: &Server,
     state: &State,
     target: String,
 ) -> Result<(String, Option<name_mailbox::MailboxNameAddress>), String> {
-    if target != "Jenny" && !name_resolution::ORDINARY_NAME_POOL.contains(&target.as_str()) {
-        return Ok((target, None));
-    }
     let route = server_route_scope(server, state)?.ok_or_else(|| {
         "NAME_ADDRESS_SCOPE_MISSING: current project route is unavailable".to_string()
     })?;
-    let holder = state
+    let project_scope = route.project_scope_id.as_str();
+    let current_key = canonical_project_key(&server.root).ok_or_else(|| {
+        "NAME_ADDRESS_SCOPE_MISSING: current project key is unavailable".to_string()
+    })?;
+    // `sendmessage`, `default` and channel-inbound routing share one address
+    // owner. It resolves `ceo`/bare project keys through the typed grant and
+    // rejects case-folded ambiguity instead of selecting the first holder.
+    match resolve_named_target(state, project_scope, &current_key, &target)? {
+        Some(resolved) => {
+            authoritative_send_binding(state, &route, &resolved.worker_id)
+                .map_err(str::to_owned)?;
+            Ok((
+                resolved.worker_id,
+                Some(name_mailbox::MailboxNameAddress {
+                    project_scope: project_scope.into(),
+                    name: resolved.name,
+                }),
+            ))
+        }
+        // Raw worker IDs keep their legacy direct-send meaning. Conversation
+        // defaults reject them because inbound has no stable way to re-resolve
+        // an arbitrary ID.
+        None => Ok((target, None)),
+    }
+}
+
+/// Canonical project key used by list/send/default addresses. It is the
+/// registered project root's file name, never derived from cwd or display text.
+fn canonical_project_key(root: &std::path::Path) -> Option<String> {
+    std::fs::canonicalize(root)
+        .ok()?
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+}
+
+/// Stable name currently occupied by a worker in this project, if any.
+fn stable_name_for_worker(state: &State, project_scope: &str, worker_id: &str) -> Option<String> {
+    state
         .name_occupancies
-        .get(route.project_scope_id.as_str())
-        .and_then(|names| names.get(&target))
-        .ok_or_else(|| {
-            format!("NAME_ADDRESS_UNOCCUPIED: {target} has no current holder in this project")
-        })?;
-    authoritative_send_binding(state, &route, &holder.worker_id).map_err(str::to_owned)?;
-    Ok((
-        holder.worker_id.clone(),
-        Some(name_mailbox::MailboxNameAddress {
-            project_scope: route.project_scope_id.as_str().into(),
-            name: target,
-        }),
-    ))
+        .get(project_scope)
+        .and_then(|names| names.values().find(|holder| holder.worker_id == worker_id))
+        .map(|holder| holder.name.clone())
 }
 
 fn authoritative_send_binding<'a>(
@@ -207,6 +312,96 @@ fn authoritative_send_binding<'a>(
         return Err("SEND_BINDING_REJECTED: authoritative runtime binding is ambiguous");
     }
     Ok(binding)
+}
+
+fn validate_channel_envelope_for_inbound(
+    envelope: &crate::server::channel_envelope::ChannelEnvelope,
+) -> Result<(), String> {
+    if envelope.source_channel != "qqbot" {
+        return Err("CHANNEL_ENVELOPE_CHANNEL_UNSUPPORTED: only qqbot inbound envelopes are admitted".into());
+    }
+    if envelope.channel_instance.trim().is_empty()
+        || envelope.external_user.trim().is_empty()
+        || envelope.external_conversation.trim().is_empty()
+        || envelope.platform_message_id.trim().is_empty()
+        || envelope.reply_route.trim().is_empty()
+    {
+        return Err(
+            "CHANNEL_ENVELOPE_INCOMPLETE: inbound envelope is missing a required channel identity or reply route"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+/// A QQ reply is legal only for the original recipient. Stable-name handoff
+/// keeps the right to answer when the same name moves to a new session.
+fn channel_reply_authorized(state: &State, original: &Message, from: &str) -> bool {
+    if original.to == from {
+        return true;
+    }
+    state
+        .mailbox_name_addresses
+        .get(&original.id)
+        .and_then(|address| {
+            state
+                .name_occupancies
+                .get(address.project_scope.as_str())
+                .and_then(|names| names.get(address.name.as_str()))
+        })
+        .is_some_and(|holder| holder.worker_id == from)
+}
+
+/// Commit one typed channel-inbound message and its envelope in the same
+/// durable batch. A duplicate platform event resolves to the first message
+/// instead of enqueuing a second one.
+pub(crate) fn handle_channel_inbound(
+    server: &Server,
+    from: String,
+    to: String,
+    subject: String,
+    body: String,
+    mut envelope: crate::server::channel_envelope::ChannelEnvelope,
+) -> Resp {
+    // Resolve the leading `[address]` or the conversation default before any
+    // mutation. A failed explicit address is returned as-is and never silently
+    // delivered to the default.
+    let resolved = {
+        let st = server.state.lock().unwrap();
+        match resolve_channel_inbound_target(
+            server,
+            &st,
+            &envelope.source_channel,
+            &envelope.channel_instance,
+            &envelope.external_conversation,
+            &body,
+            &to,
+        ) {
+            Ok(resolved) => resolved,
+            Err(error) => return Resp::err(error),
+        }
+    };
+    envelope.recipient_address = resolved.recipient_address.clone();
+    // The stored body is the fixed human-readable projection. The typed
+    // envelope stays the control truth; reply routing and attachments never
+    // depend on parsing this text.
+    let projected =
+        crate::server::channel_envelope::readable_projection(&envelope, &resolved.body);
+    handle_send_with_task_policy(
+        server,
+        from,
+        resolved.to,
+        "notify".into(),
+        Some(subject),
+        projected,
+        None,
+        "immediate".into(),
+        false,
+        None,
+        None,
+        None,
+        Some(envelope),
+    )
 }
 
 fn handle_authenticated_send_with_app_scope(
@@ -349,6 +544,7 @@ fn handle_authenticated_send_with_app_scope(
         None,
         reply_policy,
         target_session,
+        None,
     )
 }
 
@@ -379,12 +575,14 @@ pub(crate) fn handle_send_with_task(
         managed_subagent_id,
         None,
         None,
+        None,
     )
 }
 
 /// The real ordinary-send owner. `reply_policy` is the only source of a reply
 /// obligation; a linked reply validates and clears the original obligation in
 /// the same committed batch as the reply message.
+#[allow(clippy::too_many_arguments)]
 fn handle_send_with_task_policy(
     server: &Server,
     from: String,
@@ -398,6 +596,7 @@ fn handle_send_with_task_policy(
     managed_subagent_id: Option<&str>,
     reply_policy: Option<crate::proto::ReplyPolicy>,
     target_session: Option<String>,
+    channel_envelope: Option<crate::server::channel_envelope::ChannelEnvelope>,
 ) -> Resp {
     if !matches!(delivery_mode.as_str(), "immediate" | "queued") {
         return Resp::err("delivery mode must be immediate or queued");
@@ -412,10 +611,66 @@ fn handle_send_with_task_policy(
         ));
     }
     let mut st = server.state.lock().unwrap();
+    if let Some(envelope) = channel_envelope.as_ref() {
+        if let Err(error) = validate_channel_envelope_for_inbound(envelope) {
+            return Resp::err(error);
+        }
+        let key = crate::server::channel_envelope::platform_event_key(
+            &envelope.channel_instance,
+            &envelope.external_conversation,
+            &envelope.platform_message_id,
+        );
+        if let Some(message_id) = st.platform_event_index.get(&key) {
+            return Resp::data(json!({
+                "msg_id": message_id,
+                "deduplicated": true,
+                "channel": envelope.source_channel,
+                "platform_message_id": envelope.platform_message_id,
+            }));
+        }
+    }
+    let mut reply_route: Option<crate::server::channel_envelope::ChannelReplyRoute> = None;
     // Resolve and retain the original name under the durable admission lock.
-    let (to, name_address) = match resolve_send_name_address(server, &st, to) {
-        Ok(to) => to,
-        Err(error) => return Resp::err(error),
+    // A typed QQ reply uses the immutable envelope route and does not require a
+    // local worker target; a normal send still resolves through directory facts.
+    let (to, name_address) = if let Some(ref rid) = in_reply_to {
+        let Some(original) = st.msgs.get(rid).cloned() else {
+            return Resp::err(format!("in_reply_to message {} not found", rid));
+        };
+        match st.channel_envelopes.get(rid).cloned() {
+            Some(envelope) => {
+                if !channel_reply_authorized(&st, &original, &from) {
+                    return Resp::err(
+                        "CHANNEL_REPLY_FORBIDDEN: only the original recipient may reply through the original channel route",
+                    );
+                }
+                if to.trim().is_empty() {
+                    let route = crate::server::channel_envelope::ChannelReplyRoute::from_envelope(&envelope, rid);
+                    let target = route.reply_route.clone();
+                    reply_route = Some(route);
+                    (target, None)
+                } else if to == envelope.reply_route {
+                    let route = crate::server::channel_envelope::ChannelReplyRoute::from_envelope(&envelope, rid);
+                    reply_route = Some(route);
+                    (to, None)
+                } else {
+                    return Resp::err(
+                        "CHANNEL_REPLY_ROUTE_MISMATCH: explicit --to does not match the original channel reply route",
+                    );
+                }
+            }
+            None => match resolve_send_name_address(server, &st, to) {
+                Ok(resolved) => resolved,
+                Err(error) => return Resp::err(error),
+            },
+        }
+    } else if to.trim().is_empty() {
+        return Resp::err("SEND_TARGET_REQUIRED: sendmessage requires --to or a positional address");
+    } else {
+        match resolve_send_name_address(server, &st, to) {
+            Ok(resolved) => resolved,
+            Err(error) => return Resp::err(error),
+        }
     };
     let managed_child = if assign_task {
         let Some(id) = managed_subagent_id else {
@@ -451,9 +706,15 @@ fn handle_send_with_task_policy(
     // not depend on message dedup state.  Path references are still probed
     // later, after dedup, so a previously recorded handoff is never blocked
     // by a worktree that disappeared after delivery.
-    if !st.workers.contains_key(&to) {
+    let is_channel_reply = reply_route.is_some();
+    if !is_channel_reply && !st.workers.contains_key(&to) {
         let (error, data) = handoff_unresolved_recipient(&to);
         return Resp::err_data(error, data);
+    }
+    if is_channel_reply && target_session.is_some() {
+        return Resp::err(
+            "CHANNEL_REPLY_TARGET_SESSION_UNSUPPORTED: a typed channel reply uses the original external route",
+        );
     }
     if let Some(ref required_session) = target_session {
         let recipient_session = st
@@ -514,8 +775,13 @@ fn handle_send_with_task_policy(
         last_wake_attempt_ms: 0,
         retry_attempted: false,
     };
+    // A typed channel event is deduplicated only by its platform event
+    // identity (checked above). The ordinary body shortcut must not fold two
+    // distinct platform events, or one conversation's reply route would be
+    // reused for another event with the same text.
     if let Some(existing) = st.msgs.values().find(|m| {
-        m.from == from
+        channel_envelope.is_none()
+            && m.from == from
             && m.to == to
             && m.mtype == mtype
             && m.subject == msg.subject
@@ -571,13 +837,16 @@ fn handle_send_with_task_policy(
             );
         }
     }
-    if let Err((error, data)) = resolve_handoff_target(server, &st, &to, &msg.body) {
-        return Resp::err_data(error, data);
+    if !is_channel_reply {
+        if let Err((error, data)) = resolve_handoff_target(server, &st, &to, &msg.body) {
+            return Resp::err_data(error, data);
+        }
     }
     let mid = msg.id.clone();
     let task_id = assign_task.then(|| format!("task-{mid}"));
     let subscription = st
         .matching_subscription(&to, "direct-message", None, now_ms())
+        .filter(|_| !is_channel_reply)
         .cloned();
     let mut events = if let Some(task_id) = &task_id {
         let task = TaskRec {
@@ -605,6 +874,24 @@ fn handle_send_with_task_policy(
     } else {
         vec![Event::Sent { msg }]
     };
+    if let Some(envelope) = channel_envelope {
+        let idempotency_key = crate::server::channel_envelope::platform_event_key(
+            &envelope.channel_instance,
+            &envelope.external_conversation,
+            &envelope.platform_message_id,
+        );
+        events.push(Event::ChannelEnvelopeRecorded {
+            message_id: mid.clone(),
+            idempotency_key,
+            envelope,
+        });
+    }
+    if let Some(route) = reply_route {
+        events.push(Event::ChannelReplyRouteBound {
+            message_id: mid.clone(),
+            route,
+        });
+    }
     // The obligation record and the message commit together. The reply-cleared
     // marker is on the original message id, not this reply.
     if let Some(policy) = reply_policy {
@@ -845,8 +1132,20 @@ fn handle_cross_project_send(
         Err(error) => return Resp::err(error),
     };
     if target_master.as_deref() != Some(to.as_str()) {
+        let project_scope = GlobalState::canonical_project_scope(&server.root)
+            .ok()
+            .map(|scope| scope.as_str().to_owned())
+            .unwrap_or_default();
+        let master_label = target_master
+            .as_deref()
+            .and_then(|worker_id| stable_name_for_worker(&st, &project_scope, worker_id))
+            .unwrap_or_else(|| target_master.as_deref().unwrap_or_default().to_owned());
         return Resp::err(
-            "cross-project communication requires the target to be the project master",
+            format!(
+                "cross-project communication requires the target to be the project master; current target master is {} ({})",
+                master_label,
+                target_master.as_deref().unwrap_or_default()
+            ),
         );
     }
     let Some(recipient) = st.workers.get(&to).cloned() else {

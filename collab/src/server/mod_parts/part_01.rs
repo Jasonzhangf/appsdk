@@ -653,7 +653,8 @@ fn task_transition_allowed(current: &str, next: &str) -> bool {
     current == next
         || matches!(
             (current, next),
-            ("working", "blocked" | "verifying" | "cancelled")
+            ("pending", "cancelled")
+                | ("working", "blocked" | "verifying" | "cancelled")
                 | ("blocked", "working" | "cancelled")
                 | (
                     "verifying",

@@ -21,6 +21,7 @@ fn dispatch_with_route_context_bound(
         );
     }
     let unaccepted_resource_task = match &req {
+        Req::TaskClose { force: true, .. } => None,
         Req::TaskRelocate { task_id, .. }
         | Req::TaskWait { task_id, .. }
         | Req::TaskDeliver { task_id, .. }
@@ -166,6 +167,7 @@ fn dispatch_with_route_context_bound(
                     None,
                     None,
                     target_session,
+                    None,
                 )
             }
             _ => Resp::err(
@@ -393,41 +395,7 @@ fn dispatch_with_route_context_bound(
             Resp::err("RouteResolve/RouteResolveNative are only handled by the host daemon connection path")
         }
         Req::MsgStatus { msg_id } => {
-            let st = server.state.lock().unwrap();
-            let in_mem = st.msgs.get(&msg_id).cloned();
-            let transport_evidence = st.notification_delivery_evidence.get(&msg_id).cloned();
-            let msg = in_mem.or_else(|| {
-                let path = server
-                    .storage_root
-                    .join(".agent-collab")
-                    .join("mailbox")
-                    .join(format!("{}.json", msg_id));
-                std::fs::read_to_string(&path)
-                    .ok()
-                    .and_then(|s| serde_json::from_str::<Message>(&s).ok())
-            });
-            let answered = st.answered(&msg_id);
-            let reply_obligation = st.reply_obligations.get(&msg_id).cloned();
-            let consumed = st.receive_receipts.values().any(|receipt| {
-                receipt.message_ids.iter().any(|received| received == &msg_id)
-            });
-            let target_session = st.target_sessions.get(&msg_id).cloned();
-            let delivery_failure = st.notification_delivery_failures.get(&msg_id).cloned();
-            drop(st);
-            match msg {
-                Some(m) => Resp::data(json!({
-                    "id": m.id, "from": m.from, "to": m.to, "type": m.mtype,
-                    "subject": m.subject, "body": m.body,
-                    "state": m.state, "wake_attempts": m.wake_attempt_count,
-                    "created_at": iso(m.created_ms), "answered": answered,
-                    "wake_transport_evidence": transport_evidence,
-                    "consumed_by_recv": consumed,
-                    "reply_obligation": reply_obligation,
-                    "target_session": target_session,
-                    "notification_delivery_failure": delivery_failure,
-                })),
-                None => Resp::err(format!("message {} not found", msg_id)),
-            }
+            handle_msg_status(server, msg_id, project_context.as_ref())
         }
         Req::TaskRegister {
             worker_id,
@@ -596,6 +564,28 @@ fn dispatch_with_route_context_bound(
             Resp::err("declared roles are removed; use collab who/context for peer identity, or collab context --work-roles for work specialties")
         }
         Req::Directory => handle_directory(server),
+        Req::DirectoryAll => Resp::err("DIRECTORY_ALL_HOST_REQUIRED"),
+        Req::DefaultSet {
+            worker_id,
+            token,
+            channel,
+            channel_instance,
+            conversation,
+            target_address,
+        } => handle_default_set(
+            server,
+            worker_id,
+            token,
+            channel,
+            channel_instance,
+            conversation,
+            target_address,
+        ),
+        Req::DefaultShow {
+            channel,
+            channel_instance,
+            conversation,
+        } => handle_default_show(server, channel, channel_instance, conversation),
         Req::Workers => {
             record_ordinary_peer_presence_edges(server, None);
             let (workers_rec, tasks_map, msgs_map, keepalives_map, role_briefs) = {
@@ -884,10 +874,183 @@ fn dispatch(server: &Arc<Server>, req: Req) -> Resp {
     dispatch_with_route_context(server, req, None)
 }
 
+fn caller_identity_required(detail: impl std::fmt::Display) -> Resp {
+    Resp::err(format!(
+        "CALLER_IDENTITY_REQUIRED: caller has no identifiable session or typed Collab route for this project ({detail}); next: run `collab context` from the current project root to establish the caller identity, then retry"
+    ))
+}
+
+fn caller_route_not_found(detail: impl std::fmt::Display) -> Resp {
+    Resp::err(format!(
+        "CALLER_ROUTE_NOT_FOUND: caller has no current registered route in this project/app ({detail}); next: run `collab context` from the canonical current project root to restore the caller route, then retry"
+    ))
+}
+
+fn caller_route_ambiguous(detail: impl std::fmt::Display) -> Resp {
+    Resp::err(format!(
+        "CALLER_ROUTE_AMBIGUOUS: caller context matches multiple registered routes in this project/app ({detail}); next: run `collab context` from the canonical current project root to reconcile the caller route before retrying"
+    ))
+}
+
+fn msg_status_caller(state: &State, context: &ProjectContext) -> Result<WorkerRec, Resp> {
+    context
+        .validate()
+        .map_err(|error| caller_identity_required(format!("invalid caller context: {error}")))?;
+    let runtime = context.runtime_context.as_ref().ok_or_else(|| {
+        caller_identity_required("caller context has no runtime identity")
+    })?;
+    runtime
+        .validate()
+        .map_err(|error| caller_identity_required(format!("invalid caller runtime: {error}")))?;
+    let worker = state
+        .workers
+        .get(runtime.agent_id.as_str())
+        .ok_or_else(|| {
+            caller_route_not_found("caller runtime identity has no resident registered worker")
+        })?;
+    let route_scope = RouteScope {
+        app_scope_id: context.app_scope_id.clone(),
+        project_scope_id: context.project_scope.clone(),
+    };
+    let worker_scope = GlobalState::canonical_project_scope(Path::new(&worker.cwd))
+        .map_err(|error| caller_route_not_found(format!("invalid worker project: {error}")))?;
+    if worker_scope != route_scope.project_scope_id {
+        return Err(caller_route_not_found(
+            "caller worker belongs to another project route",
+        ));
+    }
+    let project = state
+        .global
+        .lookup_project_for_route(&route_scope)
+        .ok_or_else(|| caller_route_not_found("caller project route has no runtime owner"))?;
+    let mut bindings = project.runtime_bindings.values().filter(|binding| {
+        binding.project_scope == route_scope.project_scope_id
+            && binding.app_scope_id == route_scope.app_scope_id
+            && binding.agent_id.as_str() == runtime.agent_id.as_str()
+    });
+    let binding = bindings.next().ok_or_else(|| {
+        caller_route_not_found("caller has no authoritative runtime binding for this route")
+    })?;
+    if bindings.next().is_some() {
+        return Err(caller_route_ambiguous(
+            "caller has multiple authoritative runtime bindings for this route",
+        ));
+    }
+    let registered = crate::identity::RuntimeIdentity {
+        agent_id: binding.agent_id.clone(),
+        runtime_id: binding.runtime_id.clone(),
+        appserver_id: binding.app_scope_id.clone(),
+        endpoint_generation: binding.endpoint_generation,
+        binding_id: binding.binding_id.clone(),
+        session_id: binding.session_id.clone(),
+        native_thread_id: binding.native_thread_id.clone(),
+    };
+    registered
+        .validate()
+        .map_err(|error| caller_route_not_found(format!("invalid registered route: {error}")))?;
+    crate::identity::validate_binding(&registered, runtime).map_err(|error| {
+        caller_route_not_found(format!("caller route no longer matches its binding: {error}"))
+    })?;
+    Ok(worker.clone())
+}
+
+fn message_id_is_path_safe(msg_id: &str) -> bool {
+    !msg_id.is_empty()
+        && msg_id != "."
+        && msg_id != ".."
+        && !msg_id.contains('/')
+        && !msg_id.contains('\\')
+        && !msg_id.chars().any(char::is_control)
+}
+
+fn read_message_status_target(
+    server: &Server,
+    state: &State,
+    msg_id: &str,
+) -> Result<Option<Message>, String> {
+    if let Some(message) = state.msgs.get(msg_id) {
+        return Ok(Some(message.clone()));
+    }
+    let path = server
+        .storage_root
+        .join(".agent-collab")
+        .join("mailbox")
+        .join(format!("{msg_id}.json"));
+    match std::fs::read_to_string(&path) {
+        Ok(serialized) => serde_json::from_str::<Message>(&serialized)
+            .map(Some)
+            .map_err(|error| format!("persisted target message is invalid: {error}")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("persisted target message could not be read: {error}")),
+    }
+}
+
+fn handle_msg_status(
+    server: &Server,
+    msg_id: String,
+    project_context: Option<&ProjectContext>,
+) -> Resp {
+    if !message_id_is_path_safe(&msg_id) {
+        return Resp::err(
+            "MESSAGE_ID_INVALID: target message ID is not a safe retained message identifier; next: use the exact ID printed by send or recv",
+        );
+    }
+    let st = server.state.lock().unwrap();
+    let caller = match project_context {
+        Some(context) => match msg_status_caller(&st, context) {
+            Ok(caller) => Some(caller),
+            Err(response) => return response,
+        },
+        // Direct reducer tests have no wire context. Public wire requests
+        // require project context before this handler is reachable.
+        None => None,
+    };
+    let msg = match read_message_status_target(server, &st, &msg_id) {
+        Ok(Some(message)) => message,
+        Ok(None) => {
+            return Resp::err(format!(
+                "MESSAGE_NOT_FOUND: target message {msg_id} does not exist in retained project mailboxes; next: verify the message ID or inspect `collab inbox` for retained messages"
+            ));
+        }
+        Err(error) => {
+            return Resp::err(format!(
+                "MESSAGE_LOOKUP_FAILED: target message {msg_id} exists but its durable state could not be read ({error}); next: preserve the message ID and inspect daemon mailbox storage before retrying"
+            ));
+        }
+    };
+    if let Some(caller) = caller {
+        if msg.from != caller.id && msg.to != caller.id {
+            return Resp::err(format!(
+                "CALLER_NOT_PERMITTED: caller is authenticated but is neither the sender nor recipient of message {msg_id}; next: query only messages sent by or addressed to this caller"
+            ));
+        }
+    }
+    let transport_evidence = st.notification_delivery_evidence.get(&msg_id).cloned();
+    let answered = st.answered(&msg_id);
+    let reply_obligation = st.reply_obligations.get(&msg_id).cloned();
+    let consumed = st.receive_receipts.values().any(|receipt| {
+        receipt.message_ids.iter().any(|received| received == &msg_id)
+    });
+    let target_session = st.target_sessions.get(&msg_id).cloned();
+    let delivery_failure = st.notification_delivery_failures.get(&msg_id).cloned();
+    Resp::data(json!({
+        "id": msg.id, "from": msg.from, "to": msg.to, "type": msg.mtype,
+        "subject": msg.subject, "body": msg.body,
+        "state": msg.state, "wake_attempts": msg.wake_attempt_count,
+        "created_at": iso(msg.created_ms), "answered": answered,
+        "wake_transport_evidence": transport_evidence,
+        "consumed_by_recv": consumed,
+        "reply_obligation": reply_obligation,
+        "target_session": target_session,
+        "notification_delivery_failure": delivery_failure,
+    }))
+}
+
 fn request_requires_project_context(req: &Req) -> bool {
     !matches!(
         req,
         Req::Ping
+            | Req::DirectoryAll
             | Req::RouteResolve { .. }
             | Req::RouteResolvePaneRecovery { .. }
             | Req::RouteResolveNative { .. }

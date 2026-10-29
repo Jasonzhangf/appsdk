@@ -1341,6 +1341,8 @@ fn tmux_reregistration_replaces_a_persisted_appserver_default_wake_lease() {
                         created_ms: now_ms(),
                         updated_ms: now_ms(),
                         status_reason: None,
+                        patrol_idle_since_ms: None,
+                        patrol_last_push_ms: 0,
                     },
                 }],
             )
@@ -1541,6 +1543,8 @@ fn pending_unattempted_direct_message_is_recovered_once_and_not_replayed() {
             created_ms: now - 1000,
             updated_ms: now - 1000,
             status_reason: Some("goal-schedule-ended".into()),
+            patrol_idle_since_ms: None,
+            patrol_last_push_ms: 0,
         },
     }]);
     server.commit(&[
@@ -1760,6 +1764,8 @@ fn maintenance_tick_refreshes_idle_default_lease_without_recipient_context() {
             created_ms: now - DEFAULT_DIRECT_MESSAGE_TTL_SECONDS as i64 * 1000,
             updated_ms: now - DEFAULT_DIRECT_MESSAGE_TTL_SECONDS as i64 * 1000,
             status_reason: None,
+            patrol_idle_since_ms: None,
+            patrol_last_push_ms: 0,
         },
     }]);
 
@@ -1861,6 +1867,8 @@ fn maintenance_tick_refreshes_default_lease_with_timers_disabled() {
             created_ms: now - DEFAULT_DIRECT_MESSAGE_TTL_SECONDS as i64 * 1000,
             updated_ms: now - DEFAULT_DIRECT_MESSAGE_TTL_SECONDS as i64 * 1000,
             status_reason: None,
+            patrol_idle_since_ms: None,
+            patrol_last_push_ms: 0,
         },
     }]);
 
@@ -2049,6 +2057,8 @@ fn goal_reconcile_retires_retained_basename_subject_without_arbitrary_ids() {
             created_ms: now,
             updated_ms: now,
             status_reason: None,
+            patrol_idle_since_ms: None,
+            patrol_last_push_ms: 0,
         },
     }]);
 
@@ -2124,6 +2134,8 @@ fn registration_adds_default_lease_when_only_short_direct_message_lease_exists()
             created_ms: now,
             updated_ms: now,
             status_reason: None,
+            patrol_idle_since_ms: None,
+            patrol_last_push_ms: 0,
         },
     });
 

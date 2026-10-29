@@ -477,6 +477,23 @@ fn peer_publication_can_be_claimed_by_self_or_master() {
     assert_eq!(own_claim["task"]["owner"], peer);
     assert_eq!(own_claim["task"]["publisher"], peer);
     assert_eq!(own_claim["task"]["status"], "working");
+
+    // The publisher now owns the task as working work, so a non-publisher
+    // cannot claim the same task at the observed revision.
+    let non_publisher_reclaim = fixture.command_public(
+        &[
+            "board",
+            "claim",
+            "peer-self-claim",
+            "--expected-revision",
+            "2",
+        ],
+        THREAD_A,
+    );
+    assert!(
+        !non_publisher_reclaim.status.success(),
+        "a non-publisher cannot claim work the publisher already owns: {non_publisher_reclaim:?}"
+    );
 }
 
 #[test]
@@ -1737,4 +1754,83 @@ fn recv_public_replay_keeps_payload_and_reply_without_delivery_diagnostics() {
         .unwrap()
         .iter()
         .any(|message| message["id"] == next["msg_id"]));
+}
+
+/// Public CLI black box for the accepted pending-close lifecycle: a live master
+/// force-closes a pending task, a non-force close stays gated, and the pending
+/// publisher cancels unbound work through the board update entry.
+#[test]
+fn pending_publisher_close_lifecycle_public_cli() {
+    let (fixture, master, peer) = setup();
+
+    publish(&fixture, "pending-close-force");
+    let forced = fixture.run_public(
+        &[
+            "task",
+            "close",
+            "pending-close-force",
+            "--force",
+            "--reason",
+            "legacy pending task force closed by live master",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(forced["status"], "closed");
+    assert_eq!(forced["owner"], master);
+    assert_eq!(
+        fixture.run_public(&["task", "status", "pending-close-force"], THREAD_A)["status"],
+        "closed"
+    );
+
+    publish(&fixture, "pending-close-gated");
+    let gated = fixture.command_public(&["task", "close", "pending-close-gated"], THREAD_A);
+    assert!(
+        !gated.status.success(),
+        "non-force close must stay gated: {gated:?}"
+    );
+    let stderr = String::from_utf8_lossy(&gated.stderr);
+    assert!(
+        stderr.contains("BOARD_ACCEPT_REQUIRED"),
+        "non-force close must return BOARD_ACCEPT_REQUIRED: {stderr}"
+    );
+    assert_eq!(
+        fixture.run_public(&["task", "status", "pending-close-gated"], THREAD_A)["status"],
+        "pending"
+    );
+
+    let published = fixture.run_public(
+        &[
+            "board",
+            "publish",
+            "pending-cancel-board",
+            "--title",
+            "pending cancel",
+            "--description",
+            "unbound pending work",
+            "--delivery-condition",
+            "cancelled",
+            "--test-condition",
+            "CLI 黑盒通过",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(published["task"]["status"], "pending");
+    assert_eq!(published["task"]["owner"], peer);
+    let cancelled = fixture.run_public(
+        &[
+            "board",
+            "update",
+            "pending-cancel-board",
+            "--expected-revision",
+            "1",
+            "--status",
+            "cancelled",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(cancelled["task"]["status"], "cancelled");
+    assert_eq!(
+        fixture.run_public(&["task", "status", "pending-cancel-board"], THREAD_B)["status"],
+        "cancelled"
+    );
 }

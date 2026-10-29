@@ -389,20 +389,29 @@ fn retarget_owned_notification_events(
         .notification_subscriptions
         .values()
         .filter(|subscription| {
-            subscription.worker_id == worker_id
+            let recoverable = subscription.worker_id == worker_id
                 && subscription.id != default_id
                 && subscription.expires_ms > now
                 && matches!(subscription.status.as_str(), "armed" | "transport-lost")
                 && (subscription.status == "transport-lost"
                     || subscription.method != transport.kind.as_str()
-                    || subscription.target != target)
+                    || subscription.target != target);
+            let cancelled_project_patrol = subscription.worker_id == worker_id
+                && subscription.id != default_id
+                && crate::server::is_exact_project_patrol(subscription)
+                && subscription.status == "cancelled"
+                && (subscription.method != transport.kind.as_str()
+                    || subscription.target != target);
+            recoverable || cancelled_project_patrol
         })
         .map(|subscription| {
             let mut subscription = subscription.clone();
             subscription.method = transport.kind.as_str().to_owned();
             subscription.target = target.to_owned();
-            subscription.status = "armed".into();
-            subscription.status_reason = None;
+            if subscription.status != "cancelled" {
+                subscription.status = "armed".into();
+                subscription.status_reason = None;
+            }
             subscription.updated_ms = now;
             Event::NotificationSubscribed { subscription }
         })
@@ -530,6 +539,8 @@ fn default_direct_message_events(
                     created_ms: now,
                     updated_ms: now,
                     status_reason: None,
+                    patrol_idle_since_ms: None,
+                    patrol_last_push_ms: 0,
                 },
             });
         }
@@ -571,6 +582,8 @@ fn default_direct_message_events(
                 created_ms: now,
                 updated_ms: now,
                 status_reason: None,
+                patrol_idle_since_ms: None,
+                patrol_last_push_ms: 0,
             },
         });
         for message_id in std::mem::take(&mut pending_direct_message_ids).into_iter() {
@@ -602,6 +615,8 @@ fn default_direct_message_events(
             created_ms: now,
             updated_ms: now,
             status_reason: None,
+            patrol_idle_since_ms: None,
+            patrol_last_push_ms: 0,
         },
     });
     for message_id in std::mem::take(&mut pending_direct_message_ids).into_iter() {
@@ -641,11 +656,11 @@ fn restore_registered_peer_default_leases_at(server: &Server, now: i64) {
     }
 }
 
-fn selected_transport_for_worker(worker: &WorkerRec) -> Option<SelectedTransport> {
+pub(crate) fn selected_transport_for_worker(worker: &WorkerRec) -> Option<SelectedTransport> {
     worker.transport.clone()
 }
 
-fn notification_target(transport: &SelectedTransport) -> Option<&str> {
+pub(crate) fn notification_target(transport: &SelectedTransport) -> Option<&str> {
     match transport.kind {
         TransportKind::Tmux => transport.thread_id.as_deref().or_else(|| {
             transport

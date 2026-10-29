@@ -130,13 +130,14 @@ teammate 或 worker 标识；不知道这些内部标识不构成转请 master �
 | 操作 | 使用入口 |
 | --- | --- |
 | 首次注册或明确恢复身份 | 在自己的项目运行 `collab context` |
-| 同项目发送或通知 reviewer | `collab sendmessage --to '<稳定名字或真实from>' --subject '<主题>' '<正文>'`；例如同项目 Alice 可直接用 `--to Alice`，不需要先找内部 worker ID 或让 master 转发 |
+| 查可投递地址 | `collab list`；全局目录，不依赖当前目录 |
+| 发送或通知 reviewer（同项目或跨项目同一个命令） | `collab send --to '<project.name>' --subject '<主题>' --content '<正文>'`；地址来自 `collab list`。例如同项目可直接用 `--to Alice`，不需要先找内部 worker ID 或让 master 转发 |
 | 回复原请求 | 同一发送命令，原消息确有 ID 时加 `--in-reply-to '<原消息ID>'`；没有 ID 不猜、不查内部信箱找值 |
 | 只读查项目通信目录（未注册可用） | `collab directory`；只读返回已知接收方白名单，不写 presence，不暴露凭据或任务细节 |
-| 匿名发送通知（未注册可用） | `collab sendmessage --unknown-sender --to '<目标peer>' [--target-session '<会话>'] --subject '<主题>' '<正文>'`；固定来源为 unknown，跳过身份获取，无回信义务 |
+| 匿名发送通知（未注册可用） | `collab send --unknown-sender --to '<目标peer>' [--target-session '<会话>'] --subject '<主题>' '<正文>'`；固定来源为 unknown，跳过身份获取，无回信义务 |
 | DSH 收件 | gateway 将完整正文送入原生回合；直接处理和回信，不运行 `recv/ack` |
 | 非 DSH 收件 | 按本 Skill 的 `collab recv` 流程消费 |
-| 确实跨项目 | 沿下文 master-to-master 通道；普通 peer 交给自己的 master，不把跨项目地址传给 sendmessage |
+| 跨项目 | 同一个 `collab send`。调用者必须是源项目当前 master，目标是目标项目当前 master；没有权限时返回 `PERMISSION_DENIED` 并指出当前 master。普通 peer 交给自己的 master |
 
 ### 未注册脚本与固定 Session
 
@@ -175,27 +176,25 @@ Alice 等收件人不存在。若 `resolve-agent` 错误列出自己的 session 
 无 action 但要求答复时，直接回答原问题；仅普通信息且未要求回复时，不自动回“收到”。
 “完成后回复”要求在交回实际结果时答复，不能用“已收到、正在做”代替完成结果。
 
-先区分项目内与跨项目消息。下面的 `sendmessage` 回复命令仅用于项目内消息。
-跨项目消息的 `from` 是 `<worker-id>@<source-project>`；必须按下文
-“Cross-project master communication”走 `master send`，不能把整个跨项目地址传给 `sendmessage`。
-项目内回复使用原消息的真实 from 和 id，不猜名字或任务 ID：
-`collab sendmessage --to '<原消息from>' --subject '<主题>' --in-reply-to '<原消息ID>' '<实际结果、答复或阻塞证据>'`。
+项目内和跨项目回复都使用同一个 `collab send`。项目内用原消息的真实 from 和 id，
+不猜名字或任务 ID；跨项目用 `collab list` 的 `project.name` 地址，权限由 daemon 校验：
+`collab send --to '<原消息from>' --subject '<主题>' --in-reply-to '<原消息ID>' --content '<实际结果、答复或阻塞证据>'`。
 向用户报告、消费通知、ACK 或写任务进度都不等于已回复请求方。回复不自动要求对方再回，
 只有新的 action 或明确追问才开启新一轮请求，避免无意义互答。
 系统提醒本身不是请求方；它引用原消息时回复该原消息的发送者，不向 `collab-server` 代答。
 
-项目内普通投递使用以下参数；两个回复选项互斥，不带选项默认不建立 daemon 回复标记：
+普通投递使用以下参数；两个回复选项互斥，不带选项默认不建立 daemon 回复标记：
 
 ```sh
-collab sendmessage --to '<接收者>' --subject '<问题>' --reply-required '<需要答复的问题或action>'
-collab sendmessage --to '<接收者>' --subject '<任务>' --reply-on-completion '<已确认范围与交付要求>'
-collab sendmessage --to '<原消息from>' --subject '<结果>' --in-reply-to '<原消息ID>' '<实际答复>'
+collab send --to '<接收者>' --subject '<问题>' --reply-required --content '<需要答复的问题或action>'
+collab send --to '<接收者>' --subject '<任务>' --reply-on-completion --content '<已确认范围与交付要求>'
+collab send --to '<原消息from>' --subject '<结果>' --in-reply-to '<原消息ID>' --content '<实际答复>'
 ```
 
 选项放在位置正文之前。结果回复不附加回复要求；消费、ACK 或对用户汇报不清标记，
 真正关联回复的成功入队才清标记。若只报中间进度且仍需完成后答复，发送不带
 `--in-reply-to` 的普通进度消息，不提前消除原回复要求。daemon 不判断正文是否真的完成。
-这些参数属于项目内 `sendmessage`；跨项目 `master send` 尚未接入回复标记。
+这些参数属于项目内发送；跨项目发送暂不支持回复标记。
 
 交回协作结果后，立即接续自己原来的未完任务。先核对待回复要求、协作请求和本人任务，
 落实当前可执行动作；确无可继续工作时，按当前流程交回并申请下一步或 idle。
@@ -574,12 +573,19 @@ or implementation details.
    subscriptions.
 10. 每个项目的 Jenny（当前获授权 master）默认承担本项目 worker 巡检。初始化或恢复
     本人 longhorizon 后，确保本项目常驻巡检已 armed；它是当前 master 的 `master-idle`
-    订阅，subject `project-patrol`、interval `900000` 毫秒，ensure/renew 复用同一
-    订阅，不重复创建。`appsdk longhorizon show` 是只读投影，读取成功不证明已 arm。
+    订阅，subject `project-patrol`、目标 interval `1500000` 毫秒（20-30 分钟窗口，
+    默认 25 分钟），ensure/renew 复用同一订阅，不重复创建。`900000` 只兼容已存在的
+    旧订阅；`collab notify status` 的 `project_patrol.cadence_runtime_gap` 为
+    `PATROL_CADENCE_RUNTIME_GAP` 时，报告运行节奏未达目标，不声称已对齐。
+    `appsdk longhorizon show` 是只读投影，读取成功不证明已 arm。
     有限 goal/task 定时器按生命周期关闭，单个 goal 结束不关闭这条常驻项目巡检义务。
-    每次巡检提醒检查 worker 活动、未关闭 board 任务、当前绑定和按任务取消状态；
+    每次巡检提醒先检查四项：未解决的 P0/P1；未完成任务或 ready 工作；自有 worktree
+    与资源释放；peer/worker 的 busy/idle 及 idle 原因是否合理。然后再检查未关闭
+    board 任务、当前绑定和按任务取消状态。15 分钟 tick 只检测 due，可信连续 idle
+    严格超过 30 分钟才首次推送，同一 idle 阶段重复推送至少间隔 30 分钟；
     存在全局 CEO 时按 [board idle 巡检契约](references/board-idle-patrol.md)回报本项目
-    实质进度。
+    实质进度。`collab master status` 与 `collab ceo progress` 的 `workspace` 必须是
+    当前 master 绑定注册的 canonical project root。
 11. 已持有未关闭 board 任务的 peer 在正态 online+idle 时由本人巡检唤醒继续推理；
     busy 跳过且不补发；unknown、offline、cold 或 waiting_user 产生零传输输入。
     peer 可仅取消本人任务的 board-idle 巡检，入口为
@@ -595,6 +601,26 @@ or implementation details.
     隔离公开入口/native 与有限 timer 兼容验收；这不等于生产 daemon 启用或真实
     peer 消费恢复推理已验证。使用前按运行 daemon 的实际构建核实
     `collab notify methods` 与 `collab notify status`。
+12. 当前 master 可取消本人的常驻项目巡检，入口为
+    `collab notify cancel --event master-idle [--reason <text>] [--resume-condition <text>]`。
+    它只作用于 `master-idle`、subject `project-patrol`、目标 interval `1500000`
+    （兼容旧 `900000`）的精确订阅；
+    只有当前 master 可调用，其他 owner 或旧载体返回 `PROJECT_PATROL_MASTER_REQUIRED`，
+    没有该订阅返回 `PROJECT_PATROL_NOT_FOUND`。此入口拒绝 `--task-id`。取消要求项目已在
+    `ceo_report_state.projects[<canonical project>].revision` 记录至少一次进度，且没有
+    closed/cancelled 以外、又不具备有效 `TaskRec.wait` 的未关闭项目任务；只把等待记录
+    存在的 waiting 任务视为豁免，不用 `waiting_user`。不满足时返回
+    `PROJECT_PATROL_CANCEL_NOT_ELIGIBLE`，并带
+    `PROJECT_PATROL_PROGRESS_NOT_RECORDED` 或 `PROJECT_PATROL_WORK_REMAINS`。成功回执
+    返回原订阅 ID、`status=cancelled`、`changed=true`，并结束该订阅未接受的 pending
+    唤醒；重复取消返回同一 ID、`changed=false`，原因与时间不变。显式精确
+    `collab notify subscribe --event master-idle --subject project-patrol --every-ms 1500000`
+    恢复原 ID 为 `rearmed`；新增项目任务或等待释放会自动 rearm 同一订阅。同稳定名字
+    换会话保留 cancelled。`collab notify status` 的 `project_patrol` 只读投影给出
+    `armed`/`cancelled`/`missing`、`interval_ms`、`target_interval_ms` 和
+    `cadence_runtime_gap`；direct-message 租约始终独立保留，peer board idle 取消
+    语义不变。这些入口已在当前源码实现；是否在运行 daemon 生效仍须按实际构建
+    核实 `collab notify methods` 与 `collab notify status`。
 
 A legacy managed-subagent record creates no new patrol task, subscription,
 dispatch, or execution authority. Its parent or master preserves it only for
@@ -1504,10 +1530,17 @@ master 时先取得本次启动批准。收到真实就绪握手后继续派发�
 
 从发送者自己的项目目录执行下列命令；`--project` 只指定接收项目，不改变发送者身份：
 
-This existing master-to-master channel is master-only and explicit. Only the
-current master grant holder may send to the current master grant holder of
-another initialized project; non-master peers and managed subagents are
-rejected before any message is persisted:
+`collab send` is the single public cross-project command:
+
+```sh
+collab send --to '<project.name>' --subject <short-topic> --content "<original message>"
+```
+
+It resolves the address from `collab list`. Only the current source-project
+master may send to the current target-project master; non-master peers and
+managed subagents are rejected before any message is persisted, and the error
+names the current master. The lower-level `master send` form remains as a
+compatibility entry:
 
 ```sh
 collab master send --project /abs/path/to/target --to <target-master> \
@@ -2237,8 +2270,12 @@ The user-confirmed board idle patrol contract is
 [board-idle-patrol.md](references/board-idle-patrol.md). It requires Jenny default
 arming, real-time idle notification where connected, a 15-minute busy-skipping
 check otherwise, per-task owner cancellation, and CEO progress deduplication with
-`Asia/Shanghai` quiet hours. The entry points exist in the current source and
-passed this round's isolated public CLI/native and finite-timer compatibility
-acceptance. That is not proof that a production daemon is enabled or that
-production peer consumption and inference resumption are verified; verify
-`collab notify methods` and `collab notify status` on the running daemon.
+`Asia/Shanghai` quiet hours. The current master may cancel its exact standing
+project patrol with `collab notify cancel --event master-idle`; the cancel
+requires a recorded `ceo_report_state` revision, rejects actionable unclosed
+project tasks, is idempotent, and is reversed only by an explicit exact
+subscribe or a relevant project-work transition. The entry points exist in the
+current source. The master-cancel entry has public black-box test definitions;
+that is not proof that a production daemon is enabled or that production peer
+consumption and inference resumption are verified. Verify `collab notify
+methods` and `collab notify status` on the running daemon.

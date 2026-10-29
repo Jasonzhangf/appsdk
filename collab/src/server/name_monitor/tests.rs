@@ -2,7 +2,9 @@ use super::*;
 use crate::client::adapters::tmux::{AgentActivity, AgentPresence};
 use crate::proto::{SelectedTransport, TransportKind};
 use crate::scope::HostPaths;
-use crate::server::name_state::{AgentActivity as Activity, AgentPresence as Presence};
+use crate::server::name_state::{
+    AgentActivity as Activity, AgentActivityRecord, AgentPresence as Presence,
+};
 use crate::server::state::{State, WorkerRec};
 use std::sync::{Arc, Mutex};
 
@@ -142,6 +144,60 @@ fn ordinary_worker_maps_activity_and_deduplicates_facts() {
 }
 
 #[test]
+fn idle_interval_restarts_from_the_first_post_restart_observation() {
+    let server = server();
+    // A journal written by the previous daemon process records a long idle run
+    // for the same binding and session.
+    server.commit(&[crate::server::state::Event::AgentActivityObserved {
+        activity: AgentActivityRecord {
+            project_scope: scope(&server),
+            worker_id: "worker".into(),
+            session_id: "agent-session".into(),
+            activity: Activity::Idle,
+            background: true,
+            reason: "observed before restart".into(),
+            observed_ms: 500,
+            idle_since_ms: Some(500),
+        },
+    }]);
+    tick_with_observer(&server, 1_000_000, &|_| {
+        Ok(observation(AgentPresence::Online, AgentActivity::Idle))
+    });
+    assert_eq!(
+        server.state.lock().unwrap().agent_activity[&scope(&server)]["worker"].idle_since_ms,
+        Some(1_000_000),
+        "the first observation after a daemon restart starts a fresh interval"
+    );
+    tick_with_observer(&server, 1_060_000, &|_| {
+        Ok(observation(AgentPresence::Online, AgentActivity::Idle))
+    });
+    assert_eq!(
+        server.state.lock().unwrap().agent_activity[&scope(&server)]["worker"].idle_since_ms,
+        Some(1_000_000),
+        "later observations in the same process keep the interval"
+    );
+    std::fs::remove_dir_all(&server.root).unwrap();
+}
+
+#[test]
+fn legacy_activity_record_without_idle_start_decodes_as_untracked() {
+    let legacy = serde_json::json!({
+        "project_scope": "/tmp/legacy",
+        "worker_id": "worker",
+        "session_id": "agent-session",
+        "activity": "idle",
+        "background": false,
+        "reason": "legacy",
+        "observed_ms": 42,
+    });
+    let record: AgentActivityRecord = serde_json::from_value(legacy).unwrap();
+    assert_eq!(
+        record.idle_since_ms, None,
+        "an old journal never backfills a trusted idle start from observed_ms"
+    );
+}
+
+#[test]
 fn shell_offline_and_probe_error_unknown() {
     let server = server();
     tick_with_observer(&server, 1, &|_| {
@@ -227,5 +283,127 @@ fn only_tmux_with_agent_session_is_observed() {
         panic!("other transport must remain untouched")
     });
     assert!(server.state.lock().unwrap().agent_presence.is_empty());
+    std::fs::remove_dir_all(&server.root).unwrap();
+}
+
+#[test]
+fn idle_interval_requires_current_binding_and_continuity() {
+    let server = server();
+    tick_with_observer(&server, 1_000, &|_| {
+        Ok(observation(AgentPresence::Online, AgentActivity::Idle))
+    });
+    assert_eq!(
+        server.state.lock().unwrap().agent_activity[&scope(&server)]["worker"].idle_since_ms,
+        Some(1_000),
+        "first trusted online idle observation starts the trusted interval"
+    );
+
+    tick_with_observer(&server, 6_000, &|_| {
+        Ok(observation(AgentPresence::Online, AgentActivity::Idle))
+    });
+    assert_eq!(
+        server.state.lock().unwrap().agent_activity[&scope(&server)]["worker"].idle_since_ms,
+        Some(1_000),
+        "continuous idle under the same binding preserves the trusted start"
+    );
+
+    for (source, label) in [
+        (AgentActivity::Busy, "busy"),
+        (AgentActivity::WaitingUser, "waiting_user"),
+    ] {
+        tick_with_observer(&server, 7_000, &|_| {
+            Ok(observation(AgentPresence::Online, source))
+        });
+        assert_eq!(
+            server.state.lock().unwrap().agent_activity[&scope(&server)]["worker"].idle_since_ms,
+            None,
+            "{label} must clear the trusted idle start"
+        );
+        tick_with_observer(&server, 8_000, &|_| {
+            Ok(observation(AgentPresence::Online, AgentActivity::Idle))
+        });
+        assert_eq!(
+            server.state.lock().unwrap().agent_activity[&scope(&server)]["worker"].idle_since_ms,
+            Some(8_000),
+            "{label} break starts a fresh trusted interval"
+        );
+    }
+
+    tick_with_observer(&server, 9_000, &|_| {
+        Ok(observation(AgentPresence::Unknown, AgentActivity::Unknown))
+    });
+    assert_eq!(
+        server.state.lock().unwrap().agent_activity[&scope(&server)]["worker"].idle_since_ms,
+        None,
+        "unknown activity must clear the trusted idle start"
+    );
+    tick_with_observer(&server, 10_000, &|_| {
+        Ok(observation(AgentPresence::Offline, AgentActivity::Unknown))
+    });
+    assert_eq!(
+        server.state.lock().unwrap().agent_activity[&scope(&server)]["worker"].idle_since_ms,
+        None,
+        "offline observation must stay untrusted"
+    );
+
+    tick_with_observer(&server, 11_000, &|_| {
+        Ok(observation(AgentPresence::Online, AgentActivity::Idle))
+    });
+    {
+        let mut state = server.state.lock().unwrap();
+        let transport = state
+            .workers
+            .get_mut("worker")
+            .unwrap()
+            .transport
+            .as_mut()
+            .unwrap();
+        transport.session_id = Some("new-session".into());
+    }
+    tick_with_observer(&server, 12_000, &|_| {
+        Ok(observation(AgentPresence::Online, AgentActivity::Idle))
+    });
+    assert_eq!(
+        server.state.lock().unwrap().agent_activity[&scope(&server)]["worker"].idle_since_ms,
+        Some(12_000),
+        "a new session starts a fresh trusted interval instead of reusing the old start"
+    );
+
+    tick_with_observer(&server, 13_000, &|_| {
+        Ok(observation(AgentPresence::Online, AgentActivity::Idle))
+    });
+    {
+        let mut state = server.state.lock().unwrap();
+        let activity = state
+            .agent_activity
+            .get_mut(&scope(&server))
+            .expect("scope present")
+            .get_mut("worker")
+            .unwrap();
+        activity.observed_ms = 20_000;
+    }
+    tick_with_observer(&server, 14_000, &|_| {
+        Ok(observation(AgentPresence::Online, AgentActivity::Idle))
+    });
+    assert_eq!(
+        server.state.lock().unwrap().agent_activity[&scope(&server)]["worker"].idle_since_ms,
+        Some(14_000),
+        "a clock rollback must not keep a stale trusted idle start"
+    );
+
+    let mut replayed = State::default();
+    for line in std::fs::read_to_string(&server.journal_path)
+        .unwrap()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+    {
+        let event: crate::server::state::Event = serde_json::from_str(line).unwrap();
+        replayed.apply(&event);
+    }
+    assert_eq!(
+        replayed.agent_activity[&scope(&server)]["worker"].idle_since_ms,
+        Some(14_000),
+        "typed activity continuity replays through the shared journal"
+    );
     std::fs::remove_dir_all(&server.root).unwrap();
 }

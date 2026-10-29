@@ -2,6 +2,117 @@
 /// event, subject, and interval are ensured idempotently; every other
 /// subscription keeps the ordinary finite-schedule semantics.
 const PROJECT_PATROL_SUBJECT: &str = "project-patrol";
+const PROJECT_PATROL_TARGET_INTERVAL_MS: i64 = 1_500_000;
+const PROJECT_PATROL_COMPAT_INTERVAL_MS: i64 = 900_000;
+
+pub(crate) fn is_project_patrol_interval(interval_ms: Option<i64>) -> bool {
+    matches!(
+        interval_ms,
+        Some(PROJECT_PATROL_TARGET_INTERVAL_MS | PROJECT_PATROL_COMPAT_INTERVAL_MS)
+    )
+}
+
+pub(crate) fn is_exact_project_patrol(subscription: &NotificationSubscription) -> bool {
+    subscription.event == "master-idle"
+        && subscription.subject.as_deref() == Some(PROJECT_PATROL_SUBJECT)
+        && is_project_patrol_interval(subscription.interval_ms)
+}
+
+/// The current master's one standing project patrol record.
+///
+/// Callers that move or recover this resource must share this selector so the
+/// exact event/subject/interval contract never drifts between the cancel entry,
+/// the subscribe rearm, the daemon auto-recovery, and the name handoff.
+/// Historical expired records never mask the current cancelled or live record.
+pub(crate) fn exact_project_patrol<'a>(
+    subscriptions: &'a std::collections::HashMap<String, NotificationSubscription>,
+    worker_id: &str,
+    now: i64,
+) -> Option<&'a NotificationSubscription> {
+    subscriptions
+        .values()
+        .filter(|subscription| {
+            subscription.worker_id == worker_id
+                && is_exact_project_patrol(subscription)
+                && (subscription.status == "cancelled"
+                    || (subscription.status == "armed" && subscription.expires_ms > now))
+        })
+        .min_by_key(|subscription| (subscription.created_ms, subscription.id.clone()))
+}
+
+fn canonical_worker_project(state: &State, worker_id: &str) -> Option<String> {
+    state
+        .workers
+        .get(worker_id)
+        .and_then(|worker| std::fs::canonicalize(&worker.cwd).ok())
+        .map(|root| root.to_string_lossy().into_owned())
+}
+
+fn project_task_ids(state: &State, project: &str) -> Vec<String> {
+    let mut task_ids: Vec<_> = state
+        .tasks
+        .values()
+        .filter(|task| canonical_worker_project(state, &task.owner).as_deref() == Some(project))
+        .map(|task| task.id.clone())
+        .collect();
+    task_ids.sort();
+    task_ids
+}
+
+fn project_patrol_eligibility(
+    server: &Server,
+    state: &State,
+) -> Result<serde_json::Value, String> {
+    let project = route_scope_for_root(&server.root, state)
+        .map_err(|error| format!("PROJECT_PATROL_PROJECT_SCOPE_UNAVAILABLE: {error}"))?
+        .ok_or_else(|| "PROJECT_PATROL_PROJECT_SCOPE_UNAVAILABLE: project route is not registered".to_string())?
+        .project_scope_id
+        .as_str()
+        .to_owned();
+    let task_ids = project_task_ids(state, &project);
+    let mut waiting = Vec::new();
+    let mut blocked = Vec::new();
+    for task_id in &task_ids {
+        let Some(task) = state.tasks.get(task_id) else {
+            continue;
+        };
+        if matches!(task.status.as_str(), "closed" | "cancelled") {
+            continue;
+        }
+        if task.status == "waiting" && task.wait.is_some() {
+            waiting.push(task.id.clone());
+        } else {
+            blocked.push(json!({
+                "task_id": task.id,
+                "owner": task.owner,
+                "status": task.status,
+                "wait": task.wait,
+            }));
+        }
+    }
+    let progress_revision = state
+        .ceo_report_state
+        .projects
+        .get(&project)
+        .map(|progress| progress.revision)
+        .unwrap_or(0);
+    let eligible = blocked.is_empty() && progress_revision >= 1;
+    let blocker = if progress_revision == 0 {
+        Some("PROJECT_PATROL_PROGRESS_NOT_RECORDED")
+    } else if !blocked.is_empty() {
+        Some("PROJECT_PATROL_WORK_REMAINS")
+    } else {
+        None
+    };
+    Ok(json!({
+        "eligible": eligible,
+        "project_scope": project,
+        "progress_revision": progress_revision,
+        "waiting_task_ids": waiting,
+        "blocking_tasks": blocked,
+        "blocker": blocker,
+    }))
+}
 
 fn handle_notification_subscribe(
     server: &Server,
@@ -133,33 +244,50 @@ fn handle_notification_subscribe(
     }
     if event == "master-idle"
         && subject.as_deref() == Some(PROJECT_PATROL_SUBJECT)
-        && interval_ms == Some(crate::board_patrol_policy::BOARD_IDLE_PATROL_INTERVAL_MS)
-        && trigger_ms.is_none()
-        && trigger_times_ms.is_empty()
+        && is_project_patrol_interval(interval_ms)
+        && trigger_ms.is_none() && trigger_times_ms.is_empty()
         && (1..=crate::server::state::MAX_NOTIFICATION_REPEATS).contains(&repeat_count)
     {
-        let existing = state
-            .notification_subscriptions
-            .values()
-            .filter(|subscription| {
-                subscription.worker_id == worker_id
-                    && subscription.event == "master-idle"
-                    && subscription.subject.as_deref() == Some(PROJECT_PATROL_SUBJECT)
-                    && subscription.interval_ms
-                        == Some(crate::board_patrol_policy::BOARD_IDLE_PATROL_INTERVAL_MS)
-                    && subscription.status == "armed"
-                    && subscription.expires_ms > now
-                    && subscription.method == transport.kind.as_str()
-                    && subscription.target == target
-            })
-            .min_by_key(|subscription| (subscription.created_ms, subscription.id.clone()))
-            .cloned();
-        if let Some(existing) = existing {
+        let existing =
+            exact_project_patrol(&state.notification_subscriptions, &worker_id, now).cloned();
+        if let Some(mut existing) = existing {
+            let was_cancelled = existing.status == "cancelled";
+            let transport_changed =
+                existing.method != transport.kind.as_str() || existing.target != target;
+            if was_cancelled {
+                existing.status = "armed".into();
+                existing.status_reason = None;
+                existing.interval_ms = interval_ms;
+                existing.trigger_ms = Some(now.saturating_add(
+                    interval_ms.unwrap_or(PROJECT_PATROL_TARGET_INTERVAL_MS),
+                ));
+                existing.repeat_count = existing
+                    .repeat_count
+                    .max(existing.fired_count.saturating_add(100));
+                existing.expires_ms = now.saturating_add(
+                    (ttl_seconds as i64).saturating_mul(1000),
+                );
+            }
+            if was_cancelled || transport_changed {
+                existing.method = transport.kind.as_str().into();
+                existing.target = target;
+                existing.updated_ms = now;
+                if let Err(error) = server.commit_locked(
+                    &mut state,
+                    &[Event::NotificationSubscribed {
+                        subscription: existing.clone(),
+                    }],
+                ) {
+                    return Resp::err(format!("NOTIFICATION_DURABILITY_FAILED: {error}"));
+                }
+            }
             return Resp::data(json!({
                 "subscription": existing,
                 "one_shot": false,
                 "max_repeat_count": crate::server::state::MAX_NOTIFICATION_REPEATS,
-                "deduplicated": true,
+                "deduplicated": !was_cancelled,
+                "changed": was_cancelled || transport_changed,
+                "status": if was_cancelled { "rearmed" } else { "armed" },
             }));
         }
     }
@@ -175,8 +303,10 @@ fn handle_notification_subscribe(
         if trigger_ms.is_some() || !trigger_times_ms.is_empty() {
             return Resp::err("master-idle requires a recurring interval, not an absolute trigger");
         }
-        if !matches!(interval_ms, Some(900_000 | 3_600_000)) {
-            return Resp::err("master-idle interval must be exactly 900000 or 3600000 ms");
+        if !is_project_patrol_interval(interval_ms) && !matches!(interval_ms, Some(3_600_000)) {
+            return Resp::err(
+                "master-idle interval must be project-patrol 1500000, compatibility 900000, or 3600000 ms",
+            );
         }
         if repeat_count == 0 || repeat_count > crate::server::state::MAX_NOTIFICATION_REPEATS {
             return Resp::err("repeat_count must be between 1 and 100");
@@ -241,6 +371,8 @@ fn handle_notification_subscribe(
         created_ms: now,
         updated_ms: now,
         status_reason: None,
+        patrol_idle_since_ms: None,
+        patrol_last_push_ms: 0,
     };
     if let Err(error) = server.commit_locked(
         &mut state,
@@ -360,6 +492,69 @@ fn handle_notification_status(server: &Server, worker_id: String, token: String)
             .into_iter()
             .map(|(_, _, record)| record)
             .collect::<Vec<_>>());
+        let project_patrol =
+            exact_project_patrol(&state.notification_subscriptions, &worker_id, now_ms());
+        let eligibility = match project_patrol_eligibility(server, &state) {
+            Ok(eligibility) => eligibility,
+            Err(error) => json!({
+                "eligible": false,
+                "blocker": "PROJECT_PATROL_PROJECT_SCOPE_UNAVAILABLE",
+                "error": error,
+            }),
+        };
+        body["project_patrol"] = match project_patrol {
+            Some(subscription) => {
+                let status = if subscription.status == "armed"
+                    && subscription.expires_ms <= now_ms()
+                {
+                    "expired"
+                } else {
+                    subscription.status.as_str()
+                };
+                json!({
+                "status": status,
+                "armed": status == "armed",
+                "owner_key": crate::server::state::board_patrol_owner_key(&state, &worker_id),
+                "worker_id": subscription.worker_id,
+                "session_id": state.workers.get(&worker_id)
+                    .and_then(|worker| worker.transport.as_ref())
+                    .and_then(|transport| transport.session_id.clone()),
+                "subscription_id": subscription.id,
+                "event": subscription.event,
+                "subject": subscription.subject,
+                "method": subscription.method,
+                "target": subscription.target,
+                "interval_ms": subscription.interval_ms,
+                "target_interval_ms": PROJECT_PATROL_TARGET_INTERVAL_MS,
+                "cadence_runtime_gap": if subscription.interval_ms
+                    == Some(PROJECT_PATROL_COMPAT_INTERVAL_MS)
+                {
+                    json!("PATROL_CADENCE_RUNTIME_GAP")
+                } else {
+                    serde_json::Value::Null
+                },
+                "reason": subscription.status_reason,
+                "updated_ms": subscription.updated_ms,
+                "eligibility": eligibility,
+            })},
+            None => json!({
+                "status": "missing",
+                "armed": false,
+                "owner_key": crate::server::state::board_patrol_owner_key(&state, &worker_id),
+                "worker_id": worker_id,
+                "subscription_id": serde_json::Value::Null,
+                "event": "master-idle",
+                "subject": PROJECT_PATROL_SUBJECT,
+                "method": serde_json::Value::Null,
+                "target": serde_json::Value::Null,
+                "interval_ms": PROJECT_PATROL_TARGET_INTERVAL_MS,
+                "target_interval_ms": PROJECT_PATROL_TARGET_INTERVAL_MS,
+                "cadence_runtime_gap": serde_json::Value::Null,
+                "reason": serde_json::Value::Null,
+                "updated_ms": serde_json::Value::Null,
+                "eligibility": eligibility,
+            }),
+        };
     }
     Resp::data(body)
 }
@@ -373,14 +568,108 @@ fn handle_notification_cancel(
     reason: Option<String>,
     resume_condition: Option<String>,
 ) -> Resp {
-    if event != "board-idle" {
+    if !matches!(event.as_str(), "board-idle" | "master-idle") {
         return Resp::err(
-            "NOTIFY_CANCEL_SCOPE_FORBIDDEN: only caller-owned board-idle patrol can be cancelled via collab notify cancel",
+            "NOTIFY_CANCEL_SCOPE_FORBIDDEN: only caller-owned board-idle or current-master project-patrol can be cancelled via collab notify cancel",
         );
+    }
+    if event == "master-idle" && !task_ids.is_empty() {
+        return Resp::err("--task-id is valid only for --event board-idle");
     }
     let mut state = server.state.lock().unwrap();
     if let Err(error) = verify(&state, &worker_id, &token) {
         return error;
+    }
+    if event == "master-idle" {
+        let holder = match current_master_holder(server, &state) {
+            Ok(master) => master,
+            Err(error) => return Resp::err(error),
+        };
+        if holder.as_deref() != Some(worker_id.as_str()) {
+            return Resp::err("PROJECT_PATROL_MASTER_REQUIRED: only the current master can cancel this project patrol");
+        }
+        let now = now_ms();
+        let subscription =
+            exact_project_patrol(&state.notification_subscriptions, &worker_id, now).cloned();
+        let Some(mut subscription) = subscription else {
+            return Resp::err("PROJECT_PATROL_NOT_FOUND: no exact standing project-patrol subscription exists");
+        };
+        if subscription.status == "cancelled" {
+            return Resp::data(json!({
+                "event": "master-idle",
+                "subject": PROJECT_PATROL_SUBJECT,
+                "owner_key": crate::server::state::board_patrol_owner_key(&state, &worker_id),
+                "subscription_id": subscription.id,
+                "status": "cancelled",
+                "changed": false,
+                "reason": subscription.status_reason,
+                "resume_condition": "explicit exact subscribe or relevant project work transition",
+            }));
+        }
+        let eligibility = match project_patrol_eligibility(server, &state) {
+            Ok(eligibility) => eligibility,
+            Err(error) => return Resp::err(error),
+        };
+        if eligibility["eligible"] != true {
+            return Resp::err_data(
+                format!(
+                    "PROJECT_PATROL_CANCEL_NOT_ELIGIBLE: {}",
+                    eligibility["blocker"].as_str().unwrap_or("unknown")
+                ),
+                eligibility,
+            );
+        }
+        let reason = reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("no actionable project work");
+        let resume = resume_condition
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("new project work or a durable wait release");
+        let status_reason = format!("{reason}; resume_condition={resume}");
+        let pending_ids: Vec<String> = state
+            .wake_bindings
+            .iter()
+            .filter_map(|(message_id, subscription_id)| {
+                (subscription_id == &subscription.id
+                    && state.msgs.get(message_id).is_some_and(|message| {
+                        message.state == "pending"
+                            && !state
+                                .notification_delivery_accepted
+                                .contains_key(message_id)
+                    }))
+                .then(|| message_id.clone())
+            })
+            .collect();
+        let mut events = vec![Event::NotificationSuppressed {
+            subscription_id: subscription.id.clone(),
+            status: "cancelled".into(),
+            reason: status_reason.clone(),
+            updated_ms: now,
+        }];
+        if !pending_ids.is_empty() {
+            events.push(Event::Superseded { ids: pending_ids });
+        }
+        if let Err(error) = server.commit_locked(&mut state, &events) {
+            return Resp::err(format!("PROJECT_PATROL_DURABILITY_FAILED: {error}"));
+        }
+        subscription.status = "cancelled".into();
+        subscription.status_reason = Some(status_reason);
+        subscription.updated_ms = now;
+        return Resp::data(json!({
+            "event": "master-idle",
+            "subject": PROJECT_PATROL_SUBJECT,
+            "owner_key": crate::server::state::board_patrol_owner_key(&state, &worker_id),
+            "subscription_id": subscription.id,
+            "status": "cancelled",
+            "changed": true,
+            "reason": subscription.status_reason,
+            "resume_condition": resume,
+            "eligibility": eligibility,
+        }));
     }
     let owner_key = crate::server::state::board_patrol_owner_key(&state, &worker_id);
     let owned_unclosed =
@@ -700,6 +989,8 @@ fn handle_goal_schedule_reconcile(
             created_ms: now,
             updated_ms: now,
             status_reason: None,
+            patrol_idle_since_ms: None,
+            patrol_last_push_ms: 0,
         };
         events.push(Event::NotificationSubscribed {
             subscription: subscription.clone(),

@@ -111,6 +111,7 @@ async fn dispatch_wire_routed(
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> (Arc<Server>, Resp) {
     match req {
+        Req::DirectoryAll => (manager.host.clone(), manager.directory_all()),
         Req::ProjectReset { worker_id, token } => {
             let reset_manager = manager.clone();
             let response = tokio::task::spawn_blocking(move || match project_context {

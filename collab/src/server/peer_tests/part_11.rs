@@ -943,3 +943,86 @@ fn user_approved_promotion_replaces_a_master_that_owns_its_anchor() {
     drop(tmux);
     std::fs::remove_dir_all(root).ok();
 }
+
+/// Seed a legacy pending task (owner equals creator, no worktree) so the
+/// dispatch gate can observe the unaccepted `pending` status directly.
+fn seed_pending_task(server: &Server, id: &str, owner: &str, created_by: &str) {
+    let now = now_ms();
+    server.commit(&[Event::TaskCreated {
+        task: TaskRec {
+            id: id.into(),
+            owner: owner.into(),
+            created_by: created_by.into(),
+            feature_id: None,
+            worktree_path: None,
+            branch: None,
+            base_commit: None,
+            priority: default_priority(),
+            status: "pending".into(),
+            next_step: None,
+            wait: None,
+            created_ms: now,
+            updated_ms: now,
+        },
+    }]);
+}
+
+/// A live master must be able to force-close a `pending` task through the
+/// normal dispatch path. The unaccepted-task gate may not block `force: true`,
+/// while `force: false` stays gated for the same task.
+#[test]
+fn force_close_pending_task_clears_accept_gate_through_dispatch() {
+    let (server, root) = test_server();
+    assert!(register_synthetic_peer(&server, "owner", "thread-pending-owner").ok);
+    assert!(register_synthetic_peer(&server, "master", "thread-pending-master").ok);
+    promote_master(&server, "master", "user approved pending force close test");
+    seed_pending_task(&server, "legacy-pending", "owner", "owner");
+    let server = Arc::new(server);
+
+    // Non-force close of an unaccepted task must remain gated.
+    let gated = dispatch(
+        &server,
+        Req::TaskClose {
+            worker_id: "master".into(),
+            token: "token-master".into(),
+            task_id: "legacy-pending".into(),
+            force: false,
+            reason: None,
+        },
+    );
+    assert!(!gated.ok, "{gated:?}");
+    assert_eq!(
+        gated.error.as_deref(),
+        Some(
+            "BOARD_ACCEPT_REQUIRED: unaccepted tasks cannot bind execution resources or lifecycle evidence"
+        )
+    );
+    assert_eq!(
+        server.state.lock().unwrap().tasks["legacy-pending"].status,
+        "pending",
+        "a rejected non-force close must not mutate the task"
+    );
+
+    // A live master force-close must pass the gate and land closed.
+    let forced = dispatch(
+        &server,
+        Req::TaskClose {
+            worker_id: "master".into(),
+            token: "token-master".into(),
+            task_id: "legacy-pending".into(),
+            force: true,
+            reason: Some("legacy pending task force closed by master".into()),
+        },
+    );
+    assert!(forced.ok, "{forced:?}");
+    assert_eq!(forced.data["status"], "closed");
+    assert_eq!(
+        server.state.lock().unwrap().tasks["legacy-pending"].status,
+        "closed"
+    );
+
+    drop(server);
+    let replayed = replay(&root).unwrap();
+    assert_eq!(replayed.tasks["legacy-pending"].status, "closed");
+    std::fs::remove_dir_all(root).ok();
+}

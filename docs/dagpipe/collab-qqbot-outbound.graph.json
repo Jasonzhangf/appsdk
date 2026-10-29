@@ -1,0 +1,20 @@
+{
+  "id": "collab-qqbot-outbound",
+  "version": "1.0.0",
+  "description": "QQBot 出站与附件 SESE 图：解析正式附件字段与原始回复 route，校验文件在授权根内可读，读取真实文件并调用平台上传接口；平台接收记录平台消息 ID 不冒充已读，明确失败或响应丢失记录 uncertain 且不盲重发。每条消息单一入口、单一结果出口。",
+  "inputs": [{"id": "qq_outbound_request", "schema": "Object"}],
+  "nodes": [
+    {"id": "parse_attachment_fields", "operator": "appsdk.qqbot.outbound.parse_attachment_fields", "operator_version": "1", "inputs": ["qq_outbound_request"], "output": {"id": "typed_attachments", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "authorize_and_read_files", "operator": "appsdk.qqbot.outbound.authorize_and_read_files", "operator_version": "1", "inputs": ["typed_attachments"], "output": {"id": "readable_files", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "upload_and_send", "operator": "appsdk.qqbot.outbound.upload_and_send", "operator_version": "1", "inputs": ["readable_files"], "output": {"id": "upload_result", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "record_platform_result", "operator": "appsdk.qqbot.outbound.record_platform_result", "operator_version": "1", "inputs": ["upload_result"], "output": {"id": "platform_receipt", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "emit_send_result", "operator": "appsdk.qqbot.outbound.emit_send_result", "operator_version": "1", "inputs": ["platform_receipt"], "output": {"id": "send_result", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"}
+  ],
+  "edges": [
+    {"from": "parse_attachment_fields", "to": "authorize_and_read_files", "arc_id": "typed_attachments"},
+    {"from": "authorize_and_read_files", "to": "upload_and_send", "arc_id": "readable_files"},
+    {"from": "upload_and_send", "to": "record_platform_result", "arc_id": "upload_result"},
+    {"from": "record_platform_result", "to": "emit_send_result", "arc_id": "platform_receipt"}
+  ],
+  "outputs": ["send_result"]
+}

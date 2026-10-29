@@ -111,6 +111,8 @@ fn subscribe(server: &Server, worker: &str) {
                 created_ms: 1,
                 updated_ms: 1,
                 status_reason: None,
+                patrol_idle_since_ms: None,
+                patrol_last_push_ms: 0,
             },
         })
         .unwrap();

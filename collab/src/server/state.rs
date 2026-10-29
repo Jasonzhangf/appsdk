@@ -252,6 +252,14 @@ pub struct NotificationSubscription {
     pub updated_ms: i64,
     #[serde(default)]
     pub status_reason: Option<String>,
+    /// Standing project-patrol episode start. Legacy subscriptions decode it
+    /// as unknown and must earn a fresh trusted interval.
+    #[serde(default)]
+    pub patrol_idle_since_ms: Option<i64>,
+    /// Last durable project-patrol push committed for this idle episode. It
+    /// advances only after the message and scheduling events commit.
+    #[serde(default)]
+    pub patrol_last_push_ms: i64,
 }
 
 pub fn default_repeat_count() -> u32 {
@@ -1727,6 +1735,31 @@ pub enum Event {
     },
     GlobalMasterGrantReplacementCompleted {
         receipt: super::global_state::MasterGrantReplacementReceipt,
+    },
+    /// Durable per-external-conversation default delivery target. Keyed by the
+    /// channel-owned conversation key so one QQ conversation's switch never
+    /// affects another. This is control state only; it never grants identity.
+    ConversationDefaultSet {
+        default: crate::server::conversation_default::ConversationDefault,
+    },
+    /// Durable typed channel envelope recorded with its inbound message. The
+    /// idempotency key is the platform event identity so a duplicate event
+    /// resolves to the same Collab message instead of enqueuing a new one.
+    ChannelEnvelopeRecorded {
+        message_id: String,
+        idempotency_key: String,
+        envelope: crate::server::channel_envelope::ChannelEnvelope,
+    },
+    /// Immutable outbound route copied from one inbound channel envelope. It
+    /// is committed with the agent's reply and never follows a later default.
+    ChannelReplyRouteBound {
+        message_id: String,
+        route: crate::server::channel_envelope::ChannelReplyRoute,
+    },
+    /// Platform send outcome for one Collab outbound message. This is separate
+    /// from delivery and user consumption.
+    ChannelDeliveryResultRecorded {
+        result: crate::server::channel_delivery::ChannelDeliveryResult,
     },
 }
 

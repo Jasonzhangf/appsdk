@@ -132,6 +132,14 @@
     {
       "id": "collab-send-message",
       "path": "docs/dagpipe/collab-send-message.graph.json"
+    },
+    {
+      "id": "collab-qqbot-inbound",
+      "path": "docs/dagpipe/collab-qqbot-inbound.graph.json"
+    },
+    {
+      "id": "collab-qqbot-outbound",
+      "path": "docs/dagpipe/collab-qqbot-outbound.graph.json"
     }
   ]
 }

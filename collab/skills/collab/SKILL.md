@@ -26,12 +26,13 @@ cwd 确定，稳定名字承接工作；sessionID 承载当前执行，tmux pane
 | 任务 | 入口与边界 |
 |---|---|
 | 恢复当前已注册身份和状态 | 在本项目实际环境运行 `collab context`；仅给当前宿主的真实 runtime 信息 |
-| 本项目内向明确接收者发送已授权消息 | `collab sendmessage --to '<真实名字或from>' --subject '<主题>' '<正文>'`；已有接收者时直接发送，不先轮询对方是否空闲，不把跨项目地址传给 sendmessage |
-| 向另一项目交付资料或消息 | 先读 [操作手册](operations.md#cross-project-master-communication) 的跨项目章节；源项目当前 master 用 `master send`，目标以 `collab master status` 取当前 `master.worker_id`，普通 peer 交本项目 master 处理 |
+| 查可投递地址 | `collab list`；全局目录，不依赖当前目录，输出 `project.name`、通道和真实可达状态 |
+| 发送已授权消息（本项目或跨项目同一个命令） | `collab send --to '<project.name>' --subject '<主题>' --content '<正文>'`；地址必须来自 `collab list`，显式地址失败不回退默认目标 |
+| 跨项目权限 | 调用者必须是源项目当前 master，目标是目标项目当前 master；无权限时 daemon 返回 `PERMISSION_DENIED` 并指出当前 master 是谁。`master send` 只是兼容入口，不作为日常命令 |
 | 收件与消费 | 非 DSH 用 `collab recv`；DSH gateway 独占 Poll/Ack，直接处理原生完整正文，不运行 recv/ack |
 | 只读查消息 | `collab msg <真实消息ID>` 或 `collab inbox`；只读查询不等于消费 |
 | 只读查项目通信目录（未注册可用） | `collab directory`；只读返回已知接收方白名单，不写 presence，不暴露凭据或任务细节 |
-| 匿名发送通知（未注册可用） | `collab sendmessage --unknown-sender --to '<目标peer>' [--target-session '<会话>'] --subject '<主题>' '<正文>'`；固定来源为 unknown，跳过身份获取，无回信义务 |
+| 匿名发送通知（未注册可用） | `collab send --unknown-sender --to '<目标peer>' [--target-session '<会话>'] --subject '<主题>' '<正文>'`；固定来源为 unknown，跳过身份获取，无回信义务 |
 
 ### 未注册脚本自通知
 
@@ -88,26 +89,39 @@ master 不代持或代登记 peer goal，旧 runtime 拒绝 peer 时记录具体
 
 项目 Jenny/master 默认承担本项目 worker 巡检。初始化或恢复本人 longhorizon 后，
 须确保本人常驻项目巡检已 armed；它是一条 `master-idle` 订阅，subject
-`project-patrol`、interval `900000` 毫秒，ensure/renew 复用同一订阅而不并排新建。
+`project-patrol`、目标 interval `1500000` 毫秒（20-30 分钟窗口，默认 25 分钟），
+ensure/renew 复用同一订阅而不并排新建。`900000` 只兼容已存在的旧订阅；
+`collab notify status` 的 `project_patrol.cadence_runtime_gap` 返回
+`PATROL_CADENCE_RUNTIME_GAP` 时，必须如实报告运行节奏未达到目标，不能声称已对齐。
 有限 goal/task 定时器按生命周期关闭，但单个 goal 结束不关闭这条常驻巡检义务。
-每次提醒检查 worker 的 busy/idle、board 任务和按任务取消状态。当前 master 用
+每次提醒必须检查四项：未解决的 P0/P1；未完成任务或 ready 工作；自有 worktree 与
+资源释放；peer/worker 的 busy/idle 及 idle 原因是否合理。同时检查 board 任务和按
+任务取消状态。当前 master 用
 `collab notify status` 的 `project_board_patrol` 只读视图检查 peer 取消；该读取不授予
 替 peer 恢复或覆盖取消的权限。peer 持有未关闭
 board 任务且正态 idle 时应唤醒本人，由本人继续推理并判断下一步；busy 跳过，不
 补发；unknown、offline、cold 或 waiting_user 不当作 idle。支持实时状态事件时及时
-触发；不支持时默认每 15 分钟检查（当前 `notify status` 报告 realtime 未接通）。
+触发；不支持时由巡检 tick 检查。tick 只发现 due，首次推送要求可信连续 idle 严格
+超过 30 分钟，同一 idle 阶段重复推送至少间隔 30 分钟；29m59s 和恰好 30m00s 不推，
+不补发漏掉周期。
 
 peer 可取消本人 board 巡检，任务与基本收件仍保留。取消按任务和当前稳定 owner
 持久保存；新任务不恢复旧任务取消，同稳定名字换会话保留取消。恢复使用明确入口。
+当前 master 也可取消本人的常驻项目巡检：`collab notify cancel --event master-idle`
+只在项目已有 `ceo_report_state` 进度且无可执行未关闭项目任务时成功，成功回执返回
+原订阅 ID 与 `status=cancelled`；重复取消幂等。显式精确订阅或项目工作变化会 rearm
+同一订阅，direct-message 始终独立保留，peer board idle 取消语义不变。`notify status`
+的 `project_patrol` 只读投影给出 armed/cancelled/missing、`interval_ms`、
+`target_interval_ms` 和 `cadence_runtime_gap`。
 目标命令、回执和 CEO 回报边界见
 [board idle 巡检契约](references/board-idle-patrol.md)。
 
 这是 2026-10-25 用户确认的契约。`collab notify cancel --event board-idle`、
-`collab notify subscribe --event board-idle` 与 `collab notify status` 已在当前源码
-实现。本轮隔离公开入口/native 与有限 timer 兼容验收已通过；这不等于生产 daemon
-启用或生产 peer 消费或恢复推理已验证。使用前先按运行 daemon 的实际构建核实
-`collab notify methods` 与 `collab notify status`；其能力或状态不满足时只停受影响
-自动巡检，已授权工作仍继续。
+`collab notify subscribe --event board-idle` 与 `collab notify status` 已在当前
+源码实现。`collab notify cancel --event master-idle` 也已在当前源码实现，并定义了
+对应的公开黑盒用例；这不等于生产 daemon 启用或生产 peer 消费或恢复推理已验证。
+使用前先按运行 daemon 的实际构建核实 `collab notify methods` 与
+`collab notify status`；其能力或状态不满足时只停受影响自动巡检，已授权工作仍继续。
 
 巡检只提供兜底唤醒，不是执行前提。登记后立即推进 ready 工作，结果或资源变化后按
 统一调度规则自检并补位。peer 保留本人范围的交付责任；遇到受限步骤先按已有授权
@@ -123,6 +137,9 @@ master 检查必要证据，不用 ACK 或自报完成代替验收。
 全局 CEO 只由 daemon 的 typed grant 授权；工作角色 `ceo` 不授予全局权限。项目
 master 有 CEO 时通过现有 `collab ceo reply` 路由回报目标、已验收结果、剩余工作、
 阻塞和下一动作；无 CEO 时明确报告 `CEO_NOT_CONFIGURED`，继续本项目工作。
+`collab master status` 与 `collab ceo progress` 的 `workspace` 必须投影当前 master
+绑定注册的 canonical project root；不得另造可写状态根，也不得用 cwd 或 session
+载体替代工作空间事实。
 
 CEO 按项目和实质业务进展去重。非紧急汇报默认每小时最多一次，安静窗口默认
 `Asia/Shanghai` 每日 `[00:00, 08:00)`；窗口内累计，结束后合并唤醒。显式

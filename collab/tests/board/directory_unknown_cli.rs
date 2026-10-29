@@ -1,5 +1,173 @@
 use super::*;
 
+fn failed_cli_text(output: &Output) -> String {
+    format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+#[test]
+fn msg_reports_missing_caller_identity_before_target_lookup() {
+    let fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    let sent = fixture.run_public(
+        &[
+            "sendmessage",
+            "--to",
+            "Bob",
+            "--subject",
+            "caller identity target",
+            "existing body",
+        ],
+        THREAD_A,
+    );
+    let msg_id = sent["msg_id"].as_str().expect("send returns msg_id");
+
+    for target in [msg_id, "m-does-not-exist"] {
+        let output = fixture.command_without_native_facts(&["msg", target]);
+        assert!(!output.status.success(), "msg without a caller must fail");
+        let text = failed_cli_text(&output);
+        assert!(
+            text.contains("CALLER_IDENTITY_REQUIRED"),
+            "missing caller identity must be explicit: {text}"
+        );
+        assert!(
+            text.contains("caller") && text.contains("collab context"),
+            "caller error must name the subject and recovery action: {text}"
+        );
+        assert!(
+            !text.contains("MESSAGE_NOT_FOUND") && !text.contains("target message"),
+            "caller failure must not be reported as target absence: {text}"
+        );
+    }
+}
+
+#[test]
+fn msg_reports_unregistered_caller_route_before_target_lookup() {
+    const UNREGISTERED_THREAD: &str = "01a0d63a-0000-7000-8000-000000000001";
+    let fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    let sent = fixture.run_public(
+        &[
+            "sendmessage",
+            "--to",
+            "Bob",
+            "--subject",
+            "route target",
+            "existing body",
+        ],
+        THREAD_A,
+    );
+    let msg_id = sent["msg_id"].as_str().expect("send returns msg_id");
+
+    for target in [msg_id, "m-does-not-exist"] {
+        let output = fixture.command_public(&["msg", target], UNREGISTERED_THREAD);
+        assert!(!output.status.success(), "unregistered caller must fail");
+        let text = failed_cli_text(&output);
+        assert!(
+            text.contains("CALLER_ROUTE_NOT_FOUND"),
+            "unregistered caller route must be explicit: {text}"
+        );
+        assert!(
+            text.contains("caller") && text.contains("collab context"),
+            "route error must name the subject and recovery action: {text}"
+        );
+        assert!(
+            !text.contains("MESSAGE_NOT_FOUND") && !text.contains("target message"),
+            "caller route failure must not be reported as target absence: {text}"
+        );
+    }
+}
+
+#[test]
+fn msg_distinguishes_target_absence_and_private_messages_from_caller_errors() {
+    let fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+
+    let missing = fixture.command_public(&["msg", "m-does-not-exist"], THREAD_A);
+    assert!(!missing.status.success(), "missing target must fail");
+    let missing_text = failed_cli_text(&missing);
+    assert!(
+        missing_text.contains("MESSAGE_NOT_FOUND"),
+        "registered caller must receive target absence: {missing_text}"
+    );
+    assert!(
+        missing_text.contains("message") && missing_text.contains("inbox"),
+        "target absence must name what is missing and the next action: {missing_text}"
+    );
+    assert!(
+        !missing_text.contains("CALLER_IDENTITY_REQUIRED")
+            && !missing_text.contains("CALLER_ROUTE_NOT_FOUND"),
+        "target absence must not blame the caller: {missing_text}"
+    );
+
+    let sent = fixture.run_public(
+        &[
+            "sendmessage",
+            "--unknown-sender",
+            "--to",
+            "Bob",
+            "--subject",
+            "private-subject-marker",
+            "private-body-marker",
+        ],
+        THREAD_A,
+    );
+    let private_id = sent["msg_id"].as_str().expect("send returns msg_id");
+    let denied = fixture.command_public(&["msg", private_id], THREAD_A);
+    assert!(!denied.status.success(), "non-participant must fail");
+    let denied_text = failed_cli_text(&denied);
+    assert!(
+        denied_text.contains("CALLER_NOT_PERMITTED"),
+        "non-participant must receive a caller permission error: {denied_text}"
+    );
+    assert!(
+        denied_text.contains("caller") && denied_text.contains("message"),
+        "permission error must name the subject and target: {denied_text}"
+    );
+    for leaked in ["private-subject-marker", "private-body-marker", "unknown"] {
+        assert!(
+            !denied_text.contains(leaked),
+            "permission error leaked {leaked:?}: {denied_text}"
+        );
+    }
+}
+
+#[test]
+fn msg_returns_existing_success_shape_to_sender_and_recipient() {
+    let fixture = AppFixture::new();
+    let alice = fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    let sent = fixture.run_public(
+        &[
+            "sendmessage",
+            "--to",
+            "Bob",
+            "--subject",
+            "participant-visible",
+            "participant body",
+        ],
+        THREAD_A,
+    );
+    let msg_id = sent["msg_id"].as_str().expect("send returns msg_id");
+
+    for thread in [THREAD_A, THREAD_B] {
+        let queried = fixture.run_public(&["msg", msg_id], thread);
+        assert_eq!(queried["id"], msg_id);
+        assert_eq!(queried["from"], alice["identity"]["worker_id"]);
+        assert_eq!(queried["subject"], "participant-visible");
+        assert_eq!(queried["body"], "participant body");
+        assert!(queried.get("state").is_some());
+        assert!(queried.get("consumed_by_recv").is_some());
+        assert!(queried.get("notification_delivery_failure").is_some());
+    }
+}
+
 #[test]
 fn unauthenticated_directory_query_empty_and_free_of_presence_side_effects() {
     let fixture = AppFixture::new();
@@ -490,4 +658,186 @@ fn pinned_session_survives_public_continuation_and_retention_replay_without_cros
         .expect("the current session consumes its ordinary message through recv");
     assert_eq!(current["from"], "unknown");
     assert_eq!(current["body"], "complete body for the current session");
+}
+
+#[test]
+fn list_returns_copyable_project_scoped_addresses() {
+    let fixture = AppFixture::new();
+    let alice = fixture.run_public(&["context"], THREAD_A);
+    let bob = fixture.run_public(&["context"], THREAD_B);
+    assert_eq!(alice["name"], "Alice");
+    assert_eq!(bob["name"], "Bob");
+
+    // `list` is the copyable-address projection. It is read-only and must not
+    // require an authenticated caller.
+    let output = fixture.command_without_native_facts(&["list"]);
+    assert!(
+        output.status.success(),
+        "list failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let dir: Value = serde_json::from_slice(&output.stdout).expect("list emits JSON");
+    assert_eq!(dir["count"], 2);
+    let targets = dir["targets"].as_array().expect("list targets is an array");
+    assert_eq!(targets.len(), 2);
+    let project_key = targets[0]["project"]
+        .as_str()
+        .expect("list exposes the canonical project key")
+        .to_owned();
+
+    for entry in targets {
+        assert_eq!(entry["project"].as_str(), Some(project_key.as_str()));
+        let address = entry["address"]
+            .as_str()
+            .expect("a named target exposes a copyable address");
+        assert!(
+            address.starts_with(&format!("{project_key}.")),
+            "address must be project-qualified: {address}"
+        );
+        assert!(entry["channel_type"].as_str().is_some());
+        assert_eq!(
+            entry["deliverable"].as_str(),
+            Some("unknown"),
+            "unknown reachability must not be reported as online"
+        );
+        // No private control material may leak to the read-only projection.
+        assert!(entry.get("token").is_none());
+        assert!(entry.get("auth_token").is_none());
+    }
+
+    // The copied address is directly usable by the new send syntax.
+    let alice_address = targets
+        .iter()
+        .find(|entry| entry["display_name"] == "Alice")
+        .and_then(|entry| entry["address"].as_str())
+        .expect("Alice has a copyable address")
+        .to_owned();
+    let sent = fixture.run_public(
+        &[
+            "sendmessage",
+            alice_address.as_str(),
+            "--content",
+            "via list address",
+        ],
+        THREAD_B,
+    );
+    let msg_id = sent["msg_id"]
+        .as_str()
+        .expect("send returns msg_id")
+        .to_owned();
+    let received = fixture.run_public(
+        &[
+            "recv",
+            "--receive-id",
+            "list-address-recv",
+            "--timeout",
+            "0",
+        ],
+        THREAD_A,
+    );
+    let messages = received["messages"]
+        .as_array()
+        .expect("recv emits messages");
+    assert!(
+        messages
+            .iter()
+            .any(|message| message["id"] == msg_id && message["body"] == "via list address"),
+        "the copyable address must reach the exact worker: {received}"
+    );
+}
+
+#[test]
+fn new_send_syntax_and_legacy_send_reach_exact_target() {
+    let fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+
+    // New syntax: positional address plus --content.
+    let new_send = fixture.run_public(
+        &["sendmessage", "Alice", "--content", "new syntax body"],
+        THREAD_B,
+    );
+    let new_id = new_send["msg_id"]
+        .as_str()
+        .expect("new syntax send returns msg_id")
+        .to_owned();
+    // Legacy syntax stays unchanged.
+    let legacy_send = fixture.run_public(
+        &[
+            "sendmessage",
+            "--to",
+            "Bob",
+            "--subject",
+            "legacy",
+            "legacy body",
+        ],
+        THREAD_A,
+    );
+    let legacy_id = legacy_send["msg_id"]
+        .as_str()
+        .expect("legacy send returns msg_id")
+        .to_owned();
+
+    let alice = fixture.run_public(
+        &["recv", "--receive-id", "new-syntax-recv", "--timeout", "0"],
+        THREAD_A,
+    );
+    let alice_messages = alice["messages"].as_array().expect("recv emits messages");
+    assert!(
+        alice_messages.iter().any(|message| {
+            message["id"] == new_id
+                && message["body"] == "new syntax body"
+                && message["subject"] == "new syntax body"
+        }),
+        "new syntax must derive a recognizable notification title: {alice}"
+    );
+
+    let bob = fixture.run_public(
+        &["recv", "--receive-id", "legacy-send-recv", "--timeout", "0"],
+        THREAD_B,
+    );
+    let bob_messages = bob["messages"].as_array().expect("recv emits messages");
+    assert!(
+        bob_messages.iter().any(|message| {
+            message["id"] == legacy_id
+                && message["body"] == "legacy body"
+                && message["subject"] == "legacy"
+        }),
+        "legacy send must keep its subject and body: {bob}"
+    );
+
+    // Supplying --content and a positional body together is a hard error and
+    // must not enqueue anything.
+    let conflict = fixture.command_public(
+        &[
+            "sendmessage",
+            "--to",
+            "Bob",
+            "--subject",
+            "conflict",
+            "--content",
+            "c",
+            "extra body",
+        ],
+        THREAD_A,
+    );
+    assert!(!conflict.status.success(), "mixed syntax must fail");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&conflict.stdout),
+        String::from_utf8_lossy(&conflict.stderr)
+    );
+    assert!(
+        combined.contains("SEND_SYNTAX_CONFLICT"),
+        "conflict must name its failure: {combined}"
+    );
+
+    // The legacy positional form still requires --subject.
+    let missing_subject = fixture.command_public(&["sendmessage", "--to", "Bob", "body"], THREAD_A);
+    assert!(
+        !missing_subject.status.success(),
+        "legacy send without --subject must fail"
+    );
+    assert!(String::from_utf8_lossy(&missing_subject.stderr).contains("MESSAGE_SUBJECT_REQUIRED"));
 }

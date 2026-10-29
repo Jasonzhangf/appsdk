@@ -26,6 +26,94 @@ pub(crate) fn board_patrol_owner_key(state: &State, worker_id: &str) -> String {
         .unwrap_or_else(|| worker_id.to_owned())
 }
 
+fn rearm_cancelled_project_patrol(
+    state: &mut State,
+    created: bool,
+    previous: Option<&TaskRec>,
+    task: &TaskRec,
+    event_ms: i64,
+) {
+    if task_status_is_terminal(&task.status) {
+        return;
+    }
+    let became_actionable = crate::server::keepalive::actionable(&task.status)
+        && !previous.is_some_and(|previous| {
+            crate::server::keepalive::actionable(&previous.status)
+        });
+    let wait_released =
+        previous.and_then(|previous| previous.wait.as_ref()).is_some() && task.wait.is_none();
+    if !created && !became_actionable && !wait_released {
+        return;
+    }
+    let subscription_ids: Vec<String> = state
+        .notification_subscriptions
+        .values()
+        .filter(|subscription| {
+            crate::server::is_exact_project_patrol(subscription)
+                && subscription.status == "cancelled"
+                && state
+                    .global
+                    .projects
+                    .values()
+                    .any(|project| {
+                        project.master_grants.values().any(|grant| {
+                            grant.agent_id.as_str() == subscription.worker_id
+                                && state
+                                    .global
+                                    .lookup_master_grant(&grant.project_scope, &grant.binding_id)
+                                    .is_some_and(|current| current == grant)
+                                && state
+                                    .global
+                                    .lookup_binding_for(
+                                        &crate::scope::RouteScope {
+                                            app_scope_id: grant.app_scope_id.clone(),
+                                            project_scope_id: grant.project_scope.clone(),
+                                        },
+                                        &grant.binding_id,
+                                    )
+                                    .is_some_and(|binding| {
+                                        binding.endpoint_generation == grant.endpoint_generation
+                                            && binding.agent_id == grant.agent_id
+                                    })
+                        })
+                    })
+        })
+        .map(|subscription| subscription.id.clone())
+        .collect();
+    for subscription_id in subscription_ids {
+        let Some(subscription) = state
+            .notification_subscriptions
+            .get_mut(&subscription_id)
+        else {
+            continue;
+        };
+        let Some(worker) = state.workers.get(&subscription.worker_id).cloned() else {
+            continue;
+        };
+        let Some(transport) = crate::server::selected_transport_for_worker(&worker) else {
+            continue;
+        };
+        let Some(target) = crate::server::notification_target(&transport) else {
+            continue;
+        };
+        subscription.method = transport.kind.as_str().to_owned();
+        subscription.target = target.to_owned();
+        subscription.status = "armed".into();
+        subscription.status_reason = None;
+        subscription.trigger_ms =
+            Some(event_ms.saturating_add(crate::board_patrol_policy::BOARD_IDLE_PATROL_INTERVAL_MS));
+        subscription.repeat_count = subscription
+            .repeat_count
+            .max(subscription.fired_count.saturating_add(100));
+        subscription.expires_ms = subscription
+            .expires_ms
+            .max(event_ms.saturating_add(
+                (crate::server::MAX_NOTIFICATION_TTL_SECONDS as i64) * 1000,
+            ));
+        subscription.updated_ms = event_ms;
+    }
+}
+
 pub(crate) fn board_patrol_owned_unclosed_task_ids(
     state: &State,
     worker_id: &str,
@@ -564,6 +652,32 @@ impl State {
                     self.worker_names.remove(worker_id);
                 }
             },
+            Event::ConversationDefaultSet { default } => {
+                self.conversation_defaults
+                    .insert(default.key(), default.clone());
+            }
+            Event::ChannelEnvelopeRecorded {
+                message_id,
+                idempotency_key,
+                envelope,
+            } => {
+                // Duplicate platform events are idempotent: the first durable
+                // message wins and no second envelope is written.
+                if self.platform_event_index.contains_key(idempotency_key) {
+                    return Ok(());
+                }
+                self.platform_event_index
+                    .insert(idempotency_key.clone(), message_id.clone());
+                self.channel_envelopes
+                    .insert(message_id.clone(), envelope.clone());
+            }
+            Event::ChannelReplyRouteBound { message_id, route } => {
+                self.channel_reply_routes.insert(message_id.clone(), route.clone());
+            }
+            Event::ChannelDeliveryResultRecorded { result } => {
+                self.channel_delivery_results
+                    .insert(result.message_id.clone(), result.clone());
+            }
             Event::LegacyWorkerRemoved { worker_id } => {
                 self.workers.remove(worker_id);
                 self.worker_names.remove(worker_id);
@@ -883,6 +997,8 @@ impl State {
                 if let Some(subscription) = self.notification_subscriptions.get_mut(subscription_id)
                 {
                     subscription.target = target.clone();
+                    subscription.patrol_idle_since_ms = None;
+                    subscription.patrol_last_push_ms = 0;
                     subscription.updated_ms = *updated_ms;
                 }
             }
@@ -1105,6 +1221,8 @@ impl State {
                 return Err("reducer snapshot is replay-only".into());
             }
             Event::TaskCreated { task } | Event::TaskUpdated { task } => {
+                let created = matches!(ev, Event::TaskCreated { .. });
+                let previous_task = self.tasks.get(&task.id).cloned();
                 let cancellation_owner = self
                     .cancelled_board_patrol_tasks
                     .get(&task.id)
@@ -1136,6 +1254,17 @@ impl State {
                     }
                 }
                 self.tasks.insert(task.id.clone(), task.clone());
+                rearm_cancelled_project_patrol(
+                    self,
+                    created,
+                    previous_task.as_ref(),
+                    task,
+                    if task.updated_ms > 0 {
+                        task.updated_ms
+                    } else {
+                        task.created_ms
+                    },
+                );
             }
             Event::NameResolutionCommitted {
                 project_scope,
@@ -1538,6 +1667,10 @@ impl State {
         self.delivery_modes.remove(id);
         self.delivery_source_threads.remove(id);
         self.wake_bindings.remove(id);
+        self.channel_envelopes.remove(id);
+        self.platform_event_index.retain(|_, message_id| message_id != id);
+        self.channel_reply_routes.remove(id);
+        self.channel_delivery_results.remove(id);
     }
 
     /// Persisted work specialities for one stable name. Session carriers and
@@ -2011,6 +2144,43 @@ impl State {
                 });
             }
         }
+        let mut defaults: Vec<_> = self.conversation_defaults.values().cloned().collect();
+        defaults.sort_by(|a, b| a.key().cmp(&b.key()));
+        events.extend(
+            defaults
+                .into_iter()
+                .map(|default| Event::ConversationDefaultSet { default }),
+        );
+        let mut envelopes: Vec<_> = self.channel_envelopes.iter().collect();
+        envelopes.sort_by(|a, b| a.0.cmp(b.0));
+        events.extend(envelopes.into_iter().map(|(message_id, envelope)| {
+            Event::ChannelEnvelopeRecorded {
+                message_id: message_id.clone(),
+                idempotency_key: crate::server::channel_envelope::platform_event_key(
+                    &envelope.channel_instance,
+                    &envelope.external_conversation,
+                    &envelope.platform_message_id,
+                ),
+                envelope: envelope.clone(),
+            }
+        }));
+        let mut reply_routes: Vec<_> = self.channel_reply_routes.iter().collect();
+        reply_routes.sort_by(|a, b| a.0.cmp(b.0));
+        events.extend(
+            reply_routes
+                .into_iter()
+                .map(|(message_id, route)| Event::ChannelReplyRouteBound {
+                    message_id: message_id.clone(),
+                    route: route.clone(),
+                }),
+        );
+        let mut delivery_results: Vec<_> = self.channel_delivery_results.values().cloned().collect();
+        delivery_results.sort_by(|a, b| a.message_id.cmp(&b.message_id));
+        events.extend(
+            delivery_results
+                .into_iter()
+                .map(|result| Event::ChannelDeliveryResultRecorded { result }),
+        );
         // Unsettled obligations survive compaction. They follow the message
         // rows above so a restored journal has the original message first.
         let mut obligations: Vec<_> = self.reply_obligations.values().cloned().collect();
@@ -2376,6 +2546,8 @@ mod board_patrol_state_tests {
             last_realtime_idle_since_ms: 90,
             last_wake_tasks: vec!["task-a".into()],
             next_due_ms: 900_100,
+            idle_episode_start_ms: None,
+            last_poll_idle: false,
         }
     }
 

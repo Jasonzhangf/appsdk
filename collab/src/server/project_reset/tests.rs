@@ -575,6 +575,100 @@ fn resident_route_recovery_and_other_project_reset_have_one_lock_order() {
 }
 
 #[test]
+fn project_reset_clears_only_owned_channel_defaults_and_message_control() {
+    use crate::server::channel_delivery::{ChannelDeliveryResult, ChannelDeliveryStatus};
+    use crate::server::channel_envelope::{ChannelEnvelope, ChannelReplyRoute};
+    use crate::server::conversation_default::ConversationDefault;
+
+    let mut state = State::default();
+    state.apply(&Event::ConversationDefaultSet {
+        default: ConversationDefault {
+            channel: "qqbot".into(),
+            channel_instance: "qqbot".into(),
+            conversation: "u1:session".into(),
+            project_scope: "/project-a".into(),
+            target_address: "project-a.Bob".into(),
+            revision: 1,
+            updated_ms: 1,
+        },
+    });
+    state.apply(&Event::ConversationDefaultSet {
+        default: ConversationDefault {
+            channel: "qqbot".into(),
+            channel_instance: "qqbot".into(),
+            conversation: "u2:session".into(),
+            project_scope: "/project-b".into(),
+            target_address: "project-b.Bob".into(),
+            revision: 1,
+            updated_ms: 1,
+        },
+    });
+    state.apply(&Event::Sent {
+        msg: state::Message {
+            id: "inbound-a".into(),
+            from: "external:qqbot".into(),
+            to: "project-a.Bob".into(),
+            mtype: "notify".into(),
+            subject: Some("QQBot inbound".into()),
+            body: "hello".into(),
+            in_reply_to: None,
+            created_ms: 1,
+            state: "pending".into(),
+            wake_attempt_count: 0,
+            last_wake_attempt_ms: 0,
+            retry_attempted: false,
+        },
+    });
+    state.apply(&Event::ChannelEnvelopeRecorded {
+        message_id: "inbound-a".into(),
+        idempotency_key: "qqbot:/project-a:u1:session:platform-1".into(),
+        envelope: ChannelEnvelope {
+            source_channel: "qqbot".into(),
+            channel_instance: "qqbot".into(),
+            external_user: "u1".into(),
+            external_conversation: "u1:session".into(),
+            platform_message_id: "platform-1".into(),
+            reply_route: "qqbot://u1/session".into(),
+            recipient_address: "project-a.Bob".into(),
+            attachments: Vec::new(),
+        },
+    });
+    state.apply(&Event::ChannelReplyRouteBound {
+        message_id: "outbound-a".into(),
+        route: ChannelReplyRoute {
+            source_channel: "qqbot".into(),
+            channel_instance: "qqbot".into(),
+            external_conversation: "u1:session".into(),
+            reply_route: "qqbot://u1/session".into(),
+            in_reply_to: "inbound-a".into(),
+        },
+    });
+    state.apply(&Event::ChannelDeliveryResultRecorded {
+        result: ChannelDeliveryResult {
+            message_id: "outbound-a".into(),
+            channel_instance: "qqbot".into(),
+            status: ChannelDeliveryStatus::Uncertain,
+            platform_message_id: None,
+            error: Some("response lost".into()),
+            updated_ms: 1,
+        },
+    });
+
+    crate::server::project_reset::clear_project(&mut state, "/project-a", true, &[]);
+
+    assert!(!state
+        .conversation_defaults
+        .contains_key("qqbot:qqbot:u1:session"));
+    assert!(state
+        .conversation_defaults
+        .contains_key("qqbot:qqbot:u2:session"));
+    assert!(state.channel_envelopes.is_empty());
+    assert!(state.platform_event_index.is_empty());
+    assert!(state.channel_reply_routes.is_empty());
+    assert!(state.channel_delivery_results.is_empty());
+}
+
+#[test]
 fn online_reset_durability_error_does_not_delete_payload() {
     let (server, root, manager, context) = fixture();
     let payload = root.join(".agent-collab/payload");

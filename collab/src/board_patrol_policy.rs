@@ -18,6 +18,11 @@ use serde::{Deserialize, Serialize};
 /// Periodic fallback interval for the board idle patrol.
 pub const BOARD_IDLE_PATROL_INTERVAL_MS: i64 = 900_000;
 
+/// A trusted continuous idle interval must exceed this before the first
+/// reminder, and every later reminder in the same episode must be at least
+/// this far after the last committed push.
+pub const BOARD_IDLE_TRUSTED_INTERVAL_MS: i64 = 1_800_000;
+
 /// Error returned when a cancellation request names a task the caller does not own.
 pub const BOARD_PATROL_TASK_OWNER_REQUIRED: &str = "BOARD_PATROL_TASK_OWNER_REQUIRED";
 
@@ -50,6 +55,15 @@ pub struct PeerBoardPatrolGate {
     pub last_realtime_idle_since_ms: i64,
     pub last_wake_tasks: Vec<String>,
     pub next_due_ms: i64,
+    /// Trusted continuous-idle episode start discovered by the periodic
+    /// poll. The first reliable positive-idle poll seeds it; a non-idle poll
+    /// clears it. It is never backfilled from an older snapshot.
+    #[serde(default)]
+    pub idle_episode_start_ms: Option<i64>,
+    /// Whether the most recent poll observed positive online idle. This is
+    /// persisted so the episode continuity is explicit across ticks.
+    #[serde(default)]
+    pub last_poll_idle: bool,
 }
 
 /// Result of one patrol evaluation.
@@ -58,8 +72,10 @@ pub struct PeerBoardPatrolGate {
 pub enum PatrolDecision {
     /// The owner holds no unclosed, uncancelled task.
     NoEligibleTasks,
-    /// Nothing new since the last wake, or the periodic deadline is not reached.
-    NotDueYet,
+    /// Nothing new since the last wake, or the periodic deadline is not
+    /// reached. The gate carries the poll's updated episode facts so the
+    /// runtime can persist a quiet observation without creating a wake.
+    NotDueYet { gate: PeerBoardPatrolGate },
     /// Activity is not positively idle, so no wake is allowed.
     SkipUnknown { gate: PeerBoardPatrolGate },
     /// The host is busy, so this round is skipped without backfill.
@@ -170,6 +186,8 @@ pub fn apply_rearm(
 /// `is_positively_idle` must come from a current host fact. `is_busy` is only
 /// consulted for a positively known busy host; waiting, offline and unknown
 /// activity are all represented as `is_positively_idle == false` and never wake.
+/// `idle_since_ms` is the trusted continuous online-idle start, or a
+/// non-positive value when the current observation is not a trusted interval.
 pub fn evaluate_board_patrol(
     eligible_tasks: &[String],
     owner_key: &str,
@@ -193,13 +211,20 @@ pub fn evaluate_board_patrol(
             last_realtime_idle_since_ms: i64::MIN,
             last_wake_tasks: Vec::new(),
             next_due_ms: now_ms,
+            idle_episode_start_ms: None,
+            last_poll_idle: false,
         },
     };
+
+    // Persist this poll's episode fact before deciding. A non-idle poll clears
+    // the start so a later idle poll starts a fresh interval.
+    gate.idle_episode_start_ms = (is_positively_idle && idle_since_ms > 0).then_some(idle_since_ms);
+    gate.last_poll_idle = is_positively_idle;
 
     match mode {
         PatrolTriggerMode::PeriodicPoll => {
             if now_ms < gate.next_due_ms {
-                return PatrolDecision::NotDueYet;
+                return PatrolDecision::NotDueYet { gate };
             }
             if is_busy {
                 gate.next_due_ms = now_ms + BOARD_IDLE_PATROL_INTERVAL_MS;
@@ -211,13 +236,18 @@ pub fn evaluate_board_patrol(
                 gate.next_due_ms = now_ms + BOARD_IDLE_PATROL_INTERVAL_MS;
                 return PatrolDecision::SkipUnknown { gate };
             }
-            gate.last_wake_ms = now_ms;
-            gate.last_realtime_idle_since_ms = idle_since_ms;
-            gate.last_wake_tasks = eligible_tasks.to_vec();
-            gate.next_due_ms = now_ms + BOARD_IDLE_PATROL_INTERVAL_MS;
-            PatrolDecision::WakeDue {
-                tasks: eligible_tasks.to_vec(),
-                gate,
+            if patrol_idle_due(idle_since_ms, now_ms, &gate) {
+                gate.last_wake_ms = now_ms;
+                gate.last_realtime_idle_since_ms = idle_since_ms;
+                gate.last_wake_tasks = eligible_tasks.to_vec();
+                gate.next_due_ms = now_ms + BOARD_IDLE_PATROL_INTERVAL_MS;
+                PatrolDecision::WakeDue {
+                    tasks: eligible_tasks.to_vec(),
+                    gate,
+                }
+            } else {
+                gate.next_due_ms = now_ms + BOARD_IDLE_PATROL_INTERVAL_MS;
+                PatrolDecision::NotDueYet { gate }
             }
         }
         PatrolTriggerMode::RealtimeEvent => {
@@ -232,16 +262,30 @@ pub fn evaluate_board_patrol(
                 .iter()
                 .any(|task_id| !gate.last_wake_tasks.contains(task_id));
             if !is_new_episode && !has_new_task {
-                return PatrolDecision::NotDueYet;
+                return PatrolDecision::NotDueYet { gate };
             }
-            gate.last_wake_ms = now_ms;
-            gate.last_realtime_idle_since_ms = idle_since_ms;
-            gate.last_wake_tasks = eligible_tasks.to_vec();
-            gate.next_due_ms = now_ms + BOARD_IDLE_PATROL_INTERVAL_MS;
-            PatrolDecision::WakeDue {
-                tasks: eligible_tasks.to_vec(),
-                gate,
+            if patrol_idle_due(idle_since_ms, now_ms, &gate) {
+                gate.last_wake_ms = now_ms;
+                gate.last_realtime_idle_since_ms = idle_since_ms;
+                gate.last_wake_tasks = eligible_tasks.to_vec();
+                gate.next_due_ms = now_ms + BOARD_IDLE_PATROL_INTERVAL_MS;
+                PatrolDecision::WakeDue {
+                    tasks: eligible_tasks.to_vec(),
+                    gate,
+                }
+            } else {
+                PatrolDecision::NotDueYet { gate }
             }
         }
     }
+}
+
+/// One shared due predicate for both triggers. A trusted idle start is
+/// required, the interval must be strictly longer than the reminder interval
+/// for the first push, and later pushes need at least one full interval since
+/// the last committed push.
+fn patrol_idle_due(idle_since_ms: i64, now_ms: i64, gate: &PeerBoardPatrolGate) -> bool {
+    idle_since_ms > 0
+        && now_ms > idle_since_ms + BOARD_IDLE_TRUSTED_INTERVAL_MS
+        && (gate.last_wake_ms == 0 || now_ms - gate.last_wake_ms >= BOARD_IDLE_TRUSTED_INTERVAL_MS)
 }

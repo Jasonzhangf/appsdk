@@ -368,6 +368,8 @@ use super::*;
                 created_ms: now - 26 * 600_000,
                 updated_ms: now,
                 status_reason: None,
+                patrol_idle_since_ms: None,
+                patrol_last_push_ms: 0,
             },
         }]);
 
@@ -437,6 +439,8 @@ use super::*;
                 created_ms: now - 600_000,
                 updated_ms: now,
                 status_reason: None,
+                patrol_idle_since_ms: None,
+                patrol_last_push_ms: 0,
             },
         }]);
 
@@ -503,6 +507,8 @@ use super::*;
                     created_ms,
                     updated_ms: now,
                     status_reason: None,
+                    patrol_idle_since_ms: None,
+                    patrol_last_push_ms: 0,
                 },
             }]);
         }
@@ -633,6 +639,8 @@ use super::*;
                 created_ms: now,
                 updated_ms: now,
                 status_reason: None,
+                patrol_idle_since_ms: None,
+                patrol_last_push_ms: 0,
             },
         }]);
 
@@ -689,6 +697,8 @@ use super::*;
                 created_ms: now,
                 updated_ms: now,
                 status_reason: None,
+                patrol_idle_since_ms: None,
+                patrol_last_push_ms: 0,
             },
         }]);
 
@@ -753,6 +763,8 @@ use super::*;
                     created_ms: now,
                     updated_ms: now,
                     status_reason: Some("fixture transport-lost".into()),
+                    patrol_idle_since_ms: None,
+                    patrol_last_push_ms: 0,
                 },
             }]);
         };
@@ -876,6 +888,8 @@ use super::*;
                     updated_ms: now,
                     status_reason: (status == "transport-lost")
                         .then(|| "fixture transport-lost".into()),
+                    patrol_idle_since_ms: None,
+                    patrol_last_push_ms: 0,
                 },
             }]);
         };
@@ -992,6 +1006,8 @@ use super::*;
                     created_ms: now,
                     updated_ms: now,
                     status_reason: None,
+                    patrol_idle_since_ms: None,
+                    patrol_last_push_ms: 0,
                 },
             }]);
             id
@@ -1199,6 +1215,7 @@ use super::*;
                 background: false,
                 reason: "controlled current idle observation after unknown".into(),
                 observed_ms: now_ms(),
+                idle_since_ms: Some(now_ms()),
             }
         };
         let idle_at = activity.observed_ms + 1;
@@ -2143,7 +2160,9 @@ use super::*;
         assert!(text.contains("msg-batch-3"));
         assert!(text.contains("msg-batch-4"));
         assert!(text.contains("message_ids="));
-        assert!(text.contains("action_categories="));
+        assert!(text.contains("entries=msg-batch-2:"));
+        assert!(text.contains("msg-batch-3:"));
+        assert!(text.contains("msg-batch-4:"));
         assert!(!text.contains("task_ids"), "{text}");
         assert!(!text.contains("collab inbox"), "{text}");
 
@@ -2294,6 +2313,8 @@ use super::*;
                 created_ms: now,
                 updated_ms: now,
                 status_reason: None,
+                patrol_idle_since_ms: None,
+                patrol_last_push_ms: 0,
             },
         }]);
         server.commit(&[Event::MasterWakeUpdated {
@@ -2388,6 +2409,8 @@ use super::*;
                 created_ms: now,
                 updated_ms: now,
                 status_reason: None,
+                patrol_idle_since_ms: None,
+                patrol_last_push_ms: 0,
             },
         }]);
         server.commit(&[Event::MasterWakeUpdated {

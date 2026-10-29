@@ -740,7 +740,20 @@ pub(super) fn goal_check_subscription_owner(
 
 pub(super) const PROJECT_PATROL_EVENT: &str = "master-idle";
 pub(super) const PROJECT_PATROL_SUBJECT: &str = "project-patrol";
-pub(super) const PROJECT_PATROL_EVERY_MS: i64 = 900_000;
+pub(super) const PROJECT_PATROL_EVERY_MS: i64 = 1_500_000;
+pub(super) const PROJECT_PATROL_COMPAT_EVERY_MS: i64 = 900_000;
+pub(super) const PROJECT_PATROL_EVERY_MS_STR: &str = "1500000";
+
+fn is_project_patrol_interval(interval_ms: Option<i64>) -> bool {
+    matches!(
+        interval_ms,
+        Some(PROJECT_PATROL_EVERY_MS | PROJECT_PATROL_COMPAT_EVERY_MS)
+    )
+}
+
+pub(super) fn project_patrol_cadence_gap(interval_ms: Option<i64>) -> Option<&'static str> {
+    (interval_ms == Some(PROJECT_PATROL_COMPAT_EVERY_MS)).then_some("PATROL_CADENCE_RUNTIME_GAP")
+}
 
 fn goal_notify_subscriptions(root: &Path) -> Result<Vec<Value>, String> {
     let mut command = Command::new("collab");
@@ -779,7 +792,7 @@ fn goal_patrol_subscription_is_usable(
 ) -> Option<String> {
     if goal_check_subscription_owner(scope, subscription).is_err()
         || subscription["event"].as_str() != Some(PROJECT_PATROL_EVENT)
-        || subscription["interval_ms"].as_i64() != Some(PROJECT_PATROL_EVERY_MS)
+        || !is_project_patrol_interval(subscription["interval_ms"].as_i64())
         || subscription["status"].as_str() != Some("armed")
         || subscription["subject"].as_str() != Some(PROJECT_PATROL_SUBJECT)
     {
@@ -806,7 +819,7 @@ fn goal_patrol_subscription_is_usable(
         .map(str::to_owned)
 }
 
-pub(super) fn goal_project_patrol_subscription(
+fn goal_project_patrol_record(
     root: &Path,
     scope: &GoalScope,
 ) -> Result<Option<(String, Value)>, String> {
@@ -814,8 +827,25 @@ pub(super) fn goal_project_patrol_subscription(
     let mut matches: Vec<(String, Value)> = goal_notify_subscriptions(root)?
         .into_iter()
         .filter_map(|subscription| {
-            goal_patrol_subscription_is_usable(scope, &subscription, now_ms)
-                .map(|id| (id, subscription))
+            if goal_check_subscription_owner(scope, &subscription).is_err()
+                || subscription["event"].as_str() != Some(PROJECT_PATROL_EVENT)
+                || !is_project_patrol_interval(subscription["interval_ms"].as_i64())
+                || subscription["subject"].as_str() != Some(PROJECT_PATROL_SUBJECT)
+            {
+                return None;
+            }
+            let current = subscription["status"].as_str() == Some("cancelled")
+                || (subscription["status"].as_str() == Some("armed")
+                    && subscription["expires_ms"]
+                        .as_i64()
+                        .is_none_or(|expires_ms| expires_ms > now_ms));
+            if !current {
+                return None;
+            }
+            subscription["id"]
+                .as_str()
+                .filter(|id| !id.trim().is_empty())
+                .map(|id| (id.to_owned(), subscription.clone()))
         })
         .collect();
     matches.sort_by_key(|(_, subscription)| {
@@ -825,6 +855,18 @@ pub(super) fn goal_project_patrol_subscription(
         )
     });
     Ok(matches.into_iter().next())
+}
+
+pub(super) fn goal_project_patrol_subscription(
+    root: &Path,
+    scope: &GoalScope,
+) -> Result<Option<(String, Value)>, String> {
+    let now_ms = goal_now_ms();
+    Ok(
+        goal_project_patrol_record(root, scope)?.filter(|(_, subscription)| {
+            goal_patrol_subscription_is_usable(scope, subscription, now_ms).is_some()
+        }),
+    )
 }
 
 fn goal_project_patrol_subscribe(
@@ -841,7 +883,7 @@ fn goal_project_patrol_subscribe(
             "--subject",
             PROJECT_PATROL_SUBJECT,
             "--every-ms",
-            "900000",
+            PROJECT_PATROL_EVERY_MS_STR,
             "--repeat-count",
             "100",
             "--ttl-seconds",
@@ -884,17 +926,41 @@ pub(super) fn goal_ensure_project_patrol(root: &Path, scope: &GoalScope) -> Valu
         });
     }
     let now = chrono::Utc::now().to_rfc3339();
-    match goal_project_patrol_subscription(root, scope) {
-        Ok(Some((subscription_id, subscription))) => serde_json::json!({
-            "applicable": true,
-            "armed": true,
-            "subscription_id": subscription_id,
-            "every_ms": PROJECT_PATROL_EVERY_MS,
-            "source": "reused",
-            "checked_at": now,
-            "subscription": subscription,
-            "error": Value::Null,
-        }),
+    match goal_project_patrol_record(root, scope) {
+        Ok(Some((subscription_id, subscription)))
+            if subscription["status"].as_str() == Some("cancelled") =>
+        {
+            serde_json::json!({
+                "applicable": true,
+                "armed": false,
+                "subscription_id": subscription_id,
+                "every_ms": PROJECT_PATROL_EVERY_MS,
+                "source": "cancelled",
+                "status": "cancelled",
+                "checked_at": now,
+                "subscription": subscription,
+                "error": Value::Null,
+            })
+        }
+        Ok(Some((subscription_id, subscription)))
+            if goal_patrol_subscription_is_usable(scope, &subscription, goal_now_ms())
+                .is_some() =>
+        {
+            let actual = subscription["interval_ms"].as_i64();
+            serde_json::json!({
+                "applicable": true,
+                "armed": true,
+                "subscription_id": subscription_id,
+                "every_ms": actual.unwrap_or(PROJECT_PATROL_EVERY_MS),
+                "target_every_ms": PROJECT_PATROL_EVERY_MS,
+                "cadence_runtime_gap": project_patrol_cadence_gap(actual),
+                "source": "reused",
+                "status": "armed",
+                "checked_at": now,
+                "subscription": subscription,
+                "error": Value::Null,
+            })
+        }
         Ok(None) => match goal_project_patrol_subscribe(root, scope) {
             Ok((subscription_id, subscription)) => serde_json::json!({
                 "applicable": true,
@@ -917,6 +983,31 @@ pub(super) fn goal_ensure_project_patrol(root: &Path, scope: &GoalScope) -> Valu
                 "error": error,
             }),
         },
+        Ok(Some((_subscription_id, _subscription))) => {
+            match goal_project_patrol_subscribe(root, scope) {
+                Ok((subscription_id, subscription)) => serde_json::json!({
+                    "applicable": true,
+                    "armed": true,
+                    "subscription_id": subscription_id,
+                    "every_ms": PROJECT_PATROL_EVERY_MS,
+                    "source": "armed",
+                    "status": "armed",
+                    "checked_at": now,
+                    "subscription": subscription,
+                    "error": Value::Null,
+                }),
+                Err(error) => serde_json::json!({
+                    "applicable": true,
+                    "armed": false,
+                    "subscription_id": Value::Null,
+                    "every_ms": PROJECT_PATROL_EVERY_MS,
+                    "source": "failed",
+                    "checked_at": now,
+                    "subscription": Value::Null,
+                    "error": error,
+                }),
+            }
+        }
         Err(error) => serde_json::json!({
             "applicable": true,
             "armed": false,
@@ -940,20 +1031,56 @@ pub(super) fn goal_project_patrol_projection(root: &Path, scope: &GoalScope) -> 
             "error": Value::Null,
         });
     }
-    match goal_project_patrol_subscription(root, scope) {
-        Ok(Some((subscription_id, subscription))) => serde_json::json!({
-            "applicable": true,
-            "armed": true,
-            "subscription_id": subscription_id,
-            "every_ms": PROJECT_PATROL_EVERY_MS,
-            "subject": subscription["subject"].clone(),
-            "error": Value::Null,
-        }),
+    match goal_project_patrol_record(root, scope) {
+        Ok(Some((subscription_id, subscription)))
+            if subscription["status"].as_str() == Some("cancelled") =>
+        {
+            serde_json::json!({
+                "applicable": true,
+                "armed": false,
+                "subscription_id": subscription_id,
+                "every_ms": PROJECT_PATROL_EVERY_MS,
+                "subject": subscription["subject"].clone(),
+                "status": "cancelled",
+                "source": "cancelled",
+                "error": Value::Null,
+            })
+        }
+        Ok(Some((subscription_id, subscription)))
+            if goal_patrol_subscription_is_usable(scope, &subscription, goal_now_ms())
+                .is_some() =>
+        {
+            let actual = subscription["interval_ms"].as_i64();
+            serde_json::json!({
+                "applicable": true,
+                "armed": true,
+                "subscription_id": subscription_id,
+                "every_ms": actual.unwrap_or(PROJECT_PATROL_EVERY_MS),
+                "target_every_ms": PROJECT_PATROL_EVERY_MS,
+                "cadence_runtime_gap": project_patrol_cadence_gap(actual),
+                "subject": subscription["subject"].clone(),
+                "status": "armed",
+                "source": "reused",
+                "error": Value::Null,
+            })
+        }
         Ok(None) => serde_json::json!({
             "applicable": true,
             "armed": false,
             "subscription_id": Value::Null,
             "every_ms": PROJECT_PATROL_EVERY_MS,
+            "status": "missing",
+            "source": "missing",
+            "error": Value::Null,
+        }),
+        Ok(Some((subscription_id, subscription))) => serde_json::json!({
+            "applicable": true,
+            "armed": false,
+            "subscription_id": subscription_id,
+            "every_ms": PROJECT_PATROL_EVERY_MS,
+            "subject": subscription["subject"].clone(),
+            "status": subscription["status"].clone(),
+            "source": "inactive",
             "error": Value::Null,
         }),
         Err(error) => serde_json::json!({
@@ -961,6 +1088,8 @@ pub(super) fn goal_project_patrol_projection(root: &Path, scope: &GoalScope) -> 
             "armed": false,
             "subscription_id": Value::Null,
             "every_ms": PROJECT_PATROL_EVERY_MS,
+            "status": "error",
+            "source": "failed",
             "error": error,
         }),
     }
@@ -1192,5 +1321,18 @@ mod tests {
 
         drop(second);
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn patrol_cadence_gap_marks_only_legacy_interval() {
+        assert_eq!(
+            project_patrol_cadence_gap(Some(PROJECT_PATROL_COMPAT_EVERY_MS)),
+            Some("PATROL_CADENCE_RUNTIME_GAP")
+        );
+        assert_eq!(
+            project_patrol_cadence_gap(Some(PROJECT_PATROL_EVERY_MS)),
+            None
+        );
+        assert_eq!(project_patrol_cadence_gap(None), None);
     }
 }

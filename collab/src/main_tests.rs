@@ -59,6 +59,26 @@ fn removed_identity_selectors_are_rejected() {
 }
 
 #[test]
+fn sendmessage_positional_address_before_content_parses_exact_target_and_body() {
+    let cli = Cli::try_parse_from(["collab", "sendmessage", "Bob", "--content", "hello"])
+        .expect("documented sendmessage form must parse");
+    let Cmd::Send {
+        to,
+        content,
+        subject,
+        body,
+        ..
+    } = cli.cmd
+    else {
+        panic!("expected the send command");
+    };
+    assert_eq!(to, None);
+    assert_eq!(content.as_deref(), Some("hello"));
+    assert_eq!(subject, None);
+    assert_eq!(body, vec!["Bob".to_owned()]);
+}
+
+#[test]
 fn cli_rejects_managed_subagent_start_before_resolving_collab_context() {
     let error = run(Cmd::Subagent {
         command: subagent::Action::Start {
@@ -676,20 +696,45 @@ fn cli_project_context_uses_the_cli_app_and_exact_root() {
 
 #[test]
 fn default_recv_publishes_a_replayable_receive_identity_before_consuming() {
-    let first = new_receive_id();
-    let second = new_receive_id();
+    let independent_first = new_receive_id();
+    let independent_second = new_receive_id();
     assert_ne!(
-        first, second,
+        independent_first, independent_second,
         "each default receive owns a distinct identity"
     );
     assert!(
-        crate::identity::validate_id_for_protocol(&first).is_ok(),
+        crate::identity::validate_id_for_protocol(&independent_first).is_ok(),
         "the generated identity must satisfy protocol identifier rules"
     );
-    let banner = receive_recovery_banner(&first);
-    assert!(banner.contains(&format!("receive_id={first}")));
     assert!(
-        banner.contains(&format!("collab recv --receive-id {first}")),
+        crate::identity::validate_id_for_protocol(&independent_second).is_ok(),
+        "the generated identity must satisfy protocol identifier rules"
+    );
+
+    let same_nonce = 1_729_977_600_000_000_000;
+    let first_nonced = new_receive_id_from_nonce(same_nonce);
+    let second_nonced = new_receive_id_from_nonce(same_nonce);
+    assert_ne!(
+        first_nonced, second_nonced,
+        "each default receive owns a distinct identity"
+    );
+    assert!(
+        crate::identity::validate_id_for_protocol(&first_nonced).is_ok(),
+        "the generated identity must satisfy protocol identifier rules"
+    );
+    assert!(
+        crate::identity::validate_id_for_protocol(&second_nonced).is_ok(),
+        "the generated identity must satisfy protocol identifier rules"
+    );
+    let retained = format!("receive-{}-{same_nonce}", std::process::id());
+    assert!(
+        first_nonced.starts_with(&retained) && second_nonced.starts_with(&retained),
+        "the stable pid and nonce information must remain in each identity"
+    );
+    let banner = receive_recovery_banner(&first_nonced);
+    assert!(banner.contains(&format!("receive_id={first_nonced}")));
+    assert!(
+        banner.contains(&format!("collab recv --receive-id {first_nonced}")),
         "the default path must publish the exact replay command: {banner}"
     );
 }
@@ -1136,3 +1181,218 @@ fn cli_error_decorates_route_resolve_not_found_from_current_and_legacy_daemons()
 
 #[path = "main_tests_part2.rs"]
 mod part2;
+
+mod qqbot_lifecycle_tests {
+    use super::*;
+    use crate::server::conversation_default::{
+        conversation_default_key, lookup_default, ConversationDefault,
+    };
+    use crate::server::state::{Event, State};
+
+    fn new_state() -> State {
+        State::default()
+    }
+
+    fn default_for(
+        state: &mut State,
+        channel: &str,
+        conversation: &str,
+        target_address: &str,
+    ) -> u64 {
+        let channel_instance = "qqbot@host";
+        let key = conversation_default_key(channel, channel_instance, conversation);
+        let revision = state
+            .conversation_defaults
+            .get(&key)
+            .map(|default| default.revision)
+            .unwrap_or(0);
+        let default = ConversationDefault {
+            channel: channel.to_owned(),
+            channel_instance: channel_instance.to_owned(),
+            conversation: conversation.to_owned(),
+            project_scope: "/project".into(),
+            target_address: target_address.to_owned(),
+            revision: revision + 1,
+            updated_ms: 0,
+        };
+        state.apply(&Event::ConversationDefaultSet { default });
+        revision + 1
+    }
+
+    #[test]
+    fn per_conversation_default_is_isolated_and_switched_atomically() {
+        let mut state = new_state();
+        // Two QQ conversations for two external users start with no default.
+        assert!(lookup_default(&state, "qqbot", "qqbot@host", "u1:session").is_none());
+        assert!(lookup_default(&state, "qqbot", "qqbot@host", "u2:session").is_none());
+
+        // User 1 sets its default to Alice; user 2's default must be unaffected.
+        default_for(&mut state, "qqbot", "u1:session", "project.Alice");
+        default_for(&mut state, "qqbot", "u2:session", "project.Bob");
+        assert_eq!(
+            lookup_default(&state, "qqbot", "qqbot@host", "u1:session")
+                .unwrap()
+                .target_address,
+            "project.Alice"
+        );
+        assert_eq!(
+            lookup_default(&state, "qqbot", "qqbot@host", "u2:session")
+                .unwrap()
+                .target_address,
+            "project.Bob"
+        );
+
+        // Switching user 1 to Jenny must not disturb user 2.
+        default_for(&mut state, "qqbot", "u1:session", "project.Jenny");
+        assert_eq!(
+            lookup_default(&state, "qqbot", "qqbot@host", "u1:session")
+                .unwrap()
+                .target_address,
+            "project.Jenny"
+        );
+        assert_eq!(
+            lookup_default(&state, "qqbot", "qqbot@host", "u2:session")
+                .unwrap()
+                .target_address,
+            "project.Bob",
+            "switching one conversation must not move another"
+        );
+        // Each accepted switch advances its own revision monotonically.
+        assert_eq!(
+            lookup_default(&state, "qqbot", "qqbot@host", "u1:session")
+                .unwrap()
+                .revision,
+            2
+        );
+        assert_eq!(
+            lookup_default(&state, "qqbot", "qqbot@host", "u2:session")
+                .unwrap()
+                .revision,
+            1
+        );
+    }
+
+    #[test]
+    fn inbound_duplicate_platform_event_is_one_durable_message() {
+        use crate::server::channel_envelope::{platform_event_key, ChannelEnvelope};
+        let mut state = new_state();
+        let key = platform_event_key("qqbot", "u1:session", "platform-msg-1");
+        let envelope = ChannelEnvelope {
+            source_channel: "qqbot".into(),
+            channel_instance: "qqbot@host".into(),
+            external_user: "u1".into(),
+            external_conversation: "u1:session".into(),
+            platform_message_id: "platform-msg-1".into(),
+            reply_route: "qqbot://u1/session".into(),
+            recipient_address: "project.Bob".into(),
+            attachments: Vec::new(),
+        };
+        state.apply(&Event::ChannelEnvelopeRecorded {
+            message_id: "collab-msg-1".into(),
+            idempotency_key: key.clone(),
+            envelope: envelope.clone(),
+        });
+        // A duplicate platform event (even with a different Collab id) must not
+        // create a second message or a second envelope.
+        state.apply(&Event::ChannelEnvelopeRecorded {
+            message_id: "collab-msg-2".into(),
+            idempotency_key: key.clone(),
+            envelope,
+        });
+        assert_eq!(
+            state.platform_event_index.len(),
+            1,
+            "{:?}",
+            state.platform_event_index
+        );
+        assert_eq!(state.channel_envelopes.len(), 1);
+        assert_eq!(
+            state.platform_event_index.get(&key).map(String::as_str),
+            Some("collab-msg-1"),
+            "the first durable message must win for the platform event"
+        );
+        assert!(state.channel_envelopes.contains_key("collab-msg-1"));
+        assert!(!state.channel_envelopes.contains_key("collab-msg-2"));
+    }
+
+    #[test]
+    fn outbound_attachment_path_must_stay_inside_authorized_root() {
+        use crate::server::channel_envelope::authorized_attachment_path;
+        let base = std::env::temp_dir().join(format!(
+            "att-boundary-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let root = base.join("authorized");
+        std::fs::create_dir_all(&root).unwrap();
+        let inside = root.join("报告 file.pdf");
+        std::fs::write(&inside, b"payload").unwrap();
+        let outside = base.join("secret.txt");
+        std::fs::write(&outside, b"secret").unwrap();
+        let dir = root.join("subdir");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // In-root regular file is accepted (Chinese and space in the name).
+        let resolved = authorized_attachment_path(&root, &inside).expect("in-root file");
+        assert_eq!(resolved, inside.canonicalize().unwrap());
+        // Out-of-root path is rejected.
+        let err = authorized_attachment_path(&root, &outside).unwrap_err();
+        assert!(err.contains("ATTACHMENT_PATH_OUT_OF_ROOT"), "{err}");
+        // Missing path is reported, not fabricated.
+        let missing = root.join("nope.bin");
+        let err = authorized_attachment_path(&root, &missing).unwrap_err();
+        assert!(err.contains("ATTACHMENT_PATH_UNAVAILABLE"), "{err}");
+        // A directory is not a sendable attachment.
+        let err = authorized_attachment_path(&root, &dir).unwrap_err();
+        assert!(err.contains("ATTACHMENT_PATH_NOT_FILE"), "{err}");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn conversation_default_and_channel_envelope_survive_snapshot_replay() {
+        use crate::server::channel_envelope::{platform_event_key, ChannelEnvelope};
+        let mut state = new_state();
+        default_for(&mut state, "qqbot", "u1:session", "project.Bob");
+        let key = platform_event_key("qqbot@host", "u1:session", "platform-msg-1");
+        state.apply(&Event::ChannelEnvelopeRecorded {
+            message_id: "collab-msg-1".into(),
+            idempotency_key: key.clone(),
+            envelope: ChannelEnvelope {
+                source_channel: "qqbot".into(),
+                channel_instance: "qqbot@host".into(),
+                external_user: "u1".into(),
+                external_conversation: "u1:session".into(),
+                platform_message_id: "platform-msg-1".into(),
+                reply_route: "qqbot://u1/session".into(),
+                recipient_address: "project.Bob".into(),
+                attachments: Vec::new(),
+            },
+        });
+        // Compacted journal baselines must restore the typed default and the
+        // platform idempotency index, not just the message rows.
+        let lines: Vec<String> = state
+            .snapshot_events()
+            .iter()
+            .map(|event| serde_json::to_string(event).unwrap())
+            .collect();
+        let mut replayed = new_state();
+        for line in lines {
+            let event: Event = serde_json::from_str(&line).unwrap();
+            replayed.apply(&event);
+        }
+        assert_eq!(
+            lookup_default(&replayed, "qqbot", "qqbot@host", "u1:session")
+                .unwrap()
+                .target_address,
+            "project.Bob"
+        );
+        assert_eq!(
+            replayed.platform_event_index.get(&key).map(String::as_str),
+            Some("collab-msg-1")
+        );
+        assert!(replayed.channel_envelopes.contains_key("collab-msg-1"));
+    }
+}

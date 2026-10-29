@@ -1,5 +1,6 @@
 use super::*;
 use std::collections::BTreeSet;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const CUE_TIMEOUT: Duration = Duration::from_secs(10);
 const SKIP_TIMEOUT: Duration = Duration::from_secs(4);
@@ -111,6 +112,34 @@ fn set_native_status(fixture: &AppFixture, thread: &str, status: &str) {
 }
 
 fn advance_gate(fixture: &mut AppFixture, context: &Value, last_wake_tasks: &[&str]) -> usize {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    append_gate(
+        fixture,
+        context,
+        last_wake_tasks,
+        Some(now - 1_800_001),
+        true,
+    )
+}
+
+fn advance_fresh_gate(
+    fixture: &mut AppFixture,
+    context: &Value,
+    last_wake_tasks: &[&str],
+) -> usize {
+    append_gate(fixture, context, last_wake_tasks, None, false)
+}
+
+fn append_gate(
+    fixture: &mut AppFixture,
+    context: &Value,
+    last_wake_tasks: &[&str],
+    idle_episode_start_ms: Option<i64>,
+    last_poll_idle: bool,
+) -> usize {
     let start = journal_events(fixture).len();
     let worker_id = context["identity"]["worker_id"]
         .as_str()
@@ -124,7 +153,9 @@ fn advance_gate(fixture: &mut AppFixture, context: &Value, last_wake_tasks: &[&s
             "last_wake_ms": 0,
             "last_realtime_idle_since_ms": i64::MIN,
             "last_wake_tasks": last_wake_tasks,
-            "next_due_ms": 0
+            "next_due_ms": 0,
+            "idle_episode_start_ms": idle_episode_start_ms,
+            "last_poll_idle": last_poll_idle
         }
     })]);
     start
@@ -280,6 +311,50 @@ fn board_idle_patrol_runtime_idle_carrier_receives_new_cue() {
     let status = fixture.run_public(&["notify", "status"], THREAD_A);
     assert_eq!(status["board_patrol"]["eligible_task_ids"], json!(["T1"]));
     assert_eq!(status["board_patrol"]["cancelled_tasks"], json!([]));
+}
+
+#[test]
+fn board_idle_patrol_runtime_requires_30m_continuous_idle() {
+    let mut fixture = AppFixture::new();
+    let alice = fixture.run_public(&["context"], THREAD_A);
+    let worker_id = alice["identity"]["worker_id"].as_str().unwrap().to_owned();
+    set_native_status(&fixture, THREAD_A, "active");
+    fixture.run_public(&["task", "register", "T1"], THREAD_A);
+    set_native_idle(&fixture, THREAD_A);
+    let baseline = cue_baseline(&fixture, THREAD_A);
+
+    let fresh_start = advance_fresh_gate(&mut fixture, &alice, &[]);
+    thread::sleep(NEGATIVE_WAIT);
+    assert_no_new_cue(&fixture, THREAD_A, &worker_id, &baseline);
+    let fresh_gate = latest_gate_after(&fixture, &worker_id, fresh_start)
+        .expect("the fresh idle poll still persists its trusted episode start");
+    assert!(
+        fresh_gate["idle_episode_start_ms"].as_i64().is_some(),
+        "the first reliable idle poll starts a new trusted interval: {fresh_gate}"
+    );
+    assert_eq!(
+        fresh_gate["last_wake_ms"].as_i64(),
+        Some(0),
+        "a fresh idle poll must not record a committed push: {fresh_gate}"
+    );
+    assert_eq!(fresh_gate["last_wake_tasks"], json!([]));
+
+    let trusted_start = advance_gate(&mut fixture, &alice, &[]);
+    let message_id = wait_for_new_cue(&fixture, THREAD_A, &worker_id, &baseline, CUE_TIMEOUT)
+        .expect("a trusted idle episode older than 30 minutes receives one cue");
+    let gate = latest_gate_after(&fixture, &worker_id, trusted_start)
+        .expect("the trusted wake persists its gate");
+    assert_eq!(gate["last_wake_tasks"], json!(["T1"]));
+    assert_eq!(gate["owner_key"], "Alice");
+    let events = journal_events(&fixture);
+    assert_eq!(
+        notice_ids(&events)
+            .difference(&baseline.notices)
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![message_id],
+        "the runtime must create exactly one durable cue for the trusted episode"
+    );
 }
 
 #[test]

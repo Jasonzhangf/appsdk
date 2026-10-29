@@ -964,6 +964,7 @@ fn pending_is_durable_idempotent_and_online_activity_unknown_is_not_pending() {
                 background: true,
                 reason: "background".into(),
                 observed_ms: 20,
+                idle_since_ms: None,
             },
         })
         .unwrap();

@@ -1,0 +1,22 @@
+{
+  "id": "collab-qqbot-inbound",
+  "version": "1.0.0",
+  "description": "QQBot 入站消息 SESE 图：读取平台事件与真实回复 route，按显式地址或该会话 default 解析收件人，先完整保存附件再发布可读路径，以平台事件幂等键与 Collab Sent 同批持久化 typed ChannelEnvelope，最终汇入唯一接收结果出口。延迟、平台事件重复和保存失败均为明确结果，不伪造路径或重复投递。",
+  "inputs": [{"id": "qq_inbound_event", "schema": "Object"}],
+  "nodes": [
+    {"id": "ingest_platform_event", "operator": "appsdk.qqbot.inbound.ingest_platform_event", "operator_version": "1", "inputs": ["qq_inbound_event"], "output": {"id": "typed_event", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "resolve_recipient", "operator": "appsdk.qqbot.inbound.resolve_recipient", "operator_version": "1", "inputs": ["typed_event"], "output": {"id": "resolved_recipient", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "save_attachments", "operator": "appsdk.qqbot.inbound.save_attachments", "operator_version": "1", "inputs": ["resolved_recipient"], "output": {"id": "saved_attachments", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "commit_envelope_and_message", "operator": "appsdk.qqbot.inbound.commit_envelope_and_message", "operator_version": "1", "inputs": ["saved_attachments"], "output": {"id": "durable_inbound", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "project_readable_text", "operator": "appsdk.qqbot.inbound.project_readable_text", "operator_version": "1", "inputs": ["durable_inbound"], "output": {"id": "readable_projection", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},
+    {"id": "emit_receive_result", "operator": "appsdk.qqbot.inbound.emit_receive_result", "operator_version": "1", "inputs": ["readable_projection"], "output": {"id": "receive_result", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"}
+  ],
+  "edges": [
+    {"from": "ingest_platform_event", "to": "resolve_recipient", "arc_id": "typed_event"},
+    {"from": "resolve_recipient", "to": "save_attachments", "arc_id": "resolved_recipient"},
+    {"from": "save_attachments", "to": "commit_envelope_and_message", "arc_id": "saved_attachments"},
+    {"from": "commit_envelope_and_message", "to": "project_readable_text", "arc_id": "durable_inbound"},
+    {"from": "project_readable_text", "to": "emit_receive_result", "arc_id": "readable_projection"}
+  ],
+  "outputs": ["receive_result"]
+}

@@ -38,7 +38,6 @@ mod main_context;
 use main_context::*;
 mod main_maintenance;
 mod main_autostart;
-use main_autostart::*;
 
 #[cfg(feature = "context-cancel-test-hooks")]
 mod context_cancel_test_hooks;
@@ -945,11 +944,44 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
         }
         Cmd::Serve { service } => {
             let root = if service {
-                scope::service_scope_root()?.ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "SERVICE_RECORD_MISSING: run `collab up` from an initialized project first"
-                    )
-                })?
+                // A login-supervised daemon (launchd RunAtLoad) has no project
+                // cwd. Two cases must exit cleanly instead of erroring, or
+                // launchd would relaunch us in a tight crash-loop:
+                //   * no service record yet (nothing bound, the user has not
+                //     run `collab up`/registered a project on this host), and
+                //   * a healthy daemon already owns the socket.
+                let recorded = match scope::service_scope_root() {
+                    Ok(record) => record,
+                    Err(error) => {
+                        // A malformed record cannot be repaired by relaunching;
+                        // exit 0 so launchd does not spin, and surface the
+                        // reason in the log.
+                        out(&json!({
+                            "ok": false,
+                            "service": "record-invalid",
+                            "reason": format!("{error:#}"),
+                        }));
+                        return Ok(());
+                    }
+                };
+                let Some(root) = recorded else {
+                    out(&json!({
+                        "ok": true,
+                        "service": "idle",
+                        "reason": "SERVICE_RECORD_MISSING: waiting for the first `collab up`",
+                    }));
+                    return Ok(());
+                };
+                let probe = Scope { root: root.clone() };
+                if client::alive(&probe.sock_path()) {
+                    out(&json!({
+                        "ok": true,
+                        "service": "already-running",
+                        "server": probe.sock_path(),
+                    }));
+                    return Ok(());
+                }
+                root
             } else {
                 scope::lifecycle_project_root()?
             };
@@ -1012,7 +1044,10 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     password,
                 },
             )?;
-            main_autostart::unload_job()?;
+            // Do NOT `launchctl unload -w` here: that is a persistent disable
+            // that would also cancel the next login. The daemon exits cleanly,
+            // so the RunAtLoad/KeepAlive(SuccessfulExit=false) job stays
+            // stopped for this session and resumes automatically on next login.
             out(&json!({"ok": true, "down": true, "server": scope.sock_path()}));
             Ok(())
         }

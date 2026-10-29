@@ -26,9 +26,11 @@ fn collab_bin_path() -> PathBuf {
 }
 
 /// Render the per-user LaunchAgent plist. RunAtLoad guarantees login-time
-/// autostart; KeepAlive restarts the service only when the job is loaded and
-/// the process exits (crash recovery). An explicit `collab down` unloads the
-/// job for the current session and does not permanently disable autostart.
+/// autostart; `KeepAlive.SuccessfulExit=false` restarts the service only after
+/// an unsuccessful exit (crash recovery), never after a clean `collab down`.
+/// That is what lets a manual `down` stay stopped for the current session
+/// without the persistent `launchctl unload -w` disable that would also cancel
+/// the next login. The plist stays installed, so the next login re-runs it.
 fn render_plist(collab_bin: &Path) -> String {
     let log_path = scope::HostPaths::resolve()
         .map(|p| p.state_root().join("serve.log").display().to_string())
@@ -49,7 +51,10 @@ fn render_plist(collab_bin: &Path) -> String {
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
     <key>StandardOutPath</key>
     <string>{log}</string>
     <key>StandardErrorPath</key>
@@ -97,20 +102,6 @@ pub fn install_and_load() -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
-/// Unload the LaunchAgent job for the current session. This is the action
-/// behind `collab down`: the plist file is retained, so the next login reloads
-/// it and autostart resumes; an explicit `collab up` also reloads it.
-pub fn unload_job() -> anyhow::Result<()> {
-    let path = launch_agent_path();
-    if !path.exists() {
-        return Ok(());
-    }
-    let _: std::process::ExitStatus = Command::new("launchctl")
-        .args(["unload", "-w", &path.display().to_string()])
-        .status()?;
-    Ok(())
-}
-
 /// Returns true when the LaunchAgent job is currently loaded.
 pub fn is_loaded() -> bool {
     let path = launch_agent_path();
@@ -120,4 +111,32 @@ pub fn is_loaded() -> bool {
     let label = LAUNCH_AGENT_LABEL;
     let output = Command::new("launchctl").args(["list", label]).output();
     matches!(output, Ok(o) if o.status.success())
+}
+
+#[cfg(test)]
+mod plist_tests {
+    use super::*;
+
+    #[test]
+    fn plist_runs_serve_service_at_load() {
+        let plist = render_plist(Path::new("/usr/local/bin/collab"));
+        assert!(plist.contains("<key>RunAtLoad</key>\n    <true/>"), "{plist}");
+        assert!(plist.contains("<string>serve</string>"), "{plist}");
+        assert!(plist.contains("<string>--service</string>"), "{plist}");
+        assert!(plist.contains(LAUNCH_AGENT_LABEL), "{plist}");
+    }
+
+    #[test]
+    fn keepalive_restarts_only_on_unsuccessful_exit() {
+        // A clean `collab down` exits 0; launchd must NOT relaunch it, or the
+        // daemon would come straight back and manual close would be impossible.
+        // Crash recovery still needs a relaunch, so SuccessfulExit=false.
+        let plist = render_plist(Path::new("/usr/local/bin/collab"));
+        assert!(
+            plist.contains("<key>KeepAlive</key>\n    <dict>\n        <key>SuccessfulExit</key>\n        <false/>"),
+            "{plist}"
+        );
+        // Guard against the old always-restart boolean form coming back.
+        assert!(!plist.contains("<key>KeepAlive</key>\n    <true/>"), "{plist}");
+    }
 }

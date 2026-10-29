@@ -902,7 +902,7 @@ fn master_idle_subscription_is_restricted_to_the_live_master_and_supported_inter
     assert!(!invalid.ok);
     assert_eq!(
         invalid.error.as_deref(),
-        Some("master-idle interval must be exactly 900000 or 3600000 ms")
+        Some("master-idle interval must be project-patrol 1500000, compatibility 900000, or 3600000 ms")
     );
     std::fs::remove_dir_all(root).ok();
 }

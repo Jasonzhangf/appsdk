@@ -607,21 +607,19 @@ fn resolve_send_target(scope: &Scope, requested: &str) -> anyhow::Result<SendTar
 /// Build a host-wide cross-project send while keeping `collab send` as the
 /// only public command. Permission failures name the current project master,
 /// so an unauthorized caller learns exactly who can send.
-fn send_cross_project(
+fn require_current_master(
     scope: &Scope,
     ident: &Identity,
-    target: &GlobalDeliveryTarget,
-    subject: String,
-    body: String,
-    in_reply_to: Option<String>,
-) -> anyhow::Result<()> {
+    action: &str,
+    destination: &str,
+) -> anyhow::Result<Value> {
     let local: Value = call_project(scope, ident, &Req::MasterStatus)?;
     let master = local
         .get("master")
         .filter(|entry| !entry.is_null())
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "PERMISSION_DENIED: cross-project send requires the current project master; no master is active for this project"
+                "PERMISSION_DENIED: {action} requires the current project master; no master is active for this project"
             )
         })?;
     let master_worker = master
@@ -634,12 +632,24 @@ fn send_cross_project(
             .and_then(Value::as_str)
             .unwrap_or(master_worker);
         anyhow::bail!(
-            "PERMISSION_DENIED: cross-project send requires this project's current master; current master is {} ({}). You are not permitted to send to {}",
+            "PERMISSION_DENIED: {action} requires this project's current master; current master is {} ({}). You are not permitted to send to {}",
             master_name,
             master_worker,
-            target.address
+            destination
         );
     }
+    Ok(master.clone())
+}
+
+fn send_cross_project(
+    scope: &Scope,
+    ident: &Identity,
+    target: &GlobalDeliveryTarget,
+    subject: String,
+    body: String,
+    in_reply_to: Option<String>,
+) -> anyhow::Result<()> {
+    let master = require_current_master(scope, ident, "cross-project send", &target.address)?;
     let request = Req::CrossProjectSend {
         from: ident.worker_id.clone(),
         from_project: scope.root.to_string_lossy().into_owned(),
@@ -668,8 +678,9 @@ fn send_cross_project(
 }
 
 /// `ceo` is a host-wide address, not necessarily the master of the CEO's own
-/// workspace project. Route it through the daemon-owned CEO reply path so the
-/// same permission rule applies and no project-master substitution is made.
+/// workspace project. Delivery keeps ordinary message semantics: an
+/// uncorrelated send must reach the CEO mailbox as a message, not be folded
+/// into project progress aggregation.
 fn send_to_ceo(
     scope: &Scope,
     ident: &Identity,
@@ -677,15 +688,20 @@ fn send_to_ceo(
     body: String,
     in_reply_to: Option<String>,
 ) -> anyhow::Result<()> {
+    require_current_master(scope, ident, "send to ceo", "ceo")?;
+    let command = match in_reply_to {
+        Some(original) => crate::ceo::CeoCommand::Reply {
+            subject,
+            body,
+            in_reply_to: Some(original),
+            urgent: false,
+        },
+        None => crate::ceo::CeoCommand::DirectMessage { subject, body },
+    };
     let request = Req::Ceo {
         worker_id: ident.worker_id.clone(),
         token: ident.token.clone(),
-        command: crate::ceo::CeoCommand::Reply {
-            subject,
-            body,
-            in_reply_to,
-            urgent: false,
-        },
+        command,
     };
     let value: Value = call_project(scope, ident, &request)?;
     out(&value);
@@ -1410,6 +1426,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             r#type,
             in_reply_to,
             delivery,
+            channel_envelope,
             reply_required,
             reply_on_completion,
             body,
@@ -1463,6 +1480,25 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 }
                 if reply_required || reply_on_completion {
                     anyhow::bail!("anonymous send cannot establish reply obligations");
+                }
+                if let Some(raw) = channel_envelope {
+                    let envelope: crate::server::channel_envelope::ChannelEnvelope =
+                        serde_json::from_str(&raw).map_err(|error| {
+                            anyhow::anyhow!("CHANNEL_ENVELOPE_INVALID: {error}")
+                        })?;
+                    let v: serde_json::Value = client::call_with_context(
+                        &scope.sock_path(),
+                        &Req::ChannelInbound {
+                            from: "unknown".into(),
+                            to: target,
+                            subject,
+                            body,
+                            envelope,
+                        },
+                        Some(cli_project_context(&scope.root)?),
+                    )?;
+                    out(&v);
+                    return Ok(());
                 }
                 let v: serde_json::Value = client::call_with_context(
                     &scope.sock_path(),

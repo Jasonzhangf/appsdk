@@ -11,7 +11,6 @@ use std::process::{Command, Output};
 fn binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_collab"))
 }
-
 fn isolated_state_root() -> PathBuf {
     let root = std::env::temp_dir().join(format!(
         "qqbot-cli-{}-{}",

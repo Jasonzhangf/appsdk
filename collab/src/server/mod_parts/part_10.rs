@@ -691,6 +691,7 @@ fn mutation_blocked_during_migration(req: &Req) -> bool {
             crate::subagent::Action::List | crate::subagent::Action::Status { .. }
         ),
         Req::Send { .. }
+        | Req::ChannelInbound { .. }
         | Req::CrossProjectSend { .. }
         | Req::LiveClosureDaemonSend { .. }
         | Req::NotificationSubscribe { .. }

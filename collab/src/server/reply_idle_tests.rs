@@ -206,7 +206,7 @@ fn reply_idle_working_and_unknown_do_not_remind() {
 }
 
 #[test]
-fn reply_idle_working_again_rearms_the_next_idle_episode() {
+fn reply_idle_working_again_does_not_rearm_the_same_obligation() {
     let (server, root) = setup();
     seed_obligation(&server, "msg-c", "sender", ReplyPolicy::OnCompletion);
     let now = now_ms();
@@ -214,47 +214,67 @@ fn reply_idle_working_again_rearms_the_next_idle_episode() {
     assert_eq!(reminders(&server).len(), 1);
     assert_eq!(obligation_view(&server)[0]["reminded_idle_episode"], true);
 
-    // A new Working episode re-arms the obligation once the anti-spam floor
-    // since the previous reminder has elapsed.
-    let rearmed_at = now + 10 * 60 * 1000 + 1;
     observe(&server, "worker", AgentActivity::Busy, "current");
-    tick_at(&server, rearmed_at);
+    tick_at(&server, now + 10 * 60 * 1000 + 1);
     assert_eq!(reminders(&server).len(), 1);
-    assert_eq!(obligation_view(&server)[0]["reminded_idle_episode"], false);
+    assert_eq!(obligation_view(&server)[0]["reminded_idle_episode"], true);
 
     observe(&server, "worker", AgentActivity::Idle, "current");
-    tick_at(&server, rearmed_at + 1);
-    assert_eq!(reminders(&server).len(), 2);
+    tick_at(&server, now + 10 * 60 * 1000 + 2);
+    assert_eq!(
+        reminders(&server).len(),
+        1,
+        "the same pending obligation must not produce a second reminder"
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn reply_idle_rearm_floor_breaks_the_reminder_wake_loop() {
+fn reply_idle_long_working_episode_does_not_rearm_the_same_obligation() {
     let (server, root) = setup();
     seed_obligation(&server, "msg-loop", "sender", ReplyPolicy::Required);
     let start = now_ms();
     idle_episode(&server, start);
     assert_eq!(reminders(&server).len(), 1);
 
-    // The reminder's own wake looks like a brief Working episode. It must not
-    // immediately re-arm the same obligation.
+    // The reminder's own wake looks like a Working episode. It must not re-arm
+    // the same obligation, even when that episode lasts past ten minutes.
     observe(&server, "worker", AgentActivity::Busy, "current");
     tick_at(&server, start + 5_000);
     assert_eq!(obligation_view(&server)[0]["reminded_idle_episode"], true);
+    tick_at(&server, start + 10 * 60 * 1000 + 1);
+    assert_eq!(obligation_view(&server)[0]["reminded_idle_episode"], true);
     observe(&server, "worker", AgentActivity::Idle, "current");
-    tick_at(&server, start + 5_001);
+    tick_at(&server, start + 10 * 60 * 1000 + 2);
     assert_eq!(
         reminders(&server).len(),
         1,
-        "a brief wake must not re-remind inside the floor"
+        "elapsed time alone must not re-arm the reminder loop"
     );
+    std::fs::remove_dir_all(root).unwrap();
+}
 
-    // After the floor, one settled Working episode re-arms one new reminder.
-    observe(&server, "worker", AgentActivity::Busy, "current");
-    tick_at(&server, start + 10 * 60 * 1000 + 1);
+#[test]
+fn reply_idle_new_obligation_still_gets_its_own_reminder() {
+    let (server, root) = setup();
+    seed_obligation(&server, "msg-old", "sender", ReplyPolicy::Required);
+    let start = now_ms();
+    idle_episode(&server, start);
+    assert_eq!(reminders(&server).len(), 1);
+
+    seed_obligation(&server, "msg-new", "sender", ReplyPolicy::Required);
     observe(&server, "worker", AgentActivity::Idle, "current");
-    tick_at(&server, start + 10 * 60 * 1000 + 2);
-    assert_eq!(reminders(&server).len(), 2);
+    tick_at(&server, start + 60_000);
+    let notices = reminders(&server);
+    assert_eq!(notices.len(), 2);
+    // Mailbox storage is a map, so select the notice that names the new
+    // obligation instead of assuming insertion order.
+    let body = notices
+        .iter()
+        .find(|notice| notice.body.contains("message_id=msg-new"))
+        .map(|notice| &notice.body)
+        .unwrap_or_else(|| panic!("no reminder named msg-new: {notices:?}"));
+    assert!(!body.contains("message_id=msg-old"), "{body}");
     std::fs::remove_dir_all(root).unwrap();
 }
 

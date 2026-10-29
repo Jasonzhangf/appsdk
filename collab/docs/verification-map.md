@@ -208,6 +208,23 @@ separate from that evidence.
 - `server::adapters::qqbot::tests` cover the outbound boundary: a text-only
   message needs no attachment root, a path mentioned in the body is never read,
   and only a typed attachment is resolved inside the authorized root.
+- The hidden, adapter-only `sendmessage --channel-envelope` path is covered by
+  `channel_inbound_cli`: the typed envelope reaches `recv`, a second identical
+  platform event deduplicates to one durable message, and a reply with
+  `--in-reply-to` binds the original `qqbot://` route instead of the Codex
+  window. Malformed JSON is rejected at the CLI boundary.
+- `qqbot-receiver-routing.test.mjs` covers the 30-second trailing window from
+  message receipt, deferring a flush while an attachment download is still in
+  flight, merging the late arrival into the same batch, and draining queued
+  batches on shutdown. Envelope construction keeps the external user,
+  conversation, platform message ID, reply route and attachment descriptors
+  typed.
+- `cross_project_stale_identity_cli::send_to_ceo_delivers_directly_and_names_the_source_master_when_denied`
+  proves an uncorrelated `send --to ceo` lands in the CEO mailbox as a direct
+  message and a non-master peer receives a denial that names the source master.
+- `server::keepalive::reply_idle_tests` proves a reminded reply obligation stays
+  sticky: a Working observation or elapsed time never re-arms the same
+  reminder, while a new obligation still gets its own one-time reminder.
 - Daemon-backed end-to-end cases (list address delivery, reply route after a
   default switch, inbound image/file publication, outbound upload bytes and
   uncertain no-replay) require a socket-capable environment and the external

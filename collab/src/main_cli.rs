@@ -670,6 +670,10 @@ pub(crate) enum Cmd {
         in_reply_to: Option<String>,
         #[arg(long, default_value = "immediate")]
         delivery: String,
+        /// Adapter-only typed channel envelope. Requires --unknown-sender and
+        /// keeps the external reply route out of the message body.
+        #[arg(long, hide = true)]
+        channel_envelope: Option<String>,
         /// Track an obligation: the recipient must reply to this message.
         #[arg(long, conflicts_with_all = ["reply_on_completion", "unknown_sender"])]
         reply_required: bool,

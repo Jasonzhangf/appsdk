@@ -773,6 +773,16 @@ pub enum Req {
         body: String,
         in_reply_to: Option<String>,
     },
+    /// Adapter-owned channel ingress. The typed envelope carries the external
+    /// reply route, platform event identity and published attachments, so a
+    /// later reply never reconstructs them from message text.
+    ChannelInbound {
+        from: String,
+        to: String,
+        subject: String,
+        body: String,
+        envelope: crate::server::channel_envelope::ChannelEnvelope,
+    },
     LiveClosureDaemonSend {
         worker_id: String,
         token: String,

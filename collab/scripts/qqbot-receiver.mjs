@@ -364,6 +364,126 @@ const composeBatchBody = (bodies) =>
     .filter((body) => body.length > 0)
     .join("\n\n");
 
+const buildChannelEnvelope = (batch) => ({
+  source_channel: "qqbot",
+  channel_instance: "qqbot",
+  external_user: batch.messages[0]?.record?.senderId ?? "",
+  external_conversation: String(batch.sessionTargetId ?? ""),
+  platform_message_id: String(batch.batchId ?? ""),
+  reply_route: `qqbot://${batch.replyTarget?.scope ?? ""}/${batch.replyTarget?.targetId ?? ""}`,
+  recipient_address: String(batch.sendToAddress ?? ""),
+  attachments: batch.messages.flatMap((item) =>
+    (item.record?.attachments ?? []).map((attachment) => ({
+      local_path: attachment.path ?? attachment.local_path ?? "",
+      display_name: attachment.filename ?? attachment.display_name ?? "",
+      media_type: attachment.contentType ?? attachment.media_type ?? "",
+    })),
+  ),
+});
+
+// Groups messages that arrive within a trailing window. A flush is deferred
+// while an inbound message is still being processed, so an attachment download
+// never silently splits one conversation burst into two deliveries.
+const createBatchQueue = ({ windowMs, maxWaitMs, flush, now = Date.now }) => {
+  const batches = new Map();
+  let counter = 0;
+  let inflight = 0;
+  const deferred = new Set();
+  const fired = new Set();
+  const flushPromises = new Set();
+
+  const runFlush = (batch) => {
+    if (!batch || fired.has(batch.batchId)) return;
+    if (inflight > 0) {
+      deferred.add(batch);
+      return;
+    }
+    fired.add(batch.batchId);
+    deferred.delete(batch);
+    batches.delete(batch.key);
+    if (batch.timer) clearTimeout(batch.timer);
+    if (batch.maxTimer) clearTimeout(batch.maxTimer);
+    batch.timer = null;
+    batch.maxTimer = null;
+    const promise = Promise.resolve()
+      .then(() => flush(batch))
+      .catch(() => {
+        // Timer-driven flushes must not surface as unhandled rejections.
+        // Shutdown drains await the settled promise via flushAll.
+      });
+    flushPromises.add(promise);
+    void promise.finally(() => flushPromises.delete(promise));
+  };
+
+  const beginMessage = () => {
+    inflight += 1;
+  };
+
+  const endMessage = () => {
+    inflight = Math.max(0, inflight - 1);
+    if (inflight === 0) {
+      for (const batch of [...deferred]) {
+        deferred.delete(batch);
+        runFlush(batch);
+      }
+    }
+  };
+
+  const enqueue = (item, routeInfo, receivedAtMs = now()) => {
+    const key = `${routeInfo.projectRoot}\u0000${routeInfo.sendToAddress}\u0000${routeInfo.sessionTargetId}`;
+    let batch = batches.get(key);
+    if (!batch) {
+      batch = {
+        key,
+        batchId: `qqbot-batch-${now()}-${++counter}`,
+        projectRoot: routeInfo.projectRoot,
+        sendToAddress: routeInfo.sendToAddress,
+        deliveryAddress: routeInfo.deliveryAddress,
+        resolvedAddress: routeInfo.resolvedAddress,
+        resolvedWorkerId: routeInfo.resolvedWorkerId,
+        sessionTargetId: routeInfo.sessionTargetId,
+        routeSource: routeInfo.routeSource,
+        messages: [],
+        replyTarget: routeInfo.replyTarget,
+        newlyBound: false,
+        flushing: false,
+        timer: null,
+        maxTimer: null,
+      };
+      batches.set(key, batch);
+      batch.maxTimer = setTimeout(
+        () => runFlush(batch),
+        Math.max(0, receivedAtMs + maxWaitMs - now()),
+      );
+    }
+    batch.messages.push(item);
+    batch.replyTarget = routeInfo.replyTarget;
+    batch.newlyBound = batch.newlyBound || routeInfo.newlyBound;
+    batch.routeSource = routeInfo.routeSource;
+    if (batch.timer) clearTimeout(batch.timer);
+    batch.timer = setTimeout(
+      () => runFlush(batch),
+      Math.max(0, receivedAtMs + windowMs - now()),
+    );
+    return batch;
+  };
+
+  const flushAll = async () => {
+    for (const batch of [...batches.values()]) runFlush(batch);
+    await Promise.all([...flushPromises]);
+  };
+
+  return {
+    beginMessage,
+    endMessage,
+    enqueue,
+    flushAll,
+    get size() {
+      return batches.size;
+    },
+  };
+};
+
 const statePayload = (value, pid, updatedAt) => ({
   ...value,
   pid,
@@ -395,8 +515,6 @@ async function startReceiver() {
     return targets;
   };
 
-  const batches = new Map();
-  let batchCounter = 0;
   const appendInboxRecord = (record) =>
     fs.appendFileSync(path.join(state, "inbox.jsonl"), JSON.stringify(record) + "\n", {
       mode: 0o600,
@@ -405,16 +523,17 @@ async function startReceiver() {
     fs.appendFileSync(path.join(state, "receipts.jsonl"), JSON.stringify(record) + "\n", {
       mode: 0o600,
     });
-
   const flushBatch = async (batch) => {
     if (!batch || batch.flushing) return;
     batch.flushing = true;
     if (batch.timer) clearTimeout(batch.timer);
     if (batch.maxTimer) clearTimeout(batch.maxTimer);
-    batches.delete(batch.key);
 
+    // Saved attachment paths travel in the typed envelope; the body carries
+    // only user text and attachment failures, so the daemon projection does
+    // not list each successful path twice.
     const combinedBody = composeBatchBody(
-      batch.messages.map((item) => item.routedBody),
+      batch.messages.map((item) => item.deliveryBody),
     );
     let deliveryStatus = "failed";
     let deliveryError = null;
@@ -431,6 +550,8 @@ async function startReceiver() {
             batch.sendToAddress,
             "--content",
             combinedBody,
+            "--channel-envelope",
+            JSON.stringify(buildChannelEnvelope(batch)),
           ],
           batch.projectRoot,
         );
@@ -518,40 +639,14 @@ async function startReceiver() {
     });
   };
 
-  const enqueueBatch = (item, routeInfo) => {
-    const key = `${routeInfo.projectRoot}\u0000${routeInfo.sendToAddress}\u0000${routeInfo.sessionTargetId}`;
-    let batch = batches.get(key);
-    if (!batch) {
-      batch = {
-        key,
-        batchId: `qqbot-batch-${Date.now()}-${++batchCounter}`,
-        projectRoot: routeInfo.projectRoot,
-        sendToAddress: routeInfo.sendToAddress,
-        deliveryAddress: routeInfo.deliveryAddress,
-        resolvedAddress: routeInfo.resolvedAddress,
-        resolvedWorkerId: routeInfo.resolvedWorkerId,
-        sessionTargetId: routeInfo.sessionTargetId,
-        routeSource: routeInfo.routeSource,
-        messages: [],
-        replyTarget: routeInfo.replyTarget,
-        newlyBound: false,
-        flushing: false,
-        timer: null,
-        maxTimer: null,
-      };
-      batches.set(key, batch);
-      batch.maxTimer = setTimeout(() => {
-        void flushBatch(batch);
-      }, MESSAGE_BATCH_MAX_WAIT_MS);
-    }
-    batch.messages.push(item);
-    batch.replyTarget = routeInfo.replyTarget;
-    batch.newlyBound = batch.newlyBound || routeInfo.newlyBound;
-    batch.routeSource = routeInfo.routeSource;
-    if (batch.timer) clearTimeout(batch.timer);
-    batch.timer = setTimeout(() => {
-      void flushBatch(batch);
-    }, MESSAGE_BATCH_WINDOW_MS);
+  const queue = createBatchQueue({
+    windowMs: MESSAGE_BATCH_WINDOW_MS,
+    maxWaitMs: MESSAGE_BATCH_MAX_WAIT_MS,
+    flush: flushBatch,
+  });
+
+  const enqueueBatch = (item, routeInfo, receivedAtMs) => {
+    const batch = queue.enqueue(item, routeInfo, receivedAtMs);
     status({
       event: "message_batched",
       connected: true,
@@ -565,21 +660,18 @@ async function startReceiver() {
     });
   };
 
-  const flushAllBatches = async () => {
-    const pending = [...batches.values()];
-    await Promise.all(pending.map((batch) => flushBatch(batch)));
-  };
-
   bot.on("ready", () => status({ event: "ready", connected: true, targetBound: !!target }));
   bot.on("resumed", () => status({ event: "resumed", connected: true, targetBound: !!target }));
   bot.on("error", (error) =>
     status({ event: "error", code: error.code ?? "SDK_ERROR" }),
   );
 
+  let shuttingDown = false;
   let serial = Promise.resolve();
   bot.on("message", (_ctx, message) => {
     serial = serial
       .then(async () => {
+        if (shuttingDown) return;
         if (message.kind !== "c2c" || seen.has(message.messageId)) return;
         seen.add(message.messageId);
         let newlyBound = false;
@@ -608,6 +700,8 @@ async function startReceiver() {
         const baseBody = leading ? leading.body : String(message.content ?? "");
         let routedBody = "";
 
+        const receivedAtMs = Date.now();
+        queue.beginMessage();
         try {
           const attachmentResult = await processInboundAttachments(
             message.attachments,
@@ -620,7 +714,10 @@ async function startReceiver() {
             attachmentResult.saved,
             attachmentResult.failed,
           );
-          if (!routedBody) {
+          const deliveryBody =
+            buildRoutedBody(baseBody, [], attachmentResult.failed) ||
+            (attachmentResult.saved.length > 0 ? "（附件）" : "");
+          if (!routedBody && !deliveryBody) {
             status({ event: "ignored_empty", connected: true, targetBound: true });
             return;
           }
@@ -732,6 +829,7 @@ async function startReceiver() {
                 resolvedWorkerId,
               },
               routedBody,
+              deliveryBody,
               attachmentCount: attachmentResult.saved.length,
               attachmentErrorCount: attachmentResult.failed.length,
               attachmentPaths: attachmentResult.saved.map(
@@ -750,6 +848,7 @@ async function startReceiver() {
               newlyBound,
               routeSource: route.source,
             },
+            receivedAtMs,
           );
         } catch (error) {
           const deliveryError = String(error.stderr || error.message || error).slice(0, 1200);
@@ -803,6 +902,8 @@ async function startReceiver() {
             routedAddress: routedAddress ?? null,
             message: deliveryError,
           });
+        } finally {
+          queue.endMessage();
         }
       })
       .catch((error) =>
@@ -827,13 +928,16 @@ async function startReceiver() {
   process.on("unhandledRejection", (reason) => recordFatal("unhandled_rejection", reason));
   process.on("uncaughtException", (error) => recordFatal("uncaught_exception", error));
 
-  let shuttingDown = false;
   for (const signal of ["SIGINT", "SIGTERM"]) {
     process.on(signal, () => {
       if (shuttingDown) return;
       shuttingDown = true;
       status({ event: "stopping", connected: false });
-      void flushAllBatches()
+      // Drain in-flight message processing first so a pending download can
+      // still join its open batch, then flush everything still queued.
+      void serial
+        .catch(() => {})
+        .then(() => queue.flushAll())
         .catch((error) => recordFatal("flush_on_shutdown_failed", error))
         .finally(() => {
           try {
@@ -855,6 +959,8 @@ async function startReceiver() {
 export {
   processInboundAttachments,
   buildRoutedBody,
+  buildChannelEnvelope,
+  createBatchQueue,
   extensionForAttachment,
   composeBatchBody,
 };

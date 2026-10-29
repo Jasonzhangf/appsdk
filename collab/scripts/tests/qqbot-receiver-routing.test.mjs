@@ -1,14 +1,30 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  buildChannelEnvelope,
   buildRoutedBody,
   composeBatchBody,
+  createBatchQueue,
   extensionForAttachment,
   matchCeoTarget,
   parseLeadingAddress,
   resolveAddress,
   resolveInboundRoute,
 } from "../qqbot-receiver.mjs";
+
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const queueRoute = {
+  projectRoot: "/projects/appsdk",
+  sendToAddress: "appsdk.Bob",
+  deliveryAddress: "appsdk.Bob",
+  resolvedAddress: "appsdk.Bob",
+  resolvedWorkerId: "worker-bob",
+  sessionTargetId: "conversation-42",
+  replyTarget: { scope: "c2c", targetId: "conversation-42" },
+  newlyBound: false,
+  routeSource: "default",
+};
 
 const targets = [
   {
@@ -142,4 +158,109 @@ test("unset default resolves to CEO and a set default never falls back", async (
   });
   assert.match(invalidDefault.error, /ADDRESS_NOT_FOUND/);
   assert.equal(ceos, 0);
+});
+
+test("channel envelope keeps the external reply route and attachments typed", () => {
+  assert.deepEqual(
+    buildChannelEnvelope({
+      batchId: "qqbot-batch-1",
+      sessionTargetId: "conversation-42",
+      sendToAddress: "appsdk.Bob",
+      replyTarget: { scope: "c2c", targetId: "conversation-42" },
+      messages: [
+        {
+          record: {
+            senderId: "sender-1",
+            attachments: [
+              { path: "/tmp/a.png", filename: "a.png", contentType: "image/png" },
+            ],
+          },
+        },
+        { record: { senderId: "sender-1", attachments: [] } },
+      ],
+    }),
+    {
+      source_channel: "qqbot",
+      channel_instance: "qqbot",
+      external_user: "sender-1",
+      external_conversation: "conversation-42",
+      platform_message_id: "qqbot-batch-1",
+      reply_route: "qqbot://c2c/conversation-42",
+      recipient_address: "appsdk.Bob",
+      attachments: [
+        { local_path: "/tmp/a.png", display_name: "a.png", media_type: "image/png" },
+      ],
+    },
+  );
+});
+
+test("an in-flight attachment keeps its open batch from flushing too early", async () => {
+  const flushed = [];
+  const queue = createBatchQueue({
+    windowMs: 20,
+    maxWaitMs: 500,
+    flush: (batch) => flushed.push(batch),
+  });
+
+  queue.enqueue({ routedBody: "text", record: { senderId: "sender-1" } }, queueRoute);
+  queue.beginMessage();
+  await delay(40);
+  assert.equal(flushed.length, 0, "the trailing timer must defer during a download");
+
+  queue.enqueue(
+    { routedBody: "image", record: { senderId: "sender-1" } },
+    queueRoute,
+    Date.now() - 35,
+  );
+  queue.endMessage();
+  await delay(5);
+  assert.equal(flushed.length, 1);
+  assert.deepEqual(
+    flushed[0].messages.map((message) => message.routedBody),
+    ["text", "image"],
+  );
+});
+
+test("the trailing window is measured from receipt, not processing completion", async () => {
+  const flushed = [];
+  const queue = createBatchQueue({
+    windowMs: 50,
+    maxWaitMs: 500,
+    flush: (batch) => flushed.push(batch),
+  });
+  queue.enqueue(
+    { routedBody: "late", record: { senderId: "sender-1" } },
+    queueRoute,
+    Date.now() - 40,
+  );
+  await delay(20);
+  assert.equal(flushed.length, 1);
+});
+
+test("shutdown drain flushes every queued batch without waiting for the window", async () => {
+  const flushed = [];
+  const queue = createBatchQueue({
+    windowMs: 10000,
+    maxWaitMs: 20000,
+    flush: (batch) => flushed.push(batch),
+  });
+  queue.enqueue({ routedBody: "a", record: { senderId: "sender-1" } }, queueRoute);
+  assert.equal(flushed.length, 0);
+  await queue.flushAll();
+  assert.equal(flushed.length, 1);
+});
+
+test("shutdown drain waits for asynchronous flush completion", async () => {
+  let completed = false;
+  const queue = createBatchQueue({
+    windowMs: 10000,
+    maxWaitMs: 20000,
+    flush: async () => {
+      await delay(25);
+      completed = true;
+    },
+  });
+  queue.enqueue({ routedBody: "a", record: { senderId: "sender-1" } }, queueRoute);
+  await queue.flushAll();
+  assert.equal(completed, true, "flushAll must not resolve before flush finishes");
 });

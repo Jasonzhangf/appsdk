@@ -457,13 +457,7 @@ fn message_status(
 ) -> Value {
     // `collab msg` is the public read owner; it attaches the caller runtime
     // identity the daemon now requires before the target lookup.
-    run_ok_at(
-        fixture,
-        target_root,
-        target_pane,
-        &["msg", msg_id],
-        false,
-    )
+    run_ok_at(fixture, target_root, target_pane, &["msg", msg_id], false)
 }
 
 fn assert_rejected_without_message(
@@ -807,7 +801,13 @@ fn unified_send_and_global_list_share_one_address_source() {
         &fixture,
         &source_root,
         &source_pane,
-        &["send", "--to", &peer_address, "--content", "local handoff body"],
+        &[
+            "send",
+            "--to",
+            &peer_address,
+            "--content",
+            "local handoff body",
+        ],
         false,
     );
     assert_eq!(local["durable"], true, "{local}");
@@ -874,4 +874,119 @@ fn unified_send_and_global_list_share_one_address_source() {
     );
     drop(fixture);
     std::fs::remove_dir_all(target_root).expect("remove isolated target project");
+}
+
+/// `ceo` is a host-wide address from a non-CEO project. An uncorrelated send
+/// must land in the CEO mailbox as a message and a non-master peer must see the
+/// current source master's identity in the denial.
+#[test]
+fn send_to_ceo_delivers_directly_and_names_the_source_master_when_denied() {
+    let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (fixture, source_pane) = Fixture::isolated_with_pane_command("ceo-direct", "sleep 600");
+    let source_root = fixture.root.canonicalize().unwrap();
+    let ceo_root = create_external_project(&fixture, "ceo-workspace");
+    let ceo_pane = create_session(&fixture, "ceo-workspace");
+    let peer_pane = create_session(&fixture, "ceo-peer");
+
+    let source = register_context(&fixture, &source_root, &source_pane, "ceo-source", false);
+    register_context(&fixture, &source_root, &peer_pane, "ceo-source-peer", false);
+    register_context(&fixture, &ceo_root, &ceo_pane, "ceo-target", false);
+    let (source_id, _) = identity(&source);
+
+    run_ok_at(
+        &fixture,
+        &source_root,
+        &source_pane,
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "user approved isolated source master",
+        ],
+        false,
+    );
+    run_ok_at(
+        &fixture,
+        &ceo_root,
+        &ceo_pane,
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "user approved isolated ceo master",
+        ],
+        false,
+    );
+    let promoted = run_ok_at(
+        &fixture,
+        &ceo_root,
+        &ceo_pane,
+        &["ceo", "promote", "--approval", "user approved isolated ceo"],
+        false,
+    );
+    assert_eq!(promoted["is_current"], true, "{promoted}");
+
+    let sent = run_ok_at(
+        &fixture,
+        &source_root,
+        &source_pane,
+        &[
+            "send",
+            "--to",
+            "ceo",
+            "--subject",
+            "direct",
+            "--content",
+            "direct ceo body",
+        ],
+        false,
+    );
+    assert_eq!(sent["durable"], true, "{sent}");
+    let received = run_ok_at(
+        &fixture,
+        &ceo_root,
+        &ceo_pane,
+        &["recv", "--timeout", "0"],
+        false,
+    );
+    let message = received["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["id"] == sent["msg_id"])
+        .expect("CEO must consume the direct message");
+    assert_eq!(message["body"], "direct ceo body", "{message}");
+    assert_eq!(message["subject"], "direct", "{message}");
+
+    let denied = command_at(
+        &fixture,
+        &source_root,
+        &peer_pane,
+        &[
+            "send",
+            "--to",
+            "ceo",
+            "--subject",
+            "denied",
+            "--content",
+            "must not enqueue",
+        ],
+        false,
+    )
+    .output()
+    .expect("run unauthorized send to ceo");
+    assert!(
+        !denied.status.success(),
+        "unauthorized ceo send succeeded: {}",
+        String::from_utf8_lossy(&denied.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&denied.stderr);
+    assert!(stderr.contains("PERMISSION_DENIED"), "{stderr}");
+    assert!(
+        stderr.contains(&source_id),
+        "permission error must name the current source master: {stderr}"
+    );
+
+    drop(fixture);
+    std::fs::remove_dir_all(ceo_root).expect("remove isolated ceo project");
 }

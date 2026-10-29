@@ -40,23 +40,12 @@ pub struct Record {
     /// ACKs, monitoring messages, and runtime flaps do not.
     #[serde(default)]
     pub idle_episode_tasks: Vec<(String, String)>,
-    /// Last time this worker received a reply-pending reminder. A working
-    /// observation caused by the reminder's own wake must not immediately
-    /// re-arm the same obligations; this floor breaks the notify-wake-notify
-    /// loop that would otherwise repeat every keepalive tick.
-    #[serde(default)]
-    pub last_reply_reminder_ms: i64,
 }
 
 /// A starting agent legitimately flaps between idle and working while it boots
 /// and renders. Reporting each flap floods the master, so a state must hold
 /// before it is worth one scheduling notification.
 const SUBAGENT_STATE_SETTLE_MS: i64 = 60_000;
-
-/// Minimum interval between reply-pending reminder bursts for one worker.
-/// A short Working episode (including the wake produced by the reminder
-/// itself) does not re-arm obligations until this floor elapses.
-const REPLY_REMINDER_REARM_MS: i64 = 10 * 60 * 1000;
 
 pub(crate) fn actionable(status: &str) -> bool {
     matches!(
@@ -280,27 +269,12 @@ pub(crate) fn tick_at(server: &Server, now: i64) {
             record.last_notice_id = None;
             let mut events = Vec::new();
             // Reply obligations are durable message control state. Keepalive
-            // only projects the typed agent observation: a new Working episode
-            // re-arms an already reminded obligation, and a settled Waiting
-            // episode sends one reminder through the existing direct-message
-            // path. Unknown/WaitingUser never reach this block.
-            if agent == AgentState::Working {
-                for obligation in state.reply_obligation_view(&worker.id) {
-                    if obligation["reminded_idle_episode"].as_bool() == Some(true) {
-                        if now.saturating_sub(record.last_reply_reminder_ms)
-                            < REPLY_REMINDER_REARM_MS
-                        {
-                            continue;
-                        }
-                        if let Some(message_id) = obligation["message_id"].as_str() {
-                            events.push(Event::ReplyObligationReminded {
-                                message_id: message_id.to_owned(),
-                                reminded: false,
-                            });
-                        }
-                    }
-                }
-            } else if agent == AgentState::Waiting && idle_record_ready {
+            // sends one reminder per pending obligation through the existing
+            // direct-message path. The reminded marker stays on the obligation
+            // itself and is never cleared by elapsed time or by a Working
+            // observation, so a wake caused by the reminder cannot re-arm the
+            // same reminder. Unknown/WaitingUser never reach this block.
+            if agent == AgentState::Waiting && idle_record_ready {
                 let pending: Vec<_> = state
                     .reply_obligation_view(&worker.id)
                     .into_iter()
@@ -309,7 +283,6 @@ pub(crate) fn tick_at(server: &Server, now: i64) {
                     })
                     .collect();
                 if !pending.is_empty() {
-                    record.last_reply_reminder_ms = now;
                     let alert_id = super::gen_msg_id();
                     events.push(Event::Sent {
                         msg: Message {

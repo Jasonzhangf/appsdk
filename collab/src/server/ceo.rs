@@ -403,6 +403,22 @@ impl ProjectRuntimeManager {
                 subject,
                 body,
             } => self.ceo_bootstrap_ready(&source, &actor, &name, operation_id, subject, body),
+            CeoCommand::DirectMessage { subject, body } => {
+                if current_master_holder(&source, &source.state.lock().unwrap())
+                    .map_err(Resp::err)?
+                    .as_deref()
+                    != Some(&actor)
+                {
+                    return Err(Resp::err(
+                        "CEO_DIRECT_MESSAGE_PROJECT_MASTER_REQUIRED: only the current project master may send a direct message to the CEO",
+                    ));
+                }
+                let grant = self.ceo_grant()?;
+                let (target, to) = self.ceo_holder(&grant)?;
+                self.ceo_deliver(
+                    &source, &actor, &name, &target, &to, subject, body, None, None, None, None,
+                )
+            }
             command => {
                 let ceo_grant = self.require_ceo(context, &name)?;
                 match command {

@@ -1132,8 +1132,20 @@ fn handle_cross_project_send(
         Err(error) => return Resp::err(error),
     };
     if target_master.as_deref() != Some(to.as_str()) {
+        let project_scope = GlobalState::canonical_project_scope(&server.root)
+            .ok()
+            .map(|scope| scope.as_str().to_owned())
+            .unwrap_or_default();
+        let master_label = target_master
+            .as_deref()
+            .and_then(|worker_id| stable_name_for_worker(&st, &project_scope, worker_id))
+            .unwrap_or_else(|| target_master.as_deref().unwrap_or_default().to_owned());
         return Resp::err(
-            "cross-project communication requires the target to be the project master",
+            format!(
+                "cross-project communication requires the target to be the project master; current target master is {} ({})",
+                master_label,
+                target_master.as_deref().unwrap_or_default()
+            ),
         );
     }
     let Some(recipient) = st.workers.get(&to).cloned() else {

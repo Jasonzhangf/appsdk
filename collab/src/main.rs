@@ -423,6 +423,284 @@ fn call_project<T: DeserializeOwned>(
     client::call_with_runtime_identity_at_root(&scope.sock_path(), request, &scope.root, runtime)
 }
 
+/// One copyable delivery address resolved from the host-wide directory.
+#[derive(Clone)]
+struct GlobalDeliveryTarget {
+    worker_id: String,
+    project_root: String,
+    address: String,
+}
+
+/// Host-wide directory entries carry one target per stable address. The
+/// daemon already deduplicates route records by owner; this helper folds any
+/// case variants back to one holder and rejects a genuinely ambiguous name.
+fn unique_directory_targets(targets: Vec<GlobalDeliveryTarget>) -> Vec<GlobalDeliveryTarget> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for target in targets {
+        let key = (
+            target.project_root.clone(),
+            target.worker_id.clone(),
+            target.address.clone(),
+        );
+        if seen.insert(key) {
+            out.push(target);
+        }
+    }
+    out
+}
+
+/// Read the host-wide directory without requiring a project scope. This is
+/// the same read-only source as `collab list`, so send addresses and list
+/// addresses can never drift from each other.
+fn host_directory() -> anyhow::Result<Vec<GlobalDeliveryTarget>> {
+    let host = scope::HostPaths::resolve()?;
+    let value: Value = client::call(&host.socket_path(), &Req::DirectoryAll)?;
+    let mut targets = Vec::new();
+    for entry in value
+        .get("targets")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(address) = entry.get("address").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(project_root) = entry.get("project_root").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(worker_id) = entry.get("worker_id").and_then(Value::as_str) else {
+            continue;
+        };
+        targets.push(GlobalDeliveryTarget {
+            worker_id: worker_id.to_owned(),
+            project_root: project_root.to_owned(),
+            address: address.to_owned(),
+        });
+    }
+    Ok(targets)
+}
+
+/// Resolve `ceo` through the typed host grant and the global directory.
+fn resolve_ceo_delivery_target(
+    scope: &Scope,
+    directory: &[GlobalDeliveryTarget],
+) -> anyhow::Result<GlobalDeliveryTarget> {
+    let host = scope::HostPaths::resolve()?;
+    let value: Value = client::call(
+        &host.socket_path(),
+        &Req::Ceo {
+            worker_id: String::new(),
+            token: String::new(),
+            command: crate::ceo::CeoCommand::Status,
+        },
+    )?;
+    let ceo = value.get("ceo").filter(|entry| !entry.is_null());
+    let Some(worker_id) = ceo
+        .and_then(|entry| entry.get("worker_id"))
+        .or_else(|| value.get("worker_id"))
+        .and_then(Value::as_str)
+    else {
+        anyhow::bail!("CHANNEL_CEO_GRANT_MISSING: no typed CEO grant is active");
+    };
+    let workspace = ceo
+        .and_then(|entry| entry.get("workspace"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let matches = unique_directory_targets(
+        directory
+            .iter()
+            .filter(|target| {
+                target.worker_id == worker_id
+                    && (workspace.is_empty() || path_eq(&target.project_root, workspace))
+            })
+            .cloned()
+            .collect(),
+    );
+    match matches.len() {
+        1 => Ok(matches.into_iter().next().expect("one target")),
+        0 => anyhow::bail!(
+            "CHANNEL_CEO_HOLDER_UNAVAILABLE: the active CEO has no current deliverable address"
+        ),
+        _ => anyhow::bail!(
+            "CHANNEL_CEO_ADDRESS_AMBIGUOUS: the active CEO maps to multiple deliverable addresses"
+        ),
+    }
+}
+
+fn path_eq(left: &str, right: &str) -> bool {
+    match (
+        std::path::Path::new(left).canonicalize(),
+        std::path::Path::new(right).canonicalize(),
+    ) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
+}
+
+/// Classify one send target. A project-qualified address can name either the
+/// current project or another project; `ceo` names the host-wide CEO. Bare
+/// names and worker IDs stay on the existing local send path so project-local
+/// behavior does not change.
+struct SendTargetResolution {
+    to: String,
+    cross_project: Option<GlobalDeliveryTarget>,
+}
+
+fn resolve_send_target(scope: &Scope, requested: &str) -> anyhow::Result<SendTargetResolution> {
+    let wanted = requested.trim();
+    if wanted.is_empty() {
+        return Ok(SendTargetResolution {
+            to: wanted.to_owned(),
+            cross_project: None,
+        });
+    }
+    let directory = host_directory()?;
+    if wanted.eq_ignore_ascii_case("ceo") {
+        let target = resolve_ceo_delivery_target(scope, &directory)?;
+        let cross = if path_eq(&target.project_root, &scope.root.to_string_lossy()) {
+            None
+        } else {
+            Some(target.clone())
+        };
+        return Ok(SendTargetResolution {
+            to: target.address,
+            cross_project: cross,
+        });
+    }
+    if !wanted.contains('.') {
+        return Ok(SendTargetResolution {
+            to: wanted.to_owned(),
+            cross_project: None,
+        });
+    }
+    let matches = unique_directory_targets(
+        directory
+            .into_iter()
+            .filter(|target| target.address.eq_ignore_ascii_case(wanted))
+            .collect(),
+    );
+    match matches.len() {
+        1 => {
+            let target = matches.into_iter().next().expect("one target");
+            let cross = if path_eq(&target.project_root, &scope.root.to_string_lossy()) {
+                None
+            } else {
+                Some(target.clone())
+            };
+            Ok(SendTargetResolution {
+                to: target.address,
+                cross_project: cross,
+            })
+        }
+        0 => Ok(SendTargetResolution {
+            to: wanted.to_owned(),
+            cross_project: None,
+        }),
+        _ => anyhow::bail!(
+            "ADDRESS_AMBIGUOUS: {} folds to multiple current holders",
+            wanted
+        ),
+    }
+}
+
+/// Build a host-wide cross-project send while keeping `collab send` as the
+/// only public command. Permission failures name the current project master,
+/// so an unauthorized caller learns exactly who can send.
+fn send_cross_project(
+    scope: &Scope,
+    ident: &Identity,
+    target: &GlobalDeliveryTarget,
+    subject: String,
+    body: String,
+    in_reply_to: Option<String>,
+) -> anyhow::Result<()> {
+    let local: Value = call_project(scope, ident, &Req::MasterStatus)?;
+    let master = local
+        .get("master")
+        .filter(|entry| !entry.is_null())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "PERMISSION_DENIED: cross-project send requires the current project master; no master is active for this project"
+            )
+        })?;
+    let master_worker = master
+        .get("worker_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if master_worker != ident.worker_id {
+        let master_name = master
+            .get("display_name")
+            .and_then(Value::as_str)
+            .unwrap_or(master_worker);
+        anyhow::bail!(
+            "PERMISSION_DENIED: cross-project send requires this project's current master; current master is {} ({}). You are not permitted to send to {}",
+            master_name,
+            master_worker,
+            target.address
+        );
+    }
+    let request = Req::CrossProjectSend {
+        from: ident.worker_id.clone(),
+        from_project: scope.root.to_string_lossy().into_owned(),
+        source_master_assigned_by: master
+            .get("assigned_by")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        source_master_approval: master
+            .get("approval")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        source_master_assigned_ms: master
+            .get("assigned_ms")
+            .and_then(Value::as_i64)
+            .unwrap_or_default(),
+        to: target.worker_id.clone(),
+        subject,
+        body,
+        in_reply_to,
+    };
+    let context = cli_project_context(std::path::Path::new(&target.project_root))?;
+    let value: Value = client::call_with_context(&scope.sock_path(), &request, Some(context))?;
+    out(&value);
+    Ok(())
+}
+
+/// `ceo` is a host-wide address, not necessarily the master of the CEO's own
+/// workspace project. Route it through the daemon-owned CEO reply path so the
+/// same permission rule applies and no project-master substitution is made.
+fn send_to_ceo(
+    scope: &Scope,
+    ident: &Identity,
+    subject: String,
+    body: String,
+    in_reply_to: Option<String>,
+) -> anyhow::Result<()> {
+    let request = Req::Ceo {
+        worker_id: ident.worker_id.clone(),
+        token: ident.token.clone(),
+        command: crate::ceo::CeoCommand::Reply {
+            subject,
+            body,
+            in_reply_to,
+            urgent: false,
+        },
+    };
+    let value: Value = call_project(scope, ident, &request)?;
+    out(&value);
+    if value.get("ok") == Some(&Value::Bool(false)) {
+        anyhow::bail!(
+            "{}",
+            value
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("CEO_SEND_FAILED")
+        );
+    }
+    Ok(())
+}
+
 /// Resolve the same canonical scope the context bootstrap used for an
 /// authenticated follow-up mutation.
 fn context_mutation_scope(
@@ -1215,6 +1493,28 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             } else {
                 None
             };
+            // One address owner for local and cross-project delivery. A
+            // project-qualified address that names another project is routed
+            // through the host-wide cross-project path; a target the caller
+            // is not authorized to send to gets an explicit permission error
+            // naming the current master.
+            let resolved = resolve_send_target(&scope, &target)?;
+            if let Some(cross) = resolved.cross_project {
+                if reply_policy.is_some() {
+                    anyhow::bail!(
+                        "SEND_REPLY_POLICY_UNSUPPORTED: cross-project send has no reply obligation; ask the target project's master to assign the work"
+                    );
+                }
+                if target_session.is_some() {
+                    anyhow::bail!(
+                        "SEND_TARGET_SESSION_UNSUPPORTED: cross-project send cannot pin a local session"
+                    );
+                }
+                if target.eq_ignore_ascii_case("ceo") {
+                    return send_to_ceo(&scope, &ident, subject, body, in_reply_to);
+                }
+                return send_cross_project(&scope, &ident, &cross, subject, body, in_reply_to);
+            }
             let command = command_envelope(&scope, &ident)?;
             let v: serde_json::Value = call_project(
                 &scope,
@@ -1224,7 +1524,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     worker_id: Some(ident.worker_id.clone()),
                     token: Some(ident.token.clone()),
                     command: Some(command),
-                    to: target,
+                    to: resolved.to,
                     mtype: r#type,
                     subject: Some(subject),
                     body,

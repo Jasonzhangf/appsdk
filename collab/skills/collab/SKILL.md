@@ -26,12 +26,13 @@ cwd 确定，稳定名字承接工作；sessionID 承载当前执行，tmux pane
 | 任务 | 入口与边界 |
 |---|---|
 | 恢复当前已注册身份和状态 | 在本项目实际环境运行 `collab context`；仅给当前宿主的真实 runtime 信息 |
-| 本项目内向明确接收者发送已授权消息 | `collab sendmessage --to '<真实名字或from>' --subject '<主题>' '<正文>'`；已有接收者时直接发送，不先轮询对方是否空闲，不把跨项目地址传给 sendmessage |
-| 向另一项目交付资料或消息 | 先读 [操作手册](operations.md#cross-project-master-communication) 的跨项目章节；源项目当前 master 用 `master send`，目标以 `collab master status` 取当前 `master.worker_id`，普通 peer 交本项目 master 处理 |
+| 查可投递地址 | `collab list`；全局目录，不依赖当前目录，输出 `project.name`、通道和真实可达状态 |
+| 发送已授权消息（本项目或跨项目同一个命令） | `collab send --to '<project.name>' --subject '<主题>' --content '<正文>'`；地址必须来自 `collab list`，显式地址失败不回退默认目标 |
+| 跨项目权限 | 调用者必须是源项目当前 master，目标是目标项目当前 master；无权限时 daemon 返回 `PERMISSION_DENIED` 并指出当前 master 是谁。`master send` 只是兼容入口，不作为日常命令 |
 | 收件与消费 | 非 DSH 用 `collab recv`；DSH gateway 独占 Poll/Ack，直接处理原生完整正文，不运行 recv/ack |
 | 只读查消息 | `collab msg <真实消息ID>` 或 `collab inbox`；只读查询不等于消费 |
 | 只读查项目通信目录（未注册可用） | `collab directory`；只读返回已知接收方白名单，不写 presence，不暴露凭据或任务细节 |
-| 匿名发送通知（未注册可用） | `collab sendmessage --unknown-sender --to '<目标peer>' [--target-session '<会话>'] --subject '<主题>' '<正文>'`；固定来源为 unknown，跳过身份获取，无回信义务 |
+| 匿名发送通知（未注册可用） | `collab send --unknown-sender --to '<目标peer>' [--target-session '<会话>'] --subject '<主题>' '<正文>'`；固定来源为 unknown，跳过身份获取，无回信义务 |
 
 ### 未注册脚本自通知
 

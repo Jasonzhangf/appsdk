@@ -130,13 +130,14 @@ teammate 或 worker 标识；不知道这些内部标识不构成转请 master �
 | 操作 | 使用入口 |
 | --- | --- |
 | 首次注册或明确恢复身份 | 在自己的项目运行 `collab context` |
-| 同项目发送或通知 reviewer | `collab sendmessage --to '<稳定名字或真实from>' --subject '<主题>' '<正文>'`；例如同项目 Alice 可直接用 `--to Alice`，不需要先找内部 worker ID 或让 master 转发 |
+| 查可投递地址 | `collab list`；全局目录，不依赖当前目录 |
+| 发送或通知 reviewer（同项目或跨项目同一个命令） | `collab send --to '<project.name>' --subject '<主题>' --content '<正文>'`；地址来自 `collab list`。例如同项目可直接用 `--to Alice`，不需要先找内部 worker ID 或让 master 转发 |
 | 回复原请求 | 同一发送命令，原消息确有 ID 时加 `--in-reply-to '<原消息ID>'`；没有 ID 不猜、不查内部信箱找值 |
 | 只读查项目通信目录（未注册可用） | `collab directory`；只读返回已知接收方白名单，不写 presence，不暴露凭据或任务细节 |
-| 匿名发送通知（未注册可用） | `collab sendmessage --unknown-sender --to '<目标peer>' [--target-session '<会话>'] --subject '<主题>' '<正文>'`；固定来源为 unknown，跳过身份获取，无回信义务 |
+| 匿名发送通知（未注册可用） | `collab send --unknown-sender --to '<目标peer>' [--target-session '<会话>'] --subject '<主题>' '<正文>'`；固定来源为 unknown，跳过身份获取，无回信义务 |
 | DSH 收件 | gateway 将完整正文送入原生回合；直接处理和回信，不运行 `recv/ack` |
 | 非 DSH 收件 | 按本 Skill 的 `collab recv` 流程消费 |
-| 确实跨项目 | 沿下文 master-to-master 通道；普通 peer 交给自己的 master，不把跨项目地址传给 sendmessage |
+| 跨项目 | 同一个 `collab send`。调用者必须是源项目当前 master，目标是目标项目当前 master；没有权限时返回 `PERMISSION_DENIED` 并指出当前 master。普通 peer 交给自己的 master |
 
 ### 未注册脚本与固定 Session
 
@@ -175,27 +176,25 @@ Alice 等收件人不存在。若 `resolve-agent` 错误列出自己的 session 
 无 action 但要求答复时，直接回答原问题；仅普通信息且未要求回复时，不自动回“收到”。
 “完成后回复”要求在交回实际结果时答复，不能用“已收到、正在做”代替完成结果。
 
-先区分项目内与跨项目消息。下面的 `sendmessage` 回复命令仅用于项目内消息。
-跨项目消息的 `from` 是 `<worker-id>@<source-project>`；必须按下文
-“Cross-project master communication”走 `master send`，不能把整个跨项目地址传给 `sendmessage`。
-项目内回复使用原消息的真实 from 和 id，不猜名字或任务 ID：
-`collab sendmessage --to '<原消息from>' --subject '<主题>' --in-reply-to '<原消息ID>' '<实际结果、答复或阻塞证据>'`。
+项目内和跨项目回复都使用同一个 `collab send`。项目内用原消息的真实 from 和 id，
+不猜名字或任务 ID；跨项目用 `collab list` 的 `project.name` 地址，权限由 daemon 校验：
+`collab send --to '<原消息from>' --subject '<主题>' --in-reply-to '<原消息ID>' --content '<实际结果、答复或阻塞证据>'`。
 向用户报告、消费通知、ACK 或写任务进度都不等于已回复请求方。回复不自动要求对方再回，
 只有新的 action 或明确追问才开启新一轮请求，避免无意义互答。
 系统提醒本身不是请求方；它引用原消息时回复该原消息的发送者，不向 `collab-server` 代答。
 
-项目内普通投递使用以下参数；两个回复选项互斥，不带选项默认不建立 daemon 回复标记：
+普通投递使用以下参数；两个回复选项互斥，不带选项默认不建立 daemon 回复标记：
 
 ```sh
-collab sendmessage --to '<接收者>' --subject '<问题>' --reply-required '<需要答复的问题或action>'
-collab sendmessage --to '<接收者>' --subject '<任务>' --reply-on-completion '<已确认范围与交付要求>'
-collab sendmessage --to '<原消息from>' --subject '<结果>' --in-reply-to '<原消息ID>' '<实际答复>'
+collab send --to '<接收者>' --subject '<问题>' --reply-required --content '<需要答复的问题或action>'
+collab send --to '<接收者>' --subject '<任务>' --reply-on-completion --content '<已确认范围与交付要求>'
+collab send --to '<原消息from>' --subject '<结果>' --in-reply-to '<原消息ID>' --content '<实际答复>'
 ```
 
 选项放在位置正文之前。结果回复不附加回复要求；消费、ACK 或对用户汇报不清标记，
 真正关联回复的成功入队才清标记。若只报中间进度且仍需完成后答复，发送不带
 `--in-reply-to` 的普通进度消息，不提前消除原回复要求。daemon 不判断正文是否真的完成。
-这些参数属于项目内 `sendmessage`；跨项目 `master send` 尚未接入回复标记。
+这些参数属于项目内发送；跨项目发送暂不支持回复标记。
 
 交回协作结果后，立即接续自己原来的未完任务。先核对待回复要求、协作请求和本人任务，
 落实当前可执行动作；确无可继续工作时，按当前流程交回并申请下一步或 idle。
@@ -1531,10 +1530,17 @@ master 时先取得本次启动批准。收到真实就绪握手后继续派发�
 
 从发送者自己的项目目录执行下列命令；`--project` 只指定接收项目，不改变发送者身份：
 
-This existing master-to-master channel is master-only and explicit. Only the
-current master grant holder may send to the current master grant holder of
-another initialized project; non-master peers and managed subagents are
-rejected before any message is persisted:
+`collab send` is the single public cross-project command:
+
+```sh
+collab send --to '<project.name>' --subject <short-topic> --content "<original message>"
+```
+
+It resolves the address from `collab list`. Only the current source-project
+master may send to the current target-project master; non-master peers and
+managed subagents are rejected before any message is persisted, and the error
+names the current master. The lower-level `master send` form remains as a
+compatibility entry:
 
 ```sh
 collab master send --project /abs/path/to/target --to <target-master> \

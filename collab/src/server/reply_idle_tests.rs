@@ -214,13 +214,46 @@ fn reply_idle_working_again_rearms_the_next_idle_episode() {
     assert_eq!(reminders(&server).len(), 1);
     assert_eq!(obligation_view(&server)[0]["reminded_idle_episode"], true);
 
+    // A new Working episode re-arms the obligation once the anti-spam floor
+    // since the previous reminder has elapsed.
+    let rearmed_at = now + 10 * 60 * 1000 + 1;
     observe(&server, "worker", AgentActivity::Busy, "current");
-    tick_at(&server, now + 2);
+    tick_at(&server, rearmed_at);
     assert_eq!(reminders(&server).len(), 1);
     assert_eq!(obligation_view(&server)[0]["reminded_idle_episode"], false);
 
     observe(&server, "worker", AgentActivity::Idle, "current");
-    tick_at(&server, now + 3);
+    tick_at(&server, rearmed_at + 1);
+    assert_eq!(reminders(&server).len(), 2);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn reply_idle_rearm_floor_breaks_the_reminder_wake_loop() {
+    let (server, root) = setup();
+    seed_obligation(&server, "msg-loop", "sender", ReplyPolicy::Required);
+    let start = now_ms();
+    idle_episode(&server, start);
+    assert_eq!(reminders(&server).len(), 1);
+
+    // The reminder's own wake looks like a brief Working episode. It must not
+    // immediately re-arm the same obligation.
+    observe(&server, "worker", AgentActivity::Busy, "current");
+    tick_at(&server, start + 5_000);
+    assert_eq!(obligation_view(&server)[0]["reminded_idle_episode"], true);
+    observe(&server, "worker", AgentActivity::Idle, "current");
+    tick_at(&server, start + 5_001);
+    assert_eq!(
+        reminders(&server).len(),
+        1,
+        "a brief wake must not re-remind inside the floor"
+    );
+
+    // After the floor, one settled Working episode re-arms one new reminder.
+    observe(&server, "worker", AgentActivity::Busy, "current");
+    tick_at(&server, start + 10 * 60 * 1000 + 1);
+    observe(&server, "worker", AgentActivity::Idle, "current");
+    tick_at(&server, start + 10 * 60 * 1000 + 2);
     assert_eq!(reminders(&server).len(), 2);
     std::fs::remove_dir_all(root).unwrap();
 }

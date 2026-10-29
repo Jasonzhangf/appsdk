@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  buildRoutedBody,
+  composeBatchBody,
+  extensionForAttachment,
   matchCeoTarget,
   parseLeadingAddress,
   resolveAddress,
@@ -31,6 +34,34 @@ test("only a leading bracket selects a route", () => {
     body: "原始正文",
   });
   assert.equal(parseLeadingAddress("请转给 [AppSDK.Bob] 处理"), null);
+});
+
+test("consecutive messages merge into one body in arrival order", () => {
+  assert.equal(
+    composeBatchBody(["  first  ", "", "second\nline", "  "]),
+    "first\n\nsecond\nline",
+  );
+});
+
+test("attachment paths and failures stay in the delivered body", () => {
+  const body = buildRoutedBody(
+    "caption",
+    [{ path: "/tmp/image.png" }],
+    [{ filename: "broken.jpg", error: "HTTP_404" }],
+  );
+  assert.equal(
+    body,
+    "caption\n附件路径：/tmp/image.png\n附件失败：broken.jpg：HTTP_404",
+  );
+});
+
+test("attachment extensions follow content type before filename", () => {
+  assert.equal(
+    extensionForAttachment({ content_type: "image/jpeg; charset=binary", filename: "x.png" }),
+    ".jpg",
+  );
+  assert.equal(extensionForAttachment({ filename: "note.md" }), ".md");
+  assert.equal(extensionForAttachment({ content_type: "image/webp" }), ".webp");
 });
 
 test("addresses match published entries case-insensitively", () => {

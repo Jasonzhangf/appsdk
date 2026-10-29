@@ -300,7 +300,7 @@ fn ensure_graph_nodes_use_registered_operators(
 mod notification;
 use notification::{register_notification_operator, validate_notification_objects};
 
-fn embedded_graph_paths() -> [(&'static str, &'static str); 33] {
+fn embedded_graph_paths() -> [(&'static str, &'static str); 35] {
     [
         (
             "docs/dagpipe/collab-send-message.graph.json",
@@ -434,12 +434,22 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 33] {
             "docs/dagpipe/collab-ceo-coordination.graph.json",
             include_str!("../../docs/dagpipe/collab-ceo-coordination.graph.json"),
         ),
+        (
+            "docs/dagpipe/collab-qqbot-inbound.graph.json",
+            include_str!("../../docs/dagpipe/collab-qqbot-inbound.graph.json"),
+        ),
+        (
+            "docs/dagpipe/collab-qqbot-outbound.graph.json",
+            include_str!("../../docs/dagpipe/collab-qqbot-outbound.graph.json"),
+        ),
     ]
 }
 
-fn design_graph_ids() -> [&'static str; 31] {
+fn design_graph_ids() -> [&'static str; 33] {
     [
         "collab-send-message",
+        "collab-qqbot-inbound",
+        "collab-qqbot-outbound",
         "collab-reply-obligation",
         "appsdk-collab-binding-lifecycle",
         "collab-work-role-registration",
@@ -473,13 +483,26 @@ fn design_graph_ids() -> [&'static str; 31] {
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 155] {
+fn design_graph_operator_names() -> [&'static str; 168] {
     [
         "appsdk.collab_send.classify_identity",
+        "appsdk.collab_send.classify_address_form",
         "appsdk.collab_send.resolve_recipient_route",
+        "appsdk.collab_send.resolve_reply_route",
         "appsdk.collab_send.commit_durable_message",
         "appsdk.collab_send.notify_recipient",
         "appsdk.collab_send.emit_send_result",
+        "appsdk.qqbot.inbound.ingest_platform_event",
+        "appsdk.qqbot.inbound.resolve_recipient",
+        "appsdk.qqbot.inbound.save_attachments",
+        "appsdk.qqbot.inbound.commit_envelope_and_message",
+        "appsdk.qqbot.inbound.project_readable_text",
+        "appsdk.qqbot.inbound.emit_receive_result",
+        "appsdk.qqbot.outbound.parse_attachment_fields",
+        "appsdk.qqbot.outbound.authorize_and_read_files",
+        "appsdk.qqbot.outbound.upload_and_send",
+        "appsdk.qqbot.outbound.record_platform_result",
+        "appsdk.qqbot.outbound.emit_send_result",
         "collab.reply.read",
         "appsdk.collab_context.bootstrap_policy",
         "collab.reply.classify",

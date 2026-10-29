@@ -919,7 +919,13 @@ fn grant_approval(
 
 fn master_status(fixture: &Fixture, pane: &Pane) -> Value {
     let status = fixture.run_ok(&["master", "status"], Some(pane));
-    status["master"].clone()
+    let mut master = status["master"].clone();
+    if let Some(object) = master.as_object_mut() {
+        // The workspace activity probe is live observation, not durable
+        // authority; full-object comparisons must stay deterministic.
+        object.remove("workspace");
+    }
+    master
 }
 
 fn binding_event_count(path: &Path, binding_id: &str, endpoint_generation: u64) -> usize {

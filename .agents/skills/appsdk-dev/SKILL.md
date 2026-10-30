@@ -131,7 +131,7 @@ Rust 格式检查使用对应 manifest 的 `cargo fmt -- --check`。
 |---|---|---|
 | AppSDK | `cargo build --release --manifest-path rust/Cargo.toml --locked`；`scripts/install-global-appsdk.sh` | 官方 installer 安装两个 binary 和三个分发 Skills；验证 installed 版本及受影响真实消费者，无 daemon |
 | DAGPipe | `scripts/install-global-dagpipe.sh` | 独立 CLI/SDK 安装；验证受影响图或真实库 consumer，无 daemon |
-| Collab | `scripts/build-collab.sh`；`scripts/install-global-collab.sh` | 正式 release 构建由脚本分配 host build 版本；installer 不操作 daemon 生命周期。全局 daemon 由用户管理，agent 只用 `collab context` 恢复 peer，不按任务内容增加身份校验 |
+| Collab | `scripts/build-collab.sh`；`scripts/install-global-collab.sh`；`collab/scripts/package-collab-tarball.sh` | 正式 release 构建由脚本分配 host build 版本；installer 不操作 daemon 生命周期。离线 tar 包由 `package-collab-tarball.sh` 生成，其 `install.sh` 与 installer 同为二进制 + Skills + `install-autostart`。全局 daemon 由用户管理，agent 只用 `collab context` 恢复 peer，不按任务内容增加身份校验 |
 
 候选 `target/` 产物用于 build/test；安装与 live 验收使用正式安装位置。
 Collab 全局 daemon 由用户管理。agent 不启动、关闭或重启它；维护命令和凭据不进入 agent 接口。安装、源码与 live 验收分别报告。

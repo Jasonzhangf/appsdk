@@ -45,6 +45,7 @@ fn render_plist(collab_bin: &Path) -> String {
         .map(|p| p.state_root().join("serve.log").display().to_string())
         .unwrap_or_else(|_| "/tmp/collab-serve.log".to_string());
     let home = std::env::var("HOME").unwrap_or_default();
+    let path = xml_escape(&service_path());
     let label = launch_agent_label();
     let state_dir = std::env::var_os(scope::COLLAB_STATE_DIR_ENV).map(|value| {
         format!(
@@ -71,6 +72,8 @@ fn render_plist(collab_bin: &Path) -> String {
     <dict>
         <key>HOME</key>
         <string>{home}</string>
+        <key>PATH</key>
+        <string>{path}</string>
 {state_dir}
     </dict>
     <key>RunAtLoad</key>
@@ -93,8 +96,35 @@ fn render_plist(collab_bin: &Path) -> String {
         bin = collab_bin.display(),
         log = log_path,
         home = home,
+        path = path,
         state_dir = state_dir,
     )
+}
+
+/// Return the PATH baked into the LaunchAgent environment. Start from the
+/// installer's PATH and append the standard macOS search locations so the
+/// supervised daemon can still find `tmux` when install runs under a minimal
+/// PATH (launchd's default excludes /opt/homebrew/bin).
+fn service_path() -> String {
+    let mut entries: Vec<String> = std::env::var("PATH")
+        .unwrap_or_default()
+        .split(':')
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_owned)
+        .collect();
+    for fallback in [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ] {
+        if !entries.iter().any(|entry| entry == fallback) {
+            entries.push(fallback.to_owned());
+        }
+    }
+    entries.join(":")
 }
 
 /// A supervised login agent owns the single default host state root. An
@@ -151,8 +181,13 @@ pub fn install_and_load() -> anyhow::Result<PathBuf> {
     // `render_plist` derives the log path from this same override, keeping the
     // isolated supervised daemon out of the default-root legacy fence.
     std::fs::create_dir_all(scope::HostPaths::resolve()?.state_root())?;
-    std::fs::write(&path, plist)?;
+    std::fs::write(&path, &plist)?;
     if is_loaded() {
+        // launchd keeps the definition it loaded, not the file just written.
+        // This install must not replace a live daemon by itself, so tell the
+        // operator the exact maintenance commands instead of pretending the
+        // new plist is already active.
+        eprintln!("{}", reload_guidance(&launch_agent_label(), &path));
         // The agent is already loaded for this login session. A clean
         // `collab down` leaves the job loaded but stopped, so launchd would
         // have no child to relaunch after a crash. Resume the loaded job here;
@@ -178,6 +213,33 @@ pub fn install_and_load() -> anyhow::Result<PathBuf> {
         );
     }
     Ok(path)
+}
+
+fn reload_guidance(label: &str, path: &Path) -> String {
+    format!(
+        "AUTOSTART_RELOAD_REQUIRED: the loaded job keeps its existing definition; to apply the latest plist run `launchctl bootout gui/$(id -u)/{label}` then `launchctl bootstrap gui/$(id -u) {path}` in a maintenance window",
+        label = label,
+        path = shell_single_quote(&path.display().to_string()),
+    )
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
+}
+
+fn xml_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
 }
 
 /// Start a loaded-but-stopped LaunchAgent job without killing a running one.
@@ -321,6 +383,66 @@ mod plist_tests {
         assert!(
             plist.contains(&format!("<key>HOME</key>\n        <string>{home}</string>")),
             "{plist}"
+        );
+    }
+
+    #[test]
+    fn plist_path_covers_homebrew_tmux_even_from_a_minimal_installer_path() {
+        // launchd gives agents only /usr/bin:/bin:/usr/sbin:/sbin. On a
+        // Homebrew host tmux lives in /opt/homebrew/bin, so the observed
+        // daemon must not inherit that minimal PATH or pane observation fails
+        // with ENOENT. The plist PATH must keep the installer path and add the
+        // standard macOS search locations.
+        let _lock = crate::scope::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = EnvGuard::set_value("PATH", "/usr/bin:/bin");
+        let plist = render_plist(Path::new("/usr/local/bin/collab"));
+        assert!(
+            plist.contains("<key>PATH</key>\n        <string>/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin:/usr/sbin:/sbin</string>"),
+            "{plist}"
+        );
+    }
+
+    #[test]
+    fn plist_escapes_xml_special_characters_in_path() {
+        // PATH is ordinary shell text and may contain ampersands or angle
+        // brackets in an unusual install environment. The plist must remain
+        // valid XML, otherwise launchd cannot load the agent at all.
+        let _lock = crate::scope::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = EnvGuard::set_value("PATH", "/opt/homebrew/bin:/tmp/a&b");
+        let plist = render_plist(Path::new("/usr/local/bin/collab"));
+        assert!(plist.contains("/tmp/a&amp;b"), "{plist}");
+        assert!(!plist.contains("/tmp/a&b</string>"), "{plist}");
+    }
+
+    #[test]
+    fn reload_guidance_targets_the_service_and_quotes_the_plist() {
+        let guidance = reload_guidance(
+            LAUNCH_AGENT_LABEL,
+            Path::new("/Users/a b/Library/LaunchAgents/com.appsdk.collab.plist"),
+        );
+        assert!(
+            guidance.contains("launchctl bootout gui/$(id -u)/com.appsdk.collab"),
+            "{guidance}"
+        );
+        assert!(
+            guidance.contains("launchctl bootstrap gui/$(id -u) '/Users/a b/Library/LaunchAgents/com.appsdk.collab.plist'"),
+            "{guidance}"
+        );
+    }
+
+    #[test]
+    fn reload_guidance_escapes_a_single_quote_in_the_plist_path() {
+        let guidance = reload_guidance(
+            LAUNCH_AGENT_LABEL,
+            Path::new("/Users/O'Brien/Library/LaunchAgents/com.appsdk.collab.plist"),
+        );
+        assert!(
+            guidance.contains(r"'/Users/O'\''Brien/Library/LaunchAgents/com.appsdk.collab.plist'"),
+            "{guidance}"
         );
     }
 

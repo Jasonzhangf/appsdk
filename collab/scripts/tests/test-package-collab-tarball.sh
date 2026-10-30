@@ -29,14 +29,26 @@ write_stub() {
 #!/bin/sh
 case "\$1" in
   --version) printf 'collab 0.2.9001\n' ;;
+  install-skills)
+    printf '%s\n' "\$*" >>"\${STUB_LOG:-/dev/null}"
+    target=""
+    previous=""
+    for argument in "\$@"; do
+      [ "\$previous" = "--target" ] && target="\$argument"
+      previous="\$argument"
+    done
+    [ -n "\$target" ] || exit 2
+    mkdir -p "\$target"
+    printf '# stub skill\n' >"\$target/SKILL.md"
+    ;;
   install-autostart)
-    printf '%s\n' "\$*" >>"\${STUB_LOG:?}"
+    printf '%s\n' "\$*" >>"\${STUB_LOG:-/dev/null}"
     if [ $autostart_exit -ne 0 ]; then
       printf 'launchctl bootstrap failed\n' >&2
       exit $autostart_exit
     fi
     ;;
-  *) printf '%s\n' "\$*" >>"\${STUB_LOG:?}" ;;
+  *) printf '%s\n' "\$*" >>"\${STUB_LOG:-/dev/null}" ;;
 esac
 STUB
   cat >"$dir/collab-mcp" <<'STUB'

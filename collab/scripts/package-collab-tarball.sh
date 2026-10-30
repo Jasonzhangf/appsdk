@@ -95,7 +95,9 @@ done
 chmod 755 "$stage/bin/collab" "$stage/bin/collab-mcp" "$stage/bin/collab-desktop-mcp"
 chmod 644 "$stage/bin/collab-desktop-mcp.mjs"
 
-cp -R "$collab_root/skills/collab" "$stage/skills/collab"
+# Export the Skill bundle from the packaged binary itself, so the archive and
+# the installed Skills come from the same build even with --bin-dir.
+"$stage/bin/collab" install-skills --target "$stage/skills/collab" --force >/dev/null
 [ -s "$stage/skills/collab/SKILL.md" ] || fail 'Skill bundle is incomplete: SKILL.md missing'
 
 cat >"$stage/install.sh" <<'INSTALL'
@@ -151,10 +153,8 @@ printf 'daemon_note=install does not restart a running daemon; switch binaries i
 INSTALL
 chmod 755 "$stage/install.sh"
 
-source_revision=$(git -C "$repo_root" rev-parse --short HEAD)
 {
   printf '# Collab %s %s\n\n' "$version" "$platform"
-  printf 'Source revision: %s\n\n' "$source_revision"
   printf 'Artifact:\n'
   cat <<'README'
 - bin/collab
@@ -187,4 +187,3 @@ printf 'tarball=%s\n' "$out_dir/$package_name.tar.gz"
 printf 'package=%s\n' "$stage"
 printf 'version=%s\n' "$version"
 printf 'platform=%s\n' "$platform"
-printf 'source_revision=%s\n' "$source_revision"

@@ -306,6 +306,15 @@ jobs:
       - name: Desktop bridge MCP consumer
         run: node --test collab/scripts/tests/desktop-bridge.test.mjs collab/scripts/tests/desktop-runtime.test.mjs
 
+  collab-packaging:
+    name: Collab packaging (macOS)
+    needs: changes
+    if: needs.changes.outputs.collab == 'true'
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash collab/scripts/tests/test-package-collab-tarball.sh
+
   installer:
     name: Installer
     needs: changes
@@ -634,8 +643,6 @@ jobs:
           cargo test --manifest-path rust/Cargo.toml --locked --bin appsdk producer::lock_tests
           cargo test --manifest-path rust/Cargo.toml --locked --test platform_lock_cli
       - run: bash scripts/tests/test-install-global-appsdk.sh
-      - name: Collab tarball installer
-        run: bash collab/scripts/tests/test-package-collab-tarball.sh
       - run: rust/target/release/appsdk verify-sdk-source-registry .
       - name: Isolated public consumer smoke
         run: |

@@ -133,6 +133,7 @@ teammate 或 worker 标识；不知道这些内部标识不构成转请 master �
 | 查可投递地址 | `collab list`；全局目录，不依赖当前目录 |
 | 发送或通知 reviewer（同项目或跨项目同一个命令） | `collab send --to '<project.name>' --subject '<主题>' --content '<正文>'`；地址来自 `collab list`。例如同项目可直接用 `--to Alice`，不需要先找内部 worker ID 或让 master 转发 |
 | 回复原请求 | 同一发送命令，原消息确有 ID 时加 `--in-reply-to '<原消息ID>'`；没有 ID 不猜、不查内部信箱找值 |
+| 回复外部通道消息（如 QQBot） | 先读消息视图的 `channel`；按 `qqbot-channel` Skill 用 `qqbot.mjs send --file` 原路回复并保留平台 `message_id`。普通 `collab send --in-reply-to` 不能替代平台投递 |
 | 只读查项目通信目录（未注册可用） | `collab directory`；只读返回已知接收方白名单，不写 presence，不暴露凭据或任务细节 |
 | 匿名发送通知（未注册可用） | `collab send --unknown-sender --to '<目标peer>' [--target-session '<会话>'] --subject '<主题>' '<正文>'`；固定来源为 unknown，跳过身份获取，无回信义务 |
 | DSH 收件 | gateway 将完整正文送入原生回合；直接处理和回信，不运行 `recv/ack` |
@@ -195,6 +196,13 @@ collab send --to '<原消息from>' --subject '<结果>' --in-reply-to '<原消�
 真正关联回复的成功入队才清标记。若只报中间进度且仍需完成后答复，发送不带
 `--in-reply-to` 的普通进度消息，不提前消除原回复要求。daemon 不判断正文是否真的完成。
 这些参数属于项目内发送；跨项目发送暂不支持回复标记。
+
+外部通道消息不能按普通 `collab send --in-reply-to` 当作已经回复用户。消息视图出现
+`channel`（例如 `channel.source_channel = "qqbot"`）或主题为 `QQBot` 时，实际回复走
+`qqbot-channel` Skill 的正式发送入口：文本用 `qqbot.mjs send --file`，图片和文件用
+`send-image` 或 `send-media`。发送后保存平台 `message_id` 回执。`collab send
+--in-reply-to` 目前只绑定原始 `reply_route` 并记录 Collab 消息，不会触发平台投递；
+不能用它宣称 QQBot 用户已收到回复。
 
 交回协作结果后，立即接续自己原来的未完任务。先核对待回复要求、协作请求和本人任务，
 落实当前可执行动作；确无可继续工作时，按当前流程交回并申请下一步或 idle。

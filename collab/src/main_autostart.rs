@@ -45,6 +45,7 @@ fn render_plist(collab_bin: &Path) -> String {
         .map(|p| p.state_root().join("serve.log").display().to_string())
         .unwrap_or_else(|_| "/tmp/collab-serve.log".to_string());
     let home = std::env::var("HOME").unwrap_or_default();
+    let path = service_path();
     let label = launch_agent_label();
     let state_dir = std::env::var_os(scope::COLLAB_STATE_DIR_ENV).map(|value| {
         format!(
@@ -71,6 +72,8 @@ fn render_plist(collab_bin: &Path) -> String {
     <dict>
         <key>HOME</key>
         <string>{home}</string>
+        <key>PATH</key>
+        <string>{path}</string>
 {state_dir}
     </dict>
     <key>RunAtLoad</key>
@@ -93,8 +96,35 @@ fn render_plist(collab_bin: &Path) -> String {
         bin = collab_bin.display(),
         log = log_path,
         home = home,
+        path = path,
         state_dir = state_dir,
     )
+}
+
+/// Return the PATH baked into the LaunchAgent environment. Start from the
+/// installer's PATH and append the standard macOS search locations so the
+/// supervised daemon can still find `tmux` when install runs under a minimal
+/// PATH (launchd's default excludes /opt/homebrew/bin).
+fn service_path() -> String {
+    let mut entries: Vec<String> = std::env::var("PATH")
+        .unwrap_or_default()
+        .split(':')
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_owned)
+        .collect();
+    for fallback in [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ] {
+        if !entries.iter().any(|entry| entry == fallback) {
+            entries.push(fallback.to_owned());
+        }
+    }
+    entries.join(":")
 }
 
 /// A supervised login agent owns the single default host state root. An
@@ -320,6 +350,21 @@ mod plist_tests {
         );
         assert!(
             plist.contains(&format!("<key>HOME</key>\n        <string>{home}</string>")),
+            "{plist}"
+        );
+    }
+
+    #[test]
+    fn plist_path_covers_homebrew_tmux_even_from_a_minimal_installer_path() {
+        // launchd gives agents only /usr/bin:/bin:/usr/sbin:/sbin. On a
+        // Homebrew host tmux lives in /opt/homebrew/bin, so the observed
+        // daemon must not inherit that minimal PATH or pane observation fails
+        // with ENOENT. The plist PATH must keep the installer path and add the
+        // standard macOS search locations.
+        let _guard = EnvGuard::set_value("PATH", "/usr/bin:/bin");
+        let plist = render_plist(Path::new("/usr/local/bin/collab"));
+        assert!(
+            plist.contains("<key>PATH</key>\n        <string>/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin:/usr/sbin:/sbin</string>"),
             "{plist}"
         );
     }

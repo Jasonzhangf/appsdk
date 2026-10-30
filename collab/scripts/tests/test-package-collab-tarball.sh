@@ -85,6 +85,8 @@ package_and_install() {
     bin/collab-desktop-mcp.mjs skills/collab/SKILL.md install.sh README-INSTALL.md; do
     [[ -e "$package/$entry" ]] || fail "missing $entry in package $name"
   done
+  grep -q '# stub skill' "$package/skills/collab/SKILL.md" ||
+    fail "archived Skill bundle did not come from the packaged binary in $name"
   [[ -x "$package/install.sh" ]] || fail "install.sh is not executable in $name"
   grep -q 'install-autostart' "$package/install.sh" ||
     fail "install.sh does not run collab install-autostart in $name"

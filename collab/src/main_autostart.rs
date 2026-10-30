@@ -45,7 +45,7 @@ fn render_plist(collab_bin: &Path) -> String {
         .map(|p| p.state_root().join("serve.log").display().to_string())
         .unwrap_or_else(|_| "/tmp/collab-serve.log".to_string());
     let home = std::env::var("HOME").unwrap_or_default();
-    let path = service_path();
+    let path = xml_escape(&service_path());
     let label = launch_agent_label();
     let state_dir = std::env::var_os(scope::COLLAB_STATE_DIR_ENV).map(|value| {
         format!(
@@ -175,14 +175,22 @@ pub fn install_and_load() -> anyhow::Result<PathBuf> {
     let collab_bin = collab_bin_path();
     let plist = render_plist(&collab_bin);
     let path = launch_agent_path();
+    let previous = std::fs::read_to_string(&path).ok();
     std::fs::create_dir_all(path.parent().expect("LaunchAgents dir"))?;
     // launchd opens StandardOutPath/StandardErrorPath before the daemon runs,
     // so the host state root must already exist or the agent fails to start.
     // `render_plist` derives the log path from this same override, keeping the
     // isolated supervised daemon out of the default-root legacy fence.
     std::fs::create_dir_all(scope::HostPaths::resolve()?.state_root())?;
-    std::fs::write(&path, plist)?;
+    std::fs::write(&path, &plist)?;
     if is_loaded() {
+        if previous.as_deref() != Some(plist.as_str()) {
+            eprintln!(
+                "AUTOSTART_RELOAD_REQUIRED: the loaded job still has the previous plist; run `launchctl bootout gui/$(id -u) {}` then `launchctl bootstrap gui/$(id -u) {}` in a maintenance window",
+                launch_agent_label(),
+                path.display()
+            );
+        }
         // The agent is already loaded for this login session. A clean
         // `collab down` leaves the job loaded but stopped, so launchd would
         // have no child to relaunch after a crash. Resume the loaded job here;
@@ -208,6 +216,21 @@ pub fn install_and_load() -> anyhow::Result<PathBuf> {
         );
     }
     Ok(path)
+}
+
+fn xml_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
 }
 
 /// Start a loaded-but-stopped LaunchAgent job without killing a running one.
@@ -361,12 +384,29 @@ mod plist_tests {
         // daemon must not inherit that minimal PATH or pane observation fails
         // with ENOENT. The plist PATH must keep the installer path and add the
         // standard macOS search locations.
+        let _lock = crate::scope::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _guard = EnvGuard::set_value("PATH", "/usr/bin:/bin");
         let plist = render_plist(Path::new("/usr/local/bin/collab"));
         assert!(
             plist.contains("<key>PATH</key>\n        <string>/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin:/usr/sbin:/sbin</string>"),
             "{plist}"
         );
+    }
+
+    #[test]
+    fn plist_escapes_xml_special_characters_in_path() {
+        // PATH is ordinary shell text and may contain ampersands or angle
+        // brackets in an unusual install environment. The plist must remain
+        // valid XML, otherwise launchd cannot load the agent at all.
+        let _lock = crate::scope::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = EnvGuard::set_value("PATH", "/opt/homebrew/bin:/tmp/a&b");
+        let plist = render_plist(Path::new("/usr/local/bin/collab"));
+        assert!(plist.contains("/tmp/a&amp;b"), "{plist}");
+        assert!(!plist.contains("/tmp/a&b</string>"), "{plist}");
     }
 
     #[test]

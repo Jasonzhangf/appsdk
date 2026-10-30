@@ -87,6 +87,16 @@ fn render_plist(collab_bin: &Path) -> String {
         <key>SuccessfulExit</key>
         <false/>
     </dict>
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>4096</integer>
+    </dict>
+    <key>HardResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>16384</integer>
+    </dict>
     <key>StandardOutPath</key>
     <string>{log}</string>
     <key>StandardErrorPath</key>
@@ -370,6 +380,27 @@ mod plist_tests {
         // Guard against the old always-restart boolean form coming back.
         assert!(
             !plist.contains("<key>KeepAlive</key>\n    <true/>"),
+            "{plist}"
+        );
+    }
+
+    #[test]
+    fn plist_raises_the_open_file_limit_for_the_daemon() {
+        // launchd gives agents a 256-file soft limit. A busy host with many
+        // registered workers exhausts that and every binding then fails with
+        // EMFILE ("Too many open files"), so the supervised daemon must raise
+        // its own soft/hard NumberOfFiles limits in the plist.
+        let plist = render_plist(Path::new("/usr/local/bin/collab"));
+        assert!(
+            plist.contains(
+                "<key>SoftResourceLimits</key>\n    <dict>\n        <key>NumberOfFiles</key>\n        <integer>4096</integer>\n    </dict>"
+            ),
+            "{plist}"
+        );
+        assert!(
+            plist.contains(
+                "<key>HardResourceLimits</key>\n    <dict>\n        <key>NumberOfFiles</key>\n        <integer>16384</integer>\n    </dict>"
+            ),
             "{plist}"
         );
     }

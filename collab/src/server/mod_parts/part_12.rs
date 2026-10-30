@@ -1254,6 +1254,7 @@ async fn run_timer_scheduler<T, R, F>(
 }
 
 async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Result<()> {
+    raise_open_file_limit();
     let scope = Scope {
         root: std::fs::canonicalize(&scope.root)?,
     };
@@ -1539,6 +1540,30 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
     }
     Ok(())
 }
+
+#[cfg(unix)]
+fn raise_open_file_limit() {
+    // launchd (and an ordinary shell) gives the daemon a 256-file soft limit.
+    // A host with many registered workers plus their keepalive connections
+    // exhausts that ceiling and every later binding fails with EMFILE. Raise
+    // the soft limit toward the hard ceiling here so a manually started daemon
+    // is protected too, not only the LaunchAgent path.
+    const TARGET: libc::rlim_t = 4096;
+    unsafe {
+        let mut limit: libc::rlimit = std::mem::zeroed();
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) != 0 {
+            return;
+        }
+        if limit.rlim_cur >= TARGET {
+            return;
+        }
+        limit.rlim_cur = if limit.rlim_max >= TARGET { TARGET } else { limit.rlim_max };
+        libc::setrlimit(libc::RLIMIT_NOFILE, &limit);
+    }
+}
+
+#[cfg(not(unix))]
+fn raise_open_file_limit() {}
 
 fn reconcile_master_goal_due(server: &Server) {
     let events = {

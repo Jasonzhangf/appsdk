@@ -217,10 +217,14 @@ pub fn install_and_load() -> anyhow::Result<PathBuf> {
 
 fn reload_guidance(label: &str, path: &Path) -> String {
     format!(
-        "AUTOSTART_RELOAD_REQUIRED: the loaded job keeps its existing definition; to apply the latest plist run `launchctl bootout gui/$(id -u)/{label}` then `launchctl bootstrap gui/$(id -u) '{path}'` in a maintenance window",
+        "AUTOSTART_RELOAD_REQUIRED: the loaded job keeps its existing definition; to apply the latest plist run `launchctl bootout gui/$(id -u)/{label}` then `launchctl bootstrap gui/$(id -u) {path}` in a maintenance window",
         label = label,
-        path = path.display(),
+        path = shell_single_quote(&path.display().to_string()),
     )
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
 }
 
 fn xml_escape(value: &str) -> String {
@@ -426,6 +430,18 @@ mod plist_tests {
         );
         assert!(
             guidance.contains("launchctl bootstrap gui/$(id -u) '/Users/a b/Library/LaunchAgents/com.appsdk.collab.plist'"),
+            "{guidance}"
+        );
+    }
+
+    #[test]
+    fn reload_guidance_escapes_a_single_quote_in_the_plist_path() {
+        let guidance = reload_guidance(
+            LAUNCH_AGENT_LABEL,
+            Path::new("/Users/O'Brien/Library/LaunchAgents/com.appsdk.collab.plist"),
+        );
+        assert!(
+            guidance.contains(r"'/Users/O'\''Brien/Library/LaunchAgents/com.appsdk.collab.plist'"),
             "{guidance}"
         );
     }

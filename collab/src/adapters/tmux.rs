@@ -327,7 +327,10 @@ fn list_panes(socket_path: &str) -> Result<Vec<ObservedPane>, String> {
             "list-panes",
             "-a",
             "-F",
-            "#{pid}\t#{session_id}\t#{pane_id}\t#{pane_pid}",
+            // Printable `|` survives locales that mangle control separators
+            // (tmux 3.x under a launchd agent with no UTF-8 locale replaces
+            // `\t` with `_`, which made the observer reject every pane).
+            "#{pid}|#{session_id}|#{pane_id}|#{pane_pid}",
         ],
     )?;
     let text = String::from_utf8(output.stdout)
@@ -339,7 +342,10 @@ fn parse_pane_lines(text: &str) -> Result<Vec<ObservedPane>, String> {
     text.lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
-            let fields = line.split('\t').collect::<Vec<_>>();
+            // tmux is asked for `|`-separated fields. A field may itself
+            // contain whitespace, so split on the literal separator rather than
+            // whitespace.
+            let fields = line.split('|').collect::<Vec<_>>();
             if fields.len() != 4 {
                 return Err("TMUX_OBSERVATION_INVALID: malformed tmux pane metadata".into());
             }
@@ -960,7 +966,7 @@ pub(crate) mod tests {
 
     #[test]
     fn list_panes_ignores_trailing_blank_lines() {
-        let observed = parse_pane_lines("58649\t$0\t%0\t58650\n\n").expect("trailing blanks parse");
+        let observed = parse_pane_lines("58649|$0|%0|58650\n\n").expect("trailing blanks parse");
         assert_eq!(observed.len(), 1);
         assert_eq!(observed[0].pane_id, "%0");
     }

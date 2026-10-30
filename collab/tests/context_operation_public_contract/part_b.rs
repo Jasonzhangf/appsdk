@@ -110,30 +110,30 @@ fn public_context_keeps_git_subdirectories_fail_closed_without_route_or_baseline
 }
 
 #[test]
-fn public_context_keeps_playground_worktrees_fail_closed_without_route_or_baseline() {
+fn public_context_keeps_plain_directories_fail_closed_without_route_or_baseline() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
-    let (fixture, pane) = Fixture::isolated("non-git-playground");
-    let worktree = fixture.root.join("parent/playground/task");
-    fs::create_dir_all(&worktree).expect("create playground worktree");
+    let (fixture, pane) = Fixture::isolated("plain-dir");
+    let worktree = fixture.root.join("parent/plain-dir/task");
+    fs::create_dir_all(&worktree).expect("create plain directory");
 
     let output = fixture
         .command_on_socket(
             &fixture.tmux_socket,
-            &["context", "--op", "ctxop-playground"],
+            &["context", "--op", "ctxop-plain-dir"],
             &pane,
         )
         .current_dir(&worktree)
         .output()
-        .expect("run context from playground worktree");
+        .expect("run context from plain directory");
     assert!(!output.status.success(), "{}", text(&output));
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("playground worktree"),
+        String::from_utf8_lossy(&output.stderr).contains("COLLAB_CONTEXT_UNRESOLVED"),
         "{}",
         text(&output)
     );
     assert!(
         !worktree.join(".agent-collab").exists(),
-        "a failed playground resolution must not create a baseline"
+        "a failed resolution must not create a baseline"
     );
 }
 

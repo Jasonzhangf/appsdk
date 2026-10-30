@@ -2292,46 +2292,22 @@ fn session_only_identity_read_is_scoped_pure_and_ignores_historical_credentials(
 fn external_linked_worktree_reuses_the_canonical_identity_without_recovery_calls() {
     let mut fixture = AppFixture::new();
     let canonical = fixture.project.clone();
-    for args in [
-        vec!["init", "-q", "-b", "main"],
-        vec![
-            "-c",
-            "user.name=Collab Test",
-            "-c",
-            "user.email=collab-test@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-q",
-            "-m",
-            "initial",
-        ],
-    ] {
-        assert!(Command::new("git")
-            .args(args)
-            .current_dir(&canonical)
-            .status()
-            .unwrap()
-            .success());
-    }
     let context = fixture.run_public(&["context"], THREAD_A);
     let linked = fixture.root.join("external-linked");
-    assert!(Command::new("git")
-        .args([
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            "linked",
-            linked.to_str().unwrap()
-        ])
-        .current_dir(&canonical)
-        .status()
-        .unwrap()
-        .success());
+    // A task directory binds to the project through an explicit `.agent-collab`
+    // marker, not through git worktree metadata. The marker may be a symlink.
+    std::fs::create_dir_all(&linked).unwrap();
+    std::os::unix::fs::symlink(
+        canonical.join(".agent-collab"),
+        linked.join(".agent-collab"),
+    )
+    .unwrap();
     fixture.project = linked;
     let replay = fixture.command_public(&["context"], THREAD_A);
     let tasks = fixture.command_without_thread(&["task", "status"], THREAD_A);
-    let worktree_baseline = fixture.project.join(".agent-collab").exists();
+    let worktree_marker = std::fs::symlink_metadata(fixture.project.join(".agent-collab"))
+        .map(|meta| meta.file_type().is_symlink())
+        .unwrap_or(false);
     // Restore the daemon's lifecycle cwd before assertions so a failing
     // regression still stops its own isolated daemon in Fixture::drop.
     fixture.project = canonical;
@@ -2355,8 +2331,8 @@ fn external_linked_worktree_reuses_the_canonical_identity_without_recovery_calls
     let tasks: Value = serde_json::from_slice(&tasks.stdout).unwrap();
     assert_eq!(tasks["tasks"], json!([]));
     assert!(
-        !worktree_baseline,
-        "a worktree must not create a second identity baseline"
+        worktree_marker,
+        "a task directory must use the project marker symlink, not a new baseline"
     );
     drop(fixture);
 }

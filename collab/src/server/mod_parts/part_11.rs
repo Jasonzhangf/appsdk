@@ -1368,7 +1368,6 @@ pub(crate) fn validate_request_context_with_register_approval(
                         root.display()
                     ));
                 }
-                reject_linked_worktree_registration(root)?;
             } else {
                 return Err(format!(
                     "PROJECT_SCOPE_UNKNOWN: no host route is registered for {}",
@@ -1398,23 +1397,7 @@ fn validate_project_registration_cwd(cwd: &str, expected_root: &Path) -> Result<
             expected_root.display()
         ));
     }
-    reject_linked_worktree_registration(expected_root)?;
     validate_register_cwd(cwd, expected_root)
-}
-
-fn reject_linked_worktree_registration(root: &Path) -> Result<(), String> {
-    let root = root
-        .canonicalize()
-        .map_err(|error| format!("PROJECT_SCOPE_INVALID: registration root: {error}"))?;
-    if crate::scope::is_linked_worktree_root(&root)
-        .map_err(|error| format!("PROJECT_SCOPE_INVALID: {error}"))?
-    {
-        return Err(format!(
-            "PROJECT_SCOPE_INVALID: linked worktree {} cannot own Collab identity; register the canonical main checkout",
-            root.display()
-        ));
-    }
-    Ok(())
 }
 
 /// Admit the explicit CLI host operator route independently of project

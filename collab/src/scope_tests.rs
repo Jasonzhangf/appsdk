@@ -1,5 +1,6 @@
 use super::*;
 use serde_json::json;
+use std::process::Command;
 
 fn test_root(name: &str) -> PathBuf {
     Path::new("/tmp").join(format!(
@@ -151,6 +152,7 @@ fn scope_resolve_reuses_identity_route_from_a_worktree() {
     let root = test_root("scope-worktree-identity");
     let canonical = root.join("project");
     let worktree = canonical.join("playground/task-a");
+    let symlink = root.join("worktree-link");
     let state_root = root.join("host-state");
     std::fs::create_dir_all(canonical.join(".agent-collab")).unwrap();
     std::fs::create_dir_all(&state_root).unwrap();
@@ -191,10 +193,10 @@ fn scope_resolve_reuses_identity_route_from_a_worktree() {
         .status()
         .unwrap();
     assert!(status.success());
-    std::fs::create_dir_all(worktree.join(".agent-collab")).unwrap();
+    std::os::unix::fs::symlink(&canonical, &symlink).unwrap();
 
     let canonical = canonical.canonicalize().unwrap();
-    let worktree = worktree.canonicalize().unwrap();
+    let symlink = symlink.canonicalize().unwrap();
     let route = json!({
         "version": 1,
         "op": "register",
@@ -234,7 +236,7 @@ fn scope_resolve_reuses_identity_route_from_a_worktree() {
     .unwrap();
 
     let host_paths = HostPaths::for_state_root(&state_root).unwrap();
-    let resolved = Scope::resolve_from_cwd_with_host_paths(&worktree, &host_paths).unwrap();
+    let resolved = Scope::resolve_from_cwd_with_host_paths(&symlink, &host_paths).unwrap();
 
     assert_eq!(resolved.root, canonical);
     match previous_thread {
@@ -272,8 +274,10 @@ fn scope_resolve_prefers_a_fresh_local_baseline_over_a_stale_identity_route() {
     std::env::remove_var("CODEX_THREAD_ID");
     let root = test_root("scope-fresh-reset");
     let project = root.join("project");
+    let symlink = root.join("project-link");
     let state_root = root.join("host-state");
     std::fs::create_dir_all(project.join(".agent-collab")).unwrap();
+    std::os::unix::fs::symlink(&project, &symlink).unwrap();
     std::fs::create_dir_all(&state_root).unwrap();
 
     let identity_dir = state_root.join("identities/worker-a");
@@ -305,9 +309,9 @@ fn scope_resolve_prefers_a_fresh_local_baseline_over_a_stale_identity_route() {
     .unwrap();
 
     let host_paths = HostPaths::for_state_root(&state_root).unwrap();
-    let resolved = Scope::resolve_from_cwd_with_host_paths(&project, &host_paths).unwrap();
+    let resolved = Scope::resolve_from_cwd_with_host_paths(&symlink, &host_paths).unwrap();
 
-    assert_eq!(resolved.root, project);
+    assert_eq!(resolved.root, project.canonicalize().unwrap());
     match previous_thread {
         Some(value) => std::env::set_var("CODEX_THREAD_ID", value),
         None => std::env::remove_var("CODEX_THREAD_ID"),
@@ -325,6 +329,7 @@ fn scope_resolve_preserves_a_nested_project_inside_a_linked_worktree() {
     let canonical = root.join("project");
     let worktree = canonical.join("playground/task-a");
     let nested = worktree.join("services/service-a");
+    let nested_symlink = root.join("nested-link");
     let state_root = root.join("host-state");
     std::fs::create_dir_all(canonical.join(".agent-collab")).unwrap();
     std::fs::create_dir_all(&state_root).unwrap();
@@ -365,11 +370,14 @@ fn scope_resolve_preserves_a_nested_project_inside_a_linked_worktree() {
         .status()
         .unwrap();
     assert!(status.success());
+    std::fs::create_dir_all(&nested).unwrap();
+    std::os::unix::fs::symlink(&nested, &nested_symlink).unwrap();
     std::fs::create_dir_all(nested.join(".agent-collab")).unwrap();
     let nested = nested.canonicalize().unwrap();
+    let nested_symlink = nested_symlink.canonicalize().unwrap();
 
     let host_paths = HostPaths::for_state_root(&state_root).unwrap();
-    let resolved = Scope::resolve_from_cwd_with_host_paths(&nested, &host_paths).unwrap();
+    let resolved = Scope::resolve_from_cwd_with_host_paths(&nested_symlink, &host_paths).unwrap();
 
     assert_eq!(resolved.root, nested);
     match previous_thread {
@@ -528,7 +536,7 @@ fn read_only_route_resolution_keeps_a_nested_project_inside_a_linked_worktree() 
 }
 
 #[test]
-fn read_only_route_resolution_rejects_a_worktree_only_route() {
+fn read_only_route_resolution_accepts_a_registered_worktree_only_route() {
     let root = test_root("read-only-worktree-only-route");
     let canonical = root.join("project");
     let worktree = canonical.join("playground/task-a");
@@ -586,16 +594,13 @@ fn read_only_route_resolution_rejects_a_worktree_only_route() {
     std::fs::write(state_root.join("routes.jsonl"), format!("{route}\n")).unwrap();
 
     let host_paths = HostPaths::for_state_root(&state_root).unwrap();
-    let error = canonical_route_for_cwd(&host_paths, &worktree).unwrap_err();
-    assert!(
-        error.to_string().contains("no registered Collab route"),
-        "unexpected error: {error}"
-    );
+    let resolved = canonical_route_for_cwd(&host_paths, &worktree).unwrap();
+    assert_eq!(resolved.root, worktree);
     std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
-fn identity_route_prefers_git_main_root_when_worktree_route_is_stale() {
+fn identity_route_contains_a_linked_worktree_without_git() {
     let root = test_root("worktree-route-disambiguation");
     let canonical = root.join("project");
     let worktree = canonical.join("playground/task-a");
@@ -667,7 +672,7 @@ fn identity_route_prefers_git_main_root_when_worktree_route_is_stale() {
 }
 
 #[test]
-fn identity_route_rejects_a_worktree_only_route() {
+fn identity_route_prefers_a_registered_worktree_without_git() {
     let root = test_root("worktree-route-only");
     let canonical = root.join("project");
     let worktree = canonical.join("playground/task-a");
@@ -732,16 +737,13 @@ fn identity_route_rejects_a_worktree_only_route() {
 
     let host_paths = HostPaths::for_state_root(&state_root).unwrap();
     let app_scope = AppServerId::new("appserver-cli").unwrap();
-    let error = canonical_route_for_identity(&host_paths, &worktree, &app_scope).unwrap_err();
-    assert!(
-        error.to_string().contains("Git main worktree"),
-        "unexpected error: {error}"
-    );
+    let resolved = canonical_route_for_identity(&host_paths, &worktree, &app_scope).unwrap();
+    assert_eq!(resolved.root, worktree);
     std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
-fn identity_route_selects_canonical_main_when_worktree_route_also_exists() {
+fn identity_route_prefers_the_most_specific_registered_route() {
     let root = test_root("worktree-route-both");
     let canonical = root.join("project");
     let worktree = canonical.join("playground/task-a");
@@ -818,7 +820,7 @@ fn identity_route_selects_canonical_main_when_worktree_route_also_exists() {
     let app_scope = AppServerId::new("appserver-cli").unwrap();
     let resolved = canonical_route_for_identity(&host_paths, &worktree, &app_scope).unwrap();
 
-    assert_eq!(resolved.root, canonical);
+    assert_eq!(resolved.root, worktree);
     std::fs::remove_dir_all(root).ok();
 }
 

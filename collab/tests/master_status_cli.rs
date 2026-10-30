@@ -123,9 +123,12 @@ fn master_status_workspace_uses_registered_canonical_project() {
         .unwrap()
         .to_string_lossy()
         .into_owned();
-    // A linked worktree or symlinked caller path is not the registered root.
+    // A task directory binds to its project through an explicit `.agent-collab`
+    // marker, not through repository metadata. Use a real subdirectory with a
+    // symlinked marker so the caller path is not the registered root.
     let caller_root = root.join("linked-worktree");
-    std::os::unix::fs::symlink(&project_root, &caller_root).unwrap();
+    std::fs::create_dir_all(&caller_root).unwrap();
+    std::os::unix::fs::symlink(&project_root.join(".agent-collab"), &caller_root.join(".agent-collab")).unwrap();
 
     let socket = state_root.join("server.sock");
     let listener = UnixListener::bind(&socket).unwrap();

@@ -887,6 +887,8 @@ fn context_root_resolution_rejects_git_subdirectory_without_baseline() {
         .status()
         .unwrap();
     assert!(status.success());
+    // A Git subdirectory is an ordinary directory to Collab. Without a route
+    // or a local baseline it must fail closed like any other unscoped cwd.
     let previous = std::env::current_dir().unwrap();
     std::env::set_current_dir(&subdir).unwrap();
     let host_paths = scope::HostPaths::resolve().unwrap();
@@ -898,11 +900,9 @@ fn context_root_resolution_rejects_git_subdirectory_without_baseline() {
         error.to_string().starts_with("COLLAB_CONTEXT_UNRESOLVED:"),
         "{error:#}"
     );
-    assert!(error.to_string().contains("not its root"), "{error:#}");
     assert!(
-        error
-            .to_string()
-            .contains(&root.canonicalize().unwrap().to_string_lossy().as_ref()),
+        !error.to_string().contains("not its root"),
+        "{}",
         "{error:#}"
     );
     std::fs::remove_dir_all(root).ok();
@@ -910,6 +910,8 @@ fn context_root_resolution_rejects_git_subdirectory_without_baseline() {
 
 #[test]
 fn context_root_resolution_rejects_playground_without_route_or_baseline() {
+    // A plain directory under any name is unscoped to Collab. With no route
+    // and no local baseline it fails closed with the generic unresolved error.
     let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
     let parent = test_root("context-root-playground");
     let root = parent.join("playground").join("task");
@@ -917,13 +919,13 @@ fn context_root_resolution_rejects_playground_without_route_or_baseline() {
     let host_paths = scope::HostPaths::resolve().unwrap();
     let error = resolve_context_root(&host_paths, &root)
         .err()
-        .expect("an unregistered playground worktree must fail closed");
+        .expect("an unregistered unscoped directory must fail closed");
     assert!(
         error.to_string().starts_with("COLLAB_CONTEXT_UNRESOLVED:"),
         "{error:#}"
     );
     assert!(
-        error.to_string().contains("playground worktree"),
+        !error.to_string().contains("playground worktree"),
         "{error:#}"
     );
     std::fs::remove_dir_all(parent).ok();

@@ -5,7 +5,6 @@ use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -195,10 +194,10 @@ pub(crate) fn resolve_context_root(
     resolve_context_root_with(host_paths, cwd, false)
 }
 
-/// Registration bootstrap may create the first baseline in an ordinary non-Git
+/// Registration bootstrap may create the first baseline in any explicit
 /// workspace. Query, register-reply, worker self-close, project reset, and any
 /// other registered-only caller use `resolve_context_root` and stay fail-closed
-/// without a local baseline, a canonical route, or a Git checkout root.
+/// without a local baseline or a canonical route.
 pub(crate) fn resolve_bootstrap_root(
     host_paths: &scope::HostPaths,
     cwd: &Path,
@@ -209,75 +208,34 @@ pub(crate) fn resolve_bootstrap_root(
 fn resolve_context_root_with(
     host_paths: &scope::HostPaths,
     cwd: &Path,
-    allow_non_git_workspace: bool,
+    allow_first_registration: bool,
 ) -> anyhow::Result<(Scope, &'static str)> {
-    // Precedence is unchanged from the original context path: an authoritative
-    // local baseline for this cwd wins, then a registered canonical route,
-    // then Git/worktree guardrails, then an ordinary non-Git cwd as root.
-    if Scope::local_baseline_is_authoritative(cwd)? {
+    let canonical_cwd = std::fs::canonicalize(cwd)?;
+    // The project marker is `.agent-collab`. Collab never consults git, so the
+    // same rule works for plain directories, nested directories, and task
+    // worktrees. A symlinked marker binds a task directory to its project.
+    if let Some(root) = scope::project_root_for_cwd(&canonical_cwd) {
+        let resolution = if root == canonical_cwd {
+            "cwd"
+        } else {
+            "project-marker"
+        };
         return Ok((
-            Scope {
-                root: std::fs::canonicalize(cwd)?,
-            },
-            "cwd",
+            Scope { root },
+            resolution,
         ));
     }
     if let Ok(route) = scope::canonical_route_for_cwd(host_paths, cwd) {
         return Ok((Scope { root: route.root }, "canonical-route"));
     }
-    let canonical_cwd = std::fs::canonicalize(cwd)?;
-    // A Git checkout root is identified by a `.git` marker, never by forking
-    // git. Under launchd a `git rev-parse` subprocess can block in getcwd and
-    // hang the identity gate, making every `collab context` call deadlock.
-    let git_root = canonical_cwd
-        .ancestors()
-        .map(|dir| dir.join(".git"))
-        .find(|marker| marker.is_dir() || marker.is_file())
-        .and_then(|marker| marker.parent().map(Path::to_path_buf))
-        .and_then(|root| std::fs::canonicalize(root).ok());
-    if canonical_cwd.join(".agent-collab").is_dir() {
-        return Ok((
-            Scope {
-                root: canonical_cwd,
-            },
-            "cwd",
-        ));
-    }
-    if canonical_cwd.ancestors().skip(1).any(|ancestor| {
-        ancestor
-            .file_name()
-            .is_some_and(|name| name == "playground")
-    }) {
-        anyhow::bail!(
-            "COLLAB_CONTEXT_UNRESOLVED: refusing to create a Collab baseline inside a ./playground worktree at {}; run `collab context` from the canonical project main checkout",
-            canonical_cwd.display()
-        );
-    }
-    if let Some(git_root) = git_root {
-        if git_root != canonical_cwd {
-            anyhow::bail!(
-                "COLLAB_CONTEXT_UNRESOLVED: {} is inside Git checkout {} but is not its root; run `collab context` from {}",
-                canonical_cwd.display(),
-                git_root.display(),
-                git_root.display()
-            );
-        }
-        return Ok((
-            Scope {
-                root: canonical_cwd,
-            },
-            "cwd",
-        ));
-    }
-    if !allow_non_git_workspace {
+    if !allow_first_registration {
         anyhow::bail!(
             "COLLAB_CONTEXT_UNRESOLVED: no registered Collab route and no local .agent-collab baseline for {}; run `collab context` without --query to register this workspace",
             canonical_cwd.display()
         );
     }
-    // A non-Git workspace has no repository root to discover. Treat the
-    // explicit cwd as the project root, matching the existing local-baseline
-    // rule while keeping Git worktrees bound to their canonical checkout.
+    // First registration binds to the explicit cwd. Collab does not infer a
+    // higher project root from repository metadata.
     Ok((
         Scope {
             root: canonical_cwd,
@@ -297,15 +255,6 @@ pub(crate) fn context_bootstrap(
     let baseline_created = if scope.root.join(".agent-collab").is_dir() {
         false
     } else {
-        if scope.root.ancestors().skip(1).any(|ancestor| {
-            ancestor
-                .file_name()
-                .is_some_and(|name| name == "playground")
-        }) {
-            anyhow::bail!(
-                "collab context refuses to create a baseline inside a ./playground worktree"
-            );
-        }
         scope::init(&scope.root)?;
         true
     };

@@ -74,6 +74,10 @@ fn render_plist(collab_bin: &Path) -> String {
         <string>{home}</string>
         <key>PATH</key>
         <string>{path}</string>
+        <key>LANG</key>
+        <string>en_US.UTF-8</string>
+        <key>LC_ALL</key>
+        <string>en_US.UTF-8</string>
 {state_dir}
     </dict>
     <key>RunAtLoad</key>

@@ -192,6 +192,28 @@ pub(crate) fn resolve_context_root(
     host_paths: &scope::HostPaths,
     cwd: &Path,
 ) -> anyhow::Result<(Scope, &'static str)> {
+    resolve_context_root_with(host_paths, cwd, false)
+}
+
+/// Registration bootstrap may create the first baseline in an ordinary non-Git
+/// workspace. Query, register-reply, worker self-close, project reset, and any
+/// other registered-only caller use `resolve_context_root` and stay fail-closed
+/// without a local baseline, a canonical route, or a Git checkout root.
+pub(crate) fn resolve_bootstrap_root(
+    host_paths: &scope::HostPaths,
+    cwd: &Path,
+) -> anyhow::Result<(Scope, &'static str)> {
+    resolve_context_root_with(host_paths, cwd, true)
+}
+
+fn resolve_context_root_with(
+    host_paths: &scope::HostPaths,
+    cwd: &Path,
+    allow_non_git_workspace: bool,
+) -> anyhow::Result<(Scope, &'static str)> {
+    // Precedence is unchanged from the original context path: an authoritative
+    // local baseline for this cwd wins, then a registered canonical route,
+    // then Git/worktree guardrails, then an ordinary non-Git cwd as root.
     if Scope::local_baseline_is_authoritative(cwd)? {
         return Ok((
             Scope {
@@ -204,7 +226,7 @@ pub(crate) fn resolve_context_root(
         return Ok((Scope { root: route.root }, "canonical-route"));
     }
     let canonical_cwd = std::fs::canonicalize(cwd)?;
-    let is_git_root = Command::new("git")
+    let git_root = Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(&canonical_cwd)
         .output()
@@ -214,14 +236,8 @@ pub(crate) fn resolve_context_root(
                 return None;
             }
             std::fs::canonicalize(String::from_utf8_lossy(&output.stdout).trim()).ok()
-        })
-        .is_some_and(|toplevel| toplevel == canonical_cwd)
-        && !canonical_cwd.ancestors().skip(1).any(|ancestor| {
-            ancestor
-                .file_name()
-                .is_some_and(|name| name == "playground")
         });
-    if canonical_cwd.join(".agent-collab").is_dir() || is_git_root {
+    if canonical_cwd.join(".agent-collab").is_dir() {
         return Ok((
             Scope {
                 root: canonical_cwd,
@@ -229,17 +245,54 @@ pub(crate) fn resolve_context_root(
             "cwd",
         ));
     }
-    anyhow::bail!(
-        "COLLAB_CONTEXT_UNRESOLVED: no registered Collab route and no local .agent-collab baseline for {}; run `collab context` from the canonical project main checkout",
-        canonical_cwd.display()
-    )
+    if canonical_cwd.ancestors().skip(1).any(|ancestor| {
+        ancestor
+            .file_name()
+            .is_some_and(|name| name == "playground")
+    }) {
+        anyhow::bail!(
+            "COLLAB_CONTEXT_UNRESOLVED: refusing to create a Collab baseline inside a ./playground worktree at {}; run `collab context` from the canonical project main checkout",
+            canonical_cwd.display()
+        );
+    }
+    if let Some(git_root) = git_root {
+        if git_root != canonical_cwd {
+            anyhow::bail!(
+                "COLLAB_CONTEXT_UNRESOLVED: {} is inside Git checkout {} but is not its root; run `collab context` from {}",
+                canonical_cwd.display(),
+                git_root.display(),
+                git_root.display()
+            );
+        }
+        return Ok((
+            Scope {
+                root: canonical_cwd,
+            },
+            "cwd",
+        ));
+    }
+    if !allow_non_git_workspace {
+        anyhow::bail!(
+            "COLLAB_CONTEXT_UNRESOLVED: no registered Collab route and no local .agent-collab baseline for {}; run `collab context` without --query to register this workspace",
+            canonical_cwd.display()
+        );
+    }
+    // A non-Git workspace has no repository root to discover. Treat the
+    // explicit cwd as the project root, matching the existing local-baseline
+    // rule while keeping Git worktrees bound to their canonical checkout.
+    Ok((
+        Scope {
+            root: canonical_cwd,
+        },
+        "cwd",
+    ))
 }
 
 pub(crate) fn context_bootstrap(
     host_paths: &scope::HostPaths,
     cwd: &Path,
 ) -> anyhow::Result<ContextBootstrap> {
-    let (scope, project_root_resolution) = resolve_context_root(host_paths, cwd)?;
+    let (scope, project_root_resolution) = resolve_bootstrap_root(host_paths, cwd)?;
     // Observe the user-managed daemon before any baseline, identity, route, or
     // journal write. Ordinary context never launches or restarts it.
     client::require_server(&scope.sock_path())?;

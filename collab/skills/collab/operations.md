@@ -1936,7 +1936,7 @@ the projections that used to require separate calls, so no agent flow needs to r
 | Worker status, board admission, or a mutation reports a stale binding generation or `SESSION_THREAD_BINDING_MISMATCH` | preserve the registered binding and run `collab context` as the only repair entry | manually rebind, edit routes or journals, or infer a binding |
 | Need peer list, master state, scheduling state, or env | read them from the single `collab context` snapshot | call `collab who`, `collab status --all`, `collab master status`, or grep the environment as a separate step |
 | `requires_identity_update` is present | supply only requested real runtime facts; a user-authorized identity/name/role recovery uses the exact intent command in stable-name-recovery; context handles migration internally | guess archived workers, inspect routes/tokens, hand-edit state, invent approval or treat historical ambiguity as insufficient user authority |
-| `collab context` exits non-zero with `COLLAB_CONTEXT_UNRESOLVED` | preserve the error; failed initial registration continues independently; existing registered participants report the affected coordination without clearing owned tasks/claims | automatically retry from another cwd; edit routes/token state, copy identity, reset the project |
+| `collab context` exits non-zero with `COLLAB_CONTEXT_UNRESOLVED` | preserve the error; a non-Git ordinary workspace registers directly with `collab context` (no `--query`), while `--query`, a Git subdirectory, or a playground worktree stays fail-closed without a route or baseline; failed initial registration continues independently; existing registered participants report the affected coordination without clearing owned tasks/claims | automatically retry from another cwd; edit routes/token state, copy identity, reset the project |
 | Default lease looks stopped | `collab context` re-arms it from the registered identity | probe sockets, call a transport directly |
 | Notification arrived | DSH: act on the native full body and reply with `collab sendmessage`; other transports: run `collab recv` once, then act | DSH running `recv`/`ack` or recovery before replying; treating submission as consumption |
 | Master has a pending merge | `collab context` → `pending_merges`, merge the candidate, then `collab task integrated` | rely on a remembered message, or try to close first |
@@ -2038,7 +2038,7 @@ snapshot:
 | 名字占用 unknown | 持久 context operation 返回 `pending`；不是注册成功 | 等待同一请求裁决续接；Jenny 自身 unknown 且本次用户明确恢复并确认接管时直接接管 Jenny/master |
 | `identity_update` | daemon 缺少真实运行事实；`registered=false`，`requires_identity_update.required=true` | 按 `required_fields`/`reason`/`action` 只补实际缺项。已授权恢复意图按稳定名字合同提交；重复档案及旧绑定由 context 自行迁移。若仍泄漏裸历史冲突，保留原错作为实现缺陷，不让 agent 选旧身份或维护控制面 |
 | 可选通信诊断 pending | 原身份与当前 route 仍可用；诊断 reply 未完成 | 该诊断不是恢复前提；若显式使用，participant 从所选 adapter 读取 challenge 并从自身环境回传；`--query` 保持只读 |
-| `COLLAB_CONTEXT_UNRESOLVED` | 无 route、无 baseline、无 git 根（非零退出） | 保留原错，不自动换 cwd 重试；首次注册失败则独立继续，已注册者报告受影响协作，保留已领任务/claim |
+| `COLLAB_CONTEXT_UNRESOLVED` | 无 route/baseline：`--query` 保持 fail-closed；不带 `--query` 的非 Git 普通工作区可直接首次注册；Git 子目录或 playground worktree 必须从规范 checkout 执行 | 保留原错，不自动换 cwd 重试；首次注册失败则独立继续，已注册者报告受影响协作，保留已领任务/claim |
 | 拒绝在 playground 创建基线 | 在 worktree 内引导（非零退出） | 保留原错，不改主树或删除旧身份；首次注册失败则独立继续，已注册者保留已有职责并报告协作缺口 |
 | 默认订阅已停 | daemon 按当前注册身份自动重武装，不存在显式退订 | 需要再收消息时运行 `collab context` 自动恢复，不由 agent 手工重订阅 |
 

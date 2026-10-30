@@ -842,23 +842,91 @@ fn default_recv_publishes_the_replay_identity_before_dispatch() {
 }
 
 #[test]
-fn context_root_resolution_fails_closed_without_route_or_baseline() {
+fn context_root_resolution_accepts_first_registration_in_non_git_workspace() {
     let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
-    let root = test_root("context-root-unresolved");
+    let root = test_root("context-root-nongit");
+    let previous = std::env::current_dir().unwrap();
+    std::env::set_current_dir(&root).unwrap();
+    let host_paths = scope::HostPaths::resolve().unwrap();
+    let (scope, resolution) = resolve_bootstrap_root(&host_paths, &root).unwrap();
+    std::env::set_current_dir(previous).unwrap();
+    assert_eq!(resolution, "cwd");
+    assert_eq!(scope.root, root.canonicalize().unwrap());
+    assert!(!root.join(".agent-collab").exists());
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn context_root_resolution_keeps_registered_only_callers_closed_in_non_git_workspace() {
+    let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+    let root = test_root("context-root-nongit-query");
     let previous = std::env::current_dir().unwrap();
     std::env::set_current_dir(&root).unwrap();
     let host_paths = scope::HostPaths::resolve().unwrap();
     let error = resolve_context_root(&host_paths, &root)
         .err()
-        .expect("no route and no baseline must fail closed");
+        .expect("a non-Git workspace without route or baseline must stay closed for query");
     std::env::set_current_dir(previous).unwrap();
     assert!(
         error.to_string().starts_with("COLLAB_CONTEXT_UNRESOLVED:"),
         "{error:#}"
     );
-    assert!(error.to_string().contains("`collab context`"));
     assert!(!root.join(".agent-collab").exists());
     std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn context_root_resolution_rejects_git_subdirectory_without_baseline() {
+    let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+    let root = test_root("context-root-git-subdir");
+    let subdir = root.join("nested");
+    std::fs::create_dir_all(&subdir).unwrap();
+    let status = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&root)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let previous = std::env::current_dir().unwrap();
+    std::env::set_current_dir(&subdir).unwrap();
+    let host_paths = scope::HostPaths::resolve().unwrap();
+    let error = resolve_context_root(&host_paths, &subdir)
+        .err()
+        .expect("a Git subdirectory without a route or baseline must fail closed");
+    std::env::set_current_dir(previous).unwrap();
+    assert!(
+        error.to_string().starts_with("COLLAB_CONTEXT_UNRESOLVED:"),
+        "{error:#}"
+    );
+    assert!(error.to_string().contains("not its root"), "{error:#}");
+    assert!(
+        error
+            .to_string()
+            .contains(&root.canonicalize().unwrap().to_string_lossy().as_ref()),
+        "{error:#}"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn context_root_resolution_rejects_playground_without_route_or_baseline() {
+    let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+    let parent = test_root("context-root-playground");
+    let root = parent.join("playground").join("task");
+    std::fs::create_dir_all(&root).unwrap();
+    let host_paths = scope::HostPaths::resolve().unwrap();
+    let error = resolve_context_root(&host_paths, &root)
+        .err()
+        .expect("an unregistered playground worktree must fail closed");
+    assert!(
+        error.to_string().starts_with("COLLAB_CONTEXT_UNRESOLVED:"),
+        "{error:#}"
+    );
+    assert!(
+        error.to_string().contains("playground worktree"),
+        "{error:#}"
+    );
+    std::fs::remove_dir_all(parent).ok();
 }
 
 #[test]

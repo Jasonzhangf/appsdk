@@ -135,9 +135,11 @@ identity recovery is not authorization to discard them.
 
 ## Registration verification
 
-Run `collab context`. It resolves the canonical project root, observes the
-available runtime facts, and asks the daemon to establish or recover the
-identity. If the snapshot contains `requires_identity_update`, supply only the
+Run `collab context`. It resolves the canonical project root, accepts an
+explicit non-Git ordinary workspace as that root, observes the available
+runtime facts, and asks the daemon to establish or recover the identity. Git
+subdirectories and unregistered playground worktrees remain fail-closed. If the
+snapshot contains `requires_identity_update`, supply only the
 requested current factual fields in this invocation. Every AppServer context must
 carry current session/thread/endpoint/namespace from the host environment or
 `--provide`; historical registration cannot fill missing current facts.

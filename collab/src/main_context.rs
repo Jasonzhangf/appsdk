@@ -226,17 +226,15 @@ fn resolve_context_root_with(
         return Ok((Scope { root: route.root }, "canonical-route"));
     }
     let canonical_cwd = std::fs::canonicalize(cwd)?;
-    let git_root = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(&canonical_cwd)
-        .output()
-        .ok()
-        .and_then(|output| {
-            if !output.status.success() {
-                return None;
-            }
-            std::fs::canonicalize(String::from_utf8_lossy(&output.stdout).trim()).ok()
-        });
+    // A Git checkout root is identified by a `.git` marker, never by forking
+    // git. Under launchd a `git rev-parse` subprocess can block in getcwd and
+    // hang the identity gate, making every `collab context` call deadlock.
+    let git_root = canonical_cwd
+        .ancestors()
+        .map(|dir| dir.join(".git"))
+        .find(|marker| marker.is_dir() || marker.is_file())
+        .and_then(|marker| marker.parent().map(Path::to_path_buf))
+        .and_then(|root| std::fs::canonicalize(root).ok());
     if canonical_cwd.join(".agent-collab").is_dir() {
         return Ok((
             Scope {

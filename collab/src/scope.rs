@@ -176,41 +176,10 @@ fn load_route_records(host_paths: &HostPaths) -> anyhow::Result<Vec<CanonicalPro
 }
 
 pub(crate) fn is_linked_worktree_root(root: &Path) -> anyhow::Result<bool> {
-    let top_level = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(root)
-        .output();
-    let Ok(top_level) = top_level else {
-        return Ok(false);
-    };
-    if !top_level.status.success() {
-        return Ok(false);
-    }
-    let top_level = std::fs::canonicalize(String::from_utf8_lossy(&top_level.stdout).trim())?;
-    if top_level != root {
-        return Ok(false);
-    }
-    let output = Command::new("git")
-        .args(["rev-parse", "--git-common-dir"])
-        .current_dir(root)
-        .output();
-    let Ok(output) = output else {
-        return Ok(false);
-    };
-    if !output.status.success() {
-        return Ok(false);
-    }
-    let common = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-    let common = if common.is_absolute() {
-        common
-    } else {
-        root.join(common)
-    };
-    let common = std::fs::canonicalize(common)?;
-    let main_root = common.parent().ok_or_else(|| {
-        anyhow::anyhow!("Git common directory has no parent: {}", common.display())
-    })?;
-    Ok(root != main_root)
+    // A linked worktree exposes `.git` as a file whose content starts with
+    // `gitdir:`. A main checkout exposes `.git` as a directory. This is exact
+    // and never forks a git subprocess that can hang under launchd.
+    Ok(root.join(".git").is_file())
 }
 
 /// Resolve the route bound to one registered peer identity at the exact cwd.
@@ -339,59 +308,52 @@ struct GitWorktreeRoots {
 }
 
 fn git_worktree_roots_if_any(cwd: &Path) -> anyhow::Result<Option<GitWorktreeRoots>> {
-    let worktree_output = Command::new("git")
-        .args(["rev-parse", "--path-format=absolute", "--show-toplevel"])
-        .current_dir(cwd)
-        .output()?;
-    if !worktree_output.status.success() {
-        let stderr = String::from_utf8_lossy(&worktree_output.stderr);
-        if stderr.contains("not a git repository") {
+    let Some(worktree_root) = git_marker_root(cwd) else {
+        return Ok(None);
+    };
+    let marker = worktree_root.join(".git");
+    let main_root = if marker.is_file() {
+        let text = match std::fs::read_to_string(&marker) {
+            Ok(text) => text,
+            _ => return Ok(None),
+        };
+        let path = text.trim().strip_prefix("gitdir:").map(str::trim);
+        let Some(path) = path.filter(|path| !path.is_empty()) else {
             return Ok(None);
-        }
-        anyhow::bail!(
-            "cannot resolve Git worktree root from {}: {}",
-            cwd.display(),
-            stderr.trim()
-        );
-    }
-    let worktree_root = PathBuf::from(String::from_utf8_lossy(&worktree_output.stdout).trim());
-    if !worktree_root.is_absolute() {
-        anyhow::bail!(
-            "Git worktree root is not absolute for {}: {}",
-            cwd.display(),
-            worktree_root.display()
-        );
-    }
-    let worktree_root = std::fs::canonicalize(worktree_root)?;
-
-    let worktrees_output = Command::new("git")
-        .args(["worktree", "list", "--porcelain"])
-        .current_dir(cwd)
-        .output()?;
-    if !worktrees_output.status.success() {
-        anyhow::bail!(
-            "cannot list Git worktrees from {}: {}",
-            cwd.display(),
-            String::from_utf8_lossy(&worktrees_output.stderr).trim()
-        );
-    }
-
-    let main_root = std::fs::canonicalize(
-        String::from_utf8_lossy(&worktrees_output.stdout)
-            .lines()
-            .find_map(|line| line.strip_prefix("worktree "))
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Git worktree list has no worktree entry for {}",
-                    cwd.display()
-                )
-            })?,
-    )?;
-
+        };
+        let gitdir = PathBuf::from(path);
+        let gitdir = if gitdir.is_absolute() {
+            gitdir
+        } else {
+            worktree_root.join(gitdir)
+        };
+        // A linked worktree gitdir lives at `.git/worktrees/<name>` inside the
+        // common dir; the parent of the common dir is the main checkout root.
+        let common = gitdir
+            .parent()
+            .and_then(|parent| parent.parent())
+            .unwrap_or(&gitdir);
+        let Some(main_root) = common.parent() else {
+            return Ok(None);
+        };
+        let Some(main_root) = std::fs::canonicalize(main_root).ok() else {
+            return Ok(None);
+        };
+        main_root
+    } else {
+        worktree_root.clone()
+    };
     Ok(Some(GitWorktreeRoots {
         main_root,
         worktree_root,
     }))
+}
+
+fn git_marker_root(cwd: &Path) -> Option<PathBuf> {
+    cwd.ancestors()
+        .map(|dir| dir.join(".git"))
+        .find(|marker| marker.is_dir() || marker.is_file())
+        .and_then(|marker| marker.parent().map(Path::to_path_buf))
 }
 
 fn resolve_state_root(
@@ -869,40 +831,12 @@ impl Scope {
     }
 
     pub(crate) fn local_baseline_is_authoritative(cwd: &Path) -> anyhow::Result<bool> {
-        if !cwd.join(".agent-collab").is_dir() {
-            return Ok(false);
-        }
-        let output = Command::new("git")
-            .args(["rev-parse", "--git-common-dir"])
-            .current_dir(cwd)
-            .output();
-        let Ok(output) = output else {
-            return Ok(true);
-        };
-        if !output.status.success() {
-            return Ok(true);
-        }
-        let common = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-        let common = if common.is_absolute() {
-            common
-        } else {
-            cwd.join(common)
-        };
-        let common = std::fs::canonicalize(common)?;
-        let worktree = std::fs::canonicalize(
-            String::from_utf8_lossy(
-                &Command::new("git")
-                    .args(["rev-parse", "--show-toplevel"])
-                    .current_dir(cwd)
-                    .output()?
-                    .stdout,
-            )
-            .trim(),
-        )?;
-        let main_root = common.parent().ok_or_else(|| {
-            anyhow::anyhow!("Git common directory has no parent: {}", common.display())
-        })?;
-        Ok(worktree == main_root || cwd != worktree)
+        // A local `.agent-collab` baseline is authoritative without git.
+        // Git subprocess calls can block indefinitely under launchd, hanging
+        // the identity gate and every `collab context` call.
+        // A linked worktree root (`.git` is a file) is not its own identity
+        // baseline: the canonical main checkout owns the route.
+        Ok(cwd.join(".agent-collab").is_dir() && !cwd.join(".git").is_file())
     }
 
     fn resolve_from_cwd(cwd: &Path) -> anyhow::Result<Self> {

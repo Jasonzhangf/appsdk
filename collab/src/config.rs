@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 use crate::ceo_reporting_policy::{
@@ -843,31 +842,12 @@ pub fn load(root: &Path) -> Result<Config> {
         text = updated;
     }
     let root = root.canonicalize()?;
-    let git = Command::new("git")
-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .current_dir(&root)
-        .output()?;
-    let owner = if git.status.success() {
-        let p = PathBuf::from(String::from_utf8_lossy(&git.stdout).trim());
-        if p.file_name().is_some_and(|s| s == ".git") {
-            p.parent().unwrap().to_path_buf()
-        } else {
-            root.clone()
-        }
-    } else {
-        root.clone()
-    };
-    let top = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(&root)
-        .output()?;
-    let resolved = if top.status.success() {
-        let top = PathBuf::from(String::from_utf8_lossy(&top.stdout).trim());
-        owner.join(root.strip_prefix(top).unwrap_or(Path::new("")))
-    } else {
-        owner
-    };
-    parse(&text, &resolved)
+    // Project-root resolution must never depend on a git subprocess. A
+    // launchd-managed daemon can inherit an environment where the git helper
+    // blocks in getcwd, which would hold the identity gate indefinitely and
+    // hang every `collab context` call. The canonical caller root already
+    // carries the project scope; parse() matches project overrides against it.
+    parse(&text, &root)
 }
 
 #[cfg(test)]

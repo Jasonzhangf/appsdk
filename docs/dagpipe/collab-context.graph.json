@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-context",
-  "version": "0.15.0",
-  "description": "一次 context 请求到一次权威结果的 SESE 流程。cwd 选择项目，名字承载工作，agent sessionID 锚定执行身份；thread 和端点只定位通信。Desktop CLI 从本次显式能力或当前 bridge 精确 scope 声明取得候选，不要求 AppServer endpoint 或 agent 调 MCP，不从历史 route 补事实。发现失败时，仅既有 live ancestry observer 证实当前实际 tmux pane，才能让 daemon 继续原有 pane 优先 admission；环境标记不证明 pane，不启动替代 transport。无实际 pane 且缺 Desktop 能力则明确失败，保留身份和工作。query 与普通身份读取不发现能力。名字续接、任务和消息继承归原 owner，不管理 daemon/tmux 生命周期。设计图不代替 live 验收。",
+  "version": "0.16.0",
+  "description": "一次 context 请求到一次权威结果的 SESE 流程。cwd 选择项目；无 route/baseline 的普通非 Git 工作区可直接以 cwd 作为首次注册根，而 Git 子目录和无 route 的 playground worktree 继续 fail closed，已注册 worktree 仍经 canonical route 解析。名字承载工作，agent sessionID 锚定执行身份；thread 和端点只定位通信。Desktop CLI 从本次显式能力或当前 bridge 精确 scope 声明取得候选，不要求 AppServer endpoint 或 agent 调 MCP，不从历史 route 补事实。发现失败时，仅既有 live ancestry observer 证实当前实际 tmux pane，才能让 daemon 继续原有 pane 优先 admission；环境标记不证明 pane，不启动替代 transport。无实际 pane 且缺 Desktop 能力则明确失败，保留身份和工作。query 与普通身份读取不发现能力。名字续接、任务和消息继承归原 owner，不管理 daemon/tmux 生命周期。设计图不代替 live 验收。",
   "inputs": [{"id": "context_request", "schema": "Object"}],
   "nodes": [
     {

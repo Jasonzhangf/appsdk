@@ -29,6 +29,115 @@ fn public_context_bootstraps_an_empty_resident_route() {
 }
 
 #[test]
+fn public_context_registers_a_non_git_workspace_without_existing_baseline() {
+    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (fixture, pane) = Fixture::isolated("non-git-bootstrap");
+    let root = canonical_root(&fixture);
+    fs::remove_dir_all(fixture.root.join(".agent-collab"))
+        .expect("remove seeded baseline to exercise first registration");
+
+    let output = fixture.command(&["context", "--op", "ctxop-non-git-bootstrap"], Some(&pane));
+    let payload = success_payload(&output);
+    assert_eq!(payload["bootstrap"]["project_root_resolution"], "cwd");
+    assert_eq!(payload["bootstrap"]["baseline_created"], true);
+    assert_eq!(payload["bootstrap"]["registered"], true);
+    assert!(fixture.root.join(".agent-collab").is_dir());
+
+    let records = fs::read_to_string(fixture.host_routes())
+        .expect("first registration must publish a host route journal");
+    let records: Vec<Value> = records
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("route journal record is JSON"))
+        .collect();
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0]["op"], "register");
+    assert_eq!(records[0]["project_scope"], root);
+    assert_eq!(records[0]["canonical_root"], root);
+}
+
+#[test]
+fn public_context_keeps_query_fail_closed_in_non_git_workspace_without_baseline() {
+    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (fixture, pane) = Fixture::isolated("non-git-query");
+    fs::remove_dir_all(fixture.root.join(".agent-collab"))
+        .expect("remove seeded baseline to exercise query without baseline");
+
+    let output = fixture.command(
+        &["context", "--query", "--op", "ctxop-non-git-query"],
+        Some(&pane),
+    );
+    assert!(!output.status.success(), "{}", text(&output));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("COLLAB_CONTEXT_UNRESOLVED:"),
+        "{}",
+        text(&output)
+    );
+    assert!(
+        !fixture.root.join(".agent-collab").exists(),
+        "a query must not create a baseline in a non-Git workspace"
+    );
+}
+
+#[test]
+fn public_context_keeps_git_subdirectories_fail_closed_without_route_or_baseline() {
+    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (fixture, pane) = Fixture::isolated("non-git-git-subdir");
+    git_init_main(&fixture.root);
+    fs::remove_dir_all(fixture.root.join(".agent-collab"))
+        .expect("remove seeded baseline to exercise first registration");
+    let subdir = fixture.root.join("nested");
+    fs::create_dir(&subdir).expect("create Git subdirectory");
+
+    let output = fixture
+        .command_on_socket(
+            &fixture.tmux_socket,
+            &["context", "--op", "ctxop-git-subdir"],
+            &pane,
+        )
+        .current_dir(&subdir)
+        .output()
+        .expect("run context from Git subdirectory");
+    assert!(!output.status.success(), "{}", text(&output));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("COLLAB_CONTEXT_UNRESOLVED:"),
+        "{}",
+        text(&output)
+    );
+    assert!(
+        !subdir.join(".agent-collab").exists(),
+        "a failed Git subdirectory resolution must not create a baseline"
+    );
+}
+
+#[test]
+fn public_context_keeps_playground_worktrees_fail_closed_without_route_or_baseline() {
+    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (fixture, pane) = Fixture::isolated("non-git-playground");
+    let worktree = fixture.root.join("parent/playground/task");
+    fs::create_dir_all(&worktree).expect("create playground worktree");
+
+    let output = fixture
+        .command_on_socket(
+            &fixture.tmux_socket,
+            &["context", "--op", "ctxop-playground"],
+            &pane,
+        )
+        .current_dir(&worktree)
+        .output()
+        .expect("run context from playground worktree");
+    assert!(!output.status.success(), "{}", text(&output));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("playground worktree"),
+        "{}",
+        text(&output)
+    );
+    assert!(
+        !worktree.join(".agent-collab").exists(),
+        "a failed playground resolution must not create a baseline"
+    );
+}
+
+#[test]
 fn public_context_rebuilds_a_missing_resident_route_after_restart() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (mut fixture, pane) = Fixture::isolated("resident-route-bootstrap");

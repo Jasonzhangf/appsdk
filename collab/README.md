@@ -222,6 +222,11 @@ copies, restart the global daemon, or touch `~/.collab/`, project-local
 daemon may keep running the old binary until an explicitly authorized
 maintenance window.
 
+For a new machine, read
+[Install onboarding](docs/install-onboarding.md). It records the minimum
+permission profile, the Git and tmux cases, QQBot first bind, and the checks
+for login autostart.
+
 ## Start and identity
 
 ```sh

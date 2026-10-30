@@ -99,6 +99,9 @@ chmod 644 "$stage/bin/collab-desktop-mcp.mjs"
 # the installed Skills come from the same build even with --bin-dir.
 "$stage/bin/collab" install-skills --target "$stage/skills/collab" --force >/dev/null
 [ -s "$stage/skills/collab/SKILL.md" ] || fail 'Skill bundle is incomplete: SKILL.md missing'
+[ -s "$collab_root/docs/install-onboarding.md" ] ||
+  fail 'missing docs/install-onboarding.md'
+cp "$collab_root/docs/install-onboarding.md" "$stage/INSTALL-ONBOARDING.md"
 
 cat >"$stage/install.sh" <<'INSTALL'
 #!/bin/sh
@@ -162,6 +165,7 @@ chmod 755 "$stage/install.sh"
 - bin/collab-desktop-mcp
 - bin/collab-desktop-mcp.mjs
 - skills/collab (Skill bundle exported with the binaries)
+- INSTALL-ONBOARDING.md (first-install permissions, Git, tmux and QQBot notes)
 
 README
   printf 'Install without compiling:\n\n'
@@ -178,6 +182,13 @@ Install targets:
 Install does not restart a running daemon and does not touch tmux. A daemon
 started before the install keeps the old binary until the user-managed
 maintenance window loads the LaunchAgent.
+
+First-install setup:
+- do not run Codex with YOLO or danger-full-access;
+- configure the named permission profile described in INSTALL-ONBOARDING.md;
+- Collab does not require a Git repository;
+- run `collab context` from the real Codex TUI for first registration;
+- bind QQBot with one private message inside its ten-minute receiver window.
 README
 } >"$stage/README-INSTALL.md"
 

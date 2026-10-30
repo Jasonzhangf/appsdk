@@ -82,9 +82,18 @@ package_and_install() {
   name="$(basename "$package")"
 
   for entry in bin/collab bin/collab-mcp bin/collab-desktop-mcp \
-    bin/collab-desktop-mcp.mjs skills/collab/SKILL.md install.sh README-INSTALL.md; do
+    bin/collab-desktop-mcp.mjs skills/collab/SKILL.md install.sh README-INSTALL.md \
+    INSTALL-ONBOARDING.md; do
     [[ -e "$package/$entry" ]] || fail "missing $entry in package $name"
   done
+  grep -q 'YOLO is not required' "$package/INSTALL-ONBOARDING.md" ||
+    fail "INSTALL-ONBOARDING.md lacks the permission profile guidance in $name"
+  grep -q 'Git is not a Collab requirement' "$package/INSTALL-ONBOARDING.md" ||
+    fail "INSTALL-ONBOARDING.md lacks the Git guidance in $name"
+  grep -q 'tmux is placement, not identity' "$package/INSTALL-ONBOARDING.md" ||
+    fail "INSTALL-ONBOARDING.md lacks the tmux guidance in $name"
+  grep -q 'QQBot receiver and first bind' "$package/INSTALL-ONBOARDING.md" ||
+    fail "INSTALL-ONBOARDING.md lacks the QQBot guidance in $name"
   grep -q '# stub skill' "$package/skills/collab/SKILL.md" ||
     fail "archived Skill bundle did not come from the packaged binary in $name"
   [[ -x "$package/install.sh" ]] || fail "install.sh is not executable in $name"

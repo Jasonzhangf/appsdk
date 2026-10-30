@@ -63,6 +63,10 @@ fn wait_for_agent_observations(registered: &Value) {
 
 impl Fixture {
     fn start_daemon(&mut self) {
+        self.start_daemon_with_path(None);
+    }
+
+    fn start_daemon_with_path(&mut self, path: Option<&Path>) {
         std::fs::create_dir_all(&self.host_state).unwrap();
         std::fs::write(
             self.host_state.join("tmux-endpoints.json"),
@@ -73,8 +77,12 @@ impl Fixture {
         )
         .unwrap();
         let daemon_log = std::fs::File::create(self.root.join("test-daemon.log")).unwrap();
+        let mut command = self.configured_command(&["serve"], None, "Codex TUI");
+        if let Some(path) = path {
+            command.env("PATH", path);
+        }
         self.daemon = Some(
-            self.configured_command(&["serve"], None, "Codex TUI")
+            command
                 .stdin(std::process::Stdio::null())
                 .stdout(daemon_log.try_clone().unwrap())
                 .stderr(daemon_log)
@@ -108,6 +116,11 @@ impl Fixture {
     fn restart_daemon(&mut self) {
         self.stop_daemon();
         self.start_daemon();
+    }
+
+    fn restart_daemon_with_path(&mut self, path: &Path) {
+        self.stop_daemon();
+        self.start_daemon_with_path(Some(path));
     }
 
     fn command(&self, args: &[&str], pane: Option<&Pane>) -> Output {

@@ -117,12 +117,15 @@ impl ProjectRuntimeManager {
         }
         endpoints.sort();
         endpoints.dedup();
+        // tmux observation is optional placement only. A missing socket, stale
+        // metadata, or any observation failure must not block context
+        // registration: the Codex session anchor already identifies the actor.
         let observed = crate::client::adapters::tmux::observe_caller(
             endpoints,
             caller_pid,
             facts.pane_hint.as_deref(),
         )
-        .map_err(anyhow::Error::msg)?;
+        .unwrap_or_else(|_error| None);
         // Current ancestry supersedes every caller-supplied or historical
         // placement address. No observation means no tmux selection.
         facts.tmux = observed.map(|mut endpoint| {

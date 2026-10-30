@@ -769,12 +769,14 @@ pub(crate) fn context_operation_with_intent(
                     // Only the existing live ancestry observer can establish
                     // that its native facts are not needed. The daemon still
                     // performs its own authoritative admission observation.
+                    // A missing/broken tmux observation is placement failure,
+                    // not proof that the caller lacks a native Codex session.
                     let current_pane = crate::client::adapters::tmux::observe_caller_at(
                         host_paths.state_root(),
                         std::process::id(),
                         facts.pane_hint.as_deref(),
                     )
-                    .map_err(anyhow::Error::msg)?;
+                    .unwrap_or_else(|_error| None);
                     if current_pane.is_none() {
                         if !error.is::<crate::desktop_capability::DeclarationMissing>() {
                             return Err(error);

@@ -175,7 +175,6 @@ pub fn install_and_load() -> anyhow::Result<PathBuf> {
     let collab_bin = collab_bin_path();
     let plist = render_plist(&collab_bin);
     let path = launch_agent_path();
-    let previous = std::fs::read_to_string(&path).ok();
     std::fs::create_dir_all(path.parent().expect("LaunchAgents dir"))?;
     // launchd opens StandardOutPath/StandardErrorPath before the daemon runs,
     // so the host state root must already exist or the agent fails to start.
@@ -184,13 +183,11 @@ pub fn install_and_load() -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(scope::HostPaths::resolve()?.state_root())?;
     std::fs::write(&path, &plist)?;
     if is_loaded() {
-        if previous.as_deref() != Some(plist.as_str()) {
-            eprintln!(
-                "AUTOSTART_RELOAD_REQUIRED: the loaded job still has the previous plist; run `launchctl bootout gui/$(id -u) {}` then `launchctl bootstrap gui/$(id -u) {}` in a maintenance window",
-                launch_agent_label(),
-                path.display()
-            );
-        }
+        // launchd keeps the definition it loaded, not the file just written.
+        // This install must not replace a live daemon by itself, so tell the
+        // operator the exact maintenance commands instead of pretending the
+        // new plist is already active.
+        eprintln!("{}", reload_guidance(&launch_agent_label(), &path));
         // The agent is already loaded for this login session. A clean
         // `collab down` leaves the job loaded but stopped, so launchd would
         // have no child to relaunch after a crash. Resume the loaded job here;
@@ -216,6 +213,14 @@ pub fn install_and_load() -> anyhow::Result<PathBuf> {
         );
     }
     Ok(path)
+}
+
+fn reload_guidance(label: &str, path: &Path) -> String {
+    format!(
+        "AUTOSTART_RELOAD_REQUIRED: the loaded job keeps its existing definition; to apply the latest plist run `launchctl bootout gui/$(id -u)/{label}` then `launchctl bootstrap gui/$(id -u) '{path}'` in a maintenance window",
+        label = label,
+        path = path.display(),
+    )
 }
 
 fn xml_escape(value: &str) -> String {
@@ -407,6 +412,22 @@ mod plist_tests {
         let plist = render_plist(Path::new("/usr/local/bin/collab"));
         assert!(plist.contains("/tmp/a&amp;b"), "{plist}");
         assert!(!plist.contains("/tmp/a&b</string>"), "{plist}");
+    }
+
+    #[test]
+    fn reload_guidance_targets_the_service_and_quotes_the_plist() {
+        let guidance = reload_guidance(
+            LAUNCH_AGENT_LABEL,
+            Path::new("/Users/a b/Library/LaunchAgents/com.appsdk.collab.plist"),
+        );
+        assert!(
+            guidance.contains("launchctl bootout gui/$(id -u)/com.appsdk.collab"),
+            "{guidance}"
+        );
+        assert!(
+            guidance.contains("launchctl bootstrap gui/$(id -u) '/Users/a b/Library/LaunchAgents/com.appsdk.collab.plist'"),
+            "{guidance}"
+        );
     }
 
     #[test]

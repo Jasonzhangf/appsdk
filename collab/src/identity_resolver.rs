@@ -47,12 +47,16 @@ impl AnchorObservation {
     fn from_env_at(host_paths: &HostPaths) -> anyhow::Result<Self> {
         let pane_hint = crate::client::adapters::tmux::pane_hint_from_env();
         let host_facts = crate::host_runtime::host_runtime_facts();
+        // tmux placement is host-owned delivery metadata, not an identity
+        // anchor. A malformed or unavailable observation must not block
+        // read-only identity lookup when the caller already carries Codex
+        // session/thread facts.
         let tmux = crate::client::adapters::tmux::observe_caller_at(
             host_paths.state_root(),
             std::process::id(),
             pane_hint.as_deref(),
         )
-        .map_err(anyhow::Error::msg)?
+        .unwrap_or_else(|_error| None)
         .map(|mut endpoint| {
             if let Some(agy_session) = host_facts.agy_session_id.as_deref() {
                 endpoint.codex_session_id = Some(agy_session.to_owned());

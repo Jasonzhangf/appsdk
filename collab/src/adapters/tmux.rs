@@ -332,7 +332,12 @@ fn list_panes(socket_path: &str) -> Result<Vec<ObservedPane>, String> {
     )?;
     let text = String::from_utf8(output.stdout)
         .map_err(|_| "TMUX_OBSERVATION_INVALID: non-UTF-8 tmux metadata".to_owned())?;
+    parse_pane_lines(&text)
+}
+
+fn parse_pane_lines(text: &str) -> Result<Vec<ObservedPane>, String> {
     text.lines()
+        .filter(|line| !line.trim().is_empty())
         .map(|line| {
             let fields = line.split('\t').collect::<Vec<_>>();
             if fields.len() != 4 {
@@ -951,6 +956,13 @@ pub(crate) mod tests {
             vec!["/tmp/tmux-one.sock", "/tmp/tmux-two.sock"]
         );
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn list_panes_ignores_trailing_blank_lines() {
+        let observed = parse_pane_lines("58649\t$0\t%0\t58650\n\n").expect("trailing blanks parse");
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].pane_id, "%0");
     }
 
     #[test]

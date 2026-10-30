@@ -83,6 +83,41 @@ fn context_snapshot(value: &Value) -> &Value {
         .unwrap_or(value)
 }
 
+fn trailing_blank_tmux_path(fixture: &Fixture) -> PathBuf {
+    let bin = fixture.root.join("malformed-tmux-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let real = String::from_utf8(
+        Command::new("sh")
+            .args(["-c", "command -v tmux"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let shim = bin.join("tmux");
+    std::fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\ncase \" $* \" in\n  *\" list-panes -a \"*)\n    {} \"$@\" || exit $?\n    printf '\\n'\n    ;;\n  *)\n    exec {} \"$@\"\n    ;;\nesac\n",
+            real.trim(),
+            real.trim()
+        ),
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&shim).unwrap().permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o755);
+    }
+    std::fs::set_permissions(&shim, permissions).unwrap();
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let mut joined = bin.into_os_string();
+    joined.push(":");
+    joined.push(path);
+    PathBuf::from(joined)
+}
+
 fn persisted_identity(fixture: &Fixture, worker_id: &str) -> Value {
     let path = fixture
         .host_state
@@ -90,6 +125,33 @@ fn persisted_identity(fixture: &Fixture, worker_id: &str) -> Value {
         .join(worker_id)
         .join("identity.json");
     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+#[test]
+fn context_registers_when_tmux_metadata_has_a_trailing_blank_line() {
+    let (mut fixture, pane) = single_pane_fixture("trailing-blank-tmux");
+    let path = trailing_blank_tmux_path(&fixture);
+    fixture.restart_daemon_with_path(&path);
+
+    let restored = run_in_pane_with_tmux(
+        &fixture,
+        &pane,
+        "trailing-blank-context",
+        "invalid",
+        &["context", "--op", "trailing-blank-context"],
+    );
+
+    assert_eq!(restored["ok"], true, "{restored}");
+    assert_eq!(
+        context_snapshot(&restored)["identity"]["transport"]["kind"],
+        "tmux",
+        "{restored}"
+    );
+    assert_eq!(
+        context_snapshot(&restored)["session_id"],
+        pane.session_anchor,
+        "{restored}"
+    );
 }
 
 #[test]

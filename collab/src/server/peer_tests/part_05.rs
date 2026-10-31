@@ -63,7 +63,7 @@ fn role_contract_is_identical_across_context_workers_and_status() {
             assert!(responsibilities.contains("resume your own unfinished work"));
             assert!(responsibilities.contains("user-facing summary is not that reply"));
             assert!(responsibilities.contains("register your own accepted goal"));
-            assert!(responsibilities.contains("request next work or explicit idle approval"));
+            assert!(responsibilities.contains("must not stop to report to the master and wait for a dispatch"));
             assert!(responsibilities.contains("adjust only affected duties, dependencies or handoffs"));
             assert!(responsibilities.contains("specialty roles, policy and workflow overrides are optional"));
             assert!(!responsibilities.contains("automatically update affected role workflow templates"));
@@ -2356,7 +2356,7 @@ fn role_brief_projects_identity_and_sorted_specialty_workflow_templates() {
     );
     assert!(
         responsibilities.iter().any(|line| line.as_str().is_some_and(|text|
-            text.contains("request next work or explicit idle approval"))),
+            text.contains("must not stop to report to the master and wait for a dispatch"))),
         "the common handoff duty remains in responsibilities: {brief}"
     );
     let operations = peer.data["operations"].as_array().expect("operations");

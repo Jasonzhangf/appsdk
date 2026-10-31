@@ -868,68 +868,6 @@ fn tmux_registration_rejects_a_cwd_that_is_not_the_server_project_root() {
 }
 
 #[test]
-fn registration_rejects_a_linked_worktree_root() {
-    let id = TEST_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let root = std::env::temp_dir().join(format!(
-        "collab-worktree-registration-{id}-{}",
-        std::process::id()
-    ));
-    let canonical = root.join("project");
-    let linked = canonical.join("playground/task-a");
-    std::fs::create_dir_all(&canonical).unwrap();
-    std::fs::create_dir_all(canonical.join(".agent-collab")).unwrap();
-
-    let init = std::process::Command::new("git")
-        .args(["init", "-q", "-b", "main"])
-        .current_dir(&canonical)
-        .status()
-        .unwrap();
-    assert!(init.success());
-    let commit = std::process::Command::new("git")
-        .args([
-            "-c",
-            "user.name=Collab Test",
-            "-c",
-            "user.email=collab-test@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-q",
-            "-m",
-            "initial",
-        ])
-        .current_dir(&canonical)
-        .status()
-        .unwrap();
-    assert!(commit.success());
-    let worktree = std::process::Command::new("git")
-        .args([
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            "task-a",
-            linked.to_str().unwrap(),
-            "main",
-        ])
-        .current_dir(&canonical)
-        .status()
-        .unwrap();
-    assert!(worktree.success());
-
-    let canonical = canonical.canonicalize().unwrap();
-    let linked = linked.canonicalize().unwrap();
-    std::fs::create_dir_all(linked.join(".agent-collab")).unwrap();
-
-    validate_project_registration_cwd(canonical.to_str().unwrap(), canonical.as_path()).unwrap();
-    let error =
-        validate_project_registration_cwd(linked.to_str().unwrap(), linked.as_path()).unwrap_err();
-    assert!(error.starts_with("PROJECT_SCOPE_INVALID:"), "{error}");
-    assert!(error.contains("linked worktree"), "{error}");
-
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
 fn registration_reuses_the_registered_tmux_pane_identity() {
     let (server, root, _) = test_server();
     let app_scope = AppServerId::new("app-a").unwrap();

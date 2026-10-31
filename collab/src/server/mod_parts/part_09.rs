@@ -1431,6 +1431,107 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
         })
         .collect();
     peer_snapshots.sort_by(|left, right| left.0.id.cmp(&right.0.id));
+    // Manager scope digest. A manager's default context read must answer, in
+    // one snapshot, whether each durable subordinate manager is covered by a
+    // patrol, whether it is idle, and whether idle is caused by a blocking
+    // wait. Only the project master has durable peer subordinates; a peer
+    // delegates one-shot work to GCM workers, which are not part of the
+    // durable manager scope. The digest reuses existing task, subscription and
+    // activity facts, so no second state tree is created.
+    let (scope_digest, peer_activities) = if role == "master" {
+        let now = now_ms();
+        let mut digest = Vec::new();
+        let mut activities = std::collections::HashMap::new();
+        for (peer, peer_role, peer_display_name) in &peer_snapshots {
+            if peer.id == worker_id || peer_role != "worker" {
+                continue;
+            }
+            let (_, activity_fact) = worker_agent_facts(server, &st, peer);
+            let activity = match activity_fact.map(|fact| fact.activity) {
+                Some(crate::server::name_state::AgentActivity::Busy) => "busy",
+                Some(crate::server::name_state::AgentActivity::Idle) => "idle",
+                Some(crate::server::name_state::AgentActivity::WaitingUser) => "waiting_user",
+                _ => "unknown",
+            };
+            activities.insert(peer.id.clone(), activity.to_string());
+            let mut open_tasks: Vec<&str> = st
+                .tasks
+                .values()
+                .filter(|task| {
+                    task.owner == peer.id
+                        && !matches!(task.status.as_str(), "closed" | "cancelled")
+                })
+                .map(|task| task.id.as_str())
+                .collect();
+            open_tasks.sort_unstable();
+            let blocked: Vec<serde_json::Value> = st
+                .tasks
+                .values()
+                .filter(|task| {
+                    task.owner == peer.id
+                        && !matches!(task.status.as_str(), "closed" | "cancelled")
+                })
+                .filter_map(|task| {
+                    task.wait.as_ref().map(|wait| {
+                        json!({
+                            "task_id": task.id,
+                            "waiting_for": wait.waiting_for,
+                            "reason": wait.reason,
+                            "resume_on": wait.resume_on,
+                        })
+                    })
+                })
+                .collect();
+            let armed = |subscription: &&crate::server::state::NotificationSubscription| {
+                subscription.worker_id == peer.id
+                    && subscription.status == "armed"
+                    && subscription.expires_ms > now
+            };
+            let patrol = st
+                .notification_subscriptions
+                .values()
+                .find(|subscription| {
+                    armed(subscription)
+                        && matches!(subscription.event.as_str(), "board-idle" | "master-idle")
+                });
+            let goal = st.notification_subscriptions.values().find(|subscription| {
+                armed(subscription)
+                    && subscription.event == "deadline"
+                    && subscription
+                        .subject
+                        .as_deref()
+                        .is_some_and(|subject| subject.starts_with("goal:"))
+            });
+            digest.push(json!({
+                "worker_id": peer.id,
+                "display_name": peer_display_name,
+                "role": peer_role,
+                "activity": activity,
+                "open_tasks": open_tasks,
+                "blocked": blocked,
+                "patrol": match patrol {
+                    Some(subscription) => json!({
+                        "armed": true,
+                        "event": subscription.event,
+                        "subject": subscription.subject,
+                        "interval_ms": subscription.interval_ms,
+                    }),
+                    None => json!({"armed": false}),
+                },
+                "goal": match goal {
+                    Some(subscription) => json!({
+                        "armed": true,
+                        "subject": subscription.subject,
+                        "interval_ms": subscription.interval_ms,
+                    }),
+                    None => json!({"armed": false}),
+                },
+            }));
+        }
+        (digest, activities)
+    } else {
+        (Vec::new(), std::collections::HashMap::new())
+    };
     let pending_merges = pending_merge_views(&st);
     // The master sees the whole project queue. An ordinary peer only sees the
     // merge views it owns or requested, so foreign obligations stay out of its
@@ -1549,6 +1650,7 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
                     IdentityPresence::Unknown => "unknown",
                 },
                 "endpoint_live": peer_endpoint_live,
+                "activity": peer_activities.get(&peer.id).cloned().unwrap_or_else(|| "unknown".into()),
             })
         })
         .collect();
@@ -1693,6 +1795,7 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
         "subscriptions": subscriptions,
         "peers": peers,
         "peer_count": peer_count,
+        "scope_digest": scope_digest,
         "master_wake": master_wake,
         "subagents": subagents,
         "summary": {

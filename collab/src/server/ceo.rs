@@ -1145,6 +1145,7 @@ impl ProjectRuntimeManager {
                     "workspace": unknown_workspace_view(Some(
                         root.to_string_lossy().into_owned(),
                     )),
+                    "patrol": {"armed": false},
                 }));
                 continue;
             }
@@ -1154,6 +1155,22 @@ impl ProjectRuntimeManager {
                 let scope = server_route_scope(&runtime, &state).map_err(Resp::err)?;
                 let workspace =
                     workspace_idle_view(&runtime, &state, master.as_deref(), now_ms());
+                // Whether the project's master has an armed project patrol. A
+                // CEO needs this to know if each subordinate manager keeps its
+                // own scope under patrol, without a second cross-project state
+                // tree. Reuses the same armed subscription the master itself
+                // reads through `collab context`.
+                let master_patrol = master.as_deref().and_then(|master| {
+                    state
+                        .notification_subscriptions
+                        .values()
+                        .find(|subscription| {
+                            subscription.worker_id == master
+                                && subscription.status == "armed"
+                                && subscription.expires_ms > now_ms()
+                                && subscription.event == "master-idle"
+                        })
+                });
                 let mut counts = std::collections::BTreeMap::<String, usize>::new();
                 let mut tasks = Vec::new();
                 for task in state.tasks.values().filter(|t| {
@@ -1180,7 +1197,17 @@ impl ProjectRuntimeManager {
                     .filter(|o| o.from_ceo)
                     .cloned()
                     .collect::<Vec<_>>();
-                projects.push(json!({"project":root,"app_scope_id":scope.as_ref().map(|s|s.app_scope_id.as_str()),"registered":true,"master":master,"workspace":workspace,"tasks":tasks,"task_counts":counts,"pending_replies":pending}));
+                let master_patrol = master_patrol
+                    .map(|subscription| {
+                        json!({
+                            "armed": true,
+                            "event": subscription.event,
+                            "interval_ms": subscription.interval_ms,
+                            "expires_ms": subscription.expires_ms,
+                        })
+                    })
+                    .unwrap_or_else(|| json!({"armed": false}));
+                projects.push(json!({"project":root,"app_scope_id":scope.as_ref().map(|s|s.app_scope_id.as_str()),"registered":true,"master":master,"workspace":workspace,"patrol":master_patrol,"tasks":tasks,"task_counts":counts,"pending_replies":pending}));
             }
         }
         let operations = self

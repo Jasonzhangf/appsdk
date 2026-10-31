@@ -1168,7 +1168,7 @@ impl ProjectRuntimeManager {
                             subscription.worker_id == master
                                 && subscription.status == "armed"
                                 && subscription.expires_ms > now_ms()
-                                && subscription.event == "master-idle"
+                                && crate::server::is_exact_project_patrol(subscription)
                         })
                 });
                 let mut counts = std::collections::BTreeMap::<String, usize>::new();

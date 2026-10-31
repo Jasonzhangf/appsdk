@@ -656,9 +656,12 @@ fn ceo_progress_reports_master_patrol_armed_state() {
     );
 
     let now = super::now_ms();
+    // An armed `master-idle` subscription that does not carry the canonical
+    // project-patrol subject/interval is not the standing project patrol and
+    // must not be reported as armed.
     server.commit(&[Event::NotificationSubscribed {
         subscription: super::state::NotificationSubscription {
-            id: "sub-master-idle".into(),
+            id: "sub-non-canonical-master-idle".into(),
             worker_id: "master".into(),
             event: "master-idle".into(),
             subject: Some("master-idle".into()),
@@ -666,7 +669,45 @@ fn ceo_progress_reports_master_patrol_armed_state() {
             method: "tmux".into(),
             trigger_ms: None,
             trigger_times_ms: Vec::new(),
-            interval_ms: Some(900_000),
+            interval_ms: Some(60_000),
+            repeat_count: 1,
+            fired_count: 0,
+            expires_ms: now + 3_600_000,
+            status: "armed".into(),
+            created_ms: now,
+            updated_ms: now,
+            status_reason: None,
+            patrol_idle_since_ms: None,
+            patrol_last_push_ms: 0,
+        },
+    }]);
+    let non_canonical = progress(&manager, &root);
+    assert!(non_canonical.ok, "ceo progress failed: {non_canonical:?}");
+    let project = non_canonical.data["projects"]
+        .as_array()
+        .and_then(|projects| {
+            projects
+                .iter()
+                .find(|project| project["project"].as_str() == Some(scope.as_str()))
+        })
+        .expect("progress includes the canonical project");
+    assert_eq!(
+        project["patrol"]["armed"],
+        json!(false),
+        "a non-canonical master-idle subscription must not read as the project patrol: {project}"
+    );
+
+    server.commit(&[Event::NotificationSubscribed {
+        subscription: super::state::NotificationSubscription {
+            id: "sub-master-idle".into(),
+            worker_id: "master".into(),
+            event: "master-idle".into(),
+            subject: Some("project-patrol".into()),
+            target: "thread-master".into(),
+            method: "tmux".into(),
+            trigger_ms: None,
+            trigger_times_ms: Vec::new(),
+            interval_ms: Some(1_500_000),
             repeat_count: 1,
             fired_count: 0,
             expires_ms: now + 3_600_000,
@@ -693,6 +734,10 @@ fn ceo_progress_reports_master_patrol_armed_state() {
         json!(true),
         "an armed master patrol must be visible to the CEO: {project}"
     );
-    assert_eq!(project["patrol"]["interval_ms"], json!(900_000), "{project}");
+    assert_eq!(
+        project["patrol"]["interval_ms"],
+        json!(1_500_000),
+        "{project}"
+    );
     std::fs::remove_dir_all(root).ok();
 }

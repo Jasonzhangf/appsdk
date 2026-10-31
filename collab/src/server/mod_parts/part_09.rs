@@ -1491,8 +1491,7 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
                 .notification_subscriptions
                 .values()
                 .find(|subscription| {
-                    armed(subscription)
-                        && matches!(subscription.event.as_str(), "board-idle" | "master-idle")
+                    armed(subscription) && subscription.event == "board-idle"
                 });
             let goal = st.notification_subscriptions.values().find(|subscription| {
                 armed(subscription)

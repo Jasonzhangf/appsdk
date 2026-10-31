@@ -44,6 +44,25 @@ fn register_route(project_root: &Path, state_root: &Path) {
     std::fs::write(state_root.join("routes.jsonl"), format!("{route}\n")).unwrap();
 }
 
+fn accept_with_deadline(listener: &UnixListener) -> std::os::unix::net::UnixStream {
+    // A regression that makes the CLI skip the socket must fail fast instead
+    // of blocking accept() forever and stalling CI.
+    listener.set_nonblocking(true).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => return stream,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if std::time::Instant::now() >= deadline {
+                    panic!("CLI did not connect to the master status socket within 10s");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(error) => panic!("accept failed: {error}"),
+        }
+    }
+}
+
 #[test]
 fn master_status_uses_registered_cwd_without_tmux() {
     let root = temp_root("registered");
@@ -60,7 +79,7 @@ fn master_status_uses_registered_cwd_without_tmux() {
         .to_string_lossy()
         .into_owned();
     let responder = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
+        let mut stream = accept_with_deadline(&listener);
         let mut line = String::new();
         std::io::BufReader::new(&stream)
             .read_line(&mut line)
@@ -123,18 +142,17 @@ fn master_status_workspace_uses_registered_canonical_project() {
         .unwrap()
         .to_string_lossy()
         .into_owned();
-    // A task directory binds to its project through an explicit `.agent-collab`
-    // marker, not through repository metadata. Use a real subdirectory with a
-    // symlinked marker so the caller path is not the registered root.
-    let caller_root = root.join("linked-worktree");
+    // `master status` resolves the project by directory containment under a
+    // registered root; it never consults git or marker topology. A real task
+    // subdirectory keeps the caller path distinct from the registered root.
+    let caller_root = project_root.join("playground/task-a");
     std::fs::create_dir_all(&caller_root).unwrap();
-    std::os::unix::fs::symlink(&project_root.join(".agent-collab"), &caller_root.join(".agent-collab")).unwrap();
 
     let socket = state_root.join("server.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     let expected_root = canonical_root.clone();
     let responder = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
+        let mut stream = accept_with_deadline(&listener);
         let mut line = String::new();
         std::io::BufReader::new(&stream)
             .read_line(&mut line)

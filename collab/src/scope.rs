@@ -191,10 +191,9 @@ pub(crate) fn project_root_for_cwd(cwd: &Path) -> Option<PathBuf> {
 
 /// Resolve the route bound to one registered peer identity at the exact cwd.
 ///
-/// The identity's App Server scope is authoritative. The caller's cwd must be
-/// the route root or one of its descendants. It cannot select a different
-/// project by itself. Directory containment is the whole rule; repository
-/// metadata is not identity evidence.
+/// The identity's App Server scope is authoritative. The caller's cwd may be
+/// a Git worktree, so it must belong to the route's directory or the verified
+/// Git main root. It cannot select a different project by itself.
 pub fn canonical_route_for_identity(
     host_paths: &HostPaths,
     cwd: &Path,
@@ -203,69 +202,178 @@ pub fn canonical_route_for_identity(
     let cwd = std::fs::canonicalize(cwd)?;
     let matches = load_route_records(host_paths)?
         .into_iter()
-        .filter(|route| &route.app_scope_id == app_scope_id && contains_cwd(&route.root, &cwd))
+        .filter(|route| &route.app_scope_id == app_scope_id)
         .collect::<Vec<_>>();
-    select_most_specific_route(
-        matches,
-        &format!(
-            "no registered Collab route matches app scope {} and cwd {}",
+    let (matches, git_roots) = narrow_routes_for_git_worktree(&cwd, matches)?;
+    match matches.len() {
+        1 => Ok(matches.into_iter().next().unwrap()),
+        0 => anyhow::bail!(
+            "no registered Collab route matches app scope {} for the Git main worktree {} containing cwd {}",
             app_scope_id,
+            git_roots
+                .as_ref()
+                .map(|roots| roots.main_root.display().to_string())
+                .unwrap_or_else(|| "not detected".into()),
             cwd.display()
         ),
-        &format!(
-            "multiple canonical Collab routes at the same depth match app scope {} and cwd {}",
-            app_scope_id,
-            cwd.display()
-        ),
-    )
+        _ => {
+            let roots = matches
+                .iter()
+                .map(|route| route.root.display().to_string())
+                .collect::<Vec<_>>();
+            anyhow::bail!(
+                "multiple canonical Collab routes match app scope {} and contain cwd {}: {}",
+                app_scope_id,
+                cwd.display(),
+                roots.join(", ")
+            )
+        }
+    }
 }
 
 /// Resolve the canonical registered project route for a read-only command.
 ///
 /// This lookup is deliberately identity-free so `master status` can answer
-/// before the caller has a local route. It still requires a registered route
-/// and never guesses a project from repository metadata.
+/// from a linked worktree or a freshly reset project before the caller has a
+/// local route. It still requires an exact registered route and never guesses
+/// a project from an ancestor directory.
 pub fn canonical_route_for_cwd(
     host_paths: &HostPaths,
     cwd: &Path,
 ) -> anyhow::Result<CanonicalProjectRoute> {
     let cwd = std::fs::canonicalize(cwd)?;
-    let matches = load_route_records(host_paths)?
-        .into_iter()
-        .filter(|route| contains_cwd(&route.root, &cwd))
-        .collect::<Vec<_>>();
-    select_most_specific_route(
-        matches,
-        &format!("no registered Collab route contains cwd {}", cwd.display()),
-        &format!(
-            "multiple canonical Collab routes at the same depth contain cwd {}",
-            cwd.display()
-        ),
-    )
-}
-
-fn contains_cwd(root: &Path, cwd: &Path) -> bool {
-    cwd == root || cwd.starts_with(root)
-}
-
-fn select_most_specific_route(
-    mut matches: Vec<CanonicalProjectRoute>,
-    missing: &str,
-    ambiguous: &str,
-) -> anyhow::Result<CanonicalProjectRoute> {
-    matches.sort_by_key(|route| std::cmp::Reverse(route.root.components().count()));
-    let Some(depth) = matches.first().map(|route| route.root.components().count()) else {
-        anyhow::bail!("{missing}")
-    };
-    matches.retain(|route| route.root.components().count() == depth);
-    if matches.len() == 1 {
-        return Ok(matches.pop().unwrap());
+    let matches = load_route_records(host_paths)?;
+    // An explicit `.agent-collab` marker in the cwd binds the caller to its
+    // registered project root before directory containment, matching the
+    // context root precedence. A symlinked marker resolves to the real marker
+    // directory, so a task directory maps to its canonical project.
+    if let Some(marker_root) = project_root_for_cwd(&cwd) {
+        let marker_root = std::fs::canonicalize(&marker_root).unwrap_or(marker_root);
+        if let Some(route) = matches.iter().find(|route| route.root == marker_root) {
+            return Ok(route.clone());
+        }
     }
-    let roots = matches
-        .iter()
-        .map(|route| route.root.display().to_string())
-        .collect::<Vec<_>>();
-    anyhow::bail!("{ambiguous}: {}", roots.join(", "))
+    let (matches, _) = narrow_routes_for_git_worktree(&cwd, matches)?;
+    match matches.len() {
+        1 => Ok(matches.into_iter().next().unwrap()),
+        0 => anyhow::bail!("no registered Collab route contains cwd {}", cwd.display()),
+        _ => {
+            let roots = matches
+                .iter()
+                .map(|route| route.root.display().to_string())
+                .collect::<Vec<_>>();
+            anyhow::bail!(
+                "multiple canonical Collab routes contain cwd {}: {}",
+                cwd.display(),
+                roots.join(", ")
+            )
+        }
+    }
+}
+
+/// Narrow registered routes to the one that owns the cwd. A linked Git
+/// worktree resolves to its verified main checkout, never to a sibling
+/// project or to an unregistered worktree root.
+fn narrow_routes_for_git_worktree(
+    cwd: &Path,
+    mut matches: Vec<CanonicalProjectRoute>,
+) -> anyhow::Result<(Vec<CanonicalProjectRoute>, Option<GitWorktreeRoots>)> {
+    let git_roots = git_worktree_roots_if_any(cwd)?;
+    if matches.iter().any(|route| route.root == cwd) {
+        matches.retain(|route| route.root == cwd);
+        return Ok((matches, git_roots));
+    }
+    matches.retain(|route| {
+        cwd.starts_with(&route.root)
+            || git_roots
+                .as_ref()
+                .is_some_and(|roots| route.root == roots.main_root)
+    });
+    if let Some(git_roots) = &git_roots {
+        let nested_matches = matches
+            .iter()
+            .filter(|route| {
+                route.root != git_roots.main_root
+                    && route.root != git_roots.worktree_root
+                    && route.root.starts_with(&git_roots.worktree_root)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !nested_matches.is_empty() {
+            return Ok((nested_matches, Some(git_roots.clone())));
+        }
+        if matches
+            .iter()
+            .any(|route| route.root == git_roots.main_root)
+        {
+            matches.retain(|route| route.root == git_roots.main_root);
+        } else if matches
+            .iter()
+            .any(|route| route.root == git_roots.worktree_root)
+            && git_roots.worktree_root != git_roots.main_root
+        {
+            // A linked worktree may not register its own route. When the
+            // route is rooted at the worktree itself, fail closed instead of
+            // treating it as a second project.
+            matches.retain(|route| route.root != git_roots.worktree_root);
+        }
+    }
+    Ok((matches, git_roots))
+}
+
+#[derive(Clone)]
+struct GitWorktreeRoots {
+    main_root: PathBuf,
+    worktree_root: PathBuf,
+}
+
+fn git_worktree_roots_if_any(cwd: &Path) -> anyhow::Result<Option<GitWorktreeRoots>> {
+    let Some(worktree_root) = git_marker_root(cwd) else {
+        return Ok(None);
+    };
+    let marker = worktree_root.join(".git");
+    let main_root = if marker.is_file() {
+        let text = match std::fs::read_to_string(&marker) {
+            Ok(text) => text,
+            _ => return Ok(None),
+        };
+        let path = text.trim().strip_prefix("gitdir:").map(str::trim);
+        let Some(path) = path.filter(|path| !path.is_empty()) else {
+            return Ok(None);
+        };
+        let gitdir = PathBuf::from(path);
+        let gitdir = if gitdir.is_absolute() {
+            gitdir
+        } else {
+            worktree_root.join(gitdir)
+        };
+        // A linked worktree gitdir lives at `.git/worktrees/<name>` inside the
+        // common dir; the parent of the common dir is the main checkout root.
+        let common = gitdir
+            .parent()
+            .and_then(|parent| parent.parent())
+            .unwrap_or(&gitdir);
+        let Some(main_root) = common.parent() else {
+            return Ok(None);
+        };
+        let Some(main_root) = std::fs::canonicalize(main_root).ok() else {
+            return Ok(None);
+        };
+        main_root
+    } else {
+        worktree_root.clone()
+    };
+    Ok(Some(GitWorktreeRoots {
+        main_root,
+        worktree_root,
+    }))
+}
+
+fn git_marker_root(cwd: &Path) -> Option<PathBuf> {
+    cwd.ancestors()
+        .map(|dir| dir.join(".git"))
+        .find(|marker| marker.is_dir() || marker.is_file())
+        .and_then(|marker| marker.parent().map(Path::to_path_buf))
 }
 
 fn resolve_state_root(

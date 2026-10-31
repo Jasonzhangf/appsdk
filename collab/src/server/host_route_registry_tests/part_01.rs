@@ -868,7 +868,7 @@ fn tmux_registration_rejects_a_cwd_that_is_not_the_server_project_root() {
 }
 
 #[test]
-fn registration_rejects_a_linked_worktree_root() {
+fn registration_accepts_a_marked_worktree_root_ignoring_git_topology() {
     let id = TEST_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let root = std::env::temp_dir().join(format!(
         "collab-worktree-registration-{id}-{}",
@@ -918,13 +918,16 @@ fn registration_rejects_a_linked_worktree_root() {
 
     let canonical = canonical.canonicalize().unwrap();
     let linked = linked.canonicalize().unwrap();
-    std::fs::create_dir_all(linked.join(".agent-collab")).unwrap();
 
     validate_project_registration_cwd(canonical.to_str().unwrap(), canonical.as_path()).unwrap();
+    // Without its own marker the worktree is not a Collab project.
     let error =
         validate_project_registration_cwd(linked.to_str().unwrap(), linked.as_path()).unwrap_err();
-    assert!(error.starts_with("PROJECT_SCOPE_INVALID:"), "{error}");
-    assert!(error.contains("linked worktree"), "{error}");
+    assert!(error.starts_with("PROJECT_SCOPE_UNKNOWN:"), "{error}");
+    // With the .agent-collab marker it is its own project; git worktree
+    // topology is never consulted.
+    std::fs::create_dir_all(linked.join(".agent-collab")).unwrap();
+    validate_project_registration_cwd(linked.to_str().unwrap(), linked.as_path()).unwrap();
 
     std::fs::remove_dir_all(root).unwrap();
 }

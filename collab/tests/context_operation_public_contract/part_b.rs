@@ -79,42 +79,40 @@ fn public_context_keeps_query_fail_closed_in_non_git_workspace_without_baseline(
 }
 
 #[test]
-fn public_context_keeps_git_subdirectories_fail_closed_without_route_or_baseline() {
+fn public_context_bootstraps_a_nested_subdirectory_ignoring_git_topology() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
-    let (fixture, pane) = Fixture::isolated("non-git-git-subdir");
+    let (fixture, pane) = Fixture::isolated("nested-git-subdir");
     git_init_main(&fixture.root);
     fs::remove_dir_all(fixture.root.join(".agent-collab"))
         .expect("remove seeded baseline to exercise first registration");
     let subdir = fixture.root.join("nested");
-    fs::create_dir(&subdir).expect("create Git subdirectory");
+    fs::create_dir(&subdir).expect("create nested subdirectory");
 
     let output = fixture
         .command_on_socket(
             &fixture.tmux_socket,
-            &["context", "--op", "ctxop-git-subdir"],
+            &["context", "--op", "ctxop-nested-git-subdir"],
             &pane,
         )
         .current_dir(&subdir)
         .output()
-        .expect("run context from Git subdirectory");
-    assert!(!output.status.success(), "{}", text(&output));
+        .expect("run context from nested subdirectory");
+    let payload = success_payload(&output);
+    assert_eq!(payload["bootstrap"]["project_root_resolution"], "cwd");
+    assert_eq!(payload["bootstrap"]["baseline_created"], true);
+    assert_eq!(payload["bootstrap"]["registered"], true);
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("COLLAB_CONTEXT_UNRESOLVED:"),
-        "{}",
-        text(&output)
-    );
-    assert!(
-        !subdir.join(".agent-collab").exists(),
-        "a failed Git subdirectory resolution must not create a baseline"
+        subdir.join(".agent-collab").is_dir(),
+        "first registration binds the explicit cwd instead of a Git ancestor"
     );
 }
 
 #[test]
-fn public_context_keeps_plain_directories_fail_closed_without_route_or_baseline() {
+fn public_context_bootstraps_a_nested_directory_without_inheriting_ancestor_marker() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (fixture, pane) = Fixture::isolated("plain-dir");
     let worktree = fixture.root.join("parent/plain-dir/task");
-    fs::create_dir_all(&worktree).expect("create plain directory");
+    fs::create_dir_all(&worktree).expect("create nested directory");
 
     let output = fixture
         .command_on_socket(
@@ -124,16 +122,29 @@ fn public_context_keeps_plain_directories_fail_closed_without_route_or_baseline(
         )
         .current_dir(&worktree)
         .output()
-        .expect("run context from plain directory");
-    assert!(!output.status.success(), "{}", text(&output));
+        .expect("run context from nested directory");
+    let payload = success_payload(&output);
+    assert_eq!(payload["bootstrap"]["project_root_resolution"], "cwd");
+    assert_eq!(payload["bootstrap"]["baseline_created"], true);
+    assert_eq!(payload["bootstrap"]["registered"], true);
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("COLLAB_CONTEXT_UNRESOLVED"),
-        "{}",
-        text(&output)
+        worktree.join(".agent-collab").is_dir(),
+        "first registration binds the explicit cwd, not the seeded ancestor marker"
     );
-    assert!(
-        !worktree.join(".agent-collab").exists(),
-        "a failed resolution must not create a baseline"
+
+    let records = fs::read_to_string(fixture.host_routes())
+        .expect("first registration must publish a host route journal");
+    let records: Vec<Value> = records
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("route journal record is JSON"))
+        .collect();
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(
+        records[0]["project_scope"],
+        fs::canonicalize(&worktree)
+            .expect("canonicalize nested directory")
+            .to_string_lossy()
+            .as_ref()
     );
 }
 

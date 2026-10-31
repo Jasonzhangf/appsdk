@@ -527,12 +527,11 @@ fn peer_lifecycle_a6_nonmaster_cross_main_and_app_have_no_host_effect() {
 }
 
 #[test]
-fn peer_lifecycle_a6_separate_linked_worktree_same_registered_main_succeeds() {
-    let (fixture, host, master) = a6_fixture("a6-linked", "create_ready");
-    git_init_main(&fixture.root);
-    let linked = lifecycle_sibling(&fixture.root, "execution-worktree");
-    git_add_linked_worktree(&fixture.root, &linked, "a6-execution");
-    let created = a6_create(&fixture, &master, "a6-linked-peer", &linked, "a6-linked-op");
+fn peer_lifecycle_a6_execution_subdirectory_same_registered_main_succeeds() {
+    let (fixture, host, master) = a6_fixture("a6-subdir", "create_ready");
+    let subdir = fixture.root.join("playground/execution-a6");
+    fs::create_dir_all(&subdir).expect("create execution subdirectory");
+    let created = a6_create(&fixture, &master, "a6-subdir-peer", &subdir, "a6-subdir-op");
     assert_eq!(created["result"]["outcome"], "complete", "{created}");
     assert_eq!(
         created["result"]["target"]["project_scope"],
@@ -540,7 +539,7 @@ fn peer_lifecycle_a6_separate_linked_worktree_same_registered_main_succeeds() {
     );
     assert_eq!(
         created["result"]["create"]["cwd"],
-        fs::canonicalize(&linked)
+        fs::canonicalize(&subdir)
             .unwrap()
             .to_string_lossy()
             .as_ref()
@@ -550,10 +549,6 @@ fn peer_lifecycle_a6_separate_linked_worktree_same_registered_main_succeeds() {
         master["runtime"]["appserver_id"]
     );
     assert_eq!(host.start_request_count(), 1);
-    git_run(
-        &fixture.root,
-        &["worktree", "remove", "--force", linked.to_str().unwrap()],
-    );
 }
 
 fn lifecycle_wire(fixture: &Fixture, identity: &Value, request: Value) -> Value {
@@ -1065,21 +1060,6 @@ fn git_init_main(root: &Path) {
             "-q",
             "-m",
             "initial",
-        ],
-    );
-}
-
-fn git_add_linked_worktree(main: &Path, worktree: &Path, branch: &str) {
-    git_run(
-        main,
-        &[
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            branch,
-            worktree.to_str().expect("worktree path is UTF-8"),
-            "main",
         ],
     );
 }

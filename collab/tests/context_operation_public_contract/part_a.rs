@@ -372,10 +372,10 @@ fn peer_lifecycle_u6_unknown_host_effect_is_truthful() {
     );
 }
 
-// U7: a peer executing from an external linked worktree that resolves to the
-// same registered main/app route may update its cwd with real execution proof.
+// U7: a peer executing from a task subdirectory that resolves to the same
+// registered main/app route may update its cwd with real execution proof.
 #[test]
-fn peer_lifecycle_u7_linked_worktree_resolves_to_same_main_and_updates() {
+fn peer_lifecycle_u7_execution_subdirectory_resolves_to_same_main_and_updates() {
     let fixture = Fixture::without_tmux("peer-u7");
     let host = TestAppServer::start_with_effect(
         &fixture.root,
@@ -397,14 +397,15 @@ fn peer_lifecycle_u7_linked_worktree_resolves_to_same_main_and_updates() {
     let identity = lifecycle_identity(&fixture, &seed);
     let target = lifecycle_target(&fixture, &identity);
 
-    let worktree = lifecycle_sibling(&fixture.root, "linked");
-    git_init_main(&fixture.root);
-    git_add_linked_worktree(&fixture.root, &worktree, "peer-u7-linked");
-    let worktree_cwd = fs::canonicalize(&worktree)
+    // A task subdirectory of the registered project resolves by directory
+    // containment; Collab never consults Git repository topology.
+    let subdir = fixture.root.join("playground/task-u7");
+    fs::create_dir_all(&subdir).expect("create execution subdirectory");
+    let subdir_cwd = fs::canonicalize(&subdir)
         .unwrap()
         .to_string_lossy()
         .into_owned();
-    assert_ne!(worktree_cwd, canonical_root(&fixture));
+    assert_ne!(subdir_cwd, canonical_root(&fixture));
 
     let update = lifecycle_update(
         &fixture,
@@ -412,11 +413,11 @@ fn peer_lifecycle_u7_linked_worktree_resolves_to_same_main_and_updates() {
         "peer-u7-update",
         "peer-u7-capability",
         &target,
-        &worktree_cwd,
+        &subdir_cwd,
     );
     assert_eq!(update["result"]["outcome"], "complete", "{update}");
     assert_eq!(
-        update["result"]["update"]["intended_cwd"], worktree_cwd,
+        update["result"]["update"]["intended_cwd"], subdir_cwd,
         "{update}"
     );
     assert_eq!(
@@ -424,7 +425,7 @@ fn peer_lifecycle_u7_linked_worktree_resolves_to_same_main_and_updates() {
         "{update}"
     );
     assert_eq!(
-        update["result"]["update"]["effective_cwd"]["cwd"], worktree_cwd,
+        update["result"]["update"]["effective_cwd"]["cwd"], subdir_cwd,
         "{update}"
     );
     assert_eq!(

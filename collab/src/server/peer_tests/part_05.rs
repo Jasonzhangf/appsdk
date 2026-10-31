@@ -2395,3 +2395,221 @@ fn role_brief_projects_identity_and_sorted_specialty_workflow_templates() {
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// A manager's single `collab context` read must answer, for every durable
+/// subordinate manager, whether a patrol is armed, whether it is idle, and
+/// whether idle is caused by a blocking wait. This is the scope digest a
+/// manager needs to schedule its own scope without extra round trips.
+#[test]
+fn context_scope_digest_reports_subordinate_manager_patrol_idle_and_blockers() {
+    use crate::server::name_state::{
+        AgentActivity, AgentActivityRecord, AgentPresence, AgentPresenceRecord,
+    };
+    use crate::server::state::WaitSpec;
+
+    let (server, root) = test_server();
+    register_synthetic_peer(&server, "master", "%master");
+    register_synthetic_peer(&server, "peer-a", "%peer-a");
+    register_synthetic_peer(&server, "peer-b", "%peer-b");
+    promote_master(&server, "master", "user approved master");
+
+    let now = now_ms();
+    let scope = GlobalState::canonical_project_scope(&server.root)
+        .expect("canonical project scope")
+        .as_str()
+        .to_owned();
+    let session_of = |id: &str| {
+        server
+            .state
+            .lock()
+            .unwrap()
+            .workers
+            .get(id)
+            .and_then(|worker| worker.transport.as_ref())
+            .and_then(|transport| transport.session_id.clone())
+            .expect("registered transport session")
+    };
+    // peer-a is trusted idle; peer-b is busy. Both are online.
+    server.commit(&[
+        Event::AgentPresenceObserved {
+            presence: AgentPresenceRecord {
+                project_scope: scope.clone(),
+                worker_id: "peer-a".into(),
+                session_id: session_of("peer-a"),
+                presence: AgentPresence::Online,
+                reason: "test".into(),
+                observed_ms: now,
+            },
+        },
+        Event::AgentActivityObserved {
+            activity: AgentActivityRecord {
+                project_scope: scope.clone(),
+                worker_id: "peer-a".into(),
+                session_id: session_of("peer-a"),
+                activity: AgentActivity::Idle,
+                background: false,
+                reason: "test".into(),
+                observed_ms: now,
+                idle_since_ms: Some(now - 60_000),
+            },
+        },
+        Event::AgentPresenceObserved {
+            presence: AgentPresenceRecord {
+                project_scope: scope.clone(),
+                worker_id: "peer-b".into(),
+                session_id: session_of("peer-b"),
+                presence: AgentPresence::Online,
+                reason: "test".into(),
+                observed_ms: now,
+            },
+        },
+        Event::AgentActivityObserved {
+            activity: AgentActivityRecord {
+                project_scope: scope.clone(),
+                worker_id: "peer-b".into(),
+                session_id: session_of("peer-b"),
+                activity: AgentActivity::Busy,
+                background: false,
+                reason: "test".into(),
+                observed_ms: now,
+                idle_since_ms: None,
+            },
+        },
+    ]);
+    // peer-a armed a board-idle patrol and an owned goal; peer-b armed none.
+    server.commit(&[
+        Event::NotificationSubscribed {
+            subscription: NotificationSubscription {
+                id: "sub-patrol-a".into(),
+                worker_id: "peer-a".into(),
+                event: "board-idle".into(),
+                subject: Some("board-idle-patrol".into()),
+                target: "thread-peer-a".into(),
+                method: "tmux".into(),
+                trigger_ms: None,
+                trigger_times_ms: Vec::new(),
+                interval_ms: Some(900_000),
+                repeat_count: 1,
+                fired_count: 0,
+                expires_ms: now + 3_600_000,
+                status: "armed".into(),
+                created_ms: now,
+                updated_ms: now,
+                status_reason: None,
+                patrol_idle_since_ms: None,
+                patrol_last_push_ms: 0,
+            },
+        },
+        Event::NotificationSubscribed {
+            subscription: NotificationSubscription {
+                id: "sub-goal-a".into(),
+                worker_id: "peer-a".into(),
+                event: "deadline".into(),
+                subject: Some("goal:g-a".into()),
+                target: "thread-peer-a".into(),
+                method: "tmux".into(),
+                trigger_ms: Some(now + 60_000),
+                trigger_times_ms: Vec::new(),
+                interval_ms: None,
+                repeat_count: 1,
+                fired_count: 0,
+                expires_ms: now + 3_600_000,
+                status: "armed".into(),
+                created_ms: now,
+                updated_ms: now,
+                status_reason: None,
+                patrol_idle_since_ms: None,
+                patrol_last_push_ms: 0,
+            },
+        },
+    ]);
+    // peer-a owns an open task blocked on an external resource; peer-b owns a
+    // plain open task.
+    let blocked = TaskRec {
+        id: "task-blocked".into(),
+        owner: "peer-a".into(),
+        created_by: "peer-a".into(),
+        feature_id: None,
+        worktree_path: None,
+        branch: None,
+        base_commit: None,
+        priority: "p2".into(),
+        status: "blocked".into(),
+        next_step: None,
+        wait: Some(WaitSpec {
+            waiter: "peer-a".into(),
+            waiting_for: "task-upstream".into(),
+            responsible_actor: "peer-a".into(),
+            reason: "waiting on external dependency".into(),
+            deadline_ms: now + 900_000,
+            resume_on: vec!["resource_released".into()],
+            escalation: "resource_owner_and_waiter_recheck".into(),
+        }),
+        created_ms: now,
+        updated_ms: now,
+    };
+    let plain = TaskRec {
+        id: "task-plain".into(),
+        owner: "peer-b".into(),
+        created_by: "peer-b".into(),
+        feature_id: None,
+        worktree_path: None,
+        branch: None,
+        base_commit: None,
+        priority: "p2".into(),
+        status: "working".into(),
+        next_step: None,
+        wait: None,
+        created_ms: now,
+        updated_ms: now,
+    };
+    server.commit(&[
+        Event::TaskCreated { task: blocked },
+        Event::TaskCreated { task: plain },
+    ]);
+
+    let master = handle_context(&server, "master".into(), "token-master".into());
+    assert!(master.ok, "{master:?}");
+    let digest = master.data["scope_digest"]
+        .as_array()
+        .expect("scope digest array");
+    assert_eq!(digest.len(), 2, "{digest:?}");
+    let peer_a = digest
+        .iter()
+        .find(|row| row["worker_id"] == "peer-a")
+        .expect("peer-a digest row");
+    assert_eq!(peer_a["activity"], "idle", "{peer_a}");
+    assert_eq!(peer_a["patrol"]["armed"], true, "{peer_a}");
+    assert_eq!(peer_a["patrol"]["event"], "board-idle", "{peer_a}");
+    assert_eq!(peer_a["goal"]["armed"], true, "{peer_a}");
+    assert!(
+        peer_a["open_tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|task| task == "task-blocked"),
+        "{peer_a}"
+    );
+    assert!(
+        !peer_a["blocked"].as_array().unwrap().is_empty(),
+        "blocked wait must be visible: {peer_a}"
+    );
+    let peer_b = digest
+        .iter()
+        .find(|row| row["worker_id"] == "peer-b")
+        .expect("peer-b digest row");
+    assert_eq!(peer_b["activity"], "busy", "{peer_b}");
+    assert_eq!(peer_b["patrol"]["armed"], false, "{peer_b}");
+    assert_eq!(peer_b["goal"]["armed"], false, "{peer_b}");
+    assert!(peer_b["blocked"].as_array().unwrap().is_empty(), "{peer_b}");
+
+    // A peer has no durable manager subordinates, so its own digest is empty.
+    let peer_view = handle_context(&server, "peer-a".into(), "token-peer-a".into());
+    assert!(peer_view.ok, "{peer_view:?}");
+    assert_eq!(
+        peer_view.data["scope_digest"],
+        serde_json::json!([]),
+        "a peer digest must stay empty: {peer_view:?}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}

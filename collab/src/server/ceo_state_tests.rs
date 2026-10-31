@@ -612,3 +612,132 @@ fn ceo_progress_projects_expose_canonical_master_workspace_idle() {
     );
     std::fs::remove_dir_all(root).ok();
 }
+
+/// A CEO must be able to read, per project, whether the subordinate master has
+/// its project patrol armed. The fact reuses the same armed `master-idle`
+/// subscription the master reads through `collab context`; the negative case
+/// keeps a project without patrol explicit instead of guessing.
+#[test]
+fn ceo_progress_reports_master_patrol_armed_state() {
+    let (server, root) = super::peer_tests::test_server();
+    super::peer_tests::register_synthetic_peer(&server, "master", "%master");
+    let promoted = super::handle_master_promote(
+        &server,
+        "master".into(),
+        "token-master".into(),
+        "user-approved".into(),
+    );
+    assert!(promoted.ok, "master promotion failed: {promoted:?}");
+
+    let scope =
+        super::GlobalState::canonical_project_scope(&server.root).expect("canonical project scope");
+    let server = std::sync::Arc::new(server);
+    let manager = super::ProjectRuntimeManager::new(server.clone(), &server.host_paths)
+        .expect("build manager without a listener");
+    let progress = |manager: &super::ProjectRuntimeManager, root: &std::path::Path| {
+        manager
+            .ceo_progress(Some(root.display().to_string()))
+            .expect("ceo progress reads the registered project")
+    };
+    let unarmed = progress(&manager, &root);
+    assert!(unarmed.ok, "ceo progress failed: {unarmed:?}");
+    let project = unarmed.data["projects"]
+        .as_array()
+        .and_then(|projects| {
+            projects
+                .iter()
+                .find(|project| project["project"].as_str() == Some(scope.as_str()))
+        })
+        .expect("progress includes the canonical project");
+    assert_eq!(
+        project["patrol"]["armed"],
+        json!(false),
+        "an unarmed master patrol must read as not armed: {project}"
+    );
+
+    let now = super::now_ms();
+    // An armed `master-idle` subscription that does not carry the canonical
+    // project-patrol subject/interval is not the standing project patrol and
+    // must not be reported as armed.
+    server.commit(&[Event::NotificationSubscribed {
+        subscription: super::state::NotificationSubscription {
+            id: "sub-non-canonical-master-idle".into(),
+            worker_id: "master".into(),
+            event: "master-idle".into(),
+            subject: Some("master-idle".into()),
+            target: "thread-master".into(),
+            method: "tmux".into(),
+            trigger_ms: None,
+            trigger_times_ms: Vec::new(),
+            interval_ms: Some(60_000),
+            repeat_count: 1,
+            fired_count: 0,
+            expires_ms: now + 3_600_000,
+            status: "armed".into(),
+            created_ms: now,
+            updated_ms: now,
+            status_reason: None,
+            patrol_idle_since_ms: None,
+            patrol_last_push_ms: 0,
+        },
+    }]);
+    let non_canonical = progress(&manager, &root);
+    assert!(non_canonical.ok, "ceo progress failed: {non_canonical:?}");
+    let project = non_canonical.data["projects"]
+        .as_array()
+        .and_then(|projects| {
+            projects
+                .iter()
+                .find(|project| project["project"].as_str() == Some(scope.as_str()))
+        })
+        .expect("progress includes the canonical project");
+    assert_eq!(
+        project["patrol"]["armed"],
+        json!(false),
+        "a non-canonical master-idle subscription must not read as the project patrol: {project}"
+    );
+
+    server.commit(&[Event::NotificationSubscribed {
+        subscription: super::state::NotificationSubscription {
+            id: "sub-master-idle".into(),
+            worker_id: "master".into(),
+            event: "master-idle".into(),
+            subject: Some("project-patrol".into()),
+            target: "thread-master".into(),
+            method: "tmux".into(),
+            trigger_ms: None,
+            trigger_times_ms: Vec::new(),
+            interval_ms: Some(1_500_000),
+            repeat_count: 1,
+            fired_count: 0,
+            expires_ms: now + 3_600_000,
+            status: "armed".into(),
+            created_ms: now,
+            updated_ms: now,
+            status_reason: None,
+            patrol_idle_since_ms: None,
+            patrol_last_push_ms: 0,
+        },
+    }]);
+    let armed = progress(&manager, &root);
+    assert!(armed.ok, "ceo progress failed: {armed:?}");
+    let project = armed.data["projects"]
+        .as_array()
+        .and_then(|projects| {
+            projects
+                .iter()
+                .find(|project| project["project"].as_str() == Some(scope.as_str()))
+        })
+        .expect("progress includes the canonical project");
+    assert_eq!(
+        project["patrol"]["armed"],
+        json!(true),
+        "an armed master patrol must be visible to the CEO: {project}"
+    );
+    assert_eq!(
+        project["patrol"]["interval_ms"],
+        json!(1_500_000),
+        "{project}"
+    );
+    std::fs::remove_dir_all(root).ok();
+}

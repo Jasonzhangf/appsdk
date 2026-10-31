@@ -1405,7 +1405,10 @@ collab ceo progress --project '<目标项目根目录>'
 context 返回当前全局 CEO 联系方式。只有当前 grant 持有者才获 CEO 职责与命令：
 职责并入 `role_brief` 一次，命令只在 `operations` 提供一次，不另设第二份正文或操作
 镜像；`ceo` 字段只表示 typed grant/status。`identity.role` 和项目 `authority` 保持
-原义。正常会话续接沿现有稳定名字 owner 规则，
+原义。`ceo progress` 的 `projects[]` 每行给出该项目 `master`、`workspace`（活动与
+可信 idle）、`patrol.armed`（master 是否已 armed `master-idle` 巡检）、公开任务、
+`task_counts` 与 CEO 待回复；未注册项目只给 `registered:false` 和空 `master`。
+正常会话续接沿现有稳定名字 owner 规则，
 不能凭旧 session、消息正文或角色字符串重建权限。没有 CEO 投影或入口不受支持时，
 报告安装/运行差异，不声称已启用、不手工改状态、不管理全局 daemon 生命周期。
 
@@ -2041,7 +2044,7 @@ snapshot:
 
 | 状态/终态 | 含义 | Agent 动作 |
 | --- | --- | --- |
-| `state_snapshot` 且 `registered=true` | 注册成功；含 role_brief/operations/next_actions/master/peers/peer_count/summary/master_wake/subagents/inbox/worktrees/tasks/env；默认排除终态订阅和调用者无关历史，保留 peer 目录与未结义务 | 读 `role_brief` 的有效正文和 `operations` 当前命令；无需再跑 who/status/master status |
+| `state_snapshot` 且 `registered=true` | 注册成功；含 role_brief/operations/next_actions/master/peers/peer_count/scope_digest/summary/master_wake/subagents/inbox/worktrees/tasks/env；默认排除终态订阅和调用者无关历史，保留 peer 目录与未结义务。`scope_digest` 只在 master 视角非空：每条直属 peer 给出 `activity`、`open_tasks`、`blocked`、`patrol.armed`、`goal.armed`；peer 视角为 `[]`（下级 GCM worker 不是 durable manager） | 读 `role_brief` 的有效正文、`scope_digest` 和 `operations` 当前命令；无需再跑 who/status/master status |
 | 历史 pane claim 与当前投递位置不符 | daemon 对齐通信位置；不由 pane 决定名字归属 | 名字续接按稳定名字合同；在线他人占名需确认，unknown 交 Jenny |
 | 名字占用 unknown | 持久 context operation 返回 `pending`；不是注册成功 | 等待同一请求裁决续接；Jenny 自身 unknown 且本次用户明确恢复并确认接管时直接接管 Jenny/master |
 | `identity_update` | daemon 缺少真实运行事实；`registered=false`，`requires_identity_update.required=true` | 按 `required_fields`/`reason`/`action` 只补实际缺项。已授权恢复意图按稳定名字合同提交；重复档案及旧绑定由 context 自行迁移。若仍泄漏裸历史冲突，保留原错作为实现缺陷，不让 agent 选旧身份或维护控制面 |

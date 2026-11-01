@@ -329,6 +329,7 @@ fn notification_subscription_transport_must_match_tmux_or_appserver_kind() {
         status_reason: None,
         patrol_idle_since_ms: None,
         patrol_last_push_ms: 0,
+                periodic_declared: false,
     };
     assert!(subscription_matches_transport(
         &subscription("tmux"),
@@ -406,6 +407,34 @@ fn runtime_for_registered(
         session_id: binding.session_id,
         native_thread_id: binding.native_thread_id,
     }
+}
+
+/// Build the caller command envelope a cross-project send must carry. It uses
+/// the registered binding and generation so the server can authenticate the
+/// exact execution carrier; the caller never authorizes itself.
+fn cross_project_command(
+    server: &Server,
+    root: &Path,
+    worker_id: &str,
+    app_scope: &str,
+    command_tag: &str,
+) -> CommandEnvelope {
+    let runtime = runtime_for_registered(server, root, worker_id, app_scope);
+    let route_scope = RouteScope {
+        app_scope_id: AppServerId::new(app_scope).unwrap(),
+        project_scope_id: GlobalState::canonical_project_scope(root).unwrap(),
+    };
+    CommandEnvelope::new(
+        crate::identity::CommandId::new(format!("command-{worker_id}-{command_tag}")).unwrap(),
+        crate::identity::OperationId::new(format!("operation-{worker_id}-{command_tag}")).unwrap(),
+        runtime.binding_id.clone(),
+        runtime.endpoint_generation,
+        route_scope,
+        None,
+        None,
+        None,
+        None,
+    )
 }
 
 fn test_candidates_for_registered(
@@ -868,7 +897,7 @@ fn tmux_registration_rejects_a_cwd_that_is_not_the_server_project_root() {
 }
 
 #[test]
-fn registration_rejects_a_linked_worktree_root() {
+fn registration_accepts_a_linked_worktree_root() {
     let id = TEST_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let root = std::env::temp_dir().join(format!(
         "collab-worktree-registration-{id}-{}",
@@ -921,10 +950,7 @@ fn registration_rejects_a_linked_worktree_root() {
     std::fs::create_dir_all(linked.join(".agent-collab")).unwrap();
 
     validate_project_registration_cwd(canonical.to_str().unwrap(), canonical.as_path()).unwrap();
-    let error =
-        validate_project_registration_cwd(linked.to_str().unwrap(), linked.as_path()).unwrap_err();
-    assert!(error.starts_with("PROJECT_SCOPE_INVALID:"), "{error}");
-    assert!(error.contains("linked worktree"), "{error}");
+    validate_project_registration_cwd(linked.to_str().unwrap(), linked.as_path()).unwrap();
 
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -1365,6 +1391,7 @@ fn appserver_subscription_is_bound_to_the_selected_thread() {
         status_reason: None,
         patrol_idle_since_ms: None,
         patrol_last_push_ms: 0,
+                periodic_declared: false,
         created_ms: 0,
         updated_ms: 0,
         expires_ms: i64::MAX,

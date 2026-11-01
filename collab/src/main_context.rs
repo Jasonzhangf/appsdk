@@ -150,6 +150,7 @@ fn context_call_with_cancel(
                         invocation: "cancel".into(),
                         action: "cancel".into(),
                         facts: IdentityFacts::default(),
+                        invocation_cwd: None,
                         approval: None,
                         grant_approval: None,
                         query: false,
@@ -220,10 +221,7 @@ fn resolve_context_root_with(
         } else {
             "project-marker"
         };
-        return Ok((
-            Scope { root },
-            resolution,
-        ));
+        return Ok((Scope { root }, resolution));
     }
     if let Ok(route) = scope::canonical_route_for_cwd(host_paths, cwd) {
         return Ok((Scope { root: route.root }, "canonical-route"));
@@ -779,6 +777,9 @@ pub(crate) fn context_operation_with_intent(
         )?
     };
     if !query {
+        prepared.request.invocation_cwd = Some(cwd.to_string_lossy().into_owned());
+    }
+    if !query {
         prepared.request.approval = approval;
         prepared.request.grant_approval = grant_approval;
         let prepare_request = crate::proto::IdentityContextRequest {
@@ -786,6 +787,7 @@ pub(crate) fn context_operation_with_intent(
             invocation: prepared.request.invocation.clone(),
             action: "prepare_invocation".into(),
             facts: prepared.request.facts.clone(),
+            invocation_cwd: prepared.request.invocation_cwd.clone(),
             approval: prepared.request.approval.clone(),
             grant_approval: prepared.request.grant_approval.clone(),
             query: false,

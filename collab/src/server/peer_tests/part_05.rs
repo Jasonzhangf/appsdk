@@ -282,7 +282,7 @@ fn approved_promotion_supersedes_a_live_tmux_master() {
         .as_deref()
         .unwrap()
         .starts_with("NAME_RECOVERY_REQUIRED"));
-    assert_eq!(promoted.data["outcome"], "confirmation_required");
+    assert_eq!(promoted.data["outcome"], "pending");
     assert_eq!(
         super::handle_master_status(&server).data["master"]["worker_id"],
         "peer-a"
@@ -309,6 +309,44 @@ fn confirm_test_jenny_takeover(server: &Server, worker_id: &str) {
     )
     .unwrap();
     assert_eq!(result["outcome"], "committed", "{result}");
+}
+
+/// The typed restore_master approval is the explicit path that replaces a
+/// Jenny held by another carrier; the free-text promote alone only pauses.
+#[test]
+fn explicit_typed_restore_master_replaces_an_online_incumbent() {
+    use super::name_state::{AgentPresence, AgentPresenceRecord};
+    let (server, root) = test_server();
+    register(&server, "peer-a", "thread-a");
+    register(&server, "peer-b", "thread-b");
+    assert!(
+        super::handle_master_promote(
+            &server,
+            "peer-a".into(),
+            "token-peer-a".into(),
+            "user approved peer-a as collab master".into(),
+        )
+        .ok
+    );
+    let binding = registered_binding(&server, "peer-a");
+    server
+        .commit_checked(&[Event::AgentPresenceObserved {
+            presence: AgentPresenceRecord {
+                project_scope: binding.project_scope.as_str().into(),
+                worker_id: "peer-a".into(),
+                session_id: binding.session_id.unwrap().to_string(),
+                presence: AgentPresence::Online,
+                reason: "controlled current-agent online observation".into(),
+                observed_ms: now_ms(),
+            },
+        }])
+        .unwrap();
+    confirm_test_jenny_takeover(&server, "peer-b");
+    assert_eq!(
+        super::current_master_holder(&server, &server.state.lock().unwrap()).unwrap(),
+        Some("peer-b".into())
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -361,15 +399,14 @@ fn cross_project_send_queues_to_a_live_tmux_master_without_route_projection() {
 
     let delivered = super::handle_cross_project_send(
         &server,
-        "appsdk-master".into(),
+        "appsdk-master",
         "/tmp/appsdk".into(),
-        "thread-appsdk-master".into(),
-        "appsdk-master".into(),
-        Some("user approved appsdk-master".into()),
-        1,
-        "target-master".into(),
-        "feature".into(),
-        "durable tmux master message".into(),
+        super::CrossProjectRole::Master,
+        None,
+        Some("thread-appsdk-master".into()),
+        "target-master",
+        "feature",
+        "durable tmux master message",
         None,
     );
     assert!(delivered.ok, "{}", delivered.error.unwrap_or_default());
@@ -405,15 +442,14 @@ fn cross_project_send_rejects_a_definitively_missing_tmux_endpoint() {
 
     let denied = super::handle_cross_project_send(
         &server,
-        "appsdk-master".into(),
+        "appsdk-master",
         "/tmp/appsdk".into(),
-        "thread-appsdk-master".into(),
-        "appsdk-master".into(),
-        Some("user approved appsdk-master".into()),
-        1,
-        "target-master".into(),
-        "feature".into(),
-        "must reject a dead address".into(),
+        super::CrossProjectRole::Master,
+        None,
+        Some("thread-appsdk-master".into()),
+        "target-master",
+        "feature",
+        "must reject a dead address",
         None,
     );
     assert!(!denied.ok);
@@ -428,7 +464,7 @@ fn cross_project_send_rejects_a_definitively_missing_tmux_endpoint() {
 }
 
 #[test]
-fn cross_project_send_requires_master_endpoints_on_both_sides() {
+fn cross_project_send_enforces_role_matrix() {
     let (server, root) = test_server();
     // The target master is a native App Server peer, so its presence is a real
     // runtime fact rather than a tmux address that can only report Unknown.
@@ -442,36 +478,36 @@ fn cross_project_send_requires_master_endpoints_on_both_sides() {
     );
     assert!(promoted.ok, "{}", promoted.error.unwrap_or_default());
 
+    // master -> foreign peer is rejected by the role matrix.
     let denied_peer = super::handle_cross_project_send(
         &server,
-        "appsdk-master".into(),
+        "appsdk-master",
         "/tmp/appsdk".into(),
-        "thread-appsdk-master".into(),
-        "appsdk-operator".into(),
+        super::CrossProjectRole::Master,
         None,
-        1,
-        "target-peer".into(),
-        "feature".into(),
-        "must reject non-master target".into(),
+        Some("thread-appsdk-master".into()),
+        "target-peer",
+        "feature",
+        "must reject master-to-peer",
         None,
     );
     assert!(!denied_peer.ok);
     assert!(denied_peer
         .error
         .unwrap()
-        .contains("target to be the project master"));
+        .contains("CROSS_PROJECT_SEND_REJECTED"));
 
+    // master -> master is allowed on an equal level.
     let delivered = super::handle_cross_project_send(
         &server,
-        "appsdk-master".into(),
+        "appsdk-master",
         "/tmp/appsdk".into(),
-        "thread-appsdk-master".into(),
-        "appsdk-operator".into(),
+        super::CrossProjectRole::Master,
         None,
-        1,
-        "target-master".into(),
-        "feature".into(),
-        "master-to-master message".into(),
+        Some("thread-appsdk-master".into()),
+        "target-master",
+        "feature",
+        "master-to-master message",
         None,
     );
     assert!(delivered.ok, "{}", delivered.error.unwrap_or_default());
@@ -481,21 +517,25 @@ fn cross_project_send_requires_master_endpoints_on_both_sides() {
     assert_eq!(state.msgs[msg_id].from, "appsdk-master@/tmp/appsdk");
     drop(state);
 
-    let missing_approval = super::handle_cross_project_send(
+    // A peer cannot write to a foreign project's master; the role matrix alone
+    // rejects it, with no client master evidence involved.
+    let denied_peer_master = super::handle_cross_project_send(
         &server,
-        "self-promoted".into(),
+        "appsdk-peer",
         "/tmp/appsdk".into(),
-        "thread-self-promoted".into(),
-        "self-promoted".into(),
+        super::CrossProjectRole::Peer,
         None,
-        1,
-        "target-master".into(),
-        "feature".into(),
-        "must reject missing approval".into(),
+        Some("thread-appsdk-peer".into()),
+        "target-master",
+        "feature",
+        "must reject peer-to-foreign-master",
         None,
     );
-    assert!(!missing_approval.ok);
-    assert!(missing_approval.error.unwrap().contains("user approval"));
+    assert!(!denied_peer_master.ok);
+    assert!(denied_peer_master
+        .error
+        .unwrap()
+        .contains("CROSS_PROJECT_SEND_REJECTED"));
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -1343,6 +1383,7 @@ fn tmux_reregistration_replaces_a_persisted_appserver_default_wake_lease() {
                         status_reason: None,
                         patrol_idle_since_ms: None,
                         patrol_last_push_ms: 0,
+                        periodic_declared: false,
                     },
                 }],
             )
@@ -1461,6 +1502,7 @@ fn historical_cancelled_default_lease_is_rearmed_without_reviving_goal_schedules
             session_id: "session-peer".into(),
             occupancy_revision: 1,
             updated_ms: now_ms(),
+            pane_anchor: None,
         },
         assignments: Vec::new(),
     }]);
@@ -1545,6 +1587,7 @@ fn pending_unattempted_direct_message_is_recovered_once_and_not_replayed() {
             status_reason: Some("goal-schedule-ended".into()),
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
+            periodic_declared: false,
         },
     }]);
     server.commit(&[
@@ -1766,6 +1809,7 @@ fn maintenance_tick_refreshes_idle_default_lease_without_recipient_context() {
             status_reason: None,
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
+            periodic_declared: false,
         },
     }]);
 
@@ -1869,6 +1913,7 @@ fn maintenance_tick_refreshes_default_lease_with_timers_disabled() {
             status_reason: None,
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
+            periodic_declared: false,
         },
     }]);
 
@@ -2035,6 +2080,7 @@ fn goal_reconcile_retires_retained_basename_subject_without_arbitrary_ids() {
             session_id: "session-peer".into(),
             occupancy_revision: 1,
             updated_ms: now_ms(),
+            pane_anchor: None,
         },
         assignments: Vec::new(),
     }]);
@@ -2059,6 +2105,7 @@ fn goal_reconcile_retires_retained_basename_subject_without_arbitrary_ids() {
             status_reason: None,
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
+            periodic_declared: false,
         },
     }]);
 
@@ -2136,6 +2183,7 @@ fn registration_adds_default_lease_when_only_short_direct_message_lease_exists()
             status_reason: None,
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
+            periodic_declared: false,
         },
     });
 

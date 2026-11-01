@@ -26,6 +26,8 @@ pub struct CanonicalProjectRoute {
 impl HostPaths {
     pub fn from_state_root(root: impl AsRef<Path>) -> anyhow::Result<Self> {
         let state_root = validate_host_path(root.as_ref().to_path_buf(), "host state root")?;
+        #[cfg(target_os = "macos")]
+        validate_system_volume(&state_root)?;
         Ok(Self {
             socket_path: state_root.join("server.sock"),
             lock_path: state_root.join("daemon.lock"),
@@ -81,10 +83,6 @@ impl HostPaths {
         self.state_root.join("DOWN")
     }
 
-    pub fn events_path(&self) -> PathBuf {
-        self.state_root.join("events.jsonl")
-    }
-
     pub fn journal_path(&self) -> PathBuf {
         self.state_root.join("journal.jsonl")
     }
@@ -111,6 +109,30 @@ impl HostPaths {
     pub fn ensure_root(&self) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.state_root)
     }
+}
+
+#[cfg(target_os = "macos")]
+fn validate_system_volume(path: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let mut existing = path;
+    let resolved = loop {
+        match std::fs::canonicalize(existing) {
+            Ok(resolved) => break resolved,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                existing = existing.parent().ok_or(error)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
+    let system = std::fs::metadata("/System/Volumes/Data")?;
+    if std::fs::metadata(resolved)?.dev() != system.dev() {
+        anyhow::bail!(
+            "COLLAB_SYSTEM_DISK_REQUIRED: host state root {} must be on the system data volume",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 pub(crate) fn encoded_storage_path(base: &Path, value: &str) -> PathBuf {
@@ -428,8 +450,9 @@ pub fn service_scope_root() -> anyhow::Result<Option<PathBuf>> {
     struct ServiceRecord {
         service_scope_root: PathBuf,
     }
-    let record: ServiceRecord = serde_json::from_str(&text)
-        .map_err(|error| anyhow::anyhow!("invalid service record {}: {error}", record_path.display()))?;
+    let record: ServiceRecord = serde_json::from_str(&text).map_err(|error| {
+        anyhow::anyhow!("invalid service record {}: {error}", record_path.display())
+    })?;
     Ok(Some(record.service_scope_root))
 }
 

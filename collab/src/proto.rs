@@ -201,6 +201,10 @@ pub struct IdentityContextRequest {
     pub action: String,
     #[serde(default)]
     pub facts: IdentityFacts,
+    /// Exact directory from which this CLI invocation ran. It is distinct from
+    /// the canonical project root and is used only for the current pane anchor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_cwd: Option<String>,
     #[serde(default)]
     pub approval: Option<serde_json::Value>,
     #[serde(default)]
@@ -249,6 +253,7 @@ impl IdentityContextRequest {
             invocation: "automatic".into(),
             action: "context".into(),
             facts,
+            invocation_cwd: None,
             approval: None,
             grant_approval: None,
             query: false,
@@ -765,13 +770,22 @@ pub enum Req {
     CrossProjectSend {
         from: String,
         from_project: String,
-        source_master_assigned_by: String,
-        source_master_approval: Option<String>,
-        source_master_assigned_ms: i64,
+        /// Authenticated caller credentials. The server re-verifies token and
+        /// binding/generation before any authorization; the old client-submitted
+        /// master evidence fields are gone and can no longer be used to claim an
+        /// identity. `from`/`from_project` stay only for consistency checks and
+        /// naming the written sender; they do not grant authority.
+        worker_id: String,
+        token: String,
+        command: Option<CommandEnvelope>,
         to: String,
         subject: String,
         body: String,
         in_reply_to: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_policy: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_session: Option<serde_json::Value>,
     },
     /// Adapter-owned channel ingress. The typed envelope carries the external
     /// reply route, platform event identity and published attachments, so a
@@ -833,13 +847,24 @@ pub enum Req {
         goal_id: String,
         /// Stable-name owner that owns this goal in the current project.
         goal_owner: String,
-        /// `active` creates or retains one bounded one-shot deadline;
+        /// `active` creates or retains one bounded deadline occurrence.
+        /// With `interval_ms`/`repeat_count` the occurrence recurs on that
+        /// interval up to that many deliveries; without them it stays the
+        /// single absolute one-shot deadline for compatibility.
         /// `ended` retires only that goal's finite schedule occurrences.
         desired: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         trigger_ms: Option<i64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ttl_seconds: Option<u64>,
+        /// Optional periodic interval in milliseconds. Must be paired with
+        /// `repeat_count`; together they make the active goal deadline recur.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        interval_ms: Option<i64>,
+        /// Optional total deliveries for a periodic active goal deadline
+        /// (1..=100). Absent keeps the one-shot occurrence.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repeat_count: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         goal_subject: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

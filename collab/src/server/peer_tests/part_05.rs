@@ -2546,6 +2546,7 @@ fn context_scope_digest_reports_subordinate_manager_patrol_idle_and_blockers() {
                 status_reason: None,
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
+                periodic_declared: false,
             },
         },
         Event::NotificationSubscribed {
@@ -2568,6 +2569,7 @@ fn context_scope_digest_reports_subordinate_manager_patrol_idle_and_blockers() {
                 status_reason: None,
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
+                periodic_declared: false,
             },
         },
     ]);

@@ -3,7 +3,7 @@ fn dispatch_with_route_context(
     req: Req,
     project_context: Option<ProjectContext>,
 ) -> Resp {
-    dispatch_with_route_context_bound(server, req, project_context, None)
+    dispatch_with_route_context_bound(server, req, project_context, None, None)
 }
 
 /// `dispatch_with_route_context` with an optional outer-operation binder for a
@@ -14,6 +14,9 @@ fn dispatch_with_route_context_bound(
     req: Req,
     project_context: Option<ProjectContext>,
     register_binding: Option<&RegisterOuterBinding>,
+    register_control_first: Option<
+        &mut dyn FnMut(&PreparedRegisterEnvelope) -> Result<(), String>,
+    >,
 ) -> Resp {
     if mutation_blocked_during_migration(&req) && server.state.lock().unwrap().admission_frozen() {
         return Resp::err(
@@ -111,6 +114,7 @@ fn dispatch_with_route_context_bound(
                 candidates,
                 recover_existing,
                 register_binding,
+                register_control_first,
             )
         }
         Req::Send {
@@ -266,9 +270,11 @@ fn dispatch_with_route_context_bound(
             desired,
             trigger_ms,
             ttl_seconds,
+            interval_ms,
+            repeat_count,
             goal_subject,
             reason,
-        } => handle_goal_schedule_reconcile(
+        } => handle_goal_schedule_reconcile_with_period(
             server,
             worker_id,
             token,
@@ -279,6 +285,8 @@ fn dispatch_with_route_context_bound(
             ttl_seconds,
             goal_subject,
             reason,
+            interval_ms,
+            repeat_count,
         ),
         Req::Poll { .. } => {
             Resp::err("Poll is only handled by the async daemon connection path; use collab recv")

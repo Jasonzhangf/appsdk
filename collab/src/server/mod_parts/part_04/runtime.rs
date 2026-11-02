@@ -94,6 +94,7 @@ impl ProjectRuntimeManager {
 
     fn build_runtime(
         &self,
+        key: &RouteKey,
         root: &Path,
         storage_root: &Path,
     ) -> Result<(Arc<Server>, Option<std::fs::File>), String> {
@@ -128,7 +129,18 @@ impl ProjectRuntimeManager {
             )
         };
         let journal_path = server_dir.join("journal.jsonl");
-        let state = replay_from_journal(&root, &journal_path).map_err(|error| {
+        let proven_pending = proven_pending_operations(
+            self.host.host_paths.state_root(),
+            key.0.as_str(),
+            key.1.as_str(),
+        )
+        .map_err(|error| {
+            format!(
+                "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: runtime control pending effects for {}: {error}",
+                root.display()
+            )
+        })?;
+        let state = replay_from_journal_with_proven(&root, &journal_path, &proven_pending).map_err(|error| {
             format!(
                 "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: runtime journal replay for {}: {error}",
                 root.display()
@@ -364,98 +376,28 @@ impl ProjectRuntimeManager {
         self.ensure_runtime(&key, &pending.0, &pending.1)
     }
 
-    fn verify_cross_project_source(
-        &self,
-        from: &str,
-        from_project: &str,
-        assigned_by: &str,
-        approval: Option<&str>,
-        assigned_ms: i64,
-    ) -> Result<String, String> {
-        let source_root = std::fs::canonicalize(from_project).map_err(|error| {
-            format!("CROSS_PROJECT_SOURCE_REJECTED: canonicalize source project: {error}")
-        })?;
-        if !source_root.join(".agent-collab").is_dir() {
-            return Err(format!(
-                "CROSS_PROJECT_SOURCE_REJECTED: source project {} is not initialized for Collab",
-                source_root.display()
-            ));
-        }
-        let source_scope = GlobalState::canonical_project_scope(&source_root)
-            .map_err(|error| format!("CROSS_PROJECT_SOURCE_REJECTED: {error}"))?;
-        let pending = self
-            .routes
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|((_, project_scope), _)| project_scope == source_scope.as_str())
-            .map(|(key, route)| (key.clone(), route.root.clone(), route.storage_root.clone()))
-            .collect::<Vec<_>>();
-        if pending.is_empty() {
-            return Err(format!(
-                "CROSS_PROJECT_SOURCE_REJECTED: no registered source route for {}",
-                source_scope.as_str()
-            ));
-        }
-
-        let mut matches = Vec::new();
-        for (key, root, storage_root) in pending {
-            let runtime = self
-                .ensure_runtime(&key, &root, &storage_root)
-                .map_err(|error| format!("CROSS_PROJECT_SOURCE_REJECTED: {error}"))?;
-            let state = runtime.state.lock().unwrap();
-            let master_holder = match current_master_holder(&runtime, &state) {
-                Ok(master) => master,
-                Err(error) => {
-                    return Err(format!("CROSS_PROJECT_SOURCE_REJECTED: {error}"));
-                }
+    /// Locate the one runtime for a source `RouteScope` carried by an
+    /// authenticated `CommandEnvelope`. Routing by the envelope's exact
+    /// (app scope, project scope) key keeps a caller from selecting among
+    /// several app routes for the same project root.
+    fn runtime_for_route_scope(&self, scope: &RouteScope) -> Result<Arc<Server>, String> {
+        let key = (
+            scope.app_scope_id.as_str().to_owned(),
+            scope.project_scope_id.as_str().to_owned(),
+        );
+        let (root, storage_root) = {
+            let routes = self.routes.lock().unwrap();
+            let Some(route) = routes.get(&key) else {
+                return Err(format!(
+                    "CROSS_PROJECT_SOURCE_REJECTED: no registered source route for {} / {}",
+                    scope.project_scope_id.as_str(),
+                    scope.app_scope_id.as_str()
+                ));
             };
-            if master_holder.as_deref() != Some(from) {
-                continue;
-            }
-            let route_scope = match server_route_scope(&runtime, &state) {
-                Ok(Some(route_scope)) => route_scope,
-                Ok(None) => continue,
-                Err(error) => {
-                    return Err(format!("CROSS_PROJECT_SOURCE_REJECTED: {error}"));
-                }
-            };
-            let grant = current_master_grant(&state, Some(&route_scope));
-            if grant.as_ref().map(|grant| grant.granted_by.as_str()) != Some(assigned_by)
-                || grant.as_ref().map(|grant| grant.approval.as_str()) != approval
-                || grant.as_ref().map(|grant| grant.granted_at_ms) != Some(assigned_ms)
-            {
-                return Err(
-                    "CROSS_PROJECT_SOURCE_REJECTED: source master assignment evidence does not match the source reducer"
-                        .into(),
-                );
-            }
-            let source_thread_id = state
-                .workers
-                .get(from)
-                .and_then(selected_transport_for_worker)
-                .and_then(|transport| notification_target(&transport).map(str::to_owned))
-                .ok_or_else(|| {
-                    "CROSS_PROJECT_SOURCE_REJECTED: source master has no registered route address"
-                        .to_string()
-                })?;
-            matches.push((key, source_thread_id));
-        }
-
-        match matches.len() {
-            1 => Ok(matches
-                .pop()
-                .expect("one source match")
-                .1),
-            0 => Err(
-                "CROSS_PROJECT_SOURCE_REJECTED: sender is not the live master of the source project"
-                    .into(),
-            ),
-            _ => Err(
-                "CROSS_PROJECT_SOURCE_REJECTED: source master route is ambiguous; use one registered source app scope"
-                    .into(),
-            ),
-        }
+            (route.root.clone(), route.storage_root.clone())
+        };
+        self.ensure_runtime(&key, &root, &storage_root)
+            .map_err(|error| format!("CROSS_PROJECT_SOURCE_REJECTED: {error}"))
     }
 
     fn dispatch_cross_project_send(
@@ -464,15 +406,17 @@ impl ProjectRuntimeManager {
         req: Req,
     ) -> (Arc<Server>, Resp) {
         let Req::CrossProjectSend {
-            from,
-            from_project,
-            source_master_assigned_by,
-            source_master_approval,
-            source_master_assigned_ms,
+            from: _compat_from,
+            from_project: _compat_from_project,
+            worker_id,
+            token,
+            command,
             to,
             subject,
             body,
             in_reply_to,
+            reply_policy,
+            target_session,
         } = req
         else {
             unreachable!("cross-project dispatch requires CrossProjectSend");
@@ -481,29 +425,289 @@ impl ProjectRuntimeManager {
             Ok(runtime) => runtime,
             Err(error) => return (self.host.clone(), Resp::err(error)),
         };
-        let source_thread_id = match self.verify_cross_project_source(
-            &from,
-            &from_project,
-            &source_master_assigned_by,
-            source_master_approval.as_deref(),
-            source_master_assigned_ms,
-        ) {
-            Ok(source_thread_id) => source_thread_id,
+        if reply_policy.is_some() || target_session.is_some() {
+            return (target, Resp::err("CROSS_PROJECT_OPTION_UNSUPPORTED: reply_policy and target_session are not supported"));
+        }
+        let Some(command) = command else {
+            return (
+                target,
+                Resp::err(
+                    "CROSS_PROJECT_CREDENTIALS_REQUIRED: cross-project send requires the caller command envelope",
+                ),
+            );
+        };
+        if worker_id.trim().is_empty() || token.is_empty() {
+            return (
+                target,
+                Resp::err(
+                    "CROSS_PROJECT_CREDENTIALS_REQUIRED: cross-project send requires the caller worker_id and token",
+                ),
+            );
+        }
+        let source = match self.runtime_for_route_scope(&command.scope) {
+            Ok(source) => source,
             Err(error) => return (target, Resp::err(error)),
         };
-        let response = handle_cross_project_send(
-            &target,
-            from,
-            from_project,
-            source_thread_id,
-            source_master_assigned_by,
-            source_master_approval,
-            source_master_assigned_ms,
-            to,
-            subject,
+        // Cross-project authorization and commit must be one linearized
+        // boundary. The endpoint probe is the only fallible observation that
+        // may block, so it runs before the state locks; reachability is not an
+        // authorization input and a later probe result never revokes a durable
+        // message.
+        let recipient_snapshot = {
+            let target_state = target.state.lock().unwrap();
+            target_state.workers.get(&to).cloned()
+        };
+        if let Some(recipient) = recipient_snapshot {
+            if worker_identity_and_endpoint(&*target, &recipient).1 == Some(false) {
+                return (
+                    target,
+                    Resp::err(
+                        "cross-project communication requires a reachable target binding on its server-selected transport",
+                    ),
+                );
+            }
+        }
+        if Arc::ptr_eq(&source, &target) {
+            return (
+                target,
+                Resp::err(
+                    "CROSS_PROJECT_SAME_RUNTIME_REJECTED: source and target must be different projects",
+                ),
+            );
+        }
+        // Fixed lock order: the host state is always taken first, and the
+        // host mutex serializes cross-project sends so source and target never
+        // deadlock against each other. The same Arc is never locked twice.
+        let mut host_state = self.host.state.lock().unwrap();
+        if let Some(error) = &host_state.journal_poison {
+            return (
+                target,
+                Resp::err(format!("HOST_AUTHORITY_STORE_UNAVAILABLE: {error}")),
+            );
+        }
+        let ceo_grant = host_state.ceo_grant.clone();
+        let committed = if Arc::ptr_eq(&self.host, &source) {
+            let mut target_state = target.state.lock().unwrap();
+            authorize_and_commit_cross_project(
+                &self.host,
+                &host_state,
+                &target,
+                &mut target_state,
+                &command,
+                &worker_id,
+                &token,
+                ceo_grant.as_ref(),
+                &to,
+                &subject,
+                &body,
+                in_reply_to.as_deref(),
+            )
+        } else if Arc::ptr_eq(&self.host, &target) {
+            let source_state = source.state.lock().unwrap();
+            authorize_and_commit_cross_project(
+                &source,
+                &source_state,
+                &self.host,
+                &mut host_state,
+                &command,
+                &worker_id,
+                &token,
+                ceo_grant.as_ref(),
+                &to,
+                &subject,
+                &body,
+                in_reply_to.as_deref(),
+            )
+        } else {
+            let source_state = source.state.lock().unwrap();
+            let mut target_state = target.state.lock().unwrap();
+            authorize_and_commit_cross_project(
+                &source,
+                &source_state,
+                &target,
+                &mut target_state,
+                &command,
+                &worker_id,
+                &token,
+                ceo_grant.as_ref(),
+                &to,
+                &subject,
+                &body,
+                in_reply_to.as_deref(),
+            )
+        };
+        drop(host_state);
+        let response = match committed {
+            Ok(committed) => notify_cross_project_committed(&*target, committed, &worker_id, &to),
+            Err(response) => response,
+        };
+        (target, response)
+    }
+
+    /// One host-wide current CEO grant snapshot. The caller uses it only to
+    /// select a target runtime; the authoritative read and holder resolution
+    /// happen again under the host state lock before durable commit.
+    fn ceo_grant_snapshot(&self) -> Result<Option<crate::ceo::CeoGrant>, String> {
+        let state = self.host.state.lock().unwrap();
+        if let Some(error) = &state.journal_poison {
+            return Err(format!("HOST_AUTHORITY_STORE_UNAVAILABLE: {error}"));
+        }
+        Ok(state.ceo_grant.clone())
+    }
+
+    /// Locate the one runtime named by a host CEO grant. The route record
+    /// already knows the canonical root and storage; opening it never changes
+    /// the grant or the caller's workspace.
+    fn runtime_for_ceo_grant(
+        &self,
+        grant: &crate::ceo::CeoGrant,
+    ) -> Result<Arc<Server>, String> {
+        let workspace = std::fs::canonicalize(&grant.workspace).map_err(|error| {
+            format!("CEO_WORKSPACE_UNAVAILABLE: canonicalize grant workspace: {error}")
+        })?;
+        let key = (grant.app_scope_id.clone(), grant.workspace.clone());
+        let (root, storage_root) = {
+            let routes = self.routes.lock().unwrap();
+            let Some(route) = routes.get(&key) else {
+                return Err(
+                    "CHANNEL_CEO_ROUTE_UNAVAILABLE: no registered route for the active CEO grant workspace"
+                        .into(),
+                );
+            };
+            if route.root != workspace {
+                return Err(
+                    "CHANNEL_CEO_ROUTE_UNAVAILABLE: registered CEO route root does not match the grant workspace"
+                        .into(),
+                );
+            }
+            (route.root.clone(), route.storage_root.clone())
+        };
+        self.ensure_runtime(&key, &root, &storage_root)
+            .map_err(|error| format!("CHANNEL_CEO_ROUTE_UNAVAILABLE: {error}"))
+    }
+
+    fn channel_inbound_intent(
+        &self,
+        caller: &Arc<Server>,
+        to: &str,
+        body: &str,
+        envelope: &crate::server::channel_envelope::ChannelEnvelope,
+    ) -> Result<crate::server::ChannelInboundAddressIntent, String> {
+        let state = caller.state.lock().unwrap();
+        channel_inbound_address_intent(
+            &state,
+            &envelope.source_channel,
+            &envelope.channel_instance,
+            &envelope.external_conversation,
             body,
-            in_reply_to,
-        );
+            to,
+        )
+        .map_err(|error| format!("CHANNEL_ROUTE_SCOPE_MISSING: {error}"))
+    }
+
+    /// Host-aware `ceo` channel-inbound dispatch. It reads the current host
+    /// grant, verifies the caller is that grant workspace, selects the grant
+    /// runtime, and commits under the fixed host-then-target lock order
+    /// without ever passing a stale worker id.
+    fn dispatch_channel_inbound_ceo(
+        &self,
+        caller: Arc<Server>,
+        from: String,
+        subject: String,
+        envelope: crate::server::channel_envelope::ChannelEnvelope,
+        intent: crate::server::ChannelInboundAddressIntent,
+    ) -> (Arc<Server>, Resp) {
+        let grant = match self.ceo_grant_snapshot() {
+            Ok(Some(grant)) => grant,
+            Ok(None) => {
+                return (
+                    caller,
+                    Resp::err(
+                        "CHANNEL_CEO_GRANT_MISSING: no typed CEO grant is active; [ceo] does not fall back to the project master",
+                    ),
+                )
+            }
+            Err(error) => return (caller, Resp::err(error)),
+        };
+        let caller_root = match std::fs::canonicalize(&caller.root) {
+            Ok(root) => root,
+            Err(error) => {
+                return (
+                    caller,
+                    Resp::err(format!("CHANNEL_ROUTE_SCOPE_MISSING: {error}")),
+                )
+            }
+        };
+        let grant_workspace = match std::fs::canonicalize(&grant.workspace) {
+            Ok(root) => root,
+            Err(error) => {
+                return (
+                    caller,
+                    Resp::err(format!("CHANNEL_CEO_WORKSPACE_UNAVAILABLE: {error}")),
+                )
+            }
+        };
+        // A message submitted from the former CEO workspace after the grant
+        // moved is an explicit rejection. It must not be auto-routed to the
+        // new grant holder.
+        if caller_root != grant_workspace {
+            return (
+                caller,
+                Resp::err(
+                    "CHANNEL_CEO_STALE_WORKSPACE: the active CEO grant belongs to another workspace; do not send from the former CEO project",
+                ),
+            );
+        }
+        let target = match self.runtime_for_ceo_grant(&grant) {
+            Ok(runtime) => runtime,
+            Err(error) => return (caller, Resp::err(error)),
+        };
+        // The host grant is the single authority source. It is re-read under
+        // the host state lock at commit time so a grant that moved after the
+        // workspace check is never committed to the stale holder. When the
+        // target is the host reducer one lock guards both authority and commit;
+        // otherwise the fixed host-then-target order avoids any double lock.
+        let mut response = if Arc::ptr_eq(&target, &self.host) {
+            let mut host_state = self.host.state.lock().unwrap();
+            if let Some(error) = &host_state.journal_poison {
+                return (
+                    caller,
+                    Resp::err(format!("HOST_AUTHORITY_STORE_UNAVAILABLE: {error}")),
+                );
+            }
+            let current_grant = host_state.ceo_grant.clone();
+            channel_inbound_commit_with_state(
+                &target,
+                &mut host_state,
+                from,
+                subject,
+                envelope,
+                current_grant.as_ref(),
+                &intent,
+            )
+        } else {
+            // Fixed lock order: host state first, then the target runtime. A
+            // single mutex is never locked twice.
+            let mut host_state = self.host.state.lock().unwrap();
+            if let Some(error) = &host_state.journal_poison {
+                return (
+                    caller,
+                    Resp::err(format!("HOST_AUTHORITY_STORE_UNAVAILABLE: {error}")),
+                );
+            }
+            let current_grant = host_state.ceo_grant.clone();
+            let mut target_state = target.state.lock().unwrap();
+            channel_inbound_commit_with_state(
+                &target,
+                &mut target_state,
+                from,
+                subject,
+                envelope,
+                current_grant.as_ref(),
+                &intent,
+            )
+        };
+        channel_inbound_finish(&target, &mut response);
         (target, response)
     }
 
@@ -568,6 +772,46 @@ impl ProjectRuntimeManager {
                 Resp::err(format!("PROJECT_CONTEXT_INVALID: {error}")),
             );
         }
+        // `ceo` (and the bare project key) address the host-wide CEO grant, not
+        // the caller's project-local grant. Resolve the caller runtime only to
+        // parse the address intent; a typed CEO address goes through the
+        // host-authority path below, every other address keeps the existing
+        // local resolver unchanged.
+        if let Req::ChannelInbound {
+            from,
+            to,
+            subject,
+            body,
+            envelope,
+        } = &req
+        {
+            if let Ok(caller) = self.select_runtime(&context) {
+                if let Ok(intent) = self.channel_inbound_intent(&caller, to, body, envelope) {
+                    let project_key = canonical_project_key(&caller.root);
+                    let is_ceo = intent.address.eq_ignore_ascii_case("ceo")
+                        || project_key
+                            .as_deref()
+                            .is_some_and(|key| intent.address.eq_ignore_ascii_case(key));
+                    if is_ceo {
+                        if let Err(error) = self.same_pane_master_route_ready(&caller) {
+                            return (caller, Resp::err(error));
+                        }
+                        if let Err(error) =
+                            validate_request_context(&caller, &req, Some(&context))
+                        {
+                            return (caller, Resp::err(error));
+                        }
+                        return self.dispatch_channel_inbound_ceo(
+                            caller,
+                            from.clone(),
+                            subject.clone(),
+                            envelope.clone(),
+                            intent,
+                        );
+                    }
+                }
+            }
+        }
         if let Req::Ceo {worker_id,token,command} = req {
             return self.dispatch_ceo(Some(context),worker_id,token,command);
         }
@@ -580,6 +824,24 @@ impl ProjectRuntimeManager {
                 .and_then(|route| route.runtime.clone());
             let Some(runtime) = runtime else {
                 return (self.host.clone(), Resp::err("SELF_ROUTE_UNAVAILABLE"));
+            };
+            let control_binding = {
+                let state = runtime.state.lock().unwrap();
+                let route_scope = RouteScope {
+                    app_scope_id: context.app_scope_id.clone(),
+                    project_scope_id: context.project_scope.clone(),
+                };
+                state
+                    .global
+                    .lookup_project_for_route(&route_scope)
+                    .and_then(|project| {
+                        project
+                            .runtime_bindings
+                            .values()
+                            .filter(|binding| binding.agent_id.as_str() == worker_id)
+                            .max_by_key(|binding| binding.endpoint_generation)
+                    })
+                    .cloned()
             };
             let owned_routes: Vec<_> = self
                 .host
@@ -598,6 +860,20 @@ impl ProjectRuntimeManager {
                 .collect();
             let mut response =
                 peer_lifecycle::unregister_self(&runtime, Some(&context), worker_id, token);
+            if response.ok {
+                if let Some(binding) = control_binding.as_ref() {
+                    match self.unregister_control_binding(&runtime, &context, worker_id, binding) {
+                        Ok(crate::server::binding_store::Durability::Confirmed) => {}
+                        Ok(crate::server::binding_store::Durability::Unknown) => {
+                            Self::mark_control_durability_unknown(&mut response);
+                        }
+                        Err(error) => {
+                            response.ok = false;
+                            response.error = Some(error);
+                        }
+                    }
+                }
+            }
             if response.ok && !Arc::ptr_eq(&runtime, &self.host) {
                 for binding in owned_routes {
                     if let Err(error) = self
@@ -627,7 +903,9 @@ impl ProjectRuntimeManager {
                 );
             };
             let response = match validate_request_context(&runtime, &req, Some(&context)) {
-                Ok(()) => dispatch_with_route_context_bound(&runtime, req, Some(context), None),
+                Ok(()) => {
+                    dispatch_with_route_context_bound(&runtime, req, Some(context), None, None)
+                }
                 Err(error) => peer_lifecycle::unavailable(request, &error, true),
             };
             return (runtime, response);
@@ -731,6 +1009,12 @@ impl ProjectRuntimeManager {
                 }
                 None => (None, None, None, Vec::new()),
             };
+            let mut register_effect_id = None;
+            let mut register_control_first = self.register_control_first_hook(
+                &runtime,
+                register_binding.and_then(|binding| binding.name_pane_anchor().cloned()),
+                &mut register_effect_id,
+            );
             let response = if let Err(error) = validate_request_context_with_register_approval(
                 &runtime,
                 &req,
@@ -744,8 +1028,10 @@ impl ProjectRuntimeManager {
                     req,
                     Some(context.clone()),
                     register_binding,
+                    Some(&mut register_control_first),
                 )
             };
+            drop(register_control_first);
             let (runtime, response) = self.finalize_registration(
                 runtime,
                 &context,
@@ -755,6 +1041,7 @@ impl ProjectRuntimeManager {
                 rollback_state.2,
                 rollback_state.3,
                 response,
+                register_effect_id.as_deref(),
             );
             return (
                 runtime,
@@ -787,6 +1074,12 @@ impl ProjectRuntimeManager {
                 }
                 None => (None, None, None, Vec::new()),
             };
+            let mut register_effect_id = None;
+            let mut register_control_first = self.register_control_first_hook(
+                &runtime,
+                register_binding.and_then(|binding| binding.name_pane_anchor().cloned()),
+                &mut register_effect_id,
+            );
             let response = if let Err(error) = validate_request_context_with_register_approval(
                 &runtime,
                 &req,
@@ -800,8 +1093,10 @@ impl ProjectRuntimeManager {
                     req,
                     Some(context.clone()),
                     register_binding,
+                    Some(&mut register_control_first),
                 )
             };
+            drop(register_control_first);
             let (runtime, response) = self.finalize_registration(
                 runtime,
                 &context,
@@ -811,6 +1106,7 @@ impl ProjectRuntimeManager {
                 rollback_state.2,
                 rollback_state.3,
                 response,
+                register_effect_id.as_deref(),
             );
             return (
                 runtime,
@@ -843,6 +1139,12 @@ impl ProjectRuntimeManager {
                 }
                 None => (None, None, None, Vec::new()),
             };
+            let mut register_effect_id = None;
+            let mut register_control_first = self.register_control_first_hook(
+                &self.host,
+                register_binding.and_then(|binding| binding.name_pane_anchor().cloned()),
+                &mut register_effect_id,
+            );
             let response = if let Err(error) = validate_request_context_with_register_approval(
                 &self.host,
                 &req,
@@ -856,8 +1158,10 @@ impl ProjectRuntimeManager {
                     req,
                     Some(context.clone()),
                     register_binding,
+                    Some(&mut register_control_first),
                 )
             };
+            drop(register_control_first);
             if !response.ok {
                 return (self.host.clone(), response);
             }
@@ -870,6 +1174,7 @@ impl ProjectRuntimeManager {
                 rollback_state.2,
                 rollback_state.3,
                 response,
+                register_effect_id.as_deref(),
             );
             return (
                 runtime,
@@ -921,6 +1226,12 @@ impl ProjectRuntimeManager {
             }
             None => (None, None, None, Vec::new()),
         };
+        let mut register_effect_id = None;
+        let mut register_control_first = self.register_control_first_hook(
+            &runtime,
+            register_binding.and_then(|binding| binding.name_pane_anchor().cloned()),
+            &mut register_effect_id,
+        );
         let response = if let Err(error) = validate_request_context_with_register_approval(
             &runtime,
             &req,
@@ -934,8 +1245,10 @@ impl ProjectRuntimeManager {
                 req,
                 Some(context.clone()),
                 register_binding,
+                Some(&mut register_control_first),
             )
         };
+        drop(register_control_first);
         let (runtime, response) = self.finalize_registration(
             runtime,
             &context,
@@ -945,10 +1258,84 @@ impl ProjectRuntimeManager {
             rollback_state.2,
             rollback_state.3,
             response,
+            register_effect_id.as_deref(),
         );
         (
             runtime,
             self.retire_superseded_claimants(superseded, response),
         )
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn authorize_and_commit_cross_project(
+    source: &Server,
+    source_state: &State,
+    target: &Server,
+    target_state: &mut State,
+    command: &crate::proto::CommandEnvelope,
+    worker_id: &str,
+    token: &str,
+    ceo_grant: Option<&crate::ceo::CeoGrant>,
+    to: &str,
+    subject: &str,
+    body: &str,
+    in_reply_to: Option<&str>,
+) -> Result<CrossProjectCommitted, Resp> {
+    let Some(worker) = source_state.workers.get(worker_id).cloned() else {
+        return Err(Resp::err(format!("worker {worker_id} not registered")));
+    };
+    if worker.token != token {
+        return Err(Resp::err(
+            "token mismatch: identity does not own this worker_id",
+        ));
+    }
+    let Some(binding) = source_state
+        .global
+        .lookup_binding_for(&command.scope, &command.actor_binding_id)
+        .cloned()
+    else {
+        return Err(Resp::err(
+            "CROSS_PROJECT_BINDING_REJECTED: authenticated sender binding is not registered for the source route",
+        ));
+    };
+    if binding.agent_id.as_str() != worker_id {
+        return Err(Resp::err(
+            "CROSS_PROJECT_BINDING_REJECTED: authenticated sender binding belongs to another worker",
+        ));
+    }
+    let registered_scope = binding.route_scope();
+    let runtime_identity = crate::identity::RuntimeIdentity {
+        agent_id: binding.agent_id.clone(),
+        runtime_id: binding.runtime_id.clone(),
+        appserver_id: binding.app_scope_id.clone(),
+        endpoint_generation: binding.endpoint_generation,
+        binding_id: binding.binding_id.clone(),
+        session_id: binding.session_id.clone(),
+        native_thread_id: binding.native_thread_id.clone(),
+    };
+    if let Err(error) = command.validate_for(&runtime_identity, &registered_scope) {
+        return Err(Resp::err(format!("CROSS_PROJECT_BINDING_REJECTED: {error}")));
+    }
+    let sender_role = cross_project_role(source, source_state, ceo_grant, worker_id)
+        .map_err(Resp::err)?;
+    let source_thread_id = source_state
+        .workers
+        .get(worker_id)
+        .and_then(selected_transport_for_worker)
+        .and_then(|transport| notification_target(&transport).map(str::to_owned));
+    let source_project = source.root.to_string_lossy().into_owned();
+    commit_cross_project_message(
+        target,
+        target_state,
+        worker_id,
+        &source_project,
+        sender_role,
+        ceo_grant,
+        source_thread_id,
+        to,
+        subject,
+        body,
+        in_reply_to,
+    )
 }

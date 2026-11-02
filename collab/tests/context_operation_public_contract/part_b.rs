@@ -1880,4 +1880,276 @@ fn c03_unapproved_unique_pane_stale_recovery_repairs_without_approval() {
     );
 }
 
+/// Run the real candidate CLI inside the test-owned pane under an explicit
+/// agent session and invocation cwd. The daemon observes the caller's live
+/// process ancestry for name inheritance, so this runs the binary in the pane
+/// instead of submitting tmux facts that would only impersonate observation.
+fn pane_identity_context(
+    fixture: &Fixture,
+    pane: &Pane,
+    label: &str,
+    cwd: &Path,
+    session: &str,
+    thread: &str,
+    operation_id: &str,
+) -> Value {
+    use std::os::unix::process::ExitStatusExt;
+    let done = fixture.root.join(format!("{label}.exit"));
+    let result = fixture.root.join(format!("{label}.result"));
+    let stderr = fixture.root.join(format!("{label}.stderr"));
+    fs::remove_file(&done).ok();
+    let script = format!(
+        "cd {cwd}\nexport CODEX_SESSION_ID={session}\nexport CODEX_THREAD_ID={thread}\n\"$COLLAB_BINARY\" context --op {operation_id} >{result} 2>{stderr}\nprintf '%s' \"$?\" >{done}\nsleep 600\n",
+        cwd = shell_quote(&cwd.to_string_lossy()),
+        session = shell_quote(session),
+        thread = shell_quote(thread),
+        operation_id = shell_quote(operation_id),
+        result = shell_quote(&result.to_string_lossy()),
+        stderr = shell_quote(&stderr.to_string_lossy()),
+        done = shell_quote(&done.to_string_lossy()),
+    );
+    let consumer = fixture.run_in_pane(pane, label, &script);
+    assert!(
+        wait_until(Duration::from_secs(20), || {
+            fs::read_to_string(&done).is_ok_and(|value| !value.is_empty())
+        }),
+        "pane identity context did not finish in its own pane: {}",
+        consumer.output()
+    );
+    let code: i32 = fs::read_to_string(&done).unwrap().parse().unwrap();
+    let output = std::process::Output {
+        status: std::process::ExitStatus::from_raw(code << 8),
+        stdout: fs::read(&result).unwrap_or_default(),
+        stderr: fs::read(&stderr).unwrap_or_default(),
+    };
+    success_payload(&output)
+}
+
+fn committed_occupancy(fixture: &Fixture, name: &str) -> Value {
+    read_lines(&fixture.project_journal())
+        .into_iter()
+        .filter(|event| {
+            event["ev"] == "NameResolutionCommitted" && event["occupancy"]["name"] == name
+        })
+        .last()
+        .unwrap_or_else(|| panic!("name {name} has a committed occupancy"))
+}
+
+fn seeded_name_and_worker(payload: &Value) -> (String, String) {
+    let snapshot = &payload["result"]["snapshot"];
+    (
+        snapshot["identity"]["display_name"]
+            .as_str()
+            .expect("seeded identity has a display name")
+            .to_owned(),
+        snapshot["identity"]["worker_id"]
+            .as_str()
+            .expect("seeded identity has a worker id")
+            .to_owned(),
+    )
+}
+
+#[test]
+fn pane_inheritance_same_pane_and_cwd_hands_the_name_to_a_new_agent_session() {
+    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (fixture, pane) = Fixture::isolated("pane-inherit-same-pane");
+    let cwd = PathBuf::from(canonical_root(&fixture));
+    let seed = fixture.registered_context("pane-inherit-same-pane-seed", &pane);
+    let (seed_name, seed_worker) = seeded_name_and_worker(&seed);
+    assert_eq!(
+        seed_name, "Alice",
+        "the first ordinary registration takes the pool head: {seed}"
+    );
+    let inherited = pane_identity_context(
+        &fixture,
+        &pane,
+        "pane-inherit-same-pane-second",
+        &cwd,
+        "pane-inherit-same-pane-other-session",
+        "pane-inherit-same-pane-other-thread",
+        "pane-inherit-same-pane-second",
+    );
+    let snapshot = &inherited["result"]["snapshot"];
+    assert_eq!(
+        snapshot["name_resolution"]["name"].as_str(),
+        Some(seed_name.as_str()),
+        "the same pane and cwd must hand the first name to a new agent session: {inherited}"
+    );
+    assert_eq!(
+        snapshot["identity"]["display_name"].as_str(),
+        Some(seed_name.as_str()),
+        "{inherited}"
+    );
+    assert_ne!(
+        snapshot["identity"]["worker_id"].as_str(),
+        Some(seed_worker.as_str()),
+        "a different agent session is a new carrier, not a same-session resume: {inherited}"
+    );
+    let occupancy = committed_occupancy(&fixture, &seed_name);
+    assert_eq!(
+        occupancy["occupancy"]["worker_id"], snapshot["identity"]["worker_id"],
+        "{occupancy}"
+    );
+    assert_eq!(
+        occupancy["occupancy"]["session_id"].as_str(),
+        Some("pane-inherit-same-pane-other-session"),
+        "the name moves to the new agent session, so this is pane inheritance and not a session match: {occupancy}"
+    );
+    assert_eq!(
+        occupancy["occupancy"]["pane_anchor"]["pane"]["pane_id"].as_str(),
+        Some(pane.pane_id.as_str()),
+        "{occupancy}"
+    );
+    assert_eq!(
+        occupancy["occupancy"]["pane_anchor"]["cwd"].as_str(),
+        Some(cwd.to_string_lossy().as_ref()),
+        "{occupancy}"
+    );
+}
+
+#[test]
+fn pane_inheritance_keeps_one_name_for_the_same_agent_session_across_pane_and_cwd() {
+    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (fixture, pane) = Fixture::isolated("pane-inherit-same-session");
+    let root = PathBuf::from(canonical_root(&fixture));
+    let seed = fixture.registered_context("pane-inherit-same-session-seed", &pane);
+    let (seed_name, seed_worker) = seeded_name_and_worker(&seed);
+    let other_pane = second_pane(&fixture, "pane-inherit-same-session-other", pane.server_pid);
+    let other_cwd = root.join("invocation-sub");
+    fs::create_dir_all(&other_cwd).expect("create a second invocation directory");
+
+    let resumed = pane_identity_context(
+        &fixture,
+        &other_pane,
+        "pane-inherit-same-session-readback",
+        &other_cwd,
+        &pane.session_anchor,
+        &pane.thread_anchor,
+        "pane-inherit-same-session-readback",
+    );
+    let snapshot = &resumed["result"]["snapshot"];
+    assert_eq!(
+        snapshot["identity"]["worker_id"].as_str(),
+        Some(seed_worker.as_str()),
+        "the same agent session resumes the same carrier from a different pane and cwd: {resumed}"
+    );
+    assert_eq!(
+        snapshot["name_resolution"]["name"].as_str(),
+        Some(seed_name.as_str()),
+        "one agent session keeps one name regardless of the pane or cwd it calls from: {resumed}"
+    );
+    let occupancy = committed_occupancy(&fixture, &seed_name);
+    assert_eq!(
+        occupancy["occupancy"]["worker_id"].as_str(),
+        Some(seed_worker.as_str()),
+        "{occupancy}"
+    );
+    assert_eq!(
+        occupancy["occupancy"]["session_id"].as_str(),
+        Some(pane.session_anchor.as_str()),
+        "{occupancy}"
+    );
+}
+
+#[test]
+fn pane_inheritance_does_not_follow_a_different_pane() {
+    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (fixture, pane) = Fixture::isolated("pane-inherit-other-pane");
+    let root = PathBuf::from(canonical_root(&fixture));
+    let seed = fixture.registered_context("pane-inherit-other-pane-seed", &pane);
+    let (seed_name, seed_worker) = seeded_name_and_worker(&seed);
+    let other_pane = second_pane(&fixture, "pane-inherit-other-pane-second", pane.server_pid);
+
+    let fresh = pane_identity_context(
+        &fixture,
+        &other_pane,
+        "pane-inherit-other-pane-readback",
+        &root,
+        "pane-inherit-other-pane-session",
+        "pane-inherit-other-pane-thread",
+        "pane-inherit-other-pane-readback",
+    );
+    let snapshot = &fresh["result"]["snapshot"];
+    let fresh_name = snapshot["name_resolution"]["name"]
+        .as_str()
+        .expect("fresh registration has a name")
+        .to_owned();
+    assert_ne!(
+        fresh_name, seed_name,
+        "a pane match also requires the same pane, so a different pane must not inherit the first name: {fresh}"
+    );
+    assert_ne!(
+        snapshot["identity"]["worker_id"].as_str(),
+        Some(seed_worker.as_str()),
+        "{fresh}"
+    );
+    let occupancy = committed_occupancy(&fixture, &fresh_name);
+    assert_eq!(
+        occupancy["occupancy"]["session_id"].as_str(),
+        Some("pane-inherit-other-pane-session"),
+        "{occupancy}"
+    );
+    assert_eq!(
+        occupancy["occupancy"]["pane_anchor"]["pane"]["pane_id"].as_str(),
+        Some(other_pane.pane_id.as_str()),
+        "the fresh name is anchored to the pane that actually called: {occupancy}"
+    );
+    assert_eq!(
+        committed_occupancy(&fixture, &seed_name)["occupancy"]["worker_id"].as_str(),
+        Some(seed_worker.as_str()),
+        "the original holder keeps the first name"
+    );
+}
+
+#[test]
+fn pane_inheritance_does_not_follow_a_different_cwd() {
+    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (fixture, pane) = Fixture::isolated("pane-inherit-other-cwd");
+    let root = PathBuf::from(canonical_root(&fixture));
+    let seed = fixture.registered_context("pane-inherit-other-cwd-seed", &pane);
+    let (seed_name, seed_worker) = seeded_name_and_worker(&seed);
+    let other_cwd = root.join("invocation-sub");
+    fs::create_dir_all(&other_cwd).expect("create a second invocation directory");
+
+    let fresh = pane_identity_context(
+        &fixture,
+        &pane,
+        "pane-inherit-other-cwd-readback",
+        &other_cwd,
+        "pane-inherit-other-cwd-session",
+        "pane-inherit-other-cwd-thread",
+        "pane-inherit-other-cwd-readback",
+    );
+    let snapshot = &fresh["result"]["snapshot"];
+    let fresh_name = snapshot["name_resolution"]["name"]
+        .as_str()
+        .expect("fresh registration has a name")
+        .to_owned();
+    assert_ne!(
+        fresh_name, seed_name,
+        "a pane match also requires the exact invocation cwd, so a different cwd must not inherit the first name: {fresh}"
+    );
+    assert_ne!(
+        snapshot["identity"]["worker_id"].as_str(),
+        Some(seed_worker.as_str()),
+        "{fresh}"
+    );
+    let occupancy = committed_occupancy(&fixture, &fresh_name);
+    assert_eq!(
+        occupancy["occupancy"]["session_id"].as_str(),
+        Some("pane-inherit-other-cwd-session"),
+        "{occupancy}"
+    );
+    assert_eq!(
+        occupancy["occupancy"]["pane_anchor"]["pane"]["pane_id"].as_str(),
+        Some(pane.pane_id.as_str()),
+        "{occupancy}"
+    );
+    assert_eq!(
+        occupancy["occupancy"]["pane_anchor"]["cwd"].as_str(),
+        Some(other_cwd.to_string_lossy().as_ref()),
+        "the fresh name is anchored to the cwd that actually called: {occupancy}"
+    );
+}
+
 include!("part_b_tail.rs");

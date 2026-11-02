@@ -764,33 +764,21 @@ pub(crate) fn live_closure_probe(
     );
     let timeout = live_closure_timeout()?;
     let response: serde_json::Value = if let Some(target_scope) = target_scope.as_ref() {
-        let assigned_by = master
-            .get("master")
-            .and_then(|value| value.get("assigned_by"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        let assigned_ms = master
-            .get("master")
-            .and_then(|value| value.get("assigned_ms"))
-            .and_then(serde_json::Value::as_i64)
-            .unwrap_or_default();
-        let approval = master
-            .get("master")
-            .and_then(|value| value.get("approval"))
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned);
+        let command = command_envelope(scope, &ident)?;
         client::call_with_context(
             &target_scope.sock_path(),
             &Req::CrossProjectSend {
                 from: ident.worker_id.clone(),
                 from_project: scope.root.display().to_string(),
-                source_master_assigned_by: assigned_by.to_owned(),
-                source_master_approval: approval,
-                source_master_assigned_ms: assigned_ms,
+                worker_id: ident.worker_id.clone(),
+                token: ident.token.clone(),
+                command: Some(command),
                 to: to.clone(),
                 subject: challenge.clone(),
                 body: challenge.clone(),
                 in_reply_to: None,
+                reply_policy: None,
+                target_session: None,
             },
             Some(cli_project_context(&target_scope.root)?),
         )?

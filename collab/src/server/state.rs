@@ -149,12 +149,8 @@ impl GlobalEvent {
             Self::MigrationCommitEvidence { evidence } => {
                 global.record_migration_commit_evidence(evidence)
             }
-            Self::RuntimeBindingLedgerClassified { record } => {
-                global.classify_runtime_binding_ledger(record).map(|_| ())
-            }
-            Self::LedgerScanReceiptRecorded { receipt } => {
-                global.record_ledger_scan_receipt(receipt).map(|_| ())
-            }
+            Self::RuntimeBindingLedgerClassified { .. }
+            | Self::LedgerScanReceiptRecorded { .. } => Ok(()),
             Self::MasterGrantReplacementStarted { intent } => global
                 .record_master_grant_replacement_intent(intent)
                 .map(|_| ()),
@@ -260,6 +256,12 @@ pub struct NotificationSubscription {
     /// advances only after the message and scheduling events commit.
     #[serde(default)]
     pub patrol_last_push_ms: i64,
+    /// Explicit periodic declaration for an owned goal deadline. Only a
+    /// request that explicitly declares a period sets this; legacy records
+    /// (and any occurrence that merely carries `interval_ms`/`repeat_count`)
+    /// decode it as `false` and keep the single-shot compatibility behavior.
+    #[serde(default)]
+    pub periodic_declared: bool,
 }
 
 pub fn default_repeat_count() -> u32 {
@@ -673,6 +675,23 @@ fn consume_subscription_for_preflight(
 
     let fired_count = subscription.fired_count.saturating_add(1);
     if is_goal_deadline(subscription) {
+        // A single-shot goal deadline (legacy or a non-periodic active request)
+        // is consumed on its first occurrence. An explicit periodic goal
+        // deadline keeps recurring until the interval/repeat or TTL budget is
+        // exhausted, so the preflight keeps it armed alongside the real
+        // consume path.
+        if subscription.periodic_declared {
+            if fired_count >= subscription_consumption_total(subscription) {
+                return SubscriptionConsumption {
+                    fired_count,
+                    status: SubscriptionConsumptionStatus::Consumed,
+                };
+            }
+            return SubscriptionConsumption {
+                fired_count,
+                status: SubscriptionConsumptionStatus::Armed,
+            };
+        }
         let _ = consumed_ms;
         return SubscriptionConsumption {
             fired_count,

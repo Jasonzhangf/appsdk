@@ -16,6 +16,12 @@ const runtimeDir=path.join(stateRoot,'runtime','desktop');
 const runtimeKey=pipe?createHash('sha256').update(pipe).digest('hex').slice(0,24):undefined;
 const socketPath=path.join(runtimeDir,`pipe-${runtimeKey}.sock`);
 const script=fileURLToPath(import.meta.url);
+function requireSystemVolume(target){
+  if(process.platform!=='darwin')return;
+  let existing=path.resolve(target),resolved;
+  for(;;){try{resolved=fs.realpathSync(existing);break;}catch(e){if(e.code!=='ENOENT')throw e;const parent=path.dirname(existing);if(parent===existing)throw e;existing=parent;}}
+  if(fs.statSync(resolved).dev!==fs.statSync('/System/Volumes/Data').dev)throw Error(`COLLAB_SYSTEM_DISK_REQUIRED: host state root ${target} must be on the system data volume`);
+}
 function encoded(value){const b=Buffer.from(JSON.stringify(value));if(b.length>MAX_FRAME)throw Error('DESKTOP_BRIDGE_FRAME_TOO_LARGE');const h=Buffer.alloc(4);h.writeUInt32LE(b.length);return Buffer.concat([h,b]);}
 function readNative(s,receive,fatal){let b=Buffer.alloc(0);s.on('data',c=>{b=Buffer.concat([b,c]);try{while(b.length>=4){const n=b.readUInt32LE(0);if(n>MAX_FRAME)throw Error('DESKTOP_BRIDGE_FRAME_TOO_LARGE');if(b.length<n+4)return;const v=JSON.parse(b.subarray(4,n+4));b=b.subarray(n+4);receive(v);}}catch(e){fatal(e);}});}
 function controlDirectory(target){
@@ -27,7 +33,7 @@ function callSocket(target,request,timeout=TIMEOUT_MS){return new Promise((resol
 function localCall(request){return callSocket(socketPath,request);}
 async function publisherLive(endpoint){try{const r=await callSocket(endpoint.slice('unix://'.length),{id:randomUUID(),op:'ping'},1000);return r?.ok===true;}catch{return false;}}
 async function ensureService(){
-  if(!desktop)throw Error('DESKTOP_BRIDGE_HOST_REQUIRED: current host pipe missing');controlDirectory(runtimeDir);
+  if(!desktop)throw Error('DESKTOP_BRIDGE_HOST_REQUIRED: current host pipe missing');requireSystemVolume(stateRoot);controlDirectory(runtimeDir);
   const ping=async()=>{const r=await localCall({id:randomUUID(),op:'ping'});if(!r.ok||r.runtime_key!==runtimeKey)throw Error('DESKTOP_BRIDGE_SCOPE_MISMATCH: runtime');return r;};
   try{return await ping();}catch(e){if(!['ENOENT','ECONNREFUSED'].includes(e.code))throw e;}
   const log=fs.openSync(path.join(runtimeDir,`pipe-${runtimeKey}.log`),'a',0o600);
@@ -37,7 +43,7 @@ async function ensureService(){
 }
 async function admit(facts){await ensureService();const r=await localCall({...facts,id:randomUUID(),op:'admit'});if(!r.ok)throw Error(typeof r.error==='string'?r.error:JSON.stringify(r.error));return r.desktop_bridge;}
 async function runService(){
-  if(!desktop)throw Error('DESKTOP_BRIDGE_HOST_REQUIRED');controlDirectory(runtimeDir);
+  if(!desktop)throw Error('DESKTOP_BRIDGE_HOST_REQUIRED');requireSystemVolume(stateRoot);controlDirectory(runtimeDir);
   let upstream,listener,ownedSocket,stopping=false,sequence=0,tools,hostFailure,runtimeDescriptor;
   const bindings=new Map(),pending=new Map(),clients=new Set(),publications=new Set(),publicationId=`${process.pid}-${randomUUID()}`;
   const key=(s,t)=>JSON.stringify([s,t]);
@@ -87,7 +93,11 @@ function executorThread(meta){let m=meta?.['x-codex-turn-metadata'];if(typeof m=
 function idSpan(text){let depth=0,span;for(let i=0;i<text.length;i++){const c=text[i];if(c==='{'||c==='['){depth++;continue;}if(c==='}'||c===']'){depth--;continue;}if(c!=='"')continue;const start=i++;while(i<text.length){if(text[i]==='\\'){i+=2;continue;}if(text[i]==='"')break;i++;}const end=i+1;if(depth!==1||JSON.parse(text.slice(start,end))!=='id')continue;let colon=end;while(/\s/.test(text[colon]||'')&&colon<text.length)colon++;if(text[colon]!==':')continue;let valueStart=colon+1;while(/\s/.test(text[valueStart]||'')&&valueStart<text.length)valueStart++;const token=/^(?:"(?:\\.|[^"\\])*"|null|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)/.exec(text.slice(valueStart));if(token)span={start:valueStart,end:valueStart+token[0].length};}return span;}
 function rewrittenFrame(value,kind,rawId){let text=JSON.stringify(value);const span=idSpan(text);if(rawId!==undefined&&span)text=text.slice(0,span.start)+rawId+text.slice(span.end);return mcpFrame(Buffer.from(text),kind);}
 function runMcp(){
-  const child=spawn(process.env.COLLAB_MCP_BIN||path.join(process.env.CARGO_HOME||path.join(os.homedir(),'.cargo'),'bin','collab-mcp'),[],{stdio:['pipe','pipe','pipe']});let stopping=false;
+  // Default to the collab-mcp installed beside this wrapper. Re-deriving a
+  // CARGO_HOME/home path here could spawn a different install than the one the
+  // user launched, splitting the tool from its matching binaries.
+  const mcpBin=process.env.COLLAB_MCP_BIN||path.join(path.dirname(script),'collab-mcp');
+  const child=spawn(mcpBin,[],{stdio:['pipe','pipe','pipe']});let stopping=false;
   const stop=code=>{if(stopping)return;stopping=true;child.stdin.end();const timer=setTimeout(()=>child.kill('SIGTERM'),1000);child.once('close',()=>{clearTimeout(timer);process.exit(code);});if(child.exitCode!==null||child.signalCode!==null){clearTimeout(timer);process.exit(code);}};
   const ready=desktop?ensureService():Promise.resolve();ready.catch(()=>{});
   async function forward(body,kind){let r;try{r=JSON.parse(body);}catch{child.stdin.write(mcpFrame(body,kind));return;}if(!(desktop&&r.method==='tools/call'&&r.params?.name==='collab_context'&&r.params.arguments?.query!==true)){child.stdin.write(mcpFrame(body,kind));return;}const original=body.toString(),span=idSpan(original),rawId=span?original.slice(span.start,span.end):undefined;

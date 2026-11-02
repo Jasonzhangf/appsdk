@@ -396,13 +396,11 @@
     }
 
     #[test]
-    fn admission_audit_failure_is_explicit_and_does_not_create_child() {
+    fn start_rejects_managed_child_creation_without_side_effects() {
         let (server, root) = test_server();
         register(&server, "master", "%master");
         register(&server, "idle-peer", "%idle-peer");
         promote_master(&server);
-        let events = root.join(".agent-collab/server/events.jsonl");
-        std::fs::create_dir(&events).unwrap();
         let server = Arc::new(server);
         let result = dispatch(
             &server,
@@ -995,7 +993,7 @@
     }
 
     #[test]
-    fn scheduler_dispatch_audit_failure_is_stable_on_request_retry() {
+    fn scheduler_dispatch_does_not_depend_on_activity_log() {
         let (server, root) = test_server();
         register(&server, "master", "%master");
         register_private_dispatch_peer(&server);
@@ -1026,37 +1024,27 @@
             )
         };
         let first = request("first body");
-        assert!(!first.ok, "{first:?}");
-        let first_error = first.error.clone().unwrap();
-        assert!(first_error.contains("scheduler admission audit failed"));
-        assert_eq!(first.data["reservation"], true);
+        assert!(first.ok, "{first:?}");
         let state = server.state.lock().unwrap();
         assert_eq!(state.msgs["scheduler-req-audit-failure-1"].state, "pending");
-        assert_eq!(
-            state.msgs["scheduler-req-audit-failure-1"].wake_attempt_count,
-            0
-        );
+        let attempts = state.msgs["scheduler-req-audit-failure-1"].wake_attempt_count;
         drop(state);
         *server.state.lock().unwrap() = replay(&root).unwrap();
         let second = request("retry body is ignored");
-        assert!(!second.ok, "{second:?}");
-        assert_eq!(second.error.as_deref(), Some(first_error.as_str()));
-        assert_eq!(second.data["reservation"], true);
+        assert!(second.ok, "{second:?}");
         assert_eq!(second.data["message_id"], first.data["message_id"]);
         assert_eq!(second.data["task_id"], first.data["task_id"]);
         let state = server.state.lock().unwrap();
         assert_eq!(state.tasks.len(), 1);
         assert_eq!(state.msgs.len(), 1);
-        assert_eq!(
-            state.scheduler_admissions["req-audit-failure-1"].status,
-            "failed"
-        );
+        assert_ne!(state.scheduler_admissions["req-audit-failure-1"].status, "failed");
+        assert_eq!(state.msgs["scheduler-req-audit-failure-1"].wake_attempt_count, attempts);
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn scheduler_dispatch_audit_failure_cannot_be_accepted_by_managed_child() {
+    fn scheduler_dispatch_succeeds_when_activity_log_is_unavailable() {
         let (server, root) = test_server();
         register(&server, "master", "%master");
         // The managed peer is the dispatch recipient, so it needs a
@@ -1092,8 +1080,8 @@
                 token: "token-master".into(),
                 command: crate::subagent::Action::Dispatch {
                     request_id: "req-managed-failed-audit-1".into(),
-                    subject: "Failed managed task".into(),
-                    body: "Must not execute".into(),
+                    subject: "Managed task with unavailable activity log".into(),
+                    body: "Must execute".into(),
                     feature_id: None,
                     worktree_path: None,
                     branch: None,
@@ -1104,7 +1092,7 @@
                 launch_env: Default::default(),
             },
         );
-        assert!(!dispatch_result.ok, "{dispatch_result:?}");
+        assert!(dispatch_result.ok, "{dispatch_result:?}");
         let working = crate::subagent::handle_with_env(
             &server,
             "managed-peer",
@@ -1114,30 +1102,26 @@
             },
             Default::default(),
         );
-        assert!(!working.ok, "{working:?}");
-        assert!(working
-            .error
-            .unwrap_or_default()
-            .contains("scheduler assignment admission is failed"));
+        assert!(working.ok, "{working:?}");
         let state = server.state.lock().unwrap();
         assert_eq!(
             state.scheduler_admissions["req-managed-failed-audit-1"].status,
-            "failed"
+            "succeeded"
         );
         assert_eq!(
             state.subagents["managed-child-failed-audit"].status,
-            "assigned"
+            "working"
         );
         assert_eq!(
             state.tasks["task-scheduler-req-managed-failed-audit-1"].status,
-            "assigned"
+            "working"
         );
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn scheduler_dispatch_audit_failure_does_not_wake_long_poll_or_recv() {
+    fn scheduler_dispatch_success_wakes_long_poll_when_activity_log_is_unavailable() {
         let (server, root) = test_server();
         register(&server, "master", "%master");
         register_private_dispatch_peer(&server);
@@ -1160,8 +1144,8 @@
                         token: "token-master".into(),
                         command: crate::subagent::Action::Dispatch {
                             request_id: "req-long-poll-failed-audit-1".into(),
-                            subject: "Failed long poll task".into(),
-                            body: "Must not be consumed".into(),
+                            subject: "Long poll task with unavailable activity log".into(),
+                            body: "Must wake recv".into(),
                             feature_id: None,
                             worktree_path: None,
                             branch: None,
@@ -1177,18 +1161,21 @@
             (poll_result, dispatch_result.unwrap())
         });
         assert!(poll_result.ok, "{poll_result:?}");
-        assert_eq!(poll_result.data["count"], 0);
-        assert_eq!(poll_result.data["timeout"], true);
-        assert!(!dispatch_result.ok, "{dispatch_result:?}");
+        assert_eq!(poll_result.data["count"], 1);
+        assert!(!poll_result.data["timeout"].as_bool().unwrap_or(false));
+        assert_eq!(
+            poll_result.data["messages"][0]["id"],
+            "scheduler-req-long-poll-failed-audit-1"
+        );
+        assert!(dispatch_result.ok, "{dispatch_result:?}");
         let state = server.state.lock().unwrap();
         assert_eq!(
-            state.msgs["scheduler-req-long-poll-failed-audit-1"].wake_attempt_count,
-            0
+            state.msgs["scheduler-req-long-poll-failed-audit-1"].state,
+            "read"
         );
-        assert_eq!(state.inbox_of("peer").len(), 0);
         assert_eq!(
             state.scheduler_admissions["req-long-poll-failed-audit-1"].status,
-            "failed"
+            "succeeded"
         );
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
@@ -1263,8 +1250,8 @@
 
     #[test]
     fn scheduler_dispatch_recovers_pending_reservation_without_duplicates() {
-        // Simulate a process interruption after the reservation and audit write,
-        // but before the durable succeeded status commit.
+        // Simulate a process interruption after the typed reservation, but
+        // before the durable succeeded status commit.
         let (mut server, root) = test_server();
         register(&server, "master", "%master");
         register_appserver_worker(&server, &root, "peer", "thread-peer");
@@ -1328,32 +1315,14 @@
                 },
             },
         ]);
-        record_scheduler_admission(
-            &server,
-            json!({
-                "request_id": "req-pending-recovery-1",
-                "decision": "use-registered-peer",
-                "worker_id": "peer",
-                "message_id": "scheduler-req-pending-recovery-1",
-                "task_id": "task-scheduler-req-pending-recovery-1",
-                "status": "pending",
-            }),
-        )
-        .unwrap();
-        let audit_path = root.join(".agent-collab/server/events.jsonl");
-        let original_mode = std::fs::metadata(&audit_path).unwrap().permissions().mode();
-        let mut read_only = std::fs::metadata(&audit_path).unwrap().permissions();
-        read_only.set_mode(original_mode & !0o222);
-        std::fs::set_permissions(&audit_path, read_only).unwrap();
         let server = Arc::new(server);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         // This case recovers an already-consumed pending reservation. Complete
-        // the public poll first: racing it against recovery could instead take
-        // the native notification path, whose audit is deliberately read-only.
-        // That path correctly rejects delivery and is a different failure case.
+        // the public poll first so the message is consumed: recovery then
+        // reconciles to that consumed outcome instead of re-notifying.
         let poll_result = runtime.block_on(handle_poll_async(Arc::clone(&server), "peer".into(), 1_000));
         let recovered = dispatch(
                     &server,
@@ -1374,9 +1343,6 @@
                         launch_env: Default::default(),
                     },
                 );
-        let mut restored = std::fs::metadata(&audit_path).unwrap().permissions();
-        restored.set_mode(original_mode);
-        std::fs::set_permissions(&audit_path, restored).unwrap();
         assert!(poll_result.ok, "{poll_result:?}");
         assert_eq!(poll_result.data["count"], 1);
         assert!(!poll_result.data["timeout"].as_bool().unwrap_or(false));
@@ -1395,13 +1361,5 @@
             "succeeded"
         );
         drop(state);
-        let audit_count = std::fs::read_to_string(root.join(".agent-collab/server/events.jsonl"))
-            .unwrap()
-            .lines()
-            .filter(|line| {
-                line.contains("scheduler_admission") && line.contains("req-pending-recovery-1")
-            })
-            .count();
-        assert_eq!(audit_count, 1);
         std::fs::remove_dir_all(root).unwrap();
     }

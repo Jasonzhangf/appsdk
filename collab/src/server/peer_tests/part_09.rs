@@ -636,7 +636,7 @@ fn lifecycle_cannot_bypass_delivery_or_review() {
     );
     assert_eq!(
         skipped_delivery.error.as_deref(),
-        Some("use collab task review/integrated for integration-owned lifecycle transitions")
+        Some("COLLAB_GIT_OWNERSHIP_DISABLED: Collab no longer records Git integration; close after delivery and valid review")
     );
     assert_eq!(
         server.state.lock().unwrap().tasks["task"].status,
@@ -669,7 +669,45 @@ fn lifecycle_cannot_bypass_delivery_or_review() {
 }
 
 #[test]
-fn legacy_accepted_candidate_can_record_merge() {
+fn legacy_accepted_status_can_no_longer_record_merge() {
+    let (server, root) = test_server();
+    register(&server, "peer", "%peer");
+    assert!(create_task(&server, "peer", "accepted-task", "feature").ok);
+    // Journal the legacy accepted status so replay reconstructs the same state;
+    // an in-memory-only mutation would not survive replay.
+    let mut legacy_task = server.state.lock().unwrap().tasks["accepted-task"].clone();
+    legacy_task.status = "accepted".into();
+    server.commit(&[Event::TaskUpdated { task: legacy_task }]);
+    let merged = handle_task_update(
+        &server,
+        "peer".into(),
+        "token-peer".into(),
+        "accepted-task".into(),
+        Some("merged".into()),
+        Some("integration recorded".into()),
+    );
+    // Git integration is retired: the merged transition is rejected, not taken.
+    assert!(!merged.ok, "{merged:?}");
+    assert!(
+        merged
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("COLLAB_GIT_OWNERSHIP_DISABLED")),
+        "{merged:?}"
+    );
+    assert_eq!(
+        server.state.lock().unwrap().tasks["accepted-task"].status,
+        "accepted"
+    );
+    assert_eq!(
+        replay(&root).unwrap().tasks["accepted-task"].status,
+        "accepted"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn accepted_task_without_lifecycle_edges_cannot_close() {
     let (server, root) = test_server();
     register(&server, "peer", "%peer");
     assert!(create_task(&server, "peer", "accepted-task", "feature").ok);
@@ -685,44 +723,15 @@ fn legacy_accepted_candidate_can_record_merge() {
         "token-peer".into(),
         "accepted-task".into(),
         Some("merged".into()),
-        Some("integration recorded".into()),
+        Some("legacy merge compatibility".into()),
     );
+    assert!(!merged.ok, "{merged:?}");
     assert!(
-        merged.ok,
-        "legacy accepted task must be mergeable: {merged:?}"
-    );
-    assert_eq!(
-        server.state.lock().unwrap().tasks["accepted-task"].status,
-        "merged"
-    );
-    assert_eq!(
-        replay(&root).unwrap().tasks["accepted-task"].status,
-        "merged"
-    );
-    std::fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn merged_task_without_lifecycle_edges_cannot_close() {
-    let (server, root) = test_server();
-    register(&server, "peer", "%peer");
-    assert!(create_task(&server, "peer", "accepted-task", "feature").ok);
-    {
-        let mut state = server.state.lock().unwrap();
-        let mut task = state.tasks.remove("accepted-task").unwrap();
-        task.status = "accepted".into();
-        state.tasks.insert(task.id.clone(), task);
-    }
-    assert!(
-        handle_task_update(
-            &server,
-            "peer".into(),
-            "token-peer".into(),
-            "accepted-task".into(),
-            Some("merged".into()),
-            Some("legacy merge compatibility".into()),
-        )
-        .ok
+        merged
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("COLLAB_GIT_OWNERSHIP_DISABLED")),
+        "{merged:?}"
     );
     let closed = handle_task_close(
         &server,
@@ -734,22 +743,21 @@ fn merged_task_without_lifecycle_edges_cannot_close() {
     );
     assert_eq!(
         closed.error.as_deref(),
-        Some("task accepted-task cannot close before delivery, review, and integration evidence")
+        Some("task accepted-task cannot close before delivery and valid review evidence")
     );
     assert_eq!(
         server.state.lock().unwrap().tasks["accepted-task"].status,
-        "merged"
+        "accepted"
     );
     std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
-fn task_integrated_accepts_the_main_tip() {
+fn task_integrated_is_disabled_for_main_tip() {
     let (server, root) = test_server();
     register(&server, "owner", "%owner");
     assert!(create_task(&server, "owner", "task", "feature").ok);
     accept_task(&server, "owner", "task");
-    initialize_main(&root);
     let head = current_head(&root);
 
     let integrated = handle_task_integrated(
@@ -757,132 +765,94 @@ fn task_integrated_accepts_the_main_tip() {
         "owner".into(),
         "token-owner".into(),
         "task".into(),
-        head.clone(),
+        head,
         "main tip integration".into(),
     );
-    assert!(integrated.ok, "{integrated:?}");
-    let state = server.state.lock().unwrap();
-    assert_eq!(state.tasks["task"].status, "merged");
-    assert_eq!(
-        state.task_lifecycle["task"].integration_commit.as_deref(),
-        Some(head.as_str())
+    assert!(!integrated.ok, "{integrated:?}");
+    assert!(
+        integrated
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("COLLAB_GIT_OWNERSHIP_DISABLED")),
+        "{integrated:?}"
     );
+    assert_eq!(integrated.data["task_id"], "task");
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.tasks["task"].status, "accepted");
+    assert!(state.task_lifecycle["task"].integration_commit.is_none());
     drop(state);
     std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
-fn task_integrated_accepts_a_real_merge_commit_and_the_merged_candidate() {
+fn task_integrated_is_disabled_for_merge_commit_and_candidate() {
     let (server, root) = test_server();
     register(&server, "owner", "%owner");
     assert!(create_task(&server, "owner", "task", "feature").ok);
     accept_task(&server, "owner", "task");
-    initialize_main(&root);
-
-    git_ok(&root, &["checkout", "-q", "-b", "candidate"]);
-    git_ok(&root, &["commit", "--allow-empty", "-q", "-m", "candidate"]);
-    let candidate = current_head(&root);
-    git_ok(&root, &["checkout", "-q", "main"]);
-    git_ok(
-        &root,
-        &[
-            "merge",
-            "--no-ff",
-            "-q",
-            "candidate",
-            "-m",
-            "merge candidate",
-        ],
-    );
-    let merge_commit = current_head(&root);
-    assert_ne!(candidate, merge_commit);
-    // Main keeps moving after the merge, so neither the merge commit nor the
-    // candidate is the current main tip when integration is recorded.
-    git_ok(
-        &root,
-        &["commit", "--allow-empty", "-q", "-m", "main moves on"],
-    );
-    let main_tip = current_head(&root);
-    assert_eq!(rev_parse(&root, "refs/heads/main"), main_tip);
-    assert_ne!(main_tip, merge_commit);
 
     let via_merge = handle_task_integrated(
         &server,
         "owner".into(),
         "token-owner".into(),
         "task".into(),
-        merge_commit.clone(),
+        "merge-commit".into(),
         "merge commit integration".into(),
     );
-    assert!(via_merge.ok, "{via_merge:?}");
-    assert_eq!(
-        server.state.lock().unwrap().task_lifecycle["task"]
-            .integration_commit
-            .as_deref(),
-        Some(merge_commit.as_str())
+    assert!(!via_merge.ok, "{via_merge:?}");
+    assert!(
+        via_merge
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("COLLAB_GIT_OWNERSHIP_DISABLED")),
+        "{via_merge:?}"
     );
 
-    // The same accepted task can be re-recorded with the candidate SHA that
-    // the merge brought in, because it is reachable from refs/heads/main.
-    {
-        let mut state = server.state.lock().unwrap();
-        let mut task = state.tasks.remove("task").unwrap();
-        task.status = "accepted".into();
-        state.tasks.insert(task.id.clone(), task);
-    }
     let via_candidate = handle_task_integrated(
         &server,
         "owner".into(),
         "token-owner".into(),
         "task".into(),
-        candidate.clone(),
+        "candidate-sha".into(),
         "candidate SHA integration".into(),
     );
-    assert!(via_candidate.ok, "{via_candidate:?}");
-    assert_eq!(
-        server.state.lock().unwrap().task_lifecycle["task"]
-            .integration_commit
-            .as_deref(),
-        Some(candidate.as_str())
+    assert!(!via_candidate.ok, "{via_candidate:?}");
+    assert!(
+        via_candidate
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("COLLAB_GIT_OWNERSHIP_DISABLED")),
+        "{via_candidate:?}"
     );
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.tasks["task"].status, "accepted");
+    assert!(state.task_lifecycle["task"].integration_commit.is_none());
+    drop(state);
     std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
-fn task_integrated_rejects_a_commit_not_reachable_from_main_with_an_actionable_error() {
+fn task_integrated_is_disabled_for_unreachable_commit() {
     let (server, root) = test_server();
     register(&server, "owner", "%owner");
     assert!(create_task(&server, "owner", "task", "feature").ok);
     accept_task(&server, "owner", "task");
-    initialize_main(&root);
-    let main_head = current_head(&root);
-
-    git_ok(&root, &["checkout", "-q", "--orphan", "orphan"]);
-    git_ok(&root, &["commit", "--allow-empty", "-q", "-m", "orphan"]);
-    let orphan = current_head(&root);
-    git_ok(&root, &["checkout", "-q", "main"]);
 
     let rejected = handle_task_integrated(
         &server,
         "owner".into(),
         "token-owner".into(),
         "task".into(),
-        orphan.clone(),
+        "unreachable-sha".into(),
         "orphan integration".into(),
     );
     assert!(!rejected.ok, "{rejected:?}");
-    assert_eq!(
-        rejected.error.as_deref(),
-        Some("TASK_INTEGRATION_COMMIT_MISMATCH")
-    );
-    assert_eq!(rejected.data["provided"], orphan);
-    assert_eq!(rejected.data["main_head"], main_head);
     assert!(
-        rejected.data["expected"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("reachable from refs/heads/main"),
-        "expected value must name the reachability contract: {rejected:?}"
+        rejected
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("COLLAB_GIT_OWNERSHIP_DISABLED")),
+        "{rejected:?}"
     );
     assert_eq!(
         server.state.lock().unwrap().tasks["task"].status,
@@ -892,22 +862,18 @@ fn task_integrated_rejects_a_commit_not_reachable_from_main_with_an_actionable_e
 }
 
 #[test]
-fn task_integrated_is_correct_when_root_is_not_checked_out_on_main() {
+fn task_integrated_is_disabled_regardless_of_checkout() {
     let (server, root) = test_server();
     register(&server, "owner", "%owner");
     assert!(create_task(&server, "owner", "task", "feature").ok);
     accept_task(&server, "owner", "task");
-    initialize_main(&root);
     let main_head = current_head(&root);
 
     git_ok(&root, &["checkout", "-q", "-b", "topic"]);
     git_ok(&root, &["commit", "--allow-empty", "-q", "-m", "topic"]);
     let topic_head = current_head(&root);
     assert_ne!(topic_head, main_head);
-    assert_eq!(rev_parse(&root, "refs/heads/main"), main_head);
 
-    // The recorded commit is a real ancestor of main, so reachability must be
-    // judged from refs/heads/main rather than from the current checkout.
     let integrated = handle_task_integrated(
         &server,
         "owner".into(),
@@ -916,21 +882,13 @@ fn task_integrated_is_correct_when_root_is_not_checked_out_on_main() {
         topic_head.clone(),
         "integration judged from refs/heads/main".into(),
     );
+    assert!(!integrated.ok, "{integrated:?}");
     assert!(
-        !integrated.ok,
-        "a topic-only commit must not be accepted: {integrated:?}"
-    );
-    assert_eq!(
-        integrated.error.as_deref(),
-        Some("TASK_INTEGRATION_COMMIT_MISMATCH")
-    );
-    assert!(integrated.data["expected"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("reachable from refs/heads/main"));
-    assert_eq!(
-        server.state.lock().unwrap().tasks["task"].status,
-        "accepted"
+        integrated
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("COLLAB_GIT_OWNERSHIP_DISABLED")),
+        "{integrated:?}"
     );
 
     let merged = handle_task_integrated(
@@ -938,23 +896,28 @@ fn task_integrated_is_correct_when_root_is_not_checked_out_on_main() {
         "owner".into(),
         "token-owner".into(),
         "task".into(),
-        main_head.clone(),
+        main_head,
         "main ancestor accepted while checked out on topic".into(),
     );
-    assert!(merged.ok, "{merged:?}");
-    assert_eq!(
-        server.state.lock().unwrap().task_lifecycle["task"]
-            .integration_commit
-            .as_deref(),
-        Some(main_head.as_str())
+    assert!(!merged.ok, "{merged:?}");
+    assert!(
+        merged
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("COLLAB_GIT_OWNERSHIP_DISABLED")),
+        "{merged:?}"
     );
-    // The checkout must not be moved by the integration record.
+    assert_eq!(
+        server.state.lock().unwrap().tasks["task"].status,
+        "accepted"
+    );
+    // The disabled integration record must not move the checkout.
     assert_eq!(current_head(&root), topic_head);
     std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
-fn delivery_review_and_exact_main_integration_are_durable() {
+fn delivery_review_and_close_are_durable() {
     let (server, root) = test_server();
     register(&server, "owner", "%owner");
     register(&server, "outsider", "%outsider");
@@ -981,9 +944,6 @@ fn delivery_review_and_exact_main_integration_are_durable() {
         )
         .ok
     );
-    let worktree = candidate_worktree(&root, "task");
-    git_ok(&worktree, &["commit", "--allow-empty", "-q", "-m", "candidate"]);
-    let candidate = current_head(&worktree);
     assert!(
         handle_task_deliver(
             &server,
@@ -991,7 +951,7 @@ fn delivery_review_and_exact_main_integration_are_durable() {
             "token-owner".into(),
             "task".into(),
             Some("candidate commit and gates passed".into()),
-            Some(worktree.to_string_lossy().into_owned()),
+            None,
         )
         .ok
     );
@@ -1017,22 +977,17 @@ fn delivery_review_and_exact_main_integration_are_durable() {
         )
         .ok
     );
-
-    git_ok(&root, &["merge", "--ff-only", &candidate]);
-    assert!(
-        handle_task_integrated(
-            &server,
-            "owner".into(),
-            "token-owner".into(),
-            "task".into(),
-            candidate,
-            "main integration verified".into(),
-        )
-        .ok
+    let closed = handle_task_close(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "task".into(),
+        false,
+        None,
     );
-    git_ok(&root, &["worktree", "remove", worktree.to_str().unwrap()]);
+    assert!(closed.ok, "{}", closed.error.unwrap_or_default());
     let state = server.state.lock().unwrap();
-    assert_eq!(state.tasks["task"].status, "merged");
+    assert_eq!(state.tasks["task"].status, "closed");
     let lifecycle = &state.task_lifecycle["task"];
     assert_eq!(
         lifecycle.delivery_evidence.as_deref(),
@@ -1041,17 +996,13 @@ fn delivery_review_and_exact_main_integration_are_durable() {
     assert_eq!(lifecycle.reviewer.as_deref(), Some("owner"));
     assert_eq!(
         lifecycle.integration_evidence.as_deref(),
-        Some("main integration verified")
+        None,
+        "Git integration is retired and must not be recorded by Collab"
     );
     drop(state);
     let replayed = replay(&root).unwrap();
-    assert_eq!(replayed.tasks["task"].status, "merged");
-    assert_eq!(
-        replayed.task_lifecycle["task"]
-            .integration_evidence
-            .as_deref(),
-        Some("main integration verified")
-    );
+    assert_eq!(replayed.tasks["task"].status, "closed");
+    assert!(replayed.task_lifecycle["task"].integration_evidence.is_none());
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -1118,7 +1069,7 @@ fn accepted_task_can_return_to_rework_and_redeliver() {
     );
     assert_eq!(
         direct_merge.error.as_deref(),
-        Some("use collab task review/integrated for integration-owned lifecycle transitions")
+        Some("COLLAB_GIT_OWNERSHIP_DISABLED: Collab no longer records Git integration; close after delivery and valid review")
     );
     assert!(
         handle_task_update(
@@ -1163,7 +1114,7 @@ fn accepted_task_can_return_to_rework_and_redeliver() {
 }
 
 #[test]
-fn task_lifecycle_public_read_only_delivery_reaches_no_merge_and_owner_close() {
+fn task_lifecycle_public_read_only_delivery_closes_without_merge_pending() {
     let (server, root) = test_server();
     assert!(register_synthetic_peer(&server, "owner", "thread-read-only").ok);
     assert!(create_task(&server, "owner", "read-only-task", "feature").ok);
@@ -1204,8 +1155,11 @@ fn task_lifecycle_public_read_only_delivery_reaches_no_merge_and_owner_close() {
     );
     assert!(reviewed.ok, "{reviewed:?}");
     assert_eq!(reviewed.data["status"], "accepted");
-    assert_eq!(reviewed.data["merge_pending"], false);
-    assert_eq!(reviewed.data["disposition"], "no_merge_required");
+    assert!(
+        reviewed.data.get("merge_pending").is_none(),
+        "review no longer reports a merge obligation: {reviewed:?}"
+    );
+    assert_eq!(reviewed.data["disposition"], "accepted");
     assert!(
         server
             .state
@@ -1227,7 +1181,8 @@ fn task_lifecycle_public_read_only_delivery_reaches_no_merge_and_owner_close() {
         },
     );
     assert!(closed.ok, "{closed:?}");
-    assert_eq!(closed.data["disposition"], "no_merge_required");
+    assert_eq!(closed.data["disposition"], "closed");
+    assert_eq!(closed.data["cleanup"]["result"], "not_managed");
     drop(server);
 
     let replayed = replay(&root).unwrap();
@@ -1240,13 +1195,11 @@ fn task_lifecycle_public_read_only_delivery_reaches_no_merge_and_owner_close() {
 }
 
 #[test]
-fn task_lifecycle_public_masterless_code_integration_requires_exact_candidate() {
+fn task_lifecycle_public_masterless_code_integration_is_disabled() {
     let (server, root) = test_server();
     assert!(register_synthetic_peer(&server, "owner", "thread-code").ok);
     assert!(create_task(&server, "owner", "code-task", "feature").ok);
     let worktree = candidate_worktree(&root, "code-task");
-    git_ok(&worktree, &["commit", "--allow-empty", "-q", "-m", "code candidate"]);
-    let candidate = current_head(&worktree);
     for status in ["verifying", "reviewed"] {
         assert!(
             handle_task_update(
@@ -1280,9 +1233,6 @@ fn task_lifecycle_public_masterless_code_integration_requires_exact_candidate() 
     );
     assert!(reviewed.ok, "{reviewed:?}");
     git_ok(&root, &["worktree", "remove", worktree.to_str().unwrap()]);
-    git_ok(&root, &["commit", "--allow-empty", "-q", "-m", "unrelated main"]);
-    let unrelated_main = current_head(&root);
-    assert_ne!(candidate, unrelated_main);
     let server = Arc::new(server);
 
     let rejected = dispatch(
@@ -1291,16 +1241,28 @@ fn task_lifecycle_public_masterless_code_integration_requires_exact_candidate() 
             worker_id: "owner".into(),
             token: "token-owner".into(),
             task_id: "code-task".into(),
-            commit: unrelated_main,
+            commit: "unrelated-main-sha".into(),
             evidence: "main moved without the delivered candidate".into(),
         },
     );
     assert!(!rejected.ok, "{rejected:?}");
-    assert_eq!(
-        rejected.error.as_deref(),
-        Some("TASK_INTEGRATION_CANDIDATE_MISMATCH")
+    assert!(
+        rejected
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("COLLAB_GIT_OWNERSHIP_DISABLED")),
+        "{rejected:?}"
     );
-    assert_eq!(rejected.data["candidate_commit"], candidate);
+    assert_eq!(rejected.data["task_id"], "code-task");
+    assert!(
+        server
+            .state
+            .lock()
+            .unwrap()
+            .task_lifecycle["code-task"]
+            .integration_commit
+            .is_none()
+    );
     assert_eq!(
         server.state.lock().unwrap().tasks["code-task"].status,
         "accepted"
@@ -1349,7 +1311,7 @@ fn task_lifecycle_public_unresolved_code_delivery_is_not_read_only() {
         },
     );
     assert!(reviewed.ok, "{reviewed:?}");
-    assert_eq!(reviewed.data["disposition"], "integration_required");
+    assert_eq!(reviewed.data["disposition"], "accepted");
     let closed = dispatch(
         &server,
         Req::TaskClose {
@@ -1360,10 +1322,19 @@ fn task_lifecycle_public_unresolved_code_delivery_is_not_read_only() {
             reason: None,
         },
     );
-    assert!(!closed.ok, "{closed:?}");
-    assert_eq!(
-        closed.error.as_deref(),
-        Some("TASK_DELIVERY_CANDIDATE_UNRESOLVED")
+    // Candidate resolution is a Git concern, so Collab close now succeeds and
+    // leaves any unresolved Git candidate to the user-owned delivery process.
+    assert!(closed.ok, "{closed:?}");
+    assert_eq!(closed.data["disposition"], "closed");
+    assert_eq!(closed.data["cleanup"]["result"], "not_managed");
+    assert!(
+        server
+            .state
+            .lock()
+            .unwrap()
+            .task_lifecycle["unresolved-task"]
+            .integration_commit
+            .is_none()
     );
     std::fs::remove_dir_all(root).ok();
 }

@@ -14,6 +14,7 @@ fn reassign_fixture(status: &str) -> (Server, std::path::PathBuf, RouteScope) {
                 session_id: "session-current".into(),
                 occupancy_revision: 1,
                 updated_ms: 2,
+                pane_anchor: None,
             },
         );
     let binding = authoritative_send_binding(&state, &route, "current")

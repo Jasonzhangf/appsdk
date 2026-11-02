@@ -889,6 +889,7 @@ fn lifecycle_close_retires_a_route_less_missing_tmux_target() {
             status_reason: None,
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
+                periodic_declared: false,
             created_ms: now,
             updated_ms: now,
             fired_count: 0,
@@ -1281,9 +1282,6 @@ fn last_task_close_keeps_default_lease_armed_and_preserves_pending_unread_payloa
             .ok
         );
     }
-    let worktree = candidate_worktree(&root, "task");
-    git_ok(&worktree, &["commit", "--allow-empty", "-q", "-m", "candidate"]);
-    let candidate = current_head(&worktree);
     assert!(
         handle_task_deliver(
             &server,
@@ -1291,7 +1289,7 @@ fn last_task_close_keeps_default_lease_armed_and_preserves_pending_unread_payloa
             "token-owner".into(),
             "task".into(),
             Some("candidate verified".into()),
-            Some(worktree.to_string_lossy().into_owned()),
+            None,
         )
         .ok
     );
@@ -1307,20 +1305,6 @@ fn last_task_close_keeps_default_lease_armed_and_preserves_pending_unread_payloa
         )
         .ok
     );
-    git_ok(&root, &["merge", "--ff-only", &candidate]);
-    assert!(
-        handle_task_integrated(
-            &server,
-            "owner".into(),
-            "token-owner".into(),
-            "task".into(),
-            candidate,
-            "main verified".into(),
-        )
-        .ok
-    );
-    git_ok(&root, &["worktree", "remove", worktree.to_str().unwrap()]);
-
     let closed = handle_task_close(
         &server,
         "owner".into(),

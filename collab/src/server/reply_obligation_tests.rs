@@ -153,6 +153,7 @@ fn name_handoff_rebinds_current_carrier_and_resets_reminder() {
             session_id: "session-new".into(),
             occupancy_revision: 2,
             updated_ms: 20,
+            pane_anchor: None,
         },
         assignments: Vec::new(),
     });
@@ -178,6 +179,7 @@ fn name_handoff_rebinds_current_carrier_and_resets_reminder() {
             session_id: "session-new".into(),
             occupancy_revision: 3,
             updated_ms: 30,
+            pane_anchor: None,
         },
         assignments: Vec::new(),
     });

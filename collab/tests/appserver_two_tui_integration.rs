@@ -23,6 +23,8 @@ mod context_minimality;
 mod degraded_user_maintenance;
 #[path = "board/directory_unknown_cli.rs"]
 mod directory_unknown_cli;
+#[path = "board/git_ablation.rs"]
+mod git_ablation;
 #[path = "board/name_adjudication.rs"]
 mod name_adjudication;
 #[path = "board/name_confirmed_takeover.rs"]
@@ -438,40 +440,58 @@ fn context_names_allocate_idempotently_and_restore_jenny_with_authorization() {
 }
 
 #[test]
-fn context_names_unknown_keeps_peer_and_query_is_read_only() {
+fn context_names_explicit_restore_commits_directly_and_query_is_read_only() {
     let mut fixture = AppFixture::new();
     let alice = fixture.run_public(&["context"], THREAD_A);
     let bob = fixture.run_public(&["context"], THREAD_B);
-    let output = fixture.command_public(&["context", "--op", "names-pending",
+    let output = fixture.command_public(&["context", "--op", "names-restore",
         "--approve-grant", r#"{"action":"restore_name","requested_name":"Alice","authorization":"restore my named work"}"#], THREAD_B);
-    let pending: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(pending["ok"], false, "{pending}");
+    // An explicit authorized name change commits directly even when another
+    // carrier holds the target online; there is no second confirmation.
+    let restored: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(restored["ok"], true, "{restored}");
     assert_eq!(
-        pending["result"]["snapshot"]["name_resolution"]["outcome"], "pending",
-        "{pending}"
+        restored["result"]["snapshot"]["name_resolution"]["outcome"], "committed",
+        "{restored}"
     );
-    assert_eq!(pending["result"]["snapshot"]["name"], "Bob");
+    assert_eq!(restored["result"]["snapshot"]["name"], "Alice");
     assert_eq!(
-        pending["result"]["snapshot"]["identity"]["worker_id"],
+        restored["result"]["snapshot"]["identity"]["worker_id"],
         bob["identity"]["worker_id"]
     );
+    let control = std::fs::read_to_string(fixture.host_state.join("routes.jsonl")).unwrap();
+    let control: Value = control.lines().filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|line| line["kind"] == "binding_control").expect("current bindings are saved");
+    let slots = control["slots"].as_array().unwrap();
+    let current = slots.iter().find(|slot| slot["identity_key"]["name"] == "Alice" && !slot["current"].is_null())
+        .expect("Alice has a current binding");
+    assert_eq!(current["current"]["binding"]["agent_id"], bob["identity"]["worker_id"],
+        "control must follow the explicitly selected name: {current}");
+    assert!(slots.iter().filter(|slot| !slot["current"].is_null())
+        .all(|slot| slot["identity_key"]["name"] == "Alice" || slot["current"]["binding"]["agent_id"] != bob["identity"]["worker_id"]),
+        "the same carrier must not retain its previous active name: {slots:?}");
     fixture.restart_daemon();
-    let query = fixture.command_public(&["context", "--op", "names-pending", "--query"], THREAD_B);
+    let query = fixture.command_public(&["context", "--op", "names-restore", "--query"], THREAD_B);
     let query: Value = serde_json::from_slice(&query.stdout).unwrap();
     assert_eq!(
-        query["result"]["queried_operation"]["name_resolution"]["outcome"], "pending",
+        query["result"]["queried_operation"]["outcome"], "completed",
         "{query}"
     );
+    assert_eq!(
+        query["result"]["queried_operation"]["operation_id"], "names-restore",
+        "{query}"
+    );
+    // The displaced original holder keeps its identity worker; only the name
+    // was moved by the explicit change.
     let after = fixture.run_public(&["context"], THREAD_A);
     assert_eq!(
         after["identity"]["worker_id"],
         alice["identity"]["worker_id"]
     );
-    assert_eq!(after["name"], "Alice");
 }
 
 #[test]
-fn context_names_current_worker_session_continues_without_another_approval() {
+fn context_names_changed_session_without_anchor_gets_fresh_name_without_migration() {
     let mut fixture = AppFixture::new();
     let first = fixture.run_public(&["context"], THREAD_A);
     let worker = first["identity"]["worker_id"].as_str().unwrap();
@@ -505,27 +525,29 @@ fn context_names_current_worker_session_continues_without_another_approval() {
         snapshot["identity"]["worker_id"],
         first["identity"]["worker_id"]
     );
-    assert_eq!(snapshot["name"], "Alice");
+    // The carrier session changed and there is no pane+cwd anchor. The same
+    // worker id is not an identity anchor, so a fresh ordinary name is taken
+    // and Alice's legacy tasks do not migrate to it.
+    assert_eq!(snapshot["name"], "Bob", "{snapshot}");
     assert_eq!(snapshot["session_id"], THREAD_B, "{snapshot}");
     assert_eq!(snapshot["binding"]["session_id"], THREAD_B);
-    let events = std::fs::read_to_string(fixture.name_journal()).unwrap();
-    let resolution: Value = events
+    let journal = std::fs::read_to_string(fixture.name_journal()).unwrap();
+    let resolution: Value = journal
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .filter(|event| event["ev"] == "NameResolutionCommitted")
         .last()
         .unwrap();
+    assert_eq!(resolution["occupancy"]["name"], "Bob", "{resolution}");
     let assignments = resolution["assignments"].as_array().unwrap();
-    assert_eq!(assignments.len(), 2, "{resolution}");
-    for assignment in assignments {
-        assert_ne!(assignment["task_id"], "closed");
-        assert_eq!(assignment["session_id"], THREAD_B);
-        assert_eq!(assignment["assignment_revision"], 2);
-    }
+    assert!(
+        assignments.is_empty(),
+        "a fresh ordinary name must not migrate Alice's tasks: {resolution}"
+    );
 }
 
 #[test]
-fn context_names_online_replacement_needs_confirmation_and_keeps_old_executor() {
+fn context_names_online_replacement_approves_directly() {
     let mut fixture = AppFixture::new();
     let alice = fixture.run_public(&["context"], THREAD_A);
     fixture.run_public(&["context"], THREAD_B);
@@ -536,16 +558,15 @@ fn context_names_online_replacement_needs_confirmation_and_keeps_old_executor() 
     }})]);
     let output = fixture.command_public(&["context", "--approve-grant",
         r#"{"action":"restore_name","requested_name":"Alice","authorization":"restore my work"}"#], THREAD_B);
-    let refused: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(refused["ok"], false, "{refused}");
+    let restored: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(restored["ok"], true, "{restored}");
     assert_eq!(
-        refused["result"]["snapshot"]["name_resolution"]["outcome"], "confirmation_required",
-        "{refused}"
+        restored["result"]["snapshot"]["name_resolution"]["outcome"], "committed",
+        "{restored}"
     );
-    assert_eq!(refused["result"]["snapshot"]["name"], "Bob");
-    let restored = fixture.run_public(&["context", "--approve-grant",
-        r#"{"action":"restore_name","requested_name":"Alice","authorization":"replace online holder","replace_confirmed":true}"#], THREAD_B);
-    assert_eq!(restored["name"], "Alice");
+    assert_eq!(restored["result"]["snapshot"]["name"], "Alice");
+    let restored = fixture.run_public(&["context"], THREAD_B);
+    assert_eq!(restored["name"], "Alice", "{restored}");
     let events = std::fs::read_to_string(fixture.name_journal()).unwrap();
     assert!(!events.contains("WorkerClosed"));
     assert!(!events.contains("GlobalMasterRevoked"));
@@ -569,6 +590,8 @@ fn context_names_master_commands_and_peer_restore_keep_jenny_authority_consisten
         &["master", "promote", "--approval", "user requested Jenny"],
         THREAD_B,
     );
+    // A free-text promote alone is not a typed takeover of Jenny: it pauses
+    // pending an explicit restore_master confirmation and keeps the incumbent.
     assert!(!attempted.status.success(), "{:?}", attempted);
     let still_master = fixture.run_public(&["context"], THREAD_A);
     assert_eq!(still_master["name"], "Jenny");

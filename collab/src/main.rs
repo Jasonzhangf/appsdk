@@ -12,7 +12,6 @@ mod desktop_capability;
 pub(crate) mod host_runtime;
 mod identity;
 mod install_skills;
-pub(crate) mod migration;
 mod proto;
 mod reset;
 mod scope;
@@ -680,27 +679,22 @@ fn send_cross_project(
     body: String,
     in_reply_to: Option<String>,
 ) -> anyhow::Result<()> {
-    let master = require_current_master(scope, ident, "cross-project send", &target.address)?;
+    // Authorization is server-side only. The CLI submits the caller's
+    // authenticated token and current command envelope; it never decides
+    // master/CEO/peer eligibility itself.
+    let command = command_envelope(scope, ident)?;
     let request = Req::CrossProjectSend {
         from: ident.worker_id.clone(),
         from_project: scope.root.to_string_lossy().into_owned(),
-        source_master_assigned_by: master
-            .get("assigned_by")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned(),
-        source_master_approval: master
-            .get("approval")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        source_master_assigned_ms: master
-            .get("assigned_ms")
-            .and_then(Value::as_i64)
-            .unwrap_or_default(),
+        worker_id: ident.worker_id.clone(),
+        token: ident.token.clone(),
+        command: Some(command),
         to: target.worker_id.clone(),
         subject,
         body,
         in_reply_to,
+        reply_policy: None,
+        target_session: None,
     };
     let context = cli_project_context(std::path::Path::new(&target.project_root))?;
     let value: Value = client::call_with_context(&scope.sock_path(), &request, Some(context))?;
@@ -834,8 +828,6 @@ fn main() {
     }
 }
 
-const LEGACY_ROUTE_RESOLVE_NOT_FOUND_RECOVERY: &str = "recovery: run `collab context` from the canonical project main checkout to resolve the route and restore registration; do not re-register a worktree or edit routes.jsonl";
-const LEGACY_ROUTE_RESOLVE_NOT_FOUND_UPGRADE: &str = "recovery: run `collab context` from the canonical project main checkout; preserve daemon state and do not start a second daemon or use mailbox state as transport delivery";
 include!("main_error_format.rs");
 
 fn run(cmd: Cmd) -> anyhow::Result<()> {
@@ -949,19 +941,10 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
         }
         Cmd::Init => {
             let project_root = scope::project_root_for_init()?;
-            if project_root.ancestors().skip(1).any(|ancestor| {
-                ancestor
-                    .file_name()
-                    .is_some_and(|name| name == "playground")
-            }) {
-                anyhow::bail!(
-                    "collab init must run from the project main tree, not a ./playground worktree"
-                );
-            }
             let scope = Scope { root: project_root };
             // Ordinary init observes the user-managed daemon before any
             // baseline or identity write and never launches it.
-            client::require_server(&scope.sock_path())?;
+            client::require_server(&scope.host_paths()?.socket_path())?;
             scope::init(&scope.root)?;
             let facts = collect_identity_facts(None)?;
             let (snapshot, ident) = identity_context_response(&scope, facts)?;
@@ -1085,19 +1068,15 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
         Cmd::Up => {
             let _terminal = main_maintenance::user_terminal()?;
             let project_root = scope::lifecycle_project_root()?;
+            let host_paths = scope::HostPaths::resolve()?;
             if !project_root.join(".agent-collab").is_dir() {
                 scope::init(&project_root)?;
             }
             let scope = Scope { root: project_root };
-            let host_server_dir = scope.host_server_dir();
+            let host_server_dir = host_paths.server_dir();
             std::fs::create_dir_all(&host_server_dir)?;
             std::fs::remove_file(host_server_dir.join("DOWN")).ok();
-            client::record_event(
-                &scope.sock_path(),
-                "daemon_up_requested",
-                json!({"pid": std::process::id()}),
-            );
-            let sock = scope.sock_path();
+            let sock = host_paths.socket_path();
             let was_running = client::alive(&sock);
             // Bind the supervised daemon to this project, then let launchd own
             // the start. Loading the agent before spawning anything is what
@@ -1107,8 +1086,8 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             // launchd cannot run the agent (for example a non-macOS host, or an
             // isolated state root) does `up` start a detached daemon, and the
             // result says which happened.
-            let service_record = main_autostart::write_service_record(&scope.root);
-            let autostart = main_autostart::install_and_load();
+            let service_record = main_autostart::write_service_record(&scope.root)?;
+            let autostart = main_autostart::install_and_reload();
             let started = match &autostart {
                 Ok(path) => supervised_up_started(
                     path,
@@ -1128,10 +1107,17 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                         // reachable. Do not infer success from the earlier
                         // liveness observation alone.
                         true
+                    } else if was_running {
+                        // The daemon was already serving before `up`. Autostart
+                        // is a side capability of `up`; a launchd, plist, or
+                        // permission failure here must not fail the command or
+                        // disturb the running daemon. The result still reports
+                        // `autostart.installed=false`.
+                        false
                     } else {
-                        // A real launchd, plist, or permission failure must not
-                        // be masked by a detached substitute. Surface the
-                        // original error so `up` exits non-zero.
+                        // A real launchd, plist, or permission failure with no
+                        // daemon serving means activation was what `up` needed,
+                        // so surface the original error and exit non-zero.
                         return Err(anyhow::anyhow!("{}", message));
                     }
                 }
@@ -1142,10 +1128,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 "server": sock,
                 "started": started,
                 "supervised": supervised,
-                "service_record": match &service_record {
-                    Ok(path) => json!({"bound": true, "path": path}),
-                    Err(error) => json!({"bound": false, "error": format!("{error:#}")}),
-                },
+                "service_record": {"bound": true, "path": service_record},
                 "autostart": match &autostart {
                     Ok(path) => json!({
                         "installed": true,
@@ -1166,6 +1149,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             let scope = Scope {
                 root: scope::lifecycle_project_root()?,
             };
+            let sock = scope.host_paths()?.socket_path();
             let configured = config::maintenance_password_opt()?;
             let password = match configured {
                 None => {
@@ -1184,12 +1168,12 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     Some(entered)
                 }
             };
-            let _: Value = client::call(&scope.sock_path(), &Req::Shutdown { password })?;
+            let _: Value = client::call(&sock, &Req::Shutdown { password })?;
             // Do NOT `launchctl unload -w` here: that is a persistent disable
             // that would also cancel the next login. The daemon exits cleanly,
             // so the RunAtLoad/KeepAlive(SuccessfulExit=false) job stays
             // stopped for this session and resumes automatically on next login.
-            out(&json!({"ok": true, "down": true, "server": scope.sock_path()}));
+            out(&json!({"ok": true, "down": true, "server": sock}));
             Ok(())
         }
         Cmd::InstallAutostart => {
@@ -1365,20 +1349,6 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     subject,
                     body,
                 } => {
-                    let local: serde_json::Value =
-                        call_project(&scope, &ident, &Req::MasterStatus)?;
-                    let Some(master) = local.get("master") else {
-                        anyhow::bail!(
-                            "cross-project send requires this peer to be the project master"
-                        )
-                    };
-                    if master.get("worker_id").and_then(|v| v.as_str())
-                        != Some(ident.worker_id.as_str())
-                    {
-                        anyhow::bail!(
-                            "cross-project send requires this peer to be the project master"
-                        )
-                    }
                     let target = project.canonicalize()?;
                     if target == scope.root.canonicalize()? {
                         anyhow::bail!("cross-project send requires a different project")
@@ -1387,28 +1357,21 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                         anyhow::bail!("target project has no .agent-collab: {}", target.display())
                     }
                     let target_scope = Scope { root: target };
+                    let command = command_envelope(&scope, &ident)?;
                     let value: serde_json::Value = client::call_with_context(
                         &target_scope.sock_path(),
                         &Req::CrossProjectSend {
                             from: ident.worker_id.clone(),
                             from_project: scope.root.display().to_string(),
-                            source_master_assigned_by: master
-                                .get("assigned_by")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or_default()
-                                .to_string(),
-                            source_master_approval: master
-                                .get("approval")
-                                .and_then(|v| v.as_str())
-                                .map(str::to_owned),
-                            source_master_assigned_ms: master
-                                .get("assigned_ms")
-                                .and_then(|v| v.as_i64())
-                                .unwrap_or_default(),
+                            worker_id: ident.worker_id.clone(),
+                            token: ident.token.clone(),
+                            command: Some(command),
                             to,
                             subject,
                             body: body.join(" "),
                             in_reply_to: None,
+                            reply_policy: None,
+                            target_session: None,
                         },
                         Some(cli_project_context(&target_scope.root)?),
                     )?;
@@ -1852,6 +1815,8 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 desired,
                 trigger_ms,
                 ttl_seconds,
+                interval_ms,
+                repeat_count,
                 goal_subject,
                 reason,
             } = cmd;
@@ -1866,6 +1831,8 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     desired,
                     trigger_ms,
                     ttl_seconds,
+                    interval_ms,
+                    repeat_count,
                     goal_subject,
                     reason,
                 },

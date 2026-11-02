@@ -88,24 +88,6 @@ pub fn stale_socket_error(error: &io::Error) -> bool {
     ) || error.raw_os_error() == Some(libc::EOPNOTSUPP)
 }
 
-pub fn record_event(sock: &Path, kind: &str, detail: Value) {
-    let Some(server_dir) = sock.parent() else {
-        return;
-    };
-    let path = server_dir.join("events.jsonl");
-    let record = serde_json::json!({"ts": chrono::Utc::now().timestamp_millis(), "kind": kind, "detail": detail});
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        use std::io::Write;
-        let mut line = serde_json::to_vec(&record).unwrap_or_default();
-        line.push(b'\n');
-        let _ = file.write_all(&line);
-    }
-}
-
 /// Round-trip one request without changing daemon state.
 ///
 /// The caller must have an already-running daemon. In particular, this path
@@ -470,11 +452,6 @@ fn spawn_server(sock: &Path) -> anyhow::Result<()> {
         .stderr(err)
         .process_group(0)
         .spawn()?;
-    record_event(
-        sock,
-        "daemon_restart_requested",
-        serde_json::json!({"pid": std::process::id()}),
-    );
     Ok(())
 }
 

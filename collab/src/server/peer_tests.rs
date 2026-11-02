@@ -22,3 +22,4 @@ include!("peer_tests/part_09.rs");
 include!("peer_tests/part_10.rs");
 include!("peer_tests/part_11.rs");
 include!("peer_tests/part_12.rs");
+include!("peer_tests/part_15.rs");

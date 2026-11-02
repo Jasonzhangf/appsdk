@@ -10,6 +10,14 @@
       "path": "docs/dagpipe/collab-binding-lifecycle.graph.json"
     },
     {
+      "id": "appsdk-collab-startup-recovery",
+      "path": "docs/dagpipe/collab-startup-recovery.graph.json"
+    },
+    {
+      "id": "appsdk-collab-installer",
+      "path": "docs/dagpipe/collab-installer.graph.json"
+    },
+    {
       "id": "collab-work-role-registration",
       "path": "docs/dagpipe/collab-work-role-registration.graph.json"
     },

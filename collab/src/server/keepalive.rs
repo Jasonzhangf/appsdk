@@ -1952,6 +1952,7 @@ mod tests {
                 session_id,
                 occupancy_revision: revision,
                 updated_ms: 1,
+                pane_anchor: None,
             },
             assignments: vec![],
         }]);

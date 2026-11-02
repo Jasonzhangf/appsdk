@@ -373,6 +373,7 @@ fn handle_notification_subscribe(
         status_reason: None,
         patrol_idle_since_ms: None,
         patrol_last_push_ms: 0,
+        periodic_declared: false,
     };
     if let Err(error) = server.commit_locked(
         &mut state,
@@ -758,6 +759,9 @@ fn handle_notification_board_rearm(
     }))
 }
 
+/// Single-shot compatibility entry. Goal reconcile without explicit periodic
+/// fields keeps the original one absolute one-shot deadline occurrence.
+#[cfg_attr(not(test), allow(dead_code))]
 fn handle_goal_schedule_reconcile(
     server: &Server,
     worker_id: String,
@@ -769,6 +773,30 @@ fn handle_goal_schedule_reconcile(
     ttl_seconds: Option<u64>,
     goal_subject: Option<String>,
     reason: Option<String>,
+) -> Resp {
+    handle_goal_schedule_reconcile_with_period(
+        server, worker_id, token, goal_id, goal_owner, desired, trigger_ms, ttl_seconds,
+        goal_subject, reason, None, None,
+    )
+}
+
+/// Reconcile one owned goal's finite deadline schedule. When `interval_ms` and
+/// `repeat_count` are both present the occurrence recurs on that interval up to
+/// the repeat count or TTL, whichever exhausts first; without them it is the
+/// single absolute one-shot occurrence kept for compatibility.
+fn handle_goal_schedule_reconcile_with_period(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    goal_id: String,
+    goal_owner: String,
+    desired: String,
+    trigger_ms: Option<i64>,
+    ttl_seconds: Option<u64>,
+    goal_subject: Option<String>,
+    reason: Option<String>,
+    interval_ms: Option<i64>,
+    repeat_count: Option<u32>,
 ) -> Resp {
     if goal_id.trim().is_empty() {
         return Resp::err("GOAL_SCHEDULE_ID_REQUIRED");
@@ -870,6 +898,34 @@ fn handle_goal_schedule_reconcile(
         if trigger_ms <= now || trigger_ms >= expires_ms {
             return Resp::err("goal deadline trigger must be in the future and before expiry");
         }
+        // A sustained periodic goal deadline is declared explicitly by a
+        // request that carries both `interval_ms` and `repeat_count`. Legacy
+        // records and any occurrence that merely carries interval/repeat keep
+        // the original single absolute one-shot contract.
+        if interval_ms.is_some() != repeat_count.is_some() {
+            return Resp::err(
+                "GOAL_SCHEDULE_PERIOD_INCOMPLETE: interval_ms and repeat_count must be provided together",
+            );
+        }
+        let (requested_interval, requested_repeat) = match (interval_ms, repeat_count) {
+            (Some(interval), Some(repeat)) => {
+                if interval <= 0 {
+                    return Resp::err("interval_ms must be greater than zero");
+                }
+                if !(1..=crate::server::state::MAX_NOTIFICATION_REPEATS).contains(&repeat) {
+                    return Resp::err(format!(
+                        "repeat_count must be between 1 and {}",
+                        crate::server::state::MAX_NOTIFICATION_REPEATS
+                    ));
+                }
+                if now.saturating_add(interval) >= expires_ms {
+                    return Resp::err("every-ms must fire before goal deadline expiry");
+                }
+                (Some(interval), repeat)
+            }
+            _ => (None, 1),
+        };
+        let periodic_declared = requested_interval.is_some();
         let Some(target) = notification_target(&transport) else {
             return Resp::err("selected transport has no route address");
         };
@@ -877,11 +933,26 @@ fn handle_goal_schedule_reconcile(
             .iter()
             .find(|subscription| {
                 subscription.status == "armed"
-                    && subscription.trigger_ms == Some(trigger_ms)
                     && subscription.trigger_times_ms.is_empty()
-                    && subscription.interval_ms.is_none()
-                    && subscription.repeat_count == 1
                     && subscription.expires_ms > now
+                    && match requested_interval {
+                        // A periodic plan is identified by its interval and
+                        // total count, not by the (advancing) next trigger, so
+                        // a repeated reconcile keeps the id and fired count.
+                        Some(interval) => {
+                            subscription.interval_ms == Some(interval)
+                                && subscription.repeat_count == requested_repeat
+                                && subscription.periodic_declared
+                        }
+                        // A one-shot occurrence is still identified by its
+                        // single absolute trigger.
+                        None => {
+                            subscription.interval_ms.is_none()
+                                && subscription.trigger_ms == Some(trigger_ms)
+                                && subscription.repeat_count == 1
+                                && !subscription.periodic_declared
+                        }
+                    }
             })
             .cloned()
         {
@@ -943,7 +1014,7 @@ fn handle_goal_schedule_reconcile(
                 "retired_subscription_ids": retired,
                 "superseded_message_ids": superseded,
                 "deduplicated": events.is_empty(),
-                "one_shot": true,
+                "one_shot": requested_interval.is_none(),
                 "max_repeat_count": crate::server::state::MAX_NOTIFICATION_REPEATS,
             }));
         }
@@ -972,6 +1043,23 @@ fn handle_goal_schedule_reconcile(
                 ids: superseded.clone(),
             });
         }
+        // The new occurrence replaces every matching plan for this goal, so the
+        // 3-active budget must count only the other armed plans. A rejected new
+        // plan leaves the existing plans untouched because nothing is committed.
+        let other_active = state
+            .notification_subscriptions
+            .values()
+            .filter(|subscription| {
+                subscription.worker_id == worker_id
+                    && subscription.status == "armed"
+                    && !matching
+                        .iter()
+                        .any(|existing| existing.id == subscription.id)
+            })
+            .count();
+        if other_active >= MAX_ACTIVE_SUBSCRIPTIONS_PER_WORKER {
+            return Resp::err("maximum 3 active subscriptions per agent");
+        }
         let subscription = NotificationSubscription {
             id: format!("sub-{}", gen_msg_id()),
             worker_id: worker_id.clone(),
@@ -981,8 +1069,8 @@ fn handle_goal_schedule_reconcile(
             method: transport.kind.as_str().into(),
             trigger_ms: Some(trigger_ms),
             trigger_times_ms: Vec::new(),
-            interval_ms: None,
-            repeat_count: 1,
+            interval_ms: requested_interval,
+            repeat_count: requested_repeat,
             fired_count: 0,
             expires_ms,
             status: "armed".into(),
@@ -991,6 +1079,7 @@ fn handle_goal_schedule_reconcile(
             status_reason: None,
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
+            periodic_declared,
         };
         events.push(Event::NotificationSubscribed {
             subscription: subscription.clone(),
@@ -1012,7 +1101,7 @@ fn handle_goal_schedule_reconcile(
             "retired_subscription_ids": retired,
             "superseded_message_ids": superseded,
             "deduplicated": false,
-            "one_shot": true,
+                "one_shot": requested_interval.is_none(),
             "max_repeat_count": crate::server::state::MAX_NOTIFICATION_REPEATS,
         }));
     }
@@ -1604,7 +1693,7 @@ fn consume_prepared_register_typed(
     prepared: PreparedRegisterEnvelope,
     approval: Option<&RegisterApprovalProof>,
 ) -> Resp {
-    consume_register_typed(server, worker_id, transport, prepared, approval)
+    consume_register_typed(server, worker_id, transport, prepared, approval, None)
 }
 
 fn consume_register_typed(
@@ -1613,6 +1702,7 @@ fn consume_register_typed(
     transport: &SelectedTransport,
     prepared: PreparedRegisterEnvelope,
     approval: Option<&RegisterApprovalProof>,
+    name_pane_anchor: Option<crate::server::name_state::NamePaneAnchor>,
 ) -> Resp {
     let registered_at = match &prepared.typed.command {
         TypedCommand::RegisterWorker { worker, .. } => worker.registered_ms,
@@ -1621,12 +1711,17 @@ fn consume_register_typed(
     let committed = server.consume_prepared_register_with_approval(prepared, approval);
     match committed {
         Ok(outcome) => {
-            let name_resolution = match name_resolution::resolve_registered_name(
+            // The context owner hands its live-observed pane+cwd here so the
+            // very first name decision anchors on the pane instead of taking a
+            // pool name that the later context resolution would then inherit.
+            let name_resolution = match name_resolution::resolve_registered_name_with_authorization(
                 server,
                 worker_id,
                 outcome.receipt.operation_id.as_str(),
                 "register",
                 None,
+                None,
+                name_pane_anchor,
             ) {
                 Ok(resolution) => resolution,
                 Err(error) => {
@@ -1727,6 +1822,7 @@ fn register_typed_observed(
     app_scope: Option<AppServerId>,
     reuse_existing: bool,
     register_approval: Option<&RegisterApprovalProof>,
+    name_pane_anchor: Option<crate::server::name_state::NamePaneAnchor>,
     before_consume: Option<&mut dyn FnMut(&PreparedRegisterEnvelope) -> Result<(), String>>,
 ) -> Resp {
     let prepared = match prepare_register_typed(
@@ -1750,7 +1846,14 @@ fn register_typed_observed(
         }
     }
     let response =
-        consume_register_typed(server, worker_id, transport, prepared, register_approval);
+        consume_register_typed(
+            server,
+            worker_id,
+            transport,
+            prepared,
+            register_approval,
+            name_pane_anchor,
+        );
     clear_context_cancel_operation();
     crate::server::clear_context_register_start_binding();
     response
@@ -1790,6 +1893,7 @@ pub(crate) fn register_created_peer(
         Some(context.project_scope.clone()),
         Some(context.app_scope_id.clone()),
         false,
+        None,
         None,
         None,
     );
@@ -2025,6 +2129,7 @@ fn handle_register_with_app_scope_inner(
         candidates,
         recover_existing,
         None,
+        None,
     )
 }
 
@@ -2088,6 +2193,9 @@ fn handle_register_with_app_scope_inner_bound(
     candidates: Option<TransportCandidates>,
     recover_existing: bool,
     outer_binding: Option<&RegisterOuterBinding>,
+    register_control_first: Option<
+        &mut dyn FnMut(&PreparedRegisterEnvelope) -> Result<(), String>,
+    >,
 ) -> Resp {
     let candidates = candidates.unwrap_or_default();
     let selected = match validate_transport_candidates(server, &candidates, &cwd) {
@@ -2202,6 +2310,14 @@ fn handle_register_with_app_scope_inner_bound(
             }
             None => Ok(()),
         };
+        let mut control_before = register_control_first;
+        let mut composed_before_consume = |prepared: &PreparedRegisterEnvelope| {
+            before_consume(prepared)?;
+            if let Some(control_before) = control_before.as_mut() {
+                control_before(prepared)?;
+            }
+            Ok(())
+        };
         let mut resp = register_typed_observed(
             server,
             &worker_id,
@@ -2212,7 +2328,8 @@ fn handle_register_with_app_scope_inner_bound(
             app_scope,
             reuse_existing,
             outer_binding.and_then(RegisterOuterBinding::approval),
-            Some(&mut before_consume),
+            outer_binding.and_then(|binding| binding.name_pane_anchor().cloned()),
+            Some(&mut composed_before_consume),
         );
         if resp.ok {
             if reuse_existing {
@@ -2232,6 +2349,14 @@ fn handle_register_with_app_scope_inner_bound(
         }
         None => Ok(()),
     };
+    let mut control_before = register_control_first;
+    let mut composed_before_consume = |prepared: &PreparedRegisterEnvelope| {
+        before_consume(prepared)?;
+        if let Some(control_before) = control_before.as_mut() {
+            control_before(prepared)?;
+        }
+        Ok(())
+    };
     register_typed_observed(
         server,
         &worker_id,
@@ -2242,7 +2367,8 @@ fn handle_register_with_app_scope_inner_bound(
         app_scope,
         false,
         outer_binding.and_then(RegisterOuterBinding::approval),
-        Some(&mut before_consume),
+        outer_binding.and_then(|binding| binding.name_pane_anchor().cloned()),
+        Some(&mut composed_before_consume),
     )
 }
 

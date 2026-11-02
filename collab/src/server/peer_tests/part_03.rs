@@ -410,9 +410,15 @@ fn command_start_append_and_sync_failures_fail_closed_before_business_apply() {
                 assert!(replay.is_ok(), "failed first append must leave no command");
             }
             CommandJournalFault::StartSync => {
+                // A bare start with no durable control pending effect cannot
+                // prove a re-driver, so the project is isolated and the tail
+                // bytes are kept rather than trimmed without evidence.
+                let error = replay.expect_err(
+                    "an unproven incomplete start must isolate the project, not be trimmed",
+                );
                 assert!(
-                    replay.is_err(),
-                    "sync failure after start append must poison replay"
+                    error.to_string().contains("no matching durable control pending effect"),
+                    "unexpected error: {error}"
                 );
             }
             _ => unreachable!(),
@@ -422,7 +428,7 @@ fn command_start_append_and_sync_failures_fail_closed_before_business_apply() {
 }
 
 #[test]
-fn command_completion_append_failure_leaves_incomplete_replay() {
+fn command_completion_append_failure_isolates_unproven_incomplete_tail() {
     let (server, root) = test_server();
     inject_command_journal_fault(CommandJournalFault::CompletionAppend);
     let result = server.commit_command(
@@ -436,7 +442,26 @@ fn command_completion_append_failure_leaves_incomplete_replay() {
     );
     assert!(result.is_err());
     assert!(server.state.lock().unwrap().keepalives.is_empty());
-    assert!(super::replay(&root).is_err());
+    // The completion marker is the commit point, but unrelated business has no
+    // durable control pending effect to prove a reliable re-driver. Keep the
+    // original bytes and isolate the project instead of trimming or archiving.
+    let journal = root.join(".agent-collab/server/journal.jsonl");
+    let preserved = std::fs::read_to_string(&journal).unwrap();
+    assert!(
+        preserved.contains("operation-completion-append"),
+        "unproven incomplete tail must be kept byte-for-byte: {preserved}"
+    );
+    let error = super::replay(&root)
+        .expect_err("an unproven incomplete completion tail must isolate the project");
+    assert!(
+        error.to_string().contains("no matching durable control pending effect"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&journal).unwrap(),
+        preserved,
+        "a failed replay must not rewrite the preserved journal"
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -670,10 +695,6 @@ fn missing_subagent_with_unresolved_responsibility_still_requires_a_snapshot() {
     let closed_task = handle_task_close(&server, "child".into(), "token-child".into(),
         "task-missing-busy".into(), true, Some("owner resolves the fixture task before unread-only responsibility check".into()));
     assert!(closed_task.ok, "{closed_task:?}");
-    let finalized = handle_task_finalize_cleanup(&server, "child".into(), "token-child".into(),
-        "task-missing-busy".into(), None);
-    assert!(finalized.ok, "{finalized:?}");
-    assert_eq!(finalized.data["cleanup"]["result"], "verified");
     assert_eq!(server.state.lock().unwrap().tasks["task-missing-busy"].status, "closed");
     let sent = handle_send(&server, "parent".into(), "child".into(), "notify".into(),
         Some("unread responsibility".into()), "This child still owns an unread result.".into(),
@@ -1018,11 +1039,83 @@ fn replayed_command_is_idempotent_and_operation_conflict_fails_closed() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[test]
-fn replay_rejects_business_event_persisted_without_command_completion() {
-    let (server, root) = test_server();
+fn committed_keepalive_events() -> Vec<Event> {
+    vec![
+        Event::CommandStarted {
+            command_id: "committed".into(),
+            operation_id: "operation-committed".into(),
+        },
+        Event::KeepaliveUpdated {
+            worker_id: "committed-worker".into(),
+            record: crate::server::keepalive::Record::default(),
+        },
+        Event::CommandCompleted {
+            command_id: "committed".into(),
+            operation_id: "operation-committed".into(),
+            receipt: crate::server::state::CommandReceipt {
+                operation_id: "operation-committed".into(),
+                outcome: json!({"accepted": true}),
+                sequence: 4,
+                revision: 4,
+            },
+        },
+    ]
+}
+
+fn serialize_events(events: &[Event]) -> String {
+    events
+        .iter()
+        .map(|event| serde_json::to_string(event).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn write_journal_with_tail(root: &Path, tail: &[Event]) -> (PathBuf, String) {
     let journal = root.join(".agent-collab/server/journal.jsonl");
-    let events = [
+    let content = format!(
+        "{}\n{}\n",
+        serialize_events(&committed_keepalive_events()),
+        serialize_events(tail)
+    );
+    std::fs::write(&journal, &content).unwrap();
+    (journal, content)
+}
+
+fn incomplete_handover_events() -> Vec<Event> {
+    vec![
+        Event::CommandStarted {
+            command_id: "incomplete-register".into(),
+            operation_id: "operation-incomplete-register".into(),
+        },
+        Event::Registered {
+            worker: crate::server::state::WorkerRec {
+                id: "pending-worker".into(),
+                token: "token-pending-worker".into(),
+                cwd: "/tmp".into(),
+                registered_ms: 1,
+                transport: Some(test_appserver_transport("thread-pending-worker")),
+            },
+        },
+        Event::WorkerNamed {
+            worker_id: "pending-worker".into(),
+            name: Some("pending".into()),
+        },
+    ]
+}
+
+fn uncommitted_side_files(root: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(root.join(".agent-collab/server"))
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.to_string_lossy().contains(".uncommitted."))
+        .collect()
+}
+
+#[test]
+fn replay_rejects_incomplete_unrelated_business_tail_without_trimming() {
+    let (server, root) = test_server();
+    let tail = [
         Event::CommandStarted {
             command_id: "incomplete".into(),
             operation_id: "operation-incomplete".into(),
@@ -1032,17 +1125,131 @@ fn replay_rejects_business_event_persisted_without_command_completion() {
             record: crate::server::keepalive::Record::default(),
         },
     ];
-    let body = events
-        .iter()
-        .map(|event| serde_json::to_string(event).unwrap())
-        .collect::<Vec<_>>()
-        .join("\n");
-    std::fs::write(&journal, format!("{body}\n")).unwrap();
-    let error = match super::replay(&root) {
-        Ok(_) => panic!("incomplete command replay must fail"),
-        Err(error) => error.to_string(),
+    let (journal, original) = write_journal_with_tail(&root, &tail);
+    // Unrelated business has no durable control pending effect to prove a
+    // reliable re-driver. The bytes must be kept and the project isolated.
+    let error = super::replay(&root)
+        .expect_err("unrelated business without a pending effect must isolate the project");
+    assert!(
+        error
+            .to_string()
+            .contains("no matching durable control pending effect"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&journal).unwrap(),
+        original,
+        "an unproven business tail must be preserved byte-for-byte"
+    );
+    assert!(
+        uncommitted_side_files(&root).is_empty(),
+        "no no-consumer quarantine history may be written"
+    );
+    drop(server);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn replay_rejects_incomplete_identity_events_without_a_matching_pending_effect() {
+    let (server, root) = test_server();
+    let tail = incomplete_handover_events();
+    let (journal, original) = write_journal_with_tail(&root, &tail);
+    // Identity-looking events are not proof by themselves. Without a durable
+    // control pending effect the tail is kept and the project is isolated.
+    let error = super::replay(&root)
+        .expect_err("identity events without a pending effect must isolate the project");
+    assert!(
+        error
+            .to_string()
+            .contains("no matching durable control pending effect"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&journal).unwrap(),
+        original,
+        "identity-style tail without a pending effect must be preserved"
+    );
+    assert!(
+        uncommitted_side_files(&root).is_empty(),
+        "identity-style tail without a pending effect must not be archived"
+    );
+    drop(server);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn replay_drops_incomplete_handover_with_a_matching_pending_effect() {
+    let (server, root) = test_server();
+    let tail = incomplete_handover_events();
+    let (journal, _) = write_journal_with_tail(&root, &tail);
+    let project_scope = super::GlobalState::canonical_project_scope(&root).unwrap();
+    let app_scope_id =
+        crate::identity::AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
+    let state_root = root.join("host-state");
+    std::fs::create_dir_all(&state_root).unwrap();
+    let effect = crate::server::binding_slot::PendingEffect {
+        kind: crate::server::binding_slot::PendingEffectKind::Register,
+        effect_id: "effect-incomplete-register".into(),
+        operation_id: "operation-incomplete-register".into(),
+        project_scope: project_scope.clone(),
+        app_scope_id: app_scope_id.clone(),
+        name: "pending".into(),
+        previous_worker_id: None,
+        previous_session_id: None,
+        target_worker_id: "pending-worker".into(),
+        target_session_id: "session-pending-worker".into(),
+        occupancy_revision: 1,
+        source_names: Vec::new(),
+        pane_anchor: None,
+        created_ms: 1,
     };
-    assert!(error.contains("incomplete"), "unexpected error: {error}");
+    let binding = super::GlobalState::canonical_project_scope(&root).map(|scope| {
+        crate::server::global_state::RuntimeBinding {
+            project_scope: scope,
+            app_scope_id: app_scope_id.clone(),
+            agent_id: crate::identity::AgentId::new("pending-worker").unwrap(),
+            runtime_id: crate::identity::RuntimeId::new("pending-runtime").unwrap(),
+            binding_id: crate::identity::BindingId::new("pending-binding").unwrap(),
+            endpoint_generation: 1,
+            session_id: Some(crate::identity::SessionId::new("session-pending-worker").unwrap()),
+            native_thread_id: None,
+            tmux_endpoint: None,
+        }
+    }).unwrap();
+    crate::server::binding_store::BindingControlStore::new(&state_root)
+        .commit(crate::server::binding_store::ControlChange::CommitWithEffect {
+            key: crate::server::binding_slot::IdentityBindingKey::new(project_scope.clone(), app_scope_id, "pending"),
+            value: crate::server::binding_slot::BindingValue::new(binding, test_appserver_transport("pending-thread")),
+            expected_generation: None,
+            effect,
+        })
+        .expect("durable control pending effect must publish");
+    let proven = super::proven_pending_operations(
+        &state_root,
+        crate::identity::CLI_APP_SERVER_ID,
+        project_scope.as_str(),
+    )
+    .unwrap();
+    assert_eq!(proven.len(), 1, "exact operation must be proven: {proven:?}");
+    let state = super::replay_from_journal_with_proven(&root, &journal, &proven)
+        .expect("an exact durable pending effect must allow the tail to be trimmed");
+    assert!(
+        state.keepalives.contains_key("committed-worker"),
+        "committed command must be applied"
+    );
+    assert!(
+        !state.workers.contains_key("pending-worker"),
+        "uncommitted register must not be applied to the reducer"
+    );
+    let rewritten = std::fs::read_to_string(&journal).unwrap();
+    assert!(
+        rewritten.contains("committed") && !rewritten.contains("incomplete-register"),
+        "proven handover tail must be trimmed, committed prefix must remain: {rewritten}"
+    );
+    assert!(
+        uncommitted_side_files(&root).is_empty(),
+        "proven handover tail must not be archived"
+    );
     drop(server);
     std::fs::remove_dir_all(root).unwrap();
 }

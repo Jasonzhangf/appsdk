@@ -1,4 +1,5 @@
 use super::*;
+use crate::identity::Identity;
 use crate::server::peer_tests::{register_synthetic_peer, test_server};
 
 fn project_context(root: &Path) -> ProjectContext {
@@ -99,6 +100,7 @@ fn self_close_with_open_task_succeeds_and_preserves_business_records() {
                 status_reason: None,
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
+                periodic_declared: false,
             },
         },
         state::Event::Sent {
@@ -157,5 +159,38 @@ fn self_close_with_open_task_succeeds_and_preserves_business_records() {
         .lookup_master_grant_for(&binding.route_scope(), &binding.binding_id)
         .is_none());
     drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn self_close_removes_the_retired_worker_identity_anchor() {
+    let (server, root) = test_server();
+    let context = project_context(&root);
+    let peer = "peer-self-anchor";
+    assert!(register_synthetic_peer(&server, peer, "%self-anchor").ok);
+
+    let identity_dir = server.host_paths.state_root().join("identities").join(peer);
+    std::fs::create_dir_all(&identity_dir).unwrap();
+    let identity = Identity {
+        worker_id: peer.into(),
+        token: format!("token-{peer}"),
+        project_scope: Some(context.project_scope.clone()),
+        runtime: None,
+        transport: None,
+    };
+    let identity_path = identity_dir.join("identity.json");
+    std::fs::write(&identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
+
+    let request = self_close_request(&server, &context, peer, "self-removes-anchor");
+    let response = handle(&server, Some(&context), request);
+    assert_eq!(
+        response.data["result"]["outcome"], "complete",
+        "{response:?}"
+    );
+    assert!(
+        !identity_path.exists(),
+        "self-unregister must remove the retired worker's persisted identity anchor"
+    );
+
     std::fs::remove_dir_all(root).unwrap();
 }

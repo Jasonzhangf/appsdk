@@ -94,6 +94,7 @@ fn patrol_fixture_inner(
             session_id,
             occupancy_revision: 1,
             updated_ms: now_ms(),
+            pane_anchor: None,
         };
         let events = build_name_resolution_events(&state, project_scope.as_str(), &occupancy);
         server.commit_locked_checked(&mut state, &events).unwrap();

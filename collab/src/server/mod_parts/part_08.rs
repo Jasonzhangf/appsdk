@@ -361,47 +361,247 @@ pub(crate) fn handle_channel_inbound(
     to: String,
     subject: String,
     body: String,
-    mut envelope: crate::server::channel_envelope::ChannelEnvelope,
+    envelope: crate::server::channel_envelope::ChannelEnvelope,
 ) -> Resp {
-    // Resolve the leading `[address]` or the conversation default before any
-    // mutation. A failed explicit address is returned as-is and never silently
-    // delivered to the default.
-    let resolved = {
-        let st = server.state.lock().unwrap();
-        match resolve_channel_inbound_target(
-            server,
-            &st,
-            &envelope.source_channel,
-            &envelope.channel_instance,
-            &envelope.external_conversation,
-            &body,
-            &to,
-        ) {
-            Ok(resolved) => resolved,
-            Err(error) => return Resp::err(error),
+    let mut st = server.state.lock().unwrap();
+    let intent = match channel_inbound_address_intent(
+        &st,
+        &envelope.source_channel,
+        &envelope.channel_instance,
+        &envelope.external_conversation,
+        &body,
+        &to,
+    ) {
+        Ok(intent) => intent,
+        Err(error) => return Resp::err(error),
+    };
+    let project_key = canonical_project_key(&server.root);
+    let is_ceo = intent.address.eq_ignore_ascii_case("ceo")
+        || project_key
+            .as_deref()
+            .is_some_and(|key| intent.address.eq_ignore_ascii_case(key));
+    let local_grant = if is_ceo {
+        st.ceo_grant.clone()
+    } else {
+        None
+    };
+    let mut response = channel_inbound_commit_with_state(
+        server,
+        &mut st,
+        from,
+        subject,
+        envelope,
+        local_grant.as_ref(),
+        &intent,
+    );
+    drop(st);
+    channel_inbound_finish(server, &mut response);
+    response
+}
+
+/// Lock-free inbound admission used by the host-aware manager path. The caller
+/// holds `target_state` (and, when the target differs from the host, holds the
+/// host state first). This commit parses the authoritative holder under the
+/// same guard and never re-locks the target state.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn channel_inbound_commit_with_state(
+    server: &Server,
+    target_state: &mut State,
+    from: String,
+    subject: String,
+    envelope: crate::server::channel_envelope::ChannelEnvelope,
+    ceo_grant: Option<&crate::ceo::CeoGrant>,
+    intent: &crate::server::ChannelInboundAddressIntent,
+) -> Resp {
+    let route = match server_route_scope(server, target_state) {
+        Ok(Some(route)) => route,
+        Ok(None) => {
+            return Resp::err(
+                "CHANNEL_ROUTE_SCOPE_MISSING: the current project route is unavailable",
+            )
+        }
+        Err(error) => return Resp::err(error.to_owned()),
+    };
+    let project_scope = route.project_scope_id.as_str();
+    let project_key = match canonical_project_key(&server.root) {
+        Some(key) => key,
+        None => {
+            return Resp::err(
+                "CHANNEL_ROUTE_SCOPE_MISSING: the current project key is unavailable",
+            )
         }
     };
-    envelope.recipient_address = resolved.recipient_address.clone();
-    // The stored body is the fixed human-readable projection. The typed
-    // envelope stays the control truth; reply routing and attachments never
-    // depend on parsing this text.
+    let (worker_id, recipient_address, body_after_address) = if let Some(grant) = ceo_grant {
+        let worker_id = match resolve_ceo_holder_from_grant(target_state, project_scope, grant) {
+            Ok(worker_id) => worker_id,
+            Err(error) => return Resp::err(error),
+        };
+        if let Err(error) = authoritative_send_binding(target_state, &route, &worker_id) {
+            return Resp::err(error);
+        }
+        (worker_id, intent.address.clone(), intent.body.clone())
+    } else {
+        let worker_id = if intent.explicit_to && target_state.workers.contains_key(&intent.address) {
+            intent.address.clone()
+        } else {
+            match resolve_address(target_state, &route, &project_key, &intent.address) {
+                Ok(worker_id) => worker_id,
+                Err(error) => return Resp::err(error),
+            }
+        };
+        (
+            worker_id,
+            intent.address.clone(),
+            intent.body.clone(),
+        )
+    };
+    let mut envelope = envelope;
+    envelope.recipient_address = recipient_address.clone();
     let projected =
-        crate::server::channel_envelope::readable_projection(&envelope, &resolved.body);
-    handle_send_with_task_policy(
+        crate::server::channel_envelope::readable_projection(&envelope, &body_after_address);
+    channel_inbound_commit_locked(
         server,
+        target_state,
         from,
-        resolved.to,
-        "notify".into(),
-        Some(subject),
+        worker_id,
+        subject,
         projected,
-        None,
-        "immediate".into(),
-        false,
-        None,
-        None,
-        None,
-        Some(envelope),
+        envelope,
     )
+}
+
+/// Commit the durable message and envelope while `target_state` is already
+/// held. The caller must release the guard before notification.
+#[allow(clippy::too_many_arguments)]
+fn channel_inbound_commit_locked(
+    server: &Server,
+    st: &mut State,
+    from: String,
+    to: String,
+    subject: String,
+    body: String,
+    envelope: crate::server::channel_envelope::ChannelEnvelope,
+) -> Resp {
+    let channel_envelope = Some(envelope);
+    if let Err(error) = validate_channel_envelope_for_inbound(
+        channel_envelope.as_ref().expect("channel envelope supplied"),
+    ) {
+        return Resp::err(error);
+    }
+    let key = crate::server::channel_envelope::platform_event_key(
+        &channel_envelope.as_ref().expect("channel envelope supplied").channel_instance,
+        &channel_envelope.as_ref().expect("channel envelope supplied").external_conversation,
+        &channel_envelope.as_ref().expect("channel envelope supplied").platform_message_id,
+    );
+    if let Some(message_id) = st.platform_event_index.get(&key) {
+        return Resp::data(json!({
+            "msg_id": message_id,
+            "deduplicated": true,
+            "channel": channel_envelope.as_ref().expect("channel envelope supplied").source_channel,
+            "platform_message_id": channel_envelope.as_ref().expect("channel envelope supplied").platform_message_id,
+        }));
+    }
+    if !st.workers.contains_key(&to) {
+        let (error, data) = handoff_unresolved_recipient(&to);
+        return Resp::err_data(error, data);
+    }
+    let msg = Message {
+        id: gen_msg_id(),
+        from,
+        to: to.clone(),
+        mtype: "notify".into(),
+        subject: Some(subject),
+        body,
+        in_reply_to: None,
+        created_ms: now_ms(),
+        state: "pending".into(),
+        wake_attempt_count: 0,
+        last_wake_attempt_ms: 0,
+        retry_attempted: false,
+    };
+    let mid = msg.id.clone();
+    let subscription = st
+        .matching_subscription(&to, "direct-message", None, now_ms())
+        .cloned();
+    let mut events = vec![
+        Event::Sent { msg },
+        Event::DeliveryMode {
+            msg_id: mid.clone(),
+            mode: "immediate".into(),
+            source_thread_id: None,
+        },
+    ];
+    let envelope = channel_envelope.expect("channel envelope supplied");
+    events.push(Event::ChannelEnvelopeRecorded {
+        message_id: mid.clone(),
+        idempotency_key: key,
+        envelope,
+    });
+    if let Some(subscription) = &subscription {
+        events.push(Event::WakeBound {
+            message_id: mid.clone(),
+            subscription_id: subscription.id.clone(),
+        });
+    }
+    if let Err(error) = server.commit_locked(st, &events) {
+        return Resp::err(format!("SEND_DURABILITY_FAILED: {error}"));
+    }
+    Resp::data(json!({
+        "msg_id": mid,
+        "notification": subscription.is_some().then(|| "queued").unwrap_or("mailbox-only-no-subscription"),
+        "durable": true,
+    }))
+}
+
+/// Notification runs only after the inbound commit released the state guard.
+fn channel_inbound_finish(server: &Server, response: &mut Resp) {
+    if response.data.get("deduplicated").and_then(|value| value.as_bool()) == Some(true) {
+        return;
+    }
+    let Some(msg_id) = response
+        .data
+        .as_object()
+        .and_then(|data| data.get("msg_id"))
+        .and_then(|value| value.as_str())
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    let (subscription, to) = {
+        let st = server.state.lock().unwrap();
+        (
+            st.wake_bindings.get(&msg_id)
+                .and_then(|id| st.notification_subscriptions.get(id))
+                .cloned(),
+            st.msgs.get(&msg_id).map(|message| message.to.clone()),
+        )
+    };
+    let Some(subscription) = subscription else {
+        if let Some(to) = to {
+            if let Some(data) = response.data.as_object_mut() {
+                data.insert(
+                    "notification".into(),
+                    json!("mailbox-only-no-subscription"),
+                );
+                data.insert("notification_error".into(), json!(NOTIFICATION_SUBSCRIPTION_MISSING_ERROR));
+                data.insert("failure".into(), json!("notification_subscription_missing"));
+                data.insert("repair_required".into(), json!(true));
+                data.insert("escalation".into(), json!(MAILBOX_ONLY_ESCALATION));
+            }
+        }
+        return;
+    };
+    let notification = attempt_notification_detailed_with_at(server, &msg_id, &subscription.id, now_ms());
+    let method = {
+        let st = server.state.lock().unwrap();
+        notification_method_for_worker(&st, &to.unwrap_or_default())
+    };
+    *response = notification_send_response(
+        response.data.clone(),
+        true,
+        method,
+        &notification,
+    );
 }
 
 fn handle_authenticated_send_with_app_scope(
@@ -1096,83 +1296,118 @@ fn handle_live_closure_daemon_send(
     )
 }
 
-fn handle_cross_project_send(
+/// Cross-project role resolved from server-side control state only. The caller
+/// never supplies this; a worker named "CEO" or a stale master grant cannot
+/// manufacture authority. Priority order matches the user ruling: CEO covers
+/// the whole project, then same-level master/master and peer/peer are allowed,
+/// then peer->foreign master and master->foreign peer are denied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CrossProjectRole {
+    Ceo,
+    Master,
+    Peer,
+}
+
+fn cross_project_role(
     server: &Server,
-    from: String,
-    from_project: String,
-    source_thread_id: String,
-    source_master_assigned_by: String,
-    source_master_approval: Option<String>,
-    source_master_assigned_ms: i64,
-    to: String,
-    subject: String,
-    body: String,
-    in_reply_to: Option<String>,
-) -> Resp {
-    if from_project.trim().is_empty() || source_master_assigned_by.trim().is_empty() {
-        return Resp::err(
-            "cross-project send requires source project and master assignment evidence",
-        );
+    state: &State,
+    ceo_grant: Option<&crate::ceo::CeoGrant>,
+    worker_id: &str,
+) -> Result<CrossProjectRole, String> {
+    let route_scope = server_route_scope(server, state)
+        .map_err(|error| format!("CROSS_PROJECT_ROLE_RESOLVE_FAILED: {error}"))?;
+    // CEO authority is host-wide; a worker is the CEO only when it currently
+    // occupies the grant's stable name inside the grant's workspace and app
+    // scope. A same-named worker elsewhere grants nothing.
+    if let Some(grant) = ceo_grant {
+        let root_matches = grant.workspace == server.root.to_string_lossy().as_ref();
+        let app_matches = route_scope
+            .as_ref()
+            .is_some_and(|scope| scope.app_scope_id.as_str() == grant.app_scope_id);
+        if root_matches
+            && app_matches
+            && state
+                .name_occupancy(&grant.workspace, &grant.name)
+                .is_some_and(|holder| holder.worker_id == worker_id)
+        {
+            return Ok(CrossProjectRole::Ceo);
+        }
     }
-    if source_master_assigned_ms <= 0 {
-        return Resp::err("cross-project send requires source master assignment timestamp");
+    if let Some(grant) = current_master_grant(state, route_scope.as_ref()) {
+        if grant.agent_id.as_str() == worker_id {
+            return Ok(CrossProjectRole::Master);
+        }
     }
-    if source_master_approval
-        .as_deref()
-        .is_none_or(|v| v.trim().is_empty())
-        && source_master_assigned_by == from
-    {
-        return Resp::err(
-            "cross-project send requires user approval evidence for self-promoted source master",
-        );
+    if state.workers.contains_key(worker_id) {
+        return Ok(CrossProjectRole::Peer);
     }
-    let mut st = server.state.lock().unwrap();
-    let target_master = match current_master_holder(server, &st) {
-        Ok(master) => master,
-        Err(error) => return Resp::err(error),
+    Err(format!("worker {worker_id} not registered"))
+}
+
+/// Server-side-only cross-project authorization. The caller is already
+/// authenticated by the runtime dispatch; here we judge the sender role, the
+/// target registration, and the role matrix, then commit the durable message
+/// under the target state lock. No client master evidence is consulted.
+#[derive(Debug)]
+pub(crate) struct CrossProjectCommitted {
+    pub(crate) msg_id: String,
+    pub(crate) subscription: Option<crate::server::state::NotificationSubscription>,
+}
+
+/// Authorization and durable commit happen under a single target state guard.
+/// `sender_role` is resolved by the caller from current server-side state and
+/// is never read from the request. This function never re-locks `server`.
+fn commit_cross_project_message(
+    server: &Server,
+    st: &mut State,
+    sender_worker_id: &str,
+    source_project: &str,
+    sender_role: CrossProjectRole,
+    ceo_grant: Option<&crate::ceo::CeoGrant>,
+    source_thread_id: Option<String>,
+    to: &str,
+    subject: &str,
+    body: &str,
+    in_reply_to: Option<&str>,
+) -> Result<CrossProjectCommitted, Resp> {
+    if subject.trim().is_empty() {
+        return Err(Resp::err(
+            "MESSAGE_SUBJECT_REQUIRED: cross-project send requires --subject",
+        ));
+    }
+    let target_role = cross_project_role(server, st, ceo_grant, to).map_err(Resp::err)?;
+    let allowed = match (sender_role, target_role) {
+        (CrossProjectRole::Ceo, _) => true,
+        (CrossProjectRole::Master, CrossProjectRole::Master) => true,
+        (CrossProjectRole::Peer, CrossProjectRole::Peer) => true,
+        _ => false,
     };
-    if target_master.as_deref() != Some(to.as_str()) {
+    if !allowed {
         let project_scope = GlobalState::canonical_project_scope(&server.root)
             .ok()
             .map(|scope| scope.as_str().to_owned())
             .unwrap_or_default();
-        let master_label = target_master
-            .as_deref()
-            .and_then(|worker_id| stable_name_for_worker(&st, &project_scope, worker_id))
-            .unwrap_or_else(|| target_master.as_deref().unwrap_or_default().to_owned());
-        return Resp::err(
-            format!(
-                "cross-project communication requires the target to be the project master; current target master is {} ({})",
-                master_label,
-                target_master.as_deref().unwrap_or_default()
-            ),
-        );
+        let target_label = stable_name_for_worker(st, &project_scope, to)
+            .unwrap_or_else(|| to.to_owned());
+        return Err(Resp::err(format!(
+            "CROSS_PROJECT_SEND_REJECTED: a {} cannot send to a {}; the current target is {} ({})",
+            role_label(sender_role),
+            role_label(target_role),
+            target_label,
+            to,
+        )));
     }
-    let Some(recipient) = st.workers.get(&to).cloned() else {
-        return Resp::err(format!("recipient {} not registered", to));
-    };
-    drop(st);
-    // Cross-project messages are durable mailbox entries. Identity admission
-    // must not turn endpoint uncertainty or activity into an enqueue failure.
-    // A tmux peer has a valid address even when its runtime identity remains
-    // Unknown; only a definitively dead endpoint blocks enqueue.
-    if worker_identity_and_endpoint(server, &recipient).1 == Some(false) {
-        return Resp::err(
-            "cross-project communication requires a reachable target binding on its server-selected transport",
-        );
-    }
-    let mut st = server.state.lock().unwrap();
-    if subject.trim().is_empty() {
-        return Resp::err("MESSAGE_SUBJECT_REQUIRED: cross-project send requires --subject");
+    if !st.workers.contains_key(to) {
+        return Err(Resp::err(format!("recipient {} not registered", to)));
     }
     let msg = Message {
         id: gen_msg_id(),
-        from: format!("{}@{}", from, from_project),
-        to: to.clone(),
+        from: format!("{}@{}", sender_worker_id, source_project),
+        to: to.to_owned(),
         mtype: "notify".into(),
-        subject: Some(subject),
-        body,
-        in_reply_to,
+        subject: Some(subject.to_owned()),
+        body: body.to_owned(),
+        in_reply_to: in_reply_to.map(str::to_owned),
         created_ms: now_ms(),
         state: "pending".into(),
         wake_attempt_count: 0,
@@ -1181,14 +1416,14 @@ fn handle_cross_project_send(
     };
     let mid = msg.id.clone();
     let subscription = st
-        .matching_subscription(&to, "direct-message", None, now_ms())
+        .matching_subscription(to, "direct-message", None, now_ms())
         .cloned();
     let mut events = vec![
         Event::Sent { msg },
         Event::DeliveryMode {
             msg_id: mid.clone(),
             mode: "explicit-notification".into(),
-            source_thread_id: Some(source_thread_id),
+            source_thread_id,
         },
     ];
     if let Some(subscription) = &subscription {
@@ -1197,33 +1432,112 @@ fn handle_cross_project_send(
             subscription_id: subscription.id.clone(),
         });
     }
-    if let Err(error) = server.commit_locked(&mut st, &events) {
-        drop(st);
-        return Resp::err(format!("CROSS_PROJECT_SEND_DURABILITY_FAILED: {error}"));
-    }
-    drop(st);
+    server
+        .commit_locked(st, &events)
+        .map_err(|error| Resp::err(format!("CROSS_PROJECT_SEND_DURABILITY_FAILED: {error}")))?;
+    Ok(CrossProjectCommitted {
+        msg_id: mid,
+        subscription,
+    })
+}
+
+/// Build the public send response and attempt notification after the commit
+/// has released its state guard. Notification never reverses or authorizes the
+/// already durable message.
+fn notify_cross_project_committed(
+    server: &Server,
+    committed: CrossProjectCommitted,
+    sender_worker_id: &str,
+    to: &str,
+) -> Resp {
+    let CrossProjectCommitted {
+        msg_id,
+        subscription,
+    } = committed;
     let notification = subscription
         .as_ref()
         .map(|subscription| {
-            attempt_notification_detailed_with_at(server, &mid, &subscription.id, now_ms())
+            attempt_notification_detailed_with_at(server, &msg_id, &subscription.id, now_ms())
         })
         .unwrap_or_else(|| {
             NotificationAttempt::NotAttempted("no notification subscription".into())
         });
     notification_send_response(
         json!({
-            "msg_id": mid,
+            "msg_id": msg_id,
             "cross_project": true,
-            "source_master": from,
-            "target_master": to,
+            "sender": sender_worker_id,
+            "recipient": to,
         }),
         subscription.is_some(),
         {
             let state = server.state.lock().unwrap();
-            notification_method_for_worker(&state, &to)
+            notification_method_for_worker(&state, to)
         },
         &notification,
     )
+}
+
+/// Target-side handler kept for direct reducer tests. It resolves the target
+/// role, checks endpoint reachability outside the state lock, and commits the
+/// message under one target guard.
+fn handle_cross_project_send(
+    server: &Server,
+    sender_worker_id: &str,
+    source_project: String,
+    sender_role: CrossProjectRole,
+    ceo_grant: Option<crate::ceo::CeoGrant>,
+    source_thread_id: Option<String>,
+    to: &str,
+    subject: &str,
+    body: &str,
+    in_reply_to: Option<&str>,
+) -> Resp {
+    if source_project.trim().is_empty() {
+        return Resp::err("cross-project send requires a resolved source project");
+    }
+    // Cross-project messages are durable mailbox entries. Identity admission
+    // must not turn endpoint uncertainty or activity into an enqueue failure.
+    // A tmux peer has a valid address even when its runtime identity remains
+    // Unknown; only a definitively dead endpoint blocks enqueue.
+    let recipient_snapshot = {
+        let state = server.state.lock().unwrap();
+        state.workers.get(to).cloned()
+    };
+    if let Some(recipient) = recipient_snapshot {
+        if worker_identity_and_endpoint(server, &recipient).1 == Some(false) {
+            return Resp::err(
+                "cross-project communication requires a reachable target binding on its server-selected transport",
+            );
+        }
+    }
+    let mut st = server.state.lock().unwrap();
+    let committed = match commit_cross_project_message(
+        server,
+        &mut st,
+        sender_worker_id,
+        &source_project,
+        sender_role,
+        ceo_grant.as_ref(),
+        source_thread_id,
+        to,
+        subject,
+        body,
+        in_reply_to,
+    ) {
+        Ok(committed) => committed,
+        Err(response) => return response,
+    };
+    drop(st);
+    notify_cross_project_committed(server, committed, sender_worker_id, to)
+}
+
+fn role_label(role: CrossProjectRole) -> &'static str {
+    match role {
+        CrossProjectRole::Ceo => "CEO",
+        CrossProjectRole::Master => "master",
+        CrossProjectRole::Peer => "peer",
+    }
 }
 
 #[cfg(test)]
@@ -1457,7 +1771,7 @@ fn handle_task_relocate(
         "branch": task.branch,
         "base_commit": task.base_commit,
         "status": task.status,
-        "next": "verify git worktree list and continue the existing claim; evidence remains attached"
+        "next": "continue the existing claim; evidence remains attached"
     }))
 }
 
@@ -1595,7 +1909,7 @@ fn task_update_locked(
             ));
         }
         if new_status == "closed" {
-            return Resp::err("use collab task close after owner merge and cleanup verification");
+            return Resp::err("use collab task close after delivery and valid review");
         }
         if new_status == "delivered" {
             return Resp::err(
@@ -1605,25 +1919,16 @@ fn task_update_locked(
         if new_status == "working" && task.status == "assigned" {
             return Resp::err("use collab task accept to accept an assigned task");
         }
-        // Pre-review producers persisted accepted candidates without a lifecycle
-        // record. Keep their owner-local merge transition replayable while new
-        // review records continue through the evidence-bearing integrated path.
-        let legacy_accepted_merge = new_status == "merged"
-            && task.status == "accepted"
-            && !st.task_lifecycle.contains_key(&task.id)
-            && required_work_reviewer(st, &task.id).is_none();
-        if new_status == "accepted" || (new_status == "merged" && !legacy_accepted_merge) {
+        if new_status == "accepted" {
+            return Resp::err("use collab task review to accept a delivered task");
+        }
+        if new_status == "merged" {
             return Resp::err(
-                "use collab task review/integrated for integration-owned lifecycle transitions",
+                "COLLAB_GIT_OWNERSHIP_DISABLED: Collab no longer records Git integration; close after delivery and valid review",
             );
         }
         if new_status == "waiting" {
             return Resp::err("use collab task wait so responsibility and deadline are durable");
-        }
-        if new_status == "cancelled" && task.worktree_path.is_some() {
-            return Resp::err(
-                "CLEANUP_REQUIRED_BEFORE_CANCEL: task owns a worktree; close only after merged cleanup",
-            );
         }
         if !task_transition_allowed(&task.status, &new_status) {
             return Resp::err(format!(
@@ -1702,163 +2007,10 @@ fn stale_worker_views(
                 "worker": worker.id,
                 "transport_kind": worker.transport.as_ref().map(|transport| transport.kind.as_str()),
                 "active_tasks": active_tasks,
-                "action": "peer owns cleanup; daemon operator may inspect during migration"
+                "action": "peer owns its declared task responsibility; Collab does not manage Git resources"
             })
         })
         .collect()
-}
-
-fn close_task_resources(
-    root: &Path,
-    config: &crate::config::Config,
-    worktree_path: Option<&str>,
-    branch: Option<&str>,
-    recorded_integration: Option<&str>,
-) -> Result<(), String> {
-    if let Some(branch) = branch {
-        let branch_ref = format!("refs/heads/{branch}");
-        let branch_exists = Command::new("git")
-            .current_dir(root)
-            .args(["rev-parse", "--verify", &branch_ref])
-            .output()
-            .map_err(|e| format!("cannot verify branch {branch}: {e}"))?;
-        if branch_exists.status.success() {
-            let main_ref = "refs/heads/main";
-            let merged = Command::new("git")
-                .current_dir(root)
-                .args(["merge-base", "--is-ancestor", &branch_ref, main_ref])
-                .output()
-                .map_err(|e| format!("cannot verify branch {branch}: {e}"))?;
-            if !merged.status.success()
-                && !integration_commit_proves_branch_merged(
-                    root,
-                    main_ref,
-                    recorded_integration,
-                )?
-            {
-                return Err(format!(
-                    "branch {branch} is not merged into {main_ref}; refusing delete"
-                ));
-            }
-        }
-    }
-    if let Some(relative) = worktree_path {
-        let worktree = cleanup_worktree_path(root, config, relative)?;
-        if worktree.exists() {
-            let dirty = Command::new("git")
-                .arg("-C")
-                .arg(&worktree)
-                .args(["status", "--porcelain"])
-                .output()
-                .map_err(|e| format!("cannot inspect worktree {}: {e}", relative))?;
-            if !dirty.status.success() {
-                return Err(format!(
-                    "cannot verify clean worktree {}: {}",
-                    relative,
-                    String::from_utf8_lossy(&dirty.stderr).trim()
-                ));
-            }
-            if !dirty.stdout.is_empty() {
-                return Err(format!("worktree {} has uncommitted changes", relative));
-            }
-
-            let removed = Command::new("git")
-                .current_dir(root)
-                .args(["worktree", "remove", &worktree.display().to_string()])
-                .output()
-                .map_err(|e| format!("cannot remove worktree {}: {e}", relative))?;
-            if !removed.status.success() {
-                return Err(format!(
-                    "worktree cleanup failed for {}: {}",
-                    relative,
-                    String::from_utf8_lossy(&removed.stderr).trim()
-                ));
-            }
-        }
-    }
-
-    if let Some(branch) = branch {
-        let branch_ref = format!("refs/heads/{branch}");
-        let branch_exists = Command::new("git")
-            .current_dir(root)
-            .args(["rev-parse", "--verify", &branch_ref])
-            .output()
-            .map_err(|e| format!("cannot verify branch {branch}: {e}"))?;
-        if branch_exists.status.success() {
-            let deleted = Command::new("git")
-                .current_dir(root)
-                .args(["branch", "-D", branch])
-                .output()
-                .map_err(|e| format!("cannot delete branch {branch}: {e}"))?;
-            if !deleted.status.success() {
-                return Err(format!(
-                    "branch cleanup failed for {branch}: {}",
-                    String::from_utf8_lossy(&deleted.stderr).trim()
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-/// A squash integration replaces the branch tip with a new commit, so the
-/// branch is not an ancestor of main even though its work landed. The recorded
-/// `integration.commit` is the authoritative proof in that case. The check is
-/// the same reachability question `collab task integrated` answers: resolve the
-/// commit, then require it to be reachable from `refs/heads/main`.
-fn integration_commit_proves_branch_merged(
-    root: &Path,
-    main_ref: &str,
-    recorded_integration: Option<&str>,
-) -> Result<bool, String> {
-    let Some(commit) = recorded_integration
-        .map(str::trim)
-        .filter(|commit| !commit.is_empty())
-    else {
-        return Ok(false);
-    };
-    let main_head = resolve_authoritative_main_head(root)
-        .map_err(|error| {
-            format!(
-                "cannot resolve {main_ref} while checking integration commit {commit}: {}",
-                error.error.unwrap_or_default()
-            )
-        })?;
-    match commit_is_integrated_in_main(root, commit) {
-        Ok(true) => Ok(true),
-        Ok(false) => Err(format!(
-            "integration commit {commit} is not reachable from {main_ref} (main_head {main_head}); expected a commit reachable from {main_ref}; refusing delete"
-        )),
-        Err(error) => Err(format!(
-            "integration commit {commit} cannot be resolved (main_head {main_head}): {}; expected a commit reachable from {main_ref}; refusing delete",
-            error.error.unwrap_or_default()
-        )),
-    }
-}
-
-fn cleanup_receipt_is_reusable(root: &Path, receipt: &CleanupReceipt) -> bool {
-    if let Some(path) = receipt.worktree_path.as_deref() {
-        let worktree = Path::new(path);
-        let worktree = if worktree.is_absolute() {
-            worktree.to_path_buf()
-        } else {
-            root.join(worktree.strip_prefix("./").unwrap_or(worktree))
-        };
-        if worktree.exists() {
-            return false;
-        }
-    }
-    if let Some(branch) = receipt.branch.as_deref() {
-        let branch_exists = Command::new("git")
-            .current_dir(root)
-            .args(["rev-parse", "--verify", branch])
-            .output()
-            .is_ok_and(|output| output.status.success());
-        if branch_exists {
-            return false;
-        }
-    }
-    true
 }
 
 fn handle_task_deliver(
@@ -1910,26 +2062,9 @@ fn handle_task_deliver_with_intent(
     let Some(evidence) = evidence.filter(|value| !value.trim().is_empty()) else {
         return Resp::err("task deliver requires non-empty --evidence");
     };
-    let worktree = if no_candidate {
-        if worktree.is_some() {
-            return Resp::err(
-                "task deliver --no-candidate cannot be combined with --worktree",
-            );
-        }
-        None
-    } else {
-        let Some(worktree) = worktree.filter(|value| !value.trim().is_empty()) else {
-            return Resp::err("task deliver requires non-empty --worktree");
-        };
-        if task
-            .worktree_path
-            .as_deref()
-            .is_some_and(|registered| registered != worktree)
-        {
-            return Resp::err("task deliver --worktree must match the registered task worktree");
-        }
-        Some(worktree)
-    };
+    // Worktree values remain optional historical declarations. Delivery is a
+    // Collab fact and does not resolve a Git candidate or require a repository.
+    let worktree = worktree.filter(|value| !value.trim().is_empty());
     let now = now_ms();
     task.status = "delivered".to_string();
     task.wait = None;
@@ -1954,11 +2089,7 @@ fn handle_task_deliver_with_intent(
     lifecycle.integration_commit = None;
     lifecycle.integration_evidence = None;
     lifecycle.integrated_ms = None;
-    // Capture the exact candidate commit so a later pending merge can prove
-    // the delivered candidate itself reached main, not just some main ref.
-    lifecycle.delivery_commit = worktree
-        .as_deref()
-        .and_then(|worktree| resolve_candidate_commit(&server.root, &task, worktree));
+    lifecycle.delivery_commit = None;
     let delivery_kind = lifecycle.delivery_kind;
     let mut review_notice = None;
     let mut reviewer_waiting = None;
@@ -2006,6 +2137,7 @@ fn handle_task_deliver_with_intent(
         "evidence": evidence,
         "worktree": worktree,
         "delivery_kind": delivery_kind.as_str(),
+        "git_managed": false,
         "notification": "none",
         "required_reviewer": required_reviewer,
         "review_waiting": reviewer_waiting,
@@ -2022,50 +2154,6 @@ fn handle_task_deliver_with_intent(
         data["review_message_id"] = json!(message_id);
         notification_send_response(data,subscription.is_some(),method,&attempt)
     } else { Resp::data(data) }
-}
-
-fn resolve_candidate_commit(root: &Path, task: &TaskRec, worktree: &str) -> Option<String> {
-    // The delivered worktree HEAD is the authoritative candidate. A branch
-    // ref may point at a stale or unrelated commit; it is only admissible as
-    // a consistency cross-check, never as the binding on its own.
-    let worktree_dir = if Path::new(worktree).is_absolute() {
-        PathBuf::from(worktree)
-    } else {
-        root.join(worktree)
-    };
-    let worktree_head = Command::new("git")
-        .current_dir(worktree_dir)
-        .args(["rev-parse", "--verify", "HEAD^{commit}"])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| {
-            let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            (!head.is_empty()).then_some(head)
-        })?;
-    if let Some(branch) = task.branch.as_deref() {
-        let branch_head = Command::new("git")
-            .current_dir(root)
-            .args([
-                "rev-parse",
-                "--verify",
-                &format!("refs/heads/{branch}^{{commit}}"),
-            ])
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .and_then(|output| {
-                let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                (!head.is_empty()).then_some(head)
-            });
-        // Fail closed on divergence: the delivered worktree HEAD must agree
-        // with the registered branch or the candidate is not provably the
-        // delivered commit.
-        if branch_head.as_deref() != Some(worktree_head.as_str()) {
-            return None;
-        }
-    }
-    Some(worktree_head)
 }
 
 fn task_integration_authorized(

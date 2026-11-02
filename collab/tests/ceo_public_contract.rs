@@ -322,8 +322,8 @@ fn ceo_explicit_reassignment_and_carrier_retirement_keep_authority_scoped() {
     );
     let continued = run_ok_at(&fixture, &root, &pane, &["ceo", "status"], false);
     assert_eq!(
-        continued["is_current"], false,
-        "a new work name must not inherit CEO authority: {continued}"
+        continued["is_current"], true,
+        "same pane and cwd continuation inherits the stable name and its typed CEO authority: {continued}"
     );
     run_ok_at(
         &fixture,

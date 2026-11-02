@@ -40,10 +40,8 @@ fn collab_bin_path() -> PathBuf {
 /// That is what lets a manual `down` stay stopped for the current session
 /// without the persistent `launchctl unload -w` disable that would also cancel
 /// the next login. The plist stays installed, so the next login re-runs it.
-fn render_plist(collab_bin: &Path) -> String {
-    let log_path = scope::HostPaths::resolve()
-        .map(|p| p.state_root().join("serve.log").display().to_string())
-        .unwrap_or_else(|_| "/tmp/collab-serve.log".to_string());
+fn render_plist(collab_bin: &Path, state_root: &Path) -> String {
+    let log_path = state_root.join("serve.log").display().to_string();
     let home = std::env::var("HOME").unwrap_or_default();
     let path = xml_escape(&service_path());
     let label = launch_agent_label();
@@ -174,10 +172,11 @@ pub fn write_service_record(root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Install the LaunchAgent plist and load it so the daemon autostarts on login
-/// and after crashes. Idempotent: overwrites an existing plist and reuses the
-/// loaded job if present.
-pub fn install_and_load() -> anyhow::Result<PathBuf> {
+/// Render and persist the launch-agent plist, returning its path. The
+/// platform check, isolated-state guard, directory creation, and plist write
+/// are shared by install, reload, and the `collab up` path so a live daemon is
+/// never replaced through duplicated logic.
+fn prepare_launch_agent() -> anyhow::Result<PathBuf> {
     // login autostart is a macOS LaunchAgent feature only. A non-macOS host has
     // no supervisor to own crash recovery, so report it as unavailable rather
     // than fail on the missing `launchctl` binary.
@@ -186,16 +185,45 @@ pub fn install_and_load() -> anyhow::Result<PathBuf> {
     }
 
     validate_state_override()?;
+    // Resolve the host state root once: it seeds both the plist log path and
+    // the directory launchd needs to exist. There is no fallback location, so a
+    // resolution failure surfaces to the caller instead of moving the log.
+    let host_paths = scope::HostPaths::resolve()?;
     let collab_bin = collab_bin_path();
-    let plist = render_plist(&collab_bin);
+    let plist = render_plist(&collab_bin, host_paths.state_root());
     let path = launch_agent_path();
     std::fs::create_dir_all(path.parent().expect("LaunchAgents dir"))?;
     // launchd opens StandardOutPath/StandardErrorPath before the daemon runs,
     // so the host state root must already exist or the agent fails to start.
-    // `render_plist` derives the log path from this same override, keeping the
-    // isolated supervised daemon out of the default-root legacy fence.
-    std::fs::create_dir_all(scope::HostPaths::resolve()?.state_root())?;
+    std::fs::create_dir_all(host_paths.state_root())?;
     std::fs::write(&path, &plist)?;
+    Ok(path)
+}
+
+/// Load a previously persisted plist with `launchctl load -w`. Used only for
+/// a fresh, unloaded installation; an already-loaded job needs the reload
+/// path.
+fn load_launch_agent(path: &Path) -> anyhow::Result<()> {
+    let output = Command::new("launchctl")
+        .args(["load", "-w", &path.display().to_string()])
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "launchctl load failed for {} ({}): {}{}",
+            path.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim(),
+        );
+    }
+    Ok(())
+}
+
+/// Install the LaunchAgent plist and load it so the daemon autostarts on login
+/// and after crashes. Idempotent: overwrites an existing plist and reuses the
+/// loaded job if present.
+pub fn install_and_load() -> anyhow::Result<PathBuf> {
+    let path = prepare_launch_agent()?;
     if is_loaded() {
         // launchd keeps the definition it loaded, not the file just written.
         // This install must not replace a live daemon by itself, so tell the
@@ -212,21 +240,77 @@ pub fn install_and_load() -> anyhow::Result<PathBuf> {
         }
         return Ok(path);
     }
-    let output = Command::new("launchctl")
-        .args(["load", "-w", &path.display().to_string()])
+    load_launch_agent(&path)?;
+    Ok(path)
+}
+
+/// Reload an already-loaded LaunchAgent from the freshly written plist.
+///
+/// `collab up` calls this instead of `install_and_load` so one command makes
+/// launchd read the current plist and start the current binary. The existing
+/// loaded job is booted out and the new one bootstrapped in its place. A real
+/// launchd failure is surfaced as an error; this never uses a broad process
+/// kill.
+pub fn install_and_reload() -> anyhow::Result<PathBuf> {
+    let path = prepare_launch_agent()?;
+
+    if is_loaded() {
+        reload_loaded_job(&path)?;
+        if !is_running() {
+            start_loaded_job()?;
+        }
+        return Ok(path);
+    }
+
+    // Not loaded yet: a plain load is sufficient and avoids a redundant
+    // bootout on a clean install.
+    load_launch_agent(&path)?;
+    Ok(path)
+}
+
+/// Reload a loaded LaunchAgent from the plist at `path`.
+///
+/// `bootout` removes the current definition and `bootstrap` loads the file
+/// just written. Both use the exact service domain and plist path; no broad
+/// process kill is involved. A launchd failure is returned, not hidden.
+fn reload_loaded_job(path: &Path) -> anyhow::Result<()> {
+    let label = launch_agent_label();
+    let uid = unsafe { libc::geteuid() };
+    let domain = format!("gui/{uid}/{label}");
+
+    let bootout = Command::new("launchctl")
+        .args(["bootout", &domain])
         .output()?;
-    if !output.status.success() {
-        // Report the real launchd failure instead of claiming the autostart
-        // was installed.
+    if !bootout.status.success() {
+        // bootout fails if the job was never loaded or already removed. If the
+        // job is not loaded, bootstrap will load it fresh, so treat "not loaded"
+        // as success and let bootstrap handle a real error.
+        let stderr = String::from_utf8_lossy(&bootout.stderr);
+        if !stderr.contains("Could not find") && !bootout.status.code().is_some_and(|c| c == 3) {
+            anyhow::bail!(
+                "launchctl bootout failed for {} ({}): {}{}",
+                domain,
+                bootout.status,
+                String::from_utf8_lossy(&bootout.stdout).trim(),
+                stderr.trim(),
+            );
+        }
+    }
+
+    let bootstrap_domain = format!("gui/{uid}");
+    let bootstrap = Command::new("launchctl")
+        .args(["bootstrap", &bootstrap_domain, &path.display().to_string()])
+        .output()?;
+    if !bootstrap.status.success() {
         anyhow::bail!(
-            "launchctl load failed for {} ({}): {}{}",
+            "launchctl bootstrap failed for {} ({}): {}{}",
             path.display(),
-            output.status,
-            String::from_utf8_lossy(&output.stdout).trim(),
-            String::from_utf8_lossy(&output.stderr).trim(),
+            bootstrap.status,
+            String::from_utf8_lossy(&bootstrap.stdout).trim(),
+            String::from_utf8_lossy(&bootstrap.stderr).trim(),
         );
     }
-    Ok(path)
+    Ok(())
 }
 
 fn reload_guidance(label: &str, path: &Path) -> String {
@@ -357,7 +441,10 @@ mod plist_tests {
 
     #[test]
     fn plist_runs_serve_service_at_load() {
-        let plist = render_plist(Path::new("/usr/local/bin/collab"));
+        let plist = render_plist(
+            Path::new("/usr/local/bin/collab"),
+            Path::new("/Users/test/.collab"),
+        );
         assert!(
             plist.contains("<key>RunAtLoad</key>\n    <true/>"),
             "{plist}"
@@ -372,7 +459,10 @@ mod plist_tests {
         // A clean `collab down` exits 0; launchd must NOT relaunch it, or the
         // daemon would come straight back and manual close would be impossible.
         // Crash recovery still needs a relaunch, so SuccessfulExit=false.
-        let plist = render_plist(Path::new("/usr/local/bin/collab"));
+        let plist = render_plist(
+            Path::new("/usr/local/bin/collab"),
+            Path::new("/Users/test/.collab"),
+        );
         assert!(
             plist.contains("<key>KeepAlive</key>\n    <dict>\n        <key>SuccessfulExit</key>\n        <false/>"),
             "{plist}"
@@ -390,7 +480,10 @@ mod plist_tests {
         // registered workers exhausts that and every binding then fails with
         // EMFILE ("Too many open files"), so the supervised daemon must raise
         // its own soft/hard NumberOfFiles limits in the plist.
-        let plist = render_plist(Path::new("/usr/local/bin/collab"));
+        let plist = render_plist(
+            Path::new("/usr/local/bin/collab"),
+            Path::new("/Users/test/.collab"),
+        );
         assert!(
             plist.contains(
                 "<key>SoftResourceLimits</key>\n    <dict>\n        <key>NumberOfFiles</key>\n        <integer>4096</integer>\n    </dict>"
@@ -409,8 +502,16 @@ mod plist_tests {
     fn plist_pins_the_installing_users_home() {
         // The agent must resolve the same host state root and configuration as
         // the installer, rather than whatever HOME launchd happens to give it.
+        // Hold the env lock so a concurrent test that unsets HOME cannot make
+        // this read observe an empty environment.
+        let _lock = crate::scope::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let home = std::env::var("HOME").expect("HOME");
-        let plist = render_plist(Path::new("/usr/local/bin/collab"));
+        let plist = render_plist(
+            Path::new("/usr/local/bin/collab"),
+            Path::new("/Users/test/.collab"),
+        );
         assert!(
             plist.contains("<key>EnvironmentVariables</key>\n    <dict>"),
             "{plist}"
@@ -432,7 +533,10 @@ mod plist_tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _guard = EnvGuard::set_value("PATH", "/usr/bin:/bin");
-        let plist = render_plist(Path::new("/usr/local/bin/collab"));
+        let plist = render_plist(
+            Path::new("/usr/local/bin/collab"),
+            Path::new("/Users/test/.collab"),
+        );
         assert!(
             plist.contains("<key>PATH</key>\n        <string>/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin:/usr/sbin:/sbin</string>"),
             "{plist}"
@@ -448,7 +552,10 @@ mod plist_tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _guard = EnvGuard::set_value("PATH", "/opt/homebrew/bin:/tmp/a&b");
-        let plist = render_plist(Path::new("/usr/local/bin/collab"));
+        let plist = render_plist(
+            Path::new("/usr/local/bin/collab"),
+            Path::new("/Users/test/.collab"),
+        );
         assert!(plist.contains("/tmp/a&amp;b"), "{plist}");
         assert!(!plist.contains("/tmp/a&b</string>"), "{plist}");
     }
@@ -518,7 +625,7 @@ mod plist_tests {
         let _label =
             EnvGuard::set_value(AUTOSTART_LABEL_ENV, "com.appsdk.collab.e2e.state-root-test");
 
-        let plist = render_plist(Path::new("/tmp/collab"));
+        let plist = render_plist(Path::new("/tmp/collab"), &state);
         assert!(
             plist.contains(&format!(
                 "<key>{}</key>\n        <string>{}</string>",
@@ -557,5 +664,166 @@ mod plist_tests {
 
         std::env::set_var(AUTOSTART_LABEL_ENV, "com.appsdk.collab.e2e.allowed");
         validate_state_override().expect("an isolated label permits an isolated state root");
+    }
+
+    #[test]
+    fn plist_never_falls_back_to_a_tmp_log_path() {
+        // The installer resolves the host state root exactly once and passes it
+        // in; a resolution failure must not silently redirect the daemon log to
+        // /tmp. The old single-arg render_plist fell back to /tmp/collab-serve.log
+        // whenever HostPaths::resolve failed, hiding the real path error.
+        let _lock = crate::scope::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _home = EnvGuard::remove("HOME");
+        let _state = EnvGuard::remove(scope::COLLAB_STATE_DIR_ENV);
+        let state = Path::new("/Users/test/.collab");
+        let plist = render_plist(Path::new("/usr/local/bin/collab"), state);
+        assert!(
+            plist.contains(&format!(
+                "<string>{}</string>",
+                state.join("serve.log").display()
+            )),
+            "{plist}"
+        );
+        assert!(!plist.contains("/tmp/collab-serve.log"), "{plist}");
+    }
+
+    #[test]
+    fn service_record_binds_the_requested_project_root() {
+        // `collab up` must bind the supervised daemon to the current project
+        // before loading the agent. A record bound to the host default root is
+        // the wrong-project binding this test guards against.
+        let _lock = crate::scope::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root = std::env::temp_dir().join(format!(
+            "collab-service-record-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = root.join("home");
+        let state = root.join("state");
+        let project = root.join("project");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        let _home = EnvGuard::set("HOME", &home);
+        let _state = EnvGuard::set(scope::COLLAB_STATE_DIR_ENV, &state);
+
+        write_service_record(&project).unwrap();
+        let recorded = scope::service_scope_root()
+            .expect("service record path resolves")
+            .expect("service record was written");
+
+        assert_eq!(recorded, project);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    fn fake_launchctl(root: &Path) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let bin = root.join("fake-bin");
+        let log = root.join("launchctl.log");
+        std::fs::create_dir_all(&bin).unwrap();
+        let script = bin.join("launchctl");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\n  list) printf '\\\"PID\\\" = 123;\\n' ;;\n  bootstrap) if [ \"${{FAKE_BOOTSTRAP_FAIL:-0}}\" = 1 ]; then printf 'fake bootstrap failure\\n' >&2; exit 7; fi ;;\nesac\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+        (bin, log)
+    }
+
+    #[cfg(unix)]
+    fn reload_fixture() -> (PathBuf, PathBuf, PathBuf, PathBuf, String) {
+        let root = std::env::temp_dir().join(format!(
+            "collab-autostart-reload-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = root.join("home");
+        let state = root.join("state");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        let (fake_bin, log) = fake_launchctl(&root);
+        (root, home, state, fake_bin, log.display().to_string())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn up_reloads_loaded_launch_agent_from_new_plist() {
+        let _lock = crate::scope::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (root, home, state, fake_bin, log) = reload_fixture();
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let _path =
+            EnvGuard::set_value("PATH", &format!("{}:{}", fake_bin.display(), original_path));
+        let _home = EnvGuard::set("HOME", &home);
+        let _state = EnvGuard::set(scope::COLLAB_STATE_DIR_ENV, &state);
+        let label = "com.appsdk.collab.e2e.up-reload";
+        let _label = EnvGuard::set_value(AUTOSTART_LABEL_ENV, label);
+        let _cargo_bin = EnvGuard::set("CARGO_BIN", &fake_bin);
+
+        let path = install_and_reload().expect("loaded job should reload");
+        let invocations = std::fs::read_to_string(&log).unwrap();
+        let uid = unsafe { libc::geteuid() };
+        assert!(
+            invocations.contains(&format!("list {label}")),
+            "{invocations}"
+        );
+        assert!(
+            invocations.contains(&format!("bootout gui/{uid}/{label}")),
+            "{invocations}"
+        );
+        assert!(
+            invocations.contains(&format!("bootstrap gui/{uid} {}", path.display())),
+            "{invocations}"
+        );
+        assert!(path.starts_with(&home), "{}", path.display());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn up_reports_launchd_bootstrap_failure() {
+        let _lock = crate::scope::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (root, home, state, fake_bin, _log) = reload_fixture();
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let _path =
+            EnvGuard::set_value("PATH", &format!("{}:{}", fake_bin.display(), original_path));
+        let _home = EnvGuard::set("HOME", &home);
+        let _state = EnvGuard::set(scope::COLLAB_STATE_DIR_ENV, &state);
+        let _label = EnvGuard::set_value(
+            AUTOSTART_LABEL_ENV,
+            "com.appsdk.collab.e2e.bootstrap-failure",
+        );
+        let _cargo_bin = EnvGuard::set("CARGO_BIN", &fake_bin);
+        let _fail = EnvGuard::set_value("FAKE_BOOTSTRAP_FAIL", "1");
+
+        let error = install_and_reload().expect_err("bootstrap failure must surface");
+        assert!(
+            error.to_string().starts_with("launchctl bootstrap failed"),
+            "{error:#}"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

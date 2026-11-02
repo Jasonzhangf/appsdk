@@ -1,9 +1,9 @@
 #!/bin/sh
-# Build a Collab release tarball whose installer enables daemon autostart.
+# Build a Collab release tarball whose installer installs binaries and Skills.
 #
 # The tarball carries prebuilt binaries, the Collab Skill bundle and an
-# install.sh with the same delivery steps as install-global-collab.sh, so a
-# machine without a checkout gets login autostart instead of binaries only.
+# install.sh with the same installation steps as install-global-collab.sh.
+# Daemon activation belongs to `collab up`.
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -102,13 +102,15 @@ chmod 644 "$stage/bin/collab-desktop-mcp.mjs"
 [ -s "$collab_root/docs/install-onboarding.md" ] ||
   fail 'missing docs/install-onboarding.md'
 cp "$collab_root/docs/install-onboarding.md" "$stage/INSTALL-ONBOARDING.md"
+cp "$collab_root/scripts/require-system-volume.sh" "$stage/require-system-volume.sh"
 
 cat >"$stage/install.sh" <<'INSTALL'
 #!/bin/sh
-# Install the packaged Collab binaries, Skill bundle and login autostart.
+# Install the packaged Collab binaries and Skill bundle.
 set -eu
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$here/require-system-volume.sh"
 cargo_home=${CARGO_HOME:-"$HOME/.cargo"}
 bin_dir="$cargo_home/bin"
 skills_target=${COLLAB_SKILLS_TARGET:-"$HOME/.agents/skills/collab"}
@@ -116,6 +118,9 @@ skills_target=${COLLAB_SKILLS_TARGET:-"$HOME/.agents/skills/collab"}
 test -x "$here/bin/collab"
 test -x "$here/bin/collab-mcp"
 test -x "$here/bin/collab-desktop-mcp"
+
+require_system_volume "$bin_dir"
+require_system_volume "$skills_target"
 
 mkdir -p "$bin_dir"
 collab_tmp="$bin_dir/.collab.install.$$"
@@ -137,22 +142,11 @@ trap - EXIT HUP INT TERM
 
 "$bin_dir/collab" install-skills --target "$skills_target" --force
 
-# Login autostart is a required part of the delivery on macOS, so a launchd
-# failure must fail the install instead of leaving binaries without autostart.
-case "$(uname -s)" in
-  Darwin)
-    "$bin_dir/collab" install-autostart
-    ;;
-  *)
-    printf 'autostart=skipped: launchd is macOS-only (uname -s = %s)\n' "$(uname -s)" >&2
-    ;;
-esac
-
 printf 'version=%s\n' "$("$bin_dir/collab" --version)"
 printf 'collab=%s\n' "$bin_dir/collab"
 printf 'collab_mcp=%s\n' "$bin_dir/collab-mcp"
 printf 'skills=%s\n' "$skills_target"
-printf 'daemon_note=install does not restart a running daemon; switch binaries in a user-managed maintenance window\n'
+printf 'daemon_note=install only; run collab up from the project root to activate the daemon\n'
 INSTALL
 chmod 755 "$stage/install.sh"
 
@@ -177,11 +171,14 @@ Install targets:
 - `$CARGO_HOME/bin/collab-mcp`
 - `$CARGO_HOME/bin/collab-desktop-mcp` and `collab-desktop-mcp.mjs`
 - `$HOME/.agents/skills/collab`
-- launchd LaunchAgent `com.appsdk.collab` via `collab install-autostart`
 
-Install does not restart a running daemon and does not touch tmux. A daemon
-started before the install keeps the old binary until the user-managed
-maintenance window loads the LaunchAgent.
+On macOS the installer refuses an install target that resolves to an external
+volume and stops before writing.
+
+Install does not start or restart a daemon and does not touch tmux. After
+install, run `collab up` from the project root. It writes the service record for
+that project before loading the login LaunchAgent. A daemon started before the
+install keeps the old binary until the next user-managed maintenance window.
 
 First-install setup:
 - do not run Codex with YOLO or danger-full-access;

@@ -126,7 +126,8 @@
         std::fs::remove_dir_all(project_root).unwrap();
     }
 
-    /// Moving to the incumbent's pane supplies no name-presence observation.
+    /// Approval does not classify an unknown name holder as offline. Pane
+    /// position cannot bypass the durable pending adjudication path.
     #[tokio::test]
     async fn approved_promotion_keeps_unknown_name_when_peer_took_its_pane() {
         let (_host, host_root, runtime, project_root, _manager, app, mut candidates, _master) =
@@ -492,7 +493,9 @@
             .is_some_and(|route| route.binding_id == master_binding.binding_id));
         assert!(manager.same_pane_master_route_ready(&runtime).is_ok());
         assert!(manager
-            .reconcile_same_pane_master_routes()
+            .reconcile_same_pane_master_routes(
+                &crate::server::binding_slot::BindingControlSet::new()
+            )
             .is_ok());
         std::fs::remove_dir_all(host_root).unwrap();
         std::fs::remove_dir_all(project_root).unwrap();
@@ -548,7 +551,9 @@
                 None,
             );
 
-        manager.reconcile_started_thread_routes().unwrap();
+        manager
+            .reconcile_started_thread_routes(&crate::server::binding_slot::BindingControlSet::new())
+            .unwrap();
 
         let published = host
             .state
@@ -565,7 +570,9 @@
         host.commit_checked(&[Event::GlobalCurrentThreadRouteSet {
             binding: superseding.clone(),
         }]).unwrap();
-        manager.reconcile_started_thread_routes().unwrap();
+        manager
+            .reconcile_started_thread_routes(&crate::server::binding_slot::BindingControlSet::new())
+            .unwrap();
         assert_eq!(host.state.lock().unwrap().global
             .lookup_current_thread_route(binding.session_id.as_ref().unwrap(), binding.native_thread_id.as_ref().unwrap()),
             Some(&superseding), "historical project bindings cannot stop startup or evict the current route");
@@ -640,7 +647,9 @@
                 None,
             );
 
-        manager.reconcile_started_thread_routes().unwrap();
+        manager
+            .reconcile_started_thread_routes(&crate::server::binding_slot::BindingControlSet::new())
+            .unwrap();
 
         let published = host
             .state
@@ -651,6 +660,106 @@
             .unwrap()
             .clone();
         assert_eq!(published, binding);
+        std::fs::remove_dir_all(host_root).unwrap();
+        std::fs::remove_dir_all(project_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn started_route_reconciler_skips_a_binding_superseded_by_control() {
+        let (host, host_root, _) = test_server();
+        let (runtime, project_root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
+        let worker = "control-superseded-worker";
+        let token = "token-control-superseded-worker";
+        let app = AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
+        let candidates = test_candidates("control-superseded-worker").unwrap();
+        let registered = seed_committed_registration_fixture(
+            &runtime,
+            worker.into(),
+            token.into(),
+            project_root.display().to_string(),
+            Some(app.clone()),
+            Some(candidates),
+        );
+        assert!(registered.ok, "{registered:?}");
+        let binding = {
+            let state = runtime.state.lock().unwrap();
+            let scope = GlobalState::canonical_project_scope(&project_root).unwrap();
+            state
+                .global
+                .lookup_project_for_route(&crate::server::global_state::RouteScope {
+                    app_scope_id: app.clone(),
+                    project_scope_id: scope,
+                })
+                .and_then(|project| {
+                    project
+                        .runtime_bindings
+                        .values()
+                        .find(|binding| binding.agent_id.as_str() == worker)
+                        .cloned()
+                })
+                .expect("seeded worker has a runtime binding")
+        };
+        let transport = runtime
+            .state
+            .lock()
+            .unwrap()
+            .workers
+            .get(worker)
+            .and_then(|record| record.transport.clone())
+            .expect("registered worker has a selected transport");
+        manager.install_runtime(
+            &(
+                app.as_str().to_owned(),
+                binding.project_scope.as_str().to_owned(),
+            ),
+            runtime.clone(),
+            None,
+        );
+        // A confirmed control slot publishes the same principal with a newer
+        // generation and a different binding id. The reducer still holds the
+        // stale copy; startup must not republish that old binding.
+        let mut controlled_binding = binding.clone();
+        controlled_binding.binding_id =
+            BindingId::new("binding-control-superseded-current").unwrap();
+        controlled_binding.endpoint_generation += 2;
+        let store = crate::server::binding_store::BindingControlStore::at(
+            &host.host_paths.state_root().join("routes.jsonl"),
+        );
+        store
+            .commit(crate::server::binding_store::ControlChange::Commit {
+                key: crate::server::binding_slot::IdentityBindingKey::new(
+                    binding.project_scope.clone(),
+                    binding.app_scope_id.clone(),
+                    "Alice".to_owned(),
+                ),
+                value: crate::server::binding_slot::BindingValue::new(
+                    controlled_binding.clone(),
+                    transport,
+                ),
+                expected_generation: None,
+            })
+            .unwrap();
+
+        manager
+            .reconcile_started_thread_routes(&store.load().unwrap())
+            .unwrap();
+
+        let published = host
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_current_thread_route(
+                binding.session_id.as_ref().unwrap(),
+                binding.native_thread_id.as_ref().unwrap(),
+            )
+            .cloned();
+        assert!(
+            published.as_ref().is_none_or(|route| route == &controlled_binding),
+            "control must decide the current route; published={published:?}"
+        );
         std::fs::remove_dir_all(host_root).unwrap();
         std::fs::remove_dir_all(project_root).unwrap();
     }

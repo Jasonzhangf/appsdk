@@ -444,7 +444,7 @@ fn configured_worktree_path_rejects_expected_parent_escape() {
 }
 
 #[test]
-fn configured_worktree_lifecycle_register_relocate_and_cleanup_use_configured_base() {
+fn configured_worktree_register_relocate_and_close_use_configured_base() {
     let (mut server, root) = test_server();
     let base = root.with_file_name(format!(
         "{}-external-playground",
@@ -542,22 +542,6 @@ fn configured_worktree_lifecycle_register_relocate_and_cleanup_use_configured_ba
         "configured external worktree lifecycle review pass".into(),
     );
     assert!(reviewed.ok, "{reviewed:?}");
-    let main_tip = git(&["rev-parse", "HEAD"])
-        .stdout
-        .into_iter()
-        .take_while(|byte| *byte != b'\n')
-        .map(|byte| byte as char)
-        .collect::<String>();
-    let integrated = handle_task_integrated(
-        &server,
-        "owner".into(),
-        "token-owner".into(),
-        "configured-task".into(),
-        main_tip,
-        "configured external worktree lifecycle integrated".into(),
-    );
-    assert!(integrated.ok, "{integrated:?}");
-
     let closed = handle_task_close(
         &server,
         "owner".into(),
@@ -567,17 +551,13 @@ fn configured_worktree_lifecycle_register_relocate_and_cleanup_use_configured_ba
         None,
     );
     assert!(closed.ok, "{closed:?}");
-    let finalized = handle_task_finalize_cleanup(
-        &server,
-        "owner".into(),
-        "token-owner".into(),
-        "configured-task".into(),
-        None,
-    );
-    assert!(finalized.ok, "{finalized:?}");
-    assert!(!target.exists());
+    assert_eq!(closed.data["cleanup"]["result"], "not_managed");
+    assert_eq!(closed.data["cleanup"]["collab_managed"], false);
+    // Register and relocate still validate the configured base, but close no
+    // longer deletes the worktree or branch; they remain user-owned.
+    assert!(target.exists());
     assert!(
-        !git(&["rev-parse", "--verify", "refs/heads/configured"])
+        git(&["rev-parse", "--verify", "refs/heads/configured"])
             .status
             .success()
     );
@@ -1974,6 +1954,7 @@ fn routing_seat(server: &Server, name: &str, worker: &str) {
                 session_id: session,
                 occupancy_revision: 1,
                 updated_ms: now_ms(),
+                pane_anchor: None,
             },
         );
 }

@@ -696,6 +696,121 @@ fn dsh_context_discovers_first_registration_and_preserves_current_route_recovery
     fixture.finish();
 }
 
+/// Regression for git-bug e25779c: a full `~/.collab` reset clears the
+/// gateway-published placement declaration and every committed DSH binding,
+/// while the gateway process keeps running. Collab must not guess the gateway
+/// socket or pid while the declaration is absent; once the live gateway
+/// re-publishes its own declaration, a fresh CLI must rediscover and
+/// re-enroll every live peer without any gateway restart.
+#[test]
+fn dsh_full_reset_recovers_every_live_peer_after_gateway_republishes_declaration() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut fixture = Fixture::new_requiring_enrollment();
+    fixture.start_daemon();
+    let capability = fixture.state.join("runtime/dsh/gateway-control.json");
+    let declare = |fixture: &Fixture| {
+        std::fs::create_dir_all(capability.parent().unwrap()).unwrap();
+        std::fs::write(
+            &capability,
+            json!({"version":1,
+            "control_socket":fixture.gateway.socket,"pid":std::process::id()})
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::set_permissions(&capability, std::fs::Permissions::from_mode(0o600)).unwrap();
+    };
+    declare(&fixture);
+
+    // Baseline: both live peers register and enroll over the one live gateway.
+    for agent in ["agentA", "agentB"] {
+        let output = fixture.dsh_command(&["context"], agent);
+        assert!(
+            output.status.success(),
+            "baseline register {agent}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert_eq!(fixture.registrations(), 2, "baseline registers both peers");
+    let enrolled_before = fixture.gateway.register_peer_requests().len();
+    assert!(
+        enrolled_before >= 2,
+        "baseline enrolls both peers: {enrolled_before}"
+    );
+
+    // Model the full reset: collab's control plane and the gateway declaration
+    // both disappear. The gateway process stays running on the same socket.
+    fixture.stop_daemon();
+    std::fs::remove_dir_all(&fixture.state).unwrap();
+    std::fs::create_dir_all(&fixture.state).unwrap();
+    fixture.start_daemon();
+
+    // With no declaration, Collab must not fabricate placement or identity.
+    let unresolved = fixture.dsh_command(&["context"], "agentA");
+    let unresolved: Value = serde_json::from_slice(&unresolved.stdout).unwrap_or(Value::Null);
+    assert_eq!(
+        unresolved["result"]["outcome"], "missing_facts",
+        "a lost declaration must surface as missing facts, not a guessed endpoint: {unresolved}"
+    );
+    assert_eq!(
+        unresolved["result"]["requires"]["fields"],
+        json!(["dsh"]),
+        "{unresolved}"
+    );
+    assert_eq!(
+        fixture.registrations(),
+        0,
+        "missing declaration must not register"
+    );
+    assert_eq!(
+        fixture.gateway.register_peer_requests().len(),
+        enrolled_before,
+        "missing declaration must not enroll any peer"
+    );
+
+    // The live gateway re-publishes its own placement declaration. That is the
+    // gateway-owned half of the recovery; Collab cannot synthesize socket/pid.
+    // No gateway restart happens: same process, same socket, same listener.
+    declare(&fixture);
+
+    let mut recovered_agents = HashSet::new();
+    for agent in ["agentA", "agentB"] {
+        let output = fixture.dsh_command(&["context"], agent);
+        let parsed: Value = serde_json::from_slice(&output.stdout).unwrap_or(Value::Null);
+        assert!(
+            output.status.success(),
+            "recover {agent}: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(parsed["result"]["outcome"], "completed", "{parsed}");
+        assert_eq!(
+            parsed["result"]["snapshot"]["identity"]["transport"]["kind"], "dsh",
+            "{parsed}"
+        );
+    }
+    assert_eq!(
+        fixture.registrations(),
+        2,
+        "every live peer must re-register after the declaration returns"
+    );
+    for enrollment in fixture
+        .gateway
+        .register_peer_requests()
+        .into_iter()
+        .skip(enrolled_before)
+    {
+        if let Some(agent) = enrollment["params"]["agentId"].as_str() {
+            recovered_agents.insert(agent.to_owned());
+        }
+    }
+    assert_eq!(
+        recovered_agents,
+        HashSet::from(["agentA".to_owned(), "agentB".to_owned()]),
+        "every live peer must be re-enrolled after the declaration returns"
+    );
+    fixture.finish();
+}
+
 #[test]
 fn dsh_bootstrap_discovery_rejects_invalid_capabilities_without_registration() {
     use std::os::unix::fs::PermissionsExt;

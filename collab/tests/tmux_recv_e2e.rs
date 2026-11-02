@@ -842,6 +842,237 @@ fn context_recovers_archived_master_in_the_same_live_pane() {
     assert_eq!(status["consumed_by_recv"], true);
 }
 
+/// A later agent session in the same live pane and the same exact invocation
+/// cwd inherits the pane's current name. The saved transport's old endpoint is
+/// not the caller pane; only this invocation's daemon ancestry observation may
+/// seed the name anchor.
+#[test]
+fn same_live_caller_pane_and_exact_cwd_inherits_name_across_session() {
+    let root = unique_root();
+    let host_state = root.join("h");
+    let tmux_socket = root.join("t.sock");
+    std::fs::create_dir_all(&host_state).unwrap();
+    seed_baseline(&root);
+    let mut fixture = Fixture {
+        binary: collab_test_binary(),
+        root: root.clone(),
+        host_state,
+        tmux_socket: tmux_socket.clone(),
+        daemon: None,
+        owned_sessions: vec!["collab-pane-inherit".into()],
+    };
+    tmux(
+        &tmux_socket,
+        &[
+            "new-session",
+            "-d",
+            "-s",
+            "collab-pane-inherit",
+            "sleep 600",
+        ],
+    );
+    let server_pid =
+        String::from_utf8(tmux(&tmux_socket, &["display-message", "-p", "#{pid}"]).stdout)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+    let pane_id =
+        String::from_utf8(tmux(&tmux_socket, &["display-message", "-p", "#{pane_id}"]).stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+    let old = Pane {
+        server_pid,
+        pane_id: pane_id.clone(),
+        session_anchor: "session-before".into(),
+        thread_anchor: "thread-before".into(),
+    };
+    fixture.start_daemon();
+    fixture.registered_context(&old, true);
+    let init = fixture.run_ok(&["init"], Some(&old));
+    let worker_id = init["worker_id"]
+        .as_str()
+        .expect("init receipt names the daemon-owned worker")
+        .to_owned();
+    fixture.run_ok(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "user approved isolated master",
+        ],
+        Some(&old),
+    );
+    let before = fixture.run_context(&["context"], Some(&old));
+    assert_eq!(before["name"], "Jenny", "{before}");
+
+    // Force recovery from the archived pane credential so the name anchor is
+    // proven from this invocation's live caller pane, not a local session hit.
+    let archive = fixture
+        .host_state
+        .join("archives/identities-retired-1")
+        .join(&worker_id);
+    std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
+    std::fs::rename(
+        fixture.host_state.join("identities").join(&worker_id),
+        &archive,
+    )
+    .unwrap();
+
+    // A different agent session runs in the same live pane and same cwd. The
+    // session anchor is not the identity anchor; the exact pane plus cwd is.
+    let new = Pane {
+        session_anchor: "session-after".into(),
+        thread_anchor: "thread-after".into(),
+        ..old
+    };
+    let envelope = fixture.run_ok(&["context"], Some(&new));
+    assert_eq!(envelope["result"]["outcome"], "completed", "{envelope}");
+    let recovered = context_snapshot(&envelope);
+    assert_eq!(
+        recovered["name"], "Jenny",
+        "the same live pane plus exact cwd must inherit the name across a session change: {recovered}"
+    );
+}
+
+/// The saved pane and its durable binding still carry the old name, but this
+/// invocation runs in a different live pane with the same exact invocation
+/// cwd. Equality between the saved transport and the binding proves only saved
+/// state consistency, never the current caller pane; recovering an old
+/// identity must not seed the name anchor from the saved endpoint. The caller
+/// takes a fresh ordinary name instead of the saved pane name.
+#[test]
+fn different_live_pane_with_same_cwd_does_not_inherit_saved_pane_name() {
+    let root = unique_root();
+    let host_state = root.join("h");
+    let tmux_socket = root.join("t.sock");
+    std::fs::create_dir_all(&host_state).unwrap();
+    seed_baseline(&root);
+    let mut fixture = Fixture {
+        binary: collab_test_binary(),
+        root: root.clone(),
+        host_state,
+        tmux_socket: tmux_socket.clone(),
+        daemon: None,
+        owned_sessions: vec![
+            "collab-pane-anchor-saved".into(),
+            "collab-pane-anchor-live".into(),
+        ],
+    };
+    tmux(
+        &tmux_socket,
+        &[
+            "new-session",
+            "-d",
+            "-s",
+            "collab-pane-anchor-saved",
+            "sleep 600",
+        ],
+    );
+    let live_pane_id = String::from_utf8(
+        tmux(
+            &tmux_socket,
+            &[
+                "new-session",
+                "-d",
+                "-P",
+                "-F",
+                "#{pane_id}",
+                "-s",
+                "collab-pane-anchor-live",
+                "sleep 600",
+            ],
+        )
+        .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+    let server_pid =
+        String::from_utf8(tmux(&tmux_socket, &["display-message", "-p", "#{pid}"]).stdout)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+    let saved_pane_id = String::from_utf8(
+        tmux(
+            &tmux_socket,
+            &[
+                "display-message",
+                "-p",
+                "-t",
+                "collab-pane-anchor-saved",
+                "#{pane_id}",
+            ],
+        )
+        .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+    assert_ne!(saved_pane_id, live_pane_id);
+    let saved = Pane {
+        server_pid,
+        pane_id: saved_pane_id,
+        session_anchor: "session-saved".into(),
+        thread_anchor: "thread-saved".into(),
+    };
+    let live = Pane {
+        server_pid,
+        pane_id: live_pane_id,
+        session_anchor: "session-live".into(),
+        thread_anchor: "thread-live".into(),
+    };
+
+    fixture.start_daemon();
+    fixture.registered_context(&saved, true);
+    let init = fixture.run_ok(&["init"], Some(&saved));
+    let worker_id = init["worker_id"]
+        .as_str()
+        .expect("init receipt names the daemon-owned worker")
+        .to_owned();
+    fixture.run_ok(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "user approved isolated master",
+        ],
+        Some(&saved),
+    );
+    let before = fixture.run_context(&["context"], Some(&saved));
+    assert_eq!(before["name"], "Jenny", "{before}");
+
+    // Force recovery from the archived pane credential so the saved pane name
+    // must be proven from this invocation's live caller pane, not from the
+    // saved transport that still equals the durable binding.
+    let archive = fixture
+        .host_state
+        .join("archives/identities-retired-1")
+        .join(&worker_id);
+    std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
+    std::fs::rename(
+        fixture.host_state.join("identities").join(&worker_id),
+        &archive,
+    )
+    .unwrap();
+
+    // A different live pane in the same tmux server, same exact cwd. The saved
+    // transport (the archived pane) is not the current caller pane.
+    let envelope = fixture.run_ok(&["context"], Some(&live));
+    assert_eq!(envelope["result"]["outcome"], "completed", "{envelope}");
+    let recovered = context_snapshot(&envelope);
+    assert_ne!(
+        recovered["name"], "Jenny",
+        "a different live pane must not inherit the saved pane name: {recovered}"
+    );
+    assert_ne!(
+        recovered["identity"]["worker_id"], worker_id,
+        "the archived identity must not be recovered from a different live pane: {recovered}"
+    );
+}
+
 /// The implicit bootstrap path — `collab context` run from a pane with no
 /// `--worker` and no `COLLAB_WORKER` — resolves its durable identity from the
 /// pane anchor. A stale local token must synchronize with its unique durable

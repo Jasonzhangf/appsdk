@@ -128,7 +128,11 @@ fn master_status_workspace_uses_registered_canonical_project() {
     // symlinked marker so the caller path is not the registered root.
     let caller_root = root.join("linked-worktree");
     std::fs::create_dir_all(&caller_root).unwrap();
-    std::os::unix::fs::symlink(&project_root.join(".agent-collab"), &caller_root.join(".agent-collab")).unwrap();
+    std::os::unix::fs::symlink(
+        &project_root.join(".agent-collab"),
+        &caller_root.join(".agent-collab"),
+    )
+    .unwrap();
 
     let socket = state_root.join("server.sock");
     let listener = UnixListener::bind(&socket).unwrap();

@@ -40,6 +40,7 @@ fn board_name_fixture() -> (Server, std::path::PathBuf, RouteScope) {
                 session_id: "session-old".into(),
                 occupancy_revision: 1,
                 updated_ms: 1,
+                pane_anchor: None,
             },
         );
     drop(state);

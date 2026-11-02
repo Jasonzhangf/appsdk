@@ -209,6 +209,9 @@ async fn dispatch_wire_routed(
                 Ok(server) => server,
                 Err(error) => return (manager.host.clone(), Resp::err(error)),
             };
+            if let Err(error) = manager.recover_pending_effects_for_scope(&context) {
+                return (server, Resp::err(error));
+            }
             if let Err(error) = validate_request_context(&server, &poll_req, Some(&context)) {
                 return (server, Resp::err(error));
             }
@@ -243,9 +246,20 @@ async fn dispatch_wire_routed(
             (server, response)
         }
         req => {
+            let gate_effects = mutation_blocked_during_migration(&req)
+                && !matches!(&req, Req::Register { .. } | Req::IdentityContext { .. });
             let result = tokio::task::spawn_blocking({
                 let manager = manager.clone();
-                move || manager.dispatch_sync(project_context, req)
+                move || {
+                    if gate_effects {
+                        if let Some(context) = project_context.as_ref() {
+                            if let Err(error) = manager.recover_pending_effects_for_scope(context) {
+                                return (manager.host.clone(), Resp::err(error));
+                            }
+                        }
+                    }
+                    manager.dispatch_sync(project_context, req)
+                }
             })
             .await;
             match result {
@@ -407,8 +421,11 @@ async fn conn_task_degraded(
                 "now": iso(now_ms()),
             })),
             Ok((_, Req::Shutdown { password })) => {
-                let response =
-                    handle_host_shutdown(&host_paths, maintenance_password.as_deref(), password.as_ref());
+                let response = handle_host_shutdown(
+                    &host_paths,
+                    maintenance_password.as_deref(),
+                    password.as_ref(),
+                );
                 close_daemon = response.ok;
                 response
             }
@@ -618,20 +635,72 @@ pub fn replay_host_index(storage_root: &Path) -> anyhow::Result<State> {
 /// The project root remains the semantic scope used by worktree and identity
 /// validation; the journal path may be an appserver-specific runtime store.
 fn replay_from_journal(root: &Path, journal: &Path) -> anyhow::Result<State> {
-    replay_from_journal_mode(root, journal, true)
+    replay_from_journal_mode(root, journal, true, &std::collections::HashSet::new())
+}
+
+/// Replay a project reducer, treating only the given operation ids as proven
+/// safe to trim from an uncommitted tail. The caller builds this set from the
+/// durable control store, so an incomplete command is trimmed only when a real
+/// pending effect for the exact operation is still recorded.
+fn replay_from_journal_with_proven(
+    root: &Path,
+    journal: &Path,
+    proven_pending_operations: &std::collections::HashSet<String>,
+) -> anyhow::Result<State> {
+    replay_from_journal_mode(root, journal, true, proven_pending_operations)
 }
 
 /// Read-only replay for startup discovery. It parses the same committed state
 /// but never rewrites a legacy journal; any rewrite requires the writer lock
 /// that normal materialization takes before opening the route.
 fn replay_from_journal_read_only(root: &Path, journal: &Path) -> anyhow::Result<State> {
-    replay_from_journal_mode(root, journal, false)
+    replay_from_journal_mode(root, journal, false, &std::collections::HashSet::new())
+}
+
+/// Collect the operation ids that the durable binding-control store still
+/// records as a pending effect for this exact route. A pending effect is the
+/// only proof that an uncommitted trailing command has a reliable re-driver:
+/// `recover_pending_effects` (or a retried outer register) replays the exact
+/// handoff recorded here. The completion marker is the commit point, and the
+/// binding promotion that can run before it is that recorded effect, so no
+/// unrecorded external side effect survives the trim. An empty set means no
+/// tail may be trimmed automatically. A corrupt control store fails explicitly
+/// instead of being treated as "no effect".
+pub(crate) fn proven_pending_operations(
+    state_root: &Path,
+    app_scope_id: &str,
+    project_scope: &str,
+) -> anyhow::Result<std::collections::HashSet<String>> {
+    let control = crate::server::binding_store::BindingControlStore::new(state_root)
+        .load()
+        .map_err(anyhow::Error::msg)?;
+    Ok(control
+        .pending_effects()
+        .filter(|effect| {
+            effect.app_scope_id.as_str() == app_scope_id
+                && effect.project_scope.as_str() == project_scope
+                && control
+                    .slot(&crate::server::binding_slot::IdentityBindingKey::new(
+                        effect.project_scope.clone(),
+                        effect.app_scope_id.clone(),
+                        effect.name.clone(),
+                    ))
+                    .and_then(|slot| slot.active_binding())
+                    .is_some_and(|current| {
+                        current.binding.agent_id.as_str() == effect.target_worker_id
+                            && current.binding.session_id.as_ref().map(|id| id.as_str())
+                                == Some(effect.target_session_id.as_str())
+                    })
+        })
+        .map(|effect| effect.operation_id.clone())
+        .collect())
 }
 
 fn replay_from_journal_mode(
     root: &Path,
     journal: &Path,
     allow_journal_rewrite: bool,
+    proven_pending_operations: &std::collections::HashSet<String>,
 ) -> anyhow::Result<State> {
     let mut st = State::default();
     if !journal.exists() {
@@ -648,7 +717,13 @@ fn replay_from_journal_mode(
     let mut saw_typed_master_authority = false;
     let mut saw_snapshot_baseline = false;
     let mut saw_real_event = false;
+    let mut line_start_offset = 0usize;
+    let mut incomplete_command_offset: Option<usize> = None;
     for (index, line) in content.lines().enumerate() {
+        let offset = line_start_offset;
+        line_start_offset = line_start_offset
+            .saturating_add(line.len())
+            .saturating_add(1);
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -763,6 +838,7 @@ fn replay_from_journal_mode(
                     operation_id.clone(),
                     vec![event.clone()],
                 ));
+                incomplete_command_offset = Some(offset);
                 continue;
             }
             if let Some((command_id, operation_id, pending)) = pending_command.as_mut() {
@@ -787,6 +863,7 @@ fn replay_from_journal_mode(
                         pending.push(event.clone());
                         let committed = std::mem::take(pending);
                         pending_command = None;
+                        incomplete_command_offset = None;
                         for event in committed {
                             apply_replayed_event(&mut st, &event, index + 1)?;
                             track_legacy_master_authority(
@@ -823,10 +900,41 @@ fn replay_from_journal_mode(
             events.push(event);
         }
     }
-    if let Some((command_id, _, _)) = pending_command {
-        anyhow::bail!(
-            "journal replay failed: incomplete command {command_id}; completion marker missing"
-        );
+    if let Some((command_id, operation_id, _pending_events)) = &pending_command {
+        if !allow_journal_rewrite {
+            anyhow::bail!(
+                "journal replay failed: incomplete command {command_id}; completion marker missing"
+            );
+        }
+        let offset = incomplete_command_offset.ok_or_else(|| {
+            anyhow::anyhow!(
+                "journal replay failed: incomplete command {command_id}; completion marker missing"
+            )
+        })?;
+        if proven_pending_operations.contains(operation_id) {
+            // A durable control pending effect for this exact operation is the
+            // reliable re-driver. The interrupted command never reached the
+            // reducer, and the binding promotion that could have run is the
+            // recorded effect consumed by `recover_pending_effects` or the
+            // retried outer register; nothing else can run before Completion.
+            let file = std::fs::OpenOptions::new().write(true).open(journal)?;
+            file.set_len(offset as u64)?;
+            file.sync_all()?;
+            append_log(
+                &journal.with_file_name("log.txt"),
+                &format!(
+                    "JOURNAL_TAIL_DROPPED_PROVEN_EFFECT: incomplete command {command_id} (operation {operation_id}) matched a durable control pending effect and was trimmed from the uncommitted tail"
+                ),
+            );
+        } else {
+            // No durable control pending effect proves a re-driver. Keep the
+            // original bytes untouched and fail this project's replay so the
+            // affected reducer is isolated instead of silently losing a
+            // possible side effect. Other projects replay independently.
+            anyhow::bail!(
+                "journal replay failed: incomplete command {command_id} (operation {operation_id}) has no matching durable control pending effect; uncommitted tail preserved at byte {offset} and project isolated"
+            );
+        }
     }
     // Route events are an incomplete index. A journal can contain an
     // unrelated route event while an exact durable binding has no project
@@ -1289,18 +1397,24 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
 
     prepare_socket_path(&sock_path)?;
 
+    // The durable operation journal opens only when a pending reset or the
+    // first identity operation needs it. Ping and unrelated services stay
+    // available when the journal is malformed and no reset is pending.
     let operation_journal = Arc::new(
-        crate::server::operation_journal::OperationJournal::open(host_paths.journal_path())
-            .map_err(|error| anyhow::anyhow!("OPERATION_JOURNAL_REPLAY_FAILED: {error}"))?,
+        crate::server::operation_journal::OperationJournal::deferred(host_paths.journal_path()),
     );
     let journal_path = project_server_dir.join("journal.jsonl");
-    let replayed = replay_from_journal(&scope.root, &journal_path);
+    let proven_pending = proven_pending_operations(
+        host_paths.state_root(),
+        resident_key.0.as_str(),
+        resident_key.1.as_str(),
+    )?;
+    let replayed = replay_from_journal_with_proven(&scope.root, &journal_path, &proven_pending);
     let state = match replayed {
         Ok(state) => state,
         Err(error) => {
             let project_replay_failure = format!("{error:#}");
-            let maintenance_password: Option<String> =
-                crate::config::maintenance_password_opt()?;
+            let maintenance_password: Option<String> = crate::config::maintenance_password_opt()?;
             append_log(
                 &host_paths.log_path(),
                 &format!("project replay failed; entering query-only degraded mode: {project_replay_failure}"),
@@ -1557,7 +1671,11 @@ fn raise_open_file_limit() {
         if limit.rlim_cur >= TARGET {
             return;
         }
-        limit.rlim_cur = if limit.rlim_max >= TARGET { TARGET } else { limit.rlim_max };
+        limit.rlim_cur = if limit.rlim_max >= TARGET {
+            TARGET
+        } else {
+            limit.rlim_max
+        };
         libc::setrlimit(libc::RLIMIT_NOFILE, &limit);
     }
 }

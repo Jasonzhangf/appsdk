@@ -44,6 +44,7 @@ fn query_request(capability: &str) -> IdentityContextRequest {
         invocation: "query".into(),
         action: "query".into(),
         facts: Default::default(),
+        invocation_cwd: None,
         approval: None,
         grant_approval: None,
         query: true,
@@ -58,6 +59,7 @@ fn malformed_query_request(capability: &str) -> IdentityContextRequest {
         invocation: "automatic".into(),
         action: "query".into(),
         facts: Default::default(),
+        invocation_cwd: None,
         approval: None,
         grant_approval: None,
         query: false,
@@ -120,10 +122,10 @@ fn cancelled_pending_operation_remains_cancelled_after_journal_reopen() {
     ));
     drop(journal);
     let journal = OperationJournal::open(&path).unwrap();
-    assert!(journal.is_cancelled("ctxop-1"));
+    assert!(journal.is_cancelled("ctxop-1").unwrap());
     // Re-admission cannot erase the durable cancellation decision.
     journal.install_safe("ctxop-1", Vec::new());
-    assert!(journal.is_cancelled("ctxop-1"));
+    assert!(journal.is_cancelled("ctxop-1").unwrap());
     let query = journal
         .query(
             &query_request("raw-capability-that-must-not-persist"),
@@ -460,6 +462,66 @@ fn illegal_and_terminal_phase_transitions_are_rejected_without_journal_delta() {
         .expect_err("unknown stays unresolved until a separate owner action");
     assert!(terminal.starts_with("IDENTITY_OPERATION_PHASE_CONFLICT"));
     assert_eq!(unresolved, std::fs::read(journal.path()).unwrap());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn malformed_operation_journal_does_not_block_manager_without_pending_reset() {
+    let (server, root) = peer_tests::test_server();
+    let server = Arc::new(server);
+    let journal_path = server.host_paths.journal_path();
+    std::fs::create_dir_all(journal_path.parent().unwrap()).unwrap();
+    std::fs::write(&journal_path, b"{malformed}\n").unwrap();
+
+    let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths)
+        .expect("startup without a pending reset must not replay the operation journal");
+    assert!(manager.prune_stale_routes().is_ok());
+    let error = manager
+        .operation_journal
+        .query(
+            &query_request("raw-capability-that-must-not-persist"),
+            "/tmp/project",
+            crate::identity::CLI_APP_SERVER_ID,
+        )
+        .expect_err("the first identity query must expose the broken journal");
+    assert!(
+        error.starts_with("OPERATION_JOURNAL_REPLAY_FAILED"),
+        "{error}"
+    );
+
+    drop(manager);
+    drop(server);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn malformed_operation_journal_blocks_startup_with_a_pending_reset() {
+    let (server, root) = peer_tests::test_server();
+    let server = Arc::new(server);
+    let journal_path = server.host_paths.journal_path();
+    std::fs::create_dir_all(journal_path.parent().unwrap()).unwrap();
+    std::fs::write(&journal_path, b"{malformed}\n").unwrap();
+
+    let project = root.join("pending-reset");
+    std::fs::create_dir_all(project.join(".agent-collab/server")).unwrap();
+    server
+        .commit_checked(&[Event::ProjectResetStarted {
+            project_scope: project.canonicalize().unwrap().display().to_string(),
+            clear_local: true,
+            worker_ids: Vec::new(),
+        }])
+        .unwrap();
+
+    let error = match ProjectRuntimeManager::new(server.clone(), &server.host_paths) {
+        Ok(_) => panic!("pending reset recovery must fail closed when the journal is broken"),
+        Err(error) => error,
+    };
+    assert!(
+        error.starts_with("OPERATION_JOURNAL_REPLAY_FAILED"),
+        "{error}"
+    );
+
+    drop(server);
     std::fs::remove_dir_all(root).unwrap();
 }
 

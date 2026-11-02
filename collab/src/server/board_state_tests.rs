@@ -433,7 +433,10 @@ fn task_view_omits_lifecycle_sections_that_hold_no_evidence() {
     assert_eq!(view["id"], "open-work");
     assert_eq!(view["owner"], "peer");
     assert_eq!(view["status"], "working");
-    assert_eq!(view["completion_missing"], json!(["review"]));
+    assert_eq!(
+        view["completion_missing"],
+        json!(["delivery", "review", "close"])
+    );
     for empty_section in [
         "delivery",
         "review",
@@ -525,13 +528,20 @@ fn task_view_keeps_pending_merge_pinned_reviewer_and_outstanding_cleanup() {
         view["delivery"]["evidence"], "self-check and black-box regression",
         "{view}"
     );
-    assert_eq!(view["disposition"], "integration_required", "{view}");
-    assert_eq!(view["merge"]["pending"], true, "{view}");
+    assert_eq!(view["disposition"], "accepted", "{view}");
+    assert_eq!(view["merge"]["pending"], false, "{view}");
+    assert_eq!(view["merge"]["historical"], true, "{view}");
+    assert_eq!(view["merge"]["collab_managed"], false, "{view}");
     assert_eq!(view["merge"]["owner"], "peer", "{view}");
     assert_eq!(
-        view["cleanup"]["status"], "pending",
-        "outstanding cleanup stays visible: {view}"
+        view["cleanup"]["required"], true,
+        "cleanup stays required for the worktree task: {view}"
     );
+    assert_eq!(
+        view["cleanup"]["status"], "historical_unmanaged",
+        "cleanup stays visible but collab-owned cleanup is retired: {view}"
+    );
+    assert_eq!(view["cleanup"]["collab_managed"], false, "{view}");
     drop(state);
     std::fs::remove_dir_all(root).ok();
 }

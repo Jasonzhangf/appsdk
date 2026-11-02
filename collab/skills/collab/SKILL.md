@@ -69,6 +69,9 @@ collab sendmessage --unknown-sender --to 'my-peer-id' \
 ## Task routing and role responsibilities
 
 master 管项目目标，peer 管已接受的子目标，两者均负责拆分、解阻、验收和资源收口。
+manager 核实下级对进度、完成、阻塞和验收的声明，检查相关原始回执或产物，判断证据
+是否支持结论。worker 报告的权限、环境、失败或无法执行也是待核查的声明；manager
+检查原错，区分沙箱限制与系统拒绝，并在已有授权内解阻。不把局部限制扩大为全局结论。
 长程目标经任务板邀请可用且同意接收的 peer；一次性执行或观察沿
 [统一角色路由](../codex-orchestrator/SKILL.md#codex-路由)。
 无可用 peer 时保留长程目标并拆分 worker，不等待注册。

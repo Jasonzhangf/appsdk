@@ -115,21 +115,15 @@ fn tools() -> Value {
         ),
         tool(
             "collab_task_deliver",
-            "Deliver a claimed task through the Server. Code delivery requires --worktree and its exact candidate must resolve before integration. Set no_candidate=true only for explicit read-only work that has no code candidate.",
+            "Deliver a claimed task with evidence. Collab does not inspect Git or manage worktrees.",
             json!({"id":{"type":"string"},"evidence":{"type":"string"},"worktree":{"type":"string"},"no_candidate":{"type":"boolean"}}),
             &["id", "evidence"]
         ),
         tool(
             "collab_task_review",
-            "Accept a delivered task or return it for rework with durable evidence. Accepted code delivery creates the applicable main integration obligation. Accepted explicit read-only delivery reaches no_merge_required and can close after owned cleanup.",
+            "Accept a delivered task or return it for rework with evidence.",
             json!({"id":{"type":"string"},"accept":{"type":"boolean"},"rework":{"type":"boolean"},"evidence":{"type":"string"}}),
             &["id", "evidence"]
-        ),
-        tool(
-            "collab_task_integrated",
-            "Code delivery only: record exact integration of an accepted task on refs/heads/main and resolve its applicable daemon-owned pending merge before close. Explicit read-only delivery returns TASK_NO_MERGE_REQUIRED and closes after review plus owned cleanup.",
-            json!({"id":{"type":"string"},"commit":{"type":"string"},"evidence":{"type":"string"}}),
-            &["id", "commit", "evidence"]
         ),
         tool(
             "collab_task_relocate",
@@ -151,7 +145,7 @@ fn tools() -> Value {
         ),
         tool(
             "collab_task_close",
-            "Close the owner's merged task and safely clean its declared resources. Fails with TASK_MERGE_PENDING while a pending merge is unresolved.",
+            "Close the owner's task after its Collab responsibilities are complete. Collab does not delete worktrees or branches.",
             json!({"id":{"type":"string"}}),
             &["id"]
         ),
@@ -676,11 +670,6 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
             if args.get("rework").and_then(Value::as_bool).unwrap_or(false) {
                 argv.push("--rework".into());
             }
-            argv.extend(["--evidence".into(), required(args, "evidence")?]);
-        }
-        "collab_task_integrated" => {
-            argv.extend(["task".into(), "integrated".into(), required(args, "id")?]);
-            argv.extend(["--commit".into(), required(args, "commit")?]);
             argv.extend(["--evidence".into(), required(args, "evidence")?]);
         }
         "collab_task_relocate" => {

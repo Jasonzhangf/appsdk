@@ -31,7 +31,18 @@ pub(crate) fn load_host_route_records(path: &Path) -> Result<Vec<HostRouteRecord
                 index + 1
             ));
         }
-        let record = serde_json::from_str::<HostRouteRecord>(line).map_err(|error| {
+        let value: serde_json::Value = serde_json::from_str(line).map_err(|error| {
+            format!(
+                "HOST_ROUTE_REPLAY_FAILED: route journal line {}: {error}",
+                index + 1
+            )
+        })?;
+        if value.get("kind").and_then(serde_json::Value::as_str)
+            == Some(crate::server::binding_store::BINDING_CONTROL_KIND)
+        {
+            continue;
+        }
+        let record = serde_json::from_value::<HostRouteRecord>(value).map_err(|error| {
             format!(
                 "HOST_ROUTE_REPLAY_FAILED: route journal line {}: {error}",
                 index + 1
@@ -541,6 +552,7 @@ fn default_direct_message_events(
                     status_reason: None,
                     patrol_idle_since_ms: None,
                     patrol_last_push_ms: 0,
+                    periodic_declared: false,
                 },
             });
         }
@@ -584,6 +596,7 @@ fn default_direct_message_events(
                 status_reason: None,
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
+                periodic_declared: false,
             },
         });
         for message_id in std::mem::take(&mut pending_direct_message_ids).into_iter() {
@@ -617,6 +630,7 @@ fn default_direct_message_events(
             status_reason: None,
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
+            periodic_declared: false,
         },
     });
     for message_id in std::mem::take(&mut pending_direct_message_ids).into_iter() {

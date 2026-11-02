@@ -260,31 +260,25 @@ pub(super) fn clear_project(
         .retain(|_, r| r.project_scope.as_str() != scope);
 }
 
-/// Append deletion through the live route owner. Never rewrite a live journal.
+/// Remove the route and its scope's control slots through the shared owner.
 pub(super) fn delete_route(path: &Path, record: &HostRouteRecord) -> Result<(), String> {
-    // Called under the manager's registration gate (or before startup
-    // admission). Remove the historical bytes as well as the active index.
-    let records = load_host_route_records(path)?;
-    let mut body = Vec::new();
-    for retained in records.into_iter().filter(|retained| {
-        retained.project_scope != record.project_scope
-            || retained.app_scope_id != record.app_scope_id
-    }) {
-        serde_json::to_writer(&mut body, &retained).map_err(|e| e.to_string())?;
-        body.push(b'\n');
-    }
-    let temporary = path.with_extension("reset-tmp");
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&temporary)
-        .map_err(|e| format!("route delete open {}: {e}", path.display()))?;
-    file.write_all(&body)
-        .and_then(|_| file.sync_all())
-        .map_err(|e| format!("route delete persist {}: {e}", path.display()))?;
-    std::fs::rename(&temporary, path).map_err(|e| format!("route delete publish: {e}"))?;
-    sync_parent_dir(path).map_err(|e| format!("route delete directory: {e}"))
+    // Remove the route line and the scope's control slots in one shared
+    // commit. This closes the historical reset gap where the route journal
+    // preserved the binding control line and the retired identity could
+    // resurrect on restart.
+    let store = crate::server::binding_store::BindingControlStore::at(path);
+    let (routes, mut control) = store.load_shared()?;
+    let retained: Vec<HostRouteRecord> = routes
+        .into_iter()
+        .filter(|retained| {
+            retained.project_scope != record.project_scope
+                || retained.app_scope_id != record.app_scope_id
+        })
+        .collect();
+    control.remove_scope(record.project_scope.as_str());
+    store
+        .publish_shared(&retained, &control)?
+        .require_confirmed_route()
 }
 
 /// Delete project data, keeping only exact live host resources when the

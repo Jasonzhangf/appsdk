@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-control-plane-reset",
-  "version": "0.3.0",
-  "description": "当前项目 master 在线 reset 的 SESE 图。认证当前项目 master 后，在现有 daemon 内串行化项目变更，先持久记录 scoped reset intent，再删除本项目历史消息、任务、route、身份、订阅、操作、资产与负载。共享 journal 由其 writer owner 持锁压缩，物理删除目标历史并保留其他项目。未完成 intent 在启动路由恢复前继续删除。全局 daemon、socket、PID、lock 和其他项目不变；不经过离线、归档、历史身份批准或维护入口。真实写入或删除失败返回 RESET_INCOMPLETE，不能宣称成功。用户主机维护不属于本图。",
+  "version": "0.3.1",
+  "description": "当前项目 master 在线 reset 的 SESE 图。认证当前项目 master 后，在现有 daemon 内串行化项目变更：同一次持久控制集合提交先移除本项目的 routes、绑定槽、身份、名字与 grants，并记录 scoped reset 待办；随后由既有 writer owner 持锁压缩共享 journal，物理删除本项目历史消息、任务、订阅、操作、资产与负载。已提交待办在启动路由恢复前继续删除；新请求看到 reset-pending 不得重建该项目。route-only legacy 条目按同 scope 删除，其他项目、全局 daemon、socket、PID、lock 不变；不经过离线、归档、历史身份批准或维护入口。真实写入或删除失败返回 RESET_INCOMPLETE，不能宣称成功；用户主机维护不属于本图。",
   "inputs": [{"id": "reset_request", "schema": "Object"}],
   "nodes": [
     {
@@ -16,12 +16,34 @@
       "iterator": "Whole"
     },
     {
-      "id": "online_project_reset",
-      "description": "当前 master 认证后沿现有全局锁顺序 identity → materialization → route publication → project wire 串行化删除；resident route 恢复同样先 materialization 再 publication，避免跨项目锁反转。",
-      "operator": "appsdk.collab_control_plane.online_project_reset",
+      "id": "提交 scoped reset 控制变更",
+      "description": "当前 master 认证后，在 identity → materialization → route publication → project wire 的既有锁序内，用一次控制集合提交同批移除该项目全部 app routes、binding 槽、身份、名字、grants 与 current/previous 值，并写入有界 scoped reset 待办。route 与 control 不再相互保留另一类行；legacy route-only 与旧格式 control 条目不因转换复活。rename 前失败保持旧集合有效且未提交；rename 成功而父目录 sync 失败为 published/durability_unknown，不回滚旧快照。其他项目不变。",
+      "operator": "appsdk.collab_control_plane.commit_reset_control",
       "operator_version": "1",
       "inputs": ["authorized_reset_request"],
+      "output": {"id": "reset_control_result", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "删除项目业务与历史状态",
+      "description": "由现有 writer owner 持共享 journal 锁压缩并物理删除本项目历史消息、任务、订阅、操作 proof、资产与负载；保留其他项目。resident route 恢复同样先 materialization 再 publication，避免跨项目锁反转。route-only legacy 条目不物化、不扫描业务 journal 发现绑定。未完成 reset 待办在启动路由恢复前继续本节点；部分失败保留待办并返回 RESET_INCOMPLETE，不宣称成功。",
+      "operator": "appsdk.collab_control_plane.online_project_reset",
+      "operator_version": "1",
+      "inputs": ["reset_control_result"],
       "output": {"id": "online_project_result", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "完成 reset 待办",
+      "description": "仅在业务与存储删除完成后清除 scoped reset 待办；清除失败时 receipt 防止重复删除，重启读取既有 receipt 跳过已完成效果并只重试清除。待办存在期间，新请求不得重建该项目的 routes、身份、名字、grants 或 runtime。成功后该 scope 的 control 与 legacy 条目均不可复活。",
+      "operator": "appsdk.collab_control_plane.complete_reset_pending",
+      "operator_version": "1",
+      "inputs": ["online_project_result"],
+      "output": {"id": "reset_completion_result", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
       "output_selector": {"include": [], "exclude": [], "predicate": null},
       "iterator": "Whole"
@@ -30,7 +52,7 @@
       "id": "record_reset_receipt",
       "operator": "appsdk.collab_control_plane.record_reset_receipt",
       "operator_version": "1",
-      "inputs": ["online_project_result"],
+      "inputs": ["reset_completion_result"],
       "output": {"id": "reset_receipt", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
       "output_selector": {"include": [], "exclude": [], "predicate": null},
@@ -38,8 +60,10 @@
     }
   ],
   "edges": [
-    {"from": "authorize_reset", "to": "online_project_reset", "arc_id": "authorized_reset_request"},
-    {"from": "online_project_reset", "to": "record_reset_receipt", "arc_id": "online_project_result"}
+    {"from": "authorize_reset", "to": "提交 scoped reset 控制变更", "arc_id": "authorized_reset_request"},
+    {"from": "提交 scoped reset 控制变更", "to": "删除项目业务与历史状态", "arc_id": "reset_control_result"},
+    {"from": "删除项目业务与历史状态", "to": "完成 reset 待办", "arc_id": "online_project_result"},
+    {"from": "完成 reset 待办", "to": "record_reset_receipt", "arc_id": "reset_completion_result"}
   ],
   "outputs": ["reset_receipt"]
 }

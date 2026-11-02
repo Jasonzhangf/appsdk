@@ -740,6 +740,116 @@ fn online_reset_forgets_project_operations_and_reservations_on_replay() {
 }
 
 #[test]
+fn healthy_operation_journal_restarts_with_the_same_operation_projection() {
+    let (server, root, manager, context) = fixture();
+    let operation_id = "ctxop-restart-project";
+    let capability = "restart-capability";
+    let capability_hash = operation_journal::capability_hash(capability);
+    manager
+        .operation_journal
+        .append(operation_journal::OperationAdmission {
+            operation_id: operation_id.into(),
+            project_scope: context.project_scope.as_str().to_owned(),
+            app_scope_id: context.app_scope_id.as_str().to_owned(),
+            action: "context".into(),
+            invocation: "automatic".into(),
+            intent_digest: "restart-intent".into(),
+            query_capability_hash: capability_hash.clone(),
+            phase: crate::proto::IdentityOperationPhase::Admitted,
+            committed_phases: Vec::new(),
+            nested_command_id: None,
+            nested_operation_id: None,
+            approval_evidence: None,
+        })
+        .unwrap();
+    let before = std::fs::read(manager.operation_journal.path()).unwrap();
+    drop(manager);
+
+    let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
+    let projection = manager
+        .operation_journal
+        .query(
+            &crate::proto::IdentityContextRequest {
+                operation_id: operation_id.into(),
+                invocation: "query".into(),
+                action: "query".into(),
+                facts: Default::default(),
+                invocation_cwd: None,
+                approval: None,
+                grant_approval: None,
+                query: true,
+                query_capability: capability.into(),
+                invocation_ticket: String::new(),
+            },
+            context.project_scope.as_str(),
+            context.app_scope_id.as_str(),
+        )
+        .unwrap();
+    assert_eq!(projection.result.operation_id, operation_id);
+    assert_eq!(
+        projection.result.phase,
+        crate::proto::IdentityOperationPhase::Admitted
+    );
+    assert_eq!(
+        std::fs::read(manager.operation_journal.path()).unwrap(),
+        before
+    );
+
+    drop(manager);
+    drop(server);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn online_reset_clears_only_the_target_operation_journal_project() {
+    let (_server, root, manager, context) = fixture();
+    let capability = "reset-scope-capability";
+    let capability_hash = operation_journal::capability_hash(capability);
+    for (operation_id, scope) in [
+        ("reset-target", context.project_scope.as_str()),
+        ("reset-other", "/unrelated/project"),
+    ] {
+        manager
+            .operation_journal
+            .append(operation_journal::OperationAdmission {
+                operation_id: operation_id.into(),
+                project_scope: scope.into(),
+                app_scope_id: crate::identity::CLI_APP_SERVER_ID.into(),
+                action: "context".into(),
+                invocation: "automatic".into(),
+                intent_digest: "reset-scope-intent".into(),
+                query_capability_hash: capability_hash.clone(),
+                phase: crate::proto::IdentityOperationPhase::Admitted,
+                committed_phases: Vec::new(),
+                nested_command_id: None,
+                nested_operation_id: None,
+                approval_evidence: None,
+            })
+            .unwrap();
+    }
+    assert!(
+        manager
+            .reset_project(&context, "reset-master", "reset-token")
+            .ok
+    );
+    let remaining = operation_journal::peek_query_journal(manager.operation_journal.path());
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].operation_id, "reset-other");
+    let bytes = std::fs::read_to_string(manager.operation_journal.path()).unwrap();
+    assert!(!bytes.contains("reset-target"));
+    assert!(bytes.contains("reset-other"));
+
+    let reopened = operation_journal::OperationJournal::open(manager.operation_journal.path())
+        .expect("reset must leave a healthy journal that can reopen");
+    let reopened_projections = operation_journal::peek_query_journal(reopened.path());
+    assert_eq!(reopened_projections.len(), 1);
+    assert_eq!(reopened_projections[0].operation_id, "reset-other");
+
+    drop(reopened);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn online_reset_external_project_drops_runtime_and_its_journal() {
     let (host, host_root, manager, host_context) = fixture();
     let (external, external_root, _external_manager, external_context) = fixture();

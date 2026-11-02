@@ -1129,7 +1129,9 @@ fn resource_reassignment_consumer(status: &str) {
     );
     assert_eq!(durable["review"]["evidence"], "independent review pass");
     assert_eq!(durable["merge"]["owner"], peer);
-    assert_eq!(durable["merge"]["pending"], true);
+    assert_eq!(durable["merge"]["pending"], false);
+    assert_eq!(durable["merge"]["historical"], true);
+    assert_eq!(durable["merge"]["collab_managed"], false);
 
     let invited = fixture.run_public(
         &[
@@ -1245,7 +1247,9 @@ fn resource_reassignment_consumer(status: &str) {
     );
     assert_eq!(reassigned["review"]["evidence"], "independent review pass");
     assert_eq!(reassigned["merge"]["owner"], carol);
-    assert_eq!(reassigned["merge"]["pending"], true);
+    assert_eq!(reassigned["merge"]["pending"], false);
+    assert_eq!(reassigned["merge"]["historical"], true);
+    assert_eq!(reassigned["merge"]["collab_managed"], false);
 
     let board = fixture.run_public(&["board", "show"], THREAD_A);
     let task = board["tasks"]

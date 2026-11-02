@@ -412,7 +412,11 @@ fn source_credentials(
         false,
     );
     assert_eq!(status["master"]["worker_id"], source_id, "{status}");
-    let identity_path = fixture.host_state.join("identities").join(source_id).join("identity.json");
+    let identity_path = fixture
+        .host_state
+        .join("identities")
+        .join(source_id)
+        .join("identity.json");
     let persisted: Value = serde_json::from_slice(&std::fs::read(identity_path).unwrap()).unwrap();
     let binding = &source_context["result"]["snapshot"]["binding"];
     SourceCredentials {
@@ -513,7 +517,13 @@ fn cross_project_route_projection_loss_preserves_binding_and_durable_enqueue() {
         false,
     );
     assert_eq!(promoted["master"], source_id, "{promoted}");
-    let credentials = source_credentials(&fixture, &source_root, &source_pane, &source_id, &source_context);
+    let credentials = source_credentials(
+        &fixture,
+        &source_root,
+        &source_pane,
+        &source_id,
+        &source_context,
+    );
 
     let target_pane = create_session(&fixture, "target-pane");
     let target_context =
@@ -559,13 +569,30 @@ fn cross_project_route_projection_loss_preserves_binding_and_durable_enqueue() {
     assert_eq!(promoted["master"], target_id, "{promoted}");
 
     let before = message_count(&fixture, &target_context, &target_id);
-    for (field, value) in [("reply_policy", json!("required")), ("target_session", json!("other-session"))] {
-        let mut request = cross_project_request(&source_id, &source_root, &credentials, &target_id,
-            &target_context, "Unsupported option", "must not enqueue", false);
+    for (field, value) in [
+        ("reply_policy", json!("required")),
+        ("target_session", json!("other-session")),
+    ] {
+        let mut request = cross_project_request(
+            &source_id,
+            &source_root,
+            &credentials,
+            &target_id,
+            &target_context,
+            "Unsupported option",
+            "must not enqueue",
+            false,
+        );
         request[field] = value;
         let rejected = wire_request(&fixture.host_state.join("server.sock"), &request);
-        assert_rejected_without_message(&fixture, &target_context, &target_id, &rejected,
-            "CROSS_PROJECT_OPTION_UNSUPPORTED", before);
+        assert_rejected_without_message(
+            &fixture,
+            &target_context,
+            &target_id,
+            &rejected,
+            "CROSS_PROJECT_OPTION_UNSUPPORTED",
+            before,
+        );
     }
     let source_rejected = wire_request(
         &fixture.host_state.join("server.sock"),
@@ -728,34 +755,150 @@ fn public_cross_project_peers_send_and_cross_level_requests_have_no_effect() {
     let target_master = create_session(&fixture, "scope-target-master");
     let target_peer = create_session(&fixture, "scope-target-peer");
     let unregistered = create_session(&fixture, "scope-unregistered");
-    register_context(&fixture, &source_root, &source_master, "scope-source-master", false);
-    register_context(&fixture, &source_root, &source_peer, "scope-source-peer", false);
-    let target = register_context(&fixture, &target_root, &target_master, "scope-target-master", false);
-    let peer = register_context(&fixture, &target_root, &target_peer, "scope-target-peer", false);
-    for (root, pane) in [(&source_root, &source_master), (&target_root, &target_master)] {
-        run_ok_at(&fixture, root, pane, &["master", "promote", "--approval", "user approved isolated master"], false);
+    register_context(
+        &fixture,
+        &source_root,
+        &source_master,
+        "scope-source-master",
+        false,
+    );
+    register_context(
+        &fixture,
+        &source_root,
+        &source_peer,
+        "scope-source-peer",
+        false,
+    );
+    let target = register_context(
+        &fixture,
+        &target_root,
+        &target_master,
+        "scope-target-master",
+        false,
+    );
+    let peer = register_context(
+        &fixture,
+        &target_root,
+        &target_peer,
+        "scope-target-peer",
+        false,
+    );
+    for (root, pane) in [
+        (&source_root, &source_master),
+        (&target_root, &target_master),
+    ] {
+        run_ok_at(
+            &fixture,
+            root,
+            pane,
+            &[
+                "master",
+                "promote",
+                "--approval",
+                "user approved isolated master",
+            ],
+            false,
+        );
     }
     let listed = run_ok_at(&fixture, &source_root, &source_master, &["list"], false);
     let master_address = address_for(&listed, &identity(&target).0);
     let peer_address = address_for(&listed, &identity(&peer).0);
-    let sent = run_ok_at(&fixture, &source_root, &source_peer,
-        &["send", "--to", &peer_address, "--subject", "peer-message", "--content", "peer body"], false);
+    let sent = run_ok_at(
+        &fixture,
+        &source_root,
+        &source_peer,
+        &[
+            "send",
+            "--to",
+            &peer_address,
+            "--subject",
+            "peer-message",
+            "--content",
+            "peer body",
+        ],
+        false,
+    );
     assert_eq!(sent["durable"], true, "{sent}");
-    let received = run_ok_at(&fixture, &target_root, &target_peer, &["recv", "--timeout", "0"], false);
-    assert!(received["messages"].as_array().unwrap().iter().any(|m| m["id"] == sent["msg_id"] && m["body"] == "peer body"), "{received}");
-    for (pane, address) in [(&source_peer, &master_address), (&source_master, &peer_address)] {
-        let denied = command_at(&fixture, &source_root, pane,
-            &["send", "--to", address, "--subject", "denied-cross-level", "--content", "must not arrive"], false)
-            .output().unwrap();
-        assert!(!denied.status.success(), "cross-level request succeeded: {}", String::from_utf8_lossy(&denied.stdout));
+    let received = run_ok_at(
+        &fixture,
+        &target_root,
+        &target_peer,
+        &["recv", "--timeout", "0"],
+        false,
+    );
+    assert!(
+        received["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["id"] == sent["msg_id"] && m["body"] == "peer body"),
+        "{received}"
+    );
+    for (pane, address) in [
+        (&source_peer, &master_address),
+        (&source_master, &peer_address),
+    ] {
+        let denied = command_at(
+            &fixture,
+            &source_root,
+            pane,
+            &[
+                "send",
+                "--to",
+                address,
+                "--subject",
+                "denied-cross-level",
+                "--content",
+                "must not arrive",
+            ],
+            false,
+        )
+        .output()
+        .unwrap();
+        assert!(
+            !denied.status.success(),
+            "cross-level request succeeded: {}",
+            String::from_utf8_lossy(&denied.stdout)
+        );
     }
-    let denied = command_at(&fixture, &source_root, &unregistered,
-        &["send", "--to", &peer_address, "--subject", "denied-cross-level", "--content", "must not arrive"], false)
-        .output().unwrap();
-    assert!(!denied.status.success(), "unregistered request succeeded: {}", String::from_utf8_lossy(&denied.stdout));
+    let denied = command_at(
+        &fixture,
+        &source_root,
+        &unregistered,
+        &[
+            "send",
+            "--to",
+            &peer_address,
+            "--subject",
+            "denied-cross-level",
+            "--content",
+            "must not arrive",
+        ],
+        false,
+    )
+    .output()
+    .unwrap();
+    assert!(
+        !denied.status.success(),
+        "unregistered request succeeded: {}",
+        String::from_utf8_lossy(&denied.stdout)
+    );
     for pane in [&target_master, &target_peer] {
-        let inbox = run_ok_at(&fixture, &target_root, pane, &["recv", "--timeout", "0"], false);
-        assert!(inbox["messages"].as_array().unwrap().iter().all(|m| m["subject"] != "denied-cross-level"), "{inbox}");
+        let inbox = run_ok_at(
+            &fixture,
+            &target_root,
+            pane,
+            &["recv", "--timeout", "0"],
+            false,
+        );
+        assert!(
+            inbox["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|m| m["subject"] != "denied-cross-level"),
+            "{inbox}"
+        );
     }
     drop(fixture);
     std::fs::remove_dir_all(target_root).unwrap();
@@ -770,23 +913,90 @@ fn public_ceo_without_source_master_grant_sends_to_foreign_master_and_peer() {
     let ceo = create_session(&fixture, "scope-ceo-peer");
     let target_master = create_session(&fixture, "scope-ceo-target-master");
     let target_peer = create_session(&fixture, "scope-ceo-target-peer");
-    register_context(&fixture, &source_root, &source_master, "ceo-source-master", false);
+    register_context(
+        &fixture,
+        &source_root,
+        &source_master,
+        "ceo-source-master",
+        false,
+    );
     register_context(&fixture, &source_root, &ceo, "ceo-source-holder", false);
-    let master = register_context(&fixture, &target_root, &target_master, "ceo-foreign-master", false);
-    let peer = register_context(&fixture, &target_root, &target_peer, "ceo-foreign-peer", false);
-    for (root, pane) in [(&source_root, &source_master), (&target_root, &target_master)] {
-        run_ok_at(&fixture, root, pane, &["master", "promote", "--approval", "user approved isolated master"], false);
+    let master = register_context(
+        &fixture,
+        &target_root,
+        &target_master,
+        "ceo-foreign-master",
+        false,
+    );
+    let peer = register_context(
+        &fixture,
+        &target_root,
+        &target_peer,
+        "ceo-foreign-peer",
+        false,
+    );
+    for (root, pane) in [
+        (&source_root, &source_master),
+        (&target_root, &target_master),
+    ] {
+        run_ok_at(
+            &fixture,
+            root,
+            pane,
+            &[
+                "master",
+                "promote",
+                "--approval",
+                "user approved isolated master",
+            ],
+            false,
+        );
     }
-    run_ok_at(&fixture, &source_root, &ceo, &["ceo", "promote", "--approval", "user approved isolated CEO"], false);
+    run_ok_at(
+        &fixture,
+        &source_root,
+        &ceo,
+        &["ceo", "promote", "--approval", "user approved isolated CEO"],
+        false,
+    );
     let listed = run_ok_at(&fixture, &source_root, &ceo, &["list"], false);
     let master_address = address_for(&listed, &identity(&master).0);
     let peer_address = address_for(&listed, &identity(&peer).0);
-    for (pane, address) in [(&target_master, &master_address), (&target_peer, &peer_address)] {
-        let sent = run_ok_at(&fixture, &source_root, &ceo,
-            &["send", "--to", address, "--subject", "ceo-scope", "--content", "CEO body"], false);
+    for (pane, address) in [
+        (&target_master, &master_address),
+        (&target_peer, &peer_address),
+    ] {
+        let sent = run_ok_at(
+            &fixture,
+            &source_root,
+            &ceo,
+            &[
+                "send",
+                "--to",
+                address,
+                "--subject",
+                "ceo-scope",
+                "--content",
+                "CEO body",
+            ],
+            false,
+        );
         assert_eq!(sent["durable"], true, "{sent}");
-        let inbox = run_ok_at(&fixture, &target_root, pane, &["recv", "--timeout", "0"], false);
-        assert!(inbox["messages"].as_array().unwrap().iter().any(|m| m["id"] == sent["msg_id"] && m["body"] == "CEO body"), "{inbox}");
+        let inbox = run_ok_at(
+            &fixture,
+            &target_root,
+            pane,
+            &["recv", "--timeout", "0"],
+            false,
+        );
+        assert!(
+            inbox["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["id"] == sent["msg_id"] && m["body"] == "CEO body"),
+            "{inbox}"
+        );
     }
     drop(fixture);
     std::fs::remove_dir_all(target_root).unwrap();
@@ -795,44 +1005,130 @@ fn public_ceo_without_source_master_grant_sends_to_foreign_master_and_peer() {
 #[test]
 fn qqbot_ceo_address_works_in_external_ceo_workspace() {
     let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
-    let (fixture, host_pane) = Fixture::isolated_with_pane_command("qqbot-external-ceo", "sleep 600");
+    let (fixture, host_pane) =
+        Fixture::isolated_with_pane_command("qqbot-external-ceo", "sleep 600");
     let host_root = fixture.root.canonicalize().unwrap();
     let ceo_root = create_external_project(&fixture, "ceo-workspace");
     let ceo_pane = create_session(&fixture, "qqbot-external-holder");
     register_context(&fixture, &host_root, &host_pane, "qqbot-host", false);
     let context = register_context(&fixture, &ceo_root, &ceo_pane, "qqbot-ceo", false);
     let (ceo_id, _) = identity(&context);
-    let promoted = run_ok_at(&fixture, &ceo_root, &ceo_pane,
-        &["ceo", "promote", "--approval", "user approved isolated CEO"], false);
+    let promoted = run_ok_at(
+        &fixture,
+        &ceo_root,
+        &ceo_pane,
+        &["ceo", "promote", "--approval", "user approved isolated CEO"],
+        false,
+    );
     assert_eq!(promoted["is_current"], true, "{promoted}");
     let envelope = json!({"source_channel":"qqbot", "channel_instance":"qqbot",
         "external_user":"fixture-user", "external_conversation":"fixture-conversation",
         "platform_message_id":"external-ceo-event", "reply_route":"qqbot://c2c/fixture-conversation",
         "recipient_address":"ceo", "attachments":[]}).to_string();
-    let sent = run_ok_at(&fixture, &ceo_root, &ceo_pane,
-        &["sendmessage", "--unknown-sender", "--to", "ceo", "--subject", "QQBot",
-          "--content", "external CEO message", "--channel-envelope", &envelope], false);
-    let duplicate = run_ok_at(&fixture, &ceo_root, &ceo_pane,
-        &["sendmessage", "--unknown-sender", "--to", "ceo", "--subject", "QQBot",
-          "--content", "external CEO message", "--channel-envelope", &envelope], false);
+    let sent = run_ok_at(
+        &fixture,
+        &ceo_root,
+        &ceo_pane,
+        &[
+            "sendmessage",
+            "--unknown-sender",
+            "--to",
+            "ceo",
+            "--subject",
+            "QQBot",
+            "--content",
+            "external CEO message",
+            "--channel-envelope",
+            &envelope,
+        ],
+        false,
+    );
+    let duplicate = run_ok_at(
+        &fixture,
+        &ceo_root,
+        &ceo_pane,
+        &[
+            "sendmessage",
+            "--unknown-sender",
+            "--to",
+            "ceo",
+            "--subject",
+            "QQBot",
+            "--content",
+            "external CEO message",
+            "--channel-envelope",
+            &envelope,
+        ],
+        false,
+    );
     assert_eq!(duplicate["msg_id"], sent["msg_id"], "{duplicate}");
     assert_eq!(duplicate["deduplicated"], true, "{duplicate}");
-    let inbox = run_ok_at(&fixture, &ceo_root, &ceo_pane, &["recv", "--timeout", "0"], false);
-    let message = inbox["messages"].as_array().unwrap().iter().find(|m| m["id"] == sent["msg_id"])
+    let inbox = run_ok_at(
+        &fixture,
+        &ceo_root,
+        &ceo_pane,
+        &["recv", "--timeout", "0"],
+        false,
+    );
+    let message = inbox["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == sent["msg_id"])
         .expect("external CEO must consume the message");
     assert_eq!(message["to"], ceo_id, "{message}");
-    run_ok_at(&fixture, &host_root, &host_pane,
-        &["ceo", "promote", "--approval", "user approved CEO transfer"], false);
+    run_ok_at(
+        &fixture,
+        &host_root,
+        &host_pane,
+        &["ceo", "promote", "--approval", "user approved CEO transfer"],
+        false,
+    );
     let mut stale_envelope: Value = serde_json::from_str(&envelope).unwrap();
     stale_envelope["platform_message_id"] = json!("external-ceo-after-transfer");
     let stale_envelope = stale_envelope.to_string();
-    let stale = command_at(&fixture, &ceo_root, &ceo_pane,
-        &["sendmessage", "--unknown-sender", "--to", "ceo", "--subject", "QQBot",
-          "--content", "must not reach former CEO", "--channel-envelope", &stale_envelope], false)
-        .output().unwrap();
-    assert!(!stale.status.success(), "old workspace must not use a stale CEO grant");
-    let inbox = run_ok_at(&fixture, &ceo_root, &ceo_pane, &["recv", "--timeout", "0"], false);
-    assert!(inbox["messages"].as_array().unwrap().iter().all(|m| !m["body"].as_str().unwrap_or("").contains("must not reach former CEO")), "{inbox}");
+    let stale = command_at(
+        &fixture,
+        &ceo_root,
+        &ceo_pane,
+        &[
+            "sendmessage",
+            "--unknown-sender",
+            "--to",
+            "ceo",
+            "--subject",
+            "QQBot",
+            "--content",
+            "must not reach former CEO",
+            "--channel-envelope",
+            &stale_envelope,
+        ],
+        false,
+    )
+    .output()
+    .unwrap();
+    assert!(
+        !stale.status.success(),
+        "old workspace must not use a stale CEO grant"
+    );
+    let inbox = run_ok_at(
+        &fixture,
+        &ceo_root,
+        &ceo_pane,
+        &["recv", "--timeout", "0"],
+        false,
+    );
+    assert!(
+        inbox["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| !m["body"]
+                .as_str()
+                .unwrap_or("")
+                .contains("must not reach former CEO")),
+        "{inbox}"
+    );
     drop(fixture);
     std::fs::remove_dir_all(ceo_root).unwrap();
 }

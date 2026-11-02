@@ -178,7 +178,8 @@ fn message_recorded(fixture: &Fixture, msg_id: &str) -> bool {
 #[test]
 fn self_close_clears_old_anchors_before_cross_project_context() {
     let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
-    let (fixture, pane) = Fixture::isolated_with_pane_command("self-close-cross-project", "sleep 600");
+    let (fixture, pane) =
+        Fixture::isolated_with_pane_command("self-close-cross-project", "sleep 600");
     let source_root = fixture.root.canonicalize().unwrap();
     let target_root = create_external_project(&fixture, "next-project");
 
@@ -237,13 +238,11 @@ fn self_close_clears_old_anchors_before_cross_project_context() {
     );
     assert_eq!(closed["result"]["outcome"], "complete", "{closed}");
     assert_eq!(
-        closed["result"]["close"]["binding_retirement"]["state"],
-        "verified",
+        closed["result"]["close"]["binding_retirement"]["state"], "verified",
         "{closed}"
     );
     assert_eq!(
-        closed["result"]["close"]["route_retirement"]["state"],
-        "verified",
+        closed["result"]["close"]["route_retirement"]["state"], "verified",
         "{closed}"
     );
 
@@ -257,12 +256,18 @@ fn self_close_clears_old_anchors_before_cross_project_context() {
         "self close must keep the owning pane alive"
     );
 
-    let tasks_after = board_tasks(&fixture, &project_context_json(&source_root, &source_app_scope));
+    let tasks_after = board_tasks(
+        &fixture,
+        &project_context_json(&source_root, &source_app_scope),
+    );
     assert!(
         tasks_after.iter().any(|id| id == "self-close-open-task"),
         "self close must preserve open business task: {tasks_after:?}"
     );
-    assert!(message_recorded(&fixture, &msg_id), "self close must retain the message record");
+    assert!(
+        message_recorded(&fixture, &msg_id),
+        "self close must retain the message record"
+    );
 
     // The public entrance that the fix must unblock: the same pane registers
     // in a second real project directory after a normal self close.

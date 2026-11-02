@@ -185,25 +185,14 @@ fn context_hides_terminal_history_and_keeps_obligations() {
         master_merge_tasks.contains(&"unrelated-merge-task"),
         "{master_merge_tasks:?}"
     );
-    let master_merge_operations: Vec<&Value> = master_context["operations"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|operation| operation["kind"] == "merge_pending")
-        .collect();
-    assert_eq!(
-        master_merge_operations.len(),
-        1,
-        "{}",
-        master_context["operations"]
-    );
-    assert_eq!(
-        master_merge_operations[0]["pending_merges_ref"],
-        "pending_merges"
-    );
     assert!(
-        master_merge_operations[0].get("pending_merges").is_none(),
-        "merge operation copied the pending array"
+        !master_context["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|operation| operation["kind"] == "merge_pending"),
+        "pending merges must not be duplicated into context operations: {}",
+        master_context["operations"]
     );
     let history = fixture.command_public(&["notify", "status"], THREAD_B);
     assert!(history.status.success());

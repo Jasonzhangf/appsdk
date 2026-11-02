@@ -927,7 +927,10 @@ fn malformed_operation_journal_keeps_nonidentity_usable_and_blocks_late_reply() 
     );
     let ping: Value = serde_json::from_slice(&ping_output.stdout).expect("typed status result");
     for field in ["messages", "tasks", "workers"] {
-        assert!(ping[field].is_number(), "missing status count {field}: {ping}");
+        assert!(
+            ping[field].is_number(),
+            "missing status count {field}: {ping}"
+        );
     }
     assert!(ping["now"].is_string(), "missing status time: {ping}");
 

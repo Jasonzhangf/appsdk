@@ -460,16 +460,28 @@ fn context_names_explicit_restore_commits_directly_and_query_is_read_only() {
         bob["identity"]["worker_id"]
     );
     let control = std::fs::read_to_string(fixture.host_state.join("routes.jsonl")).unwrap();
-    let control: Value = control.lines().filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .find(|line| line["kind"] == "binding_control").expect("current bindings are saved");
+    let control: Value = control
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|line| line["kind"] == "binding_control")
+        .expect("current bindings are saved");
     let slots = control["slots"].as_array().unwrap();
-    let current = slots.iter().find(|slot| slot["identity_key"]["name"] == "Alice" && !slot["current"].is_null())
+    let current = slots
+        .iter()
+        .find(|slot| slot["identity_key"]["name"] == "Alice" && !slot["current"].is_null())
         .expect("Alice has a current binding");
-    assert_eq!(current["current"]["binding"]["agent_id"], bob["identity"]["worker_id"],
-        "control must follow the explicitly selected name: {current}");
-    assert!(slots.iter().filter(|slot| !slot["current"].is_null())
-        .all(|slot| slot["identity_key"]["name"] == "Alice" || slot["current"]["binding"]["agent_id"] != bob["identity"]["worker_id"]),
-        "the same carrier must not retain its previous active name: {slots:?}");
+    assert_eq!(
+        current["current"]["binding"]["agent_id"], bob["identity"]["worker_id"],
+        "control must follow the explicitly selected name: {current}"
+    );
+    assert!(
+        slots
+            .iter()
+            .filter(|slot| !slot["current"].is_null())
+            .all(|slot| slot["identity_key"]["name"] == "Alice"
+                || slot["current"]["binding"]["agent_id"] != bob["identity"]["worker_id"]),
+        "the same carrier must not retain its previous active name: {slots:?}"
+    );
     fixture.restart_daemon();
     let query = fixture.command_public(&["context", "--op", "names-restore", "--query"], THREAD_B);
     let query: Value = serde_json::from_slice(&query.stdout).unwrap();

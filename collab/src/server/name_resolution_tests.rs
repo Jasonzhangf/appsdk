@@ -510,6 +510,7 @@ fn task(id: &str, status: &str) -> TaskRec {
         status: status.into(),
         next_step: Some("preserved".into()),
         wait: None,
+        isolation_mode: None,
         created_ms: 1,
         updated_ms: 1,
     }
@@ -812,6 +813,7 @@ fn holder_change_updates_legacy_owner_without_overwriting_reassigned_work() {
             owner_agent_id: "old".into(),
             binding_id: "binding".into(),
             base_commit: "base".into(),
+            isolation_mode: None,
         },
     );
     state.pending_merges.insert(

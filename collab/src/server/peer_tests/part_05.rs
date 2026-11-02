@@ -2545,6 +2545,7 @@ fn context_scope_digest_reports_subordinate_manager_patrol_idle_and_blockers() {
             resume_on: vec!["resource_released".into()],
             escalation: "resource_owner_and_waiter_recheck".into(),
         }),
+        isolation_mode: None,
         created_ms: now,
         updated_ms: now,
     };
@@ -2560,6 +2561,7 @@ fn context_scope_digest_reports_subordinate_manager_patrol_idle_and_blockers() {
         status: "working".into(),
         next_step: None,
         wait: None,
+        isolation_mode: None,
         created_ms: now,
         updated_ms: now,
     };

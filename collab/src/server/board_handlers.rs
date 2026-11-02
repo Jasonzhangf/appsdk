@@ -315,6 +315,7 @@ fn handle_board_command(server: &Server, actor: String, token: String, command: 
                 id: id.clone(), owner: actor.clone(), created_by: actor.clone(),
                 feature_id: None, worktree_path: None, branch: None, base_commit: None,
                 priority, status: "pending".into(), next_step: None, wait: None,
+                isolation_mode: None,
                 created_ms: now, updated_ms: now,
             };
             let details = BoardTaskDetails {

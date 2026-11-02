@@ -20,6 +20,20 @@ pub fn default_priority() -> String {
     "p2".into()
 }
 
+/// 任务隔离模式取值，与 `rust/src/workspace.rs` 保持一致。历史记录若缺字段，
+/// 默认按 `isolated_worktree` 对待，不做任何历史数据迁移。
+pub(crate) const ISOLATION_WORKTREE: &str = "isolated_worktree";
+pub(crate) const ISOLATION_LAYERFS_WORKSPACE: &str = "layerfs_workspace";
+
+/// 仅在任务注册/搬移时由调用方显式设定；历史及未设定的记录按工作空间路径推断，
+/// 既保留向后兼容，又让声明的隔离模式在记录中显式存在。
+pub(crate) fn derive_isolation_mode(worktree_path: Option<&str>) -> String {
+    match worktree_path {
+        Some(path) if super::is_layerfs_workspace(path) => ISOLATION_LAYERFS_WORKSPACE.to_string(),
+        _ => ISOLATION_WORKTREE.to_string(),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WaitSpec {
     #[serde(default)]
@@ -77,6 +91,9 @@ pub struct WorktreeBinding {
     pub owner_agent_id: String,
     pub binding_id: String,
     pub base_commit: String,
+    /// 任务工作空间的显式隔离模式；历史绑定缺字段时按 `worktree_root` 推导。
+    #[serde(default)]
+    pub isolation_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1164,8 +1181,22 @@ pub struct TaskRec {
     pub next_step: Option<String>,
     #[serde(default)]
     pub wait: Option<WaitSpec>,
+    /// 显式隔离模式。任务注册/搬移时按声明的工作空间设定；历史记录缺字段时
+    /// 视为 `isolated_worktree`，不做任何历史数据迁移。
+    #[serde(default)]
+    pub isolation_mode: Option<String>,
     pub created_ms: i64,
     pub updated_ms: i64,
+}
+
+impl TaskRec {
+    /// 生效的隔离模式。优先返回记录显式持有的值；历史缺字段的记录按工作空间
+    /// 路径推导，避免消费者各自重复前缀判断。
+    pub(crate) fn isolation_mode_value(&self) -> String {
+        self.isolation_mode
+            .clone()
+            .unwrap_or_else(|| derive_isolation_mode(self.worktree_path.as_deref()))
+    }
 }
 
 /// Lifecycle evidence is separate from TaskRec so older producers and journal

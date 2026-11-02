@@ -119,6 +119,7 @@ mod required_review_state_tests {
                 status: "accepted".into(),
                 next_step: None,
                 wait: None,
+                isolation_mode: None,
                 created_ms: 1,
                 updated_ms: 1,
             },

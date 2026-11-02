@@ -16,6 +16,28 @@ pub(crate) fn is_layerfs_workspace(value: &str) -> bool {
     value.trim_start().starts_with(LAYERFS_WORKSPACE_SCHEME)
 }
 
+/// 对 LayerFS 工作空间声明，任务分支必须来自被解析的 `layerfs:<project>/<branch>`
+/// 引用。单独传入且不一致的 `--branch` 是冲突，不能被静默覆盖；Git worktree
+/// 声明保持原有独立 branch 行为。
+pub(crate) fn resolve_task_branch(
+    worktree_path: &str,
+    supplied: Option<&str>,
+) -> Result<Option<String>, String> {
+    if !is_layerfs_workspace(worktree_path) {
+        return Ok(supplied.map(str::to_owned));
+    }
+    let workspace = parse_layerfs_workspace(worktree_path)?;
+    if let Some(branch) = supplied {
+        if branch != workspace.branch {
+            return Err(format!(
+                "layerfs workspace branch mismatch: reference declares {:?} but --branch is {:?}; the task branch comes from layerfs:<project>/<branch>",
+                workspace.branch, branch
+            ));
+        }
+    }
+    Ok(Some(workspace.branch))
+}
+
 /// Parse `layerfs:<project>/<branch>`. The LayerFS project name follows the
 /// LayerFS naming rule; the Branch name is the remainder and may contain `/`.
 pub(crate) fn parse_layerfs_workspace(value: &str) -> Result<LayerFsWorkspace, String> {
@@ -970,14 +992,22 @@ mod layerfs_workspace_tests {
     }
 
     #[test]
-    fn declares_layerfs_workspace_without_a_git_worktree_base() {
-        let config = crate::config::Config::default();
-        let declared = declare_task_workspace(
-            std::path::Path::new("/nonexistent-project-root"),
-            &config,
-            "layerfs:demo/task-1",
-        )
-        .unwrap();
-        assert_eq!(declared, "layerfs:demo/task-1");
+    fn isolation_mode_is_explicit_and_backward_compatible() {
+        use crate::server::state::{
+            derive_isolation_mode, ISOLATION_LAYERFS_WORKSPACE, ISOLATION_WORKTREE,
+        };
+
+        // A LayerFS workspace declares the LayerFS isolation mode.
+        assert_eq!(
+            derive_isolation_mode(Some("layerfs:demo/task-1")),
+            ISOLATION_LAYERFS_WORKSPACE
+        );
+        // A local worktree path stays on the historical worktree mode.
+        assert_eq!(
+            derive_isolation_mode(Some("/tmp/playground/worktree")),
+            ISOLATION_WORKTREE
+        );
+        // Historical records without a declared workspace default to worktree.
+        assert_eq!(derive_isolation_mode(None), ISOLATION_WORKTREE);
     }
 }

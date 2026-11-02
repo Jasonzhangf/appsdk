@@ -2,7 +2,6 @@ use super::*;
 
 pub(super) fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
     assert_project_root_safe(root);
-    assert_mutation_worktree(root);
     assert_identifier(module_id, "INVALID_MODULE_ID");
     let project = read_project(root);
     assert_declared_contracts(root, &project);
@@ -81,6 +80,19 @@ pub(super) fn produce_lifecycle_records(root: &Path, module_id: &str, input_path
     {
         fail("PRODUCER_MODULE_MISMATCH");
     }
+    if producer_string(worktree, "/isolation_mode", "INVALID_WORKTREE_RECORD")
+        == crate::workspace::ISOLATION_LAYERFS_WORKSPACE
+    {
+        // This producer resolves a local Git worktree topology (branch, root,
+        // base/head commits). A LayerFS task workspace is intentionally outside
+        // that topology; its lifecycle records are produced through the LayerFS
+        // Skill entry, so fail closed here instead of failing on a Git check.
+        fail("PRODUCER_LAYERFS_UNSUPPORTED: lifecycle records for a LayerFS task workspace go through the LayerFS Skill, not this Git worktree producer");
+    }
+    // Only Git worktree records reach here. The mutation-worktree guard must run
+    // after the LayerFS rejection so a LayerFS workspace fails with the explicit
+    // unsupported error instead of a Git topology error.
+    assert_mutation_worktree(root);
     if producer_string(worktree, "/scope_hash", "INVALID_WORKTREE_RECORD") != expected_scope_hash {
         fail(format!(
             "PRODUCER_SCOPE_MISMATCH:expected={}",

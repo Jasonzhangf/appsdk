@@ -968,6 +968,7 @@ mod tests {
             status: status.into(),
             next_step: Some("work".into()),
             wait: None,
+            isolation_mode: None,
             created_ms: now,
             updated_ms: now,
         }

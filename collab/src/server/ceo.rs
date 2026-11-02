@@ -490,6 +490,7 @@ impl ProjectRuntimeManager {
                             status: "pending".into(),
                             next_step: None,
                             wait: None,
+                            isolation_mode: None,
                             created_ms: now,
                             updated_ms: now,
                         };

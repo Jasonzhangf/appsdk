@@ -204,6 +204,39 @@ pub fn canonical_route_for_identity(
         .into_iter()
         .filter(|route| &route.app_scope_id == app_scope_id)
         .collect::<Vec<_>>();
+    // An explicit `.agent-collab` marker in the cwd binds identity to its
+    // registered project before Git containment. A LayerFS Workspace lives
+    // outside the Git main root and has no `.git` topology, so this is the
+    // only portable way for a task Workspace to resolve its project. The
+    // marker is authoritative for the same AppServer scope only.
+    if let Some(marker_root) = project_root_for_cwd(&cwd) {
+        let marker_root = std::fs::canonicalize(&marker_root).unwrap_or(marker_root);
+        let marker_matches = matches
+            .iter()
+            .filter(|route| route.root == marker_root)
+            .cloned()
+            .collect::<Vec<_>>();
+        if marker_matches.len() == 1 {
+            return Ok(marker_matches.into_iter().next().unwrap());
+        }
+        if marker_matches.len() > 1 {
+            let roots = marker_matches
+                .iter()
+                .map(|route| route.root.display().to_string())
+                .collect::<Vec<_>>();
+            anyhow::bail!(
+                "multiple canonical Collab routes match app scope {} for marker {}: {}",
+                app_scope_id,
+                marker_root.display(),
+                roots.join(", ")
+            );
+        }
+        // A `.agent-collab` marker only wins when it points at an exact
+        // registered route root. Otherwise fall through to the existing Git
+        // worktree narrowing: a nested worktree marker still resolves through
+        // the verified Git main root, and an unregistered marker fails closed
+        // there without guessing another project.
+    }
     let (matches, git_roots) = narrow_routes_for_git_worktree(&cwd, matches)?;
     match matches.len() {
         1 => Ok(matches.into_iter().next().unwrap()),
@@ -249,9 +282,28 @@ pub fn canonical_route_for_cwd(
     // directory, so a task directory maps to its canonical project.
     if let Some(marker_root) = project_root_for_cwd(&cwd) {
         let marker_root = std::fs::canonicalize(&marker_root).unwrap_or(marker_root);
-        if let Some(route) = matches.iter().find(|route| route.root == marker_root) {
-            return Ok(route.clone());
+        let marker_matches = matches
+            .iter()
+            .filter(|route| route.root == marker_root)
+            .cloned()
+            .collect::<Vec<_>>();
+        if marker_matches.len() == 1 {
+            return Ok(marker_matches.into_iter().next().unwrap());
         }
+        if marker_matches.len() > 1 {
+            let roots = marker_matches
+                .iter()
+                .map(|route| route.root.display().to_string())
+                .collect::<Vec<_>>();
+            anyhow::bail!(
+                "multiple canonical Collab routes match explicit project marker {}: {}",
+                marker_root.display(),
+                roots.join(", ")
+            );
+        }
+        // Same fall-through as identity resolution: only an exact registered
+        // root match is authoritative. A nested or unregistered marker is
+        // resolved by Git worktree narrowing and fails closed there.
     }
     let (matches, _) = narrow_routes_for_git_worktree(&cwd, matches)?;
     match matches.len() {

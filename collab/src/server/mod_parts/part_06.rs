@@ -1181,7 +1181,11 @@ fn migration_issues(server: &Server, state: &State) -> Vec<String> {
             {
                 issues.push(format!("TASK_CLEANUP_RECEIPT_MISMATCH:{}", task.id));
             }
-            if let Some(path) = task.worktree_path.as_deref() {
+            if let Some(path) = task
+                .worktree_path
+                .as_deref()
+                .filter(|path| !is_layerfs_workspace(path))
+            {
                 let worktree = Path::new(path);
                 let worktree = if worktree.is_absolute() {
                     worktree.to_path_buf()

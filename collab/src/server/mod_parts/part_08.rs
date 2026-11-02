@@ -1295,11 +1295,10 @@ fn handle_task_register_with_next(
     }
     let task_owner = worker_id.clone();
     if let Some(path) = &worktree_path {
-        let canonical = match validate_worktree_path(&server.root, &server.config, path) {
-            Ok(path) => path,
+        match declare_task_workspace(&server.root, &server.config, path) {
+            Ok(declared) => worktree_path = Some(declared),
             Err(error) => return Resp::err(error),
-        };
-        worktree_path = Some(canonical.display().to_string());
+        }
     }
     if let Some(existing) = st
         .tasks
@@ -1406,12 +1405,11 @@ fn handle_task_relocate(
     if worker.token != token {
         return Resp::err("token mismatch: identity does not own this worker_id");
     }
-    let canonical_worktree =
-        match validate_worktree_path(&server.root, &server.config, &worktree_path) {
-            Ok(path) => path,
+    let worktree_path =
+        match declare_task_workspace(&server.root, &server.config, &worktree_path) {
+            Ok(declared) => declared,
             Err(error) => return Resp::err(error),
         };
-    let worktree_path = canonical_worktree.display().to_string();
     let Some(mut task) = st.tasks.get(&task_id).cloned() else {
         return Resp::err(format!("task {} not found", task_id));
     };
@@ -1457,7 +1455,7 @@ fn handle_task_relocate(
         "branch": task.branch,
         "base_commit": task.base_commit,
         "status": task.status,
-        "next": "verify git worktree list and continue the existing claim; evidence remains attached"
+        "next": "verify the declared task workspace and continue the existing claim; evidence remains attached"
     }))
 }
 
@@ -1715,6 +1713,10 @@ fn close_task_resources(
     branch: Option<&str>,
     recorded_integration: Option<&str>,
 ) -> Result<(), String> {
+    if worktree_path.is_some_and(is_layerfs_workspace) {
+        let worktree_path = worktree_path.unwrap_or_default();
+        return close_layerfs_task_workspace(worktree_path);
+    }
     if let Some(branch) = branch {
         let branch_ref = format!("refs/heads/{branch}");
         let branch_exists = Command::new("git")
@@ -1801,6 +1803,24 @@ fn close_task_resources(
     Ok(())
 }
 
+/// Release a LayerFS task workspace obligation. Collab owns only the isolation
+/// binding: it verifies the declared LayerFS task branch still exists through
+/// the generic LayerFS entry and never runs `git worktree remove`, `git branch
+/// -D`, `git status`, or any other local-Git operation against the Workspace.
+/// Branch sync, publish and Git commit capture remain the LayerFS Skill's
+/// contract. A missing entry, missing profile or unreachable Store keeps the
+/// original error and leaves the obligation open instead of faking success.
+fn close_layerfs_task_workspace(worktree_path: &str) -> Result<(), String> {
+    let workspace = parse_layerfs_workspace(worktree_path)?;
+    if !layerfs_branch_exists(&workspace.project, &workspace.branch)? {
+        return Err(format!(
+            "layerfs task branch {} no longer exists in project {}; preserve the site and reconcile through the LayerFS Skill",
+            workspace.branch, workspace.project
+        ));
+    }
+    Ok(())
+}
+
 /// A squash integration replaces the branch tip with a new commit, so the
 /// branch is not an ancestor of main even though its work landed. The recorded
 /// `integration.commit` is the authoritative proof in that case. The check is
@@ -1837,6 +1857,16 @@ fn integration_commit_proves_branch_merged(
 }
 
 fn cleanup_receipt_is_reusable(root: &Path, receipt: &CleanupReceipt) -> bool {
+    // A LayerFS binding has no local path or Git branch to re-check; always
+    // re-verify through the LayerFS entry so a stale receipt cannot skip the
+    // branch check with a locally coincidental Git branch name.
+    if receipt
+        .worktree_path
+        .as_deref()
+        .is_some_and(is_layerfs_workspace)
+    {
+        return false;
+    }
     if let Some(path) = receipt.worktree_path.as_deref() {
         let worktree = Path::new(path);
         let worktree = if worktree.is_absolute() {
@@ -2025,6 +2055,15 @@ fn handle_task_deliver_with_intent(
 }
 
 fn resolve_candidate_commit(root: &Path, task: &TaskRec, worktree: &str) -> Option<String> {
+    // A LayerFS task records the LayerFS task branch head as its candidate.
+    // That id is a LayerFS commit id, never a local Git HEAD, so the exact
+    // Git sha on `refs/heads/main` is proven separately by the Git owner. A
+    // missing entry or unreachable Store resolves to `None` and the delivery
+    // fails closed instead of inventing a candidate.
+    if is_layerfs_workspace(worktree) {
+        let workspace = parse_layerfs_workspace(worktree).ok()?;
+        return layerfs_branch_head(&workspace.project, &workspace.branch).ok();
+    }
     // The delivered worktree HEAD is the authoritative candidate. A branch
     // ref may point at a stale or unrelated commit; it is only admissible as
     // a consistency cross-check, never as the binding on its own.

@@ -308,25 +308,58 @@ fn handle_task_integrated(
             .and_then(|request| request.candidate_commit.as_deref())
     });
     if let Some(candidate) = candidate {
-        match commit_is_integrated_in_main(&server.root, candidate) {
-            Ok(true) => {}
-            Ok(false) => {
+        if task.worktree_path.as_deref().is_some_and(is_layerfs_workspace) {
+            // A LayerFS task candidate is the LayerFS task branch head, not a
+            // Git sha, so Git reachability cannot prove it. Prove the exact
+            // delivered branch head is still current through the LayerFS entry
+            // instead; the Git owner separately records the captured Git
+            // commit, which the checks above already require to be reachable
+            // from refs/heads/main.
+            let current_head = task
+                .worktree_path
+                .as_deref()
+                .and_then(|value| parse_layerfs_workspace(value).ok())
+                .and_then(|workspace| {
+                    layerfs_branch_head(&workspace.project, &workspace.branch).ok()
+                });
+            if current_head.as_deref() != Some(candidate) {
                 let code = if st.pending_merges.contains_key(&task_id) {
                     "TASK_MERGE_PENDING"
                 } else {
-                    "TASK_INTEGRATION_CANDIDATE_MISMATCH"
+                    "TASK_INTEGRATION_LAYERFS_CANDIDATE_MISMATCH"
                 };
                 return Resp::err_data(
                     code,
                     json!({
                         "task_id": task_id,
                         "candidate_commit": candidate,
+                        "current_layerfs_head": current_head,
                         "provided": commit,
-                        "rule": "the exact delivered candidate must be reachable from refs/heads/main before integration can be recorded",
+                        "rule": "the exact delivered LayerFS task branch head must still be current before Git integration can be recorded",
                     }),
                 );
             }
-            Err(error) => return error,
+        } else {
+            match commit_is_integrated_in_main(&server.root, candidate) {
+                Ok(true) => {}
+                Ok(false) => {
+                    let code = if st.pending_merges.contains_key(&task_id) {
+                        "TASK_MERGE_PENDING"
+                    } else {
+                        "TASK_INTEGRATION_CANDIDATE_MISMATCH"
+                    };
+                    return Resp::err_data(
+                        code,
+                        json!({
+                            "task_id": task_id,
+                            "candidate_commit": candidate,
+                            "provided": commit,
+                            "rule": "the exact delivered candidate must be reachable from refs/heads/main before integration can be recorded",
+                        }),
+                    );
+                }
+                Err(error) => return error,
+            }
         }
     }
     let now = now_ms();

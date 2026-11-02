@@ -307,6 +307,14 @@ collab task integrated <id> --commit <main-sha> --evidence "main gates=pass"
 collab task close <id>
 ```
 
+`--worktree` keeps its Git-worktree meaning for existing projects. A project
+whose task workflow uses LayerFS passes the stable task-branch reference
+`--worktree layerfs:<project>/<branch>` instead. Collab resolves the LayerFS
+project through the current generic `layerfs --project <project>` entry, never
+creates or removes a Git worktree for that task, and records the LayerFS task
+branch head as the code candidate. Branch publish, Git commit capture and
+remote delivery remain the LayerFS workflow's responsibility.
+
 Normal states are `working`, `blocked`, `waiting`, `verifying`, `reviewed`,
 `delivered`, `accepted`, `rework`, `merged`, `closed`, and `cancelled`.
 `waiting` must be entered through `collab task wait`; `delivered` through

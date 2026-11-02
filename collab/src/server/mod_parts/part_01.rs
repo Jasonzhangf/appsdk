@@ -1,3 +1,71 @@
+/// Explicit scheme prefix that marks an existing task workspace field as a
+/// LayerFS task branch reference rather than a local Git worktree path.
+pub(crate) const LAYERFS_WORKSPACE_SCHEME: &str = "layerfs:";
+
+/// A parsed LayerFS task workspace reference: the LayerFS project name plus the
+/// task Branch name. The Workspace mount handle is transient execution
+/// placement, like a tmux pane, so it is not part of the stable isolation
+/// identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LayerFsWorkspace {
+    pub project: String,
+    pub branch: String,
+}
+
+pub(crate) fn is_layerfs_workspace(value: &str) -> bool {
+    value.trim_start().starts_with(LAYERFS_WORKSPACE_SCHEME)
+}
+
+/// Parse `layerfs:<project>/<branch>`. The LayerFS project name follows the
+/// LayerFS naming rule; the Branch name is the remainder and may contain `/`.
+pub(crate) fn parse_layerfs_workspace(value: &str) -> Result<LayerFsWorkspace, String> {
+    let value = value.trim();
+    let rest = value
+        .strip_prefix(LAYERFS_WORKSPACE_SCHEME)
+        .ok_or_else(|| format!("{value:?} is not a layerfs workspace reference"))?;
+    let (project, branch) = rest.split_once('/').ok_or_else(|| {
+        format!("layerfs workspace reference must be layerfs:<project>/<branch>, got {value:?}")
+    })?;
+    validate_layerfs_project_name(project)?;
+    if branch.is_empty() || branch.len() > 255 {
+        return Err(format!(
+            "layerfs workspace branch must be 1-255 characters: {branch:?}"
+        ));
+    }
+    if branch.contains(char::is_whitespace)
+        || branch.contains("..")
+        || branch.starts_with('/')
+        || branch.ends_with('/')
+    {
+        return Err(format!("layerfs workspace branch is invalid: {branch:?}"));
+    }
+    Ok(LayerFsWorkspace {
+        project: project.to_owned(),
+        branch: branch.to_owned(),
+    })
+}
+
+fn validate_layerfs_project_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.len() > 63 {
+        return Err("layerfs project name must be 1-63 characters".into());
+    }
+    let bytes = name.as_bytes();
+    let is_edge = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    if !is_edge(bytes[0]) || !is_edge(bytes[bytes.len() - 1]) {
+        return Err("layerfs project name must start and end with a letter or digit".into());
+    }
+    if !bytes
+        .iter()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-' | b'.'))
+    {
+        return Err(
+            "layerfs project name may only contain lowercase letters, digits, '_', '-' or '.'"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 /// The resident v1 daemon owns one project reducer/journal.  Keep that
 /// ownership explicit at the host boundary instead of treating the process
 /// root as an implicit fallback for every valid project context.
@@ -626,6 +694,108 @@ fn validate_worktree_path(
     resolve_worktree_path(root, config, raw, false)
 }
 
+/// The generic LayerFS entry. It resolves the per-project profile, Store, VM
+/// and image from `~/.config/layerfs/projects/<project>.env`; Collab never
+/// hardcodes a project path, Store, volume or runtime.
+const LAYERFS_ENTRY: &str = "layerfs";
+
+/// Normalize a declared task workspace. A `layerfs:` reference is parsed and
+/// re-rendered without any host-path or configured-worktree-base requirement;
+/// every other value keeps the original Git worktree validation. This is the
+/// only place a task workspace is classified, so registration and relocation
+/// cannot diverge.
+pub(crate) fn declare_task_workspace(
+    root: &Path,
+    config: &crate::config::Config,
+    raw: &str,
+) -> Result<String, String> {
+    if is_layerfs_workspace(raw) {
+        let workspace = parse_layerfs_workspace(raw)?;
+        return Ok(format!(
+            "{LAYERFS_WORKSPACE_SCHEME}{}/{}",
+            workspace.project, workspace.branch
+        ));
+    }
+    Ok(validate_worktree_path(root, config, raw)?
+        .display()
+        .to_string())
+}
+
+/// Read-only JSON call against the generic LayerFS entry. The entry returns a
+/// typed `{"code","message"}` object for expected failures such as
+/// `NoSuchBranch`, so a `code` field is an error even when the process exits
+/// zero. A missing tool, missing profile, unreachable Store or malformed output
+/// is returned as the original error and never replaced with a worktree
+/// fallback.
+fn run_layerfs_json(project: &str, args: &[&str]) -> Result<serde_json::Value, String> {
+    let output = Command::new(LAYERFS_ENTRY)
+        .arg("--project")
+        .arg(project)
+        .args(args)
+        .output()
+        .map_err(|error| {
+            format!("cannot run `layerfs --project {project}` for workspace binding: {error}")
+        })?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let trimmed = stdout.trim();
+    let value: serde_json::Value = serde_json::from_str(trimmed).map_err(|error| {
+        format!(
+            "`layerfs --project {project} {}` returned no JSON ({error}); stderr: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+    })?;
+    if let Some(code) = value.get("code").and_then(|code| code.as_str()) {
+        let message = value
+            .get("message")
+            .and_then(|message| message.as_str())
+            .unwrap_or_default();
+        return Err(format!("LAYERFS_ERROR {code}: {message}"));
+    }
+    if !output.status.success() {
+        return Err(format!(
+            "`layerfs --project {project} {}` exited {}: {}",
+            args.join(" "),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(value)
+}
+
+/// Resolve the exact LayerFS task branch head. This is the real branch
+/// candidate a LayerFS delivery records; it is a LayerFS commit id, not a Git
+/// sha, so Git integration is proven separately by the Git owner.
+pub(crate) fn layerfs_branch_head(project: &str, branch: &str) -> Result<String, String> {
+    let value = run_layerfs_json(
+        project,
+        &["branch", "list_commits", branch, "--page-size", "1"],
+    )?;
+    value
+        .get("items")
+        .and_then(|items| items.as_array())
+        .and_then(|items| items.first())
+        .and_then(|commit| commit.get("id"))
+        .and_then(|id| id.as_str())
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| format!("layerfs branch {branch} has no commits in project {project}"))
+}
+
+/// Confirm a LayerFS task branch still exists in its project. Used to verify
+/// close state without ever touching a local Git worktree or branch.
+pub(crate) fn layerfs_branch_exists(project: &str, branch: &str) -> Result<bool, String> {
+    let value = run_layerfs_json(project, &["project", "list_branches", "--page-size", "1000"])?;
+    Ok(value
+        .get("items")
+        .and_then(|items| items.as_array())
+        .is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| item.get("name").and_then(|name| name.as_str()) == Some(branch))
+        }))
+}
+
 fn cleanup_worktree_path(
     root: &Path,
     config: &crate::config::Config,
@@ -748,4 +918,46 @@ fn request_activity(req: &Req, resp: &Resp) -> serde_json::Value {
         "error": resp.error,
         "request": request,
     })
+}
+
+#[cfg(test)]
+mod layerfs_workspace_tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_layerfs_workspace_references() {
+        assert!(is_layerfs_workspace("layerfs:demo/task-1"));
+        assert!(is_layerfs_workspace("  layerfs:demo/task-1"));
+        assert!(!is_layerfs_workspace("/tmp/worktree"));
+        assert!(!is_layerfs_workspace("layerfsdemo/task"));
+    }
+
+    #[test]
+    fn parses_valid_layerfs_workspace_reference() {
+        let parsed = parse_layerfs_workspace("layerfs:my-proj/feature/task-2").unwrap();
+        assert_eq!(parsed.project, "my-proj");
+        assert_eq!(parsed.branch, "feature/task-2");
+    }
+
+    #[test]
+    fn rejects_invalid_layerfs_workspace_references() {
+        assert!(parse_layerfs_workspace("layerfs:").is_err());
+        assert!(parse_layerfs_workspace("layerfs:demo").is_err());
+        assert!(parse_layerfs_workspace("layerfs:Demo/task").is_err());
+        assert!(parse_layerfs_workspace("layerfs:-demo/task").is_err());
+        assert!(parse_layerfs_workspace("layerfs:demo/").is_err());
+        assert!(parse_layerfs_workspace("not-layerfs").is_err());
+    }
+
+    #[test]
+    fn declares_layerfs_workspace_without_a_git_worktree_base() {
+        let config = crate::config::Config::default();
+        let declared = declare_task_workspace(
+            std::path::Path::new("/nonexistent-project-root"),
+            &config,
+            "layerfs:demo/task-1",
+        )
+        .unwrap();
+        assert_eq!(declared, "layerfs:demo/task-1");
+    }
 }

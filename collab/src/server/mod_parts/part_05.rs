@@ -291,6 +291,9 @@ fn handoff_worktree_reference(server: &Server, state: &State, candidate: &str) -
         let Some(registered) = task.worktree_path.as_deref() else {
             continue;
         };
+        if is_layerfs_workspace(registered) {
+            continue;
+        }
         // A registered worktree path is project-scoped, so a relative spelling
         // resolves against the owning project root before equality is tested.
         let registered = Path::new(registered);

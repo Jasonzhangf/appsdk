@@ -144,6 +144,7 @@
         "rust/src/long_horizon_role.rs",
         "rust/src/main.rs",
         "rust/src/platform.rs",
+        "rust/src/workspace.rs",
         "rust/src/main/**"
       ],
       "symbol_owners": {

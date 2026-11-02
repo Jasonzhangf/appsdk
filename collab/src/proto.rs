@@ -1306,6 +1306,11 @@ impl Resp {
 
 pub const MSG_TYPES: [&str; 3] = ["notify", "request", "reply"];
 
+/// Capability advertised by a daemon that accepts `invocation_cwd` on the
+/// identity-context request. Older daemons omit it from the context-free Ping
+/// response, so the client must keep the legacy request shape for them.
+pub const IDENTITY_CONTEXT_CWD_PROTOCOL: &str = "identity-context-cwd-v1";
+
 #[cfg(test)]
 mod tests {
     use super::*;

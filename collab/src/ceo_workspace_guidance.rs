@@ -382,6 +382,17 @@ fn guidance_content(preferences_source: &Path, collab_skill_source: &Path) -> Gu
         "  from 00:00 to 08:00 Beijing time. The typed CEO config wins over these defaults, and typed"
             .to_owned(),
         "  urgent work is explicit and separate from the digest.".to_owned(),
+        "- Keep a local Markdown patrol index for each master core or urgent task receipt: the goal, owner,"
+            .to_owned(),
+        "  current result, raw evidence with its source time, gap, blocker, and next action. Check actual"
+            .to_owned(),
+        "  progress against the necessary evidence, dispatch or fix by owner, and track to acceptance. Reuse"
+            .to_owned(),
+        "  valid evidence when nothing changed, and do not send routine reminders. Mark self-report,"
+            .to_owned(),
+        "  independent verification, and unknown separately. The index is only an index: it never replaces"
+            .to_owned(),
+        "  the board or live state and never becomes a second control source.".to_owned(),
         format!(
             "- Before using user style or preferences, read the existing preference source at `{preferences}`."
         ),

@@ -111,6 +111,10 @@ fn guidance_limits_ceo_authority_to_the_typed_grant() {
     assert!(lowered.contains("per hour"), "{content}");
     assert!(lowered.contains("single authority"), "{content}");
     assert!(
+        lowered.contains("patrol index") && lowered.contains("second control source"),
+        "guidance must carry the master core/urgent patrol index rule: {content}"
+    );
+    assert!(
         lowered.contains("do not create a second profile"),
         "{content}"
     );

@@ -88,6 +88,17 @@ pub fn stale_socket_error(error: &io::Error) -> bool {
     ) || error.raw_os_error() == Some(libc::EOPNOTSUPP)
 }
 
+/// Probe the daemon for the identity-context cwd protocol capability without
+/// mutating state. An older daemon answers a context-free Ping but omits the
+/// capability; the caller must then keep the legacy request shape.
+pub fn supports_identity_context_cwd(sock: &Path) -> bool {
+    let Ok(value): Result<serde_json::Value, _> = call(sock, &Req::Ping) else {
+        return false;
+    };
+    value.get("protocol_version").and_then(serde_json::Value::as_str)
+        == Some(crate::proto::IDENTITY_CONTEXT_CWD_PROTOCOL)
+}
+
 /// Round-trip one request without changing daemon state.
 ///
 /// The caller must have an already-running daemon. In particular, this path

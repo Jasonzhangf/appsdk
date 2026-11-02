@@ -789,7 +789,10 @@ pub(crate) fn context_operation_with_intent(
         )?
     };
     if !query {
-        prepared.request.invocation_cwd = Some(cwd.to_string_lossy().into_owned());
+        prepared.request.invocation_cwd =
+            client::supports_identity_context_cwd(&scope.sock_path()).then(|| {
+                cwd.to_string_lossy().into_owned()
+            });
     }
     if !query {
         prepared.request.approval = approval;

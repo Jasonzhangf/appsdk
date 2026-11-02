@@ -714,6 +714,7 @@ fn dispatch_with_route_context_bound(
                 "messages": st.msgs.len(),
                 "tasks": st.tasks.len(),
                 "now": iso(now_ms()),
+                "protocol_version": crate::proto::IDENTITY_CONTEXT_CWD_PROTOCOL,
             }))
         }
         Req::StatusAll => {

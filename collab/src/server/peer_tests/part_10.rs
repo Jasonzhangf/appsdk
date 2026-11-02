@@ -225,6 +225,8 @@ fn master_context_routes_work_by_task_kind() {
     assert!(responsibilities.contains("bounded subagent tasks"));
     assert!(responsibilities.contains("regardless of whether other peers are busy"));
     assert!(responsibilities.contains("codex exec --profile gcm"));
+    assert!(responsibilities.contains("per-peer task list"));
+    assert!(responsibilities.contains("subworker"));
     assert!(!responsibilities.contains("saturate every live present peer first"));
     assert!(!context
         .data

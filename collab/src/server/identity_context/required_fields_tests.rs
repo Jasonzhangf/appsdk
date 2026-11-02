@@ -1,10 +1,142 @@
 use super::*;
 use crate::proto::{DshCandidate, TmuxCandidate, TmuxPaneAnchor};
 use crate::server::binding_slot::{PendingEffect, PendingEffectKind};
-use crate::server::name_state::{NameOccupancy, NamePaneAnchor};
+use crate::server::name_state::{NameOccupancy, NamePaneAnchor, TaskAssignment};
 use crate::server::operation_journal::{inject_next_append_fault, OperationJournal};
 use crate::server::peer_tests::test_server;
 use std::sync::Arc;
+
+/// Role recovery preserves the same carrier's ordinary work identity. It must
+/// not rewrite the stable-name mailbox or move open tasks as a side effect.
+#[test]
+fn restore_peer_role_recovery_does_not_rewrite_old_name_mailbox_or_tasks() {
+    let (host, runtime, manager, host_root, root, fixture_facts, _saved) =
+        persisted_context_fixture();
+    let context = recovery_context(&root);
+    let project_scope = context.project_scope.clone();
+    // The fixture starts with a committed stable name. Seed one unread message
+    // and one open task under that name so the regression is observable.
+    let name = {
+        let state = runtime.state.lock().unwrap();
+        state
+            .name_occupancies
+            .get(project_scope.as_str())
+            .and_then(|names| {
+                names
+                    .values()
+                    .find(|holder| holder.worker_id.as_str() == "saved-peer")
+            })
+            .map(|holder| holder.name.clone())
+            .expect("fixture owner has a stable name")
+    };
+    let worker = {
+        let state = runtime.state.lock().unwrap();
+        state
+            .workers
+            .get("saved-peer")
+            .expect("fixture worker")
+            .clone()
+    };
+    let message_id = "restore-peer-unread".to_owned();
+    runtime.commit(&[
+        Event::Sent {
+            msg: Message {
+                id: message_id.clone(),
+                from: "sender".into(),
+                to: worker.id.clone(),
+                mtype: "notify".into(),
+                subject: Some("restore-peer".into()),
+                body: "unread follows Jenny".into(),
+                in_reply_to: None,
+                created_ms: 1,
+                state: "pending".into(),
+                wake_attempt_count: 0,
+                last_wake_attempt_ms: 0,
+                retry_attempted: false,
+            },
+        },
+        Event::MailboxNameAddressed {
+            message_id: message_id.clone(),
+            address: name_mailbox::MailboxNameAddress {
+                project_scope: project_scope.as_str().to_owned(),
+                name: name.clone(),
+            },
+        },
+        Event::TaskCreated {
+            task: TaskRec {
+                id: "restore-peer-open".into(),
+                owner: worker.id.clone(),
+                created_by: "sender".into(),
+                feature_id: None,
+                worktree_path: None,
+                branch: None,
+                base_commit: None,
+                priority: "p1".into(),
+                status: "working".into(),
+                next_step: Some("keep".into()),
+                wait: None,
+                created_ms: 1,
+                updated_ms: 1,
+            },
+        },
+        Event::TaskAssignmentUpdated {
+            assignment: TaskAssignment {
+                task_id: "restore-peer-open".into(),
+                name: name.clone(),
+                session_id: worker
+                    .transport
+                    .as_ref()
+                    .and_then(|transport| transport.session_id.as_ref())
+                    .cloned()
+                    .unwrap_or_else(|| "saved-agent-session".into()),
+                assignment_revision: 1,
+                reflow: None,
+                updated_ms: 1,
+            },
+        },
+    ]);
+
+    let approval = json!({
+        "action": "restore_peer",
+        "authorization": "user releases Jenny",
+        "decision": "approved",
+    })
+    .to_string();
+    let facts = IdentityFacts {
+        caller_pid: Some(std::process::id()),
+        ..fixture_facts
+    };
+    let request = IdentityContextRequest {
+        grant_approval: Some(serde_json::from_str(&approval).unwrap()),
+        approval: None,
+        operation_id: "restore-peer-role".into(),
+        invocation: "approved_recovery".into(),
+        action: "context".into(),
+        facts,
+        invocation_cwd: Some(root.display().to_string()),
+        query: false,
+        query_capability: "restore-peer-role-capability".into(),
+        invocation_ticket: String::new(),
+    };
+    let (_, response) = manager.identity_context(context.clone(), request);
+    assert!(response.ok);
+    let state = runtime.state.lock().unwrap();
+    assert_eq!(state.worker_names["saved-peer"], name);
+    assert_eq!(state.msgs[&message_id].to, worker.id);
+    assert_eq!(
+        state.mailbox_name_addresses[&message_id].name, name,
+        "role recovery must not rewrite the old stable-name address"
+    );
+    assert_eq!(state.task_assignments["restore-peer-open"].name, name);
+    assert_eq!(state.tasks["restore-peer-open"].owner, worker.id);
+
+    drop(state);
+    drop(manager);
+    drop(runtime);
+    drop(host);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(host_root).unwrap();
+}
 
 #[test]
 fn dsh_facts_do_not_compete_with_launcher_tmux_ancestry() {
@@ -85,24 +217,53 @@ fn register_control_commit_surfaces_unknown_durability_instead_of_swallowing_it(
 
 #[test]
 fn refreshed_binding_reports_unknown_control_durability() {
-    let (host, runtime, manager, host_root, root, _facts, mut identity) = persisted_context_fixture();
+    let (host, runtime, manager, host_root, root, _facts, mut identity) =
+        persisted_context_fixture();
     let context = recovery_context(&root);
     let binding = {
         let state = runtime.state.lock().unwrap();
-        state.global.lookup_project_for_route(&RouteScope {
-            app_scope_id: context.app_scope_id.clone(), project_scope_id: context.project_scope.clone(),
-        }).unwrap().runtime_bindings.values().find(|binding| binding.agent_id.as_str() == "saved-peer").unwrap().clone()
+        state
+            .global
+            .lookup_project_for_route(&RouteScope {
+                app_scope_id: context.app_scope_id.clone(),
+                project_scope_id: context.project_scope.clone(),
+            })
+            .unwrap()
+            .runtime_bindings
+            .values()
+            .find(|binding| binding.agent_id.as_str() == "saved-peer")
+            .unwrap()
+            .clone()
     };
     let transport = identity.transport.clone().unwrap();
     let endpoint = transport.tmux_endpoint.as_ref().unwrap();
-    seed_saved_pane_name(&runtime, context.project_scope.as_str(), "saved-peer",
+    seed_saved_pane_name(
+        &runtime,
+        context.project_scope.as_str(),
+        "saved-peer",
         binding.session_id.as_ref().unwrap().as_str(),
-        TmuxPaneAnchor { socket_path: endpoint.socket_path.clone(), pane_id: endpoint.pane_id.clone() },
-        &root.display().to_string());
+        TmuxPaneAnchor {
+            socket_path: endpoint.socket_path.clone(),
+            pane_id: endpoint.pane_id.clone(),
+        },
+        &root.display().to_string(),
+    );
     crate::server::test_hooks::fail_next_parent_sync();
-    let error = manager.refresh_session_transport(&runtime, &binding, transport, &mut identity, &Scope { root: root.clone() })
+    let error = manager
+        .refresh_session_transport(
+            &runtime,
+            &binding,
+            transport,
+            &mut identity,
+            &Scope { root: root.clone() },
+        )
         .expect_err("unknown control durability must not report a successful refresh");
-    assert!(error.to_string().contains("BINDING_CONTROL_DURABILITY_UNKNOWN"), "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("BINDING_CONTROL_DURABILITY_UNKNOWN"),
+        "{error}"
+    );
     drop(manager);
     drop(runtime);
     drop(host);
@@ -112,7 +273,8 @@ fn refreshed_binding_reports_unknown_control_durability() {
 
 #[test]
 fn nameless_restored_identity_defers_its_control_slot() {
-    let (host, runtime, manager, host_root, root, _facts, mut identity) = persisted_context_fixture();
+    let (host, runtime, manager, host_root, root, _facts, mut identity) =
+        persisted_context_fixture();
     let context = recovery_context(&root);
     let binding = {
         let state = runtime.state.lock().unwrap();
@@ -148,9 +310,7 @@ fn nameless_restored_identity_defers_its_control_slot() {
         &binding,
         transport,
         &mut identity,
-        &Scope {
-            root: root.clone(),
-        },
+        &Scope { root: root.clone() },
     );
     assert!(result.is_ok(), "{result:?}");
 
@@ -212,8 +372,7 @@ fn automatic_context_name_publishes_control_slot_matching_business_occupancy() {
                 && slot.identity_key.project_scope == context.project_scope
                 && slot.active_binding().is_some_and(|value| {
                     value.binding.agent_id.as_str() == "saved-peer"
-                        && value.binding.project_scope.as_str()
-                            == context.project_scope.as_str()
+                        && value.binding.project_scope.as_str() == context.project_scope.as_str()
                 })
         }),
         "the published control slot must match the business occupancy name {name}"
@@ -261,6 +420,7 @@ fn completed_name_effect_is_cleared_without_replaying_occupancy() {
                 target_session_id: holder.session_id.clone(),
                 occupancy_revision: holder.occupancy_revision,
                 source_names: Vec::new(),
+                moves_existing_names: false,
                 pane_anchor: holder.pane_anchor.clone(),
                 created_ms: holder.updated_ms,
             },
@@ -314,6 +474,7 @@ fn incomplete_register_effect_blocks_instead_of_synthesizing_a_worker() {
                 target_session_id: "missing-register-session".into(),
                 occupancy_revision: 1,
                 source_names: Vec::new(),
+                moves_existing_names: false,
                 pane_anchor: None,
                 created_ms: 1,
             },
@@ -382,6 +543,7 @@ fn superseded_register_effect_is_retired_instead_of_blocking_forever() {
                 target_session_id: "older-superseded-session".into(),
                 occupancy_revision: holder.occupancy_revision.saturating_add(1),
                 source_names: Vec::new(),
+                moves_existing_names: false,
                 pane_anchor: None,
                 created_ms: holder.updated_ms,
             },
@@ -392,7 +554,8 @@ fn superseded_register_effect_is_retired_instead_of_blocking_forever() {
         host.host_paths.state_root(),
         context.app_scope_id.as_str(),
         context.project_scope.as_str(),
-    ).unwrap();
+    )
+    .unwrap();
     assert!(
         !proven.contains("superseded-register-effect"),
         "a superseded effect must not authorize trimming a business tail"
@@ -404,7 +567,12 @@ fn superseded_register_effect_is_retired_instead_of_blocking_forever() {
     manager.recover_pending_effects().unwrap();
     assert!(store.load().unwrap().pending_effect(&effect_id).is_none());
     assert!(
-        runtime.state.lock().unwrap().workers.contains_key("saved-peer"),
+        runtime
+            .state
+            .lock()
+            .unwrap()
+            .workers
+            .contains_key("saved-peer"),
         "retiring a stale effect must not remove the committed owner"
     );
 
@@ -464,6 +632,7 @@ fn incomplete_register_effect_is_consumed_by_a_later_typed_register() {
                 target_session_id,
                 occupancy_revision: 1,
                 source_names: Vec::new(),
+                moves_existing_names: false,
                 pane_anchor: None,
                 created_ms: 1,
             },
@@ -732,6 +901,7 @@ fn started_route_reconciler_skips_old_identity_while_control_handoff_is_pending(
         target_session_id: binding.session_id.as_ref().unwrap().as_str().to_owned(),
         occupancy_revision: 1,
         source_names: Vec::new(),
+        moves_existing_names: false,
         pane_anchor: None,
         created_ms: crate::server::now_ms(),
     };
@@ -914,6 +1084,7 @@ fn controlled_route_reconciler_does_not_install_a_control_only_identity() {
         target_session_id: binding.session_id.as_ref().unwrap().as_str().to_owned(),
         occupancy_revision: 1,
         source_names: Vec::new(),
+        moves_existing_names: false,
         pane_anchor: None,
         created_ms: crate::server::now_ms(),
     };
@@ -1369,19 +1540,31 @@ fn multiple_current_session_carriers_without_name_owner_report_conflict() {
     let context = recovery_context(&root);
     {
         let mut state = runtime.state.lock().unwrap();
-        state.name_occupancies.remove(context.project_scope.as_str());
+        state
+            .name_occupancies
+            .remove(context.project_scope.as_str());
         let mut second_worker = state.workers.get("saved-peer").unwrap().clone();
         second_worker.id = "second-peer".into();
-        state.workers.insert(second_worker.id.clone(), second_worker);
-        let project = state.global.projects.get_mut(context.project_scope.as_str()).unwrap();
+        state
+            .workers
+            .insert(second_worker.id.clone(), second_worker);
+        let project = state
+            .global
+            .projects
+            .get_mut(context.project_scope.as_str())
+            .unwrap();
         let mut second = project.runtime_bindings.values().next().unwrap().clone();
         second.agent_id = AgentId::new("second-peer").unwrap();
         second.binding_id = BindingId::new("binding-second-peer").unwrap();
-        project.runtime_bindings.insert(second.binding_id.as_str().into(), second);
+        project
+            .runtime_bindings
+            .insert(second.binding_id.as_str().into(), second);
     }
     let result = manager.current_session_identity(&context, &facts);
-    assert!(matches!(&result, Err(error) if error.to_string().starts_with("IDENTITY_RESTORE_AMBIGUOUS:")),
-        "multiple current carriers without a name owner must not fall through to a new draft");
+    assert!(
+        matches!(&result, Err(error) if error.to_string().starts_with("IDENTITY_RESTORE_AMBIGUOUS:")),
+        "multiple current carriers without a name owner must not fall through to a new draft"
+    );
     drop(manager);
     drop(runtime);
     drop(host);
@@ -1418,31 +1601,41 @@ fn explicitly_restoring_peer_ignores_foreign_project_identity() {
         }
     };
     assert_ne!(admission.identity.worker_id, saved.worker_id);
-    assert_eq!(admission.identity.project_scope.as_ref(), Some(&target.project_scope));
+    assert_eq!(
+        admission.identity.project_scope.as_ref(),
+        Some(&target.project_scope)
+    );
     let retry = match manager.approved_recovery_admission(&target, &request) {
         Ok(Some(admission)) => admission,
         _ => panic!("retry must preserve the same target admission"),
     };
-    assert_eq!(retry.identity.worker_id, admission.identity.worker_id,
-        "the same session retry must not mint another target carrier");
+    assert_eq!(
+        retry.identity.worker_id, admission.identity.worker_id,
+        "the same session retry must not mint another target carrier"
+    );
     let mut committed = admission.identity.clone();
     let mut binding = saved.runtime.clone().unwrap();
     binding.agent_id = AgentId::new(committed.worker_id.clone()).unwrap();
     binding.binding_id = BindingId::new(format!("binding-{}", committed.worker_id)).unwrap();
     identity::persist_registration_at(
         &host.host_paths,
-        &Scope { root: target_root.clone() },
+        &Scope {
+            root: target_root.clone(),
+        },
         &mut committed,
         binding,
         saved.transport.clone().unwrap(),
-    ).unwrap();
+    )
+    .unwrap();
     let committed_retry = match manager.approved_recovery_admission(&target, &request) {
         Ok(Some(admission)) => admission,
         _ => panic!("retry must recover the committed target identity"),
     };
     assert_eq!(committed_retry.identity.worker_id, committed.worker_id);
-    assert!(committed_retry.identity.token == committed.token,
-        "retry must reuse the committed target credential");
+    assert!(
+        committed_retry.identity.token == committed.token,
+        "retry must reuse the committed target credential"
+    );
     let other_target_root = root.join("third-project");
     std::fs::create_dir_all(&other_target_root).unwrap();
     let other_target = recovery_context(&other_target_root);
@@ -1453,8 +1646,10 @@ fn explicitly_restoring_peer_ignores_foreign_project_identity() {
             panic!("explicit recovery in the other project failed: {error}")
         }
     };
-    assert_ne!(other_admission.identity.worker_id, admission.identity.worker_id,
-        "different target projects must not share a carrier id");
+    assert_ne!(
+        other_admission.identity.worker_id, admission.identity.worker_id,
+        "different target projects must not share a carrier id"
+    );
     let original = identity::read_persisted(&host.host_paths, &saved.worker_id)
         .unwrap()
         .unwrap();
@@ -1492,12 +1687,19 @@ fn explicitly_restoring_master_ignores_foreign_project_identity() {
     let admission = match manager.approved_recovery_admission(&target, &request) {
         Ok(Some(admission)) => admission,
         Ok(None) => panic!("foreign identity must not fall through to ordinary master recovery"),
-        Err(ApprovedAdmissionError::Error(error)) => panic!("explicit master recovery failed: {error}"),
+        Err(ApprovedAdmissionError::Error(error)) => {
+            panic!("explicit master recovery failed: {error}")
+        }
     };
     assert_ne!(admission.identity.worker_id, saved.worker_id);
-    assert_eq!(admission.identity.project_scope.as_ref(), Some(&target.project_scope));
+    assert_eq!(
+        admission.identity.project_scope.as_ref(),
+        Some(&target.project_scope)
+    );
     assert_eq!(admission.identity_approval.action, "restore_master");
-    let original = identity::read_persisted(&host.host_paths, &saved.worker_id).unwrap().unwrap();
+    let original = identity::read_persisted(&host.host_paths, &saved.worker_id)
+        .unwrap()
+        .unwrap();
     assert!(serde_json::to_value(original).unwrap() == serde_json::to_value(&saved).unwrap());
     drop(manager);
     drop(host);

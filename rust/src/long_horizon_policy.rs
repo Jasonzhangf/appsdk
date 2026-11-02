@@ -67,6 +67,7 @@ pub(crate) fn project_patrol_brief(role: ExecutionRole) -> String {
 
 - **默认 arm 已完成**：`appsdk goal subscribe` 在初始化或恢复本人长程目标时，会确保本项目 `collab notify subscribe --event master-idle --subject project-patrol --every-ms 900000` 的 15 分钟巡检已 armed，并复用有效订阅、不重复创建。只读命令 `appsdk longhorizon show --json` 只投影真实 `patrol_armed` 与 `patrol_subscription_id`，绝不创建订阅，也不能拿投影当作已 arm 回执。
 - **每次巡检必须检查真实 worker 状态**：分别读每个 worker 的 `idle`、`busy`、`unknown`，不要只判断“非 busy”。同时核对 `collab status --all` 中未关闭 board 任务的所有权与每个任务的巡检取消状态。只有真实观测到 `idle` 且该任务未被本人取消时才继续；`busy` 跳过且不补发，`unknown`、`offline`、`absent` 记录具体缺口，不臆断唤醒。
+- **维护逐 peer 任务清单并按可用性派发**：在项目现有 goal/task notes 记录每个 peer 的 goal、当前工作、变化、证据源与时间、剩余缺口和下一动作；每轮被动更新，包括无任务 peer，不把它当 board 或 live 状态。把已授权长程目标交给确认可用且无任务的 peer，跟踪接受与执行；peer 不可达、未知或不可用时保留该长程目标，把 ready 一次性执行或观察派给独立 `codex exec --profile gcm` subworker。未知不是 idle；无 ready 工作不发明任务。
 - **不 rearm 已取消任务**：peer 可取消其本人任务的 board 巡检，取消只停该任务的巡检，保留任务、direct-message 和其他订阅。巡检不得重新 arm 已被 peer 取消的任务；本人明确恢复后才恢复。
 - **有 CEO 时回报实质进度**：`collab ceo reply --subject "<项目进度>" <正文>`，正文必须含目标、已验收结果、剩余工作、有证据的阻塞和下一动作，不写无证据心跳，不按正文关键词猜测紧急程度。
 - **无 CEO 时明确走无上游分支**：继续本项目本地工作，不虚构接收者，也不在测试外发送真实消息。"#
@@ -232,6 +233,8 @@ mod tests {
         assert!(prompt.contains("Worker / subworker 处理规则"));
         assert!(prompt.contains("通知处理准则"));
         assert!(prompt.contains("项目巡检与 CEO 汇报"));
+        assert!(prompt.contains("逐 peer 任务清单"));
+        assert!(prompt.contains("codex exec --profile gcm` subworker"));
         assert!(prompt.contains("--event master-idle"));
         assert!(prompt.contains("collab ceo reply"));
         assert!(prompt.contains("无 CEO 时明确走无上游分支"));

@@ -838,3 +838,71 @@ fn desktop_context_same_session_refreshes_native_thread_and_subscription() {
         "a read-only query must not mutate the durable operation history"
     );
 }
+
+// A master's public `collab context` snapshot must expose, in one read, the
+// durable subordinate managers of its scope: activity, open/blocked tasks and
+// whether each subordinate keeps a patrol armed. The child itself has no
+// durable subordinates, so its own snapshot digest stays empty.
+#[test]
+fn public_context_scope_digest_lists_durable_subordinate_manager() {
+    let (fixture, master_host, child_host, _master, child) =
+        lifecycle_native_pair_fixture("scope-digest", "ack_only");
+    let child_id = child["worker_id"]
+        .as_str()
+        .expect("child identity")
+        .to_owned();
+    let master_snapshot = fixture.context_provide(
+        "scope-digest-master-read",
+        &json!({
+            "session_id": "lifecycle-master-session",
+            "thread_id": "lifecycle-master-thread",
+            "endpoint": master_host.endpoint(),
+            "namespace": "codex_tui"
+        }),
+        None,
+    );
+    assert_eq!(
+        master_snapshot["result"]["outcome"], "completed",
+        "{master_snapshot}"
+    );
+    let digest = master_snapshot["result"]["snapshot"]["scope_digest"]
+        .as_array()
+        .expect("master snapshot carries a scope digest");
+    let row = digest
+        .iter()
+        .find(|row| row["worker_id"].as_str() == Some(child_id.as_str()))
+        .expect("the durable subordinate appears in the master digest");
+    assert_eq!(row["role"], "worker", "{row}");
+    assert!(
+        row["activity"].is_string(),
+        "the digest reports subordinate activity: {row}"
+    );
+    assert_eq!(
+        row["patrol"]["armed"], false,
+        "an unarmed subordinate patrol reads as not armed: {row}"
+    );
+    assert!(
+        row["open_tasks"].is_array() && row["blocked"].is_array(),
+        "the digest reports subordinate work and blocking waits: {row}"
+    );
+
+    let child_snapshot = fixture.context_provide(
+        "scope-digest-child-read",
+        &json!({
+            "session_id": "lifecycle-child-session",
+            "thread_id": "lifecycle-child-thread",
+            "endpoint": child_host.endpoint(),
+            "namespace": "codex_tui"
+        }),
+        None,
+    );
+    assert_eq!(
+        child_snapshot["result"]["outcome"], "completed",
+        "{child_snapshot}"
+    );
+    assert_eq!(
+        child_snapshot["result"]["snapshot"]["scope_digest"],
+        json!([]),
+        "a peer with no durable subordinates has an empty digest: {child_snapshot}"
+    );
+}

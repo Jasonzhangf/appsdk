@@ -310,7 +310,7 @@ jobs:
     name: Collab packaging (macOS)
     needs: changes
     if: needs.changes.outputs.collab == 'true'
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - run: bash collab/scripts/tests/test-package-collab-tarball.sh
@@ -614,7 +614,7 @@ jobs:
     name: macOS AppSDK (ARM64)
     needs: changes
     if: needs.changes.outputs.release == 'true'
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -735,7 +735,7 @@ jobs:
             target-triple: x86_64-unknown-linux-gnu
           - runner: windows-latest
             target-triple: x86_64-pc-windows-msvc
-          - runner: macos-14
+          - runner: macos-15
             target-triple: aarch64-apple-darwin
     runs-on: ${{ matrix.runner }}
     steps:

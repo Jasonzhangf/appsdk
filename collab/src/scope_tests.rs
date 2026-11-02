@@ -1327,6 +1327,83 @@ fn identity_route_rejects_malformed_control_records() {
 }
 
 #[test]
+fn read_only_route_resolution_binds_symlinked_marker_to_registered_project() {
+    let root = test_root("read-only-marker-binds-project");
+    let project_root = root.join("project");
+    let caller_root = root.join("task-dir");
+    let state_root = root.join("host-state");
+    std::fs::create_dir_all(project_root.join(".agent-collab")).unwrap();
+    std::fs::create_dir_all(&caller_root).unwrap();
+    std::fs::create_dir_all(&state_root).unwrap();
+    // A task directory binds through a symlinked `.agent-collab` marker, not
+    // through repository metadata or directory containment.
+    std::os::unix::fs::symlink(
+        &project_root.join(".agent-collab"),
+        &caller_root.join(".agent-collab"),
+    )
+    .unwrap();
+    let project_root = project_root.canonicalize().unwrap();
+    let route = json!({
+        "version": 1,
+        "op": "register",
+        "app_scope_id": "appserver-cli",
+        "project_scope": project_root,
+        "canonical_root": project_root,
+        "storage_root": project_root,
+        "registered_ms": 1
+    });
+    std::fs::write(state_root.join("routes.jsonl"), format!("{route}\n")).unwrap();
+
+    let host_paths = HostPaths::for_state_root(&state_root).unwrap();
+    let resolved = canonical_route_for_cwd(&host_paths, &caller_root).unwrap();
+    assert_eq!(resolved.root, project_root);
+    assert_eq!(resolved.app_scope_id.as_str(), "appserver-cli");
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn read_only_route_resolution_rejects_marker_to_unregistered_project() {
+    let root = test_root("read-only-marker-unregistered");
+    let registered_root = root.join("project");
+    let unregistered_root = root.join("other-project");
+    let caller_root = root.join("task-dir");
+    let state_root = root.join("host-state");
+    std::fs::create_dir_all(registered_root.join(".agent-collab")).unwrap();
+    std::fs::create_dir_all(unregistered_root.join(".agent-collab")).unwrap();
+    std::fs::create_dir_all(&caller_root).unwrap();
+    std::fs::create_dir_all(&state_root).unwrap();
+    std::os::unix::fs::symlink(
+        &unregistered_root.join(".agent-collab"),
+        &caller_root.join(".agent-collab"),
+    )
+    .unwrap();
+    let registered_root = registered_root.canonicalize().unwrap();
+    let route = json!({
+        "version": 1,
+        "op": "register",
+        "app_scope_id": "appserver-cli",
+        "project_scope": registered_root,
+        "canonical_root": registered_root,
+        "storage_root": registered_root,
+        "registered_ms": 1
+    });
+    std::fs::write(state_root.join("routes.jsonl"), format!("{route}\n")).unwrap();
+
+    let host_paths = HostPaths::for_state_root(&state_root).unwrap();
+    // The marker names a project with no registered route. The lookup must not
+    // guess a project; it must fail closed exactly like an unmarked caller.
+    let error = canonical_route_for_cwd(&host_paths, &caller_root).unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("no registered Collab route contains cwd"),
+        "unexpected error: {message}"
+    );
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn identity_route_ignores_missing_stale_root_and_keeps_current_route() {
     let root = test_root("worktree-route-missing-root");
     let canonical = root.join("project");

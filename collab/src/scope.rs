@@ -225,8 +225,16 @@ pub fn canonical_route_for_identity(
         .filter(|route| &route.app_scope_id == app_scope_id)
         .collect::<Vec<_>>();
     let matches = if let Some(marker_root) = project_root_for_cwd(&cwd) {
-        let marked = matches.iter().filter(|route| route.root == marker_root).cloned().collect::<Vec<_>>();
-        if marked.is_empty() { narrow_routes_for_cwd(&cwd, matches) } else { marked }
+        let marked = matches
+            .iter()
+            .filter(|route| route.root == marker_root)
+            .cloned()
+            .collect::<Vec<_>>();
+        if marked.is_empty() {
+            narrow_routes_for_cwd(&cwd, matches)
+        } else {
+            marked
+        }
     } else {
         narrow_routes_for_cwd(&cwd, matches)
     };
@@ -293,9 +301,16 @@ pub fn canonical_route_for_cwd(
 }
 
 /// Use the nearest registered project containing the caller's cwd.
-fn narrow_routes_for_cwd(cwd: &Path, mut matches: Vec<CanonicalProjectRoute>) -> Vec<CanonicalProjectRoute> {
+fn narrow_routes_for_cwd(
+    cwd: &Path,
+    mut matches: Vec<CanonicalProjectRoute>,
+) -> Vec<CanonicalProjectRoute> {
     matches.retain(|route| cwd.starts_with(&route.root));
-    if let Some(depth) = matches.iter().map(|route| route.root.components().count()).max() {
+    if let Some(depth) = matches
+        .iter()
+        .map(|route| route.root.components().count())
+        .max()
+    {
         matches.retain(|route| route.root.components().count() == depth);
     }
     matches

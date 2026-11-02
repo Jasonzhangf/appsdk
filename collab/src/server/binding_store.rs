@@ -220,10 +220,7 @@ impl BindingControlStore {
     /// resource. Unchanged facts never rewrite the file. A post-rename parent
     /// sync failure returns Durability::Unknown without rolling back the new
     /// file that is already visible.
-    pub(crate) fn commit(
-        &self,
-        change: ControlChange,
-    ) -> Result<StoreCommit, String> {
+    pub(crate) fn commit(&self, change: ControlChange) -> Result<StoreCommit, String> {
         let (routes, mut control) = self.load_shared()?;
         let mut effect_changed = false;
         let outcome = match change {
@@ -231,16 +228,16 @@ impl BindingControlStore {
                 key,
                 value,
                 expected_generation,
-            } => StoreChangeOutcome::Slot(
-                control
-                    .commit(&key, value, expected_generation)
-                    .map_err(|error| {
+            } => {
+                StoreChangeOutcome::Slot(control.commit(&key, value, expected_generation).map_err(
+                    |error| {
                         format!(
                             "BINDING_CONTROL_COMMIT_REJECTED: {}: {error}",
                             self.path.display()
                         )
-                    })?,
-            ),
+                    },
+                )?)
+            }
             ControlChange::CommitWithEffect {
                 key,
                 value,
@@ -274,12 +271,14 @@ impl BindingControlStore {
                 let outcome = if control.slot(&key).is_none() {
                     CommitOutcome::Unchanged { generation: 0 }
                 } else {
-                    control.unregister(&key, expected_generation).map_err(|error| {
-                        format!(
-                            "BINDING_CONTROL_COMMIT_REJECTED: {}: {error}",
-                            self.path.display()
-                        )
-                    })?
+                    control
+                        .unregister(&key, expected_generation)
+                        .map_err(|error| {
+                            format!(
+                                "BINDING_CONTROL_COMMIT_REJECTED: {}: {error}",
+                                self.path.display()
+                            )
+                        })?
                 };
                 StoreChangeOutcome::Slot(outcome)
             }
@@ -334,24 +333,33 @@ impl BindingControlStore {
                 let changed = control.clear_effect(&effect_id);
                 StoreChangeOutcome::Effect { changed }
             }
-            ControlChange::RemoveScope { project_scope } => {
-                StoreChangeOutcome::Removed {
-                    removed: control.remove_scope(project_scope.as_str()),
-                }
-            }
+            ControlChange::RemoveScope { project_scope } => StoreChangeOutcome::Removed {
+                removed: control.remove_scope(project_scope.as_str()),
+            },
         };
         let durability = if effect_changed {
             self.publish_shared(&routes, &control)?
         } else {
             match outcome {
-            StoreChangeOutcome::Slot(CommitOutcome::Unchanged { .. })
-            | StoreChangeOutcome::Removed { removed: 0 } => {
-                // Stores are reconstructed between requests. Matching bytes
-                // do not prove that an earlier rename was directory-synced.
-                // Confirm that publication without rewriting the resource or
-                // rotating its generation. A truly absent resource has no
-                // publication to confirm (legacy unregister/reset no-op).
-                match self.path.try_exists() {
+                StoreChangeOutcome::Slot(CommitOutcome::Unchanged { .. })
+                | StoreChangeOutcome::Removed { removed: 0 } => {
+                    // Stores are reconstructed between requests. Matching bytes
+                    // do not prove that an earlier rename was directory-synced.
+                    // Confirm that publication without rewriting the resource or
+                    // rotating its generation. A truly absent resource has no
+                    // publication to confirm (legacy unregister/reset no-op).
+                    match self.path.try_exists() {
+                        Ok(true) => self.confirm_publication(),
+                        Ok(false) => Durability::Confirmed,
+                        Err(error) => {
+                            return Err(format!(
+                                "BINDING_CONTROL_READ_FAILED: {}: {error}",
+                                self.path.display()
+                            ))
+                        }
+                    }
+                }
+                StoreChangeOutcome::Effect { changed: false } => match self.path.try_exists() {
                     Ok(true) => self.confirm_publication(),
                     Ok(false) => Durability::Confirmed,
                     Err(error) => {
@@ -360,41 +368,28 @@ impl BindingControlStore {
                             self.path.display()
                         ))
                     }
-                }
-            }
-            StoreChangeOutcome::Effect { changed: false } => {
-                match self.path.try_exists() {
-                    Ok(true) => self.confirm_publication(),
-                    Ok(false) => Durability::Confirmed,
-                    Err(error) => {
-                        return Err(format!(
-                            "BINDING_CONTROL_READ_FAILED: {}: {error}",
-                            self.path.display()
-                        ))
+                },
+                StoreChangeOutcome::Moved(MoveNameOutcome {
+                    target: CommitOutcome::Unchanged { .. },
+                    sources_retired: 0,
+                }) => {
+                    // Stores are reconstructed between requests. Matching bytes
+                    // do not prove that an earlier rename was directory-synced.
+                    // Confirm that publication without rewriting the resource or
+                    // rotating its generation. A truly absent resource has no
+                    // publication to confirm (legacy unregister/reset no-op).
+                    match self.path.try_exists() {
+                        Ok(true) => self.confirm_publication(),
+                        Ok(false) => Durability::Confirmed,
+                        Err(error) => {
+                            return Err(format!(
+                                "BINDING_CONTROL_READ_FAILED: {}: {error}",
+                                self.path.display()
+                            ))
+                        }
                     }
                 }
-            }
-            StoreChangeOutcome::Moved(MoveNameOutcome {
-                target: CommitOutcome::Unchanged { .. },
-                sources_retired: 0,
-            }) => {
-                // Stores are reconstructed between requests. Matching bytes
-                // do not prove that an earlier rename was directory-synced.
-                // Confirm that publication without rewriting the resource or
-                // rotating its generation. A truly absent resource has no
-                // publication to confirm (legacy unregister/reset no-op).
-                match self.path.try_exists() {
-                    Ok(true) => self.confirm_publication(),
-                    Ok(false) => Durability::Confirmed,
-                    Err(error) => {
-                        return Err(format!(
-                            "BINDING_CONTROL_READ_FAILED: {}: {error}",
-                            self.path.display()
-                        ))
-                    }
-                }
-            }
-            _ => self.publish_shared(&routes, &control)?,
+                _ => self.publish_shared(&routes, &control)?,
             }
         };
         Ok(StoreCommit {
@@ -457,9 +452,7 @@ impl BindingControlStore {
                 effects: set.pending_effects().cloned().collect(),
             };
             let mut line = serde_json::to_vec(&control).map_err(|error| {
-                format!(
-                    "BINDING_CONTROL_SAVE_FAILED: serialize control set: {error}"
-                )
+                format!("BINDING_CONTROL_SAVE_FAILED: serialize control set: {error}")
             })?;
             line.push(b'\n');
             body.extend_from_slice(&line);

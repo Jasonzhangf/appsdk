@@ -353,6 +353,23 @@ impl ProjectRuntimeManager {
         // file without a binding_control line therefore stays lazy: startup
         // must not materialize all initialized projects up front. Project
         // journals are never consulted to discover bindings.
+        let controlled_route_count = binding_control.active_values().count();
+        append_log(
+            &host_paths.log_path(),
+            &format!("BINDING_CONTROL_STARTUP_ROUTES: {controlled_route_count}"),
+        );
+        for value in binding_control.active_values() {
+            let key = (
+                value.binding.app_scope_id.as_str().to_owned(),
+                value.binding.project_scope.as_str().to_owned(),
+            );
+            let storage_root = host_paths.app_storage_root(&key.1, &key.0);
+            manager.install_pending_route(
+                &key,
+                Path::new(value.binding.project_scope.as_str()),
+                &storage_root,
+            );
+        }
         let active_routes = manager.active_host_route_keys();
         let pending = manager
             .routes

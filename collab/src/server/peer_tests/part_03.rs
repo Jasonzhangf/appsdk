@@ -1200,6 +1200,7 @@ fn replay_drops_incomplete_handover_with_a_matching_pending_effect() {
         target_session_id: "session-pending-worker".into(),
         occupancy_revision: 1,
         source_names: Vec::new(),
+        moves_existing_names: false,
         pane_anchor: None,
         created_ms: 1,
     };

@@ -1436,6 +1436,7 @@ fn handle_master_promote(
         Some(name_resolution::NameIntent {
             requested_name: "Jenny".into(),
             user_authorized: true,
+            moves_existing_names: true,
             replace_confirmed: false,
         }),
         Some(&approval),

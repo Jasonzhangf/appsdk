@@ -441,6 +441,7 @@ fn confirmed_user_jenny_takeover_overrides_unknown_without_ordinary_name_bypass(
     next.intent = Some(NameIntent {
         requested_name: "Jenny".into(),
         user_authorized: true,
+        moves_existing_names: true,
         replace_confirmed: false,
     });
     assert!(matches!(
@@ -669,6 +670,7 @@ fn explicit_name_overrides_any_presence_and_jenny_plan() {
     i.intent = Some(NameIntent {
         requested_name: "Alice".into(),
         user_authorized: true,
+        moves_existing_names: true,
         replace_confirmed: false,
     });
     for presence in [
@@ -810,6 +812,7 @@ fn registered_name_owner_replaces_online_master_with_user_authorization() {
         Some(NameIntent {
             requested_name: "Jenny".into(),
             user_authorized: true,
+            moves_existing_names: true,
             replace_confirmed: true,
         }),
     )
@@ -901,6 +904,7 @@ fn holder_change_updates_legacy_owner_without_overwriting_reassigned_work() {
     i.intent = Some(NameIntent {
         requested_name: "Alice".into(),
         user_authorized: true,
+        moves_existing_names: true,
         replace_confirmed: false,
     });
     state
@@ -988,6 +992,7 @@ fn plan_explicit_name_move_reports_target_and_retired_source_names() {
         &NameIntent {
             requested_name: "Alice".into(),
             user_authorized: true,
+            moves_existing_names: true,
             replace_confirmed: false,
         },
         None,
@@ -1005,6 +1010,7 @@ fn plan_explicit_name_move_reports_target_and_retired_source_names() {
         &NameIntent {
             requested_name: "Bob".into(),
             user_authorized: true,
+            moves_existing_names: true,
             replace_confirmed: false,
         },
         None,
@@ -1023,6 +1029,7 @@ fn plan_explicit_name_move_reports_target_and_retired_source_names() {
         &NameIntent {
             requested_name: "Jenny".into(),
             user_authorized: true,
+            moves_existing_names: true,
             replace_confirmed: false,
         },
         None,
@@ -1115,6 +1122,7 @@ fn name_intent_rejects_unapproved_invalid_and_untyped_requests() {
         Some(NameIntent {
             requested_name,
             user_authorized: false,
+            moves_existing_names: true,
             replace_confirmed: false,
         }) if requested_name == "Jenny"
     ));
@@ -1170,6 +1178,7 @@ fn explicit_name_overrides_online_holder_without_confirmation() {
     i.intent = Some(NameIntent {
         requested_name: "Alice".into(),
         user_authorized: true,
+        moves_existing_names: true,
         replace_confirmed: false,
     });
     let plan = plan_name_resolution(&state, &i).unwrap();
@@ -1398,6 +1407,7 @@ fn explicit_rename_migrates_callers_open_assignments_to_new_name() {
     i.intent = Some(NameIntent {
         requested_name: "Bob".into(),
         user_authorized: true,
+        moves_existing_names: true,
         replace_confirmed: false,
     });
     assert_eq!(committed(&mut state, &i).name, "Bob");

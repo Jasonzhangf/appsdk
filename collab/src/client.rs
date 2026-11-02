@@ -95,7 +95,9 @@ pub fn supports_identity_context_cwd(sock: &Path) -> bool {
     let Ok(value): Result<serde_json::Value, _> = call(sock, &Req::Ping) else {
         return false;
     };
-    value.get("protocol_version").and_then(serde_json::Value::as_str)
+    value
+        .get("protocol_version")
+        .and_then(serde_json::Value::as_str)
         == Some(crate::proto::IDENTITY_CONTEXT_CWD_PROTOCOL)
 }
 

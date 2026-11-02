@@ -442,7 +442,10 @@ fn resolver_rejects_ambiguous_session_without_minting_an_identity() {
         Ok(_) => panic!("ambiguous session must not create a draft"),
         Err(error) => error,
     };
-    assert!(error.to_string().contains("IDENTITY_RESTORE_AMBIGUOUS"), "{error}");
+    assert!(
+        error.to_string().contains("IDENTITY_RESTORE_AMBIGUOUS"),
+        "{error}"
+    );
     assert_eq!(
         std::fs::read_dir(host_paths.state_root().join("identities"))
             .unwrap()
@@ -627,13 +630,20 @@ fn resolver_rejects_duplicate_archives_without_using_pane_ownership() {
     let second_path = identity_path_at(&host_paths, "same-project-pane-peer").unwrap();
     let first_before = std::fs::read(&first_path).unwrap();
     let second_before = std::fs::read(&second_path).unwrap();
-    let count_before = std::fs::read_dir(host_paths.state_root().join("identities")).unwrap().count();
+    let count_before = std::fs::read_dir(host_paths.state_root().join("identities"))
+        .unwrap()
+        .count();
     let error = match resolve_for_daemon_at(&host_paths, &scope, &facts) {
         Ok(_) => panic!("ambiguous identities must not create a draft"),
         Err(error) => error,
     };
     assert!(error.to_string().contains("IDENTITY_RESTORE_AMBIGUOUS"));
-    assert_eq!(std::fs::read_dir(host_paths.state_root().join("identities")).unwrap().count(), count_before);
+    assert_eq!(
+        std::fs::read_dir(host_paths.state_root().join("identities"))
+            .unwrap()
+            .count(),
+        count_before
+    );
     assert!(std::fs::read(first_path).unwrap() == first_before);
     assert!(std::fs::read(second_path).unwrap() == second_before);
     std::fs::remove_dir_all(root).ok();
@@ -670,7 +680,9 @@ fn resolver_rejects_duplicate_archives_with_one_matching_pane() {
     let second_path = identity_path_at(&host_paths, "codex-%175").unwrap();
     let first_before = std::fs::read(&first_path).unwrap();
     let second_before = std::fs::read(&second_path).unwrap();
-    let count_before = std::fs::read_dir(host_paths.state_root().join("identities")).unwrap().count();
+    let count_before = std::fs::read_dir(host_paths.state_root().join("identities"))
+        .unwrap()
+        .count();
     let error = match resolve_for_daemon_at(
         &host_paths,
         &scope,
@@ -680,7 +692,12 @@ fn resolver_rejects_duplicate_archives_with_one_matching_pane() {
         Err(error) => error,
     };
     assert!(error.to_string().contains("IDENTITY_RESTORE_AMBIGUOUS"));
-    assert_eq!(std::fs::read_dir(host_paths.state_root().join("identities")).unwrap().count(), count_before);
+    assert_eq!(
+        std::fs::read_dir(host_paths.state_root().join("identities"))
+            .unwrap()
+            .count(),
+        count_before
+    );
     assert!(std::fs::read(first_path).unwrap() == first_before);
     assert!(std::fs::read(second_path).unwrap() == second_before);
     std::fs::remove_dir_all(root).ok();

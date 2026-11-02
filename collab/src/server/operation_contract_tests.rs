@@ -552,7 +552,7 @@ async fn wait_for_socket(socket: &Path) {
 }
 
 #[tokio::test]
-async fn degraded_startup_serves_only_authorized_query_and_keeps_project_journal_unchanged() {
+async fn project_replay_failure_refuses_startup_without_publishing_socket() {
     let _startup_test_lock = startup_test_lock();
     let root = test_root("degraded");
     let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
@@ -582,74 +582,31 @@ async fn degraded_startup_serves_only_authorized_query_and_keeps_project_journal
     let host_before = std::fs::read(host_paths.journal_path()).unwrap();
 
     let socket = host_paths.socket_path();
-    let running = tokio::spawn(run_with_host_paths(
-        Scope { root: root.clone() },
-        host_paths.clone(),
-    ));
-    wait_for_socket(&socket).await;
-
-    let response = send_request(
-        &socket,
-        &RequestEnvelope::with_context(
-            Req::IdentityContext {
-                facts: Default::default(),
-                identity_context: Some(malformed_query_request("raw-malformed-capability")),
-            },
-            context.clone(),
-        ),
-    )
-    .await;
-    assert!(!response.ok);
-    assert_eq!(
-        response.error.as_deref(),
-        Some("IDENTITY_OPERATION_QUERY_SHAPE_INVALID")
+    let pid_path = host_paths.pid_path();
+    let error = run_with_host_paths(Scope { root: root.clone() }, host_paths.clone())
+        .await
+        .expect_err("a project replay failure must refuse startup");
+    let rendered = format!("{error:#}");
+    assert!(
+        rendered.contains("PROJECT_RUNTIME_REPLAY_FAILED"),
+        "{rendered}"
     );
-
-    let response = send_request(
-        &socket,
-        &RequestEnvelope::with_context(
-            Req::IdentityContext {
-                facts: Default::default(),
-                identity_context: Some(query_request("raw-capability-that-must-not-persist")),
-            },
-            context.clone(),
-        ),
-    )
-    .await;
-    assert!(response.ok, "{response:?}");
-    assert_eq!(response.data["result"]["operation_id"], "ctxop-1");
-    assert_eq!(
-        host_before,
-        std::fs::read(host_paths.journal_path()).unwrap()
+    assert!(rendered.contains("journal replay failed"), "{rendered}");
+    assert!(
+        !socket.exists(),
+        "{} must not be published",
+        socket.display()
     );
-
-    let response = send_request(
-        &socket,
-        &RequestEnvelope::with_context(
-            Req::Register {
-                worker_id: "worker-1".into(),
-                token: "token-1".into(),
-                cwd: root.display().to_string(),
-                candidates: Some(TransportCandidates::default()),
-            },
-            context,
-        ),
-    )
-    .await;
-    assert!(!response.ok);
-    assert!(response
-        .error
-        .as_deref()
-        .unwrap_or_default()
-        .starts_with("PROJECT_RUNTIME_UNAVAILABLE"));
+    assert!(
+        !pid_path.exists(),
+        "{} must not be published",
+        pid_path.display()
+    );
     assert_eq!(project_before, std::fs::read(&project_journal).unwrap());
     assert_eq!(
         host_before,
         std::fs::read(host_paths.journal_path()).unwrap()
     );
-
-    running.abort();
-    let _ = running.await;
     std::fs::remove_dir_all(root).unwrap();
 }
 

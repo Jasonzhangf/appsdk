@@ -16,6 +16,10 @@ pub(crate) const ORDINARY_NAME_POOL: [&str; 20] = [
 pub(crate) struct NameIntent {
     pub requested_name: String,
     pub user_authorized: bool,
+    /// A user-requested name change carries the caller's previous names with it.
+    /// Role recovery that allocates an ordinary name for the same carrier is not
+    /// a rename and must leave existing name work and mail at the old name.
+    pub moves_existing_names: bool,
     /// Typed takeover confirmation for a name held by another carrier. The
     /// legacy promote approval text never sets this; only the explicit typed
     /// `restore_master`/`restore_name` approval object can.
@@ -80,6 +84,7 @@ pub(crate) fn parse_name_intent(
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|text| !text.trim().is_empty()),
         },
+        moves_existing_names: true,
         replace_confirmed,
     }))
 }
@@ -877,7 +882,11 @@ pub(crate) fn plan_name_resolution(
             pane_anchor: input.pane_anchor.clone(),
         },
     };
-    let rename_from = if input.intent.is_some() {
+    let rename_from = if input
+        .intent
+        .as_ref()
+        .is_some_and(|intent| intent.moves_existing_names)
+    {
         names_held_by_worker(state, &input.project_scope, &request.caller_worker_id)
     } else {
         Vec::new()

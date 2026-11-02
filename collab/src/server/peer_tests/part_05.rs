@@ -304,6 +304,7 @@ fn confirm_test_jenny_takeover(server: &Server, worker_id: &str) {
         Some(super::name_resolution::NameIntent {
             requested_name: "Jenny".into(),
             user_authorized: true,
+            moves_existing_names: true,
             replace_confirmed: true,
         }),
     )

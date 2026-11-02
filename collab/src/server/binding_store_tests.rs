@@ -301,7 +301,12 @@ fn move_name_commit_publishes_one_target_slot_and_retires_the_source() {
     assert_eq!(loaded.slots().count(), 2);
     let alice_slot = loaded.slot(&alice).unwrap();
     assert_eq!(
-        alice_slot.active_binding().unwrap().binding.agent_id.as_str(),
+        alice_slot
+            .active_binding()
+            .unwrap()
+            .binding
+            .agent_id
+            .as_str(),
         "bob-s2"
     );
     assert_eq!(
@@ -552,11 +557,7 @@ fn route_record(key: &IdentityBindingKey) -> HostRouteRecord {
     }
 }
 
-fn effect_for(
-    key: &IdentityBindingKey,
-    effect_id: &str,
-    target_session_id: &str,
-) -> PendingEffect {
+fn effect_for(key: &IdentityBindingKey, effect_id: &str, target_session_id: &str) -> PendingEffect {
     PendingEffect {
         kind: if effect_id.starts_with("register") {
             PendingEffectKind::Register
@@ -574,6 +575,7 @@ fn effect_for(
         target_session_id: target_session_id.to_owned(),
         occupancy_revision: 1,
         source_names: Vec::new(),
+        moves_existing_names: false,
         pane_anchor: None,
         created_ms: 1,
     }

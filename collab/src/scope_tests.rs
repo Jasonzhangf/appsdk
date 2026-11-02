@@ -611,18 +611,36 @@ fn route_selection_uses_cwd_instead_of_git_main_checkout() {
     std::fs::create_dir_all(workspace.join(".agent-collab")).unwrap();
     std::fs::create_dir_all(&cwd).unwrap();
     std::fs::create_dir_all(&state_root).unwrap();
-    std::fs::write(cwd.join(".git"), format!("gitdir: {}", main.join(".git/worktrees/task").display())).unwrap();
+    std::fs::write(
+        cwd.join(".git"),
+        format!("gitdir: {}", main.join(".git/worktrees/task").display()),
+    )
+    .unwrap();
     let main = main.canonicalize().unwrap();
     let workspace = workspace.canonicalize().unwrap();
-    let route = |path: &std::path::Path| json!({
-        "version": 1, "op": "register", "app_scope_id": "appserver-cli",
-        "project_scope": path, "canonical_root": path, "storage_root": path, "registered_ms": 1
-    });
-    std::fs::write(state_root.join("routes.jsonl"), format!("{}\n{}\n", route(&main), route(&workspace))).unwrap();
+    let route = |path: &std::path::Path| {
+        json!({
+            "version": 1, "op": "register", "app_scope_id": "appserver-cli",
+            "project_scope": path, "canonical_root": path, "storage_root": path, "registered_ms": 1
+        })
+    };
+    std::fs::write(
+        state_root.join("routes.jsonl"),
+        format!("{}\n{}\n", route(&main), route(&workspace)),
+    )
+    .unwrap();
     let host_paths = HostPaths::for_state_root(&state_root).unwrap();
     let app_scope = AppServerId::new("appserver-cli").unwrap();
-    assert_eq!(canonical_route_for_identity(&host_paths, &cwd, &app_scope).unwrap().root, workspace);
-    assert_eq!(canonical_route_for_cwd(&host_paths, &cwd).unwrap().root, workspace);
+    assert_eq!(
+        canonical_route_for_identity(&host_paths, &cwd, &app_scope)
+            .unwrap()
+            .root,
+        workspace
+    );
+    assert_eq!(
+        canonical_route_for_cwd(&host_paths, &cwd).unwrap().root,
+        workspace
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -1386,7 +1404,8 @@ fn read_only_route_resolution_binds_symlinked_marker_to_registered_project() {
     assert_eq!(resolved.root, project_root);
     assert_eq!(resolved.app_scope_id.as_str(), "appserver-cli");
     let app_scope = AppServerId::new("appserver-cli").unwrap();
-    let identity_route = canonical_route_for_identity(&host_paths, &caller_root, &app_scope).unwrap();
+    let identity_route =
+        canonical_route_for_identity(&host_paths, &caller_root, &app_scope).unwrap();
     assert_eq!(identity_route.root, project_root);
 
     std::fs::remove_dir_all(root).ok();

@@ -883,9 +883,10 @@ fn identity_by_current_anchors_at(
         .route_scope(AppServerId::new(CLI_APP_SERVER_ID)?)?
         .project_scope_id;
     if !matches.is_empty()
-        && matches.values().flat_map(|group| group.values()).all(|identity| {
-            identity.project_scope.as_ref() != Some(&expected_scope)
-        })
+        && matches
+            .values()
+            .flat_map(|group| group.values())
+            .all(|identity| identity.project_scope.as_ref() != Some(&expected_scope))
     {
         return Ok(Some(AnchorResolution::CrossProject));
     }

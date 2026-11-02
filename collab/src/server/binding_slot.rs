@@ -129,6 +129,11 @@ pub(crate) struct PendingEffect {
     pub(crate) occupancy_revision: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) source_names: Vec<String>,
+    /// Whether recovery must apply the source names as a business rename.
+    /// Role recovery retires its old control name but leaves the stable-name
+    /// mailbox and task assignment for that name in place.
+    #[serde(default)]
+    pub(crate) moves_existing_names: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) pane_anchor: Option<NamePaneAnchor>,
     pub(crate) created_ms: i64,
@@ -394,10 +399,7 @@ impl BindingControlSet {
         }
     }
 
-    pub(crate) fn from_parts(
-        slots: Vec<IdentityBindingSlot>,
-        effects: Vec<PendingEffect>,
-    ) -> Self {
+    pub(crate) fn from_parts(slots: Vec<IdentityBindingSlot>, effects: Vec<PendingEffect>) -> Self {
         Self { slots, effects }
     }
 
@@ -431,9 +433,11 @@ impl BindingControlSet {
 
     pub(crate) fn set_effect(&mut self, effect: PendingEffect) -> Result<bool, SlotError> {
         effect.validate()?;
-        if let Some(existing) = self.effects.iter_mut().find(|existing| {
-            existing.effect_id == effect.effect_id
-        }) {
+        if let Some(existing) = self
+            .effects
+            .iter_mut()
+            .find(|existing| existing.effect_id == effect.effect_id)
+        {
             let changed = *existing != effect;
             *existing = effect;
             Ok(changed)

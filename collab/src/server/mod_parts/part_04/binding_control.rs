@@ -145,6 +145,7 @@ impl ProjectRuntimeManager {
         effect_id: &str,
         kind: crate::server::binding_slot::PendingEffectKind,
         source_names: Vec<String>,
+        moves_existing_names: bool,
         pane_anchor: Option<crate::server::name_state::NamePaneAnchor>,
     ) -> Option<crate::server::binding_slot::PendingEffect> {
         let target_carrier_is_current = state
@@ -193,6 +194,7 @@ impl ProjectRuntimeManager {
             target_session_id: target_session_id.to_owned(),
             occupancy_revision,
             source_names,
+            moves_existing_names,
             pane_anchor,
             created_ms: crate::server::now_ms(),
         })
@@ -323,6 +325,7 @@ impl ProjectRuntimeManager {
             effect_id,
             crate::server::binding_slot::PendingEffectKind::Name,
             Vec::new(),
+            false,
             pane_anchor,
         ) {
             Some(effect) => self
@@ -414,6 +417,7 @@ impl ProjectRuntimeManager {
             &effect_id,
             crate::server::binding_slot::PendingEffectKind::Register,
             Vec::new(),
+            false,
             pane_anchor,
         );
         let key = crate::server::binding_slot::IdentityBindingKey::new(
@@ -654,12 +658,17 @@ impl ProjectRuntimeManager {
                 updated_ms: effect.created_ms,
                 pane_anchor: effect.pane_anchor.clone(),
             };
+            let rename_sources = if effect.moves_existing_names {
+                effect.source_names.as_slice()
+            } else {
+                &[]
+            };
             let mut events =
                 crate::server::name_resolution::build_name_resolution_events_with_rename_from(
                     &state,
                     effect.project_scope.as_str(),
                     &occupancy,
-                    &effect.source_names,
+                    rename_sources,
                 );
             // The mailbox/subscription/task constructors can legitimately
             // emit no name-resolution record when the target occupancy is
@@ -877,6 +886,7 @@ impl ProjectRuntimeManager {
             effect_id,
             crate::server::binding_slot::PendingEffectKind::Name,
             planned.source_names.clone(),
+            intent.moves_existing_names,
             pane_anchor,
         );
         let commit = match effect {

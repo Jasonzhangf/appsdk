@@ -892,6 +892,7 @@ impl ProjectRuntimeManager {
             intent = Some(name_resolution::NameIntent {
                 requested_name: name,
                 user_authorized: true,
+                moves_existing_names: false,
                 replace_confirmed: false,
             });
         }

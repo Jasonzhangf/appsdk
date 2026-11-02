@@ -377,5 +377,11 @@ fn fsize_limited_update_child() {
     let rc = unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &rlimit) };
     assert_eq!(rc, 0, "setrlimit failed");
 
-    let _ = ensure_ceo_workspace_guidance(&workspace, &preferences, &skill);
+    if ensure_ceo_workspace_guidance(&workspace, &preferences, &skill).is_err() {
+        // macOS reports EFBIG from the write instead of raising a fatal
+        // SIGXFSZ, so the child must signal the observed failure itself. The
+        // parent already accepts any non-success exit, which also covers
+        // platforms where the process is killed by the signal.
+        std::process::exit(3);
+    }
 }

@@ -521,14 +521,34 @@ fn collab_completion_projection(state: &State, task: &TaskRec) -> (bool, Vec<Str
             if !work_review_valid(state, &task.id) {
                 missing.push("review".into());
             }
+            if record.delivery_kind == crate::server::state::TaskDeliveryKind::Code
+                && record.integration_commit.is_none()
+            {
+                missing.push("integration".into());
+            }
         }
         None => {
             missing.push("delivery".into());
             missing.push("review".into());
         }
     }
+    let cleanup_ok = (task.worktree_path.is_none() && task.branch.is_none())
+        || state
+            .cleanup_receipts
+            .get(&task.id)
+            .is_some_and(|receipt| receipt.verification == CleanupVerification::Verified);
+    if !cleanup_ok {
+        missing.push("cleanup".into());
+    }
     if task.status != "closed" {
         missing.push("close".into());
+    }
+    if state
+        .cleanup_receipts
+        .get(&task.id)
+        .is_some_and(|receipt| receipt.manual_reason.is_some())
+    {
+        missing.push("manual_termination".into());
     }
     (missing.is_empty(), missing)
 }

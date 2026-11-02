@@ -525,15 +525,37 @@ fn dispatch_with_route_context_bound(
         Req::TaskStatus { task_id } => {
             let st = server.state.lock().unwrap();
             match task_id {
-                Some(id) => st
-                    .tasks
-                    .get(&id)
-                    .map(|task| task_view(&st, task))
-                    .map(Resp::data)
-                    .unwrap_or_else(|| Resp::err(format!("task {} not found", id))),
-                None => Resp::data(
-                    json!({"tasks": st.tasks.values().map(|task| task_view(&st, task)).collect::<Vec<_>>() }),
-                ),
+                Some(id) => match st.tasks.get(&id) {
+                    Some(task) => {
+                        if let Some(workspace) = task
+                            .worktree_path
+                            .as_deref()
+                            .filter(|value| is_layerfs_workspace(value))
+                        {
+                            if let Err(error) = validate_layerfs_workspace(workspace) {
+                                return Resp::err(error);
+                            }
+                        }
+                        Resp::data(task_view(&st, task))
+                    }
+                    None => Resp::err(format!("task {} not found", id)),
+                },
+                None => {
+                    for task in st.tasks.values() {
+                        if let Some(workspace) = task
+                            .worktree_path
+                            .as_deref()
+                            .filter(|value| is_layerfs_workspace(value))
+                        {
+                            if let Err(error) = validate_layerfs_workspace(workspace) {
+                                return Resp::err(error);
+                            }
+                        }
+                    }
+                    Resp::data(
+                        json!({"tasks": st.tasks.values().map(|task| task_view(&st, task)).collect::<Vec<_>>() }),
+                    )
+                }
             }
         }
         Req::TaskConflicts {

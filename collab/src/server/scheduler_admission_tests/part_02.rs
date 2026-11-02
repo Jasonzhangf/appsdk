@@ -180,6 +180,7 @@
                 status: "assigned".into(),
                 next_step: None,
                 wait: None,
+                isolation_mode: None,
                 created_ms: now_ms(),
                 updated_ms: now_ms(),
             },

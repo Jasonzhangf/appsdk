@@ -1275,6 +1275,7 @@ fn command_receipt_and_worktree_binding_replay_preserve_durable_state() {
         owner_agent_id: "worker-1".into(),
         binding_id: "binding-task-1".into(),
         base_commit: "abc123".into(),
+        isolation_mode: None,
     };
     let events = [
         Event::CommandRecorded {

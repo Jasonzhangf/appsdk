@@ -226,6 +226,7 @@ fn worktree_binding_for_task(server: &Server, task: &TaskRec) -> Option<Worktree
         owner_agent_id: task.owner.clone(),
         binding_id: format!("binding-task-{}", task.id),
         base_commit: task.base_commit.clone().unwrap_or_default(),
+        isolation_mode: Some(task.isolation_mode_value()),
     })
 }
 
@@ -302,6 +303,9 @@ fn handoff_worktree_reference(server: &Server, state: &State, candidate: &str) -
         let Some(registered) = task.worktree_path.as_deref() else {
             continue;
         };
+        if is_layerfs_workspace(registered) {
+            continue;
+        }
         // A registered worktree path is project-scoped, so a relative spelling
         // resolves against the owning project root before equality is tested.
         let registered = Path::new(registered);

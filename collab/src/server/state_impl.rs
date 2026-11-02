@@ -2609,6 +2609,7 @@ mod board_patrol_state_tests {
             status: "working".into(),
             next_step: None,
             wait: None,
+            isolation_mode: None,
             created_ms: 1,
             updated_ms: 1,
         }

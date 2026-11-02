@@ -123,6 +123,11 @@ Playground/Active/Protected/generated 是消费者治理分区。不能据此把
   目标按规范项目和稳定名字隔离，sessionID 是执行载体；同名换会话或 worktree 继续
   原目标。普通 task、board 分配、笔记和定时订阅不能代替 goal 的真实登记回执。
 - `.agent-collab/` 为项目局部状态；存在目录不证明当前 peer 已注册。
+- 任务工作空间按项目实际工作流选择 Git worktree 或 LayerFS。已有 Git worktree
+  项目保持原路径、校验和清理规则；已启用 LayerFS 的项目使用
+  `layerfs:<项目名>/<分支>` 声明任务分支，不创建或清理本机 Git worktree。
+  LayerFS 项目解析、分支同步、publish、Git 提交捕获和远端交付遵循
+  `layerfs` Skill；Collab 只绑定任务分支和 owner，不回退为 worktree。
 - 当前 Collab 运行态只使用 `~/.collab/` 下的 central project/app 存储。
   旧项目本地 `.agent-collab/server` journal、信箱和任务按存储版本隔离，
   不自动导入或重放，也不删除。当前 central 数据保持，损坏仍明确失败。

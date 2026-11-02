@@ -920,6 +920,7 @@ fn master_force_close_skips_owner_and_cleanup_requirements() {
             status: "blocked".into(),
             next_step: None,
             wait: None,
+            isolation_mode: None,
             created_ms: now,
             updated_ms: now,
         },

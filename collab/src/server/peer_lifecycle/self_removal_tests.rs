@@ -76,6 +76,7 @@ fn self_close_with_open_task_succeeds_and_preserves_business_records() {
                 status: "working".into(),
                 next_step: Some("continue after control-plane removal".into()),
                 wait: None,
+                isolation_mode: None,
                 created_ms: now,
                 updated_ms: now,
             },

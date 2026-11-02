@@ -23,6 +23,7 @@ use long_horizon_role::execution_role;
 
 mod communication;
 mod dagpipe;
+mod workspace;
 
 const SDK_BUNDLE_MANIFEST: &str = include_str!("../../contracts/sdk-bundle.manifest.json");
 const SDK_VERSION: &str = env!("APPSDK_VERSION");

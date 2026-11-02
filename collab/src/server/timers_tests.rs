@@ -357,6 +357,7 @@ fn working_task(server: &Server, worker_id: &str) {
             status: "working".into(),
             next_step: Some("keep working".into()),
             wait: None,
+            isolation_mode: None,
             created_ms: now,
             updated_ms: now,
         },

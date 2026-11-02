@@ -34,6 +34,7 @@ fn task(owner: &str, id: &str, status: &str) -> TaskRec {
         status: status.into(),
         next_step: None,
         wait: None,
+        isolation_mode: None,
         created_ms: 1,
         updated_ms: 1,
     }
@@ -145,6 +146,7 @@ fn public_task(owner: &str, id: &str, status: &str) -> TaskRec {
         status: status.into(),
         next_step: Some("public-next-step".into()),
         wait: None,
+        isolation_mode: None,
         created_ms: 1,
         updated_ms: 1,
     }
@@ -302,6 +304,7 @@ fn fence_rejects_every_responsibility_writer_class_before_journal_bytes_change()
                 owner_agent_id: TARGET.into(),
                 binding_id: "wt-1".into(),
                 base_commit: "abc".into(),
+                isolation_mode: None,
             },
         }],
     );

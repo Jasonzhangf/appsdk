@@ -164,6 +164,7 @@ use super::*;
             status: "waiting".into(),
             next_step: None,
             wait: None,
+            isolation_mode: None,
             created_ms: 0,
             updated_ms: 0,
         };

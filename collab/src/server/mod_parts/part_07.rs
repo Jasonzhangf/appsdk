@@ -1146,11 +1146,10 @@ pub(crate) fn handle_scheduler_dispatch(
         ));
     }
     if let Some(path) = &worktree_path {
-        let canonical = match validate_worktree_path(&server.root, &server.config, path) {
-            Ok(path) => path,
+        match declare_task_workspace(&server.root, &server.config, path) {
+            Ok(declared) => worktree_path = Some(declared),
             Err(error) => return Resp::err(error),
-        };
-        worktree_path = Some(canonical.display().to_string());
+        }
     }
 
     let message_id = format!("scheduler-{request_id}");
@@ -1267,6 +1266,9 @@ pub(crate) fn handle_scheduler_dispatch(
                 ))
             }),
             wait: None,
+            isolation_mode: worktree_path
+                .as_deref()
+                .map(|path| derive_isolation_mode(Some(path))),
             created_ms: now,
             updated_ms: now,
         };

@@ -710,6 +710,7 @@ struct AppFixture {
     project: PathBuf,
     host_state: PathBuf,
     app_socket: PathBuf,
+    path_prepend: PathBuf,
     state: Arc<Mutex<HashMap<String, ThreadState>>>,
     appserver_connections: Arc<AtomicU64>,
     daemon: Option<Child>,
@@ -759,8 +760,10 @@ impl AppFixture {
         } else {
             root.join("app.sock")
         };
+        let path_prepend = root.join("bin");
         std::fs::create_dir_all(&project).expect("create project root");
         std::fs::create_dir_all(&host_state).expect("create host state root");
+        std::fs::create_dir_all(&path_prepend).expect("create fixture binary root");
         std::fs::create_dir_all(app_socket.parent().unwrap())
             .expect("create AppServer socket root");
         seed_baseline(&project);
@@ -792,6 +795,7 @@ impl AppFixture {
             project,
             host_state,
             app_socket,
+            path_prepend,
             state: shared,
             appserver_connections: connections,
             daemon: None,
@@ -809,6 +813,7 @@ impl AppFixture {
         Command::new(binary())
             .args(args)
             .current_dir(&self.project)
+            .env("PATH", self.fixture_path())
             .env("COLLAB_STATE_DIR", &self.host_state)
             .env("HOME", self.root.join("home"))
             .env("COLLAB_APPSERVER_SOCKET", &self.app_socket)
@@ -989,6 +994,7 @@ impl AppFixture {
         command
             .arg("serve")
             .current_dir(&self.project)
+            .env("PATH", self.fixture_path())
             .env("COLLAB_STATE_DIR", &self.host_state)
             .env("HOME", self.root.join("home"))
             .env("CODEX_HOME", self.root.join("home"))
@@ -1007,12 +1013,24 @@ impl AppFixture {
         let deadline = Instant::now() + Duration::from_secs(5);
         while !self.host_state.join("server.sock").exists() && Instant::now() < deadline {
             if let Some(status) = self.daemon.as_mut().unwrap().try_wait().unwrap() {
+                eprintln!(
+                    "[diag] start_daemon child exited early: status={status} state={} sock_exists={}",
+                    self.host_state.display(),
+                    self.host_state.join("server.sock").exists()
+                );
                 panic!(
                     "test-owned serve exited before readiness: {status}: {}",
                     std::fs::read_to_string(self.root.join("test-daemon.log")).unwrap_or_default()
                 );
             }
             thread::sleep(Duration::from_millis(25));
+        }
+        if !self.host_state.join("server.sock").exists() {
+            eprintln!(
+                "[diag] start_daemon timed out: state={} pid={:?}",
+                self.host_state.display(),
+                self.daemon.as_ref().map(|child| child.id())
+            );
         }
         assert!(
             self.host_state.join("server.sock").exists(),
@@ -1023,6 +1041,15 @@ impl AppFixture {
     fn restart_daemon(&mut self) {
         self.stop_daemon();
         self.start_daemon();
+    }
+
+    fn fixture_path(&self) -> std::ffi::OsString {
+        let mut path = std::ffi::OsString::from(&self.path_prepend);
+        if let Some(existing) = std::env::var_os("PATH") {
+            path.push(":");
+            path.push(existing);
+        }
+        path
     }
 }
 

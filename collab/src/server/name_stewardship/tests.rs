@@ -230,6 +230,7 @@ fn offline_adjudication_inherits_all_open_work_using_current_session() {
             owner_agent_id: "old".into(),
             binding_id: "resource".into(),
             base_commit: "base".into(),
+            isolation_mode: None,
         },
     );
     let response = adjudicate(

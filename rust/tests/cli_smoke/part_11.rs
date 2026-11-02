@@ -352,6 +352,22 @@ esac
     assert!(String::from_utf8_lossy(&mismatched_result.stderr)
         .contains("BUG_TRIAGE_QUERY_IDENTITY_MISMATCH"));
 
+    let mut layerfs_input = valid_input.clone();
+    layerfs_input["worktree"]["isolation_mode"] = Value::String("layerfs_workspace".into());
+    fs::write(
+        &input_path,
+        serde_json::to_string_pretty(&layerfs_input).unwrap() + "\n",
+    )
+    .unwrap();
+    let layerfs_result = produce(&input_path);
+    assert!(!layerfs_result.status.success());
+    assert!(
+        String::from_utf8_lossy(&layerfs_result.stderr).contains("PRODUCER_LAYERFS_UNSUPPORTED"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&layerfs_result.stdout),
+        String::from_utf8_lossy(&layerfs_result.stderr)
+    );
+
     fs::write(
         &input_path,
         serde_json::to_string_pretty(&valid_input).unwrap() + "\n",

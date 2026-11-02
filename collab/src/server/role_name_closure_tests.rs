@@ -62,6 +62,7 @@ fn role_name_closure_delegate_transfers_work_and_mailbox_with_authority() {
                     status: status.into(),
                     next_step: Some("preserve".into()),
                     wait: None,
+                    isolation_mode: None,
                     created_ms: 1,
                     updated_ms: 1,
                 },
@@ -85,6 +86,7 @@ fn role_name_closure_delegate_transfers_work_and_mailbox_with_authority() {
                 owner_agent_id: "a".into(),
                 binding_id: "resource".into(),
                 base_commit: "base".into(),
+                isolation_mode: None,
             },
         });
         for (id, status) in [("pending", "pending"), ("read", "read")] {

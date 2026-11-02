@@ -41,6 +41,7 @@ fn reassign_fixture(status: &str) -> (Server, std::path::PathBuf, RouteScope) {
             owner_agent_id: "old".into(),
             binding_id: "resource".into(),
             base_commit: "base".into(),
+            isolation_mode: None,
         },
     );
     state.worktree_bindings.insert(
@@ -52,6 +53,7 @@ fn reassign_fixture(status: &str) -> (Server, std::path::PathBuf, RouteScope) {
             owner_agent_id: "old".into(),
             binding_id: "unrelated".into(),
             base_commit: "other-base".into(),
+            isolation_mode: None,
         },
     );
     state.pending_merges.insert(

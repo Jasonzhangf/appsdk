@@ -144,6 +144,74 @@ fn layerfs_task_register_status_and_close_use_the_generic_layerfs_entry_only() {
 }
 
 #[test]
+fn layerfs_task_branch_mismatch_is_rejected_instead_of_silently_stored() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(&["context"], THREAD_C);
+    fixture.run_public(
+        &[
+            "context",
+            "--approve-grant",
+            r#"{"action":"restore_master","authorization":"layerfs fixture review master"}"#,
+        ],
+        THREAD_C,
+    );
+
+    let calls = fixture.root.join("workspace-tool-calls.log");
+    let layerfs = fixture.path_prepend.join("layerfs");
+    let git = fixture.path_prepend.join("git");
+    std::fs::write(
+        &layerfs,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"layerfs $*\" >> '{}'\ncase \"$*\" in\n  *\"project list_branches\"*) printf '{{\"items\":[{{\"name\":\"task-1\"}}]}}\\n' ;;\n  *) printf '{{\"code\":\"UnknownCommand\",\"message\":\"stub\"}}\\n' ;;\nesac\n",
+            calls.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        &git,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"git $*\" >> '{}'\nexec /usr/bin/git \"$@\"\n",
+            calls.display()
+        ),
+    )
+    .unwrap();
+    for path in [&layerfs, &git] {
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+
+    let output = fixture.command_public(
+        &[
+            "task",
+            "register",
+            "layerfs-branch-mismatch",
+            "--worktree",
+            "layerfs:demo/task-1",
+            "--branch",
+            "task-2",
+            "--priority",
+            "p1",
+        ],
+        THREAD_B,
+    );
+    assert!(
+        !output.status.success(),
+        "mismatched LayerFS branch must be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("layerfs workspace branch mismatch"),
+        "{stderr}"
+    );
+    let status = fixture.command_public(&["task", "status", "layerfs-branch-mismatch"], THREAD_B);
+    assert!(!status.status.success(), "mismatched task must not exist");
+}
+
+#[test]
 fn layerfs_task_binding_unavailable_fails_closed() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -2147,4 +2215,79 @@ fn pending_publisher_close_lifecycle_public_cli() {
         fixture.run_public(&["task", "status", "pending-cancel-board"], THREAD_B)["status"],
         "cancelled"
     );
+}
+
+/// Live black-box acceptance for the LayerFS task workspace path. Unlike the
+/// stub-driven cases above, this runs the real generic `layerfs --project
+/// <name>` entry against a real LayerFS project, task branch and Workspace.
+/// It is ignored by default because it needs external LayerFS state; run it
+/// with `COLLAB_LAYERFS_LIVE_PROJECT`, `COLLAB_LAYERFS_LIVE_BRANCH` and
+/// `LAYERFS_CONFIG_DIR` set to the live profile directory.
+#[test]
+#[ignore = "requires a live LayerFS project, task branch and Workspace"]
+fn layerfs_live_task_branch_workspace_black_box() {
+    let project = std::env::var("COLLAB_LAYERFS_LIVE_PROJECT")
+        .expect("set COLLAB_LAYERFS_LIVE_PROJECT to a real LayerFS project");
+    let branch = std::env::var("COLLAB_LAYERFS_LIVE_BRANCH")
+        .expect("set COLLAB_LAYERFS_LIVE_BRANCH to an existing LayerFS task branch");
+    let worktree = format!("layerfs:{project}/{branch}");
+
+    let mut fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(&["context"], THREAD_C);
+    fixture.run_public(
+        &[
+            "context",
+            "--approve-grant",
+            r#"{"action":"restore_master","authorization":"layerfs live acceptance master"}"#,
+        ],
+        THREAD_C,
+    );
+
+    let registered = fixture.run_public(
+        &[
+            "task",
+            "register",
+            "layerfs-live-accept",
+            "--worktree",
+            &worktree,
+            "--branch",
+            &branch,
+            "--priority",
+            "p1",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(registered["cleanup"], "pending");
+
+    let status = fixture.run_public(&["task", "status", "layerfs-live-accept"], THREAD_B);
+    assert_eq!(status["worktree"], worktree.as_str());
+    assert_eq!(status["branch"], branch.as_str());
+
+    fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            "layerfs-live-accept",
+            "--no-candidate",
+            "--evidence",
+            "live layerfs task branch and workspace through the generic entry",
+        ],
+        THREAD_B,
+    );
+    fixture.run_public(
+        &[
+            "task",
+            "review",
+            "layerfs-live-accept",
+            "--accept",
+            "--evidence",
+            "reviewed by another registered peer",
+        ],
+        THREAD_C,
+    );
+    fixture.run_public(&["task", "close", "layerfs-live-accept"], THREAD_B);
+
+    let closed = fixture.run_public(&["task", "status", "layerfs-live-accept"], THREAD_B);
+    assert_eq!(closed["status"], "closed");
 }

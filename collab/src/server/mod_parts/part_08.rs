@@ -863,6 +863,7 @@ fn handle_send_with_task_policy(
                 "Read collab msg {mid}; accept via subagent working; bind a worktree with task relocate before code edits."
             )),
             wait: None,
+            isolation_mode: None,
             created_ms: now_ms(),
             updated_ms: now_ms(),
         };
@@ -1300,6 +1301,16 @@ fn handle_task_register_with_next(
             Err(error) => return Resp::err(error),
         }
     }
+    let branch = match worktree_path.as_deref() {
+        Some(path) => match resolve_task_branch(path, branch.as_deref()) {
+            Ok(resolved) => resolved,
+            Err(error) => return Resp::err(error),
+        },
+        None => branch,
+    };
+    let isolation_mode = worktree_path
+        .as_deref()
+        .map(|path| derive_isolation_mode(Some(path)));
     if let Some(existing) = st
         .tasks
         .values()
@@ -1339,6 +1350,7 @@ fn handle_task_register_with_next(
             status: "blocked".into(),
             next_step: Some(format!("RESOURCE_CONFLICT={}", existing.id)),
             wait: None,
+            isolation_mode: isolation_mode.clone(),
             created_ms: now,
             updated_ms: now,
         };
@@ -1371,6 +1383,7 @@ fn handle_task_register_with_next(
         status: "working".to_string(),
         next_step,
         wait: None,
+        isolation_mode,
         created_ms: now,
         updated_ms: now,
     };
@@ -1432,6 +1445,11 @@ fn handle_task_relocate(
     }
     let old_worktree = task.worktree_path.clone();
     task.worktree_path = Some(worktree_path.clone());
+    let branch = match resolve_task_branch(&worktree_path, branch.as_deref()) {
+        Ok(resolved) => resolved,
+        Err(error) => return Resp::err(error),
+    };
+    task.isolation_mode = Some(derive_isolation_mode(Some(&worktree_path)));
     if branch.is_some() {
         task.branch = branch;
     }

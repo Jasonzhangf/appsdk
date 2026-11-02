@@ -370,6 +370,7 @@ fn binding_projection_is_scoped_before_same_named_binding_uniqueness() {
         id: "scoped-owner-task".into(), owner: worker.id.clone(), created_by: worker.id.clone(),
         feature_id: None, worktree_path: None, branch: None, base_commit: None,
         priority: "p1".into(), status: "working".into(), next_step: None, wait: None,
+        isolation_mode: None,
         created_ms: now_ms(), updated_ms: now_ms(),
     };
     let mut state = server.state.lock().unwrap();
@@ -832,6 +833,7 @@ fn squash_merged_holder(
             status: "working".into(),
             next_step: None,
             wait: None,
+            isolation_mode: None,
             created_ms: now,
             updated_ms: now,
         },
@@ -1645,6 +1647,7 @@ fn worker_freed_transitions_notify_live_master() {
                 status: "working".into(),
                 next_step: None,
                 wait: None,
+                isolation_mode: None,
                 created_ms: now,
                 updated_ms: now,
             },
@@ -1665,6 +1668,7 @@ fn worker_freed_transitions_notify_live_master() {
                 status: "closed".into(),
                 next_step: None,
                 wait: None,
+                isolation_mode: None,
                 created_ms: now,
                 updated_ms: now + 2,
             },

@@ -535,6 +535,7 @@ fn handoff_with_registered_task_worktree_outside_playground_fails_typed() {
             status: "working".into(),
             next_step: None,
             wait: None,
+            isolation_mode: None,
             created_ms: now_ms(),
             updated_ms: now_ms(),
         },

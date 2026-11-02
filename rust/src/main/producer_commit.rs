@@ -436,12 +436,11 @@ pub(super) fn assert_produced_record_shapes(
     }
     producer_bool(worktree, "/initial_clean", "PRODUCER_RECORD_SCHEMA_INVALID");
     producer_bool(worktree, "/final_clean", "PRODUCER_RECORD_SCHEMA_INVALID");
-    if producer_string(
+    if !crate::workspace::isolation_mode_value_allowed(&producer_string(
         worktree,
         "/isolation_mode",
         "PRODUCER_RECORD_SCHEMA_INVALID",
-    ) != "isolated_worktree"
-    {
+    )) {
         fail("PRODUCER_RECORD_SCHEMA_INVALID");
     }
     if producer_string(worktree, "/module_id", "PRODUCER_RECORD_SCHEMA_INVALID") != module_id {
@@ -851,7 +850,10 @@ pub(super) fn producer_try_reuse_records(
     expected_worktree["head_commit"] = Value::String(head_commit.to_string());
     expected_worktree["initial_clean"] = Value::Bool(true);
     expected_worktree["final_clean"] = Value::Bool(true);
-    expected_worktree["isolation_mode"] = Value::String("isolated_worktree".into());
+    expected_worktree["isolation_mode"] = worktree
+        .get("isolation_mode")
+        .cloned()
+        .unwrap_or_else(|| Value::String(crate::workspace::ISOLATION_WORKTREE.to_string()));
     expected_worktree["scope_hash"] = Value::String(scope_hash.to_string());
     expected_worktree
         .as_object_mut()

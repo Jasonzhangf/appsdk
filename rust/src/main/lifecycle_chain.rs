@@ -73,8 +73,11 @@ pub(super) fn produce_lifecycle_records(root: &Path, module_id: &str, input_path
     producer_bool(worktree, "/initial_clean", "WORKTREE_INITIAL_NOT_CLEAN");
     producer_bool(worktree, "/final_clean", "WORKTREE_FINAL_NOT_CLEAN");
     if producer_string(worktree, "/module_id", "INVALID_WORKTREE_RECORD") != module_id
-        || producer_string(worktree, "/isolation_mode", "INVALID_WORKTREE_RECORD")
-            != "isolated_worktree"
+        || !crate::workspace::isolation_mode_value_allowed(&producer_string(
+            worktree,
+            "/isolation_mode",
+            "INVALID_WORKTREE_RECORD",
+        ))
     {
         fail("PRODUCER_MODULE_MISMATCH");
     }

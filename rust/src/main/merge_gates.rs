@@ -192,7 +192,7 @@ pub(super) fn assert_fix_lifecycle_graph(
     }
     if worktree.get("initial_clean") != Some(&Value::Bool(true))
         || worktree.get("final_clean") != Some(&Value::Bool(true))
-        || worktree.get("isolation_mode").and_then(Value::as_str) != Some("isolated_worktree")
+        || !crate::workspace::isolation_mode_allowed(&worktree)
     {
         fail("FIX_WORKTREE_NOT_CLEAN_ISOLATED");
     }

@@ -43,6 +43,106 @@ fn publish(fixture: &AppFixture, id: &str) -> Value {
     )
 }
 
+#[test]
+fn layerfs_task_register_status_and_close_use_the_generic_layerfs_entry_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(&["context"], THREAD_C);
+    fixture.run_public(
+        &[
+            "context",
+            "--approve-grant",
+            r#"{"action":"restore_master","authorization":"layerfs fixture review master"}"#,
+        ],
+        THREAD_C,
+    );
+
+    let calls = fixture.root.join("workspace-tool-calls.log");
+    let layerfs = fixture.path_prepend.join("layerfs");
+    let git = fixture.path_prepend.join("git");
+    std::fs::write(
+        &layerfs,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"layerfs $*\" >> '{}'\ncase \"$*\" in\n  *\"project list_branches\"*) printf '{{\"items\":[{{\"name\":\"task-1\"}}]}}\\n' ;;\n  *\"branch list_commits task-1\"*) printf '{{\"items\":[{{\"id\":\"layerfs-commit-1\"}}]}}\\n' ;;\n  *) printf '{{\"code\":\"UnknownCommand\",\"message\":\"stub\"}}\\n' ;;\nesac\n",
+            calls.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        &git,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"git $*\" >> '{}'\nexec /usr/bin/git \"$@\"\n",
+            calls.display()
+        ),
+    )
+    .unwrap();
+    for path in [&layerfs, &git] {
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+
+    let registered = fixture.run_public(
+        &[
+            "task",
+            "register",
+            "layerfs-task",
+            "--worktree",
+            "layerfs:demo/task-1",
+            "--branch",
+            "task-1",
+            "--priority",
+            "p1",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(registered["cleanup"], "pending");
+
+    let status = fixture.run_public(&["task", "status", "layerfs-task"], THREAD_B);
+    assert_eq!(status["worktree"], "layerfs:demo/task-1");
+    assert_eq!(status["branch"], "task-1");
+
+    fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            "layerfs-task",
+            "--no-candidate",
+            "--evidence",
+            "LayerFS task workspace public entry",
+        ],
+        THREAD_B,
+    );
+    fixture.run_public(
+        &[
+            "task",
+            "review",
+            "layerfs-task",
+            "--accept",
+            "--evidence",
+            "reviewed by another registered peer",
+        ],
+        THREAD_C,
+    );
+    fixture.run_public(&["task", "close", "layerfs-task"], THREAD_B);
+
+    let closed = fixture.run_public(&["task", "status", "layerfs-task"], THREAD_B);
+    assert_eq!(closed["status"], "closed");
+    let calls = std::fs::read_to_string(calls).unwrap();
+    assert!(
+        calls.contains("--project demo project list_branches --page-size 1000"),
+        "{calls}"
+    );
+    for forbidden in ["git worktree", "git branch -D", "git status"] {
+        assert!(
+            !calls.contains(forbidden),
+            "{forbidden} must not run: {calls}"
+        );
+    }
+}
+
 fn board_journal_path(fixture: &AppFixture) -> PathBuf {
     let project = std::fs::canonicalize(&fixture.project).unwrap();
     let record = std::fs::read_to_string(fixture.host_state.join("routes.jsonl"))

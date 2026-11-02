@@ -424,6 +424,7 @@ where
             let mut goal_file: Option<String> = None;
             let mut interval_str = "10m".to_string();
             let mut repeat_count: u32 = 100;
+            let mut repeat_declared = false;
             let mut ttl_seconds: u64 = 604800;
             let mut format_json = false;
 
@@ -443,6 +444,7 @@ where
                                 r, error
                             ))
                         });
+                        repeat_declared = true;
                     }
                     "--ttl" | "--ttl-seconds" => {
                         let t = args.next().unwrap_or_else(|| fail("MISSING_TTL_ARG"));
@@ -503,6 +505,12 @@ where
                     GOAL_MIN_INTERVAL_MS / 60_000
                 ));
             }
+            // A sustained periodic goal deadline is declared only when the
+            // caller explicitly pairs the interval with --repeat. Without an
+            // explicit --repeat the historical one-shot rearm-intent contract
+            // is preserved.
+            let explicit_periodic = repeat_declared;
+            let period_interval_ms = every_ms.min(i64::MAX as u64) as i64;
             let scope = match resolve_goal_scope(root) {
                 Ok(scope) => scope,
                 Err(error) => goal_fail(format_json, &error, None),
@@ -615,7 +623,9 @@ where
                                     Some(existing),
                                 );
                             }
-                            if goal_deadline_trigger_is_due(&remote_record, goal_now_ms()) {
+                            if remote_record["periodic_declared"].as_bool() != Some(true)
+                                && goal_deadline_trigger_is_due(&remote_record, goal_now_ms())
+                            {
                                 // Retaining an already-due one-shot deadline
                                 // would report `subscribed` while the patrol
                                 // loop stays stopped. Cancel it and fall
@@ -745,6 +755,21 @@ where
             }
 
             let mut trigger_ms = goal_now_ms().saturating_add(every_ms.min(i64::MAX as u64) as i64);
+            let schedule = if explicit_periodic {
+                "periodic"
+            } else {
+                "one-shot"
+            };
+            let local_schedule = if explicit_periodic {
+                "daemon-periodic"
+            } else {
+                "periodic-rearm-intent"
+            };
+            let recovery = if explicit_periodic {
+                "The daemon keeps this explicit periodic deadline recurring for the requested interval and count or until TTL expiry; cancel the goal to stop it early."
+            } else {
+                "When the one-shot deadline is consumed, expires, or Collab restarts, rerun appsdk goal subscribe with this goal to create a fresh one-shot deadline; renewal is explicit and is not automatic."
+            };
             let mut record = serde_json::json!({
                 "schema_version": 1,
                 "goal_id": goal_id,
@@ -756,10 +781,11 @@ where
                 "interval": interval_str,
                 "every_ms": every_ms,
                 "trigger_ms": trigger_ms,
-                "repeat_count": 1,
+                "repeat_count": if explicit_periodic { repeat_count } else { 1 },
                 "requested_repeat_count": repeat_count,
-                "schedule": "one-shot",
-                "local_schedule": "periodic-rearm-intent",
+                "schedule": schedule,
+                "local_schedule": local_schedule,
+                "periodic_declared": explicit_periodic,
                 "rearm_interval_ms": every_ms,
                 "ttl_seconds": ttl_seconds,
                 "owner": owner,
@@ -771,7 +797,7 @@ where
                 "error": Value::Null,
                 "registered_at": chrono::Utc::now().to_rfc3339(),
                 "active": false,
-                "recovery": "When the one-shot deadline is consumed, expires, or Collab restarts, rerun appsdk goal subscribe with this goal to create a fresh one-shot deadline; renewal is explicit and is not automatic."
+                "recovery": recovery,
             });
             if let Some(previous) = existing.as_ref().filter(|previous| {
                 previous["desired"].as_str() == Some("recovery_required")
@@ -805,7 +831,15 @@ where
             // actual at-ms from carrying the record-write delay as well.
             trigger_ms = goal_now_ms().saturating_add(every_ms.min(i64::MAX as u64) as i64);
             record["trigger_ms"] = Value::Number(trigger_ms.into());
-            let collab_sub = goal_reconcile_active(root, &goal_id, &owner, trigger_ms, ttl_seconds);
+            let collab_sub = goal_reconcile_active(
+                root,
+                &goal_id,
+                &owner,
+                trigger_ms,
+                ttl_seconds,
+                explicit_periodic.then_some(period_interval_ms),
+                explicit_periodic.then_some(repeat_count),
+            );
 
             let (collab_subscribed, sub_details, subscription_id, sub_error) = match collab_sub {
                 Ok((response, id)) => {
@@ -895,11 +929,23 @@ where
             } else {
                 println!("Long-horizon goal successfully registered:");
                 println!("- Goal file: {}", goal_path.display());
-                println!(
-                    "- One-shot deadline: first trigger after {} (local rearm intent: every {}, up to {} deliveries; TTL {} seconds)",
-                    interval_str, interval_str, repeat_count, ttl_seconds
-                );
-                println!("- Collab notification status: one-shot armed; rearm is explicit and verifiable");
+                if explicit_periodic {
+                    println!(
+                        "- Periodic deadline: first trigger after {}, recurring every {}, up to {} deliveries; TTL {} seconds",
+                        interval_str, interval_str, repeat_count, ttl_seconds
+                    );
+                    println!(
+                        "- Collab notification status: explicit periodic subscription armed; each occurrence is consumed independently"
+                    );
+                } else {
+                    println!(
+                        "- One-shot deadline: first trigger after {} (local rearm intent: every {}, up to {} deliveries; TTL {} seconds)",
+                        interval_str, interval_str, repeat_count, ttl_seconds
+                    );
+                    println!(
+                        "- Collab notification status: one-shot armed; rearm is explicit and verifiable"
+                    );
+                }
                 goal_print_patrol_status(&record);
                 println!("\n{}", goal_prompt);
             }
@@ -974,6 +1020,18 @@ where
                             record["active"] = Value::Bool(true);
                             record["collab_subscribed"] = Value::Bool(true);
                             record["error"] = Value::Null;
+                        } else if record["periodic_declared"].as_bool() == Some(true)
+                            && matches!(remote_status.as_str(), "consumed" | "expired")
+                        {
+                            // An explicit periodic subscription that finished
+                            // its deliveries (or TTL) is complete, not a
+                            // broken one-shot that needs manual recovery.
+                            record["desired"] = Value::String("completed".into());
+                            record["observed"] = Value::String(remote_status.clone());
+                            record["active"] = Value::Bool(false);
+                            record["collab_subscribed"] = Value::Bool(false);
+                            record["error"] = Value::Null;
+                            record["recovery"] = Value::Null;
                         } else {
                             let error = format!(
                                 "GOAL_ONE_SHOT_SUBSCRIPTION_NOT_ARMED:{}: deadline may be consumed or expired, or Collab may have restarted",

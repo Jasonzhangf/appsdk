@@ -467,24 +467,33 @@ pub(super) fn goal_reconcile_active(
     goal_owner: &str,
     trigger_ms: i64,
     ttl_seconds: u64,
+    interval_ms: Option<i64>,
+    repeat_count: Option<u32>,
 ) -> Result<(Value, String), String> {
     let mut command = Command::new("collab");
-    command
-        .args([
-            "goal",
-            "reconcile",
-            "--goal-id",
-            goal_id,
-            "--owner",
-            goal_owner,
-            "--desired",
-            "active",
-            "--at-ms",
-            &trigger_ms.to_string(),
-            "--ttl-seconds",
-            &ttl_seconds.to_string(),
-        ])
-        .current_dir(root);
+    command.args([
+        "goal",
+        "reconcile",
+        "--goal-id",
+        goal_id,
+        "--owner",
+        goal_owner,
+        "--desired",
+        "active",
+        "--at-ms",
+        &trigger_ms.to_string(),
+        "--ttl-seconds",
+        &ttl_seconds.to_string(),
+    ]);
+    if let (Some(interval_ms), Some(repeat_count)) = (interval_ms, repeat_count) {
+        command.args([
+            "--every-ms",
+            &interval_ms.to_string(),
+            "--repeat",
+            &repeat_count.to_string(),
+        ]);
+    }
+    command.current_dir(root);
     let out = run_goal_collab_command(command, GOAL_COLLAB_WRITE_TIMEOUT).map_err(|error| {
         if error == "GOAL_COLLAB_COMMAND_TIMEOUT" {
             error

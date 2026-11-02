@@ -1960,6 +1960,15 @@ fn handle_task_deliver_with_intent(
         }
         Some(worktree)
     };
+    // Resolve the exact candidate before changing task or lifecycle state. A
+    // required LayerFS failure must stop delivery with its original error.
+    let delivery_commit = match worktree.as_deref() {
+        Some(worktree) => match resolve_candidate_commit(&server.root, &task, worktree) {
+            Ok(candidate) => candidate,
+            Err(error) => return Resp::err(error),
+        },
+        None => None,
+    };
     let now = now_ms();
     task.status = "delivered".to_string();
     task.wait = None;
@@ -1986,9 +1995,7 @@ fn handle_task_deliver_with_intent(
     lifecycle.integrated_ms = None;
     // Capture the exact candidate commit so a later pending merge can prove
     // the delivered candidate itself reached main, not just some main ref.
-    lifecycle.delivery_commit = worktree
-        .as_deref()
-        .and_then(|worktree| resolve_candidate_commit(&server.root, &task, worktree));
+    lifecycle.delivery_commit = delivery_commit;
     let delivery_kind = lifecycle.delivery_kind;
     let mut review_notice = None;
     let mut reviewer_waiting = None;
@@ -2054,15 +2061,19 @@ fn handle_task_deliver_with_intent(
     } else { Resp::data(data) }
 }
 
-fn resolve_candidate_commit(root: &Path, task: &TaskRec, worktree: &str) -> Option<String> {
+fn resolve_candidate_commit(
+    root: &Path,
+    task: &TaskRec,
+    worktree: &str,
+) -> Result<Option<String>, String> {
     // A LayerFS task records the LayerFS task branch head as its candidate.
     // That id is a LayerFS commit id, never a local Git HEAD, so the exact
-    // Git sha on `refs/heads/main` is proven separately by the Git owner. A
-    // missing entry or unreachable Store resolves to `None` and the delivery
-    // fails closed instead of inventing a candidate.
+    // Git sha on `refs/heads/main` is proven separately by the Git owner.
+    // The generic entry error must propagate so delivery stops before the
+    // task state changes; callers handle Result accordingly.
     if is_layerfs_workspace(worktree) {
-        let workspace = parse_layerfs_workspace(worktree).ok()?;
-        return layerfs_branch_head(&workspace.project, &workspace.branch).ok();
+        let workspace = parse_layerfs_workspace(worktree)?;
+        return layerfs_branch_head(&workspace.project, &workspace.branch).map(Some);
     }
     // The delivered worktree HEAD is the authoritative candidate. A branch
     // ref may point at a stale or unrelated commit; it is only admissible as
@@ -2081,7 +2092,10 @@ fn resolve_candidate_commit(root: &Path, task: &TaskRec, worktree: &str) -> Opti
         .and_then(|output| {
             let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
             (!head.is_empty()).then_some(head)
-        })?;
+        });
+    let Some(worktree_head) = worktree_head else {
+        return Ok(None);
+    };
     if let Some(branch) = task.branch.as_deref() {
         let branch_head = Command::new("git")
             .current_dir(root)
@@ -2101,10 +2115,10 @@ fn resolve_candidate_commit(root: &Path, task: &TaskRec, worktree: &str) -> Opti
         // with the registered branch or the candidate is not provably the
         // delivered commit.
         if branch_head.as_deref() != Some(worktree_head.as_str()) {
-            return None;
+            return Ok(None);
         }
     }
-    Some(worktree_head)
+    Ok(Some(worktree_head))
 }
 
 fn task_integration_authorized(

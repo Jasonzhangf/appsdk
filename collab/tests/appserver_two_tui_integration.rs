@@ -978,12 +978,24 @@ impl AppFixture {
         let deadline = Instant::now() + Duration::from_secs(5);
         while !self.host_state.join("server.sock").exists() && Instant::now() < deadline {
             if let Some(status) = self.daemon.as_mut().unwrap().try_wait().unwrap() {
+                eprintln!(
+                    "[diag] start_daemon child exited early: status={status} state={} sock_exists={}",
+                    self.host_state.display(),
+                    self.host_state.join("server.sock").exists()
+                );
                 panic!(
                     "test-owned serve exited before readiness: {status}: {}",
                     std::fs::read_to_string(self.root.join("test-daemon.log")).unwrap_or_default()
                 );
             }
             thread::sleep(Duration::from_millis(25));
+        }
+        if !self.host_state.join("server.sock").exists() {
+            eprintln!(
+                "[diag] start_daemon timed out: state={} pid={:?}",
+                self.host_state.display(),
+                self.daemon.as_ref().map(|child| child.id())
+            );
         }
         assert!(
             self.host_state.join("server.sock").exists(),

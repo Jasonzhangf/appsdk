@@ -711,6 +711,12 @@ pub(crate) fn declare_task_workspace(
 ) -> Result<String, String> {
     if is_layerfs_workspace(raw) {
         let workspace = parse_layerfs_workspace(raw)?;
+        if !layerfs_branch_exists(&workspace.project, &workspace.branch)? {
+            return Err(format!(
+                "layerfs task branch {} does not exist in project {}; preserve the declaration and reconcile through the LayerFS entry",
+                workspace.branch, workspace.project
+            ));
+        }
         return Ok(format!(
             "{LAYERFS_WORKSPACE_SCHEME}{}/{}",
             workspace.project, workspace.branch
@@ -794,6 +800,20 @@ pub(crate) fn layerfs_branch_exists(project: &str, branch: &str) -> Result<bool,
                 .iter()
                 .any(|item| item.get("name").and_then(|name| name.as_str()) == Some(branch))
         }))
+}
+
+/// Re-check a declared LayerFS task binding through the generic entry. This is
+/// the shared read-only validation for public lifecycle boundaries that must
+/// not treat an unreachable profile, Store or branch as a valid binding.
+pub(crate) fn validate_layerfs_workspace(value: &str) -> Result<(), String> {
+    let workspace = parse_layerfs_workspace(value)?;
+    if layerfs_branch_exists(&workspace.project, &workspace.branch)? {
+        return Ok(());
+    }
+    Err(format!(
+        "layerfs task branch {} no longer exists in project {}; preserve the site and reconcile through the LayerFS entry",
+        workspace.branch, workspace.project
+    ))
 }
 
 fn cleanup_worktree_path(

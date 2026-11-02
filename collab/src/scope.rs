@@ -588,8 +588,9 @@ pub fn service_scope_root() -> anyhow::Result<Option<PathBuf>> {
     struct ServiceRecord {
         service_scope_root: PathBuf,
     }
-    let record: ServiceRecord = serde_json::from_str(&text)
-        .map_err(|error| anyhow::anyhow!("invalid service record {}: {error}", record_path.display()))?;
+    let record: ServiceRecord = serde_json::from_str(&text).map_err(|error| {
+        anyhow::anyhow!("invalid service record {}: {error}", record_path.display())
+    })?;
     Ok(Some(record.service_scope_root))
 }
 

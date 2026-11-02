@@ -220,10 +220,7 @@ fn resolve_context_root_with(
         } else {
             "project-marker"
         };
-        return Ok((
-            Scope { root },
-            resolution,
-        ));
+        return Ok((Scope { root }, resolution));
     }
     if let Ok(route) = scope::canonical_route_for_cwd(host_paths, cwd) {
         return Ok((Scope { root: route.root }, "canonical-route"));

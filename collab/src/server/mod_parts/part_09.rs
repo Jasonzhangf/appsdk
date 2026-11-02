@@ -27,6 +27,32 @@ fn handle_task_review(
             task_id, task.status
         ));
     }
+    if accept {
+        let lifecycle = st.task_lifecycle.get(&task_id).cloned().unwrap_or_default();
+        if lifecycle.delivery_kind == state::TaskDeliveryKind::Code {
+            if let Some(workspace) = task
+                .worktree_path
+                .as_deref()
+                .filter(|value| is_layerfs_workspace(value))
+            {
+                let parsed = match parse_layerfs_workspace(workspace) {
+                    Ok(parsed) => parsed,
+                    Err(error) => return Resp::err(error),
+                };
+                let current_head =
+                    match layerfs_branch_head(&parsed.project, &parsed.branch) {
+                        Ok(head) => head,
+                        Err(error) => return Resp::err(error),
+                    };
+                if lifecycle.delivery_commit.as_deref() != Some(current_head.as_str()) {
+                    return Resp::err(format!(
+                        "task {} LayerFS candidate changed or is unavailable; rework and re-deliver before review",
+                        task_id
+                    ));
+                }
+            }
+        }
+    }
     let required_reviewer = required_work_reviewer(&st, &task_id);
     let reviewer_name = if let Some(name) = required_reviewer.as_deref() {
         let route = match server_route_scope(server,&st) {

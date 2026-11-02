@@ -143,6 +143,220 @@ fn layerfs_task_register_status_and_close_use_the_generic_layerfs_entry_only() {
     }
 }
 
+#[test]
+fn layerfs_task_binding_unavailable_fails_closed() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let write_layerfs = |fixture: &AppFixture, body: &str| {
+        let path = fixture.path_prepend.join("layerfs");
+        std::fs::write(&path, body).unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).unwrap();
+    };
+
+    {
+        let mut fixture = AppFixture::new();
+        fixture.run_public(&["context"], THREAD_B);
+        write_layerfs(
+            &fixture,
+            r#"#!/bin/sh
+printf '%s\n' "layerfs $*" >&2
+printf '{"code":"StoreUnavailable","message":"layerfs store unavailable"}\n'
+"#,
+        );
+        let output = fixture.command_public(
+            &[
+                "task",
+                "register",
+                "layerfs-task",
+                "--worktree",
+                "layerfs:demo/task-1",
+                "--branch",
+                "task-1",
+                "--priority",
+                "p1",
+            ],
+            THREAD_B,
+        );
+        assert!(!output.status.success(), "register must fail closed");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("StoreUnavailable"), "{stderr}");
+    }
+
+    {
+        let mut fixture = AppFixture::new();
+        fixture.run_public(&["context"], THREAD_B);
+        write_layerfs(
+            &fixture,
+            r#"#!/bin/sh
+printf '%s\n' "layerfs $*" >&2
+case "$*" in
+  *"project list_branches"*) printf '{"items":[{"name":"task-1"}]}\n' ;;
+  *"branch list_commits task-1"*) printf '{"code":"StoreUnavailable","message":"layerfs store unavailable"}\n' ;;
+  *) printf '{"code":"UnknownCommand","message":"stub"}\n' ;;
+esac
+"#,
+        );
+        fixture.run_public(
+            &[
+                "task",
+                "register",
+                "layerfs-task",
+                "--worktree",
+                "layerfs:demo/task-1",
+                "--branch",
+                "task-1",
+                "--priority",
+                "p1",
+            ],
+            THREAD_B,
+        );
+        let output = fixture.command_public(
+            &[
+                "task",
+                "deliver",
+                "layerfs-task",
+                "--worktree",
+                "layerfs:demo/task-1",
+                "--evidence",
+                "LayerFS delivery must fail closed",
+            ],
+            THREAD_B,
+        );
+        assert!(!output.status.success(), "delivery must fail closed");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("StoreUnavailable"), "{stderr}");
+        let status = fixture.run_public(&["task", "status", "layerfs-task"], THREAD_B);
+        assert_eq!(status["status"], "working");
+    }
+
+    {
+        let mut fixture = AppFixture::new();
+        fixture.run_public(&["context"], THREAD_B);
+        fixture.run_public(&["context"], THREAD_C);
+        fixture.run_public(
+            &[
+                "context",
+                "--approve-grant",
+                r#"{"action":"restore_master","authorization":"layerfs review fixture master"}"#,
+            ],
+            THREAD_C,
+        );
+        write_layerfs(
+            &fixture,
+            r#"#!/bin/sh
+case "$*" in
+  *"project list_branches"*) printf '{"items":[{"name":"task-1"}]}\n' ;;
+  *"branch list_commits task-1"*) printf '{"items":[{"id":"layerfs-commit-1"}]}\n' ;;
+  *) printf '{"code":"UnknownCommand","message":"stub"}\n' ;;
+esac
+"#,
+        );
+        fixture.run_public(
+            &[
+                "task",
+                "register",
+                "layerfs-task",
+                "--worktree",
+                "layerfs:demo/task-1",
+                "--branch",
+                "task-1",
+                "--priority",
+                "p1",
+            ],
+            THREAD_B,
+        );
+        fixture.run_public(
+            &[
+                "task",
+                "deliver",
+                "layerfs-task",
+                "--worktree",
+                "layerfs:demo/task-1",
+                "--evidence",
+                "LayerFS code delivery",
+            ],
+            THREAD_B,
+        );
+
+        write_layerfs(
+            &fixture,
+            r#"#!/bin/sh
+case "$*" in
+  *"project list_branches"*) printf '{"code":"StoreUnavailable","message":"layerfs store unavailable"}\n' ;;
+  *"branch list_commits task-1"*) printf '{"items":[{"id":"layerfs-commit-1"}]}\n' ;;
+  *) printf '{"code":"UnknownCommand","message":"stub"}\n' ;;
+esac
+"#,
+        );
+        let output = fixture.command_public(&["task", "status", "layerfs-task"], THREAD_B);
+        assert!(!output.status.success(), "status must fail closed");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("StoreUnavailable"), "{stderr}");
+
+        write_layerfs(
+            &fixture,
+            r#"#!/bin/sh
+case "$*" in
+  *"project list_branches"*) printf '{"items":[{"name":"task-1"}]}\n' ;;
+  *"branch list_commits task-1"*) printf '{"code":"StoreUnavailable","message":"layerfs store unavailable"}\n' ;;
+  *) printf '{"code":"UnknownCommand","message":"stub"}\n' ;;
+esac
+"#,
+        );
+        let output = fixture.command_public(
+            &[
+                "task",
+                "review",
+                "layerfs-task",
+                "--accept",
+                "--evidence",
+                "LayerFS review must fail closed",
+            ],
+            THREAD_C,
+        );
+        assert!(!output.status.success(), "review must fail closed");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("StoreUnavailable"), "{stderr}");
+        let status = fixture.run_public(&["task", "status", "layerfs-task"], THREAD_B);
+        assert_eq!(status["status"], "delivered");
+
+        write_layerfs(
+            &fixture,
+            r#"#!/bin/sh
+case "$*" in
+  *"project list_branches"*) printf '{"items":[{"name":"task-1"}]}\n' ;;
+  *"branch list_commits task-1"*) printf '{"items":[{"id":"layerfs-commit-2"}]}\n' ;;
+  *) printf '{"code":"UnknownCommand","message":"stub"}\n' ;;
+esac
+"#,
+        );
+        let output = fixture.command_public(
+            &[
+                "task",
+                "review",
+                "layerfs-task",
+                "--accept",
+                "--evidence",
+                "LayerFS candidate must remain current",
+            ],
+            THREAD_C,
+        );
+        assert!(
+            !output.status.success(),
+            "changed candidate must fail review"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("candidate changed or is unavailable"),
+            "{stderr}"
+        );
+        let status = fixture.run_public(&["task", "status", "layerfs-task"], THREAD_B);
+        assert_eq!(status["status"], "delivered");
+    }
+}
+
 fn board_journal_path(fixture: &AppFixture) -> PathBuf {
     let project = std::fs::canonicalize(&fixture.project).unwrap();
     let record = std::fs::read_to_string(fixture.host_state.join("routes.jsonl"))

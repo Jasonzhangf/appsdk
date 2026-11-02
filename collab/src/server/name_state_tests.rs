@@ -130,6 +130,7 @@ fn name_revision_retains_released_epochs_across_legacy_replay_and_snapshots() {
                     session_id: "session".into(),
                     occupancy_revision: revision,
                     updated_ms: 1,
+                    pane_anchor: None,
                 },
                 assignments: vec![],
             })
@@ -197,6 +198,7 @@ fn name_resolution_atomically_replays_with_assignments_and_snapshot_records() {
                 session_id: "session-2".into(),
                 occupancy_revision: 6,
                 updated_ms: 19,
+                pane_anchor: None,
             },
             assignments: vec![assignment("task-a", "Bob", "session-2", 6)],
         })
@@ -214,6 +216,7 @@ fn name_resolution_atomically_replays_with_assignments_and_snapshot_records() {
             session_id: "session-2".into(),
             occupancy_revision: 7,
             updated_ms: 20,
+            pane_anchor: None,
         },
         assignments: vec![
             assignment("task-a", "Alice", "session-2", 7),
@@ -281,6 +284,7 @@ fn name_resolution_releases_previous_current_name_for_the_same_worker() {
                 session_id: "session-alice".into(),
                 occupancy_revision: 1,
                 updated_ms: 10,
+                pane_anchor: None,
             },
         ),
         (
@@ -291,6 +295,7 @@ fn name_resolution_releases_previous_current_name_for_the_same_worker() {
                 session_id: "session-bob".into(),
                 occupancy_revision: 1,
                 updated_ms: 10,
+                pane_anchor: None,
             },
         ),
         (
@@ -301,6 +306,7 @@ fn name_resolution_releases_previous_current_name_for_the_same_worker() {
                 session_id: "session-replaced".into(),
                 occupancy_revision: 1,
                 updated_ms: 10,
+                pane_anchor: None,
             },
         ),
         (
@@ -311,6 +317,7 @@ fn name_resolution_releases_previous_current_name_for_the_same_worker() {
                 session_id: "session-other-project".into(),
                 occupancy_revision: 1,
                 updated_ms: 10,
+                pane_anchor: None,
             },
         ),
     ] {
@@ -332,6 +339,7 @@ fn name_resolution_releases_previous_current_name_for_the_same_worker() {
             session_id: "session-jenny".into(),
             occupancy_revision: 2,
             updated_ms: 20,
+            pane_anchor: None,
         },
         assignments: Vec::new(),
     };
@@ -392,6 +400,7 @@ fn closed_task_history_is_not_modified_by_name_session_resolution() {
             session_id: "session-new".into(),
             occupancy_revision: 4,
             updated_ms: 40,
+            pane_anchor: None,
         },
         assignments: vec![assignment("task-open", "Alice", "session-new", 4)],
     });
@@ -421,6 +430,7 @@ fn project_reset_clears_new_project_state() {
             session_id: "session-new".into(),
             occupancy_revision: 5,
             updated_ms: 50,
+            pane_anchor: None,
         },
         assignments: vec![assignment("task-reset", "Alice", "session-new", 5)],
     });

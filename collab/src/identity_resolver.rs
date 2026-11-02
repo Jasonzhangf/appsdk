@@ -186,9 +186,8 @@ pub(crate) fn resolve_for_daemon_with_route_at(
     // same-project cold/unknown peer is never adopted by recency. Historical
     // pane placement is not owner evidence: the same pane can host a new agent
     // session. Match archived credentials by the supplied session/thread
-    // anchors alone, so a unique archive stays authoritative while duplicate
-    // historical carriers fall through to the stable session carrier below
-    // instead of letting pane history choose or veto the recovery.
+    // anchors alone. A unique archive stays authoritative; ambiguous
+    // historical carriers cannot establish the current owner.
     let anchor_match = AnchorObservation {
         tmux: None,
         tmux_anchor: None,
@@ -197,12 +196,6 @@ pub(crate) fn resolve_for_daemon_with_route_at(
     match identity_by_current_anchors_same_scope_at(host_paths, scope, &anchor_match) {
         Ok(Some(identity)) => return Ok(identity),
         Ok(None) => {}
-        Err(error) if observed.dsh_session_id.is_none()
-            && error.to_string().starts_with("IDENTITY_RESTORE_AMBIGUOUS:") => {
-            // Multiple historical archives carry this exact current session.
-            // They cannot prove a unique owner, so the current session derives
-            // its own stable carrier.
-        }
         Err(error) => return Err(error),
     }
     let worker_id = draft_worker_id_at(&observed)?;

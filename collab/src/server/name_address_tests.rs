@@ -37,6 +37,7 @@ fn name_address_current_holder_and_id_compatibility() {
                     session_id: worker.into(),
                     occupancy_revision: revision,
                     updated_ms: revision as i64,
+                    pane_anchor: None,
                 };
                 state
                     .name_occupancies

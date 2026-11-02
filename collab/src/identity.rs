@@ -552,6 +552,25 @@ pub(crate) fn read_persisted(
     read_identity(&identity_path_at(host_paths, worker_id)?)
 }
 
+/// Remove the persisted identity file for one exact worker. Self-unregister
+/// retires the control plane and must not leave stale project/transport
+/// anchors that block a later registration from another project on the same
+/// pane. A missing file is already the intended cleared state.
+pub(crate) fn clear_persisted_identity(
+    host_paths: &HostPaths,
+    worker_id: &str,
+) -> Result<(), String> {
+    let path = identity_path_at(host_paths, worker_id).map_err(|error| error.to_string())?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "remove persisted identity {}: {error}",
+            path.display()
+        )),
+    }
+}
+
 fn identity_temp_path(path: &std::path::Path) -> PathBuf {
     path.parent().unwrap().join(format!(
         "identity.json.tmp.{}.{}",
@@ -863,6 +882,13 @@ fn identity_by_current_anchors_at(
     let expected_scope = scope
         .route_scope(AppServerId::new(CLI_APP_SERVER_ID)?)?
         .project_scope_id;
+    if !matches.is_empty()
+        && matches.values().flat_map(|group| group.values()).all(|identity| {
+            identity.project_scope.as_ref() != Some(&expected_scope)
+        })
+    {
+        return Ok(Some(AnchorResolution::CrossProject));
+    }
     for (anchor, identities) in matches {
         let mut group = identities.into_values().collect::<Vec<_>>();
         if group.len() > 1 {

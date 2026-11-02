@@ -404,6 +404,7 @@ pub(crate) fn adjudicate(
                     session_id: session.to_string(),
                     occupancy_revision: current.occupancy_revision + 1,
                     updated_ms: now,
+                    pane_anchor: None,
                 };
                 if occupancy.name == "Jenny" {
                     let grant = match master_grant_for_worker(
@@ -418,11 +419,18 @@ pub(crate) fn adjudicate(
                     };
                     events.extend(master_authority_transfer_events(&state, &route, grant));
                 }
-                events.extend(name_resolution::build_name_resolution_events(
-                    &state,
-                    &recovery.project_scope,
-                    &occupancy,
-                ));
+                events.extend(
+                    name_resolution::build_name_resolution_events_with_rename_from(
+                        &state,
+                        &recovery.project_scope,
+                        &occupancy,
+                        &name_resolution::names_held_by_worker(
+                            &state,
+                            &recovery.project_scope,
+                            &worker.id,
+                        ),
+                    ),
+                );
             }
             recovery.progress = NameRecoveryProgress::Applied;
             recovery.result = Some(NameRecoveryResult {

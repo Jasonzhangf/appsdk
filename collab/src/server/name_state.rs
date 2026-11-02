@@ -2,6 +2,16 @@ use serde::{Deserialize, Serialize};
 
 use super::state::State;
 
+/// Current pane and exact invocation directory for a name's execution carrier.
+/// The socket path disambiguates the same pane id across tmux servers without
+/// becoming an identity anchor. `cwd` is the precise call directory, never the
+/// canonical project root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamePaneAnchor {
+    pub pane: crate::proto::TmuxPaneAnchor,
+    pub cwd: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NameOccupancy {
     pub name: String,
@@ -9,6 +19,10 @@ pub struct NameOccupancy {
     pub session_id: String,
     pub occupancy_revision: u64,
     pub updated_ms: i64,
+    /// Current pane and exact invocation cwd, replaced on each rebind. Legacy
+    /// records decode this as `None`; history is never scanned to backfill it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_anchor: Option<NamePaneAnchor>,
 }
 
 impl NameOccupancy {

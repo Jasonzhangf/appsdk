@@ -33,6 +33,7 @@ impl std::fmt::Display for ServerResponseError {
 impl std::error::Error for ServerResponseError {}
 
 const READINESS_TIMEOUT: Duration = Duration::from_millis(250);
+const REQUIRED_SERVER_PING_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, serde::Deserialize)]
 struct PingReadiness {
@@ -380,6 +381,13 @@ pub fn ensure_server(sock: &Path) -> anyhow::Result<()> {
 /// never launch, replace, or restart the shared daemon. A daemon that is
 /// already starting is observed until it becomes reachable; nothing is spawned.
 pub fn require_server(sock: &Path) -> anyhow::Result<()> {
+    require_server_with_probe(sock, |timeout| readiness_probe_with_timeout(sock, timeout))
+}
+
+fn require_server_with_probe(
+    sock: &Path,
+    mut probe: impl FnMut(Duration) -> io::Result<()>,
+) -> anyhow::Result<()> {
     let Some(server_dir) = sock.parent() else {
         anyhow::bail!("invalid collab server socket path");
     };
@@ -391,7 +399,10 @@ pub fn require_server(sock: &Path) -> anyhow::Result<()> {
     }
     let deadline = Instant::now() + STARTING_WAIT;
     loop {
-        let status = daemon_status(sock);
+        let (status, probe_error) = match probe(REQUIRED_SERVER_PING_TIMEOUT) {
+            Ok(()) => (DaemonAvailability::Alive, None),
+            Err(error) => (failed_connection_status(sock, &error), Some(error)),
+        };
         match status {
             DaemonAvailability::Alive => return Ok(()),
             DaemonAvailability::Starting if Instant::now() < deadline => {
@@ -410,10 +421,10 @@ pub fn require_server(sock: &Path) -> anyhow::Result<()> {
                 );
             }
             DaemonAvailability::Unknown => {
-                anyhow::bail!(
+                return Err(probe_error.expect("unknown requires a failed probe")).context(format!(
                     "DAEMON_UNKNOWN: collab daemon state is ambiguous at {}; refusing to launch or replace it",
                     sock.display()
-                );
+                ));
             }
         }
     }
@@ -522,27 +533,53 @@ fn wait_for_server_with_budgets(
 }
 
 fn readiness_probe(sock: &Path) -> io::Result<()> {
+    readiness_probe_with_timeout(sock, READINESS_TIMEOUT)
+}
+
+fn readiness_probe_with_timeout(sock: &Path, timeout: Duration) -> io::Result<()> {
     let mut stream = connect(sock)?;
-    stream.set_write_timeout(Some(READINESS_TIMEOUT))?;
-    stream.set_read_timeout(Some(READINESS_TIMEOUT))?;
+    let deadline = Instant::now() + timeout;
     let request = serde_json::to_vec(&Req::Ping).map_err(|error| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("cannot encode daemon readiness request: {error}"),
         )
     })?;
-    stream.write_all(&request)?;
-    stream.write_all(b"\n")?;
-    stream.flush()?;
-    let mut response = String::new();
-    let bytes_read = io::BufReader::new(&mut stream).read_line(&mut response)?;
-    if bytes_read == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "daemon closed the readiness connection before replying",
-        ));
+    write_ping_until(
+        &mut stream,
+        &request,
+        deadline,
+        Instant::now,
+        |stream, timeout| stream.set_write_timeout(Some(timeout)),
+    )?;
+    let mut response = Vec::new();
+    let mut reader = io::BufReader::new(&mut stream);
+    loop {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::TimedOut, "daemon readiness Ping timed out")
+            })?;
+        reader.get_ref().set_read_timeout(Some(remaining))?;
+        let chunk = reader.fill_buf()?;
+        if chunk.is_empty() {
+            if !response.is_empty() {
+                break;
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "daemon closed the readiness connection before replying",
+            ));
+        }
+        let end = chunk.iter().position(|byte| *byte == b'\n');
+        let length = end.map_or(chunk.len(), |index| index + 1);
+        response.extend_from_slice(&chunk[..length]);
+        reader.consume(length);
+        if end.is_some() {
+            break;
+        }
     }
-    let response: Resp = serde_json::from_str(response.trim()).map_err(|error| {
+    let response: Resp = serde_json::from_slice(&response).map_err(|error| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("daemon readiness response was malformed: {error}"),
@@ -570,6 +607,46 @@ fn readiness_probe(sock: &Path) -> io::Result<()> {
         ));
     }
     Ok(())
+}
+
+fn write_ping_until<W: Write>(
+    writer: &mut W,
+    request: &[u8],
+    deadline: Instant,
+    mut now: impl FnMut() -> Instant,
+    mut set_timeout: impl FnMut(&mut W, Duration) -> io::Result<()>,
+) -> io::Result<()> {
+    for part in [request, b"\n".as_slice()] {
+        let mut remaining = part;
+        while !remaining.is_empty() {
+            let timeout = deadline
+                .checked_duration_since(now())
+                .filter(|value| !value.is_zero())
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::TimedOut, "daemon readiness Ping timed out")
+                })?;
+            set_timeout(writer, timeout)?;
+            match writer.write(remaining) {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "daemon readiness Ping write failed",
+                    ))
+                }
+                Ok(written) => remaining = &remaining[written..],
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    let timeout = deadline
+        .checked_duration_since(now())
+        .filter(|value| !value.is_zero())
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::TimedOut, "daemon readiness Ping timed out")
+        })?;
+    set_timeout(writer, timeout)?;
+    writer.flush()
 }
 
 /// Check whether the daemon endpoint is accepting connections.
@@ -785,6 +862,210 @@ fn lock_availability(server_dir: &Path) -> LockAvailability {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ping_write_stops_when_shared_deadline_expires_between_partial_writes() {
+        struct SlowWriter(usize);
+        impl io::Write for SlowWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0 += 1;
+                if self.0 == 1 {
+                    Ok(1)
+                } else {
+                    Ok(bytes.len())
+                }
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut writer = SlowWriter(0);
+        let start = Instant::now();
+        let mut clock_reads = 0;
+        let error = write_ping_until(
+            &mut writer,
+            b"ping",
+            start + Duration::from_millis(5),
+            || {
+                clock_reads += 1;
+                if clock_reads == 1 {
+                    start
+                } else {
+                    start + Duration::from_millis(20)
+                }
+            },
+            |_, _| Ok(()),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(writer.0, 1, "no second write after deadline");
+    }
+
+    #[test]
+    fn ping_write_completes_and_preserves_write_errors() {
+        let mut output = Vec::new();
+        write_ping_until(
+            &mut output,
+            b"ping",
+            Instant::now() + Duration::from_secs(1),
+            Instant::now,
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(output, b"ping\n");
+        struct FailingWriter;
+        impl io::Write for FailingWriter {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::Error::from_raw_os_error(libc::EPIPE))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let error = write_ping_until(
+            &mut FailingWriter,
+            b"ping",
+            Instant::now() + Duration::from_secs(1),
+            Instant::now,
+            |_, _| Ok(()),
+        )
+        .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EPIPE));
+    }
+
+    #[test]
+    fn ping_flush_does_not_start_after_shared_deadline() {
+        struct FlushTracker(bool);
+        impl io::Write for FlushTracker {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                self.0 = true;
+                Ok(())
+            }
+        }
+        let start = Instant::now();
+        let mut reads = 0;
+        let mut writer = FlushTracker(false);
+        let error = write_ping_until(
+            &mut writer,
+            b"ping",
+            start + Duration::from_millis(5),
+            || {
+                reads += 1;
+                if reads <= 2 {
+                    start
+                } else {
+                    start + Duration::from_millis(5)
+                }
+            },
+            |_, _| Ok(()),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(!writer.0, "flush must not start after the deadline");
+    }
+
+    #[test]
+    fn require_server_accepts_delayed_real_ping_response() {
+        let fixture = TempServerDir::new("ordinary-ping-delayed");
+        let listener = UnixListener::bind(fixture.socket()).unwrap();
+        let responder = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = io::BufReader::new(stream);
+            let mut request = String::new();
+            reader.read_line(&mut request).unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&request).unwrap()["op"],
+                "Ping"
+            );
+            thread::sleep(Duration::from_millis(750));
+            reader
+                .into_inner()
+                .write_all(b"{\"ok\":true,\"now\":\"now\"}\n")
+                .unwrap();
+        });
+        require_server(&fixture.socket()).unwrap();
+        responder.join().unwrap();
+    }
+
+    #[test]
+    fn require_server_times_out_real_ping_and_keeps_io_error() {
+        let fixture = TempServerDir::new("ordinary-ping-no-response");
+        let listener = UnixListener::bind(fixture.socket()).unwrap();
+        let responder = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = io::BufReader::new(stream);
+            let mut request = String::new();
+            reader.read_line(&mut request).unwrap();
+            thread::sleep(Duration::from_millis(5500));
+        });
+        let started = Instant::now();
+        let error = require_server(&fixture.socket()).unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(4500) && elapsed < Duration::from_secs(8),
+            "{elapsed:?}"
+        );
+        assert!(error.to_string().contains("DAEMON_UNKNOWN"));
+        assert!(error
+            .chain()
+            .filter_map(|cause| cause.downcast_ref::<io::Error>())
+            .any(|cause| matches!(
+                cause.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            )));
+        responder.join().unwrap();
+    }
+
+    #[test]
+    fn require_server_rejects_malformed_real_ping_response() {
+        let fixture = TempServerDir::new("ordinary-ping-malformed");
+        let listener = UnixListener::bind(fixture.socket()).unwrap();
+        let responder = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = io::BufReader::new(stream);
+            let mut request = String::new();
+            reader.read_line(&mut request).unwrap();
+            reader.into_inner().write_all(b"{invalid}\n").unwrap();
+        });
+        let error = require_server(&fixture.socket()).unwrap_err();
+        assert!(error.to_string().contains("DAEMON_UNKNOWN"));
+        assert!(error
+            .chain()
+            .filter_map(|cause| cause.downcast_ref::<io::Error>())
+            .any(|cause| cause.kind() == io::ErrorKind::InvalidData));
+        responder.join().unwrap();
+    }
+
+    #[test]
+    fn require_server_gives_slow_ping_a_bounded_response_window() {
+        let fixture = super::tests::TempServerDir::new("ordinary-ping-window");
+        let mut supplied = None;
+        super::require_server_with_probe(&fixture.socket(), |timeout| {
+            supplied = Some(timeout);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(supplied, Some(std::time::Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn require_server_preserves_unknown_ping_error() {
+        let fixture = super::tests::TempServerDir::new("ordinary-ping-error");
+        let error = super::require_server_with_probe(&fixture.socket(), |_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "probe timed out",
+            ))
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("DAEMON_UNKNOWN"));
+        assert!(error
+            .chain()
+            .any(|cause| cause.to_string().contains("probe timed out")));
+    }
+
     use super::*;
     use serde_json::json;
     use std::fs::{self, File};

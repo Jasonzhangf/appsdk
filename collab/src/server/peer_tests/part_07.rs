@@ -1,29 +1,25 @@
 #[test]
-fn finalize_is_disabled_for_any_caller_and_state() {
+fn finalize_requires_a_closed_task_and_authorized_caller() {
     let (server, root) = test_server();
     register(&server, "owner", "%owner");
     register(&server, "peer", "%peer");
     assert!(create_task(&server, "owner", "open-task", "feature").ok);
-    let disabled = handle_task_finalize_cleanup(
+    let not_closed = handle_task_finalize_cleanup(
         &server,
         "owner".into(),
         "token-owner".into(),
         "open-task".into(),
         None,
     );
-    assert!(!disabled.ok, "{disabled:?}");
+    assert!(!not_closed.ok);
     assert!(
-        disabled
+        not_closed
             .error
             .as_deref()
-            .is_some_and(|error| error.starts_with("COLLAB_GIT_OWNERSHIP_DISABLED")),
-        "{disabled:?}"
+            .is_some_and(|error| error.contains("must be closed")),
+        "{not_closed:?}"
     );
-    assert_eq!(disabled.data["resource_operations"], false);
-    let state = server.state.lock().unwrap();
-    assert_eq!(state.tasks["open-task"].status, "working");
-    assert!(!state.cleanup_receipts.contains_key("open-task"));
-    drop(state);
+    drop(server);
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -119,7 +115,7 @@ fn force_closed_real_worktree_holder(server: &Server, root: &Path) -> (String, S
 }
 
 #[test]
-fn finalize_is_disabled_and_never_destroys_a_competing_resource() {
+fn finalize_refuses_a_worktree_taken_over_by_another_open_task() {
     let (server, root) = test_server();
     let (worktree, _) = force_closed_real_worktree_holder(&server, &root);
     // A peer legitimately claims the same worktree after the force close,
@@ -134,27 +130,27 @@ fn finalize_is_disabled_and_never_destroys_a_competing_resource() {
         state.tasks.insert("taken-over".into(), taken);
     }
 
-    let disabled = handle_task_finalize_cleanup(
+    let refused = handle_task_finalize_cleanup(
         &server,
         "master".into(),
         "token-master".into(),
         "held".into(),
         None,
     );
-    assert!(!disabled.ok, "{disabled:?}");
+    assert!(!refused.ok, "{refused:?}");
     assert!(
-        disabled
+        refused
             .error
             .as_deref()
-            .is_some_and(|error| error.starts_with("COLLAB_GIT_OWNERSHIP_DISABLED")),
-        "{disabled:?}"
+            .is_some_and(|error| error.starts_with("CLEANUP_FINALIZE_REFUSED")),
+        "{refused:?}"
     );
-    assert_eq!(disabled.data["resource_operations"], false);
-    // The retired finalize must never destroy a resource, even one another
-    // open task now owns.
+    assert_eq!(refused.data["competing_task"], "taken-over");
+    assert_eq!(refused.data["finalized"], false);
+    // The competing task's resource must still exist untouched.
     assert!(
         root.join("playground/held-wt").is_dir(),
-        "the retired finalize must not destroy a resource another open task owns"
+        "finalize must not destroy a resource another open task owns"
     );
     assert!(
         Command::new("git")
@@ -164,34 +160,27 @@ fn finalize_is_disabled_and_never_destroys_a_competing_resource() {
             .unwrap()
             .status
             .success(),
-        "the retired finalize must not delete a branch another open task owns"
+        "finalize must not delete a branch another open task owns"
     );
     std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
-fn finalize_leaves_worktree_and_branch_untouched() {
+fn finalize_removes_the_worktree_when_the_closed_task_still_owns_it() {
     let (server, root) = test_server();
     let (worktree, _) = force_closed_real_worktree_holder(&server, &root);
-    let disabled = handle_task_finalize_cleanup(
+    let finalized = handle_task_finalize_cleanup(
         &server,
         "master".into(),
         "token-master".into(),
         "held".into(),
         None,
     );
-    assert!(!disabled.ok, "{disabled:?}");
-    assert!(
-        disabled
-            .error
-            .as_deref()
-            .is_some_and(|error| error.starts_with("COLLAB_GIT_OWNERSHIP_DISABLED")),
-        "{disabled:?}"
-    );
-    assert_eq!(disabled.data["task_id"], "held");
-    assert!(worktree.ends_with("held-wt"));
-    assert!(root.join("playground/held-wt").is_dir());
-    assert!(Command::new("git")
+    assert!(finalized.ok, "{}", finalized.error.unwrap_or_default());
+    assert_eq!(finalized.data["cleanup"]["result"], "verified");
+    assert_eq!(finalized.data["cleanup"]["worktree"], worktree);
+    assert!(!root.join("playground/held-wt").exists());
+    assert!(!Command::new("git")
         .current_dir(&root)
         .args(["rev-parse", "--verify", "refs/heads/feature"])
         .output()
@@ -202,68 +191,27 @@ fn finalize_leaves_worktree_and_branch_untouched() {
 }
 
 #[test]
-fn close_keeps_the_owner_default_lease_armed_on_last_responsibility() {
+fn finalize_keeps_the_owner_default_lease_armed_on_last_responsibility() {
     let (server, root) = test_server();
-    register(&server, "holder", "%holder");
-    assert!(create_task(&server, "holder", "held", "feature").ok);
-    for status in ["verifying", "reviewed"] {
-        assert!(
-            handle_task_update(
-                &server,
-                "holder".into(),
-                "token-holder".into(),
-                "held".into(),
-                Some(status.into()),
-                Some(format!("continue {status}")),
-            )
-            .ok
-        );
-    }
-    assert!(
-        handle_task_deliver(
-            &server,
-            "holder".into(),
-            "token-holder".into(),
-            "held".into(),
-            Some("candidate verified".into()),
-            None,
-        )
-        .ok
-    );
-    assert!(
-        handle_task_review(
-            &server,
-            "holder".into(),
-            "token-holder".into(),
-            "held".into(),
-            true,
-            false,
-            "review passed".into(),
-        )
-        .ok
-    );
-    let lease_id = crate::server::mailbox::default_direct_message_id("holder");
-    let lease_armed = server.state.lock().unwrap().notification_subscriptions[&lease_id]
-        .status
-        .clone();
+    let (_, lease_armed) = force_closed_real_worktree_holder(&server, &root);
     assert_eq!(
         lease_armed, "armed",
         "registration must arm the owner's default lease for this test to mean anything"
     );
-    let closed = handle_task_close(
+    let finalized = handle_task_finalize_cleanup(
         &server,
-        "holder".into(),
-        "token-holder".into(),
+        "master".into(),
+        "token-master".into(),
         "held".into(),
-        false,
         None,
     );
-    assert!(closed.ok, "{}", closed.error.unwrap_or_default());
+    assert!(finalized.ok, "{}", finalized.error.unwrap_or_default());
     let state = server.state.lock().unwrap();
-    let lease = &state.notification_subscriptions[&lease_id];
+    let lease = &state.notification_subscriptions
+        [&crate::server::mailbox::default_direct_message_id("holder")];
     assert_eq!(
         lease.status, "armed",
-        "closing the last responsibility must keep the owner's default direct-message lease armed"
+        "finalize must keep the owner's default direct-message lease armed"
     );
     drop(state);
     std::fs::remove_dir_all(root).ok();
@@ -453,17 +401,12 @@ fn registered_peer_force_closes_orphaned_owner_with_no_live_master() {
         Some("owner route lost; no live master; peer closes orphan".into()),
     );
     assert!(resp.ok, "{}", resp.error.unwrap_or_default());
-    assert_eq!(
-        resp.data["next_action"],
-        "manual close recorded; Collab does not manage Git resources"
-    );
     let state = server.state.lock().unwrap();
     assert_eq!(state.tasks["orphan"].status, "closed");
     assert_eq!(
-        state.tasks["orphan"].next_step.as_deref(),
-        Some("manual close: owner route lost; no live master; peer closes orphan"),
+        state.cleanup_receipts["orphan"].manual_reason.as_deref(),
+        Some("owner route lost; no live master; peer closes orphan"),
     );
-    assert!(!state.cleanup_receipts.contains_key("orphan"));
     drop(state);
     std::fs::remove_dir_all(root).ok();
 }
@@ -487,10 +430,11 @@ fn repeated_orphan_force_close_is_idempotent_after_journal_replay() {
         Some(reason.into()),
     );
     assert!(first.ok, "{}", first.error.unwrap_or_default());
+    let receipt_id = first.data["receipt_id"].as_str().unwrap().to_owned();
     assert_eq!(first.data["cleanup"]["result"], "unverified");
     assert_eq!(
         first.data["next_action"],
-        "manual close recorded; Collab does not manage Git resources"
+        "manual close recorded; worktree/branch cleanup remains unverified"
     );
     let task_updated_ms = server.state.lock().unwrap().tasks["orphan"].updated_ms;
     let journal_path = root.join(".agent-collab/server/journal.jsonl");
@@ -507,10 +451,11 @@ fn repeated_orphan_force_close_is_idempotent_after_journal_replay() {
     );
     assert!(second.ok, "{}", second.error.unwrap_or_default());
     assert_eq!(second.data["idempotent"], true);
+    assert_eq!(second.data["receipt_id"], receipt_id);
     assert_eq!(second.data["cleanup"]["result"], "unverified");
     assert_eq!(
         second.data["next_action"],
-        "task already closed; Collab does not manage Git resources"
+        "manual close recorded; worktree/branch cleanup remains unverified"
     );
     assert_eq!(
         server.state.lock().unwrap().tasks["orphan"].updated_ms,
@@ -520,16 +465,19 @@ fn repeated_orphan_force_close_is_idempotent_after_journal_replay() {
         std::fs::read_to_string(&journal_path).unwrap(),
         journal_after_first
     );
-    // No cleanup receipt is written; the manual reason lives on the task and
-    // the repeated close is a no-op after replay.
-    {
-        let state = server.state.lock().unwrap();
-        assert!(!state.cleanup_receipts.contains_key("orphan"));
-        assert_eq!(
-            state.tasks["orphan"].next_step.as_deref(),
-            Some("manual close: owner route lost; replay closes the same orphan"),
-        );
-    }
+    // The same orphan address proof must also authorize the existing cleanup
+    // owner. This task declared no filesystem or Git resource to remove.
+    let finalized = handle_task_finalize_cleanup(&server, "peer".into(), "token-peer".into(), "orphan".into(), None);
+    assert!(finalized.ok, "{finalized:?}");
+    assert_eq!(finalized.data["cleanup"]["result"], "verified");
+    let finalized_id = finalized.data["cleanup"]["receipt_id"].clone();
+    let finalized_journal = std::fs::read(&journal_path).unwrap();
+    *server.state.lock().unwrap() = replay(&root).unwrap();
+    let finalize_again = handle_task_finalize_cleanup(&server, "peer".into(), "token-peer".into(), "orphan".into(), None);
+    assert!(finalize_again.ok, "{finalize_again:?}");
+    assert_eq!(finalize_again.data["idempotent"], true);
+    assert_eq!(finalize_again.data["cleanup"]["receipt_id"], finalized_id);
+    assert_eq!(std::fs::read(&journal_path).unwrap(), finalized_journal);
     let owner = server.state.lock().unwrap().workers["owner"].clone();
     assert_eq!(worker_identity_and_endpoint(&server, &owner), (true, Some(false)));
     std::fs::remove_dir_all(root).ok();
@@ -550,7 +498,7 @@ fn legacy_manual_cleanup_receipt_replays_as_unverified() {
 }
 
 #[test]
-fn worktree_claim_survives_cancel_and_remains_untouched() {
+fn worktree_claim_requires_cleanup_and_cannot_cancel() {
     let (server, root) = test_server();
     register(&server, "peer", "%peer");
     let now = now_ms();
@@ -580,33 +528,12 @@ fn worktree_claim_survives_cancel_and_remains_untouched() {
         Some("cancelled".into()),
         None,
     );
-    assert!(cancelled.ok, "{cancelled:?}");
-    assert_eq!(cancelled.data["status"], "cancelled");
-    let state = server.state.lock().unwrap();
+    assert!(!cancelled.ok);
     assert_eq!(
-        state.tasks["task"].status,
-        "cancelled",
-        "Git cleanup is no longer a cancellation gate"
-    );
-    assert_eq!(
-        state.tasks["task"].worktree_path.as_deref(),
-        Some("playground/task-wt")
-    );
-    assert_eq!(
-        state.tasks["task"].branch.as_deref(),
-        Some("codex/task-wt")
-    );
-    assert!(!state.cleanup_receipts.contains_key("task"));
-    drop(state);
-    let replayed = replay(&root).unwrap();
-    assert_eq!(replayed.tasks["task"].status, "cancelled");
-    assert_eq!(
-        replayed.tasks["task"].worktree_path.as_deref(),
-        Some("playground/task-wt")
-    );
-    assert_eq!(
-        replayed.tasks["task"].branch.as_deref(),
-        Some("codex/task-wt")
+        cancelled.error.as_deref(),
+        Some(
+            "CLEANUP_REQUIRED_BEFORE_CANCEL: task owns a worktree; close only after merged cleanup"
+        )
     );
     std::fs::remove_dir_all(root).ok();
 }
@@ -810,6 +737,8 @@ fn holder_close_persists_release_only_for_waiter() {
         );
     }
     let worktree = candidate_worktree(&root, "held");
+    git_ok(&worktree, &["commit", "--allow-empty", "-q", "-m", "candidate"]);
+    let candidate = current_head(&worktree);
     assert!(
         handle_task_deliver(
             &server,
@@ -830,6 +759,18 @@ fn holder_close_persists_release_only_for_waiter() {
             true,
             false,
             "reviewed candidate".into(),
+        )
+        .ok
+    );
+    git_ok(&root, &["merge", "--ff-only", &candidate]);
+    assert!(
+        handle_task_integrated(
+            &server,
+            "holder".into(),
+            "token-holder".into(),
+            "held".into(),
+            candidate,
+            "main verified".into(),
         )
         .ok
     );

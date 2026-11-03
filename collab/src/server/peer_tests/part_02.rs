@@ -1,16 +1,34 @@
 #[test]
 fn pending_merge_requires_the_delivered_candidate_on_main() {
-    // Contract change: delivery no longer binds a Git candidate commit and
-    // review accept no longer registers a pending merge. The test now verifies
-    // deliver -> master review -> close without any candidate obligation, plus
-    // that the retired integrated path fails closed.
-    let (server, root) = test_server();
+    let (mut server, root) = test_server();
     register(&server, "owner", "%owner");
     register(&server, "master", "%master");
     promote_master(&server, "master", "user approved candidate merge test");
     initialize_main(&root);
 
+    git_ok(&root, &["checkout", "-q", "-b", "codex/candidate"]);
+    std::fs::write(root.join("candidate.txt"), "candidate\n").unwrap();
+    git_ok(&root, &["add", "candidate.txt"]);
+    git_ok(&root, &["commit", "-q", "-m", "candidate work"]);
+    let candidate = current_head(&root);
+    git_ok(&root, &["checkout", "-q", "main"]);
     let main_before_merge = current_head(&root);
+    // The candidate must be delivered from a real worktree checked out on the
+    // registered branch; a branch ref alone is not proof of the delivered
+    // commit under the fail-closed binding rule.
+    let worktree_dir = configured_test_worktree(&mut server, &root, "candidate");
+    git_ok(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            worktree_dir.to_str().unwrap(),
+            "codex/candidate",
+        ],
+    );
+    assert_eq!(rev_parse(&worktree_dir, "HEAD"), candidate);
+
     let registered = handle_task_register(
         &server,
         "owner".into(),
@@ -18,13 +36,16 @@ fn pending_merge_requires_the_delivered_candidate_on_main() {
         "task".into(),
         None,
         Some("feature".into()),
-        None,
-        None,
-        None,
+        Some(worktree_dir.display().to_string()),
+        Some("codex/candidate".into()),
+        Some(main_before_merge.clone()),
         default_priority(),
     );
     assert!(registered.ok, "{}", registered.error.unwrap_or_default());
-    let worktree = "/tmp/candidate".to_string();
+    let worktree = server.state.lock().unwrap().tasks["task"]
+        .worktree_path
+        .clone()
+        .unwrap();
     for status in ["verifying", "reviewed"] {
         assert!(
             handle_task_update(
@@ -49,9 +70,12 @@ fn pending_merge_requires_the_delivered_candidate_on_main() {
         )
         .ok
     );
-    assert!(
-        server.state.lock().unwrap().task_lifecycle["task"].delivery_commit.is_none(),
-        "delivery must not bind a git candidate commit after git ownership retired"
+    assert_eq!(
+        server.state.lock().unwrap().task_lifecycle["task"]
+            .delivery_commit
+            .as_deref(),
+        Some(candidate.as_str()),
+        "deliver must bind the obligation to the exact candidate commit"
     );
     assert!(
         handle_task_review(
@@ -66,8 +90,7 @@ fn pending_merge_requires_the_delivered_candidate_on_main() {
         .ok
     );
 
-    // integrated is retired; it must fail closed without registering an
-    // obligation or changing task status.
+    // An unrelated pre-existing main commit must not satisfy the obligation.
     let unrelated = handle_task_integrated(
         &server,
         "master".into(),
@@ -77,39 +100,25 @@ fn pending_merge_requires_the_delivered_candidate_on_main() {
         "unrelated main sha".into(),
     );
     assert!(!unrelated.ok, "{unrelated:?}");
-    assert_eq!(
-        unrelated.error.as_deref(),
-        Some("COLLAB_GIT_OWNERSHIP_DISABLED: task integration, finalize-cleanup and worktree/branch cleanup are retired; deliver, review and close carry task responsibility without git or resource operations")
-    );
+    assert_eq!(unrelated.error.as_deref(), Some("TASK_MERGE_PENDING"));
     assert!(
-        !server.state.lock().unwrap().pending_merges.contains_key("task"),
-        "retired integrated must not register an obligation"
-    );
-    assert_eq!(
-        server.state.lock().unwrap().tasks["task"].status,
-        "accepted",
-        "retired integrated must not change task status"
+        server.state.lock().unwrap().pending_merges.contains_key("task"),
+        "the obligation must survive an unrelated-main integration attempt"
     );
 
-    // Close carries the responsibility without git or resource operations.
-    let closed = handle_task_close(
+    // Only after the candidate itself lands on main may the master record it.
+    git_ok(&root, &["merge", "--no-ff", "-q", "codex/candidate", "-m", "merge candidate"]);
+    let merged = handle_task_integrated(
         &server,
-        "owner".into(),
-        "token-owner".into(),
+        "master".into(),
+        "token-master".into(),
         "task".into(),
-        false,
-        None,
+        candidate.clone(),
+        "candidate merged onto main".into(),
     );
-    assert!(closed.ok, "{}", closed.error.unwrap_or_default());
-    assert_eq!(closed.data["disposition"], serde_json::json!("closed"));
-    assert_eq!(
-        closed.data["cleanup"]["result"],
-        serde_json::json!("not_managed")
-    );
-    assert_eq!(
-        server.state.lock().unwrap().tasks["task"].status,
-        "closed"
-    );
+    assert!(merged.ok, "{merged:?}");
+    assert!(!server.state.lock().unwrap().pending_merges.contains_key("task"));
+    std::fs::remove_dir_all(server.config.worktree.base.as_ref().unwrap()).ok();
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -198,12 +207,6 @@ fn pending_merge_binds_worktree_head_not_a_stale_branch_ref() {
 
 #[test]
 fn review_accept_surfaces_failed_immediate_wake_attempt() {
-    // Contract change: review accept no longer registers a merge obligation or
-    // a merge-pending immediate wake, so there is no notification/repair field
-    // on the accept response. The general notification repair contract still
-    // exists for other notice paths; the merge-specific wake surface is gone.
-    // Open gap: no black-box evidence yet that accept still surfaces a review
-    // notice when the master's subscription is missing.
     let (mut server, root) = test_server();
     register(&server, "owner", "%owner");
     register(&server, "master", "%master");
@@ -248,15 +251,21 @@ fn review_accept_surfaces_failed_immediate_wake_attempt() {
         "review passed".into(),
     );
     assert!(response.ok, "{}", response.error.clone().unwrap_or_default());
-    assert_eq!(response.data["status"], serde_json::json!("accepted"));
-    assert_eq!(response.data["disposition"], serde_json::json!("accepted"));
+    assert_eq!(
+        response.data["notification"],
+        serde_json::json!("subscribed-not-sent")
+    );
+    assert_eq!(response.data["repair_required"], serde_json::json!(true));
     assert!(
-        response.data.get("notification").is_none(),
-        "review accept must not surface a merge wake notification field"
+        response.data["notification_error"]
+            .as_str()
+            .is_some_and(|error| error.contains("notifications are disabled")),
+        "{}",
+        response.data
     );
     assert!(
-        !server.state.lock().unwrap().pending_merges.contains_key("task"),
-        "review accept must not register a merge obligation when notifications are disabled"
+        server.state.lock().unwrap().pending_merges.contains_key("task"),
+        "the obligation remains durable even when the wake cannot deliver"
     );
     std::fs::remove_dir_all(root).ok();
 }
@@ -270,12 +279,7 @@ fn legacy_accepted_update_to_rework_resolves_pending_merge() {
     assert!(create_task(&server, "owner", "task", "feature").ok);
 
     accept_task(&server, "owner", "task");
-    // Contract change: review accept no longer registers a pending merge, so
-    // accepted -> rework has no merge obligation to resolve.
-    assert!(
-        !server.state.lock().unwrap().pending_merges.contains_key("task"),
-        "review accept must not register a pending merge"
-    );
+    assert!(server.state.lock().unwrap().pending_merges.contains_key("task"));
 
     assert!(
         handle_task_update(
@@ -291,7 +295,7 @@ fn legacy_accepted_update_to_rework_resolves_pending_merge() {
     let state = server.state.lock().unwrap();
     assert!(
         !state.pending_merges.contains_key("task"),
-        "rework must leave no pending merge obligation"
+        "accepted -> rework must resolve the pending merge"
     );
     assert_eq!(state.tasks["task"].status, "rework");
     drop(state);

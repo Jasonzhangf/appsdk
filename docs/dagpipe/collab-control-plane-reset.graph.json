@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-control-plane-reset",
   "version": "0.3.1",
-  "description": "当前项目 master 在线 reset 的 SESE 图。认证当前项目 master 后，在现有 daemon 内串行化项目变更：同一次持久控制集合提交先移除本项目的 routes、绑定槽、身份、名字与 grants，并记录 scoped reset 待办；随后由既有 writer owner 持锁压缩共享 journal，物理删除本项目历史消息、任务、订阅、操作、资产与负载。已提交待办在启动路由恢复前继续删除；新请求看到 reset-pending 不得重建该项目。route-only legacy 条目按同 scope 删除，其他项目、全局 daemon、socket、PID、lock 不变；不经过离线、归档、历史身份批准或维护入口。真实写入或删除失败返回 RESET_INCOMPLETE，不能宣称成功；用户主机维护不属于本图。",
+  "description": "当前项目 master 在线 reset 的 SESE 图。认证当前项目 master 后，在现有 daemon 内清理项目业务状态；保留当前 DSH gateway 的 session、端点、绑定和恢复所需身份凭据，使其在 reset 和重启后继续可用。已提交待办在启动路由恢复前继续处理；其他项目、全局 daemon、socket、PID、lock 不变。真实写入或删除失败返回 RESET_INCOMPLETE，不能宣称成功；用户主机维护不属于本图。",
   "inputs": [{"id": "reset_request", "schema": "Object"}],
   "nodes": [
     {
@@ -17,7 +17,7 @@
     },
     {
       "id": "提交 scoped reset 控制变更",
-      "description": "当前 master 认证后，在 identity → materialization → route publication → project wire 的既有锁序内，用一次控制集合提交同批移除该项目全部 app routes、binding 槽、身份、名字、grants 与 current/previous 值，并写入有界 scoped reset 待办。route 与 control 不再相互保留另一类行；legacy route-only 与旧格式 control 条目不因转换复活。rename 前失败保持旧集合有效且未提交；rename 成功而父目录 sync 失败为 published/durability_unknown，不回滚旧快照。其他项目不变。",
+      "description": "当前 master 认证后，在既有锁序内提交 scoped reset 控制变更。保留当前 DSH 绑定、对应路由及恢复凭据；清理本项目其余需退役的控制和业务归属，且不复活旧任务、消息或授权。真实提交失败明确报告，其他项目不变。",
       "operator": "appsdk.collab_control_plane.commit_reset_control",
       "operator_version": "1",
       "inputs": ["authorized_reset_request"],

@@ -910,77 +910,44 @@ fn master_idle_subscription_is_restricted_to_the_live_master_and_supported_inter
 
 #[test]
 fn review_accept_registers_daemon_owned_pending_merge_with_master_notification() {
-    // Contract change: review --accept no longer registers a daemon-owned
-    // pending merge and no longer writes a merge-pending notice for the live
-    // master. The accept response carries only status/delivery_complete/
-    // reviewer/evidence/disposition/next_action; there is no merge_pending or
-    // notification field. The accepted task carries responsibility to close.
     let (server, root) = test_server();
     register(&server, "owner", "%owner");
     register(&server, "master", "%master");
     promote_master(&server, "master", "user approved master merge registration test");
     assert!(create_task(&server, "owner", "task", "feature").ok);
 
-    for status in ["verifying", "reviewed"] {
-        assert!(
-            handle_task_update(
-                &server,
-                "owner".into(),
-                "token-owner".into(),
-                "task".into(),
-                Some(status.into()),
-                None,
-            )
-            .ok
-        );
-    }
-    assert!(
-        handle_task_deliver(
-            &server,
-            "owner".into(),
-            "token-owner".into(),
-            "task".into(),
-            Some("candidate commit and gates passed".into()),
-            Some("/tmp/candidate".into()),
-        )
-        .ok
-    );
-    let response = handle_task_review(
-        &server,
-        "owner".into(),
-        "token-owner".into(),
-        "task".into(),
-        true,
-        false,
-        "review passed".into(),
-    );
-    assert!(response.ok, "{}", response.error.unwrap_or_default());
-    assert_eq!(response.data["status"], serde_json::json!("accepted"));
-    assert_eq!(response.data["disposition"], serde_json::json!("accepted"));
-    assert!(
-        response.data.get("merge_pending").is_none(),
-        "the accept response must not expose a merge_pending field"
-    );
-    assert!(
-        response.data.get("notification").is_none(),
-        "the accept response must not expose a merge notification field"
-    );
+    accept_task(&server, "owner", "task");
 
     let state = server.state.lock().unwrap();
-    assert_eq!(state.tasks["task"].status, "accepted");
     assert!(
-        !state.pending_merges.contains_key("task"),
-        "review --accept must not register a pending merge"
+        state.pending_merges.contains_key("task"),
+        "review --accept must register a durable daemon-owned pending merge"
     );
+    let request = state.pending_merges["task"].clone();
+    assert_eq!(request.owner, "owner");
+    assert_eq!(request.task_id, "task");
+    let notified = state.msgs.values().any(|message| {
+        message.to == "master"
+            && message
+                .subject
+                .as_deref()
+                .is_some_and(|subject| subject == "merge-pending:task")
+    });
     assert!(
-        !state.msgs.values().any(|message| {
-            message.to == "master"
-                && message
-                    .subject
-                    .as_deref()
-                    .is_some_and(|subject| subject == "merge-pending:task")
-        }),
-        "review --accept must not create a merge-pending notice for the master"
+        notified,
+        "review --accept must create a durable merge-pending notice for the live master"
+    );
+    let notice_id = state
+        .msgs
+        .values()
+        .find(|message| message.subject.as_deref() == Some("merge-pending:task"))
+        .expect("merge-pending notice")
+        .id
+        .clone();
+    assert_eq!(
+        state.delivery_modes.get(&notice_id).map(String::as_str),
+        Some("immediate"),
+        "the master's merge obligation must wake immediately, not wait for the batch window"
     );
     drop(state);
     std::fs::remove_dir_all(root).ok();
@@ -988,18 +955,15 @@ fn review_accept_registers_daemon_owned_pending_merge_with_master_notification()
 
 #[test]
 fn review_accept_without_master_direct_message_subscription_surfaces_repair() {
-    // Contract change: review --accept no longer registers a merge obligation,
-    // so there is no mailbox-only repair terminal and no merge notification on
-    // accept. Accept succeeds regardless of master subscription state. Open
-    // gap: whether the master must still observe an accepted task through some
-    // other channel is unresolved (no alternative black-box evidence yet).
     let (server, root) = test_server();
     register(&server, "owner", "%owner");
     register(&server, "master", "%master");
     promote_master(&server, "master", "user approved master merge registration test");
     assert!(create_task(&server, "owner", "task", "feature").ok);
 
-    // Simulate the master losing its default direct-message lease.
+    // Simulate the master losing its default direct-message lease: the pending
+    // merge must stay durable and the review response must carry the explicit
+    // mailbox-only repair terminal, never a silent success.
     let drop_ids: Vec<String> = server
         .state
         .lock()
@@ -1049,33 +1013,25 @@ fn review_accept_without_master_direct_message_subscription_surfaces_repair() {
         "review passed".into(),
     );
     assert!(response.ok, "{}", response.error.unwrap_or_default());
-    assert_eq!(response.data["status"], serde_json::json!("accepted"));
-    assert_eq!(response.data["disposition"], serde_json::json!("accepted"));
+    assert_eq!(
+        response.data["notification"],
+        serde_json::json!("mailbox-only-no-subscription")
+    );
+    assert_eq!(response.data["repair_required"], serde_json::json!(true));
     assert!(
-        response.data.get("notification").is_none(),
-        "review accept must not surface a notification repair terminal"
+        response.data["failure"]
+            .as_str()
+            .is_some_and(|f| f == "notification_subscription_missing")
     );
     assert!(
-        response.data.get("repair_required").is_none(),
-        "review accept must not surface a repair_required field"
+        server.state.lock().unwrap().pending_merges.contains_key("task"),
+        "the obligation must remain durable even without a wake subscription"
     );
-    let state = server.state.lock().unwrap();
-    assert_eq!(state.tasks["task"].status, "accepted");
-    assert!(
-        !state.pending_merges.contains_key("task"),
-        "review accept must not register a pending merge without a wake subscription"
-    );
-    drop(state);
     std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
 fn pending_merge_with_unbound_candidate_fails_closed_on_integrated() {
-    // Contract change: delivery no longer binds a Git candidate commit and
-    // review accept no longer registers a pending merge, so an unresolvable
-    // worktree is no longer a review or integrated error. integrated/finalize
-    // are disabled; rework -> re-deliver -> review -> close is the recovery
-    // path.
     let (server, root) = test_server();
     register(&server, "owner", "%owner");
     register(&server, "master", "%master");
@@ -1095,6 +1051,8 @@ fn pending_merge_with_unbound_candidate_fails_closed_on_integrated() {
             .ok
         );
     }
+    // Deliver with a worktree that does not resolve to a git commit, so the
+    // accepted candidate is unbound (None) while the pending merge exists.
     assert!(
         handle_task_deliver(
             &server,
@@ -1116,17 +1074,23 @@ fn pending_merge_with_unbound_candidate_fails_closed_on_integrated() {
         "review passed".into(),
     );
     assert!(response.ok, "{}", response.error.unwrap_or_default());
-    assert_eq!(response.data["status"], serde_json::json!("accepted"));
-    assert_eq!(response.data["disposition"], serde_json::json!("accepted"));
-    let state = server.state.lock().unwrap();
-    assert_eq!(state.tasks["task"].status, "accepted");
-    assert!(
-        !state.pending_merges.contains_key("task"),
-        "an unbound candidate must not register a pending merge"
+    assert_eq!(
+        response.data["merge_pending"],
+        serde_json::json!(true),
+        "a live-master accept that registers a pending merge must report it"
     );
-    drop(state);
+    {
+        let state = server.state.lock().unwrap();
+        assert!(state.pending_merges.contains_key("task"));
+        assert!(
+            state.pending_merges["task"].candidate_commit.is_none(),
+            "this test deliberately leaves the delivered candidate unbound"
+        );
+        assert_eq!(state.tasks["task"].status, "accepted");
+    }
 
-    // integrated is retired; it must fail closed without a side effect.
+    // A main-reachable SHA must not satisfy an unbound code delivery; the
+    // unresolved candidate is the stronger typed failure, never read-only.
     let head = current_head(&root);
     let integrated = handle_task_integrated(
         &server,
@@ -1139,15 +1103,20 @@ fn pending_merge_with_unbound_candidate_fails_closed_on_integrated() {
     assert!(!integrated.ok, "{integrated:?}");
     assert_eq!(
         integrated.error.as_deref(),
-        Some("COLLAB_GIT_OWNERSHIP_DISABLED: task integration, finalize-cleanup and worktree/branch cleanup are retired; deliver, review and close carry task responsibility without git or resource operations")
+        Some("TASK_DELIVERY_CANDIDATE_UNRESOLVED")
     );
-    assert_eq!(
-        server.state.lock().unwrap().tasks["task"].status,
-        "accepted",
-        "integrated must fail closed without changing task status"
+    assert!(
+        integrated.data["candidate_commit"].is_null(),
+        "the fail-closed response must expose the unbound candidate"
     );
+    {
+        let state = server.state.lock().unwrap();
+        assert!(state.pending_merges.contains_key("task"));
+        assert_eq!(state.tasks["task"].status, "accepted");
+    }
 
-    // Rework is the explicit recovery path.
+    // Rework is the explicit recovery path: it resolves the unprovable
+    // obligation so the owner can re-deliver with a resolvable candidate.
     assert!(
         handle_task_update(
             &server,
@@ -1159,7 +1128,6 @@ fn pending_merge_with_unbound_candidate_fails_closed_on_integrated() {
         )
         .ok
     );
-    assert_eq!(server.state.lock().unwrap().tasks["task"].status, "rework");
     assert!(!server.state.lock().unwrap().pending_merges.contains_key("task"));
     std::fs::remove_dir_all(root).ok();
 }
@@ -1193,9 +1161,9 @@ fn review_accept_merge_pending_field_reflects_registered_obligation() {
         )
         .ok
     );
-    // Contract change: the review response no longer carries a merge_pending
-    // field at all. The public contract must state the new response shape
-    // explicitly; there is no compatibility merge_pending field.
+    // Masterless accept leaves the owner-local lifecycle intact: no daemon
+    // pending merge exists, so merge_pending must be false even though accept
+    // succeeded.
     let response = handle_task_review(
         &server,
         "owner".into(),
@@ -1206,23 +1174,13 @@ fn review_accept_merge_pending_field_reflects_registered_obligation() {
         "review passed".into(),
     );
     assert!(response.ok, "{}", response.error.unwrap_or_default());
-    assert_eq!(response.data["status"], serde_json::json!("accepted"));
-    assert_eq!(response.data["disposition"], serde_json::json!("accepted"));
-    assert!(
-        response.data.get("merge_pending").is_none(),
-        "the accept response must not expose a merge_pending field"
-    );
+    assert_eq!(response.data["merge_pending"], serde_json::json!(false));
     assert!(!server.state.lock().unwrap().pending_merges.contains_key("task"));
     std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
 fn close_refuses_pending_merge_until_task_integrated_resolves_it() {
-    // Contract change: task integrated/finalize are disabled; deliver -> review
-    // -> close carries task responsibility. A historical pending merge
-    // inherited from migrated journal data must still be cleared by close so it
-    // stops appearing in collab context / status. The assertion below verifies
-    // that current close behavior clears the legacy obligation.
     let (server, root) = test_server();
     register(&server, "owner", "%owner");
     register(&server, "master", "%master");
@@ -1232,21 +1190,48 @@ fn close_refuses_pending_merge_until_task_integrated_resolves_it() {
 
     accept_task(&server, "owner", "task");
 
-    // Simulate a historical pending merge inherited from migrated journal data.
-    {
-        let mut state = server.state.lock().unwrap();
-        state.pending_merges.insert(
-            "task".into(),
-            state::PendingMerge {
-                task_id: "task".into(),
-                owner: "owner".into(),
-                requested_by: "master".into(),
-                requested_ms: now_ms(),
-                candidate_commit: None,
-            },
-        );
-    }
+    let refused = handle_task_close(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "task".into(),
+        false,
+        None,
+    );
+    assert!(!refused.ok, "{refused:?}");
+    assert_eq!(refused.error.as_deref(), Some("TASK_MERGE_PENDING"));
 
+    let owner_integrated = handle_task_integrated(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "task".into(),
+        current_head(&root),
+        "owner bypass attempt".into(),
+    );
+    assert!(!owner_integrated.ok, "owner could not bypass the master merge obligation");
+    assert_eq!(owner_integrated.error.as_deref(), Some("TASK_MERGE_PENDING"));
+
+    let head = current_head(&root);
+    assert!(
+        handle_task_integrated(
+            &server,
+            "master".into(),
+            "token-master".into(),
+            "task".into(),
+            head,
+            "main merged".into(),
+        )
+        .ok
+    );
+    {
+        let state = server.state.lock().unwrap();
+        assert!(
+            !state.pending_merges.contains_key("task"),
+            "task integrated must resolve the pending merge"
+        );
+        assert_eq!(state.tasks["task"].status, "merged");
+    }
     let closed = handle_task_close(
         &server,
         "owner".into(),
@@ -1256,26 +1241,11 @@ fn close_refuses_pending_merge_until_task_integrated_resolves_it() {
         None,
     );
     assert!(closed.ok, "{}", closed.error.unwrap_or_default());
-    assert_eq!(closed.data["disposition"], serde_json::json!("closed"));
-    assert_eq!(
-        closed.data["cleanup"]["result"],
-        serde_json::json!("not_managed")
-    );
-    // Close clears the historical pending merge obligation.
-    assert!(
-        !server.state.lock().unwrap().pending_merges.contains_key("task"),
-        "close must clear a historical pending merge obligation"
-    );
     std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
 fn integrated_supersedes_stale_merge_pending_notice() {
-    // Contract change: review accept no longer creates a merge-pending notice
-    // and integrated/finalize are disabled. Legacy merge-pending notices
-    // inherited from migrated journal data must still be superseded when the
-    // task closes so they do not remain actionable P0 notices. The assertion
-    // below verifies the current close cleanup.
     let (server, root) = test_server();
     register(&server, "owner", "%owner");
     register(&server, "master", "%master");
@@ -1284,40 +1254,38 @@ fn integrated_supersedes_stale_merge_pending_notice() {
     assert!(create_task(&server, "owner", "task", "feature").ok);
     accept_task(&server, "owner", "task");
 
-    {
-        let mut state = server.state.lock().unwrap();
-        state.msgs.insert(
-            "legacy-merge-notice".into(),
-            Message {
-                id: "legacy-merge-notice".into(),
-                from: "collab-server".into(),
-                to: "master".into(),
-                mtype: "notification".into(),
-                subject: Some("merge-pending:task".into()),
-                body: "legacy merge pending".into(),
-                in_reply_to: None,
-                created_ms: now_ms(),
-                state: "pending".into(),
-                wake_attempt_count: 0,
-                last_wake_attempt_ms: 0,
-                retry_attempted: false,
-            },
-        );
-    }
+    let notice_id = {
+        let state = server.state.lock().unwrap();
+        state
+            .msgs
+            .values()
+            .find(|message| {
+                message.to == "master"
+                    && message.subject.as_deref() == Some("merge-pending:task")
+                    && matches!(message.state.as_str(), "pending" | "delivered")
+            })
+            .expect("merge-pending notice must exist")
+            .id
+            .clone()
+    };
 
-    let closed = handle_task_close(
-        &server,
-        "owner".into(),
-        "token-owner".into(),
-        "task".into(),
-        false,
-        None,
+    let head = current_head(&root);
+    assert!(
+        handle_task_integrated(
+            &server,
+            "master".into(),
+            "token-master".into(),
+            "task".into(),
+            head,
+            "merged onto main".into(),
+        )
+        .ok
     );
-    assert!(closed.ok, "{}", closed.error.unwrap_or_default());
 
     let state = server.state.lock().unwrap();
+    assert!(!state.pending_merges.contains_key("task"));
     assert_eq!(
-        state.msgs["legacy-merge-notice"].state, "superseded",
+        state.msgs[&notice_id].state, "superseded",
         "a resolved obligation must not remain readable as an actionable P0 notice"
     );
     drop(state);
@@ -1357,9 +1325,10 @@ fn review_accept_succeeds_with_merge_obligation_when_master_presence_is_unknown(
         .ok
     );
 
-    // Dropping the tmux server leaves the master's transport Unknown. Contract
-    // change: transport reachability no longer gates review accept, and accept
-    // no longer registers a master merge obligation or notice.
+    // Dropping the tmux server leaves the master's transport Unknown. Authority
+    // is the current typed grant, not transport reachability, so the owner's
+    // authorized review accept must still transition the task and register the
+    // master's merge obligation instead of failing closed.
     stop_registered_test_tmux_server();
 
     let response = handle_task_review(
@@ -1372,19 +1341,19 @@ fn review_accept_succeeds_with_merge_obligation_when_master_presence_is_unknown(
         "review passed".into(),
     );
     assert!(response.ok, "{response:?}");
-    assert_eq!(response.data["status"], serde_json::json!("accepted"));
-    assert_eq!(response.data["disposition"], serde_json::json!("accepted"));
     let state = server.state.lock().unwrap();
+    let pending = state
+        .pending_merges
+        .get("task")
+        .expect("the current grant holder must own the merge obligation");
+    assert_eq!(pending.owner, "owner");
+    assert_eq!(pending.requested_by, "owner");
     assert_eq!(state.tasks["task"].status, "accepted");
     assert!(
-        !state.pending_merges.contains_key("task"),
-        "review accept must not register a merge obligation when master presence is unknown"
-    );
-    assert!(
-        !state.msgs.values().any(|message| {
+        state.msgs.values().any(|message| {
             message.to == "master" && message.subject.as_deref() == Some("merge-pending:task")
         }),
-        "review accept must not write a merge-pending notice"
+        "the merge obligation must notify the current grant holder"
     );
     drop(state);
     std::fs::remove_dir_all(root).ok();

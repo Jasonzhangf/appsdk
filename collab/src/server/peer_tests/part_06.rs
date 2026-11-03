@@ -141,7 +141,7 @@ fn daemon_restart_reuses_existing_deadline_without_recreating_it() {
         status_reason: None,
         patrol_idle_since_ms: None,
         patrol_last_push_ms: 0,
-                periodic_declared: false,
+        periodic_declared: false,
     };
     state.apply(&Event::NotificationSubscribed {
         subscription: original.clone(),
@@ -515,6 +515,8 @@ fn owner_completes_local_lifecycle_without_peer_reports() {
     register(&server, "peer", "%peer");
     assert!(create_task(&server, "peer", "task", "feature").ok);
     let worktree = candidate_worktree(&root, "task");
+    git_ok(&worktree, &["commit", "--allow-empty", "-q", "-m", "candidate"]);
+    let candidate = current_head(&worktree);
     assert!(
         handle_task_update(
             &server,
@@ -548,8 +550,18 @@ fn owner_completes_local_lifecycle_without_peer_reports() {
         )
         .ok
     );
-    // Git integration is retired: an owner finishes its own task by closing
-    // the Collab responsibility after review, without any Git operation.
+    git_ok(&root, &["merge", "--ff-only", &candidate]);
+    assert!(
+        handle_task_integrated(
+            &server,
+            "peer".into(),
+            "token-peer".into(),
+            "task".into(),
+            candidate,
+            "main verified".into(),
+        )
+        .ok
+    );
     git_ok(&root, &["worktree", "remove", worktree.to_str().unwrap()]);
     let closed = handle_task_close(
         &server,
@@ -562,10 +574,7 @@ fn owner_completes_local_lifecycle_without_peer_reports() {
     assert!(closed.ok);
     let state = server.state.lock().unwrap();
     assert_eq!(state.tasks["task"].status, "closed");
-    assert!(
-        !state.cleanup_receipts.contains_key("task"),
-        "a normal Collab close records no Git cleanup receipt"
-    );
+    assert_eq!(state.cleanup_receipts["task"].task_id, "task");
     assert!(
         state.msgs.is_empty(),
         "normal lifecycle must not report to peers"
@@ -575,7 +584,7 @@ fn owner_completes_local_lifecycle_without_peer_reports() {
 }
 
 #[test]
-fn owner_close_leaves_declared_worktree_and_branch_untouched() {
+fn owner_close_uses_integrated_main_not_daemon_head_for_cleanup() {
     let (mut server, root) = test_server();
     register(&server, "peer", "%peer");
     initialize_main(&root);
@@ -586,6 +595,7 @@ fn owner_close_leaves_declared_worktree_and_branch_untouched() {
     git_ok(&root, &["commit", "-q", "-m", "cleanup task"]);
     git_ok(&root, &["checkout", "-q", "main"]);
     git_ok(&root, &["merge", "--ff-only", "codex/cleanup-live"]);
+    let main_commit = rev_parse(&root, "refs/heads/main");
     git_ok(&root, &["checkout", "-q", "-b", "root-snapshot", &base]);
     let worktree = configured_test_worktree(&mut server, &root, "cleanup-live");
     let worktree_string = worktree.display().to_string();
@@ -653,6 +663,17 @@ fn owner_close_leaves_declared_worktree_and_branch_untouched() {
         )
         .ok
     );
+    assert!(
+        handle_task_integrated(
+            &server,
+            "peer".into(),
+            "token-peer".into(),
+            "cleanup-live".into(),
+            main_commit,
+            "main verified".into(),
+        )
+        .ok
+    );
 
     let closed = handle_task_close(
         &server,
@@ -663,27 +684,26 @@ fn owner_close_leaves_declared_worktree_and_branch_untouched() {
         None,
     );
     assert!(closed.ok, "{}", closed.error.unwrap_or_default());
-    assert_eq!(closed.data["cleanup"]["result"], "not_managed");
-    assert_eq!(closed.data["cleanup"]["collab_managed"], false);
-    // Close records Collab responsibility only; the declared worktree and
-    // branch stay as user-owned resources regardless of the recorded main head.
-    assert!(worktree.exists());
+    assert!(!worktree.exists());
     let branch_after_close = Command::new("git")
         .current_dir(&root)
         .args(["rev-parse", "--verify", "refs/heads/codex/cleanup-live"])
         .output()
         .unwrap();
-    assert!(branch_after_close.status.success());
+    assert!(!branch_after_close.status.success());
     let state = server.state.lock().unwrap();
     assert_eq!(state.tasks["cleanup-live"].status, "closed");
-    assert!(!state.cleanup_receipts.contains_key("cleanup-live"));
+    assert_eq!(
+        state.cleanup_receipts["cleanup-live"].verification,
+        crate::server::state::CleanupVerification::Verified
+    );
     drop(state);
     std::fs::remove_dir_all(server.config.worktree.base.as_ref().unwrap()).ok();
     std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
-fn live_master_closes_task_with_declared_worktree_untouched() {
+fn live_master_closes_merged_task_with_verified_cleanup() {
     let (mut server, root) = test_server();
     register(&server, "owner", "%owner");
     register(&server, "master", "%master");
@@ -696,6 +716,7 @@ fn live_master_closes_task_with_declared_worktree_untouched() {
     git_ok(&root, &["commit", "-q", "-m", "master cleanup task"]);
     git_ok(&root, &["checkout", "-q", "main"]);
     git_ok(&root, &["merge", "--ff-only", "codex/master-cleanup"]);
+    let main_commit = rev_parse(&root, "refs/heads/main");
     let worktree = configured_test_worktree(&mut server, &root, "master-cleanup");
     let worktree_string = worktree.display().to_string();
     git_ok(
@@ -762,6 +783,17 @@ fn live_master_closes_task_with_declared_worktree_untouched() {
         )
         .ok
     );
+    assert!(
+        handle_task_integrated(
+            &server,
+            "master".into(),
+            "token-master".into(),
+            "master-cleanup".into(),
+            main_commit,
+            "main verified".into(),
+        )
+        .ok
+    );
 
     let closed = handle_task_close(
         &server,
@@ -772,28 +804,27 @@ fn live_master_closes_task_with_declared_worktree_untouched() {
         None,
     );
     assert!(closed.ok, "{}", closed.error.unwrap_or_default());
-    assert_eq!(closed.data["cleanup"]["result"], "not_managed");
-    assert_eq!(closed.data["cleanup"]["collab_managed"], false);
-    // A live master's close ends the Collab responsibility; the declared
-    // worktree and branch are not removed by Collab.
-    assert!(worktree.exists());
+    assert!(!worktree.exists());
     let branch_after_close = Command::new("git")
         .current_dir(&root)
         .args(["rev-parse", "--verify", "refs/heads/codex/master-cleanup"])
         .output()
         .unwrap();
-    assert!(branch_after_close.status.success());
+    assert!(!branch_after_close.status.success());
     let state = server.state.lock().unwrap();
     assert_eq!(state.tasks["master-cleanup"].owner, "owner");
     assert_eq!(state.tasks["master-cleanup"].status, "closed");
-    assert!(!state.cleanup_receipts.contains_key("master-cleanup"));
+    assert_eq!(
+        state.cleanup_receipts["master-cleanup"].verification,
+        crate::server::state::CleanupVerification::Verified
+    );
     drop(state);
     std::fs::remove_dir_all(server.config.worktree.base.as_ref().unwrap()).ok();
     std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
-fn owner_close_records_no_git_cleanup_receipt() {
+fn owner_close_records_verified_receipt_after_prior_safe_cleanup() {
     let (mut server, root) = test_server();
     register(&server, "peer", "%peer");
     initialize_main(&root);
@@ -804,6 +835,7 @@ fn owner_close_records_no_git_cleanup_receipt() {
     git_ok(&root, &["commit", "-q", "-m", "already clean task"]);
     git_ok(&root, &["checkout", "-q", "main"]);
     git_ok(&root, &["merge", "--ff-only", "codex/already-clean"]);
+    let main_commit = rev_parse(&root, "refs/heads/main");
     let worktree = configured_test_worktree(&mut server, &root, "already-clean");
     let worktree_string = worktree.display().to_string();
     git_ok(
@@ -870,6 +902,19 @@ fn owner_close_records_no_git_cleanup_receipt() {
         )
         .ok
     );
+    assert!(
+        handle_task_integrated(
+            &server,
+            "peer".into(),
+            "token-peer".into(),
+            "already-clean".into(),
+            main_commit,
+            "main verified".into(),
+        )
+        .ok
+    );
+    git_ok(&root, &["worktree", "remove", &worktree_string]);
+    git_ok(&root, &["branch", "-D", "codex/already-clean"]);
 
     let closed = handle_task_close(
         &server,
@@ -880,22 +925,13 @@ fn owner_close_records_no_git_cleanup_receipt() {
         None,
     );
     assert!(closed.ok, "{}", closed.error.unwrap_or_default());
-    assert_eq!(closed.data["cleanup"]["result"], "not_managed");
     let state = server.state.lock().unwrap();
     assert_eq!(state.tasks["already-clean"].status, "closed");
-    assert!(
-        !state.cleanup_receipts.contains_key("already-clean"),
-        "Collab close must not fabricate a verified Git cleanup receipt"
+    assert_eq!(
+        state.cleanup_receipts["already-clean"].verification,
+        crate::server::state::CleanupVerification::Verified
     );
     drop(state);
-    assert!(worktree.exists(), "user-owned worktree must survive close");
-    assert!(Command::new("git")
-        .current_dir(&root)
-        .args(["rev-parse", "--verify", "refs/heads/codex/already-clean"])
-        .output()
-        .unwrap()
-        .status
-        .success());
     std::fs::remove_dir_all(server.config.worktree.base.as_ref().unwrap()).ok();
     std::fs::remove_dir_all(root).ok();
 }
@@ -938,21 +974,20 @@ fn master_force_close_skips_owner_and_cleanup_requirements() {
     assert_eq!(resp.data["cleanup"]["result"], "unverified");
     assert_eq!(
         resp.data["next_action"],
-        "manual close recorded; Collab does not manage Git resources"
+        "manual close recorded; worktree/branch cleanup remains unverified"
     );
     let state = server.state.lock().unwrap();
     assert_eq!(state.tasks["stuck"].status, "closed");
-    assert!(
-        !state.cleanup_receipts.contains_key("stuck"),
-        "a force close records the manual reason on the task, not a cleanup receipt"
+    assert_eq!(
+        state.cleanup_receipts["stuck"].manual_reason.as_deref(),
+        Some("worktree dirty and merge blocked; force closing per master"),
     );
     assert_eq!(
-        state.tasks["stuck"].next_step.as_deref(),
-        Some("manual close: worktree dirty and merge blocked; force closing per master"),
+        state.cleanup_receipts["stuck"].verification,
+        crate::server::state::CleanupVerification::Unverified
     );
     let projected = task_view(&state, &state.tasks["stuck"]);
-    assert_eq!(projected["cleanup"]["status"], "historical_unmanaged");
-    assert_eq!(projected["cleanup"]["collab_managed"], false);
+    assert_eq!(projected["cleanup"]["status"], "unverified");
     drop(state);
     std::fs::remove_dir_all(root).ok();
 }
@@ -960,7 +995,7 @@ fn master_force_close_skips_owner_and_cleanup_requirements() {
 /// Force-close a holder that declares no worktree/branch, leaving one waiter
 /// blocked on it with a resource-released subscription. This is the fixture the
 /// finalize regressions build on.
-fn force_closed_unverified_holder_with_waiter(server: &Server) {
+fn force_closed_unverified_holder_with_waiter(server: &Server) -> Vec<String> {
     register(server, "holder", "%holder");
     register(server, "waiter", "%waiter");
     register(server, "master", "%master");
@@ -1002,27 +1037,15 @@ fn force_closed_unverified_holder_with_waiter(server: &Server) {
     );
     assert!(forced.ok, "{}", forced.error.unwrap_or_default());
     assert_eq!(forced.data["cleanup"]["result"], "unverified");
-    assert_eq!(
-        forced.data["next_action"],
-        "manual close recorded; Collab does not manage Git resources"
-    );
-    // A force close records the manual reason on the task and must not release
-    // the waiter or write a Git cleanup receipt.
+    // A force close records the obligation; it must not release the waiter.
     let state = server.state.lock().unwrap();
     assert_eq!(state.tasks["waiting"].status, "waiting");
     assert_eq!(
-        state.tasks["held"].next_step.as_deref(),
-        Some("manual close: holder abandoned mid-flight; force closing"),
-    );
-    assert!(!state.cleanup_receipts.contains_key("held"));
-    assert!(
-        state
-            .msgs
-            .values()
-            .all(|message| !message.body.starts_with("RESOURCE_RELEASED ")),
-        "an unverified force close must not release dependents"
+        state.cleanup_receipts["held"].verification,
+        crate::server::state::CleanupVerification::Unverified
     );
     drop(state);
+    Vec::new()
 }
 
 #[test]
@@ -1031,6 +1054,11 @@ fn force_close_without_finalize_reports_unverified_and_does_not_release() {
     force_closed_unverified_holder_with_waiter(&server);
     let state = server.state.lock().unwrap();
     assert_eq!(state.tasks["held"].status, "closed");
+    assert_eq!(
+        state.cleanup_receipts["held"].verification,
+        crate::server::state::CleanupVerification::Unverified,
+        "an unfinalized force close keeps the unverified receipt, not a success"
+    );
     assert_eq!(state.tasks["waiting"].status, "waiting");
     assert!(
         state
@@ -1044,98 +1072,63 @@ fn force_close_without_finalize_reports_unverified_and_does_not_release() {
 }
 
 #[test]
-fn close_releases_a_waiter_exactly_once() {
+fn finalize_releases_a_waiter_exactly_once() {
     let (server, root) = test_server();
-    register(&server, "holder", "%holder");
-    register(&server, "waiter", "%waiter");
-    assert!(create_task(&server, "holder", "held", "shared-feature").ok);
-    assert!(!create_task(&server, "waiter", "waiting", "shared-feature").ok);
-    assert!(
-        handle_task_wait(
-            &server,
-            "waiter".into(),
-            "token-waiter".into(),
-            "waiting".into(),
-            "held".into(),
-        )
-        .ok
-    );
-    assert!(
-        handle_notification_subscribe(
-            &server,
-            "waiter".into(),
-            "token-waiter".into(),
-            "resource-released".into(),
-            Some("held".into()),
-            None,
-            Vec::new(),
-            None,
-            1,
-            60,
-        )
-        .ok
-    );
-    for status in ["verifying", "reviewed"] {
-        assert!(
-            handle_task_update(
-                &server,
-                "holder".into(),
-                "token-holder".into(),
-                "held".into(),
-                Some(status.into()),
-                Some(format!("continue {status}")),
-            )
-            .ok
-        );
-    }
-    assert!(
-        handle_task_deliver(
-            &server,
-            "holder".into(),
-            "token-holder".into(),
-            "held".into(),
-            Some("candidate verified".into()),
-            None,
-        )
-        .ok
-    );
-    assert!(
-        handle_task_review(
-            &server,
-            "holder".into(),
-            "token-holder".into(),
-            "held".into(),
-            true,
-            false,
-            "review passed".into(),
-        )
-        .ok
-    );
-    let closed = handle_task_close(
+    force_closed_unverified_holder_with_waiter(&server);
+    let finalized = handle_task_finalize_cleanup(
         &server,
-        "holder".into(),
-        "token-holder".into(),
+        "master".into(),
+        "token-master".into(),
         "held".into(),
-        false,
         None,
     );
-    assert!(closed.ok, "{}", closed.error.unwrap_or_default());
-    assert_eq!(closed.data["cleanup"]["result"], "not_managed");
+    assert!(finalized.ok, "{}", finalized.error.unwrap_or_default());
+    assert_eq!(finalized.data["cleanup"]["result"], "verified");
+    assert_eq!(finalized.data["finalized"], true);
+    assert_eq!(finalized.data["released_dependents"], json!(["waiting"]));
+    assert_eq!(
+        finalized.data["cleanup"]["manual_reason"], "holder abandoned mid-flight; force closing",
+        "the manual reason stays auditable after finalization"
+    );
+
+    {
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.tasks["waiting"].status, "blocked");
+        assert!(state.tasks["waiting"].wait.is_none());
+        assert_eq!(
+            state.cleanup_receipts["held"].verification,
+            crate::server::state::CleanupVerification::Verified
+        );
+        assert_eq!(
+            state.cleanup_receipts["held"].manual_reason.as_deref(),
+            Some("holder abandoned mid-flight; force closing")
+        );
+        let releases = state
+            .msgs
+            .values()
+            .filter(|message| message.body.starts_with("RESOURCE_RELEASED "))
+            .count();
+        assert_eq!(releases, 1, "finalize must release the waiter once");
+    }
+
+    // A second finalize must not double-release or duplicate the notification.
+    let again = handle_task_finalize_cleanup(
+        &server,
+        "master".into(),
+        "token-master".into(),
+        "held".into(),
+        None,
+    );
+    assert!(again.ok, "{}", again.error.unwrap_or_default());
+    assert_eq!(again.data["idempotent"], true);
+    assert_eq!(again.data["released_dependents"], json!([]));
     let state = server.state.lock().unwrap();
-    assert_eq!(state.tasks["waiting"].status, "blocked");
-    assert!(state.tasks["waiting"].wait.is_none());
-    assert!(state.tasks["waiting"]
-        .next_step
-        .as_deref()
-        .unwrap()
-        .starts_with("RESOURCE_RELEASED=held"));
     let releases = state
         .msgs
         .values()
         .filter(|message| message.body.starts_with("RESOURCE_RELEASED "))
-        .collect::<Vec<_>>();
-    assert_eq!(releases.len(), 1, "close must release the waiter once");
-    assert_eq!(releases[0].to, "waiter");
+        .count();
+    assert_eq!(releases, 1, "a repeated finalize must not double-release");
     assert_eq!(
         state
             .msgs
@@ -1149,85 +1142,65 @@ fn close_releases_a_waiter_exactly_once() {
 }
 
 #[test]
-fn finalize_is_disabled_and_does_not_silently_complete() {
+fn interrupted_finalize_is_resumed_by_a_retry_not_silently_completed() {
     let (server, root) = test_server();
     force_closed_unverified_holder_with_waiter(&server);
-    // The force close left the holder closed and the waiter waiting. The
-    // retired finalize entry must fail closed without completing silently or
-    // touching either task.
-    let finalized = handle_task_finalize_cleanup(
+    let first = handle_task_finalize_cleanup(
         &server,
         "master".into(),
         "token-master".into(),
         "held".into(),
         None,
     );
-    assert!(!finalized.ok, "{finalized:?}");
-    assert!(
-        finalized
-            .error
-            .as_deref()
-            .is_some_and(|error| error.starts_with("COLLAB_GIT_OWNERSHIP_DISABLED")),
-        "{finalized:?}"
+    assert!(first.ok, "{}", first.error.unwrap_or_default());
+    assert_eq!(first.data["idempotent"], false);
+
+    // Model interruption after the verified receipt committed but before the
+    // release ran by rewinding only the waiter back to its waiting state.
+    {
+        let mut state = server.state.lock().unwrap();
+        let mut waiter = state.tasks["waiting"].clone();
+        waiter.status = "waiting".into();
+        waiter.wait = Some(crate::server::state::WaitSpec {
+            deadline_ms: now_ms() + 60_000,
+            escalation: String::new(),
+            reason: "recheck after finalize".into(),
+            responsible_actor: "holder".into(),
+            resume_on: vec![],
+            waiter: "waiter".into(),
+            waiting_for: "held".into(),
+        });
+        state.tasks.insert("waiting".into(), waiter);
+    }
+
+    let retried = handle_task_finalize_cleanup(
+        &server,
+        "master".into(),
+        "token-master".into(),
+        "held".into(),
+        None,
     );
-    assert_eq!(finalized.data["resource_operations"], false);
+    assert!(retried.ok, "{}", retried.error.unwrap_or_default());
+    assert_eq!(
+        retried.data["idempotent"], true,
+        "a verified receipt with an unfinished release must resume, not re-verify"
+    );
+    assert_eq!(
+        retried.data["released_dependents"],
+        json!(["waiting"]),
+        "the resumed attempt must finish the remaining release explicitly"
+    );
     let state = server.state.lock().unwrap();
-    assert_eq!(state.tasks["held"].status, "closed");
-    assert_eq!(state.tasks["waiting"].status, "waiting");
-    assert!(state.tasks["waiting"].wait.is_some());
-    assert!(
-        state
-            .msgs
-            .values()
-            .all(|message| !message.body.starts_with("RESOURCE_RELEASED ")),
-        "the retired finalize must not release dependents"
-    );
+    assert_eq!(state.tasks["waiting"].status, "blocked");
+    assert!(state.tasks["waiting"].wait.is_none());
     drop(state);
     std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
-fn close_preserves_unread_direct_message_payloads() {
+fn finalize_preserves_unread_direct_message_payloads() {
     let (server, root) = test_server();
-    register(&server, "holder", "%holder");
-    register(&server, "waiter", "%waiter");
-    assert!(create_task(&server, "holder", "held", "shared-feature").ok);
-    for status in ["verifying", "reviewed"] {
-        assert!(
-            handle_task_update(
-                &server,
-                "holder".into(),
-                "token-holder".into(),
-                "held".into(),
-                Some(status.into()),
-                Some(format!("continue {status}")),
-            )
-            .ok
-        );
-    }
-    assert!(
-        handle_task_deliver(
-            &server,
-            "holder".into(),
-            "token-holder".into(),
-            "held".into(),
-            Some("candidate verified".into()),
-            None,
-        )
-        .ok
-    );
-    assert!(
-        handle_task_review(
-            &server,
-            "holder".into(),
-            "token-holder".into(),
-            "held".into(),
-            true,
-            false,
-            "review passed".into(),
-        )
-        .ok
-    );
+    force_closed_unverified_holder_with_waiter(&server);
     server.commit(&[Event::Sent {
         msg: Message {
             id: "unread-payload".into(),
@@ -1244,20 +1217,19 @@ fn close_preserves_unread_direct_message_payloads() {
             retry_attempted: false,
         },
     }]);
-    let closed = handle_task_close(
+    let finalized = handle_task_finalize_cleanup(
         &server,
-        "holder".into(),
-        "token-holder".into(),
+        "master".into(),
+        "token-master".into(),
         "held".into(),
-        false,
         None,
     );
-    assert!(closed.ok, "{}", closed.error.unwrap_or_default());
+    assert!(finalized.ok, "{}", finalized.error.unwrap_or_default());
     let state = server.state.lock().unwrap();
     let unread = state
         .msgs
         .get("unread-payload")
-        .expect("close must not delete unread direct-message payloads");
+        .expect("finalize must not delete unread direct-message payloads");
     assert_eq!(unread.body, "unread direct message body");
     assert_eq!(unread.state, "pending");
     drop(state);

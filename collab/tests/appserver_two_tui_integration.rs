@@ -9,6 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[path = "support/daemon_readiness.rs"]
+mod daemon_readiness;
+
 #[path = "board/cli.rs"]
 mod board_cli;
 #[path = "board/central_storage.rs"]
@@ -23,8 +26,6 @@ mod context_minimality;
 mod degraded_user_maintenance;
 #[path = "board/directory_unknown_cli.rs"]
 mod directory_unknown_cli;
-#[path = "board/git_ablation.rs"]
-mod git_ablation;
 #[path = "board/name_adjudication.rs"]
 mod name_adjudication;
 #[path = "board/name_confirmed_takeover.rs"]
@@ -537,10 +538,10 @@ fn context_names_changed_session_without_anchor_gets_fresh_name_without_migratio
         snapshot["identity"]["worker_id"],
         first["identity"]["worker_id"]
     );
-    // The carrier session changed and there is no pane+cwd anchor. The same
-    // worker id is not an identity anchor, so a fresh ordinary name is taken
-    // and Alice's legacy tasks do not migrate to it.
-    assert_eq!(snapshot["name"], "Bob", "{snapshot}");
+    // The carrier session changed. The recorded name still belongs to this
+    // worker, so the daemon keeps the name and rebinds its open tasks to the
+    // current session; closed task history stays unchanged.
+    assert_eq!(snapshot["name"], "Alice", "{snapshot}");
     assert_eq!(snapshot["session_id"], THREAD_B, "{snapshot}");
     assert_eq!(snapshot["binding"]["session_id"], THREAD_B);
     let journal = std::fs::read_to_string(fixture.name_journal()).unwrap();
@@ -550,12 +551,14 @@ fn context_names_changed_session_without_anchor_gets_fresh_name_without_migratio
         .filter(|event| event["ev"] == "NameResolutionCommitted")
         .last()
         .unwrap();
-    assert_eq!(resolution["occupancy"]["name"], "Bob", "{resolution}");
+    assert_eq!(resolution["occupancy"]["name"], "Alice", "{resolution}");
     let assignments = resolution["assignments"].as_array().unwrap();
-    assert!(
-        assignments.is_empty(),
-        "a fresh ordinary name must not migrate Alice's tasks: {resolution}"
-    );
+    assert_eq!(assignments.len(), 2, "{resolution}");
+    for assignment in assignments {
+        assert_ne!(assignment["task_id"], "closed");
+        assert_eq!(assignment["session_id"], THREAD_B);
+        assert_eq!(assignment["assignment_revision"], 2);
+    }
 }
 
 #[test]
@@ -1010,31 +1013,10 @@ impl AppFixture {
             .stdout(daemon_log.try_clone().expect("clone serve log"))
             .stderr(daemon_log);
         self.daemon = Some(command.spawn().expect("spawn owned serve child"));
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !self.host_state.join("server.sock").exists() && Instant::now() < deadline {
-            if let Some(status) = self.daemon.as_mut().unwrap().try_wait().unwrap() {
-                eprintln!(
-                    "[diag] start_daemon child exited early: status={status} state={} sock_exists={}",
-                    self.host_state.display(),
-                    self.host_state.join("server.sock").exists()
-                );
-                panic!(
-                    "test-owned serve exited before readiness: {status}: {}",
-                    std::fs::read_to_string(self.root.join("test-daemon.log")).unwrap_or_default()
-                );
-            }
-            thread::sleep(Duration::from_millis(25));
-        }
-        if !self.host_state.join("server.sock").exists() {
-            eprintln!(
-                "[diag] start_daemon timed out: state={} pid={:?}",
-                self.host_state.display(),
-                self.daemon.as_ref().map(|child| child.id())
-            );
-        }
-        assert!(
-            self.host_state.join("server.sock").exists(),
-            "owned serve did not create socket"
+        daemon_readiness::wait_for_ping(
+            self.daemon.as_mut().unwrap(),
+            &self.host_state.join("server.sock"),
+            Duration::from_secs(5),
         );
     }
 

@@ -782,6 +782,10 @@ pub(crate) fn live_managed_subagent_count(server: &Server, parent: &str) -> usiz
 
 include!("ordinary_presence_edges.rs");
 
+fn record_scheduler_admission(server: &Server, admission: serde_json::Value) -> Result<(), Resp> {
+    ensure_scheduler_admission_audit(server, &admission).map(|_| ())
+}
+
 #[cfg(test)]
 fn scheduler_admit_subagent_start(
     _server: &Server,
@@ -793,6 +797,97 @@ fn scheduler_admit_subagent_start(
     Err(Resp::err(
         "MANAGED_SUBAGENT_UNSUPPORTED: start a peer in its own tmux pane",
     ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SchedulerAdmissionAuditState {
+    Recorded,
+    Failed(String),
+}
+
+fn scheduler_admission_audit_state(
+    server: &Server,
+    request_id: &str,
+) -> Result<Option<SchedulerAdmissionAuditState>, Resp> {
+    let path = server
+        .storage_root
+        .join(".agent-collab/server/events.jsonl");
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(Resp::err(format!(
+                "scheduler admission audit failed: lookup {error}"
+            )))
+        }
+    };
+    for line in content.lines() {
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if record.get("kind").and_then(serde_json::Value::as_str) != Some("scheduler_admission")
+            || record
+                .get("detail")
+                .and_then(|detail| detail.get("request_id"))
+                .and_then(serde_json::Value::as_str)
+                != Some(request_id)
+        {
+            continue;
+        }
+        let detail = record.get("detail").cloned().unwrap_or_else(|| json!({}));
+        if detail.get("status").and_then(serde_json::Value::as_str) == Some("failed") {
+            let error = detail
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("scheduler admission audit failed")
+                .to_string();
+            return Ok(Some(SchedulerAdmissionAuditState::Failed(error)));
+        }
+        return Ok(Some(SchedulerAdmissionAuditState::Recorded));
+    }
+    Ok(None)
+}
+
+fn ensure_scheduler_admission_audit(
+    server: &Server,
+    admission: &serde_json::Value,
+) -> Result<SchedulerAdmissionAuditState, Resp> {
+    if let Some(request_id) = admission
+        .get("request_id")
+        .and_then(serde_json::Value::as_str)
+    {
+        if let Some(state) = scheduler_admission_audit_state(server, request_id)? {
+            return Ok(state);
+        }
+    }
+    if let Err(error) = record_activity(
+        &server.storage_root,
+        "scheduler_admission",
+        admission.clone(),
+    ) {
+        append_log(
+            &server.log_path(),
+            &format!("SCHEDULER_ADMISSION_RECORD_FAILED: {error}"),
+        );
+        return Err(Resp::err(format!(
+            "scheduler admission audit failed: {error}"
+        )));
+    }
+    Ok(SchedulerAdmissionAuditState::Recorded)
+}
+
+fn scheduler_admission_audit_error(
+    result: Result<SchedulerAdmissionAuditState, Resp>,
+) -> Option<String> {
+    match result {
+        Ok(SchedulerAdmissionAuditState::Recorded) => None,
+        Ok(SchedulerAdmissionAuditState::Failed(error)) => Some(error),
+        Err(error) => Some(
+            error
+                .error
+                .unwrap_or_else(|| "scheduler admission audit failed".into()),
+        ),
+    }
 }
 
 fn scheduler_admission_failed_response(
@@ -1318,6 +1413,34 @@ pub(crate) fn handle_scheduler_dispatch(
         });
         if let Err(error) = server.commit_locked(&mut state, &events) {
             return Resp::err(format!("SCHEDULER_DURABILITY_FAILED: {error}"));
+        }
+        if let Some(error) =
+            scheduler_admission_audit_error(ensure_scheduler_admission_audit(server, &admission))
+        {
+            if let Err(commit_error) = server.commit_locked(
+                &mut state,
+                &[Event::SchedulerAdmissionStatus {
+                    request_id: request_id.clone(),
+                    status: "failed".into(),
+                    error: Some(error.clone()),
+                    updated_ms: now_ms(),
+                }],
+            ) {
+                server.report_journal_commit_error(&commit_error);
+            }
+            drop(state);
+            admission["status"] = json!("failed");
+            admission["error"] = json!(error.clone());
+            return Resp::err_data(
+                error,
+                json!({
+                    "request_id": request_id,
+                    "reservation": true,
+                    "message_id": message_id,
+                    "task_id": task_id,
+                    "admission": admission,
+                }),
+            );
         }
         drop(state);
         let notification_attempt = subscription.as_ref().map(|subscription| {

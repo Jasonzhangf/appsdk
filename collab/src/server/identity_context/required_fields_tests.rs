@@ -75,6 +75,7 @@ fn restore_peer_role_recovery_does_not_rewrite_old_name_mailbox_or_tasks() {
                 status: "working".into(),
                 next_step: Some("keep".into()),
                 wait: None,
+                isolation_mode: None,
                 created_ms: 1,
                 updated_ms: 1,
             },

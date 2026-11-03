@@ -470,6 +470,38 @@ fn post_rename_parent_sync_failure_reports_unknown_and_keeps_published_file() {
 }
 
 #[test]
+fn project_reset_preserves_current_dsh_binding() {
+    let root = temp_root("reset-dsh");
+    let store = BindingControlStore::new(&root);
+    let dsh = key_in("/tmp/collab-binding-reset-dsh", "worker");
+    let mut binding = value(&dsh, "dsh-worker", "dsh-runtime");
+    binding.transport.kind = TransportKind::Dsh;
+    binding.transport.endpoint = Some("http://127.0.0.1:12700".into());
+    let mut set = BindingControlSet::new();
+    set.commit(&dsh, binding.clone(), Some(0)).unwrap();
+    store.save(&set).unwrap();
+    let mut routes = vec![route_record(&dsh)];
+    store.publish_shared(&routes, &set).unwrap();
+    super::project_reset::delete_project_routes_except_dsh(
+        store.path(),
+        dsh.project_scope.as_str(),
+        &std::collections::HashSet::from([dsh.app_scope_id.as_str().to_owned()]),
+    )
+    .unwrap();
+    let (loaded_routes, loaded) = store.load_shared().unwrap();
+    assert_eq!(
+        loaded.slot(&dsh).and_then(|slot| slot.active_binding()),
+        Some(&binding)
+    );
+    assert_eq!(
+        loaded_routes.len(),
+        1,
+        "reset must retain the active DSH route record"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn project_reset_delete_route_drops_only_its_scope_slots() {
     let root = temp_root("reset-scope");
     let store = BindingControlStore::new(&root);
@@ -506,6 +538,50 @@ fn project_reset_delete_route_drops_only_its_scope_slots() {
         "reset must keep pending effects for unrelated scopes"
     );
     std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn project_reset_delete_project_routes_keeps_only_retained_dsh_app_scope() {
+    let root = temp_root("reset-route-scope");
+    let store = BindingControlStore::new(&root);
+    let dsh = key_in("/tmp/collab-binding-reset-routes", "dsh");
+    let other = IdentityBindingKey::new(
+        ProjectScopeId::new("/tmp/collab-binding-reset-routes").unwrap(),
+        AppServerId::new("appserver-other").unwrap(),
+        "other",
+    );
+    let mut dsh_value = value(&dsh, "dsh-worker", "dsh-runtime");
+    dsh_value.transport.kind = TransportKind::Dsh;
+    let mut set = BindingControlSet::new();
+    set.commit(&dsh, dsh_value, Some(0)).unwrap();
+    set.commit(
+        &other,
+        value(&other, "other-worker", "other-runtime"),
+        Some(0),
+    )
+    .unwrap();
+    let mut other_route = route_record(&other);
+    other_route.canonical_root = "/tmp/collab-binding-reset-routes-other".into();
+    other_route.storage_root = "/tmp/collab-binding-reset-routes-other".into();
+    let routes = vec![route_record(&dsh), other_route];
+    store.publish_shared(&routes, &set).unwrap();
+
+    super::project_reset::delete_project_routes_except_dsh(
+        store.path(),
+        dsh.project_scope.as_str(),
+        &std::collections::HashSet::from([dsh.app_scope_id.as_str().to_owned()]),
+    )
+    .unwrap();
+
+    let (loaded_routes, loaded) = store.load_shared().unwrap();
+    assert_eq!(loaded_routes.len(), 1);
+    assert_eq!(loaded_routes[0].app_scope_id, dsh.app_scope_id.as_str());
+    assert!(loaded.slot(&dsh).is_some(), "active DSH slot must survive");
+    assert!(
+        loaded.slot(&other).is_none(),
+        "non-DSH slot must be retired"
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

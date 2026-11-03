@@ -177,14 +177,8 @@ async fn split_journal_context_recovery(native: bool, public_cli: bool) {
         old.endpoint_generation + 1
     );
     assert!(manager.same_pane_master_route_ready(&runtime).is_err());
-    let staged = runtime
-        .state
-        .lock()
-        .unwrap()
-        .global
-        .lookup_binding_for(&old.route_scope(), &old.binding_id)
-        .unwrap()
-        .clone();
+    let staged = runtime.state.lock().unwrap().global
+        .lookup_binding_for(&old.route_scope(), &old.binding_id).unwrap().clone();
     let committed_ids = (
         retry.data["command_id"].as_str().unwrap().to_owned(),
         retry.data["operation_id"].as_str().unwrap().to_owned(),
@@ -363,8 +357,7 @@ async fn split_journal_context_recovery(native: bool, public_cli: bool) {
                 );
                 let mut completed_status = None;
                 for _ in 0..1000 {
-                    completed_status = std::fs::read_to_string(&cli_status)
-                        .ok()
+                    completed_status = std::fs::read_to_string(&cli_status).ok()
                         .and_then(|status| status.trim().parse::<i32>().ok());
                     if completed_status.is_some() {
                         break;
@@ -386,26 +379,12 @@ async fn split_journal_context_recovery(native: bool, public_cli: bool) {
             let host_initial = std::fs::read(&host_journal).unwrap();
             let project_initial = std::fs::read(&project_journal).unwrap();
             let unchanged_repeat = run_cli();
-            assert_eq!(
-                unchanged_repeat.0,
-                0,
-                "{}",
-                String::from_utf8_lossy(&unchanged_repeat.2)
-            );
+            assert_eq!(unchanged_repeat.0, 0, "{}", String::from_utf8_lossy(&unchanged_repeat.2));
             let unchanged: serde_json::Value = serde_json::from_slice(&unchanged_repeat.1).unwrap();
             assert_eq!(unchanged["result"]["outcome"], "completed");
-            assert_eq!(
-                unchanged["result"]["snapshot"]["binding"],
-                initial["result"]["snapshot"]["binding"]
-            );
-            assert_eq!(
-                unchanged["result"]["snapshot"]["identity"],
-                initial["result"]["snapshot"]["identity"]
-            );
-            assert_eq!(
-                unchanged["result"]["snapshot"]["peers"],
-                initial["result"]["snapshot"]["peers"]
-            );
+            assert_eq!(unchanged["result"]["snapshot"]["binding"], initial["result"]["snapshot"]["binding"]);
+            assert_eq!(unchanged["result"]["snapshot"]["identity"], initial["result"]["snapshot"]["identity"]);
+            assert_eq!(unchanged["result"]["snapshot"]["peers"], initial["result"]["snapshot"]["peers"]);
             assert_eq!(unchanged["result"]["snapshot"]["inbox"]["unread"], 0);
             assert_eq!(std::fs::read(&host_journal).unwrap(), host_initial);
             assert_eq!(std::fs::read(&project_journal).unwrap(), project_initial);
@@ -413,8 +392,7 @@ async fn split_journal_context_recovery(native: bool, public_cli: bool) {
             // A cached first snapshot cannot satisfy this current-state readback.
             let (mutation_context, mutation_token, mutation_command) = {
                 let state = mutation_runtime.state.lock().unwrap();
-                let current = state
-                    .global
+                let current = state.global
                     .lookup_binding_for(&mutation_scope, &mutation_binding_id)
                     .expect("current binding after CLI recovery")
                     .clone();
@@ -429,8 +407,7 @@ async fn split_journal_context_recovery(native: bool, public_cli: bool) {
                         session_id: current.session_id.clone(),
                         native_thread_id: current.native_thread_id.clone(),
                     },
-                )
-                .unwrap();
+                ).unwrap();
                 let token = state.workers[&mutation_worker].token.clone();
                 let command = CommandEnvelope::new(
                     CommandId::new("staged-current-state-send-command").unwrap(),
@@ -438,30 +415,17 @@ async fn split_journal_context_recovery(native: bool, public_cli: bool) {
                     current.binding_id.clone(),
                     current.endpoint_generation,
                     current.route_scope(),
-                    None,
-                    None,
-                    None,
-                    None,
+                    None, None, None, None,
                 );
                 (context, token, command)
             };
-            let (_, sent) = mutation_manager.dispatch_sync(
-                Some(mutation_context),
-                Req::Send {
-                    from: mutation_worker.clone(),
-                    worker_id: Some(mutation_worker.clone()),
-                    token: Some(mutation_token),
-                    command: Some(mutation_command),
-                    to: mutation_worker,
-                    mtype: "notify".into(),
-                    subject: Some("current-context-readback".into()),
-                    body: "A message committed after the original context completed.".into(),
-                    in_reply_to: None,
-                    reply_policy: None,
-                    target_session: None,
-                    delivery: "queued".into(),
-                },
-            );
+            let (_, sent) = mutation_manager.dispatch_sync(Some(mutation_context), Req::Send {
+                from: mutation_worker.clone(), worker_id: Some(mutation_worker.clone()),
+                token: Some(mutation_token), command: Some(mutation_command), to: mutation_worker,
+                mtype: "notify".into(), subject: Some("current-context-readback".into()),
+                body: "A message committed after the original context completed.".into(),
+                in_reply_to: None, reply_policy: None, target_session: None, delivery: "queued".into(),
+            });
             assert!(sent.ok, "{sent:?}");
             assert_eq!(sent.data["durable"], true);
             let message_id = sent.data["msg_id"].as_str().unwrap();
@@ -471,47 +435,20 @@ async fn split_journal_context_recovery(native: bool, public_cli: bool) {
             assert_eq!(repeated.0, 0, "{}", String::from_utf8_lossy(&repeated.2));
             let again: serde_json::Value = serde_json::from_slice(&repeated.1).unwrap();
             assert_eq!(again["result"]["outcome"], "completed");
-            assert_eq!(
-                again["result"]["operation_id"],
-                initial["result"]["operation_id"]
-            );
+            assert_eq!(again["result"]["operation_id"], initial["result"]["operation_id"]);
             assert_eq!(again["result"]["phase"], initial["result"]["phase"]);
-            assert_eq!(
-                again["result"]["committed_phases"],
-                initial["result"]["committed_phases"]
-            );
-            assert_eq!(
-                again["result"]["snapshot"]["binding"],
-                initial["result"]["snapshot"]["binding"]
-            );
-            assert_eq!(
-                again["result"]["snapshot"]["identity"],
-                initial["result"]["snapshot"]["identity"]
-            );
-            assert_eq!(
-                again["result"]["snapshot"]["peers"],
-                initial["result"]["snapshot"]["peers"]
-            );
-            for field in [
-                "worker_id",
-                "scope",
-                "grant_id",
-                "grant_generation",
-                "binding_id",
-                "endpoint_generation",
-            ] {
-                assert_eq!(
-                    again["result"]["snapshot"]["master"][field],
-                    initial["result"]["snapshot"]["master"][field]
-                );
+            assert_eq!(again["result"]["committed_phases"], initial["result"]["committed_phases"]);
+            assert_eq!(again["result"]["snapshot"]["binding"], initial["result"]["snapshot"]["binding"]);
+            assert_eq!(again["result"]["snapshot"]["identity"], initial["result"]["snapshot"]["identity"]);
+            assert_eq!(again["result"]["snapshot"]["peers"], initial["result"]["snapshot"]["peers"]);
+            for field in ["worker_id", "scope", "grant_id", "grant_generation", "binding_id", "endpoint_generation"] {
+                assert_eq!(again["result"]["snapshot"]["master"][field],
+                    initial["result"]["snapshot"]["master"][field]);
             }
             assert_eq!(again["bootstrap"]["identity"], "daemon-owned");
             assert_eq!(again["bootstrap"]["registered"], true);
             assert_eq!(again["result"]["snapshot"]["inbox"]["unread"], 1);
-            assert_eq!(
-                again["result"]["snapshot"]["inbox"]["messages"][0]["id"],
-                message_id
-            );
+            assert_eq!(again["result"]["snapshot"]["inbox"]["messages"][0]["id"], message_id);
             assert_eq!(std::fs::read(&host_journal).unwrap(), host_before);
             assert_eq!(std::fs::read(&project_journal).unwrap(), project_before);
             first
@@ -563,29 +500,13 @@ async fn split_journal_context_recovery(native: bool, public_cli: bool) {
         // The same grant stays durable. Only its endpoint generation follows
         // the live binding; grant identity and generation do not reset.
         assert_eq!(current_grant.grant_id, grant_before_recovery.grant_id);
-        assert_eq!(
-            current_grant.grant_generation,
-            grant_before_recovery.grant_generation
-        );
+        assert_eq!(current_grant.grant_generation, grant_before_recovery.grant_generation);
         assert_eq!(current_grant.binding_id, grant_before_recovery.binding_id);
         assert_eq!(current_grant.agent_id, grant_before_recovery.agent_id);
-        assert_eq!(
-            current_grant.endpoint_generation,
-            current.endpoint_generation
-        );
+        assert_eq!(current_grant.endpoint_generation, current.endpoint_generation);
         let project_replay = replay_from_journal(&runtime.root, &runtime.journal_path).unwrap();
-        assert_eq!(
-            project_replay
-                .global
-                .lookup_binding_for(&old.route_scope(), &old.binding_id),
-            Some(&current)
-        );
-        assert_eq!(
-            project_replay
-                .global
-                .lookup_master_grant_for(&old.route_scope(), &old.binding_id),
-            Some(&current_grant)
-        );
+        assert_eq!(project_replay.global.lookup_binding_for(&old.route_scope(), &old.binding_id), Some(&current));
+        assert_eq!(project_replay.global.lookup_master_grant_for(&old.route_scope(), &old.binding_id), Some(&current_grant));
         std::fs::remove_dir_all(host_root).unwrap();
         std::fs::remove_dir_all(project_root).unwrap();
         return;
@@ -596,13 +517,7 @@ async fn split_journal_context_recovery(native: bool, public_cli: bool) {
             facts: crate::proto::IdentityFacts {
                 // The staged proof uses the persisted exact endpoint and
                 // credential; this report is not live admission evidence.
-                session_id: new_candidates
-                    .tmux
-                    .as_ref()
-                    .unwrap()
-                    .endpoint
-                    .codex_session_id
-                    .clone(),
+                session_id: new_candidates.tmux.as_ref().unwrap().endpoint.codex_session_id.clone(),
                 tmux: new_candidates.tmux.clone(),
                 ..Default::default()
             },
@@ -632,13 +547,7 @@ async fn split_journal_context_recovery(native: bool, public_cli: bool) {
         )),
         Req::IdentityContext {
             facts: crate::proto::IdentityFacts {
-                session_id: new_candidates
-                    .tmux
-                    .as_ref()
-                    .unwrap()
-                    .endpoint
-                    .codex_session_id
-                    .clone(),
+                session_id: new_candidates.tmux.as_ref().unwrap().endpoint.codex_session_id.clone(),
                 tmux: new_candidates.tmux,
                 ..Default::default()
             },
@@ -652,37 +561,13 @@ async fn split_journal_context_recovery(native: bool, public_cli: bool) {
     assert_eq!(ordinary.data["snapshot"]["binding"], binding_before_read);
     let host_replay = replay_from_journal(&host.root, &host.journal_path).unwrap();
     let project_replay = replay_from_journal(&runtime.root, &runtime.journal_path).unwrap();
-    assert_eq!(
-        host_replay.global.lookup_unique_tmux_pane_route(pane),
-        Some(&staged)
-    );
-    assert_eq!(
-        project_replay
-            .global
-            .lookup_binding_for(&old.route_scope(), &old.binding_id),
-        Some(&staged)
-    );
+    assert_eq!(host_replay.global.lookup_unique_tmux_pane_route(pane), Some(&staged));
+    assert_eq!(project_replay.global.lookup_binding_for(&old.route_scope(), &old.binding_id), Some(&staged));
     assert_eq!(json!(project_replay.workers[worker]), json!(staged_worker));
-    assert_eq!(
-        project_replay
-            .global
-            .lookup_master_grant_for(&old.route_scope(), &old.binding_id),
-        Some(&grant_before_recovery)
-    );
-    assert_eq!(
-        json!(project_replay.notification_subscriptions),
-        staged_subscriptions
-    );
-    assert!(project_replay
-        .global
-        .command_receipts
-        .contains_key(&committed_ids.0));
-    assert_eq!(
-        project_replay.global.command_receipts[&committed_ids.0]
-            .operation_id
-            .as_str(),
-        committed_ids.1
-    );
+    assert_eq!(project_replay.global.lookup_master_grant_for(&old.route_scope(), &old.binding_id), Some(&grant_before_recovery));
+    assert_eq!(json!(project_replay.notification_subscriptions), staged_subscriptions);
+    assert!(project_replay.global.command_receipts.contains_key(&committed_ids.0));
+    assert_eq!(project_replay.global.command_receipts[&committed_ids.0].operation_id.as_str(), committed_ids.1);
     std::fs::remove_dir_all(host_root).unwrap();
     std::fs::remove_dir_all(project_root).unwrap();
 }
@@ -741,7 +626,9 @@ async fn startup_reconciles_a_lagged_same_pane_master_route() {
         None,
     );
     manager
-        .reconcile_same_pane_master_routes(&crate::server::binding_slot::BindingControlSet::new())
+        .reconcile_same_pane_master_routes(
+            &crate::server::binding_slot::BindingControlSet::new(),
+        )
         .unwrap();
     let endpoint = binding
         .tmux_endpoint
@@ -859,7 +746,9 @@ async fn superseded_same_pane_master_does_not_fence_project_route() {
     // reconciler must not resurrect it.
     assert!(manager.same_pane_master_route_ready(&runtime).is_ok());
     manager
-        .reconcile_same_pane_master_routes(&crate::server::binding_slot::BindingControlSet::new())
+        .reconcile_same_pane_master_routes(
+            &crate::server::binding_slot::BindingControlSet::new(),
+        )
         .unwrap();
     assert!(manager.same_pane_master_route_ready(&runtime).is_ok());
     {
@@ -1016,14 +905,11 @@ async fn cross_scope_pane_claimant_takes_the_pane_without_fencing_the_project_ro
         );
     }
     let ready = manager.same_pane_master_route_ready(&runtime);
-    assert!(
-        ready.is_ok(),
-        "an evicted claimant must not fence another project's route: {ready:?}"
-    );
+    assert!(ready.is_ok(), "an evicted claimant must not fence another project's route: {ready:?}");
     assert!(
         manager
             .reconcile_same_pane_master_routes(
-                &crate::server::binding_slot::BindingControlSet::new()
+                &crate::server::binding_slot::BindingControlSet::new(),
             )
             .is_ok(),
         "the startup reconciler must skip the evicted claimant instead of failing"
@@ -1249,8 +1135,9 @@ async fn closed_same_pane_peer_keeps_the_pane_ownership() {
         Some(test_candidates(closer_worker).unwrap()),
     );
     assert!(closer.ok, "{closer:?}");
-    // Free-text promotion only pauses while Jenny stays with the displaced
-    // incumbent; the typed restore_master confirmation is the explicit takeover.
+    // This fixture needs a closer, not unknown adjudication. Free-text
+    // promotion pauses while Jenny is still held by the displaced incumbent;
+    // the typed restore_master confirmation is the explicit takeover.
     runtime.commit(&[Event::AgentPresenceObserved {
         presence: crate::server::name_state::AgentPresenceRecord {
             project_scope: scope.project_scope_id.as_str().into(),

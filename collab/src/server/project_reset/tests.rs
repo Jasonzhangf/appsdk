@@ -971,3 +971,288 @@ fn stale_superseded_route_is_retired_without_touching_live_unknown_route() {
     std::fs::remove_dir_all(root).unwrap();
     std::fs::remove_dir_all(other_root).unwrap();
 }
+
+fn dsh_fixture() -> (
+    Arc<Server>,
+    PathBuf,
+    Arc<ProjectRuntimeManager>,
+    ProjectContext,
+    RuntimeBinding,
+) {
+    let (server, root) = peer_tests::test_server();
+    let server = Arc::new(server);
+    let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
+    let context = ProjectContext::for_registered_root_with_app(
+        &root,
+        AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap(),
+    )
+    .unwrap();
+    manager.install_runtime(
+        &ProjectRuntimeManager::route_key(&context),
+        server.clone(),
+        None,
+    );
+    let transport = crate::proto::SelectedTransport {
+        kind: crate::proto::TransportKind::Dsh,
+        endpoint: Some("unix:///tmp/dsh-gateway-reset-test.sock".into()),
+        namespace: Some("gateway-runtime".into()),
+        session_id: Some("dsh-session-A".into()),
+        thread_id: Some("agentA".into()),
+        tmux_endpoint: None,
+        capabilities: Vec::new(),
+        self_check: String::new(),
+    };
+    let binding = RuntimeBinding::new_with_session(
+        context.project_scope.clone(),
+        context.app_scope_id.clone(),
+        AgentId::new("dsh-master").unwrap(),
+        RuntimeId::new("dsh-runtime").unwrap(),
+        BindingId::new("dsh-binding").unwrap(),
+        1,
+        Some(crate::identity::SessionId::new("dsh-session-A").unwrap()),
+        Some(NativeThreadId::new("agentA").unwrap()),
+    )
+    .unwrap();
+    let grant = global_state::MasterGrant::new(
+        context.project_scope.clone(),
+        context.app_scope_id.clone(),
+        binding.agent_id.clone(),
+        "project",
+        "test",
+        "test authorized master",
+        binding.binding_id.clone(),
+        1,
+        now_ms(),
+    )
+    .unwrap();
+    server
+        .commit_checked(&[
+            Event::Registered {
+                worker: state::WorkerRec {
+                    id: "dsh-master".into(),
+                    token: "dsh-token".into(),
+                    cwd: root.display().to_string(),
+                    registered_ms: now_ms(),
+                    transport: Some(transport),
+                },
+            },
+            Event::MasterAssigned {
+                worker_id: "dsh-master".into(),
+                assigned_by: "test".into(),
+                approval: None,
+                assigned_ms: now_ms(),
+            },
+            Event::GlobalProjectRegistered {
+                registration: ProjectRegistration::new(
+                    context.project_scope.clone(),
+                    context.app_scope_id.clone(),
+                )
+                .unwrap(),
+            },
+            Event::GlobalRuntimeBound {
+                binding: binding.clone(),
+            },
+            Event::GlobalCurrentThreadRouteSet {
+                binding: binding.clone(),
+            },
+            Event::GlobalMasterGranted { grant },
+        ])
+        .unwrap();
+    let identity_dir = server
+        .host_paths
+        .state_root()
+        .join("identities")
+        .join("dsh-master");
+    std::fs::create_dir_all(&identity_dir).unwrap();
+    std::fs::write(
+        identity_dir.join("identity.json"),
+        serde_json::to_vec(&crate::identity::Identity {
+            worker_id: "dsh-master".into(),
+            token: "dsh-token".into(),
+            project_scope: Some(context.project_scope.clone()),
+            runtime: Some(crate::identity::RuntimeIdentity {
+                agent_id: binding.agent_id.clone(),
+                runtime_id: binding.runtime_id.clone(),
+                appserver_id: binding.app_scope_id.clone(),
+                endpoint_generation: binding.endpoint_generation,
+                binding_id: binding.binding_id.clone(),
+                session_id: binding.session_id.clone(),
+                native_thread_id: binding.native_thread_id.clone(),
+            }),
+            transport: Some(crate::proto::SelectedTransport {
+                kind: crate::proto::TransportKind::Dsh,
+                endpoint: Some("unix:///tmp/dsh-gateway-reset-test.sock".into()),
+                namespace: Some("gateway-runtime".into()),
+                session_id: Some("dsh-session-A".into()),
+                thread_id: Some("agentA".into()),
+                tmux_endpoint: None,
+                capabilities: Vec::new(),
+                self_check: String::new(),
+            }),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    (server, root, manager, context, binding)
+}
+
+#[test]
+fn online_reset_preserves_live_dsh_binding_and_identity() {
+    let (server, root, manager, context, binding) = dsh_fixture();
+    let scope = context.project_scope.as_str().to_owned();
+    append_host_route_record(
+        &manager.route_journal,
+        &HostRouteRecord {
+            version: 1,
+            op: "register".into(),
+            app_scope_id: context.app_scope_id.as_str().into(),
+            project_scope: scope.clone(),
+            canonical_root: root.display().to_string(),
+            storage_root: root.display().to_string(),
+            registered_ms: now_ms(),
+        },
+    )
+    .unwrap();
+    populate(&server, "dsh-master", "dsh");
+
+    // A same-scope non-DSH worker is disposable project state.
+    server
+        .commit_checked(&[Event::Registered {
+            worker: state::WorkerRec {
+                id: "stale-worker".into(),
+                token: "stale-token".into(),
+                cwd: scope.clone(),
+                registered_ms: now_ms(),
+                transport: None,
+            },
+        }])
+        .unwrap();
+
+    // An unrelated project keeps its worker, registration and current route.
+    let other_root = root.join("other-project");
+    std::fs::create_dir_all(&other_root).unwrap();
+    let other_scope = ProjectScopeId::new(other_root.display().to_string()).unwrap();
+    let other_app = AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
+    let other_binding = RuntimeBinding::new_with_session(
+        other_scope.clone(),
+        other_app.clone(),
+        AgentId::new("other-worker").unwrap(),
+        RuntimeId::new("other-runtime").unwrap(),
+        BindingId::new("other-binding").unwrap(),
+        1,
+        Some(crate::identity::SessionId::new("other-session").unwrap()),
+        Some(NativeThreadId::new("other-thread").unwrap()),
+    )
+    .unwrap();
+    server
+        .commit_checked(&[
+            Event::Registered {
+                worker: state::WorkerRec {
+                    id: "other-worker".into(),
+                    token: "other-token".into(),
+                    cwd: other_scope.as_str().to_owned(),
+                    registered_ms: now_ms(),
+                    transport: None,
+                },
+            },
+            Event::GlobalProjectRegistered {
+                registration: ProjectRegistration::new(other_scope.clone(), other_app).unwrap(),
+            },
+            Event::GlobalRuntimeBound {
+                binding: other_binding.clone(),
+            },
+            Event::GlobalCurrentThreadRouteSet {
+                binding: other_binding.clone(),
+            },
+        ])
+        .unwrap();
+
+    let result = manager.reset_project(&context, "dsh-master", "dsh-token");
+    assert!(result.ok, "DSH project reset must succeed: {result:?}");
+
+    {
+        let state = server.state.lock().unwrap();
+        let worker = state
+            .workers
+            .get("dsh-master")
+            .expect("live DSH gateway worker must survive reset");
+        assert_eq!(worker.token, "dsh-token");
+        assert_eq!(
+            worker
+                .transport
+                .as_ref()
+                .map(|transport| transport.kind.clone()),
+            Some(crate::proto::TransportKind::Dsh)
+        );
+        let project = state
+            .global
+            .projects
+            .get(&scope)
+            .expect("DSH project registration must survive reset");
+        assert!(project.runtime_bindings.contains_key("dsh-binding"));
+        assert!(
+            project.master_grants.is_empty(),
+            "reset must not revive the old master grant"
+        );
+        assert!(
+            state
+                .global
+                .current_thread_routes
+                .values()
+                .any(|current| current == &binding),
+            "the DSH current thread route must survive reset"
+        );
+        assert!(state.tasks.is_empty(), "project tasks must be cleared");
+        assert!(state.msgs.is_empty(), "project messages must be cleared");
+        assert!(
+            state.notification_subscriptions.is_empty(),
+            "project subscriptions must be cleared"
+        );
+        assert!(
+            !state.workers.contains_key("stale-worker"),
+            "a non-DSH same-scope worker is disposable project state"
+        );
+        assert!(state.workers.contains_key("other-worker"));
+        assert!(state
+            .global
+            .projects
+            .get(other_scope.as_str())
+            .is_some_and(|project| project.runtime_bindings.contains_key("other-binding")));
+        assert!(state
+            .global
+            .current_thread_routes
+            .values()
+            .any(|current| current == &other_binding));
+    }
+
+    assert!(
+        server
+            .host_paths
+            .state_root()
+            .join("identities")
+            .join("dsh-master")
+            .join("identity.json")
+            .is_file(),
+        "retained DSH identity must survive reset for restart recovery"
+    );
+    assert!(
+        root.join(".agent-collab").is_dir(),
+        "retained DSH route must stay replayable after restart"
+    );
+    let records = load_host_route_records(&manager.route_journal).unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].app_scope_id, context.app_scope_id.as_str());
+
+    let replayed = replay_from_journal(&root, &server.journal_path).unwrap();
+    assert!(
+        replayed.workers.contains_key("dsh-master"),
+        "journal replay must preserve the live DSH worker"
+    );
+    assert!(replayed
+        .global
+        .projects
+        .get(&scope)
+        .is_some_and(|project| project.runtime_bindings.contains_key("dsh-binding")));
+    assert!(replayed.tasks.is_empty());
+    std::fs::remove_dir_all(root).unwrap();
+}

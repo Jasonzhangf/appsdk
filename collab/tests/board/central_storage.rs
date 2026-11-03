@@ -135,6 +135,7 @@ fn command_public_in(
         .args(args)
         .current_dir(cwd)
         .env("COLLAB_STATE_DIR", &fixture.host_state)
+        .env("HOME", fixture.root.join("home"))
         .env("COLLAB_APPSERVER_SOCKET", &fixture.app_socket)
         .env_remove("CODEX_APP_SERVER_SOCKET")
         .env_remove("COLLAB_APPSERVER_NAMESPACE")
@@ -180,6 +181,7 @@ fn start_daemon_from(fixture: &mut AppFixture, daemon_root: &std::path::Path) {
         .arg("serve")
         .current_dir(daemon_root)
         .env("COLLAB_STATE_DIR", &fixture.host_state)
+        .env("HOME", fixture.root.join("home"))
         .env("CODEX_HOME", fixture.root.join("home"))
         .env_remove("COLLAB_APPSERVER_SOCKET")
         .env_remove("CODEX_APP_SERVER_SOCKET")
@@ -193,20 +195,10 @@ fn start_daemon_from(fixture: &mut AppFixture, daemon_root: &std::path::Path) {
         .stdout(daemon_log.try_clone().expect("clone serve log"))
         .stderr(daemon_log);
     fixture.daemon = Some(command.spawn().expect("spawn owned serve child"));
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !fixture.host_state.join("server.sock").exists() && Instant::now() < deadline {
-        if let Some(status) = fixture.daemon.as_mut().unwrap().try_wait().unwrap() {
-            panic!(
-                "test-owned serve exited before readiness: {status}: {}",
-                std::fs::read_to_string(fixture.root.join("test-daemon-host.log"))
-                    .unwrap_or_default()
-            );
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    assert!(
-        fixture.host_state.join("server.sock").exists(),
-        "owned serve did not create socket"
+    super::daemon_readiness::wait_for_ping(
+        fixture.daemon.as_mut().unwrap(),
+        &fixture.host_state.join("server.sock"),
+        Duration::from_secs(5),
     );
 }
 

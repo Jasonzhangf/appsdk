@@ -542,6 +542,33 @@ impl BindingControlSet {
         before - self.slots.len()
     }
 
+    /// Remove every slot and pending effect in the given project scope except
+    /// the active DSH gateway binding. Project reset must keep the current DSH
+    /// session, communication API endpoint, and committed binding so the live
+    /// gateway can recover the receive loop after reset and daemon restart.
+    /// Non-DSH slots and unfinished handoff intents for the scope are retired.
+    pub(crate) fn remove_scope_except_dsh(&mut self, project_scope: &str) -> usize {
+        let before = self.slots.len();
+        self.slots.retain(|slot| {
+            let in_scope = slot.identity_key.project_scope.as_str() == project_scope;
+            if !in_scope {
+                return true;
+            }
+            let is_dsh = slot
+                .active_binding()
+                .is_some_and(|value| value.transport.kind == crate::proto::TransportKind::Dsh);
+            // Keep the active DSH slot as the retained host-owned gateway
+            // binding. A retired or non-DSH slot in this scope is disposable.
+            is_dsh
+        });
+        // Unfinished handoff intents are disposable project state. Reset must
+        // not revive a name move that never completed, not even for the
+        // retained DSH slot.
+        self.effects
+            .retain(|effect| effect.project_scope.as_str() != project_scope);
+        before - self.slots.len()
+    }
+
     pub(crate) fn validate(&self) -> Result<(), SlotError> {
         for (index, slot) in self.slots.iter().enumerate() {
             slot.validate()?;

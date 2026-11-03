@@ -2346,3 +2346,168 @@ fn anonymous_send_to_directory_target_enqueues_registered_dsh_receiver_without_n
     );
     fixture.finish();
 }
+
+/// Public DSH project reset/restart recovery scenario.
+///
+/// This is the black-box acceptance for the DSH reset retention finding:
+/// register a live DSH worker, promote it to project master, send one project
+/// message, run the public `collab reset --project`, restart the daemon with a
+/// cache-empty gateway, and then confirm the same session, endpoint, binding
+/// and credential recover without `collab context` or `Register` while the old
+/// project message is gone.
+///
+/// It binds an isolated Unix-domain gateway socket and an owned daemon socket.
+/// The current implementation sandbox denies socket bind with EPERM, so this
+/// test is compiled but not executed here. It must be run by Jenny in a
+/// permitted environment. `project_reset::tests::
+/// online_reset_preserves_live_dsh_binding_and_identity` carries the equivalent
+/// no-socket evidence for the same retentions in the meantime.
+#[test]
+#[ignore = "binds isolated Unix-domain sockets; run by Jenny in a permitted environment"]
+fn dsh_project_reset_preserves_live_session_binding_across_restart() {
+    let mut fixture = Fixture::new_requiring_enrollment();
+    fixture.start_daemon();
+
+    let facts = json!({"dsh":{
+        "endpoint":fixture.gateway.endpoint(),
+        "runtime_id":"gateway-runtime", "agent_id":"agentA",
+        "session_id":"agentA", "cwd":fixture.root
+    }})
+    .to_string();
+    let enrolled = fixture.command(&["context", "--provide", &facts]);
+    assert!(enrolled.status.success(), "{}", rendered(&enrolled));
+    let (worker, identity) = only_identity(&fixture);
+    let token = identity["token"].as_str().expect("credential").to_owned();
+    let committed_runtime = identity["runtime"].clone();
+    let committed_transport = identity["transport"].clone();
+    let ctx = json!({
+        "app_scope_id": committed_runtime["appserver_id"],
+        "canonical_root": fixture.root,
+        "project_scope": identity["project_scope"],
+        "runtime_context": committed_runtime
+    });
+    assert!(fixture.gateway.is_enrolled("gateway-runtime", "agentA"));
+
+    // The public online reset authenticates the current project master.
+    let promoted = authority(
+        &fixture,
+        "MasterPromote",
+        &worker,
+        &token,
+        &ctx,
+        json!({"approval": "isolated DSH project reset restart recovery fixture"}),
+    );
+    assert_ok(&promoted);
+
+    let before = fixture.dsh_command(
+        &[
+            "sendmessage",
+            "--to",
+            &worker,
+            "--subject",
+            "reset-old",
+            "old project business message",
+        ],
+        "agentA",
+    );
+    assert!(before.status.success(), "{}", rendered(&before));
+    let before: Value = serde_json::from_slice(&before.stdout).expect("pre-reset send JSON");
+    assert_eq!(before["notification"], "dsh-wake-enqueued", "{before}");
+    let old_msg_id = before["msg_id"]
+        .as_str()
+        .expect("old message id")
+        .to_owned();
+
+    let reset = fixture.dsh_command(&["reset", "--project"], "agentA");
+    assert!(reset.status.success(), "{}", rendered(&reset));
+    let reset: Value = serde_json::from_slice(&reset.stdout).expect("reset JSON");
+    assert_eq!(reset["status"], "complete", "{reset}");
+    assert!(
+        fixture
+            .state
+            .join("identities")
+            .join(&worker)
+            .join("identity.json")
+            .is_file(),
+        "reset must retain the live DSH credential"
+    );
+
+    // Restart the daemon and drop the gateway's local enrollment cache. No
+    // `collab context` or `Register` follows; the committed binding must
+    // recover from reset durability alone.
+    let registrations_before_restart = fixture.registrations();
+    let enrollments_before_restart = fixture.gateway.register_peer_requests().len();
+    fixture.stop_daemon();
+    fixture.gateway.clear_enrollment();
+    fixture.start_daemon();
+    assert!(
+        fixture
+            .gateway
+            .wait_enrolled("gateway-runtime", "agentA", Duration::from_secs(8)),
+        "reset plus restart did not re-enroll the retained DSH binding"
+    );
+
+    let requests = fixture.gateway.register_peer_requests();
+    let replayed = requests
+        .iter()
+        .skip(enrollments_before_restart)
+        .find(|request| request["params"]["agentId"] == "agentA")
+        .expect("post-reset handoff for agentA");
+    assert_eq!(replayed["params"]["runtimeId"], "gateway-runtime");
+    assert_eq!(replayed["params"]["binding"]["workerId"], worker.as_str());
+    assert_runtime_context(&replayed["params"], &committed_runtime);
+    assert_eq!(
+        fixture.registrations(),
+        registrations_before_restart,
+        "reset recovery must not Register again"
+    );
+
+    let (restored_worker, restored) = only_identity(&fixture);
+    assert_eq!(restored_worker, worker);
+    assert_eq!(
+        restored["runtime"]["binding_id"], committed_runtime["binding_id"],
+        "reset must preserve the committed binding"
+    );
+    assert_eq!(
+        restored["runtime"]["session_id"], committed_runtime["session_id"],
+        "reset must preserve the live DSH session"
+    );
+    assert_eq!(
+        restored["transport"], committed_transport,
+        "reset must preserve the committed DSH endpoint and credential"
+    );
+
+    let after = fixture.dsh_command(
+        &[
+            "sendmessage",
+            "--to",
+            &worker,
+            "--subject",
+            "reset-new",
+            "new project message after reset",
+        ],
+        "agentA",
+    );
+    assert!(after.status.success(), "{}", rendered(&after));
+    let after: Value = serde_json::from_slice(&after.stdout).expect("post-reset send JSON");
+    assert_eq!(after["notification"], "dsh-wake-enqueued", "{after}");
+    let new_msg_id = after["msg_id"].as_str().expect("new message id").to_owned();
+
+    let mailbox = fixture.request(json!({"op":"MailboxRead","all":true,"worker_id":worker,
+        "token":token,"project_context":ctx}));
+    assert_ok(&mailbox);
+    let mailbox_text = mailbox.to_string();
+    assert!(
+        mailbox_text.contains(&new_msg_id),
+        "new post-reset message missing: {mailbox}"
+    );
+    assert!(
+        !mailbox_text.contains(&old_msg_id),
+        "reset must clear the old project message: {mailbox}"
+    );
+    assert!(
+        !mailbox_text.contains("old project business message"),
+        "reset must clear old project message bodies: {mailbox}"
+    );
+    fixture.finish();
+}

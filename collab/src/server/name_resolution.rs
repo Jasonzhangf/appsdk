@@ -628,8 +628,8 @@ pub(crate) fn plan_automatic_name_for_binding(
         requested_ms: super::now_ms(),
     };
     let route = binding.route_scope();
-    let is_master =
-        super::current_master_worker_id(state, Some(&route)).as_deref() == Some(binding.agent_id.as_str());
+    let is_master = super::current_master_worker_id(state, Some(&route)).as_deref()
+        == Some(binding.agent_id.as_str());
     let input = NameResolutionInput {
         project_scope: binding.project_scope.as_str().to_owned(),
         operation_id: operation_id.into(),
@@ -775,7 +775,9 @@ pub(crate) fn plan_name_resolution(
                 .filter(|holder| holder.session_id == request.caller_session_id);
             let first = matches.next();
             if matches.next().is_some() {
-                return Err("NAME_SESSION_CONFLICT: the current session matches multiple names".into());
+                return Err(
+                    "NAME_SESSION_CONFLICT: the current session matches multiple names".into(),
+                );
             }
             first
         } else {
@@ -791,25 +793,7 @@ pub(crate) fn plan_name_resolution(
                 (Some(anchor), Some(names)) => match_pane_holder(names, anchor)?,
                 _ => None,
             };
-            let worker_holder = names
-                .map(|names| {
-                    names
-                        .values()
-                        .filter(|holder| holder.worker_id == request.caller_worker_id)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
             if let Some(holder) = pane_holder {
-                holder.name.clone()
-            } else if worker_holder.len() > 1 {
-                return Err(
-                    "NAME_WORKER_CONFLICT: the current worker matches multiple names".into(),
-                );
-            } else if let Some(holder) = worker_holder.first() {
-                // A session change on the same stable worker id keeps the
-                // worker's existing name when no pane anchor identifies a
-                // specific placement. Ownership follows the current worker,
-                // not the retired session.
                 holder.name.clone()
             } else if input.is_current_master {
                 "Jenny".into()

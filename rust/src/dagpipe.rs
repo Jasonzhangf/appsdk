@@ -493,7 +493,7 @@ fn design_graph_ids() -> [&'static str; 35] {
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 182] {
+fn design_graph_operator_names() -> [&'static str; 184] {
     [
         "appsdk.collab_startup.read_state",
         "appsdk.collab_startup.resolve_storage",
@@ -510,6 +510,8 @@ fn design_graph_operator_names() -> [&'static str; 182] {
         "appsdk.collab_send.classify_address_form",
         "appsdk.collab_send.resolve_recipient_route",
         "appsdk.collab_send.resolve_reply_route",
+        "appsdk.collab_send.authenticate_source",
+        "appsdk.collab_send.authorize_scope",
         "appsdk.collab_send.commit_durable_message",
         "appsdk.collab_send.notify_recipient",
         "appsdk.collab_send.emit_send_result",

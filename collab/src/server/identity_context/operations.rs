@@ -182,15 +182,15 @@ impl ProjectRuntimeManager {
                 }
                 Ok(None) => {}
             }
-            let (observed_facts, observed_pane) =
+            let (observed_facts, _) =
                 match self.observe_identity_facts_with_pane(&context, &request.facts) {
                     Ok(observed) => observed,
                     Err(error) => return (self.host.clone(), Resp::err(format!("{error:#}"))),
                 };
-            let invocation_pane = observed_pane;
+            let invocation_tmux_session_name = observed_facts.tmux_session_name.clone();
             return match self.reconcile_identity_context(
                 context.clone(),
-                observed_facts.clone(),
+                observed_facts,
                 None,
                 None,
                 true,
@@ -201,7 +201,7 @@ impl ProjectRuntimeManager {
                             &runtime,
                             &context,
                             &request,
-                            invocation_pane.as_ref(),
+                            invocation_tmux_session_name.as_deref(),
                             &mut response,
                         ) {
                             return (runtime, Resp::err_data(error, response.data));
@@ -346,11 +346,11 @@ impl ProjectRuntimeManager {
                 return (self.host.clone(), Resp::err(error));
             }
         };
-        let (facts, observed_pane) = match self.preflight_identity_facts(
+        let facts = match self.preflight_identity_facts(
             &context,
             continuation_facts.unwrap_or_else(|| request.facts.clone()),
         ) {
-            Ok(facts) => facts,
+            Ok((facts, _)) => facts,
             Err(PreflightIdentityError::MissingFacts(data)) => {
                 // missing_facts is reported before admission: no operation
                 // record exists and no side effect ran. Release the consumed
@@ -371,10 +371,7 @@ impl ProjectRuntimeManager {
                 return (self.host.clone(), Resp::err(format!("{error:#}")));
             }
         };
-        // Name inheritance uses only this invocation's caller pane. A
-        // continuation rebuilt from an admitted saved transport is not a
-        // current caller pane and must never seed the anchor.
-        let invocation_pane = observed_pane;
+        let invocation_tmux_session_name = facts.tmux_session_name.clone();
         let admitted = match self.admit_identity_operation(&context, &request) {
             Ok(operation) => operation,
             Err(error) => return (self.host.clone(), Resp::err(error)),
@@ -414,25 +411,11 @@ impl ProjectRuntimeManager {
             ),
         }
         .with_continuation(context.clone(), request.clone());
-        // Carry this invocation's live-observed pane plus exact cwd into the
-        // nested Register, so the first name decision anchors on the pane
-        // instead of taking a pool name that the later context resolution
-        // would then inherit. No second observation and no saved transport.
-        let outer_name_pane_anchor = invocation_pane.as_ref().and_then(|pane| {
-            request
-                .invocation_cwd
-                .as_deref()
-                .filter(|cwd| !cwd.trim().is_empty())
-                .map(|cwd| crate::server::name_state::NamePaneAnchor {
-                    pane: pane.clone(),
-                    cwd: cwd.to_owned(),
-                })
-        });
-        let outer_binding = if outer_name_pane_anchor.is_some() {
-            outer_binding.with_name_pane_anchor(outer_name_pane_anchor)
-        } else {
-            outer_binding
-        };
+        // Carry the daemon-observed fixed tmux session name into the nested
+        // Register. Pane and cwd are transport placement and never enter the
+        // first name decision.
+        let outer_binding =
+            outer_binding.with_name_tmux_session_name(facts.tmux_session_name.clone());
         let approved_identity = approved.as_ref().map(|approved| approved.identity.clone());
         // Do not hold identity serialization across selected-path dispatch.
         drop(_guard);
@@ -512,7 +495,7 @@ impl ProjectRuntimeManager {
                                 &runtime,
                                 &context,
                                 &request,
-                                invocation_pane.as_ref(),
+                                invocation_tmux_session_name.as_deref(),
                                 &mut response,
                             )
                         });
@@ -989,9 +972,10 @@ impl ProjectRuntimeManager {
         runtime: &Server,
         context: &ProjectContext,
         request: &IdentityContextRequest,
-        observed_pane: Option<&crate::proto::TmuxPaneAnchor>,
+        tmux_session_name: Option<&str>,
         response: &mut Resp,
     ) -> Result<name_resolution::NameResolutionEffects, String> {
+        let tmux_session_name = tmux_session_name.map(str::to_owned);
         let identity: identity::Identity =
             serde_json::from_value(response.data["identity_receipt"].clone())
                 .map_err(|error| format!("NAME_IDENTITY_REQUIRED: {error}"))?;
@@ -1037,16 +1021,6 @@ impl ProjectRuntimeManager {
         } else {
             &request.operation_id
         };
-        let pane_anchor = request
-            .invocation_cwd
-            .as_deref()
-            .filter(|cwd| !cwd.trim().is_empty())
-            .and_then(|cwd| {
-                observed_pane.map(|pane| crate::server::name_state::NamePaneAnchor {
-                    pane: pane.clone(),
-                    cwd: cwd.to_owned(),
-                })
-            });
         let authorization = request
             .grant_approval
             .as_ref()
@@ -1060,14 +1034,16 @@ impl ProjectRuntimeManager {
                 operation,
                 &request.invocation,
                 intent.clone(),
-                pane_anchor.clone(),
+                tmux_session_name.as_deref(),
             )?
         } else {
             None
         };
         let mut anchor_rename = None;
-        if let Some(target) = rename_target.as_deref() {
-            anchor_rename = rename_anchor(runtime, &identity.worker_id, target)?;
+        if let Some(preview) = &rename_target {
+            if preview.requires_rename() {
+                anchor_rename = rename_anchor(runtime, &identity.worker_id, preview.target())?;
+            }
         }
         let outcome = if let Some((operation, verdict, evidence)) = control {
             let adjudication = super::name_stewardship::adjudicate(
@@ -1105,7 +1081,7 @@ impl ProjectRuntimeManager {
                 &request.invocation,
                 intent.clone(),
                 authorization,
-                pane_anchor.clone(),
+                tmux_session_name.as_deref(),
             ) {
                 Ok(Some(value)) => value,
                 Ok(None) => {
@@ -1116,7 +1092,7 @@ impl ProjectRuntimeManager {
                         &request.invocation,
                         intent,
                         authorization,
-                        pane_anchor,
+                        tmux_session_name,
                     ) {
                         Ok(outcome) if outcome["outcome"] == "committed" => outcome,
                         Ok(outcome) => {
@@ -1200,7 +1176,7 @@ impl ProjectRuntimeManager {
         invocation: &str,
         intent: Option<name_resolution::NameIntent>,
         authorization: Option<&str>,
-        pane_anchor: Option<crate::server::name_state::NamePaneAnchor>,
+        tmux_session_name: Option<&str>,
     ) -> Result<Option<serde_json::Value>, String> {
         let _register = self.register_gate.lock().unwrap();
         let mut state = runtime.state.lock().unwrap();
@@ -1218,7 +1194,7 @@ impl ProjectRuntimeManager {
                 operation_id,
                 invocation,
                 intent,
-                pane_anchor.clone(),
+                tmux_session_name,
                 &effect_id,
             )?,
             None => match name_resolution::plan_automatic_name_locked(
@@ -1227,7 +1203,7 @@ impl ProjectRuntimeManager {
                 worker_id,
                 operation_id,
                 invocation,
-                pane_anchor.clone(),
+                tmux_session_name,
             )? {
                 Some(target) => {
                     let durability = self.commit_control_name_decision_locked(
@@ -1237,7 +1213,6 @@ impl ProjectRuntimeManager {
                         &target,
                         operation_id,
                         &effect_id,
-                        pane_anchor.clone(),
                     )?;
                     if durability == crate::server::binding_store::Durability::Unknown {
                         return Err(
@@ -1262,7 +1237,7 @@ impl ProjectRuntimeManager {
             invocation,
             intent,
             authorization,
-            pane_anchor,
+            tmux_session_name.map(str::to_owned),
         )
         .map_err(|error| {
             format!(

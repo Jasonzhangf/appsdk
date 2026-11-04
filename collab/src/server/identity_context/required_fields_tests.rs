@@ -155,6 +155,7 @@ fn dsh_facts_do_not_compete_with_launcher_tmux_ancestry() {
         dsh: Some(dsh.clone()),
         dsh_session_id: Some(dsh.session_id.clone()),
         caller_pid: Some(std::process::id()),
+        tmux_session_name: Some("caller-claimed-alice".into()),
         ..IdentityFacts::default()
     };
 
@@ -162,7 +163,27 @@ fn dsh_facts_do_not_compete_with_launcher_tmux_ancestry() {
 
     assert_eq!(observed.dsh, Some(dsh));
     assert!(observed.tmux.is_none());
+    assert!(observed.tmux_session_name.is_none());
     assert!(observed.caller_pid.is_none());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn caller_supplied_tmux_session_name_requires_live_pane_observation() {
+    let (host, root) = test_server();
+    let manager = recovery_manager(Arc::new(host));
+    let context = recovery_context(&root);
+    let facts = IdentityFacts {
+        tmux_session_name: Some("Alice".into()),
+        ..IdentityFacts::default()
+    };
+
+    let observed = manager.observe_identity_facts(&context, &facts).unwrap();
+
+    assert!(
+        observed.tmux_session_name.is_none(),
+        "a caller-controlled tmux name is not an observed name fact"
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 

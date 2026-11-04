@@ -117,7 +117,7 @@ pub(crate) fn resolve_registered_name_with_authorization(
     invocation: &str,
     intent: Option<NameIntent>,
     authorization: Option<&str>,
-    pane_anchor: Option<super::name_state::NamePaneAnchor>,
+    tmux_session_name: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let mut state = server.state.lock().unwrap();
     let (mut outcome, notices) = resolve_registered_name_locked(
@@ -128,7 +128,7 @@ pub(crate) fn resolve_registered_name_with_authorization(
         invocation,
         intent,
         authorization,
-        pane_anchor,
+        tmux_session_name,
     )?;
     drop(state);
     outcome["notifications"] =
@@ -149,7 +149,7 @@ pub(crate) fn resolve_registered_name_locked(
     invocation: &str,
     intent: Option<NameIntent>,
     authorization: Option<&str>,
-    pane_anchor: Option<super::name_state::NamePaneAnchor>,
+    tmux_session_name: Option<String>,
 ) -> Result<(serde_json::Value, Vec<Event>), String> {
     use super::name_state::NameBindingReference;
     let route = super::server_route_scope(server, &state)?
@@ -192,7 +192,7 @@ pub(crate) fn resolve_registered_name_locked(
         request,
         intent,
         is_current_master: is_master,
-        pane_anchor,
+        tmux_session_name,
     };
     let plan = plan_name_resolution(&state, &input)?;
     let mut events = Vec::new();
@@ -332,7 +332,7 @@ pub(crate) fn ensure_worker_control_name(
         request,
         intent: None,
         is_current_master: is_master,
-        pane_anchor: None,
+        tmux_session_name: None,
     };
     let plan = plan_name_resolution(&state, &input)?;
     let occupancy = match &plan.decision {
@@ -359,8 +359,8 @@ pub(crate) fn preview_registered_name(
     operation_id: &str,
     invocation: &str,
     intent: Option<NameIntent>,
-    pane_anchor: Option<super::name_state::NamePaneAnchor>,
-) -> Result<Option<String>, String> {
+    tmux_session_name: Option<&str>,
+) -> Result<Option<NamePreview>, String> {
     use super::name_state::NameBindingReference;
     let state = server.state.lock().unwrap();
     let route = super::server_route_scope(server, &state)?
@@ -403,8 +403,14 @@ pub(crate) fn preview_registered_name(
         {
             return Err("NAME_OPERATION_CONFLICT: resume the saved name recovery operation".into());
         }
-        return Ok((saved.progress == NameRecoveryProgress::Applied)
-            .then(|| saved.target_name.clone()));
+        let target = saved.target_name.clone();
+        return Ok((saved.progress == NameRecoveryProgress::Applied).then(|| {
+            if tmux_session_name == Some(target.as_str()) {
+                NamePreview::AlreadyAnchored { target }
+            } else {
+                NamePreview::Rename { target }
+            }
+        }));
     }
     let is_master =
         super::current_master_worker_id(&state, Some(&route)).as_deref() == Some(worker_id);
@@ -414,7 +420,7 @@ pub(crate) fn preview_registered_name(
         request,
         intent,
         is_current_master: is_master,
-        pane_anchor,
+        tmux_session_name: tmux_session_name.map(str::to_owned),
     };
     let plan = plan_name_resolution(&state, &input)?;
     match &plan.decision {
@@ -425,7 +431,12 @@ pub(crate) fn preview_registered_name(
                     .as_ref()
                     .is_some_and(|intent| intent.user_authorized) =>
         {
-            Ok(Some(occupancy.name.clone()))
+            let target = occupancy.name.clone();
+            Ok(Some(if tmux_session_name == Some(target.as_str()) {
+                NamePreview::AlreadyAnchored { target }
+            } else {
+                NamePreview::Rename { target }
+            }))
         }
         _ => Ok(None),
     }
@@ -461,9 +472,27 @@ pub(crate) struct NameResolutionInput {
     pub intent: Option<NameIntent>,
     /// Read from the authoritative role owner, never inferred from a label.
     pub is_current_master: bool,
-    /// The caller's currently observed pane and exact invocation cwd. Only the
-    /// third name anchor; never a stored identity or historical scan.
-    pub pane_anchor: Option<super::name_state::NamePaneAnchor>,
+    /// TUI name anchor observed by the daemon for this invocation. Pane,
+    /// socket and cwd are transport placement and never enter this decision.
+    pub tmux_session_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NamePreview {
+    AlreadyAnchored { target: String },
+    Rename { target: String },
+}
+
+impl NamePreview {
+    pub(crate) fn target(&self) -> &str {
+        match self {
+            Self::AlreadyAnchored { target } | Self::Rename { target } => target,
+        }
+    }
+
+    pub(crate) fn requires_rename(&self) -> bool {
+        matches!(self, Self::Rename { .. })
+    }
 }
 
 #[derive(Debug)]
@@ -505,7 +534,7 @@ pub(crate) fn plan_explicit_name_move(
     operation_id: &str,
     invocation: &str,
     intent: &NameIntent,
-    pane_anchor: Option<super::name_state::NamePaneAnchor>,
+    tmux_session_name: Option<&str>,
 ) -> Result<Option<PlannedNameMove>, String> {
     let state = server.state.lock().unwrap();
     plan_explicit_name_move_locked(
@@ -515,7 +544,7 @@ pub(crate) fn plan_explicit_name_move(
         operation_id,
         invocation,
         intent,
-        pane_anchor,
+        tmux_session_name,
     )
 }
 
@@ -529,7 +558,7 @@ pub(crate) fn plan_explicit_name_move_locked(
     operation_id: &str,
     invocation: &str,
     intent: &NameIntent,
-    pane_anchor: Option<super::name_state::NamePaneAnchor>,
+    tmux_session_name: Option<&str>,
 ) -> Result<Option<PlannedNameMove>, String> {
     use super::name_state::NameBindingReference;
 
@@ -571,7 +600,7 @@ pub(crate) fn plan_explicit_name_move_locked(
         request,
         intent: Some(intent.clone()),
         is_current_master: is_master,
-        pane_anchor,
+        tmux_session_name: tmux_session_name.map(str::to_owned),
     };
     let plan = plan_name_resolution(&state, &input)?;
     match plan.decision {
@@ -602,7 +631,7 @@ pub(crate) fn plan_automatic_name(
     worker_id: &str,
     operation_id: &str,
     invocation: &str,
-    pane_anchor: Option<super::name_state::NamePaneAnchor>,
+    tmux_session_name: Option<&str>,
 ) -> Result<Option<String>, String> {
     let state = server.state.lock().unwrap();
     plan_automatic_name_locked(
@@ -611,7 +640,7 @@ pub(crate) fn plan_automatic_name(
         worker_id,
         operation_id,
         invocation,
-        pane_anchor,
+        tmux_session_name,
     )
 }
 
@@ -624,7 +653,7 @@ pub(crate) fn plan_automatic_name_locked(
     worker_id: &str,
     operation_id: &str,
     invocation: &str,
-    pane_anchor: Option<super::name_state::NamePaneAnchor>,
+    tmux_session_name: Option<&str>,
 ) -> Result<Option<String>, String> {
     use super::name_state::NameBindingReference;
 
@@ -666,7 +695,7 @@ pub(crate) fn plan_automatic_name_locked(
         request,
         intent: None,
         is_current_master: is_master,
-        pane_anchor,
+        tmux_session_name: tmux_session_name.map(str::to_owned),
     };
     let plan = plan_name_resolution(&state, &input)?;
     match plan.decision {
@@ -685,7 +714,7 @@ pub(crate) fn plan_automatic_name_for_binding(
     operation_id: &str,
     invocation: &str,
     binding: &super::RuntimeBinding,
-    pane_anchor: Option<super::name_state::NamePaneAnchor>,
+    tmux_session_name: Option<&str>,
 ) -> Result<Option<String>, String> {
     if binding.agent_id.as_str().trim().is_empty() {
         return Err("NAME_IDENTITY_REQUIRED: candidate binding has no worker".into());
@@ -717,7 +746,7 @@ pub(crate) fn plan_automatic_name_for_binding(
         request,
         intent: None,
         is_current_master: is_master,
-        pane_anchor,
+        tmux_session_name: tmux_session_name.map(str::to_owned),
     };
     let plan = plan_name_resolution(state, &input)?;
     match plan.decision {
@@ -792,30 +821,6 @@ pub(crate) fn names_held_by_worker(
     names
 }
 
-/// Call with the current locked State and an admitted stable worker ID. No
-/// transport, historical label, activity, or old-session gate decides ownership.
-fn match_pane_holder<'a>(
-    names: &'a std::collections::HashMap<String, NameOccupancy>,
-    anchor: &super::name_state::NamePaneAnchor,
-) -> Result<Option<&'a NameOccupancy>, String> {
-    let mut matches = names.values().filter(|holder| {
-        holder.pane_anchor.as_ref().is_some_and(|stored| {
-            stored.pane.socket_path == anchor.pane.socket_path
-                && stored.pane.pane_id == anchor.pane.pane_id
-                && stored.cwd == anchor.cwd
-        })
-    });
-    let first = matches.next();
-    let second = matches.next();
-    match (first, second) {
-        (Some(holder), None) => Ok(Some(holder)),
-        (Some(_), Some(_)) => {
-            Err("NAME_PANE_CONFLICT: the current pane and cwd match multiple names".into())
-        }
-        (None, _) => Ok(None),
-    }
-}
-
 pub(crate) fn plan_name_resolution(
     state: &State,
     input: &NameResolutionInput,
@@ -844,8 +849,7 @@ pub(crate) fn plan_name_resolution(
     }
     let names = state.name_occupancies.get(&input.project_scope);
     let target = if let Some(intent) = &input.intent {
-        // An explicit name is decided before any pane lookup. A pane conflict
-        // must not block an authorized explicit rename.
+        // An explicit name is decided before any anchor lookup.
         intent.requested_name.clone()
     } else {
         // Same sessionID inherits the current name, including Jenny. A name is
@@ -862,37 +866,28 @@ pub(crate) fn plan_name_resolution(
         } else {
             None
         };
+        let fixed_holder = input.tmux_session_name.as_deref().and_then(|name| {
+            state.name_occupancy(&input.project_scope, name)
+        });
+        if let (Some(session_holder), Some(fixed_holder)) =
+            (same_session.as_ref(), fixed_holder)
+        {
+            if session_holder.name != fixed_holder.name {
+                return Err(format!(
+                    "NAME_TMUX_SESSION_CONFLICT: fixed tmux session {} names {} but session {} names {}",
+                    input.tmux_session_name.as_deref().unwrap_or_default(),
+                    fixed_holder.name,
+                    request.caller_session_id,
+                    session_holder.name
+                ));
+            }
+        }
         if let Some(holder) = same_session {
             holder.name.clone()
+        } else if let Some(holder) = fixed_holder {
+            holder.name.clone()
         } else {
-            // Only after explicit and same-session anchors are absent does the
-            // exact pane endpoint plus invocation cwd participate. The lookup
-            // stays in this function so a conflict can be returned directly.
-            let pane_holder = match (input.pane_anchor.as_ref(), names) {
-                (Some(anchor), Some(names)) => match_pane_holder(names, anchor)?,
-                _ => None,
-            };
-            let worker_holder = names
-                .map(|names| {
-                    names
-                        .values()
-                        .filter(|holder| holder.worker_id == request.caller_worker_id)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            if let Some(holder) = pane_holder {
-                holder.name.clone()
-            } else if worker_holder.len() > 1 {
-                return Err(
-                    "NAME_WORKER_CONFLICT: the current worker matches multiple names".into(),
-                );
-            } else if let Some(holder) = worker_holder.first() {
-                // A session change on the same stable worker id keeps the
-                // worker's existing name when no pane anchor identifies a
-                // specific placement. Ownership follows the current worker,
-                // not the retired session.
-                holder.name.clone()
-            } else if input.is_current_master {
+            if input.is_current_master {
                 "Jenny".into()
             } else {
                 ORDINARY_NAME_POOL
@@ -966,7 +961,10 @@ pub(crate) fn plan_name_resolution(
                 && holder.session_id == request.caller_session_id =>
         {
             let mut holder = holder.clone();
-            holder.pane_anchor = input.pane_anchor.clone();
+            // Legacy pane placement is not a current name anchor. Clear it
+            // when this record is next committed so recovery uses session and
+            // fixed tmux name only.
+            holder.pane_anchor = None;
             holder
         }
         _ => NameOccupancy {
@@ -978,7 +976,7 @@ pub(crate) fn plan_name_resolution(
                 .checked_add(1)
                 .ok_or("NAME_REVISION_EXHAUSTED")?,
             updated_ms: request.requested_ms,
-            pane_anchor: input.pane_anchor.clone(),
+            pane_anchor: None,
         },
     };
     let rename_from = if input

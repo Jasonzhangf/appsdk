@@ -1012,7 +1012,8 @@ impl ProjectRuntimeManager {
             let mut register_effect_id = None;
             let mut register_control_first = self.register_control_first_hook(
                 &runtime,
-                register_binding.and_then(|binding| binding.name_pane_anchor().cloned()),
+                register_binding
+                    .and_then(|binding| binding.name_tmux_session_name().map(str::to_owned)),
                 &mut register_effect_id,
             );
             let response = if let Err(error) = validate_request_context_with_register_approval(
@@ -1077,7 +1078,8 @@ impl ProjectRuntimeManager {
             let mut register_effect_id = None;
             let mut register_control_first = self.register_control_first_hook(
                 &runtime,
-                register_binding.and_then(|binding| binding.name_pane_anchor().cloned()),
+                register_binding
+                    .and_then(|binding| binding.name_tmux_session_name().map(str::to_owned)),
                 &mut register_effect_id,
             );
             let response = if let Err(error) = validate_request_context_with_register_approval(
@@ -1142,7 +1144,8 @@ impl ProjectRuntimeManager {
             let mut register_effect_id = None;
             let mut register_control_first = self.register_control_first_hook(
                 &self.host,
-                register_binding.and_then(|binding| binding.name_pane_anchor().cloned()),
+                register_binding
+                    .and_then(|binding| binding.name_tmux_session_name().map(str::to_owned)),
                 &mut register_effect_id,
             );
             let response = if let Err(error) = validate_request_context_with_register_approval(
@@ -1229,7 +1232,7 @@ impl ProjectRuntimeManager {
         let mut register_effect_id = None;
         let mut register_control_first = self.register_control_first_hook(
             &runtime,
-            register_binding.and_then(|binding| binding.name_pane_anchor().cloned()),
+            register_binding.and_then(|binding| binding.name_tmux_session_name().map(str::to_owned)),
             &mut register_effect_id,
         );
         let response = if let Err(error) = validate_request_context_with_register_approval(

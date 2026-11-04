@@ -17,6 +17,24 @@ fn tmux_session_name(fixture: &Fixture, pane: &Pane) -> String {
     .to_owned()
 }
 
+fn route_records(content: &str) -> Vec<Value> {
+    let records: Vec<Value> = content
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("route journal record is JSON"))
+        .collect();
+    assert!(
+        records
+            .iter()
+            .filter(|record| record.get("op").is_none())
+            .all(|record| record["kind"] == "binding_control"),
+        "{records:?}"
+    );
+    records
+        .into_iter()
+        .filter(|record| record.get("op").is_some())
+        .collect()
+}
+
 #[test]
 fn public_context_fixes_the_tmux_session_name_and_restores_by_it() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
@@ -174,10 +192,7 @@ fn public_context_bootstraps_an_empty_resident_route() {
     );
     let records = fs::read_to_string(fixture.host_routes())
         .expect("fresh public context must publish a host route journal");
-    let records: Vec<Value> = records
-        .lines()
-        .map(|line| serde_json::from_str(line).expect("route journal record is JSON"))
-        .collect();
+    let records = route_records(&records);
     assert_eq!(records.len(), 1, "{records:?}");
     assert_eq!(records[0]["op"], "register");
     assert_eq!(records[0]["project_scope"], root);
@@ -204,10 +219,7 @@ fn public_context_registers_a_non_git_workspace_without_existing_baseline() {
 
     let records = fs::read_to_string(fixture.host_routes())
         .expect("first registration must publish a host route journal");
-    let records: Vec<Value> = records
-        .lines()
-        .map(|line| serde_json::from_str(line).expect("route journal record is JSON"))
-        .collect();
+    let records = route_records(&records);
     assert_eq!(records.len(), 1, "{records:?}");
     assert_eq!(records[0]["op"], "register");
     assert_eq!(records[0]["project_scope"], root);
@@ -319,10 +331,7 @@ fn public_context_rebuilds_a_missing_resident_route_after_restart() {
     );
     let records = fs::read_to_string(fixture.host_routes())
         .expect("public context must recreate the host route journal");
-    let records: Vec<Value> = records
-        .lines()
-        .map(|line| serde_json::from_str(line).expect("route journal record is JSON"))
-        .collect();
+    let records = route_records(&records);
     assert_eq!(records.len(), 1, "{records:?}");
     assert_eq!(records[0]["op"], "register");
     assert_eq!(records[0]["project_scope"], root);
@@ -412,6 +421,7 @@ fn persisted_context_uses_daemon_observation_without_adjacent_admission() {
 }
 
 #[test]
+#[cfg(feature = "context-cancel-test-hooks")]
 fn single_context_master_peer_intent_overrides_and_replays_after_restart() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (mut fixture, pane) = Fixture::isolated("single-role");
@@ -2097,7 +2107,7 @@ fn seeded_name_and_worker(payload: &Value) -> (String, String) {
 }
 
 #[test]
-fn pane_inheritance_same_pane_and_cwd_hands_the_name_to_a_new_agent_session() {
+fn same_fixed_tmux_session_name_hands_name_to_new_agent_session() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (fixture, pane) = Fixture::isolated("pane-inherit-same-pane");
     let cwd = PathBuf::from(canonical_root(&fixture));
@@ -2120,17 +2130,17 @@ fn pane_inheritance_same_pane_and_cwd_hands_the_name_to_a_new_agent_session() {
     assert_eq!(
         snapshot["name_resolution"]["name"].as_str(),
         Some(seed_name.as_str()),
-        "the same pane and cwd must hand the first name to a new agent session: {inherited}"
+        "the fixed tmux session name must hand the first name to a new agent session: {inherited}"
     );
     assert_eq!(
         snapshot["identity"]["display_name"].as_str(),
         Some(seed_name.as_str()),
         "{inherited}"
     );
-    assert_ne!(
+    assert_eq!(
         snapshot["identity"]["worker_id"].as_str(),
         Some(seed_worker.as_str()),
-        "a different agent session is a new carrier, not a same-session resume: {inherited}"
+        "the fixed tmux session name keeps the identity holder and updates its agent session: {inherited}"
     );
     let occupancy = committed_occupancy(&fixture, &seed_name);
     assert_eq!(
@@ -2140,28 +2150,27 @@ fn pane_inheritance_same_pane_and_cwd_hands_the_name_to_a_new_agent_session() {
     assert_eq!(
         occupancy["occupancy"]["session_id"].as_str(),
         Some("pane-inherit-same-pane-other-session"),
-        "the name moves to the new agent session, so this is pane inheritance and not a session match: {occupancy}"
+        "the name moves to the new agent session, so this is fixed-name inheritance and not a session match: {occupancy}"
     );
-    assert_eq!(
-        occupancy["occupancy"]["pane_anchor"]["pane"]["pane_id"].as_str(),
-        Some(pane.pane_id.as_str()),
-        "{occupancy}"
-    );
-    assert_eq!(
-        occupancy["occupancy"]["pane_anchor"]["cwd"].as_str(),
-        Some(cwd.to_string_lossy().as_ref()),
-        "{occupancy}"
+    assert!(
+        occupancy["occupancy"]["pane_anchor"].is_null(),
+        "new occupancy must not carry a legacy pane anchor: {occupancy}"
     );
 }
 
 #[test]
-fn pane_inheritance_keeps_one_name_for_the_same_agent_session_across_pane_and_cwd() {
+fn same_agent_session_keeps_name_across_placements() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (fixture, pane) = Fixture::isolated("pane-inherit-same-session");
     let root = PathBuf::from(canonical_root(&fixture));
     let seed = fixture.registered_context("pane-inherit-same-session-seed", &pane);
     let (seed_name, seed_worker) = seeded_name_and_worker(&seed);
-    let other_pane = second_pane(&fixture, "pane-inherit-same-session-other", pane.server_pid);
+    let other_pane = same_session_pane(
+        &fixture,
+        "pane-inherit-same-session-other",
+        pane.server_pid,
+        &pane,
+    );
     let other_cwd = root.join("invocation-sub");
     fs::create_dir_all(&other_cwd).expect("create a second invocation directory");
 
@@ -2196,10 +2205,15 @@ fn pane_inheritance_keeps_one_name_for_the_same_agent_session_across_pane_and_cw
         Some(pane.session_anchor.as_str()),
         "{occupancy}"
     );
+    assert_eq!(
+        tmux_session_name(&fixture, &other_pane),
+        seed_name,
+        "moving to another pane in the same tmux session keeps the fixed name"
+    );
 }
 
 #[test]
-fn pane_inheritance_does_not_follow_a_different_pane() {
+fn different_agent_session_does_not_inherit_name_across_panes() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (fixture, pane) = Fixture::isolated("pane-inherit-other-pane");
     let root = PathBuf::from(canonical_root(&fixture));
@@ -2223,7 +2237,7 @@ fn pane_inheritance_does_not_follow_a_different_pane() {
         .to_owned();
     assert_ne!(
         fresh_name, seed_name,
-        "a pane match also requires the same pane, so a different pane must not inherit the first name: {fresh}"
+        "a different pane with a different fixed tmux session name must not inherit the first name: {fresh}"
     );
     assert_ne!(
         snapshot["identity"]["worker_id"].as_str(),
@@ -2236,10 +2250,9 @@ fn pane_inheritance_does_not_follow_a_different_pane() {
         Some("pane-inherit-other-pane-session"),
         "{occupancy}"
     );
-    assert_eq!(
-        occupancy["occupancy"]["pane_anchor"]["pane"]["pane_id"].as_str(),
-        Some(other_pane.pane_id.as_str()),
-        "the fresh name is anchored to the pane that actually called: {occupancy}"
+    assert!(
+        occupancy["occupancy"]["pane_anchor"].is_null(),
+        "a fresh name must not carry a legacy pane anchor: {occupancy}"
     );
     assert_eq!(
         committed_occupancy(&fixture, &seed_name)["occupancy"]["worker_id"].as_str(),
@@ -2249,7 +2262,7 @@ fn pane_inheritance_does_not_follow_a_different_pane() {
 }
 
 #[test]
-fn pane_inheritance_does_not_follow_a_different_cwd() {
+fn different_agent_session_does_not_inherit_name_across_invocation_cwd() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (fixture, pane) = Fixture::isolated("pane-inherit-other-cwd");
     let root = PathBuf::from(canonical_root(&fixture));
@@ -2257,6 +2270,11 @@ fn pane_inheritance_does_not_follow_a_different_cwd() {
     let (seed_name, seed_worker) = seeded_name_and_worker(&seed);
     let other_cwd = root.join("invocation-sub");
     fs::create_dir_all(&other_cwd).expect("create a second invocation directory");
+    let renamed_session = format!("{}-other-cwd", seed_name);
+    tmux(
+        &fixture.tmux_socket,
+        &["rename-session", "-t", seed_name.as_str(), renamed_session.as_str()],
+    );
 
     let fresh = pane_identity_context(
         &fixture,
@@ -2274,7 +2292,7 @@ fn pane_inheritance_does_not_follow_a_different_cwd() {
         .to_owned();
     assert_ne!(
         fresh_name, seed_name,
-        "a pane match also requires the exact invocation cwd, so a different cwd must not inherit the first name: {fresh}"
+        "a different invocation cwd with a different fixed tmux session name must not inherit the first name: {fresh}"
     );
     assert_ne!(
         snapshot["identity"]["worker_id"].as_str(),
@@ -2287,15 +2305,9 @@ fn pane_inheritance_does_not_follow_a_different_cwd() {
         Some("pane-inherit-other-cwd-session"),
         "{occupancy}"
     );
-    assert_eq!(
-        occupancy["occupancy"]["pane_anchor"]["pane"]["pane_id"].as_str(),
-        Some(pane.pane_id.as_str()),
-        "{occupancy}"
-    );
-    assert_eq!(
-        occupancy["occupancy"]["pane_anchor"]["cwd"].as_str(),
-        Some(other_cwd.to_string_lossy().as_ref()),
-        "the fresh name is anchored to the cwd that actually called: {occupancy}"
+    assert!(
+        occupancy["occupancy"]["pane_anchor"].is_null(),
+        "a fresh name must not carry a legacy pane anchor: {occupancy}"
     );
 }
 

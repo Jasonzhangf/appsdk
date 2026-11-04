@@ -130,11 +130,13 @@ impl ProjectRuntimeManager {
     }
 
     /// Build the durable handoff intent for one control-first decision. A
-    /// no-change carrier keeps no effect. Automatic session/pane inheritance
-    /// needs the displaced holder's exact worker/session as `previous`; the
-    /// explicit rename carries the caller's previous names plus the displaced
-    /// holder of the target name. When no handoff applies, `None` keeps the
-    /// committed control slot without a pending effect.
+    /// no-change carrier keeps no effect. Automatic fixed-name or session
+    /// inheritance needs the displaced holder's exact worker/session as
+    /// `previous`; the explicit rename carries the caller's previous names plus
+    /// the displaced holder of the target name. When no handoff applies, `None`
+    /// keeps the committed control slot without a pending effect. Pane data is
+    /// retained only as a legacy deserialization field and is never written by
+    /// a new decision.
     fn handoff_effect(
         state: &State,
         context: &ProjectContext,
@@ -146,7 +148,6 @@ impl ProjectRuntimeManager {
         kind: crate::server::binding_slot::PendingEffectKind,
         source_names: Vec<String>,
         moves_existing_names: bool,
-        pane_anchor: Option<crate::server::name_state::NamePaneAnchor>,
     ) -> Option<crate::server::binding_slot::PendingEffect> {
         let target_carrier_is_current = state
             .name_occupancy(context.project_scope.as_str(), target_name)
@@ -195,7 +196,7 @@ impl ProjectRuntimeManager {
             occupancy_revision,
             source_names,
             moves_existing_names,
-            pane_anchor,
+            pane_anchor: None,
             created_ms: crate::server::now_ms(),
         })
     }
@@ -296,7 +297,6 @@ impl ProjectRuntimeManager {
         target_name: &str,
         operation_id: &str,
         effect_id: &str,
-        pane_anchor: Option<crate::server::name_state::NamePaneAnchor>,
     ) -> Result<crate::server::binding_store::Durability, String> {
         let (binding, transport) =
             Self::control_binding_and_transport(state, context, worker_id, "name decision")?;
@@ -326,7 +326,6 @@ impl ProjectRuntimeManager {
             crate::server::binding_slot::PendingEffectKind::Name,
             Vec::new(),
             false,
-            pane_anchor,
         ) {
             Some(effect) => self
                 .commit_control_change_locked(
@@ -361,7 +360,7 @@ impl ProjectRuntimeManager {
         &self,
         runtime: &Server,
         prepared: &crate::server::PreparedRegisterEnvelope,
-        pane_anchor: Option<crate::server::name_state::NamePaneAnchor>,
+        tmux_session_name: Option<&str>,
     ) -> Result<String, String> {
         let crate::server::state::TypedCommand::RegisterWorker {
             binding, worker, ..
@@ -391,7 +390,7 @@ impl ProjectRuntimeManager {
             &prepared.nested_operation_id,
             "register",
             binding,
-            pane_anchor.clone(),
+            tmux_session_name,
         )?
         else {
             return Err(
@@ -418,7 +417,6 @@ impl ProjectRuntimeManager {
             crate::server::binding_slot::PendingEffectKind::Register,
             Vec::new(),
             false,
-            pane_anchor,
         );
         let key = crate::server::binding_slot::IdentityBindingKey::new(
             context.project_scope.clone(),
@@ -781,14 +779,14 @@ impl ProjectRuntimeManager {
     fn register_control_first_hook<'a>(
         &'a self,
         runtime: &'a Arc<Server>,
-        pane_anchor: Option<crate::server::name_state::NamePaneAnchor>,
+        tmux_session_name: Option<String>,
         effect_id_out: &'a mut Option<String>,
     ) -> impl FnMut(&crate::server::PreparedRegisterEnvelope) -> Result<(), String> + 'a {
         move |prepared| {
             *effect_id_out = Some(self.publish_register_control_before_consume(
                 runtime,
                 prepared,
-                pane_anchor.clone(),
+                tmux_session_name.as_deref(),
             )?);
             Ok(())
         }
@@ -845,7 +843,7 @@ impl ProjectRuntimeManager {
         operation_id: &str,
         invocation: &str,
         intent: &name_resolution::NameIntent,
-        pane_anchor: Option<crate::server::name_state::NamePaneAnchor>,
+        tmux_session_name: Option<&str>,
         effect_id: &str,
     ) -> Result<Option<String>, String> {
         let Some(planned) = name_resolution::plan_explicit_name_move_locked(
@@ -855,7 +853,7 @@ impl ProjectRuntimeManager {
             operation_id,
             invocation,
             intent,
-            pane_anchor.clone(),
+            tmux_session_name,
         )?
         else {
             return Ok(None);
@@ -887,7 +885,6 @@ impl ProjectRuntimeManager {
             crate::server::binding_slot::PendingEffectKind::Name,
             planned.source_names.clone(),
             intent.moves_existing_names,
-            pane_anchor,
         );
         let commit = match effect {
             Some(effect) => self.commit_control_change_locked(

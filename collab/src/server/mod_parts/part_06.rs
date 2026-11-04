@@ -1706,7 +1706,7 @@ fn consume_register_typed(
     transport: &SelectedTransport,
     prepared: PreparedRegisterEnvelope,
     approval: Option<&RegisterApprovalProof>,
-    name_pane_anchor: Option<crate::server::name_state::NamePaneAnchor>,
+    name_tmux_session_name: Option<String>,
 ) -> Resp {
     let registered_at = match &prepared.typed.command {
         TypedCommand::RegisterWorker { worker, .. } => worker.registered_ms,
@@ -1725,7 +1725,7 @@ fn consume_register_typed(
                 "register",
                 None,
                 None,
-                name_pane_anchor,
+                name_tmux_session_name,
             ) {
                 Ok(resolution) => resolution,
                 Err(error) => {
@@ -1826,7 +1826,7 @@ fn register_typed_observed(
     app_scope: Option<AppServerId>,
     reuse_existing: bool,
     register_approval: Option<&RegisterApprovalProof>,
-    name_pane_anchor: Option<crate::server::name_state::NamePaneAnchor>,
+    name_tmux_session_name: Option<String>,
     before_consume: Option<&mut dyn FnMut(&PreparedRegisterEnvelope) -> Result<(), String>>,
 ) -> Resp {
     let prepared = match prepare_register_typed(
@@ -1856,7 +1856,7 @@ fn register_typed_observed(
             transport,
             prepared,
             register_approval,
-            name_pane_anchor,
+            name_tmux_session_name,
         );
     clear_context_cancel_operation();
     crate::server::clear_context_register_start_binding();
@@ -2332,7 +2332,8 @@ fn handle_register_with_app_scope_inner_bound(
             app_scope,
             reuse_existing,
             outer_binding.and_then(RegisterOuterBinding::approval),
-            outer_binding.and_then(|binding| binding.name_pane_anchor().cloned()),
+            outer_binding
+                .and_then(|binding| binding.name_tmux_session_name().map(str::to_owned)),
             Some(&mut composed_before_consume),
         );
         if resp.ok {
@@ -2371,7 +2372,7 @@ fn handle_register_with_app_scope_inner_bound(
         app_scope,
         false,
         outer_binding.and_then(RegisterOuterBinding::approval),
-        outer_binding.and_then(|binding| binding.name_pane_anchor().cloned()),
+        outer_binding.and_then(|binding| binding.name_tmux_session_name().map(str::to_owned)),
         Some(&mut composed_before_consume),
     )
 }

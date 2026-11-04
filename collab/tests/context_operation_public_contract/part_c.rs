@@ -294,6 +294,7 @@ fn session_recovery_single_archive_without_runtime_is_migrated() {
 }
 
 #[test]
+#[cfg(feature = "context-cancel-test-hooks")]
 fn c15_direct_restore_cancellation_does_not_retire_a_duplicate_carrier() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
     let mut harness = CancellationHarness::start(&unique_root("c15-hook"));
@@ -337,6 +338,7 @@ fn c15_direct_restore_cancellation_does_not_retire_a_duplicate_carrier() {
 }
 
 #[test]
+#[cfg(feature = "context-cancel-test-hooks")]
 fn c12_sigint_before_admission_returns_local_cancelled_without_daemon_operation() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
     let mut harness = CancellationHarness::start(&unique_root("c12-hook"));
@@ -551,6 +553,7 @@ fn c12_sigint_before_admission_returns_local_cancelled_without_daemon_operation(
 }
 
 #[test]
+#[cfg(feature = "context-cancel-test-hooks")]
 fn c13_cancellation_after_owner_begins_never_claims_cancelled() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
 

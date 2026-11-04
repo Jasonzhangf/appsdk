@@ -102,11 +102,16 @@ impl ProjectRuntimeManager {
             // cannot become a competing transport candidate.
             facts.tmux = None;
             facts.tmux_anchor = None;
+            facts.tmux_session_name = None;
             facts.caller_pid = None;
             facts.pane_hint = None;
             return Ok((facts, None));
         }
         let Some(caller_pid) = facts.caller_pid else {
+            // A caller-supplied tmux name without a live daemon observation is
+            // not an identity fact. The name owner must fail closed to a fresh
+            // name rather than trust request payload it did not observe.
+            facts.tmux_session_name = None;
             return Ok((facts, None));
         };
         let mut endpoints =
@@ -130,9 +135,9 @@ impl ProjectRuntimeManager {
         }
         endpoints.sort();
         endpoints.dedup();
-        // tmux observation is optional placement only. A missing socket, stale
-        // metadata, or any observation failure must not block context
-        // registration: the Codex session anchor already identifies the actor.
+        // tmux placement is optional, but a live pane without its fixed session
+        // name is a missing name fact. Fail closed instead of guessing from the
+        // agent session or caller-controlled environment.
         let observed = crate::client::adapters::tmux::observe_caller(
             endpoints,
             caller_pid,
@@ -150,6 +155,12 @@ impl ProjectRuntimeManager {
             .and_then(|endpoint| {
                 crate::client::adapters::tmux::observe_session_name(endpoint).ok()
             });
+        if observed.is_some() && facts.tmux_session_name.is_none() {
+            return Err(anyhow::anyhow!(
+                "IDENTITY_TMUX_SESSION_NAME_REQUIRED: the daemon observed a tmux pane \
+                 but could not read its fixed session name; refusing to register or recover by name"
+            ));
+        }
         facts.tmux = observed.map(|mut endpoint| {
             // Native anchors remain transport metadata. Selecting the peer
             // still uses the observed project/session before these anchors.
@@ -204,9 +215,7 @@ impl ProjectRuntimeManager {
                 let holder = state
                     .name_occupancies
                     .get(context.project_scope.as_str())
-                    .and_then(|names| {
-                        names.values().find(|holder| holder.name == name)
-                    });
+                    .and_then(|names| names.values().find(|holder| holder.name == name));
                 if let Some(holder) = holder {
                     let mut named = project
                         .runtime_bindings
@@ -216,8 +225,7 @@ impl ProjectRuntimeManager {
                                 && state.workers.contains_key(binding.agent_id.as_str())
                         })
                         .collect::<Vec<_>>();
-                    named
-                        .sort_by_key(|binding| std::cmp::Reverse(binding.endpoint_generation));
+                    named.sort_by_key(|binding| std::cmp::Reverse(binding.endpoint_generation));
                     if let Some(binding) = named.first().copied() {
                         return Ok(self.recovered_binding_identity(context, binding, &state));
                     }

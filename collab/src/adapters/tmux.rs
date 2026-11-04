@@ -434,22 +434,64 @@ pub fn session_name_if_live(endpoint: &TmuxEndpoint) -> Result<Option<String>, S
 pub fn rename_session(endpoint: &TmuxEndpoint, target: &str) -> Result<(), String> {
     validate_endpoint(endpoint)?;
     validate_session_name(target)?;
-    if observe_session_name(endpoint)? == target {
+    let previous = observe_session_name(endpoint)?;
+    if previous == target {
+        return Ok(());
+    }
+    if let Err(error) = tmux_command(
+        &endpoint.socket_path,
+        &["rename-session", "-t", &endpoint.tmux_session_id, target],
+    ) {
+        let error = format!("TMUX_SESSION_RENAME_FAILED: {error}");
+        return Err(append_rename_rollback_error(
+            error,
+            restore_session_name(endpoint, &previous),
+        ));
+    }
+    let observed = match observe_session_name(endpoint) {
+        Ok(observed) => observed,
+        Err(error) => {
+            let error = format!("TMUX_SESSION_RENAME_FAILED: readback: {error}");
+            return Err(append_rename_rollback_error(
+                error,
+                restore_session_name(endpoint, &previous),
+            ));
+        }
+    };
+    if observed != target {
+        let error =
+            format!("TMUX_SESSION_RENAME_FAILED: readback returned {observed} instead of {target}");
+        return Err(append_rename_rollback_error(
+            error,
+            restore_session_name(endpoint, &previous),
+        ));
+    }
+    Ok(())
+}
+
+fn restore_session_name(endpoint: &TmuxEndpoint, previous: &str) -> Result<(), String> {
+    if observe_session_name(endpoint)? == previous {
         return Ok(());
     }
     tmux_command(
         &endpoint.socket_path,
-        &["rename-session", "-t", &endpoint.tmux_session_id, target],
+        &["rename-session", "-t", &endpoint.tmux_session_id, previous],
     )
-    .map_err(|error| format!("TMUX_SESSION_RENAME_FAILED: {error}"))?;
-    let observed = observe_session_name(endpoint)
-        .map_err(|error| format!("TMUX_SESSION_RENAME_FAILED: readback: {error}"))?;
-    if observed != target {
+    .map_err(|error| error.to_string())?;
+    let observed = observe_session_name(endpoint)?;
+    if observed != previous {
         return Err(format!(
-            "TMUX_SESSION_RENAME_FAILED: readback returned {observed} instead of {target}"
+            "readback returned {observed} instead of the previous name {previous}"
         ));
     }
     Ok(())
+}
+
+fn append_rename_rollback_error(error: String, rollback: Result<(), String>) -> String {
+    match rollback {
+        Ok(()) => error,
+        Err(rollback) => format!("{error}; TMUX_SESSION_RENAME_ROLLBACK_FAILED: {rollback}"),
+    }
 }
 
 pub fn probe(endpoint: &TmuxEndpoint) -> Result<PanePresence, String> {
@@ -937,6 +979,10 @@ pub(crate) mod tests {
 
     impl TmuxFailureWrapper {
         pub(crate) fn fail_command(command_name: &str) -> Self {
+            Self::with_command_result(command_name, 71)
+        }
+
+        fn with_command_result(command_name: &str, exit_code: u8) -> Self {
             let output = Command::new("which").arg("tmux").output().unwrap();
             assert!(output.status.success());
             let real_tmux = String::from_utf8(output.stdout).unwrap().trim().to_owned();
@@ -953,7 +999,7 @@ pub(crate) mod tests {
             std::fs::write(
                 &wrapper,
                 format!(
-                    "#!/bin/sh\nfor arg do\n  if [ \"$arg\" = \"{command_name}\" ]; then\n    echo 'forced {command_name} failure' >&2\n    exit 71\n  fi\ndone\nexec '{real_tmux}' \"$@\"\n"
+                    "#!/bin/sh\nfor arg do\n  if [ \"$arg\" = \"{command_name}\" ]; then\n    echo 'forced {command_name} failure' >&2\n    exit {exit_code}\n  fi\ndone\nexec '{real_tmux}' \"$@\"\n"
                 ),
             )
             .unwrap();

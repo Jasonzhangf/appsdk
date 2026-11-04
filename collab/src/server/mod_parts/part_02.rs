@@ -99,11 +99,11 @@ pub(crate) struct RegisterOuterBinding {
     initial_business_receipts: Vec<String>,
     bound: Arc<Mutex<Option<(String, String)>>>,
     continuation: Option<register_reply::Continuation>,
-    /// This context invocation's live-observed pane plus exact cwd. It travels
-    /// with the context-driven Register so the first name decision uses the
-    /// same anchor the context owner will project, instead of committing a
-    /// pool name before the pane anchor is known.
-    name_pane_anchor: Option<crate::server::name_state::NamePaneAnchor>,
+    /// This context invocation's daemon-observed fixed tmux session name. It
+    /// travels with the context-driven Register so the first name decision uses
+    /// the same anchor the context owner will project. Pane and cwd stay on
+    /// the transport record and never enter the name decision.
+    name_tmux_session_name: Option<String>,
 }
 
 impl RegisterOuterBinding {
@@ -118,7 +118,7 @@ impl RegisterOuterBinding {
             initial_business_receipts: Vec::new(),
             bound: Arc::new(Mutex::new(None)),
             continuation: None,
-            name_pane_anchor: None,
+            name_tmux_session_name: None,
         }
     }
 
@@ -140,7 +140,7 @@ impl RegisterOuterBinding {
             initial_business_receipts: Vec::new(),
             bound: Arc::new(Mutex::new(None)),
             continuation: None,
-            name_pane_anchor: None,
+            name_tmux_session_name: None,
         }
     }
 
@@ -150,19 +150,18 @@ impl RegisterOuterBinding {
         self.approval.as_deref()
     }
 
-    pub(crate) fn with_name_pane_anchor(
+    pub(crate) fn with_name_tmux_session_name(
         mut self,
-        anchor: Option<crate::server::name_state::NamePaneAnchor>,
+        tmux_session_name: Option<String>,
     ) -> Self {
-        self.name_pane_anchor = anchor;
+        self.name_tmux_session_name = tmux_session_name;
         self
     }
 
-    /// The live pane+cwd this context invocation observed, if any. Only the
-    /// nested Register name decision consumes it; it never replaces the pane
-    /// source or persisted transport.
-    pub(crate) fn name_pane_anchor(&self) -> Option<&crate::server::name_state::NamePaneAnchor> {
-        self.name_pane_anchor.as_ref()
+    /// The daemon-observed fixed tmux session name this context invocation
+    /// carries, if any. Only the nested Register name decision consumes it.
+    pub(crate) fn name_tmux_session_name(&self) -> Option<&str> {
+        self.name_tmux_session_name.as_deref()
     }
 
     pub(crate) fn with_continuation(

@@ -540,7 +540,7 @@ fn historical_pane_draft_does_not_claim_current_session() {
 }
 
 #[test]
-fn resolver_prefers_current_scope_for_a_shared_pane_anchor() {
+fn resolver_prefers_current_scope_for_a_shared_session() {
     let root = test_root("ci-resolver-shared-pane-current-scope");
     let other = root.join("other-project");
     std::fs::create_dir_all(root.join(".agent-collab")).unwrap();

@@ -477,7 +477,7 @@ fn input(worker: &str, session: &str) -> NameResolutionInput {
         },
         intent: None,
         is_current_master: false,
-        pane_anchor: None,
+        tmux_session_name: None,
     }
 }
 
@@ -583,7 +583,7 @@ fn name_session_refresh_updates_all_open_work_and_preserves_closed_and_reassigne
 }
 
 #[test]
-fn same_worker_without_session_or_pane_anchor_does_not_inherit_old_name_work_or_mailbox() {
+fn same_worker_without_session_or_tmux_name_does_not_inherit_old_name_work_or_mailbox() {
     let mut state = State::default();
     committed(&mut state, &input("w1", "s1"));
     state
@@ -1143,16 +1143,6 @@ fn name_intent_rejects_unapproved_invalid_and_untyped_requests() {
         .contains("NAME_AUTHORIZATION_REQUIRED"));
 }
 
-fn pane_anchor(socket: &str, pane_id: &str, cwd: &str) -> NamePaneAnchor {
-    NamePaneAnchor {
-        pane: crate::proto::TmuxPaneAnchor {
-            socket_path: socket.into(),
-            pane_id: pane_id.into(),
-        },
-        cwd: cwd.into(),
-    }
-}
-
 fn planned_name(state: &State, i: &NameResolutionInput) -> String {
     match plan_name_resolution(state, i).unwrap().decision {
         NameResolutionDecision::Committed { occupancy, .. } => occupancy.name,
@@ -1223,10 +1213,12 @@ fn duplicate_session_names_report_conflict_without_selecting_a_holder() {
     assert_eq!(state.name_occupancies["/project"].len(), 2);
 }
 
+/// A one-time migration reads only the legacy record's identity (name plus
+/// session). The pane placement stays on the old record and cannot make a later
+/// caller inherit the name; a fixed-name caller resumes only the identity.
 #[test]
-fn same_pane_endpoint_and_exact_cwd_inherits_across_session() {
+fn legacy_pane_record_migrates_only_its_name_identity() {
     let mut state = State::default();
-    let anchor = pane_anchor("/tmp/collab-shared.sock", "%3", "/project/sub");
     state
         .name_occupancies
         .entry("/project".into())
@@ -1239,11 +1231,23 @@ fn same_pane_endpoint_and_exact_cwd_inherits_across_session() {
                 session_id: "s1".into(),
                 occupancy_revision: 1,
                 updated_ms: 1,
-                pane_anchor: Some(anchor.clone()),
+                pane_anchor: Some(NamePaneAnchor {
+                    pane: crate::proto::TmuxPaneAnchor {
+                        socket_path: "/tmp/collab-shared.sock".into(),
+                        pane_id: "%3".into(),
+                    },
+                    cwd: "/project/sub".into(),
+                }),
             },
         );
     let mut i = input("new", "s2");
-    i.pane_anchor = Some(anchor.clone());
+    i.tmux_session_name = None;
+    assert_eq!(
+        planned_name(&state, &i),
+        "Bob",
+        "a legacy pane record must not inherit by pane or worker id"
+    );
+    i.tmux_session_name = Some("Alice".into());
     let plan = plan_name_resolution(&state, &i).unwrap();
     let NameResolutionDecision::Committed { occupancy, .. } = &plan.decision else {
         panic!("{:?}", plan.decision);
@@ -1251,45 +1255,39 @@ fn same_pane_endpoint_and_exact_cwd_inherits_across_session() {
     assert_eq!(occupancy.name, "Alice");
     assert_eq!(occupancy.worker_id, "new");
     assert_eq!(occupancy.session_id, "s2");
-    assert_eq!(occupancy.pane_anchor, Some(anchor));
+    assert_eq!(occupancy.pane_anchor, None);
 }
 
 #[test]
-fn pane_anchor_requires_exact_pane_and_cwd() {
-    for caller_anchor in [
-        // Same pane, different invocation directory.
-        pane_anchor("/tmp/collab-shared.sock", "%3", "/project/other"),
-        // Same directory, different pane.
-        pane_anchor("/tmp/collab-shared.sock", "%4", "/project/sub"),
-        // Same %N on a different tmux server.
-        pane_anchor("/tmp/collab-other.sock", "%3", "/project/sub"),
-    ] {
-        let mut state = State::default();
-        state
-            .name_occupancies
-            .entry("/project".into())
-            .or_default()
-            .insert(
-                "Alice".into(),
-                NameOccupancy {
-                    name: "Alice".into(),
-                    worker_id: "old".into(),
-                    session_id: "s1".into(),
-                    occupancy_revision: 1,
-                    updated_ms: 1,
-                    pane_anchor: Some(pane_anchor("/tmp/collab-shared.sock", "%3", "/project/sub")),
-                },
-            );
-        let mut i = input("new", "s2");
-        i.pane_anchor = Some(caller_anchor);
-        assert_eq!(planned_name(&state, &i), "Bob");
-    }
-}
-
-#[test]
-fn pane_anchor_inherits_jenny_without_copying_master_grant() {
+fn fixed_tmux_session_name_resumes_its_unique_typed_occupancy() {
     let mut state = State::default();
-    let anchor = pane_anchor("/tmp/collab-shared.sock", "%3", "/project/sub");
+    committed(&mut state, &input("old", "s1"));
+    let mut i = input("new", "s2");
+    i.tmux_session_name = Some("Alice".into());
+    let plan = plan_name_resolution(&state, &i).unwrap();
+    let NameResolutionDecision::Committed { occupancy, .. } = &plan.decision else {
+        panic!("{:?}", plan.decision);
+    };
+    assert_eq!(occupancy.name, "Alice");
+    assert_eq!(occupancy.worker_id, "new");
+    assert_eq!(occupancy.session_id, "s2");
+    assert_eq!(occupancy.pane_anchor, None);
+}
+
+#[test]
+fn fixed_tmux_session_name_conflicts_with_a_different_session_name() {
+    let mut state = State::default();
+    committed(&mut state, &input("alice", "s1"));
+    committed(&mut state, &input("bob", "s2"));
+    let mut i = input("alice", "s1");
+    i.tmux_session_name = Some("Bob".into());
+    let error = plan_name_resolution(&state, &i).unwrap_err();
+    assert!(error.starts_with("NAME_TMUX_SESSION_CONFLICT:"), "{error}");
+}
+
+#[test]
+fn fixed_session_name_inherits_jenny_without_copying_master_grant() {
+    let mut state = State::default();
     state
         .name_occupancies
         .entry("/project".into())
@@ -1302,11 +1300,11 @@ fn pane_anchor_inherits_jenny_without_copying_master_grant() {
                 session_id: "s1".into(),
                 occupancy_revision: 1,
                 updated_ms: 1,
-                pane_anchor: Some(anchor.clone()),
+                pane_anchor: None,
             },
         );
     let mut i = input("new", "s2");
-    i.pane_anchor = Some(anchor);
+    i.tmux_session_name = Some("Jenny".into());
     let plan = plan_name_resolution(&state, &i).unwrap();
     let NameResolutionDecision::Committed { occupancy, .. } = &plan.decision else {
         panic!("{:?}", plan.decision);

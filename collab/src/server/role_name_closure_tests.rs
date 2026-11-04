@@ -176,7 +176,7 @@ fn role_name_closure_clear_revokes_misaligned_legacy_grant_in_one_commit() {
 }
 
 #[test]
-fn role_name_closure_uses_only_explicit_session_or_pane_anchors_for_jenny_name() {
+fn role_name_closure_uses_only_explicit_session_or_tmux_name_for_jenny_name() {
     let mut state = State::default();
     state
         .apply_checked(&Event::NameResolutionCommitted {
@@ -210,7 +210,7 @@ fn role_name_closure_uses_only_explicit_session_or_pane_anchors_for_jenny_name()
         },
         intent: None,
         is_current_master: false,
-        pane_anchor: None,
+        tmux_session_name: None,
     };
     // The same worker id in a different session is not a name anchor. It
     // receives an ordinary name and leaves the historical Jenny holder alone.

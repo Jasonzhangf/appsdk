@@ -35,41 +35,24 @@ fn select_central_runtime_storage(
 }
 
 fn publish_central_route_record(path: &Path, record: HostRouteRecord) -> Result<(), String> {
-    use std::io::Write;
-    let records = load_host_route_records(path)?;
+    let store = crate::server::binding_store::BindingControlStore::at(path);
+    let (mut routes, control) = store
+        .load_shared()
+        .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))?;
     let mut replaced = false;
-    let mut output = Vec::new();
-    for existing in records {
-        let candidate = if existing.app_scope_id == record.app_scope_id
+    for existing in routes.iter_mut() {
+        if existing.app_scope_id == record.app_scope_id
             && existing.project_scope == record.project_scope
         {
             replaced = true;
-            &record
-        } else {
-            &existing
-        };
-        serde_json::to_writer(&mut output, candidate)
-            .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))?;
-        output.push(b'\n');
+            *existing = record.clone();
+        }
     }
     if !replaced {
-        serde_json::to_writer(&mut output, &record)
-            .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))?;
-        output.push(b'\n');
+        routes.push(record);
     }
-    let parent = path.parent().ok_or_else(|| "HOST_ROUTE_DURABILITY_FAILED: no parent".to_owned())?;
-    std::fs::create_dir_all(parent)
-        .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))?;
-    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let temporary = path.with_file_name(format!("routes.jsonl.storage-{}-{sequence}", std::process::id()));
-    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temporary)
-        .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))?;
-    file.write_all(&output).and_then(|_| file.sync_all())
-        .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))?;
-    drop(file);
-    std::fs::rename(&temporary, path)
-        .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))?;
-    sync_parent_dir(path)
-        .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))
+    store
+        .publish_shared(&routes, &control)
+        .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))?
+        .require_confirmed_route()
 }

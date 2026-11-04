@@ -1,0 +1,24 @@
+{
+  "id": "appsdk-collab-startup-recovery",
+  "version": "1.0.1",
+  "description": "目标设计：单次 daemon 启动只从当前控制、当前路由和实际有消费者的可靠待办收敛恢复；不从业务 journal 枚举或重建绑定。局部项目错误按 scope 显式隔离，身份、未读消息、未关闭任务和有效订阅不丢；核心状态失败明确退出。后台恢复不等同通信已就绪，listener 就绪也不等同消息或订阅 ready。实现及公开入口验收待完成。",
+  "inputs": [{"id": "startup_request", "schema": "Object"}],
+  "nodes": [
+    {"id":"读取持久状态", "operator":"appsdk.collab_startup.read_state", "operator_version":"1", "description":"先选择系统盘上的 Collab 自有状态与 socket 位置，再直接读取当前身份、当前及上一次绑定和项目声明；业务状态按其 owner 加载，不能用业务 journal 发现或重建绑定。", "inputs":["startup_request"], "output":{"id":"host_state", "schema":"Object"}, "input_selector":{"include":[],"exclude":[],"predicate":null}, "output_selector":{"include":[],"exclude":[],"predicate":null}, "iterator":"Whole"},
+    {"id":"收敛存储归属", "operator":"appsdk.collab_startup.resolve_storage", "operator_version":"1", "description":"完成已提交 reset，确定 central storage 唯一 owner。", "inputs":["host_state"], "output":{"id":"storage_scope", "schema":"Object"}, "input_selector":{"include":[],"exclude":[],"predicate":null}, "output_selector":{"include":[],"exclude":[],"predicate":null}, "iterator":"Whole"},
+    {"id":"建立项目路由", "operator":"appsdk.collab_startup.load_routes", "operator_version":"1", "description":"读取路由并在需要时补写 resident 路由；校验存储 owner。", "inputs":["storage_scope"], "output":{"id":"routes", "schema":"Object"}, "input_selector":{"include":[],"exclude":[],"predicate":null}, "output_selector":{"include":[],"exclude":[],"predicate":null}, "iterator":"Whole"},
+    {"id":"发现待恢复绑定", "operator":"appsdk.collab_startup.discover_bindings", "operator_version":"1", "description":"只从当前控制记录和当前路由选择有实际消费者的恢复对象：有效绑定与可靠当前待办；不扫描业务 journal 或补发另一份绑定。无真实消费者的历史记录、route-only 记录和旧待办不作为恢复来源。", "inputs":["routes"], "output":{"id":"recovery_candidates", "schema":"Object"}, "input_selector":{"include":[],"exclude":[],"predicate":null}, "output_selector":{"include":[],"exclude":[],"predicate":null}, "iterator":"Whole"},
+    {"id":"恢复项目状态", "operator":"appsdk.collab_startup.restore_projects", "operator_version":"1", "description":"按需加载当前项目业务状态。单个项目真实错误按所属 scope 显式隔离并阻塞该 scope 的恢复；不撤销绑定，不丢身份、未读消息、未关闭任务或有效订阅，也不阻断无关项目。待办缺少 runtime/worker 或真实 Register 提交时报告所属 scope 阻塞，不合成身份或成功结果。", "inputs":["recovery_candidates"], "output":{"id":"project_results", "schema":"Object"}, "input_selector":{"include":[],"exclude":[],"predicate":null}, "output_selector":{"include":[],"exclude":[],"predicate":null}, "iterator":"Whole"},
+    {"id":"启动服务入口", "operator":"appsdk.collab_startup.start_listener", "operator_version":"1", "description":"只安排当前已提交绑定及其有消费者的可靠待办恢复，并建立 listener；等待下一次真实 Register 或 context 才能完成的待办保持所属 scope 可见局部阻塞，不写成已自动恢复。取消或核心失败显式输出。listener 建立只代表入口就绪，不代表消息已投递或订阅已 ready。", "inputs":["project_results"], "output":{"id":"listener_result", "schema":"Object"}, "input_selector":{"include":[],"exclude":[],"predicate":null}, "output_selector":{"include":[],"exclude":[],"predicate":null}, "iterator":"Whole"},
+    {"id":"输出启动结果", "operator":"appsdk.collab_startup.emit_result", "operator_version":"1", "description":"区分 ready、局部 pending 或错误、核心启动错误与取消；局部 pending/错误按 scope 报告，并保留身份、未读消息、未关闭任务和有效订阅。不把 listener 就绪当作通信或消息投递完成。", "inputs":["listener_result"], "output":{"id":"startup_result", "schema":"Object"}, "input_selector":{"include":[],"exclude":[],"predicate":null}, "output_selector":{"include":[],"exclude":[],"predicate":null}, "iterator":"Whole"}
+  ],
+  "edges": [
+    {"from":"读取持久状态", "to":"收敛存储归属", "arc_id":"host_state"},
+    {"from":"收敛存储归属", "to":"建立项目路由", "arc_id":"storage_scope"},
+    {"from":"建立项目路由", "to":"发现待恢复绑定", "arc_id":"routes"},
+    {"from":"发现待恢复绑定", "to":"恢复项目状态", "arc_id":"recovery_candidates"},
+    {"from":"恢复项目状态", "to":"启动服务入口", "arc_id":"project_results"},
+    {"from":"启动服务入口", "to":"输出启动结果", "arc_id":"listener_result"}
+  ],
+  "outputs":["startup_result"]
+}

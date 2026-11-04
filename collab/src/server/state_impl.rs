@@ -417,13 +417,66 @@ impl State {
         }
         subscription.fired_count = subscription.fired_count.saturating_add(1);
         if is_goal_deadline(subscription) {
-            subscription.status = "consumed".into();
-            subscription.status_reason = Some("goal-deadline-one-shot-delivered".into());
+            if !subscription.periodic_declared {
+                subscription.status = "consumed".into();
+                subscription.status_reason =
+                    Some("goal-deadline-one-shot-delivered".into());
+                if let Some(consumed_ms) = consumed_ms {
+                    subscription.updated_ms = consumed_ms;
+                }
+                if clears_master_goal_due {
+                    crate::server::notification_state::clear_master_goal_due(
+                        &mut self.master_wake,
+                    );
+                }
+                return;
+            }
+            // Explicit periodic goal deadline: reuse the finite interval
+            // progression so a new occurrence is armed only while the repeat
+            // or TTL budget remains. Once the budget is exhausted the generic
+            // branch below marks it consumed.
+            let interval = subscription.interval_ms;
+            if subscription.fired_count >= subscription.repeat_count {
+                subscription.status = "consumed".into();
+                subscription.status_reason =
+                    Some("goal-deadline-periodic-delivered".into());
+                if let Some(consumed_ms) = consumed_ms {
+                    subscription.updated_ms = consumed_ms;
+                }
+                if clears_master_goal_due {
+                    crate::server::notification_state::clear_master_goal_due(
+                        &mut self.master_wake,
+                    );
+                }
+                return;
+            }
+            let Some(interval) = interval else {
+                subscription.status = "consumed".into();
+                subscription.status_reason =
+                    Some("goal-deadline-periodic-invalid".into());
+                if let Some(consumed_ms) = consumed_ms {
+                    subscription.updated_ms = consumed_ms;
+                }
+                if clears_master_goal_due {
+                    crate::server::notification_state::clear_master_goal_due(
+                        &mut self.master_wake,
+                    );
+                }
+                return;
+            };
+            let next_trigger = subscription
+                .trigger_ms
+                .map(|trigger| trigger.saturating_add(interval))
+                .unwrap_or_else(|| {
+                    subscription.created_ms.saturating_add(
+                        interval.saturating_mul(subscription.fired_count as i64),
+                    )
+                });
+            subscription.trigger_ms = Some(next_trigger);
+            subscription.status = "armed".into();
+            subscription.status_reason = None;
             if let Some(consumed_ms) = consumed_ms {
                 subscription.updated_ms = consumed_ms;
-            }
-            if clears_master_goal_due {
-                crate::server::notification_state::clear_master_goal_due(&mut self.master_wake);
             }
             return;
         }
@@ -1594,16 +1647,8 @@ impl State {
                     evidence: evidence.clone(),
                 })?;
             }
-            Event::GlobalRuntimeBindingLedgerClassified { record } => {
-                self.apply_global_event(&GlobalEvent::RuntimeBindingLedgerClassified {
-                    record: record.clone(),
-                })?;
-            }
-            Event::GlobalLedgerScanReceiptRecorded { receipt } => {
-                self.apply_global_event(&GlobalEvent::LedgerScanReceiptRecorded {
-                    receipt: receipt.clone(),
-                })?;
-            }
+            Event::GlobalRuntimeBindingLedgerClassified { .. }
+            | Event::GlobalLedgerScanReceiptRecorded { .. } => {}
             Event::GlobalMasterGrantReplacementStarted { intent } => {
                 self.apply_global_event(&GlobalEvent::MasterGrantReplacementStarted {
                     intent: intent.clone(),

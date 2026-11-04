@@ -33,17 +33,6 @@ pub enum RuntimeBindingLedgerState {
     RepairRequired,
 }
 
-impl RuntimeBindingLedgerState {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Live => "live",
-            Self::Cold => "cold",
-            Self::Missing => "missing",
-            Self::RepairRequired => "repair_required",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeBindingLedgerRecord {
@@ -59,40 +48,6 @@ pub struct RuntimeBindingLedgerRecord {
     pub classified_ms: i64,
     pub operation_id: OperationId,
     pub receipt_id: String,
-}
-
-impl RuntimeBindingLedgerRecord {
-    pub fn key(&self) -> String {
-        self.binding_id.as_str().to_owned()
-    }
-
-    pub fn validate(&self) -> Result<(), StateError> {
-        validate_project_scope(&self.project_scope)?;
-        validate_app_scope(&self.app_scope_id)?;
-        validate_agent_id(&self.agent_id)?;
-        validate_runtime_id(&self.runtime_id)?;
-        validate_binding_id(&self.binding_id)?;
-        validate_operation_id(&self.operation_id)?;
-        if self.endpoint_generation == 0 {
-            return Err(StateError::invalid(
-                "runtime binding ledger endpoint_generation",
-                "must be non-zero",
-            ));
-        }
-        if self.classified_ms < 0 {
-            return Err(StateError::invalid(
-                "runtime binding ledger classified_ms",
-                "must be non-negative",
-            ));
-        }
-        if self.receipt_id.trim().is_empty() || self.receipt_id.len() > 128 {
-            return Err(StateError::invalid(
-                "runtime binding ledger receipt_id",
-                "must be a non-empty short identifier",
-            ));
-        }
-        Ok(())
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -778,8 +733,6 @@ pub struct ProjectState {
     pub master_grants: BTreeMap<String, MasterGrant>,
     #[serde(default)]
     pub bootstrap_policies: BTreeMap<String, BootstrapPolicy>,
-    #[serde(default)]
-    pub runtime_binding_ledger: BTreeMap<String, RuntimeBindingLedgerRecord>,
 }
 
 impl ProjectState {
@@ -791,7 +744,6 @@ impl ProjectState {
             runtime_bindings: BTreeMap::new(),
             master_grants: BTreeMap::new(),
             bootstrap_policies: BTreeMap::new(),
-            runtime_binding_ledger: BTreeMap::new(),
         })
     }
 
@@ -874,31 +826,6 @@ impl ProjectState {
             }
         }
 
-        for (ledger_key, ledger) in &self.runtime_binding_ledger {
-            ledger.validate()?;
-            if *ledger_key != ledger.key() {
-                return Err(StateError::Invariant(format!(
-                    "runtime binding ledger key does not match record"
-                )));
-            }
-            let Some(binding) = self.runtime_bindings.get(ledger.binding_id.as_str()) else {
-                return Err(StateError::Invariant(format!(
-                    "runtime binding ledger references missing binding {}",
-                    ledger.binding_id
-                )));
-            };
-            if binding.project_scope != ledger.project_scope
-                || binding.app_scope_id != ledger.app_scope_id
-                || binding.agent_id != ledger.agent_id
-                || binding.runtime_id != ledger.runtime_id
-                || binding.binding_id != ledger.binding_id
-            {
-                return Err(StateError::Invariant(format!(
-                    "runtime binding ledger coordinates disagree for {}",
-                    ledger.binding_id
-                )));
-            }
-        }
         Ok(())
     }
 

@@ -533,40 +533,35 @@
             assert!(promoted.ok, "{worker_id} promotion: {promoted:?}");
         }
 
-        let (assigned_by, approval, assigned_ms) = {
-            let state = source_runtime.state.lock().unwrap();
-            let route_scope = server_route_scope(&source_runtime, &state)
-                .unwrap()
-                .unwrap();
-            let grant = current_master_grant(&state, Some(&route_scope)).unwrap();
-            (
-                grant.granted_by.clone(),
-                Some(grant.approval.clone()),
-                grant.granted_at_ms,
-            )
-        };
-        let cross_project_send = |assigned_ms: i64| Req::CrossProjectSend {
-            from: master_a.into(),
-            from_project: project_a.display().to_string(),
-            source_master_assigned_by: assigned_by.clone(),
-            source_master_approval: approval.clone(),
-            source_master_assigned_ms: assigned_ms,
-            to: master_b.into(),
-            subject: "cross-project tmux route".into(),
-            body: "durable cross-project message".into(),
-            in_reply_to: None,
+        // Cross-project authorization is server-side only. The request carries
+        // the caller's authenticated token and current command envelope; no
+        // client master evidence is consulted.
+        let cross_project_send = |caller: &str, token: &str, tag: &str, to: &str| {
+            let command = cross_project_command(&source_runtime, &project_a, caller, app_a, tag);
+            Req::CrossProjectSend {
+                from: caller.into(),
+                from_project: project_a.display().to_string(),
+                worker_id: caller.into(),
+                token: token.into(),
+                command: Some(command),
+                to: to.into(),
+                subject: "cross-project tmux route".into(),
+                body: "durable cross-project message".into(),
+                in_reply_to: None,
+                reply_policy: None, target_session: None,
+            }
         };
 
         let (selected, delivered) = manager.dispatch_sync(
             Some(target_context.clone()),
-            cross_project_send(assigned_ms),
+            cross_project_send(master_a, token_a, "delivered", master_b),
         );
         assert!(Arc::ptr_eq(&selected, &target_runtime));
         assert!(delivered.ok, "{delivered:?}");
         assert_eq!(delivered.data["durable"], true);
         assert_eq!(delivered.data["cross_project"], true);
-        assert_eq!(delivered.data["source_master"], master_a);
-        assert_eq!(delivered.data["target_master"], master_b);
+        assert_eq!(delivered.data["sender"], master_a);
+        assert_eq!(delivered.data["recipient"], master_b);
         assert_eq!(delivered.data["notification"], "appserver-input-submitted");
         assert_eq!(delivered.data["consumed"], false);
         let message_id = delivered.data["msg_id"].as_str().unwrap().to_owned();
@@ -596,13 +591,16 @@
 
         let target_journal_before = std::fs::read(&target_runtime.journal_path).unwrap();
         let target_message_count = target_runtime.state.lock().unwrap().msgs.len();
-        let (_, forged) =
-            manager.dispatch_sync(Some(target_context), cross_project_send(assigned_ms + 1));
+        // A real worker id with a wrong token cannot forge the master identity.
+        let (_, forged) = manager.dispatch_sync(
+            Some(target_context),
+            cross_project_send(master_a, "wrong-token", "forged", master_b),
+        );
         assert!(!forged.ok, "{forged:?}");
         assert!(forged
             .error
             .as_deref()
-            .is_some_and(|error| error.starts_with("CROSS_PROJECT_SOURCE_REJECTED:")));
+            .is_some_and(|error| error.contains("token mismatch")));
         assert!(!forged
             .error
             .as_deref()
@@ -615,6 +613,109 @@
             target_runtime.state.lock().unwrap().msgs.len(),
             target_message_count
         );
+
+        // A host-wide CEO can send even when another worker is the source
+        // project's master. The grant and name binding are daemon-owned facts.
+        let ceo = "cross-project-ceo";
+        let ceo_token = "token-cross-project-ceo";
+        let (_, registered) = register_host_fixture(
+            &manager,
+            Some(context_with_app(&project_a, app_a)),
+            Req::register(ceo.into(), ceo_token.into(), project_a.display().to_string(),
+                test_candidates_at("thread-ceo", &project_a)),
+        );
+        assert!(registered.ok, "{registered:?}");
+        register_native_peer(&source_runtime, &project_a, ceo, ceo_token, "thread-ceo", app_a);
+        source_runtime.commit(&[Event::NameResolutionCommitted {
+            project_scope: project_a.display().to_string(),
+            occupancy: crate::server::name_state::NameOccupancy {
+                name: "CEO".into(), worker_id: ceo.into(), session_id: "thread-ceo".into(),
+                occupancy_revision: 1, updated_ms: 1, pane_anchor: None,
+            },
+            assignments: vec![],
+        }]);
+        manager.host.commit(&[Event::CeoGrantSet {
+            grant: Some(crate::ceo::CeoGrant {
+                workspace: project_a.display().to_string(), app_scope_id: app_a.into(),
+                name: "CEO".into(), granted_by: "user".into(), approval: "approved".into(),
+                granted_ms: 1,
+            }),
+        }]);
+        let (_, ceo_send) = manager.dispatch_sync(
+            Some(context_with_app(&project_b, app_b)),
+            {
+                let command = cross_project_command(&source_runtime, &project_a, ceo, app_a, "ceo");
+                Req::CrossProjectSend {
+                    from: ceo.into(), from_project: project_a.display().to_string(),
+                    worker_id: ceo.into(), token: ceo_token.into(), command: Some(command),
+                    to: master_b.into(),
+                    subject: "CEO delegation".into(), body: "scope permits delivery".into(),
+                    in_reply_to: None,
+                    reply_policy: None, target_session: None,
+                }
+            },
+        );
+        for (root, app, runtime, peer, token, thread) in [
+            (&project_a, app_a, &source_runtime, "cross-peer-a", "token-peer-a", "thread-peer-a"),
+            (&project_b, app_b, &target_runtime, "cross-peer-b", "token-peer-b", "thread-peer-b"),
+        ] {
+            let (_, registered) = register_host_fixture(
+                &manager, Some(context_with_app(root, app)),
+                Req::register(peer.into(), token.into(), root.display().to_string(),
+                    test_candidates_at(thread, root)),
+            );
+            assert!(registered.ok, "{registered:?}");
+            register_native_peer(runtime, root, peer, token, thread, app);
+        }
+        // Each caller submits its own real credentials; only the server role
+        // matrix may grant or deny delivery.
+        let send_as = |caller: &str, token: &str, tag: &str, to: &str| {
+            let command = cross_project_command(&source_runtime, &project_a, caller, app_a, tag);
+            Req::CrossProjectSend {
+                from: caller.into(), from_project: project_a.display().to_string(),
+                worker_id: caller.into(), token: token.into(), command: Some(command),
+                to: to.into(),
+                subject: "role matrix".into(), body: "role matrix".into(),
+                in_reply_to: None,
+                reply_policy: None, target_session: None,
+            }
+        };
+        let (_, peer_peer) = manager.dispatch_sync(
+            Some(context_with_app(&project_b, app_b)),
+            send_as("cross-peer-a", "token-peer-a", "peer-peer", "cross-peer-b"),
+        );
+        let (_, peer_master) = manager.dispatch_sync(
+            Some(context_with_app(&project_b, app_b)),
+            send_as("cross-peer-a", "token-peer-a", "peer-master", master_b),
+        );
+        let (_, master_peer) = manager.dispatch_sync(
+            Some(context_with_app(&project_b, app_b)),
+            send_as(master_a, token_a, "master-peer", "cross-peer-b"),
+        );
+        // An unregistered worker id cannot borrow the master's binding: the
+        // token check fails before any role is read.
+        let (_, unregistered) = manager.dispatch_sync(
+            Some(context_with_app(&project_b, app_b)),
+            Req::CrossProjectSend {
+                from: "not-registered".into(),
+                from_project: project_a.display().to_string(),
+                worker_id: "not-registered".into(),
+                token: "token-not-registered".into(),
+                command: Some(cross_project_command(
+                    &source_runtime, &project_a, master_a, app_a, "unregistered",
+                )),
+                to: "cross-peer-b".into(),
+                subject: "role matrix".into(),
+                body: "role matrix".into(),
+                in_reply_to: None,
+                reply_policy: None, target_session: None,
+            },
+        );
+        assert!(ceo_send.ok, "CEO to project master must be allowed: {ceo_send:?}");
+        assert!(peer_peer.ok, "peer to peer must be allowed: {peer_peer:?}");
+        assert!(!peer_master.ok, "peer to foreign master must be rejected");
+        assert!(!master_peer.ok, "master to foreign peer must be rejected");
+        assert!(!unregistered.ok, "unregistered sender must be rejected");
 
         std::fs::remove_dir_all(host_root).unwrap();
         std::fs::remove_dir_all(project_a).unwrap();
@@ -1060,7 +1161,13 @@
             status_response.data["workers"][0]["id"],
             "legacy-replayed-worker"
         );
-        assert_eq!(std::fs::read(&route_journal).unwrap(), before_collision);
+        let routes = load_host_route_records(&route_journal).unwrap();
+        assert!(routes.iter().any(|route| route.app_scope_id == existing_app_scope));
+        assert!(routes.iter().all(|route| route.app_scope_id != candidate_app_scope),
+            "rejected route must remain absent after the valid registration");
+        let control = crate::server::binding_store::BindingControlStore::at(&route_journal).load().unwrap();
+        assert!(control.active_values().any(|value| value.binding.agent_id.as_str() == "legacy-replayed-worker"),
+            "the valid registration must publish its current binding");
 
         drop(manager);
         std::fs::remove_dir_all(host_root).unwrap();
@@ -1361,6 +1468,7 @@
             invocation: "automatic".into(),
             action: "prepare_invocation".into(),
             facts: crate::proto::IdentityFacts::default(),
+            invocation_cwd: None,
             approval: None,
             grant_approval: None,
             query: false,
@@ -1412,6 +1520,7 @@
             invocation: "automatic".into(),
             action: "prepare_invocation".into(),
             facts: crate::proto::IdentityFacts::default(),
+            invocation_cwd: None,
             approval: None,
             grant_approval: None,
             query: false,
@@ -1594,7 +1703,7 @@
     }
 
     #[test]
-    fn startup_recovers_committed_project_binding_missing_from_host_index() {
+    fn route_only_legacy_project_stays_lazy_and_does_not_publish_journal_binding() {
         let (host, host_root, _) = test_server();
         let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
         let seed_manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
@@ -1640,10 +1749,8 @@
         .unwrap();
 
         let manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
-        assert!(
-            manager.routes.lock().unwrap()[&key].runtime.is_some(),
-            "a committed project binding missing from the host index must materialize"
-        );
+        assert!(manager.routes.lock().unwrap()[&key].runtime.is_none(),
+            "a route without host binding control must stay pending at startup");
         let published = {
             let session_id = binding.session_id.clone().unwrap();
             let native_thread_id = binding.native_thread_id.clone().unwrap();
@@ -1654,11 +1761,13 @@
                 .lookup_current_thread_route(&session_id, &native_thread_id)
                 .cloned()
         };
-        assert_eq!(
-            published,
-            Some(binding),
-            "startup must republish the committed project binding"
-        );
+        assert!(published.is_none(), "startup must not discover a binding from the project journal");
+        manager.select_runtime(&context).unwrap();
+        assert!(manager.routes.lock().unwrap()[&key].runtime.is_some(),
+            "selecting the legacy project materializes that project");
+        let published = host.state.lock().unwrap().global.lookup_current_thread_route(
+            binding.session_id.as_ref().unwrap(), binding.native_thread_id.as_ref().unwrap()).cloned();
+        assert!(published.is_none(), "selection alone must not republish a historical binding");
 
         drop(manager);
         std::fs::remove_dir_all(host_root).unwrap();

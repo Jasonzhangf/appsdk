@@ -45,6 +45,27 @@ pub(super) fn retire_stale_project_routes(host: &Server, scope: &str) -> Result<
     Ok(())
 }
 
+/// The active DSH gateway workers owned by this project scope. Their session,
+/// endpoint, binding and credential are host-owned recovery facts and survive
+/// project reset; every other worker is disposable project state.
+fn dsh_workers_for_scope(state: &State, scope: &str) -> Vec<String> {
+    state
+        .global
+        .projects
+        .get(scope)
+        .into_iter()
+        .flat_map(|project| project.runtime_bindings.values())
+        .filter(|binding| {
+            state
+                .workers
+                .get(binding.agent_id.as_str())
+                .and_then(super::selected_transport_for_worker)
+                .is_some_and(|transport| transport.kind == super::TransportKind::Dsh)
+        })
+        .map(|binding| binding.agent_id.as_str().to_owned())
+        .collect()
+}
+
 /// Remove only this project's projections from the mixed resident reducer.
 /// Project-local reducers have no foreign business records; the same worker
 /// ownership filtering also handles legacy mixed resident journals.
@@ -54,6 +75,12 @@ pub(super) fn clear_project(
     clear_local: bool,
     worker_ids: &[String],
 ) {
+    // A live DSH gateway binding is host-owned recovery state, not project
+    // business state. Reset keeps the current DSH session, communication API
+    // endpoint and committed binding so the gateway receive loop can recover
+    // after reset and daemon restart without reviving old tasks, messages or
+    // grants.
+    let dsh_workers = dsh_workers_for_scope(state, scope);
     let mut workers: HashSet<String> = state
         .global
         .projects
@@ -203,7 +230,13 @@ pub(super) fn clear_project(
         .delivery_source_threads
         .retain(|id, _| !workers.contains(id));
     state.wake_bindings.retain(|id, _| !workers.contains(id));
-    state.workers.retain(|id, _| !workers.contains(id));
+    // Keep the live DSH gateway worker record (token, transport, cwd) so the
+    // receive loop can re-enroll without Register. Its tasks, messages and
+    // subscriptions above are still removed because they are project business
+    // state; only the identity record itself is host-owned recovery material.
+    state
+        .workers
+        .retain(|id, _| !workers.contains(id) || dsh_workers.contains(id));
     if state
         .master_worker_id
         .as_ref()
@@ -237,15 +270,44 @@ pub(super) fn clear_project(
         .global
         .command_receipts
         .retain(|_, receipt| retain_receipt(&receipt.outcome));
-    state.global.projects.remove(scope);
-    state
+    // Keep the retained DSH project registration and its committed runtime
+    // binding. The reducer is the authoritative source of the worker token and
+    // transport; dropping it would leave the control slot pointing at a missing
+    // runtime and make recovery fail closed on startup.
+    let retained_dsh_app_scopes: HashSet<String> = state
         .global
-        .current_thread_routes
-        .retain(|_, b| b.project_scope.as_str() != scope);
-    state
-        .global
-        .legacy_thread_routes
-        .retain(|_, b| b.project_scope.as_str() != scope);
+        .projects
+        .get(scope)
+        .into_iter()
+        .flat_map(|project| {
+            project
+                .runtime_bindings
+                .values()
+                .filter(|binding| dsh_workers.contains(&binding.agent_id.as_str().to_owned()))
+                .map(|binding| binding.app_scope_id.as_str().to_owned())
+        })
+        .collect();
+    if let Some(project) = state.global.projects.get_mut(scope) {
+        project.registrations.retain(|_, registration| {
+            retained_dsh_app_scopes.contains(registration.app_scope_id.as_str())
+        });
+        project
+            .runtime_bindings
+            .retain(|_, binding| dsh_workers.contains(&binding.agent_id.as_str().to_owned()));
+        project.master_grants.clear();
+        project.bootstrap_policies.clear();
+        if project.registrations.is_empty() && project.runtime_bindings.is_empty() {
+            state.global.projects.remove(scope);
+        }
+    } else {
+        state.global.projects.remove(scope);
+    }
+    state.global.current_thread_routes.retain(|_, b| {
+        b.project_scope.as_str() != scope || dsh_workers.contains(&b.agent_id.as_str().to_owned())
+    });
+    state.global.legacy_thread_routes.retain(|_, b| {
+        b.project_scope.as_str() != scope || dsh_workers.contains(&b.agent_id.as_str().to_owned())
+    });
     state
         .global
         .current_thread_route_tombstones
@@ -260,31 +322,48 @@ pub(super) fn clear_project(
         .retain(|_, r| r.project_scope.as_str() != scope);
 }
 
-/// Append deletion through the live route owner. Never rewrite a live journal.
+/// Remove the route and its scope's control slots through the shared owner.
 pub(super) fn delete_route(path: &Path, record: &HostRouteRecord) -> Result<(), String> {
-    // Called under the manager's registration gate (or before startup
-    // admission). Remove the historical bytes as well as the active index.
-    let records = load_host_route_records(path)?;
-    let mut body = Vec::new();
-    for retained in records.into_iter().filter(|retained| {
-        retained.project_scope != record.project_scope
-            || retained.app_scope_id != record.app_scope_id
-    }) {
-        serde_json::to_writer(&mut body, &retained).map_err(|e| e.to_string())?;
-        body.push(b'\n');
-    }
-    let temporary = path.with_extension("reset-tmp");
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&temporary)
-        .map_err(|e| format!("route delete open {}: {e}", path.display()))?;
-    file.write_all(&body)
-        .and_then(|_| file.sync_all())
-        .map_err(|e| format!("route delete persist {}: {e}", path.display()))?;
-    std::fs::rename(&temporary, path).map_err(|e| format!("route delete publish: {e}"))?;
-    sync_parent_dir(path).map_err(|e| format!("route delete directory: {e}"))
+    // Remove the route line and the scope's control slots in one shared
+    // commit. This closes the historical reset gap where the route journal
+    // preserved the binding control line and the retired identity could
+    // resurrect on restart.
+    let store = crate::server::binding_store::BindingControlStore::at(path);
+    let (routes, mut control) = store.load_shared()?;
+    let retained: Vec<HostRouteRecord> = routes
+        .into_iter()
+        .filter(|retained| {
+            retained.project_scope != record.project_scope
+                || retained.app_scope_id != record.app_scope_id
+        })
+        .collect();
+    control.remove_scope(record.project_scope.as_str());
+    store
+        .publish_shared(&retained, &control)?
+        .require_confirmed_route()
+}
+
+/// Remove this project's route records while retaining the route records for
+/// app scopes that still own a live DSH gateway binding. This is one shared
+/// control transaction so a retained route and its control slot cannot be
+/// published independently.
+pub(super) fn delete_project_routes_except_dsh(
+    path: &Path,
+    scope: &str,
+    retained_app_scopes: &HashSet<String>,
+) -> Result<(), String> {
+    let store = crate::server::binding_store::BindingControlStore::at(path);
+    let (routes, mut control) = store.load_shared()?;
+    let retained = routes
+        .into_iter()
+        .filter(|route| {
+            route.project_scope != scope || retained_app_scopes.contains(&route.app_scope_id)
+        })
+        .collect::<Vec<_>>();
+    control.remove_scope_except_dsh(scope);
+    store
+        .publish_shared(&retained, &control)?
+        .require_confirmed_route()
 }
 
 /// Delete project data, keeping only exact live host resources when the
@@ -320,7 +399,33 @@ pub(super) fn finish_reset(host: &Server, route_journal: &Path, scope: &str) -> 
         .into_iter()
         .filter(|record| record.project_scope == scope)
         .collect::<Vec<_>>();
-    remove_host_identities(&host.host_paths, scope)?;
+    // The active DSH gateway identity is host-owned recovery material. Reset
+    // keeps its worker/token/transport so `dsh_rebind` can re-enroll the
+    // receive loop after reset and daemon restart without Register. Other
+    // identities in the scope are disposable project state.
+    let retained_dsh_workers = {
+        let state = host.state.lock().unwrap();
+        dsh_workers_for_scope(&state, scope)
+    };
+    let retained_app_scopes: HashSet<String> = {
+        let state = host.state.lock().unwrap();
+        state
+            .global
+            .projects
+            .get(scope)
+            .into_iter()
+            .flat_map(|project| {
+                project
+                    .runtime_bindings
+                    .values()
+                    .filter(|binding| {
+                        retained_dsh_workers.contains(&binding.agent_id.as_str().to_owned())
+                    })
+                    .map(|binding| binding.app_scope_id.as_str().to_owned())
+            })
+            .collect()
+    };
+    remove_host_identities(&host.host_paths, scope, &retained_dsh_workers)?;
     remove_archived_identities(&host.host_paths, scope)?;
     crate::context_operation::remove_project_proofs(&host.host_paths, scope)
         .map_err(|e| format!("remove project operation proofs: {e}"))?;
@@ -334,7 +439,20 @@ pub(super) fn finish_reset(host: &Server, route_journal: &Path, scope: &str) -> 
     .collect::<Result<Vec<_>, _>>()?;
     remove_project_tree(&Path::new(scope).join(".agent-collab"), &preserved)?;
     remove_project_tree(&Path::new(scope).join(".agent-collab-v2"), &preserved)?;
+    // A retained DSH route must stay replayable after daemon restart:
+    // startup pruning treats any project root without a `.agent-collab`
+    // directory as deinitialized and retires its route. Keep the project
+    // marker (no business data) for every app scope that still owns a live
+    // DSH gateway binding.
+    if !retained_app_scopes.is_empty() {
+        std::fs::create_dir_all(Path::new(scope).join(".agent-collab"))
+            .map_err(|e| format!("persist retained project marker: {e}"))?;
+    }
     for record in &project_records {
+        // Delete the central app storage for every route record, including
+        // retained DSH app scopes. The DSH route, control slot and identity are
+        // host-owned recovery facts kept elsewhere; the retained business
+        // journal/mailbox content under central storage must not survive reset.
         let central = host
             .host_paths
             .app_storage_root(scope, &record.app_scope_id);
@@ -342,10 +460,9 @@ pub(super) fn finish_reset(host: &Server, route_journal: &Path, scope: &str) -> 
         remove_project_tree(&central, &preserved)?;
     }
     // Route records are the durable discovery source for app-scoped central
-    // storage. Keep them until every fallible deletion above has succeeded.
-    for record in &project_records {
-        delete_route(route_journal, record)?;
-    }
+    // storage. Retain the active DSH route/control binding; retire every other
+    // route for the scope in one shared transaction.
+    delete_project_routes_except_dsh(route_journal, scope, &retained_app_scopes)?;
     // The resident journal mixes projects. Compact its cleared reducer under
     // the writer's state lock, retaining the pending intent until completion.
     {
@@ -397,7 +514,11 @@ fn remove_archived_identities(paths: &HostPaths, scope: &str) -> Result<(), Stri
     Ok(())
 }
 
-fn remove_host_identities(paths: &HostPaths, scope: &str) -> Result<(), String> {
+fn remove_host_identities(
+    paths: &HostPaths,
+    scope: &str,
+    retained_workers: &[String],
+) -> Result<(), String> {
     let root = paths.state_root().join("identities");
     let entries = match std::fs::read_dir(&root) {
         Ok(entries) => entries,
@@ -417,6 +538,7 @@ fn remove_host_identities(paths: &HostPaths, scope: &str) -> Result<(), String> 
                 .project_scope
                 .as_ref()
                 .is_some_and(|p| p.as_str() == scope)
+                && !retained_workers.contains(&worker)
         }) {
             remove_project_tree(&entry.path(), &[])?;
         }

@@ -625,7 +625,11 @@ async fn startup_reconciles_a_lagged_same_pane_master_route() {
         runtime.clone(),
         None,
     );
-    manager.reconcile_same_pane_master_routes().unwrap();
+    manager
+        .reconcile_same_pane_master_routes(
+            &crate::server::binding_slot::BindingControlSet::new(),
+        )
+        .unwrap();
     let endpoint = binding
         .tmux_endpoint
         .as_ref()
@@ -741,7 +745,11 @@ async fn superseded_same_pane_master_does_not_fence_project_route() {
     // master anchor must no longer fence the project route, and the startup
     // reconciler must not resurrect it.
     assert!(manager.same_pane_master_route_ready(&runtime).is_ok());
-    manager.reconcile_same_pane_master_routes().unwrap();
+    manager
+        .reconcile_same_pane_master_routes(
+            &crate::server::binding_slot::BindingControlSet::new(),
+        )
+        .unwrap();
     assert!(manager.same_pane_master_route_ready(&runtime).is_ok());
     {
         let state = host.state.lock().unwrap();
@@ -899,7 +907,11 @@ async fn cross_scope_pane_claimant_takes_the_pane_without_fencing_the_project_ro
     let ready = manager.same_pane_master_route_ready(&runtime);
     assert!(ready.is_ok(), "an evicted claimant must not fence another project's route: {ready:?}");
     assert!(
-        manager.reconcile_same_pane_master_routes().is_ok(),
+        manager
+            .reconcile_same_pane_master_routes(
+                &crate::server::binding_slot::BindingControlSet::new(),
+            )
+            .is_ok(),
         "the startup reconciler must skip the evicted claimant instead of failing"
     );
     std::fs::remove_dir_all(host_root).unwrap();
@@ -1123,8 +1135,9 @@ async fn closed_same_pane_peer_keeps_the_pane_ownership() {
         Some(test_candidates(closer_worker).unwrap()),
     );
     assert!(closer.ok, "{closer:?}");
-    // This fixture needs a closer, not unknown adjudication. Explicitly
-    // observe the displaced incumbent offline before promoting the closer.
+    // This fixture needs a closer, not unknown adjudication. Free-text
+    // promotion pauses while Jenny is still held by the displaced incumbent;
+    // the typed restore_master confirmation is the explicit takeover.
     runtime.commit(&[Event::AgentPresenceObserved {
         presence: crate::server::name_state::AgentPresenceRecord {
             project_scope: scope.project_scope_id.as_str().into(),
@@ -1141,7 +1154,25 @@ async fn closed_same_pane_peer_keeps_the_pane_ownership() {
         closer_token.into(),
         "user approved closer".into(),
     );
-    assert!(closer_promoted.ok, "{closer_promoted:?}");
+    assert!(!closer_promoted.ok, "{closer_promoted:?}");
+    assert_eq!(closer_promoted.data["outcome"], "pending");
+    let closer_confirmed = super::name_resolution::resolve_registered_name(
+        &runtime,
+        closer_worker,
+        "confirmed-closer-takeover",
+        "approved_recovery",
+        Some(super::name_resolution::NameIntent {
+            requested_name: "Jenny".into(),
+            user_authorized: true,
+            moves_existing_names: true,
+            replace_confirmed: true,
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        closer_confirmed["outcome"], "committed",
+        "{closer_confirmed}"
+    );
     let closer_binding = runtime
         .state
         .lock()

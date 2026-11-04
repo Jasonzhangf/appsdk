@@ -176,7 +176,7 @@ fn role_name_closure_clear_revokes_misaligned_legacy_grant_in_one_commit() {
 }
 
 #[test]
-fn role_name_closure_default_peer_ignores_historical_jenny_worker_and_session() {
+fn role_name_closure_uses_only_explicit_session_or_pane_anchors_for_jenny_name() {
     let mut state = State::default();
     state
         .apply_checked(&Event::NameResolutionCommitted {
@@ -187,38 +187,57 @@ fn role_name_closure_default_peer_ignores_historical_jenny_worker_and_session() 
                 session_id: "s1".into(),
                 occupancy_revision: 1,
                 updated_ms: 1,
+                pane_anchor: None,
             },
             assignments: vec![],
         })
         .unwrap();
-    for (worker, session) in [("old", "s2"), ("new", "s1")] {
-        let input = NameResolutionInput {
-            project_scope: "/project".into(),
-            operation_id: "ordinary".into(),
-            request: NameRecoveryRequest {
-                invocation: "context".into(),
-                requested_name: None,
-                caller_worker_id: worker.into(),
-                caller_session_id: session.into(),
-                caller_binding: NameBindingReference {
-                    app_scope_id: "app".into(),
-                    binding_id: "binding".into(),
-                    endpoint_generation: 1,
-                },
-                replace_confirmed: false,
-                requested_ms: 2,
+    let input = |worker: &str, session: &str| NameResolutionInput {
+        project_scope: "/project".into(),
+        operation_id: "ordinary".into(),
+        request: NameRecoveryRequest {
+            invocation: "context".into(),
+            requested_name: None,
+            caller_worker_id: worker.into(),
+            caller_session_id: session.into(),
+            caller_binding: NameBindingReference {
+                app_scope_id: "app".into(),
+                binding_id: "binding".into(),
+                endpoint_generation: 1,
             },
-            intent: None,
-            is_current_master: false,
-        };
-        let plan = name_resolution::plan_name_resolution(&state, &input).unwrap();
-        assert!(!plan.requires_master_authorization);
-        assert!(
-            matches!(plan.decision, NameResolutionDecision::Committed { occupancy, .. } if occupancy.name == "Alice")
-        );
-        assert_eq!(
-            state.name_occupancy("/project", "Jenny").unwrap().worker_id,
-            "old"
-        );
-    }
+            replace_confirmed: false,
+            requested_ms: 2,
+        },
+        intent: None,
+        is_current_master: false,
+        pane_anchor: None,
+    };
+    // The same worker id in a different session is not a name anchor. It
+    // receives an ordinary name and leaves the historical Jenny holder alone.
+    let plan = name_resolution::plan_name_resolution(&state, &input("old", "s2")).unwrap();
+    assert!(!plan.requires_master_authorization);
+    assert!(
+        matches!(plan.decision, NameResolutionDecision::Committed { occupancy, .. } if occupancy.name == "Alice")
+    );
+    assert_eq!(
+        state.name_occupancy("/project", "Jenny").unwrap().worker_id,
+        "old"
+    );
+    // The same session is the valid anchor for inheriting the Jenny name. The
+    // name is not the master grant, so no authority transfer is implied.
+    let plan = name_resolution::plan_name_resolution(&state, &input("new", "s1")).unwrap();
+    assert!(!plan.requires_master_authorization);
+    assert!(
+        matches!(
+            plan.decision,
+            NameResolutionDecision::Committed { occupancy, .. }
+                if occupancy.name == "Jenny"
+                    && occupancy.worker_id == "new"
+                    && occupancy.session_id == "s1"
+        )
+    );
+    assert!(!plan.events.iter().any(|event| matches!(
+        event,
+        Event::GlobalMasterGranted { .. } | Event::GlobalMasterRevoked { .. }
+    )));
 }

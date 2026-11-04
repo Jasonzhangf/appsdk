@@ -1289,8 +1289,16 @@ fn retire_control_plane_target(
         PeerLifecycleStage::Verified | PeerLifecycleStage::Missing
     ) || (self_unregister
         && close.runtime_archive.state == PeerLifecycleStage::NotApplicable);
+    let identity_retirement = if self_unregister && control_complete && host_complete {
+        crate::identity::clear_persisted_identity(&server.host_paths, actor_id)
+    } else {
+        Ok(())
+    };
     close.close_outcome = if control_complete && host_complete {
-        "complete".into()
+        match identity_retirement {
+            Ok(()) => "complete".into(),
+            Err(error) => format!("cleanup-open: {error}"),
+        }
     } else {
         "cleanup-open".into()
     };

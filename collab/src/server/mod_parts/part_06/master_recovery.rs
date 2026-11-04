@@ -296,6 +296,7 @@ fn base_role_brief(server: &Server, state: &State, worker_id: &str) -> serde_jso
     let work_role_assignment_rule = workflow_template_rule("work_role_assignment_rule");
     let work_role_execution_rule = workflow_template_rule("work_role_execution_rule");
     let work_role_next_action_rule = workflow_template_rule("work_role_next_action");
+    let peer_task_list_rule = workflow_template_rule("peer_task_list_rule");
     let route_scope = server_route_scope(server, state).ok().flatten();
     if current_master_worker_id(state, route_scope.as_ref()).as_deref() == Some(worker_id) {
         return json!({
@@ -307,6 +308,7 @@ fn base_role_brief(server: &Server, state: &State, worker_id: &str) -> serde_jso
                 work_role_assignment_rule,
                 work_role_execution_rule,
                 work_role_next_action_rule,
+                peer_task_list_rule,
                 collaboration_reply_rule,
                 "The sendmessage reply command applies only within this project. For cross-project from=<worker>@<project>, reply from your own project with `collab master send --project <source-project> --to <source-worker> --subject <topic> <result>` and include the original message ID in the body. Discover a target master's current worker ID with the read-only `(cd <target-project> && collab master status)`; never register as another project's agent or search historical display-name bindings. Both endpoints must be current master grant holders. Current master send has no CLI reply marker or linked-reply option; do not claim body correlation clears an obligation.",
                 active_progress_rule,

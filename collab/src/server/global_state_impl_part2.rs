@@ -364,111 +364,6 @@ impl GlobalState {
         Ok(())
     }
 
-    pub fn record_ledger_scan_receipt(
-        &mut self,
-        receipt: LedgerScanReceipt,
-    ) -> Result<StateVersion, StateError> {
-        receipt.validate()?;
-        // A scan receipt only inserts one entry into a map that no GlobalState
-        // invariant inspects.  The clone-then-commit mutate path would copy the
-        // whole unbounded receipt map (plus every project) for each event, so
-        // replaying a journal with many receipts became quadratic.  Bump the
-        // counters before the insert so a counter overflow still leaves the
-        // state untouched.
-        let version = self.bump_counters()?;
-        self.ledger_scan_receipts
-            .insert(receipt.scan_id.clone(), receipt);
-        Ok(version)
-    }
-
-    pub fn classify_runtime_binding_ledger(
-        &mut self,
-        record: RuntimeBindingLedgerRecord,
-    ) -> Result<StateVersion, StateError> {
-        if let Some(error) = self.runtime_binding_ledger_rejection(&record) {
-            return Err(error);
-        }
-        self.mutate(|next| {
-            if let Some(error) = next.runtime_binding_ledger_rejection(&record) {
-                return Err(error);
-            }
-            let project = next
-                .projects
-                .get_mut(record.project_scope.as_str())
-                .ok_or_else(|| {
-                    StateError::ProjectNotRegistered(record.project_scope.as_str().to_owned())
-                })?;
-            project.runtime_binding_ledger.insert(record.key(), record);
-            Ok(())
-        })
-    }
-
-    /// Why [`Self::classify_runtime_binding_ledger`] rejects this record, or `None`
-    /// when it accepts it.
-    ///
-    /// The ledger is resident control state, so a record is reducible here only
-    /// when it validates, its binding id names exactly one binding host-wide, the
-    /// project it names holds a registration for its app scope, and that project
-    /// holds a binding with its id whose principal coordinates agree. This is the
-    /// single source for that decision: the reducer's pre-check, the reducer's own
-    /// commit step, and any caller that must not append an unreducible record all
-    /// ask this one question, so no second copy of the rule can disagree with it.
-    pub fn runtime_binding_ledger_rejection(
-        &self,
-        record: &RuntimeBindingLedgerRecord,
-    ) -> Option<StateError> {
-        if let Err(error) = record.validate() {
-            return Some(error);
-        }
-        if self
-            .lookup_registration(&record.project_scope, &record.app_scope_id)
-            .is_none()
-        {
-            return Some(StateError::ProjectNotRegistered(format!(
-                "{} (app scope {})",
-                record.project_scope.as_str(),
-                record.app_scope_id
-            )));
-        }
-        if self.lookup_binding(&record.binding_id).is_none() {
-            return Some(StateError::BindingNotFound(
-                record.binding_id.as_str().to_owned(),
-            ));
-        }
-        let Some(project) = self.lookup_project(&record.project_scope) else {
-            return Some(StateError::ProjectNotRegistered(
-                record.project_scope.as_str().to_owned(),
-            ));
-        };
-        let Some(binding) = project.lookup_binding(&record.binding_id) else {
-            return Some(StateError::BindingNotFound(
-                record.binding_id.as_str().to_owned(),
-            ));
-        };
-        if binding.project_scope != record.project_scope
-            || binding.app_scope_id != record.app_scope_id
-            || binding.agent_id != record.agent_id
-            || binding.runtime_id != record.runtime_id
-        {
-            return Some(StateError::Invariant(format!(
-                "runtime binding ledger principal coordinates disagree for {}",
-                record.binding_id
-            )));
-        }
-        None
-    }
-
-    pub fn lookup_runtime_binding_ledger(
-        &self,
-        project_scope: &ProjectScopeId,
-        app_scope_id: &AppServerId,
-        binding_id: &BindingId,
-    ) -> Option<&RuntimeBindingLedgerRecord> {
-        self.lookup_project(project_scope)
-            .and_then(|project| project.lookup_registration(app_scope_id).map(|_| project))
-            .and_then(|project| project.runtime_binding_ledger.get(binding_id.as_str()))
-    }
-
     /// A new registration advances the host version exactly once.  Repeating
     /// the same registration is idempotent; a conflicting registration is
     /// rejected so one AppServer cannot silently replace another identity.
@@ -505,7 +400,6 @@ impl GlobalState {
                     registrations: BTreeMap::new(),
                     runtime_bindings: BTreeMap::new(),
                     master_grants: BTreeMap::new(),
-                    runtime_binding_ledger: BTreeMap::new(),
                 });
             project.registrations.insert(app_key.clone(), registration);
             Ok(())

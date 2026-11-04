@@ -38,7 +38,6 @@ fn resolve_authoritative_main_head(root: &Path) -> Result<String, Resp> {
         )),
     }
 }
-
 /// Integration records accept the main tip, a real merge commit, or the
 /// merged candidate SHA itself. The authoritative question is reachability
 /// from `refs/heads/main`, not string equality with its current tip, because
@@ -98,4 +97,3 @@ fn commit_is_integrated_in_main(root: &Path, commit: &str) -> Result<bool, Resp>
         )),
     }
 }
-

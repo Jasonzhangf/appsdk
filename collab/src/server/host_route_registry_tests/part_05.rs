@@ -184,6 +184,7 @@
                 session_id: format!("session-{worker_id}"),
                 occupancy_revision: 1,
                 updated_ms: now_ms(),
+                pane_anchor: None,
             },
             assignments: Vec::new(),
         }]);
@@ -226,6 +227,8 @@
                 desired: "ended".into(),
                 trigger_ms: None,
                 ttl_seconds: None,
+                interval_ms: None,
+                repeat_count: None,
                 goal_subject: None,
                 reason: Some("fixture cleanup".into()),
             },

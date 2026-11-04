@@ -73,22 +73,56 @@ fn seed_retired_runtime_copy(source: &std::path::Path, destination: &std::path::
     .unwrap();
 }
 
+fn shared_journal_lines(path: &std::path::Path) -> Vec<(String, Value)> {
+    std::fs::read_to_string(path)
+        .expect("read shared route journal")
+        .lines()
+        .map(|line| {
+            let value: Value = serde_json::from_str(line).expect("parse shared route line");
+            (line.to_owned(), value)
+        })
+        .collect()
+}
+
+fn write_shared_journal(path: &std::path::Path, lines: &[String]) {
+    let mut body = lines.join("\n");
+    if !body.is_empty() {
+        body.push('\n');
+    }
+    std::fs::write(path, body).expect("write shared route journal");
+}
+
+fn is_binding_control(value: &Value) -> bool {
+    value.get("kind").and_then(Value::as_str) == Some("binding_control")
+}
+
 fn point_route_at(fixture: &AppFixture, storage_root: &std::path::Path) {
     let path = fixture.host_state.join("routes.jsonl");
-    let mut records = std::fs::read_to_string(&path)
-        .expect("read route journal")
-        .lines()
-        .map(|line| serde_json::from_str::<Value>(line).expect("parse route record"))
-        .collect::<Vec<_>>();
-    assert_eq!(records.len(), 1, "{records:?}");
-    records[0]["storage_root"] = Value::String(storage_root.to_string_lossy().into_owned());
-    let mut body = records
+    let mut routes = 0usize;
+    let lines = shared_journal_lines(&path)
         .into_iter()
-        .map(|record| serde_json::to_string(&record).expect("serialize route record"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    body.push('\n');
-    std::fs::write(path, body).expect("write route journal fixture");
+        .map(|(line, mut record)| {
+            if is_binding_control(&record) {
+                // The control line is the durable identity/binding owner and
+                // must survive fixture edits byte-for-byte.
+                return line;
+            }
+            record["storage_root"] = Value::String(storage_root.to_string_lossy().into_owned());
+            routes += 1;
+            serde_json::to_string(&record).expect("serialize route record")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(routes, 1, "fixture must contain exactly one route record");
+    write_shared_journal(&path, &lines);
+}
+
+fn remove_host_routes(fixture: &AppFixture) {
+    let path = fixture.host_state.join("routes.jsonl");
+    let lines = shared_journal_lines(&path)
+        .into_iter()
+        .filter_map(|(line, value)| is_binding_control(&value).then_some(line))
+        .collect::<Vec<_>>();
+    write_shared_journal(&path, &lines);
 }
 
 fn command_public_in(
@@ -101,6 +135,7 @@ fn command_public_in(
         .args(args)
         .current_dir(cwd)
         .env("COLLAB_STATE_DIR", &fixture.host_state)
+        .env("HOME", fixture.root.join("home"))
         .env("COLLAB_APPSERVER_SOCKET", &fixture.app_socket)
         .env_remove("CODEX_APP_SERVER_SOCKET")
         .env_remove("COLLAB_APPSERVER_NAMESPACE")
@@ -146,6 +181,7 @@ fn start_daemon_from(fixture: &mut AppFixture, daemon_root: &std::path::Path) {
         .arg("serve")
         .current_dir(daemon_root)
         .env("COLLAB_STATE_DIR", &fixture.host_state)
+        .env("HOME", fixture.root.join("home"))
         .env("CODEX_HOME", fixture.root.join("home"))
         .env_remove("COLLAB_APPSERVER_SOCKET")
         .env_remove("CODEX_APP_SERVER_SOCKET")
@@ -159,20 +195,10 @@ fn start_daemon_from(fixture: &mut AppFixture, daemon_root: &std::path::Path) {
         .stdout(daemon_log.try_clone().expect("clone serve log"))
         .stderr(daemon_log);
     fixture.daemon = Some(command.spawn().expect("spawn owned serve child"));
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !fixture.host_state.join("server.sock").exists() && Instant::now() < deadline {
-        if let Some(status) = fixture.daemon.as_mut().unwrap().try_wait().unwrap() {
-            panic!(
-                "test-owned serve exited before readiness: {status}: {}",
-                std::fs::read_to_string(fixture.root.join("test-daemon-host.log"))
-                    .unwrap_or_default()
-            );
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    assert!(
-        fixture.host_state.join("server.sock").exists(),
-        "owned serve did not create socket"
+    super::daemon_readiness::wait_for_ping(
+        fixture.daemon.as_mut().unwrap(),
+        &fixture.host_state.join("server.sock"),
+        Duration::from_secs(5),
     );
 }
 
@@ -214,7 +240,7 @@ fn retired_local_subscription_history_does_not_override_current_central_runtime(
     writeln!(file, "{}", json!({"ev":"NotificationStatus","subscription_id":"legacy-pane-sub","status":"pane-lost","updated_ms":1})).unwrap();
     drop(file);
     let legacy_before = std::fs::read(&legacy_journal).unwrap();
-    std::fs::remove_file(fixture.host_state.join("routes.jsonl")).unwrap();
+    remove_host_routes(&fixture);
     let project = fixture.project.clone();
     start_daemon_from(&mut fixture, &project);
     let restored = fixture.run_public(&["context"], THREAD_A);
@@ -430,8 +456,7 @@ fn current_central_recovery_without_host_route_ignores_retired_local_journal() {
     seed_retired_runtime_copy(&central_root, &fixture.project);
     let legacy_journal = fixture.project.join(".agent-collab/server/journal.jsonl");
     let legacy_before = std::fs::read(&legacy_journal).expect("read external legacy journal");
-    std::fs::remove_file(fixture.host_state.join("routes.jsonl"))
-        .expect("remove host route before first admission");
+    remove_host_routes(&fixture);
 
     let host_project = fixture.root.join("host-project");
     std::fs::create_dir_all(host_project.join(".agent-collab"))
@@ -591,9 +616,11 @@ fn stale_local_storage_reference_rebinds_without_importing_retired_journal() {
         "migrated journal is outside the private host: {}",
         migrated.display()
     );
-    let routes = std::fs::read_to_string(fixture.host_state.join("routes.jsonl"))
-        .expect("read migrated route");
-    let route: Value = serde_json::from_str(routes.trim()).expect("parse migrated route");
+    let route = shared_journal_lines(&fixture.host_state.join("routes.jsonl"))
+        .into_iter()
+        .map(|(_, value)| value)
+        .find(|value| !is_binding_control(value) && value.get("op") == Some(&json!("register")))
+        .expect("parse migrated route record");
     let canonical_host =
         std::fs::canonicalize(&fixture.host_state).expect("canonicalize private host root");
     let canonical_route = std::fs::canonicalize(route["storage_root"].as_str().unwrap())

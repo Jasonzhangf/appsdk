@@ -2,8 +2,13 @@
 set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+. "$repo_root/scripts/require-system-volume.sh"
 cargo_home=${CARGO_HOME:-"$HOME/.cargo"}
 bin_dir="$cargo_home/bin"
+skills_target="$HOME/.agents/skills/collab"
+
+require_system_volume "$bin_dir"
+require_system_volume "$skills_target"
 
 cd "$repo_root"
 "$repo_root/scripts/build-collab.sh"
@@ -32,19 +37,11 @@ mv "$desktop_tmp" "$bin_dir/collab-desktop-mcp"
 trap - EXIT HUP INT TERM
 
 "$bin_dir/collab" install-skills \
-  --target "$HOME/.agents/skills/collab" \
+  --target "$skills_target" \
   --force
 
-# Install and load the per-user LaunchAgent so the daemon autostarts on login.
-# On macOS this is a required part of the delivery, so a launchd failure must
-# fail the install instead of leaving the binary installed without autostart.
-case "$(uname -s)" in
-  Darwin)
-    "$bin_dir/collab" install-autostart
-    ;;
-  *)
-    printf 'autostart=skipped: launchd is macOS-only (uname -s = %s)\n' "$(uname -s)" >&2
-    ;;
-esac
+# Install installs binaries, MCP helper and Skills only. The daemon is not
+# loaded or started here; activation belongs to `collab up`, which writes the
+# service record for the current project before loading the login agent.
 
 printf 'version=%s\n' "$("$bin_dir/collab" --version)"

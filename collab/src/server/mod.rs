@@ -1,4 +1,10 @@
 mod binding_lifecycle;
+mod binding_slot;
+#[cfg(test)]
+mod binding_slot_tests;
+mod binding_store;
+#[cfg(test)]
+mod binding_store_tests;
 mod ceo_report_patrol;
 pub(crate) mod channel_delivery;
 pub(crate) mod channel_envelope;

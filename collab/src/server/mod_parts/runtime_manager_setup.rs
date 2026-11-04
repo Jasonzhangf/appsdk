@@ -30,11 +30,73 @@ fn pending_same_pane_master_bindings_in(state: &State) -> Vec<RuntimeBinding> {
         .collect()
 }
 
+/// Whether the confirmed control set owns this reducer binding's principal
+/// with a different current fact, or has retired that principal entirely.
+///
+/// A lagging reducer/journal must not republish an older binding when the
+/// durable control owner has already replaced or retired it. A control slot
+/// with a pending handoff intent still gates the scope through that pending
+/// effect. A committed control fact with a strictly newer endpoint generation
+/// also wins over a lagging reducer. A control slot that carries the same
+/// principal with the same or older generation and no pending effect is stale
+/// (for example, a leftover from a completed handoff) and must not suppress
+/// the reducer's committed current identity from startup routing. Peers and
+/// unrelated principals are never dropped by this guard.
+fn reducer_binding_superseded_by_control(
+    controlled: &crate::server::binding_slot::BindingControlSet,
+    binding: &RuntimeBinding,
+) -> bool {
+    controlled.slots().any(|slot| {
+        let same_principal = slot
+            .active_binding()
+            .or_else(|| slot.reference_previous())
+            .is_some_and(|value| value.binding.same_principal(binding));
+        if !same_principal {
+            return false;
+        }
+        let Some(control_value) = slot.active_binding() else {
+            // A retired control slot is a committed removal, not a stale
+            // leftover: do not republish the binding the control owner retired.
+            return true;
+        };
+
+        if control_value.binding == *binding {
+            return false;
+        }
+
+        // If the active control value now belongs to a different principal, the
+        // slot has moved on and the old principal's reducer binding stays out.
+        if !control_value.binding.same_principal(binding) {
+            return true;
+        }
+
+        // A pending effect for this slot's scope and name marks an interrupted
+        // handoff: the control intent owns the scope until the real Register
+        // converges it.
+        let pending_for_slot = controlled
+            .pending_effect_for_scope(
+                &slot.identity_key.project_scope,
+                &slot.identity_key.app_scope_id,
+            )
+            .any(|effect| effect.name == slot.identity_key.name);
+        if pending_for_slot {
+            return true;
+        }
+
+        // Same principal and different binding fact without a pending handoff:
+        // only a strictly newer control generation is authoritative. An equal
+        // or older generation is stale and must not block the reducer identity.
+        control_value.binding.endpoint_generation > binding.endpoint_generation
+    })
+}
+
 impl ProjectRuntimeManager {
     fn new(host: Arc<Server>, host_paths: &crate::scope::HostPaths) -> Result<Arc<Self>, String> {
+        // The operation journal opens and replays lazily. Startup only needs it
+        // immediately when a reducer reset is pending; a broken journal must not
+        // block Ping or unrelated project requests.
         let operation_journal = Arc::new(
-            crate::server::operation_journal::OperationJournal::open(host_paths.journal_path())
-                .map_err(|error| format!("OPERATION_JOURNAL_REPLAY_FAILED: {error}"))?,
+            crate::server::operation_journal::OperationJournal::deferred(host_paths.journal_path()),
         );
         Self::new_with_operation_journal(host, host_paths, operation_journal)
     }
@@ -72,12 +134,18 @@ impl ProjectRuntimeManager {
                 // Keep the already-open resident owner and its app aliases.
                 // Production startup selects its central storage before this
                 // manager exists; do not reselect an active reducer here.
-                let active_resident = storage_roots_equal(Path::new(&record.canonical_root), &host.root)?
-                    && storage_roots_equal(Path::new(&record.storage_root), &host.storage_root)?;
+                let active_resident =
+                    storage_roots_equal(Path::new(&record.canonical_root), &host.root)?
+                        && storage_roots_equal(
+                            Path::new(&record.storage_root),
+                            &host.storage_root,
+                        )?;
                 if !active_resident {
                     select_central_runtime_storage(
-                        host_paths, &route_journal,
-                        &(record.app_scope_id.clone(), record.project_scope.clone()), None,
+                        host_paths,
+                        &route_journal,
+                        &(record.app_scope_id.clone(), record.project_scope.clone()),
+                        None,
                     )?;
                 }
             }
@@ -124,14 +192,12 @@ impl ProjectRuntimeManager {
                 route_records.push(record);
             }
         }
-        Self::restore_resident_route_record(
+        if let Some(record) = Self::restore_resident_route_record(
             &host,
             host_root.as_str(),
             &route_journal,
             &route_records,
-        )?;
-        route_records.clear();
-        for record in load_host_route_records(&route_journal)? {
+        )? {
             if route_record_is_replayable(&record)? {
                 route_records.push(record);
             }
@@ -266,14 +332,44 @@ impl ProjectRuntimeManager {
         });
         manager.prune_stale_routes()?;
 
-        // A durable route record is not itself an active runtime. A route
-        // needs a reducer at startup when the host index already addresses it,
-        // or when its project journal owns a committed binding that the host
-        // index never received (the crash window between the two journals).
-        // The second case is discovered with one read-only journal read at a
-        // time; the route keeps a reducer only when it is materialized, so a
-        // stale route cannot hold a journal or writer-lock descriptor merely
-        // because it remains in the durable index.
+        let (binding_control, has_binding_control) =
+            crate::server::binding_store::BindingControlStore::new(host_paths.state_root())
+                .load_with_presence()
+                .map_err(|error| format!("BINDING_CONTROL_READ_FAILED: {error}"))?;
+        let controlled_route_keys: std::collections::BTreeSet<RouteKey> = binding_control
+            .active_values()
+            .map(|value| {
+                (
+                    value.binding.app_scope_id.as_str().to_owned(),
+                    value.binding.project_scope.as_str().to_owned(),
+                )
+            })
+            .collect();
+
+        // A durable route record is not itself an active runtime. Routes
+        // addressed by the host index and routes owned by an active binding
+        // control set are materialized at startup; every other initialized
+        // route stays pending until the client selects it. A legacy route
+        // file without a binding_control line therefore stays lazy: startup
+        // must not materialize all initialized projects up front. Project
+        // journals are never consulted to discover bindings.
+        let controlled_route_count = binding_control.active_values().count();
+        append_log(
+            &host_paths.log_path(),
+            &format!("BINDING_CONTROL_STARTUP_ROUTES: {controlled_route_count}"),
+        );
+        for value in binding_control.active_values() {
+            let key = (
+                value.binding.app_scope_id.as_str().to_owned(),
+                value.binding.project_scope.as_str().to_owned(),
+            );
+            let storage_root = host_paths.app_storage_root(&key.1, &key.0);
+            manager.install_pending_route(
+                &key,
+                Path::new(value.binding.project_scope.as_str()),
+                &storage_root,
+            );
+        }
         let active_routes = manager.active_host_route_keys();
         let pending = manager
             .routes
@@ -295,41 +391,18 @@ impl ProjectRuntimeManager {
                 );
                 continue;
             }
-            if !active_routes.contains(&key) {
-                match manager.route_has_unpublished_binding(&root, &storage_root) {
-                    Ok(true) => {
-                        append_log(
-                            &host_paths.log_path(),
-                            &format!(
-                                "RUNTIME_RECOVERY_PUBLICATION: route {key:?} at {} (storage {}) has a committed project binding missing from the host index",
-                                root.display(),
-                                storage_root.display()
-                            ),
-                        );
-                    }
-                    Ok(false) => {
-                        append_log(
-                            &host_paths.log_path(),
-                            &format!(
-                                "RUNTIME_MATERIALIZATION_DEFERRED: route {key:?} at {} (storage {}) has no active host binding",
-                                root.display(),
-                                storage_root.display()
-                            ),
-                        );
-                        continue;
-                    }
-                    Err(error) => {
-                        append_log(
-                            &host_paths.log_path(),
-                            &format!(
-                                "RUNTIME_RECOVERY_DISCOVERY_FAILED: route {key:?} at {} (storage {}): {error}",
-                                root.display(),
-                                storage_root.display()
-                            ),
-                        );
-                        continue;
-                    }
-                }
+            let active_or_controlled = active_routes.contains(&key)
+                || (has_binding_control && controlled_route_keys.contains(&key));
+            if !active_or_controlled {
+                append_log(
+                    &host_paths.log_path(),
+                    &format!(
+                        "RUNTIME_MATERIALIZATION_DEFERRED: route {key:?} at {} (storage {}) has no active host route or control binding",
+                        root.display(),
+                        storage_root.display()
+                    ),
+                );
+                continue;
             }
             // A route whose runtime cannot be opened must stay visibly not
             // ready.  Dropping this error would hide the only trace of the
@@ -346,62 +419,26 @@ impl ProjectRuntimeManager {
             }
         }
         manager.prune_stale_routes()?;
-        manager.reconcile_started_thread_routes()?;
-        manager.reconcile_same_pane_master_routes()?;
+        // Consume the durable cross-file handoff before any route index is
+        // republished. A pending effect is control truth from the interrupted
+        // transaction; it must be applied or remain an explicit blocker before
+        // the host starts addressing routes from the reducer.
+        // A single unfinished business command stays blocked per scope through
+        // the admission gate instead of stopping this daemon incarnation. Only
+        // a corrupt control resource still fails the manager open.
+        if let Err(error) = manager.recover_pending_effects() {
+            append_log(
+                &host_paths.log_path(),
+                &format!("PENDING_EFFECT_RECOVERY_DEFERRED: {error}"),
+            );
+        }
+        // The confirmed control set wins over a lagging reducer/journal index.
+        // Publish its exact current bindings first, then let the reducer-only
+        // reconciler fill addresses that control does not own.
+        manager.reconcile_controlled_thread_routes(&binding_control)?;
+        manager.reconcile_started_thread_routes(&binding_control)?;
+        manager.reconcile_same_pane_master_routes(&binding_control)?;
         Ok(manager)
-    }
-
-    /// Detect the crash window between the project binding commit and the
-    /// host index publication. The replay is read-only: it does not rewrite a
-    /// legacy journal, open an append descriptor, or take the writer lock.
-    fn route_has_unpublished_binding(
-        &self,
-        root: &Path,
-        storage_root: &Path,
-    ) -> Result<bool, String> {
-        let journal_path = storage_root
-            .join(".agent-collab")
-            .join("server")
-            .join("journal.jsonl");
-        if !journal_path.is_file() {
-            return Ok(false);
-        }
-        let state = replay_from_journal_read_only(root, &journal_path).map_err(|error| {
-            format!(
-                "replay committed project journal {}: {error}",
-                journal_path.display()
-            )
-        })?;
-        let host = self.host.state.lock().unwrap();
-        for binding in state
-            .global
-            .projects
-            .values()
-            .flat_map(|project| project.runtime_bindings.values())
-        {
-            let (Some(session_id), Some(native_thread_id)) = (
-                binding.session_id.as_ref(),
-                binding.native_thread_id.as_ref(),
-            ) else {
-                continue;
-            };
-            if host
-                .global
-                .lookup_current_thread_route(session_id, native_thread_id)
-                != Some(binding)
-            {
-                return Ok(true);
-            }
-        }
-        for binding in pending_same_pane_master_bindings_in(&state) {
-            let Some(endpoint) = binding.tmux_endpoint.as_ref() else {
-                continue;
-            };
-            if host.global.lookup_unique_tmux_pane_route(endpoint) != Some(&binding) {
-                return Ok(true);
-            }
-        }
-        Ok(false)
     }
 
     fn pending_same_pane_master_bindings(&self, runtime: &Server) -> Vec<RuntimeBinding> {
@@ -455,12 +492,25 @@ impl ProjectRuntimeManager {
         Ok(())
     }
 
-    fn reconcile_same_pane_master_routes(&self) -> Result<(), String> {
+    fn reconcile_same_pane_master_routes(
+        &self,
+        controlled: &crate::server::binding_slot::BindingControlSet,
+    ) -> Result<(), String> {
         for runtime in self.runtimes() {
             if Arc::ptr_eq(&runtime, &self.host) {
                 continue;
             }
             for binding in self.pending_same_pane_master_bindings(&runtime) {
+                if reducer_binding_superseded_by_control(controlled, &binding) {
+                    append_log(
+                        &self.host.log_path(),
+                        &format!(
+                            "RECOVERY_RECONCILE_SKIPPED_CONTROL_SUPERSEDED: reducer binding {} for {} is superseded by the control slot",
+                            binding.binding_id, binding.agent_id
+                        ),
+                    );
+                    continue;
+                }
                 let Some(endpoint) = binding.tmux_endpoint.as_ref() else {
                     continue;
                 };
@@ -528,6 +578,9 @@ impl ProjectRuntimeManager {
         let host = self.host.state.lock().unwrap();
         if let Some(endpoint) = binding.tmux_endpoint.as_ref() {
             if let Some(current) = host.global.lookup_unique_tmux_pane_route(endpoint) {
+                if current == binding {
+                    return Ok(());
+                }
                 let same_durable_route = current.same_principal(binding)
                     && current.binding_id == binding.binding_id
                     && current.runtime_id == binding.runtime_id
@@ -585,9 +638,11 @@ impl ProjectRuntimeManager {
     /// only because the host index was lagged, startup converges the host index
     /// to the project owner instead of waiting for a later send to discover a
     /// stale endpoint.
-    fn reconcile_started_thread_routes(&self) -> Result<(), String> {
-        let runtimes = self.runtimes();
-        let bindings = runtimes.into_iter().flat_map(|runtime| {
+    fn reconcile_started_thread_routes(
+        &self,
+        controlled: &crate::server::binding_slot::BindingControlSet,
+    ) -> Result<(), String> {
+        for runtime in self.runtimes() {
             let bindings = runtime
                 .state
                 .lock()
@@ -597,73 +652,82 @@ impl ProjectRuntimeManager {
                 .values()
                 .flat_map(|project| project.runtime_bindings.values().cloned())
                 .collect::<Vec<_>>();
-            bindings.into_iter()
-        });
-        for binding in bindings {
-            if binding.session_id.is_none() || binding.native_thread_id.is_none() {
-                continue;
-            }
-            let session_id = binding.session_id.clone().unwrap();
-            let native_thread_id = binding.native_thread_id.clone().unwrap();
-            // A republisher never evicts. One pane owns exactly one binding
-            // host-wide, so when another route address holds this pane, this
-            // project route stays out of the index until the owner releases it
-            // or a fresh registration takes the pane.
-            if let Some(owner) = self.pane_owner_other_than(&binding) {
-                append_log(
-                    &self.host.log_path(),
-                    &format!(
-                        "RECOVERY_RECONCILE_SKIPPED_SUPERSEDED: {} lost pane to {} binding {}",
-                        binding.binding_id, owner.agent_id, owner.binding_id
-                    ),
-                );
-                continue;
-            }
-            let current = self
-                .host
-                .state
-                .lock()
-                .unwrap()
-                .global
-                .lookup_current_thread_route(&session_id, &native_thread_id)
-                .cloned();
-            if current.as_ref() == Some(&binding) {
-                continue;
-            }
-            let Some(old) = current else {
+            for binding in bindings {
+                if reducer_binding_superseded_by_control(controlled, &binding) {
+                    append_log(
+                        &self.host.log_path(),
+                        &format!(
+                            "RECOVERY_RECONCILE_SKIPPED_CONTROL_SUPERSEDED: reducer binding {} for {} is superseded by the control slot",
+                            binding.binding_id, binding.agent_id
+                        ),
+                    );
+                    continue;
+                }
+                if binding.session_id.is_none() || binding.native_thread_id.is_none() {
+                    continue;
+                }
+                let session_id = binding.session_id.clone().unwrap();
+                let native_thread_id = binding.native_thread_id.clone().unwrap();
+                // A republisher never evicts. One pane owns exactly one binding
+                // host-wide, so when another route address holds this pane, this
+                // project route stays out of the index until the owner releases it
+                // or a fresh registration takes the pane.
+                if let Some(owner) = self.pane_owner_other_than(&binding) {
+                    append_log(
+                        &self.host.log_path(),
+                        &format!(
+                            "RECOVERY_RECONCILE_SKIPPED_SUPERSEDED: {} lost pane to {} binding {}",
+                            binding.binding_id, owner.agent_id, owner.binding_id
+                        ),
+                    );
+                    continue;
+                }
+                let current = self
+                    .host
+                    .state
+                    .lock()
+                    .unwrap()
+                    .global
+                    .lookup_current_thread_route(&session_id, &native_thread_id)
+                    .cloned();
+                if current.as_ref() == Some(&binding) {
+                    continue;
+                }
+                let Some(old) = current else {
+                    self.host
+                        .commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+                            binding: binding.clone(),
+                        }])
+                        .map_err(|error| format!("RECOVERY_RECONCILE_REQUIRED: {error}"))?;
+                    continue;
+                };
+                let same_durable_route = old.same_principal(&binding)
+                    && old.binding_id == binding.binding_id
+                    && old.runtime_id == binding.runtime_id
+                    && old.project_scope == binding.project_scope
+                    && old.app_scope_id == binding.app_scope_id
+                    && old.session_id == binding.session_id
+                    && old.native_thread_id == binding.native_thread_id;
+                if !same_durable_route {
+                    append_log(&self.host.log_path(), &format!(
+                        "RECOVERY_RECONCILE_SKIPPED_SUPERSEDED: current thread route for {} belongs to {}; historical binding {} remains unpublished",
+                        native_thread_id, old.binding_id, binding.binding_id
+                    ));
+                    continue;
+                }
+                if old.endpoint_generation >= binding.endpoint_generation {
+                    append_log(&self.host.log_path(), &format!(
+                        "RECOVERY_RECONCILE_SKIPPED_SUPERSEDED: host route for {} is at generation {} and project route is at generation {}",
+                        binding.binding_id, old.endpoint_generation, binding.endpoint_generation
+                    ));
+                    continue;
+                }
                 self.host
                     .commit_checked(&[Event::GlobalCurrentThreadRouteSet {
                         binding: binding.clone(),
                     }])
                     .map_err(|error| format!("RECOVERY_RECONCILE_REQUIRED: {error}"))?;
-                continue;
-            };
-            let same_durable_route = old.same_principal(&binding)
-                && old.binding_id == binding.binding_id
-                && old.runtime_id == binding.runtime_id
-                && old.project_scope == binding.project_scope
-                && old.app_scope_id == binding.app_scope_id
-                && old.session_id == binding.session_id
-                && old.native_thread_id == binding.native_thread_id;
-            if !same_durable_route {
-                append_log(&self.host.log_path(), &format!(
-                    "RECOVERY_RECONCILE_SKIPPED_SUPERSEDED: current thread route for {} belongs to {}; historical binding {} remains unpublished",
-                    native_thread_id, old.binding_id, binding.binding_id
-                ));
-                continue;
             }
-            if old.endpoint_generation >= binding.endpoint_generation {
-                append_log(&self.host.log_path(), &format!(
-                    "RECOVERY_RECONCILE_SKIPPED_SUPERSEDED: host route for {} is at generation {} and project route is at generation {}",
-                    binding.binding_id, old.endpoint_generation, binding.endpoint_generation
-                ));
-                continue;
-            }
-            self.host
-                .commit_checked(&[Event::GlobalCurrentThreadRouteSet {
-                    binding: binding.clone(),
-                }])
-                .map_err(|error| format!("RECOVERY_RECONCILE_REQUIRED: {error}"))?;
         }
         Ok(())
     }
@@ -688,7 +752,7 @@ impl ProjectRuntimeManager {
         host_root: &str,
         route_journal: &Path,
         route_records: &[HostRouteRecord],
-    ) -> Result<(), String> {
+    ) -> Result<Option<HostRouteRecord>, String> {
         let project_scope = ProjectScopeId::new(host_root.to_owned())
             .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?;
         let app_scope = AppServerId::new(crate::identity::CLI_APP_SERVER_ID)
@@ -701,13 +765,13 @@ impl ProjectRuntimeManager {
             .lookup_registration(&project_scope, &app_scope)
             .cloned();
         let Some(registration) = registration else {
-            return Ok(());
+            return Ok(None);
         };
         if route_records.iter().any(|record| {
             record.app_scope_id == registration.app_scope_id.as_str()
                 && record.project_scope == registration.project_scope.as_str()
         }) {
-            return Ok(());
+            return Ok(None);
         }
 
         let storage_root = storage_owner_path(&host.storage_root)
@@ -721,8 +785,10 @@ impl ProjectRuntimeManager {
             storage_root: storage_root.to_string_lossy().into_owned(),
             registered_ms: registration.registered_at_ms,
         };
-        append_host_route_record(route_journal, &record)
-            .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: restore resident route: {error}"))
+        append_host_route_record(route_journal, &record).map_err(|error| {
+            format!("HOST_ROUTE_REPLAY_FAILED: restore resident route: {error}")
+        })?;
+        Ok(Some(record))
     }
 
     fn validate_current_thread_candidate(

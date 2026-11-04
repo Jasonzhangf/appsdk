@@ -1,0 +1,18 @@
+{
+  "id": "appsdk-collab-installer",
+  "version": "1.0.0",
+  "description": "一次 Collab 安装从目标选择到结果；外置盘目标在写入前明确失败，安装不重启现有 daemon。",
+  "inputs": [{"id":"install_request","schema":"Object"}],
+  "nodes": [
+    {"id":"选择安装位置","operator":"appsdk.collab_install.select","operator_version":"1","inputs":["install_request"],"output":{"id":"install_targets","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"确认系统盘目标","operator":"appsdk.collab_install.location","operator_version":"1","description":"macOS 安装目标必须位于系统数据卷，外置路径或无法解析的位置在写入前返回错误。","inputs":["install_targets"],"output":{"id":"location_result","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"安装产品与启动入口","operator":"appsdk.collab_install.install","operator_version":"1","description":"写入产品和技能并配置启动入口；不重启正在运行的 daemon。","inputs":["location_result"],"output":{"id":"install_outcome","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"返回安装结果","operator":"appsdk.collab_install.result","operator_version":"1","description":"返回成功或实际失败阶段，不把安装成功当作运行切换。","inputs":["install_outcome"],"output":{"id":"install_result","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"}
+  ],
+  "edges": [
+    {"from":"选择安装位置","to":"确认系统盘目标","arc_id":"install_targets"},
+    {"from":"确认系统盘目标","to":"安装产品与启动入口","arc_id":"location_result"},
+    {"from":"安装产品与启动入口","to":"返回安装结果","arc_id":"install_outcome"}
+  ],
+  "outputs": ["install_result"]
+}

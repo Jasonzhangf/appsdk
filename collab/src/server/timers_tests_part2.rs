@@ -370,6 +370,7 @@ use super::*;
                 status_reason: None,
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
+                periodic_declared: false,
             },
         }]);
 
@@ -441,6 +442,7 @@ use super::*;
                 status_reason: None,
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
+                periodic_declared: false,
             },
         }]);
 
@@ -481,6 +483,91 @@ use super::*;
     }
 
     #[test]
+    fn goal_deadline_explicit_repeat_fires_three_times() {
+        // Public-entry red test for bug 10bdac3: an active goal deadline with
+        // an explicit interval and repeat count must fire once per interval up
+        // to its repeat count. Real ticks and real read/consume receipts only;
+        // no injected clock and no synthesized consumption.
+        let (server, root) = test_server();
+        register_master(&server);
+        let now = now_ms();
+        let (target, method) = subscription_target(&server, "master");
+        let subscription_id = "sub-goal-periodic".to_string();
+        server.commit(&[Event::NotificationSubscribed {
+            subscription: NotificationSubscription {
+                id: subscription_id.clone(),
+                worker_id: "master".into(),
+                event: "deadline".into(),
+                subject: Some("goal:periodic".into()),
+                target,
+                method,
+                trigger_ms: Some(now - 1),
+                trigger_times_ms: Vec::new(),
+                interval_ms: Some(1),
+                repeat_count: 3,
+                fired_count: 0,
+                expires_ms: now + 86_400_000,
+                status: "armed".into(),
+                created_ms: now - 1,
+                updated_ms: now,
+                status_reason: None,
+                patrol_idle_since_ms: None,
+                patrol_last_push_ms: 0,
+                periodic_declared: true,
+            },
+        }]);
+
+        let mut fired: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for _ in 0..300 {
+            tick_with_idle(&server, &|_| false);
+            let ids: Vec<String> = {
+                let state = server.state.lock().unwrap();
+                state
+                    .wake_bindings
+                    .iter()
+                    .filter(|(message_id, bound)| {
+                        *bound == &subscription_id
+                            && state.msgs.get(*message_id).is_some_and(|message| {
+                                message.state != "read" && message.state != "superseded"
+                            })
+                    })
+                    .map(|(message_id, _)| message_id.clone())
+                    .collect()
+            };
+            for message_id in ids {
+                if fired.insert(message_id.clone()) {
+                    server.commit(&[Event::Acked {
+                        ids: vec![message_id],
+                    }]);
+                }
+            }
+            if fired.len() >= 3 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let state = server.state.lock().unwrap();
+        assert_eq!(
+            fired.len(),
+            3,
+            "an explicit repeat=3 goal deadline must fire three distinct times, fired={} status={} reason={:?}",
+            fired.len(),
+            state.notification_subscriptions[&subscription_id].status,
+            state.notification_subscriptions[&subscription_id].status_reason,
+        );
+        assert_eq!(
+            state.notification_subscriptions[&subscription_id].fired_count,
+            3
+        );
+        assert_eq!(
+            state.notification_subscriptions[&subscription_id].status,
+            "consumed"
+        );
+        drop(state);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn duplicate_goal_deadline_records_emit_one_wake_for_the_same_deadline() {
         let (server, root) = test_server();
         register_master(&server);
@@ -509,6 +596,7 @@ use super::*;
                     status_reason: None,
                     patrol_idle_since_ms: None,
                     patrol_last_push_ms: 0,
+                periodic_declared: false,
                 },
             }]);
         }
@@ -641,6 +729,7 @@ use super::*;
                 status_reason: None,
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
+                periodic_declared: false,
             },
         }]);
 
@@ -699,6 +788,7 @@ use super::*;
                 status_reason: None,
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
+                periodic_declared: false,
             },
         }]);
 
@@ -765,6 +855,7 @@ use super::*;
                     status_reason: Some("fixture transport-lost".into()),
                     patrol_idle_since_ms: None,
                     patrol_last_push_ms: 0,
+                periodic_declared: false,
                 },
             }]);
         };
@@ -890,6 +981,7 @@ use super::*;
                         .then(|| "fixture transport-lost".into()),
                     patrol_idle_since_ms: None,
                     patrol_last_push_ms: 0,
+                periodic_declared: false,
                 },
             }]);
         };
@@ -1008,6 +1100,7 @@ use super::*;
                     status_reason: None,
                     patrol_idle_since_ms: None,
                     patrol_last_push_ms: 0,
+                periodic_declared: false,
                 },
             }]);
             id
@@ -2315,6 +2408,7 @@ use super::*;
                 status_reason: None,
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
+                periodic_declared: false,
             },
         }]);
         server.commit(&[Event::MasterWakeUpdated {
@@ -2411,6 +2505,7 @@ use super::*;
                 status_reason: None,
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
+                periodic_declared: false,
             },
         }]);
         server.commit(&[Event::MasterWakeUpdated {

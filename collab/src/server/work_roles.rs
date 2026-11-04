@@ -193,6 +193,7 @@ mod work_role_state_tests {
                         session_id: session.into(),
                         occupancy_revision: revision,
                         updated_ms: revision as i64,
+                        pane_anchor: None,
                     },
                     assignments: vec![],
                 })

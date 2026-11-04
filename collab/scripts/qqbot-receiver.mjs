@@ -47,6 +47,12 @@ const uniqueTargets = (matches) => {
   return [...byKey.values()];
 };
 
+const directoryAddressMatchesName = (address, name) => {
+  const text = String(address ?? "").trim().toLowerCase();
+  const wanted = String(name ?? "").trim().toLowerCase();
+  return text === wanted || text.endsWith(`.${wanted}`);
+};
+
 // Case-insensitive exact resolution against the address published by
 // `collab list`. A failed explicit address never falls back to another target.
 export const resolveAddress = (requested, targets) => {
@@ -69,6 +75,8 @@ export const resolveAddress = (requested, targets) => {
 
 export const matchCeoTarget = (targets, ceo) => {
   if (!ceo?.workerId) return { error: "CEO_GRANT_MISSING" };
+  const grantedName = String(ceo.name ?? "").trim();
+  if (!grantedName) return { error: "CEO_GRANT_NAME_MISSING" };
   let matches = targets.filter((entry) => entry.worker_id === ceo.workerId);
   if (ceo.workspace) {
     const exactWorkspace = matches.filter(
@@ -84,6 +92,11 @@ export const matchCeoTarget = (targets, ceo) => {
   const unique = uniqueTargets(matches);
   if (unique.length === 1) {
     const resolved = unique[0];
+    if (!directoryAddressMatchesName(resolved.address, grantedName)) {
+      return {
+        error: `CEO_NAME_MISMATCH: granted ${grantedName}, directory ${resolved.address ?? "missing"}`,
+      };
+    }
     return {
       target: {
         ...resolved,
@@ -98,6 +111,32 @@ export const matchCeoTarget = (targets, ceo) => {
     return { error: `CEO_ADDRESS_AMBIGUOUS: ${ceo.workerId}` };
   }
   return { error: `CEO_NOT_IN_DIRECTORY: ${ceo.workerId}` };
+};
+
+// A queued CEO batch must not keep a stale worker. Re-resolve the current
+// grant against a fresh directory immediately before send. Every other route
+// keeps the recipient selected at admission.
+export const resolveQueuedCeoRoute = async (
+  batch,
+  { loadTargets, lookupCeo },
+) => {
+  if (batch.deliveryAddress !== "ceo") {
+    return {
+      projectRoot: batch.projectRoot,
+      sendToAddress: batch.sendToAddress,
+      resolvedAddress: batch.resolvedAddress,
+      resolvedWorkerId: batch.resolvedWorkerId,
+    };
+  }
+  const [ceo, targets] = await Promise.all([lookupCeo(), loadTargets()]);
+  const resolved = matchCeoTarget(targets, ceo);
+  if (resolved.error) return { error: resolved.error };
+  return {
+    projectRoot: resolved.target.project_root,
+    sendToAddress: "ceo",
+    resolvedAddress: resolved.target.resolvedAddress,
+    resolvedWorkerId: resolved.target.resolvedWorkerId,
+  };
 };
 
 export const resolveRequested = async (
@@ -485,6 +524,7 @@ const createBatchQueue = ({ windowMs, maxWaitMs, flush, now = Date.now }) => {
         deliveryAddress: routeInfo.deliveryAddress,
         resolvedAddress: routeInfo.resolvedAddress,
         resolvedWorkerId: routeInfo.resolvedWorkerId,
+        ownerProject: routeInfo.ownerProject,
         sessionTargetId: routeInfo.sessionTargetId,
         routeSource: routeInfo.routeSource,
         messages: [],
@@ -614,14 +654,6 @@ async function startReceiver() {
     return targets;
   };
 
-  const appendInboxRecord = (record) =>
-    fs.appendFileSync(path.join(state, "inbox.jsonl"), JSON.stringify(record) + "\n", {
-      mode: 0o600,
-    });
-  const appendReceiptRecord = (record) =>
-    fs.appendFileSync(path.join(state, "receipts.jsonl"), JSON.stringify(record) + "\n", {
-      mode: 0o600,
-    });
   const flushBatch = async (batch) => {
     if (!batch || batch.flushing) return;
     batch.flushing = true;
@@ -639,6 +671,15 @@ async function startReceiver() {
     let collabMessageId = null;
     if (combinedBody) {
       try {
+        const currentRoute = await resolveQueuedCeoRoute(batch, {
+          loadTargets: () => activeTargets(true),
+          lookupCeo: () => ceoRoute(batch.ownerProject),
+        });
+        if (currentRoute.error) throw new Error(currentRoute.error);
+        batch.projectRoot = currentRoute.projectRoot;
+        batch.sendToAddress = currentRoute.sendToAddress;
+        batch.resolvedAddress = currentRoute.resolvedAddress;
+        batch.resolvedWorkerId = currentRoute.resolvedWorkerId;
         const sent = await sendCollabMessage(
           [
             "sendmessage",
@@ -663,19 +704,6 @@ async function startReceiver() {
       deliveryError = "EMPTY_BATCH";
     }
 
-    const deliveredAt = new Date().toISOString();
-    for (const item of batch.messages) {
-      appendInboxRecord({
-        ...item.record,
-        batchId: batch.batchId,
-        batchSize: batch.messages.length,
-        collabMessageId,
-        deliveryStatus,
-        deliveryError,
-        deliveredAt,
-      });
-    }
-
     const attachmentCount = batch.messages.reduce(
       (sum, item) => sum + item.attachmentCount,
       0,
@@ -691,25 +719,10 @@ async function startReceiver() {
         ? `已投递给${batch.routeSource === "explicit" ? "" : "默认"} [${deliveryLabel(batch.deliveryAddress)}]${mergeNote}${attachmentNote}（Collab 已接受）。`
         : `投递失败：${batch.deliveryAddress === "ceo" ? "默认/CEO" : `[${batch.deliveryAddress}]`}，${deliveryError}`;
     try {
-      const receipt = await bot.sendText(
+      await bot.sendText(
         batch.replyTarget,
         `${batch.newlyBound ? "QQ 即时通道已连接，已收到你的消息并完成私聊绑定。" : ""}${confirmation}`,
       );
-      appendReceiptRecord({
-        at: deliveredAt,
-        batchId: batch.batchId,
-        inboundIds: batch.messages.map((item) => item.record.messageId),
-        batchSize: batch.messages.length,
-        deliveryStatus,
-        deliveryAddress: batch.deliveryAddress,
-        routedTo: batch.deliveryAddress,
-        resolvedAddress: batch.resolvedAddress,
-        resolvedWorkerId: batch.resolvedWorkerId,
-        collabMessageId,
-        response: receipt,
-        attachments: batch.messages.flatMap((item) => item.attachmentPaths),
-        attachmentErrors: batch.messages.flatMap((item) => item.attachmentErrors),
-      });
     } catch (error) {
       status({
         event: "batch_confirmation_failed",
@@ -735,6 +748,7 @@ async function startReceiver() {
       collabMessageId,
       attachmentCount,
       attachmentErrorCount,
+      ...(deliveryError ? { error: deliveryError } : {}),
     });
   };
 
@@ -826,55 +840,13 @@ async function startReceiver() {
       const resolvedWorkerId =
         route.resolvedWorkerId ?? deliveryTarget?.resolvedWorkerId ?? null;
       const routingError = route.error ?? null;
-      status({
-        event: "route_debug",
-        ownerProject: owner.owner_project,
-        sessionTargetId,
-        activeCount: targets.length,
-        activeAddresses: targets.map((entry) => entry.address || entry.worker_id),
-        routeSource: route.source,
-        deliveryAddress,
-        routedTo: deliveryAddress,
-        resolvedAddress,
-        resolvedWorkerId,
-        routingError,
-      });
-
       if (!deliveryTarget) {
         const deliveryError = routingError ?? "NO_DELIVERY_TARGET";
-        appendInboxRecord({
-          source: "QQBot",
-          receivedAt: new Date().toISOString(),
-          messageId: message.messageId,
-          senderId: message.senderId,
-          replyChannel: "QQBot",
-          routedOwner: owner.owner_worker_id,
-          ownerGeneration: owner.generation,
-          content: message.content,
-          routedAddress,
-          routedBody,
-          attachments: [],
-          attachmentErrors: [],
-          deliveryAddress: null,
-          routedTo: null,
-          resolvedAddress: null,
-          resolvedWorkerId: null,
-          collabMessageId: null,
-          deliveryStatus: "failed",
-          deliveryError,
-        });
         try {
-          const response = await bot.sendText(
+          await bot.sendText(
             message.replyTarget,
             `投递失败：${routedAddress ? `[${routedAddress}]` : "默认/CEO"}，${deliveryError}`,
           );
-          appendReceiptRecord({
-            at: new Date().toISOString(),
-            inboundId: message.messageId,
-            deliveryStatus: "failed",
-            deliveryError,
-            response,
-          });
         } catch (sendError) {
           status({
             event: "failure_confirmation_failed",
@@ -896,36 +868,17 @@ async function startReceiver() {
       enqueueBatch(
         {
           record: {
-            source: "QQBot",
-            receivedAt: new Date().toISOString(),
             messageId: message.messageId,
             senderId: message.senderId,
-            replyChannel: "QQBot",
-            routedOwner: owner.owner_worker_id,
-            ownerGeneration: owner.generation,
-            content: message.content,
-            routedAddress,
-            routedBody,
             attachments: attachmentResult.saved.map((attachment) => ({
               path: attachment.path,
               filename: attachment.filename,
               contentType: attachment.contentType,
-              size: attachment.size,
             })),
-            attachmentErrors: attachmentResult.failed,
-            deliveryAddress,
-            routedTo: deliveryAddress,
-            resolvedAddress,
-            resolvedWorkerId,
           },
-          routedBody,
           deliveryBody,
           attachmentCount: attachmentResult.saved.length,
           attachmentErrorCount: attachmentResult.failed.length,
-          attachmentPaths: attachmentResult.saved.map(
-            (attachment) => attachment.path,
-          ),
-          attachmentErrors: attachmentResult.failed,
         },
         {
           projectRoot: deliveryTarget.project_root,
@@ -933,6 +886,7 @@ async function startReceiver() {
           deliveryAddress,
           resolvedAddress,
           resolvedWorkerId,
+          ownerProject: owner.owner_project,
           sessionTargetId,
           replyTarget: message.replyTarget,
           newlyBound,
@@ -942,39 +896,10 @@ async function startReceiver() {
       );
     } catch (error) {
       const deliveryError = String(error.stderr || error.message || error).slice(0, 1200);
-      const record = {
-        source: "QQBot",
-        receivedAt: new Date().toISOString(),
-        messageId: message.messageId,
-        senderId: message.senderId,
-        replyChannel: "QQBot",
-        routedOwner: owner.owner_worker_id,
-        ownerGeneration: owner.generation,
-        content: message.content,
-        routedAddress,
-        routedBody,
-        deliveryAddress: null,
-        routedTo: null,
-        deliveryStatus: "failed",
-        deliveryError,
-      };
-      fs.appendFileSync(path.join(state, "inbox.jsonl"), JSON.stringify(record) + "\n", {
-        mode: 0o600,
-      });
       try {
-        const response = await bot.sendText(
+        await bot.sendText(
           message.replyTarget,
           `投递失败：${routedAddress ? `[${routedAddress}]` : "默认/CEO"}，${deliveryError}`,
-        );
-        fs.appendFileSync(
-          path.join(state, "receipts.jsonl"),
-          JSON.stringify({
-            at: new Date().toISOString(),
-            inboundId: message.messageId,
-            deliveryStatus: "failed",
-            response,
-          }) + "\n",
-          { mode: 0o600 },
         );
       } catch (sendError) {
         status({

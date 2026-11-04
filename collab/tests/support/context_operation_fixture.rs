@@ -11,6 +11,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+#[path = "daemon_readiness.rs"]
+mod daemon_readiness;
+
 /// Fixture roots live under `/tmp` so the AF_UNIX socket stays inside
 /// `SUN_LEN`. The macOS default temp dir is long enough to make every daemon
 /// start fail with `path must be shorter than SUN_LEN` before any product
@@ -487,18 +490,10 @@ impl Fixture {
                 .expect("spawn isolated collab serve"),
         );
         let socket = self.host_state.join("server.sock");
-        assert!(
-            wait_until(Duration::from_secs(10), || {
-                if let Some(status) = self.daemon.as_mut().unwrap().try_wait().unwrap() {
-                    panic!(
-                        "fixture daemon exited before readiness: {status}: {}",
-                        std::fs::read_to_string(&log_path).unwrap_or_default()
-                    );
-                }
-                socket.exists()
-            }),
-            "fixture daemon did not create its socket: {}",
-            std::fs::read_to_string(log_path).unwrap_or_default()
+        daemon_readiness::wait_for_ping(
+            self.daemon.as_mut().unwrap(),
+            &socket,
+            Duration::from_secs(10),
         );
     }
 

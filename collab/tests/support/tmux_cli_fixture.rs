@@ -7,6 +7,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[path = "daemon_readiness.rs"]
+mod daemon_readiness;
+
 /// The single binary-selection seam for this consumer fixture. `cargo test`
 /// builds and runs the debug binary by default; a canonical installed binary
 /// can be substituted with `COLLAB_TEST_BINARY` so the same public entry point
@@ -89,19 +92,10 @@ impl Fixture {
                 .spawn()
                 .expect("spawn owned serve child"),
         );
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !self.host_state.join("server.sock").exists() && Instant::now() < deadline {
-            if let Some(status) = self.daemon.as_mut().unwrap().try_wait().unwrap() {
-                panic!(
-                    "test-owned serve exited before readiness: {status}: {}",
-                    std::fs::read_to_string(self.root.join("test-daemon.log")).unwrap_or_default()
-                );
-            }
-            thread::sleep(Duration::from_millis(25));
-        }
-        assert!(
-            self.host_state.join("server.sock").exists(),
-            "owned serve did not create socket"
+        daemon_readiness::wait_for_ping(
+            self.daemon.as_mut().unwrap(),
+            &self.host_state.join("server.sock"),
+            Duration::from_secs(5),
         );
     }
 

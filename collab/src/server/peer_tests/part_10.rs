@@ -1430,6 +1430,7 @@ fn typed_master_wake_delivery_marks_accumulator_notified() {
                 status_reason: None,
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
+                periodic_declared: false,
                 created_ms: now,
                 updated_ms: now,
                 fired_count: 0,
@@ -1482,6 +1483,7 @@ fn typed_master_wake_delivery_marks_accumulator_notified() {
                 status_reason: None,
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
+                periodic_declared: false,
             },
         },
         Event::WakeBound {
@@ -1555,6 +1557,7 @@ fn typed_master_wake_delivery_does_not_depend_on_legacy_master_projection() {
                 status_reason: None,
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
+                periodic_declared: false,
                 created_ms: now,
                 updated_ms: now,
                 fired_count: 1,

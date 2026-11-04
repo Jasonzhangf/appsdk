@@ -183,6 +183,7 @@ fn master_idle_subscription(server: &Server, interval_ms: i64) -> String {
             status_reason: None,
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
+            periodic_declared: false,
         },
     }]);
     id
@@ -217,6 +218,7 @@ fn subscribe(
             status_reason: None,
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
+            periodic_declared: false,
         },
     }]);
     id
@@ -246,6 +248,7 @@ fn periodic_deadline_subscription(server: &Server, worker_id: &str, subject: &st
             status_reason: None,
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
+            periodic_declared: false,
         },
     }]);
     id
@@ -941,290 +944,80 @@ fn explicit_delivery_mode_bypasses_batch_window() {
 }
 
 #[test]
-fn ledger_maintenance_skips_routes_this_daemon_does_not_own() {
-    // The ledger is resident control state. A host-wide route whose project
-    // scope this daemon never registered cannot be classified here: the
-    // global reducer rejects the record, so the tick would commit an event
-    // that replay can never reduce.
-    use crate::identity::{AgentId, AppServerId, BindingId, NativeThreadId, RuntimeId, SessionId};
-    use crate::scope::ProjectScopeId;
-    use crate::server::global_state::RuntimeBinding;
-
+fn ordinary_tick_does_not_persist_unused_binding_classifications() {
     let (server, root) = test_server();
-    seed_ledger_owner(&server, "codex-owner");
-    let foreign_scope = ProjectScopeId::new("/tmp/collab-unregistered-project".to_owned()).unwrap();
-    let foreign_app = AppServerId::new("appserver-cli".to_owned()).unwrap();
-    {
-        let mut state = server.state.lock().unwrap();
-        let foreign = RuntimeBinding::new_with_session(
-            foreign_scope.clone(),
-            foreign_app.clone(),
-            AgentId::new("codex-owner".to_owned()).unwrap(),
-            RuntimeId::new("runtime-foreign".to_owned()).unwrap(),
-            BindingId::new("binding-foreign".to_owned()).unwrap(),
-            1,
-            Some(SessionId::new("session-foreign".to_owned()).unwrap()),
-            Some(NativeThreadId::new("thread-foreign".to_owned()).unwrap()),
-        )
-        .expect("foreign binding");
-        state
-            .global
-            .set_current_thread_route(foreign)
-            .expect("host-wide route");
-    }
+    seed_ledger_owner(&server, "current-owner");
 
-    super::tick_ledger_maintenance_at(&server, 1_000);
+    super::tick_at(&server, 1_000);
 
     let state = server.state.lock().unwrap();
-    assert!(
-        state.journal_poison.is_none(),
-        "ledger maintenance must not commit a record the reducer rejects: {:?}",
-        state.journal_poison
-    );
-    assert!(
-        state.global.lookup_project(&foreign_scope).is_none(),
-        "fixture: the foreign project scope must stay unregistered"
-    );
-    let classified: usize = state
-        .global
-        .projects
+    let mut projection = state.global.clone();
+    projection.current_thread_routes.clear();
+    projection.legacy_thread_routes.clear();
+    let state_view = serde_json::to_value(&projection).unwrap();
+    assert!(state_view.get("ledger_scan_receipts").is_none());
+    assert!(state_view["projects"]
+        .as_object()
+        .unwrap()
         .values()
-        .map(|project| project.runtime_binding_ledger.len())
-        .sum();
-    assert!(
-        classified > 0,
-        "a route this daemon owns must still be classified"
-    );
+        .all(|project| project.get("runtime_binding_ledger").is_none()));
+    assert!(state
+        .global
+        .lookup_binding(&crate::identity::BindingId::new("binding-current-owner").unwrap())
+        .is_some());
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }
 
-/// A route can be retired between the snapshot a tick reads and the commit
-/// that writes it. The reducer rejects a classification this project no
-/// longer holds, and a rejected commit fails the journal closed, so the
-/// commit boundary asks the reducer's own predicate and drops what it
-/// rejects.
 #[test]
-fn ledger_commit_drops_classifications_the_reducer_would_reject() {
-    use crate::identity::{AgentId, AppServerId, BindingId, OperationId, RuntimeId};
-    use crate::scope::ProjectScopeId;
-    use crate::server::global_state::{
-        LedgerScanReceipt, RuntimeBinding, RuntimeBindingLedgerRecord, RuntimeBindingLedgerState,
-    };
-    use crate::server::state::Event;
+fn obsolete_binding_classification_does_not_survive_replay() {
+    use crate::identity::{BindingId, OperationId};
+    use crate::server::global_state::{RuntimeBindingLedgerRecord, RuntimeBindingLedgerState};
 
     let (server, root) = test_server();
-    seed_ledger_owner(&server, "codex-owner");
-    let owned = {
-        let state = server.state.lock().unwrap();
-        let project_scope =
-            crate::server::GlobalState::canonical_project_scope(&server.root).unwrap();
-        state
-            .global
-            .lookup_project(&project_scope)
-            .unwrap()
-            .runtime_bindings
-            .values()
-            .next()
-            .unwrap()
-            .clone()
-    };
-    let record = |binding: &RuntimeBinding, suffix: &str| RuntimeBindingLedgerRecord {
-        project_scope: binding.project_scope.clone(),
-        app_scope_id: binding.app_scope_id.clone(),
-        agent_id: binding.agent_id.clone(),
-        runtime_id: binding.runtime_id.clone(),
-        binding_id: binding.binding_id.clone(),
-        endpoint_generation: binding.endpoint_generation,
-        state: RuntimeBindingLedgerState::Live,
-        probe_state: Some(RuntimeBindingLedgerState::Live),
-        reason: None,
-        classified_ms: 1_000,
-        operation_id: OperationId::new(format!("ledger-{suffix}")).unwrap(),
-        receipt_id: format!("ledger-receipt-{suffix}"),
-    };
-    // A route whose scope this index never registered. The snapshot cannot
-    // see it go away because it was never there.
-    let retired = RuntimeBinding::new_with_session(
-        ProjectScopeId::new("/tmp/collab-retired-after-snapshot".to_owned()).unwrap(),
-        AppServerId::new("appserver-cli".to_owned()).unwrap(),
-        AgentId::new("codex-owner".to_owned()).unwrap(),
-        RuntimeId::new("runtime-retired".to_owned()).unwrap(),
-        BindingId::new("binding-retired".to_owned()).unwrap(),
-        1,
-        Some(crate::identity::SessionId::new("session-retired".to_owned()).unwrap()),
-        Some(crate::identity::NativeThreadId::new("thread-retired".to_owned()).unwrap()),
-    )
-    .unwrap();
-    // Another project holds a binding with the id the record names, while
-    // the record's own project does not. A host-wide binding lookup accepts
-    // this record; the reducer, which looks inside the record's own
-    // project, does not.
-    let other_app = AppServerId::new("appserver-cli".to_owned()).unwrap();
-    let cross = RuntimeBinding::new_with_session(
-        ProjectScopeId::new("/tmp/collab-other-project".to_owned()).unwrap(),
-        other_app.clone(),
-        AgentId::new("agent-other".to_owned()).unwrap(),
-        RuntimeId::new("runtime-other".to_owned()).unwrap(),
-        BindingId::new("binding-cross-project".to_owned()).unwrap(),
-        1,
-        Some(crate::identity::SessionId::new("session-other".to_owned()).unwrap()),
-        Some(crate::identity::NativeThreadId::new("thread-other".to_owned()).unwrap()),
-    )
-    .unwrap();
+    seed_ledger_owner(&server, "current-owner");
+    let binding = server
+        .state
+        .lock()
+        .unwrap()
+        .global
+        .lookup_binding(&BindingId::new("binding-current-owner").unwrap())
+        .unwrap()
+        .clone();
     server
-        .commit_checked(&[
-            Event::GlobalProjectRegistered {
-                registration: crate::server::global_state::ProjectRegistration::new(
-                    cross.project_scope.clone(),
-                    other_app.clone(),
-                )
-                .unwrap(),
+        .commit_checked(&[Event::GlobalRuntimeBindingLedgerClassified {
+            record: RuntimeBindingLedgerRecord {
+                project_scope: binding.project_scope,
+                app_scope_id: binding.app_scope_id,
+                agent_id: binding.agent_id,
+                runtime_id: binding.runtime_id,
+                binding_id: binding.binding_id,
+                endpoint_generation: binding.endpoint_generation,
+                state: RuntimeBindingLedgerState::Live,
+                probe_state: Some(RuntimeBindingLedgerState::Live),
+                reason: None,
+                classified_ms: 1_000,
+                operation_id: OperationId::new("old-classification").unwrap(),
+                receipt_id: "old-receipt".into(),
             },
-            Event::GlobalRuntimeBound {
-                binding: cross.clone(),
-            },
-        ])
-        .expect("registering the other project must commit");
-    let mut cross_record = record(&cross, "cross-project");
-    cross_record.project_scope = owned.project_scope.clone();
-    cross_record.app_scope_id = owned.app_scope_id.clone();
-    // A binding id held by both projects. The host-wide lookup that the
-    // reducer runs before its project check finds two candidates and fails
-    // closed, so the record is unreducible even though its own project
-    // holds a binding with that id.
-    let duplicate_id = BindingId::new("binding-duplicate".to_owned()).unwrap();
-    let duplicate_in_root = RuntimeBinding::new_with_session(
-        owned.project_scope.clone(),
-        owned.app_scope_id.clone(),
-        AgentId::new("agent-duplicate-root".to_owned()).unwrap(),
-        RuntimeId::new("runtime-duplicate-root".to_owned()).unwrap(),
-        duplicate_id.clone(),
-        1,
-        Some(crate::identity::SessionId::new("session-duplicate-root".to_owned()).unwrap()),
-        Some(crate::identity::NativeThreadId::new("thread-duplicate-root".to_owned()).unwrap()),
-    )
-    .unwrap();
-    let duplicate_in_other = RuntimeBinding::new_with_session(
-        cross.project_scope.clone(),
-        other_app,
-        AgentId::new("agent-duplicate-other".to_owned()).unwrap(),
-        RuntimeId::new("runtime-duplicate-other".to_owned()).unwrap(),
-        duplicate_id,
-        1,
-        Some(crate::identity::SessionId::new("session-duplicate-other".to_owned()).unwrap()),
-        Some(crate::identity::NativeThreadId::new("thread-duplicate-other".to_owned()).unwrap()),
-    )
-    .unwrap();
-    server
-        .commit_checked(&[
-            Event::GlobalRuntimeBound {
-                binding: duplicate_in_root.clone(),
-            },
-            Event::GlobalRuntimeBound {
-                binding: duplicate_in_other,
-            },
-        ])
-        .expect("binding one id in two projects must commit");
-    let duplicate_record = record(&duplicate_in_root, "duplicate");
-    {
-        let state = server.state.lock().unwrap();
-        let global = &state.global;
-        assert!(
-            global
-                .lookup_registration(&cross_record.project_scope, &cross_record.app_scope_id)
-                .is_some()
-                && global.lookup_binding(&cross_record.binding_id).is_some(),
-            "fixture: a host-wide binding lookup accepts the cross-project record"
-        );
-        assert!(
-            global
-                .runtime_binding_ledger_rejection(&cross_record)
-                .is_some(),
-            "the reducer looks inside the record's own project and rejects it"
-        );
-        assert!(
-            global
-                .lookup_binding(&duplicate_record.binding_id)
-                .is_none()
-                && global
-                    .lookup_project(&duplicate_record.project_scope)
-                    .is_some_and(|project| project
-                        .lookup_binding(&duplicate_record.binding_id)
-                        .is_some()),
-            "fixture: the duplicate id is ambiguous host-wide but present in its own project"
-        );
-        assert!(
-            global
-                .runtime_binding_ledger_rejection(&duplicate_record)
-                .is_some(),
-            "the reducer's host-wide pre-check rejects an ambiguous binding id"
-        );
-    }
-
-    let mut events = vec![
-        Event::GlobalRuntimeBindingLedgerClassified {
-            record: record(&owned, "owned"),
-        },
-        Event::GlobalRuntimeBindingLedgerClassified {
-            record: record(&retired, "retired"),
-        },
-        Event::GlobalRuntimeBindingLedgerClassified {
-            record: cross_record,
-        },
-        Event::GlobalRuntimeBindingLedgerClassified {
-            record: duplicate_record,
-        },
-        Event::GlobalLedgerScanReceiptRecorded {
-            receipt: LedgerScanReceipt {
-                scan_id: "ledger-scan-1000".to_owned(),
-                scanned_ms: 1_000,
-                classified: 4,
-                transitioned: 4,
-                unchanged: 0,
-                blocked: 0,
-                mailbox_messages_unchanged: true,
-            },
-        },
-    ];
-
-    let dropped = {
-        let state = server.state.lock().unwrap();
-        super::drop_unowned_ledger_classifications(&state, &mut events)
-    };
-    assert_eq!(
-        dropped, 3,
-        "every classification the reducer rejects must be dropped"
-    );
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| matches!(event, Event::GlobalRuntimeBindingLedgerClassified { .. }))
-            .count(),
-        1,
-        "only the classification this project still holds may survive"
-    );
-    let receipt = events
-        .iter()
-        .find_map(|event| match event {
-            Event::GlobalLedgerScanReceiptRecorded { receipt } => Some(receipt),
-            _ => None,
-        })
-        .expect("the scan receipt must survive");
-    assert_eq!(
-        (receipt.classified, receipt.transitioned, receipt.blocked),
-        (1, 1, 3),
-        "the receipt must describe what actually commits"
-    );
-
-    // The surviving batch is exactly what the reducer accepts, so the
-    // commit does not fail the journal closed.
-    server
-        .commit_checked(&events)
-        .expect("the surviving batch must commit");
-    let state = server.state.lock().unwrap();
-    assert!(state.journal_poison.is_none(), "{:?}", state.journal_poison);
-    drop(state);
+        }])
+        .unwrap();
+    drop(server);
+    let replayed = crate::server::replay(&root).unwrap();
+    let mut projection = replayed.global.clone();
+    projection.current_thread_routes.clear();
+    projection.legacy_thread_routes.clear();
+    let state_view = serde_json::to_value(&projection).unwrap();
+    assert!(state_view.get("ledger_scan_receipts").is_none());
+    assert!(state_view["projects"]
+        .as_object()
+        .unwrap()
+        .values()
+        .all(|project| project.get("runtime_binding_ledger").is_none()));
+    assert!(replayed
+        .global
+        .lookup_binding(&BindingId::new("binding-current-owner").unwrap())
+        .is_some());
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -1273,6 +1066,7 @@ fn project_patrol_subscription_unseeded(
             status_reason: None,
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
+            periodic_declared: false,
         },
     }]);
     id

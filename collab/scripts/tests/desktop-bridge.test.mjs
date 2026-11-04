@@ -302,3 +302,54 @@ test('context accepts object facts and project_scope while retained queries stay
   assert.deepEqual(await f.facts(),{});
   assert.equal(f.calls.length,calls,'query must not probe or enroll');
 });
+
+test('MCP wrapper prefers a sibling collab-mcp over a divergent CARGO_HOME',async t=>{
+  const root=await fs.mkdtemp('/tmp/cdb-sibling-');
+  t.after(()=>fs.rm(root,{recursive:true,force:true}).catch(()=>{}));
+  const siblingDir=path.join(root,'sibling'),cargoBin=path.join(root,'cargo','bin');
+  await fs.mkdir(siblingDir,{recursive:true});
+  await fs.mkdir(cargoBin,{recursive:true});
+  const wrapperPath=path.join(siblingDir,'collab-desktop-mcp.mjs');
+  await fs.copyFile(wrapper,wrapperPath);
+  const siblingMarker=path.join(root,'sibling.marker'),cargoMarker=path.join(root,'cargo.marker');
+  const writeStub=async(file,marker)=>{await fs.writeFile(file,`#!/bin/sh\nprintf used > "${marker}"\n`);await fs.chmod(file,0o700);};
+  await writeStub(path.join(siblingDir,'collab-mcp'),siblingMarker);
+  await writeStub(path.join(cargoBin,'collab-mcp'),cargoMarker);
+  const env={...process.env,CARGO_HOME:path.join(root,'cargo')};
+  delete env.COLLAB_MCP_BIN;delete env.CODEX_APP_TOOLS_PIPE_PATH;
+  delete env.CODEX_SESSION_ID;delete env.CODEX_THREAD_ID;
+  const child=spawn(process.execPath,[wrapperPath],{env,stdio:['pipe','pipe','pipe']});
+  t.after(()=>{if(child.exitCode===null&&child.signalCode===null)child.kill('SIGTERM');});
+  const exists=async file=>{try{await fs.access(file);return true;}catch{return false;}};
+  const deadline=Date.now()+3000;
+  while(!(await exists(siblingMarker))&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,20));
+  assert.equal(await exists(siblingMarker),true,'sibling collab-mcp must be spawned');
+  assert.equal(await exists(cargoMarker),false,'a divergent CARGO_HOME collab-mcp must not run');
+});
+
+test('Desktop bridge refuses an external state root before creating its socket',async t=>{
+  if(process.platform!=='darwin')return t.skip('macOS system data volume');
+  const base=path.dirname(wrapper);
+  if((await fs.stat(base)).dev===(await fs.stat('/System/Volumes/Data')).dev)return t.skip('external fixture unavailable');
+  const root=await fs.mkdtemp(path.join(base,'.volume-test-'));
+  t.after(()=>fs.rm(root,{recursive:true,force:true}));
+  const state=path.join(root,'state');
+  const env={...process.env,COLLAB_STATE_DIR:state,CODEX_APP_TOOLS_PIPE_PATH:'/private/tmp/collab-nonexistent-host.sock',CODEX_INTERNAL_ORIGINATOR_OVERRIDE:'Codex Desktop'};
+  const child=spawn(process.execPath,[wrapper,'--service'],{env,stdio:['ignore','ignore','pipe']});
+  let stderr='';child.stderr.on('data',chunk=>stderr+=chunk);
+  const code=await new Promise((resolve,reject)=>{child.on('error',reject);child.on('close',resolve);});
+  assert.notEqual(code,0);
+  assert.match(stderr,/COLLAB_SYSTEM_DISK_REQUIRED/);
+  await assert.rejects(fs.stat(state),{code:'ENOENT'});
+
+  const local=await fs.mkdtemp('/tmp/collab-volume-test-');
+  t.after(()=>fs.rm(local,{recursive:true,force:true}));
+  const localState=path.join(local,'state');
+  const localChild=spawn(process.execPath,[wrapper,'--service'],{env:{...env,COLLAB_STATE_DIR:localState},stdio:['ignore','ignore','pipe']});
+  let localError='';localChild.stderr.on('data',chunk=>localError+=chunk);
+  const localCode=await new Promise((resolve,reject)=>{localChild.on('error',reject);localChild.on('close',resolve);});
+  assert.notEqual(localCode,0);
+  assert.doesNotMatch(localError,/COLLAB_SYSTEM_DISK_REQUIRED/);
+  assert.match(localError,/ENOENT/);
+  assert.equal((await fs.stat(localState)).isDirectory(),true);
+});

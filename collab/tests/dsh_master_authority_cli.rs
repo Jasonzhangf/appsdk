@@ -696,6 +696,121 @@ fn dsh_context_discovers_first_registration_and_preserves_current_route_recovery
     fixture.finish();
 }
 
+/// Regression for git-bug e25779c: a full `~/.collab` reset clears the
+/// gateway-published placement declaration and every committed DSH binding,
+/// while the gateway process keeps running. Collab must not guess the gateway
+/// socket or pid while the declaration is absent; once the live gateway
+/// re-publishes its own declaration, a fresh CLI must rediscover and
+/// re-enroll every live peer without any gateway restart.
+#[test]
+fn dsh_full_reset_recovers_every_live_peer_after_gateway_republishes_declaration() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut fixture = Fixture::new_requiring_enrollment();
+    fixture.start_daemon();
+    let capability = fixture.state.join("runtime/dsh/gateway-control.json");
+    let declare = |fixture: &Fixture| {
+        std::fs::create_dir_all(capability.parent().unwrap()).unwrap();
+        std::fs::write(
+            &capability,
+            json!({"version":1,
+            "control_socket":fixture.gateway.socket,"pid":std::process::id()})
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::set_permissions(&capability, std::fs::Permissions::from_mode(0o600)).unwrap();
+    };
+    declare(&fixture);
+
+    // Baseline: both live peers register and enroll over the one live gateway.
+    for agent in ["agentA", "agentB"] {
+        let output = fixture.dsh_command(&["context"], agent);
+        assert!(
+            output.status.success(),
+            "baseline register {agent}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert_eq!(fixture.registrations(), 2, "baseline registers both peers");
+    let enrolled_before = fixture.gateway.register_peer_requests().len();
+    assert!(
+        enrolled_before >= 2,
+        "baseline enrolls both peers: {enrolled_before}"
+    );
+
+    // Model the full reset: collab's control plane and the gateway declaration
+    // both disappear. The gateway process stays running on the same socket.
+    fixture.stop_daemon();
+    std::fs::remove_dir_all(&fixture.state).unwrap();
+    std::fs::create_dir_all(&fixture.state).unwrap();
+    fixture.start_daemon();
+
+    // With no declaration, Collab must not fabricate placement or identity.
+    let unresolved = fixture.dsh_command(&["context"], "agentA");
+    let unresolved: Value = serde_json::from_slice(&unresolved.stdout).unwrap_or(Value::Null);
+    assert_eq!(
+        unresolved["result"]["outcome"], "missing_facts",
+        "a lost declaration must surface as missing facts, not a guessed endpoint: {unresolved}"
+    );
+    assert_eq!(
+        unresolved["result"]["requires"]["fields"],
+        json!(["dsh"]),
+        "{unresolved}"
+    );
+    assert_eq!(
+        fixture.registrations(),
+        0,
+        "missing declaration must not register"
+    );
+    assert_eq!(
+        fixture.gateway.register_peer_requests().len(),
+        enrolled_before,
+        "missing declaration must not enroll any peer"
+    );
+
+    // The live gateway re-publishes its own placement declaration. That is the
+    // gateway-owned half of the recovery; Collab cannot synthesize socket/pid.
+    // No gateway restart happens: same process, same socket, same listener.
+    declare(&fixture);
+
+    let mut recovered_agents = HashSet::new();
+    for agent in ["agentA", "agentB"] {
+        let output = fixture.dsh_command(&["context"], agent);
+        let parsed: Value = serde_json::from_slice(&output.stdout).unwrap_or(Value::Null);
+        assert!(
+            output.status.success(),
+            "recover {agent}: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(parsed["result"]["outcome"], "completed", "{parsed}");
+        assert_eq!(
+            parsed["result"]["snapshot"]["identity"]["transport"]["kind"], "dsh",
+            "{parsed}"
+        );
+    }
+    assert_eq!(
+        fixture.registrations(),
+        2,
+        "every live peer must re-register after the declaration returns"
+    );
+    for enrollment in fixture
+        .gateway
+        .register_peer_requests()
+        .into_iter()
+        .skip(enrolled_before)
+    {
+        if let Some(agent) = enrollment["params"]["agentId"].as_str() {
+            recovered_agents.insert(agent.to_owned());
+        }
+    }
+    assert_eq!(
+        recovered_agents,
+        HashSet::from(["agentA".to_owned(), "agentB".to_owned()]),
+        "every live peer must be re-enrolled after the declaration returns"
+    );
+    fixture.finish();
+}
+
 #[test]
 fn dsh_bootstrap_discovery_rejects_invalid_capabilities_without_registration() {
     use std::os::unix::fs::PermissionsExt;
@@ -2228,6 +2343,171 @@ fn anonymous_send_to_directory_target_enqueues_registered_dsh_receiver_without_n
         dir_after["targets"].as_array().unwrap().len(),
         1,
         "directory must not expose an unknown sender as a peer: {dir_after}"
+    );
+    fixture.finish();
+}
+
+/// Public DSH project reset/restart recovery scenario.
+///
+/// This is the black-box acceptance for the DSH reset retention finding:
+/// register a live DSH worker, promote it to project master, send one project
+/// message, run the public `collab reset --project`, restart the daemon with a
+/// cache-empty gateway, and then confirm the same session, endpoint, binding
+/// and credential recover without `collab context` or `Register` while the old
+/// project message is gone.
+///
+/// It binds an isolated Unix-domain gateway socket and an owned daemon socket.
+/// The current implementation sandbox denies socket bind with EPERM, so this
+/// test is compiled but not executed here. It must be run by Jenny in a
+/// permitted environment. `project_reset::tests::
+/// online_reset_preserves_live_dsh_binding_and_identity` carries the equivalent
+/// no-socket evidence for the same retentions in the meantime.
+#[test]
+#[ignore = "binds isolated Unix-domain sockets; run by Jenny in a permitted environment"]
+fn dsh_project_reset_preserves_live_session_binding_across_restart() {
+    let mut fixture = Fixture::new_requiring_enrollment();
+    fixture.start_daemon();
+
+    let facts = json!({"dsh":{
+        "endpoint":fixture.gateway.endpoint(),
+        "runtime_id":"gateway-runtime", "agent_id":"agentA",
+        "session_id":"agentA", "cwd":fixture.root
+    }})
+    .to_string();
+    let enrolled = fixture.command(&["context", "--provide", &facts]);
+    assert!(enrolled.status.success(), "{}", rendered(&enrolled));
+    let (worker, identity) = only_identity(&fixture);
+    let token = identity["token"].as_str().expect("credential").to_owned();
+    let committed_runtime = identity["runtime"].clone();
+    let committed_transport = identity["transport"].clone();
+    let ctx = json!({
+        "app_scope_id": committed_runtime["appserver_id"],
+        "canonical_root": fixture.root,
+        "project_scope": identity["project_scope"],
+        "runtime_context": committed_runtime
+    });
+    assert!(fixture.gateway.is_enrolled("gateway-runtime", "agentA"));
+
+    // The public online reset authenticates the current project master.
+    let promoted = authority(
+        &fixture,
+        "MasterPromote",
+        &worker,
+        &token,
+        &ctx,
+        json!({"approval": "isolated DSH project reset restart recovery fixture"}),
+    );
+    assert_ok(&promoted);
+
+    let before = fixture.dsh_command(
+        &[
+            "sendmessage",
+            "--to",
+            &worker,
+            "--subject",
+            "reset-old",
+            "old project business message",
+        ],
+        "agentA",
+    );
+    assert!(before.status.success(), "{}", rendered(&before));
+    let before: Value = serde_json::from_slice(&before.stdout).expect("pre-reset send JSON");
+    assert_eq!(before["notification"], "dsh-wake-enqueued", "{before}");
+    let old_msg_id = before["msg_id"]
+        .as_str()
+        .expect("old message id")
+        .to_owned();
+
+    let reset = fixture.dsh_command(&["reset", "--project"], "agentA");
+    assert!(reset.status.success(), "{}", rendered(&reset));
+    let reset: Value = serde_json::from_slice(&reset.stdout).expect("reset JSON");
+    assert_eq!(reset["status"], "complete", "{reset}");
+    assert!(
+        fixture
+            .state
+            .join("identities")
+            .join(&worker)
+            .join("identity.json")
+            .is_file(),
+        "reset must retain the live DSH credential"
+    );
+
+    // Restart the daemon and drop the gateway's local enrollment cache. No
+    // `collab context` or `Register` follows; the committed binding must
+    // recover from reset durability alone.
+    let registrations_before_restart = fixture.registrations();
+    let enrollments_before_restart = fixture.gateway.register_peer_requests().len();
+    fixture.stop_daemon();
+    fixture.gateway.clear_enrollment();
+    fixture.start_daemon();
+    assert!(
+        fixture
+            .gateway
+            .wait_enrolled("gateway-runtime", "agentA", Duration::from_secs(8)),
+        "reset plus restart did not re-enroll the retained DSH binding"
+    );
+
+    let requests = fixture.gateway.register_peer_requests();
+    let replayed = requests
+        .iter()
+        .skip(enrollments_before_restart)
+        .find(|request| request["params"]["agentId"] == "agentA")
+        .expect("post-reset handoff for agentA");
+    assert_eq!(replayed["params"]["runtimeId"], "gateway-runtime");
+    assert_eq!(replayed["params"]["binding"]["workerId"], worker.as_str());
+    assert_runtime_context(&replayed["params"], &committed_runtime);
+    assert_eq!(
+        fixture.registrations(),
+        registrations_before_restart,
+        "reset recovery must not Register again"
+    );
+
+    let (restored_worker, restored) = only_identity(&fixture);
+    assert_eq!(restored_worker, worker);
+    assert_eq!(
+        restored["runtime"]["binding_id"], committed_runtime["binding_id"],
+        "reset must preserve the committed binding"
+    );
+    assert_eq!(
+        restored["runtime"]["session_id"], committed_runtime["session_id"],
+        "reset must preserve the live DSH session"
+    );
+    assert_eq!(
+        restored["transport"], committed_transport,
+        "reset must preserve the committed DSH endpoint and credential"
+    );
+
+    let after = fixture.dsh_command(
+        &[
+            "sendmessage",
+            "--to",
+            &worker,
+            "--subject",
+            "reset-new",
+            "new project message after reset",
+        ],
+        "agentA",
+    );
+    assert!(after.status.success(), "{}", rendered(&after));
+    let after: Value = serde_json::from_slice(&after.stdout).expect("post-reset send JSON");
+    assert_eq!(after["notification"], "dsh-wake-enqueued", "{after}");
+    let new_msg_id = after["msg_id"].as_str().expect("new message id").to_owned();
+
+    let mailbox = fixture.request(json!({"op":"MailboxRead","all":true,"worker_id":worker,
+        "token":token,"project_context":ctx}));
+    assert_ok(&mailbox);
+    let mailbox_text = mailbox.to_string();
+    assert!(
+        mailbox_text.contains(&new_msg_id),
+        "new post-reset message missing: {mailbox}"
+    );
+    assert!(
+        !mailbox_text.contains(&old_msg_id),
+        "reset must clear the old project message: {mailbox}"
+    );
+    assert!(
+        !mailbox_text.contains("old project business message"),
+        "reset must clear old project message bodies: {mailbox}"
     );
     fixture.finish();
 }

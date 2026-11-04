@@ -35,6 +35,7 @@ fn fixture() -> (Server, std::path::PathBuf, RouteScope) {
                 session_id: "session-old".into(),
                 occupancy_revision: 1,
                 updated_ms: 1,
+                pane_anchor: None,
             },
         })
         .unwrap();
@@ -113,6 +114,7 @@ fn subscribe(server: &Server, worker: &str) {
                 status_reason: None,
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
+                periodic_declared: false,
             },
         })
         .unwrap();
@@ -573,6 +575,7 @@ fn unknown_request_enqueues_once_and_reassignment_uses_new_name() {
                     session_id: "session-new".into(),
                     occupancy_revision: 1,
                     updated_ms: 5,
+                    pane_anchor: None,
                 },
             )
             .unwrap();

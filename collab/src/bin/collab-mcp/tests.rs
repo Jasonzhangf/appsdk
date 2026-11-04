@@ -762,21 +762,15 @@ fn master_tool_exposes_status_promote_clear_and_delegate() {
 }
 
 #[test]
-fn lifecycle_review_and_integration_tools_are_exposed() {
+fn lifecycle_review_is_exposed_without_git_integration() {
     let definitions = tools();
-    for (name, required) in [
-        ("collab_task_review", json!(["id", "evidence"])),
-        (
-            "collab_task_integrated",
-            json!(["id", "commit", "evidence"]),
-        ),
-    ] {
-        let tool = definitions
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|tool| tool["name"] == name)
-            .unwrap_or_else(|| panic!("missing MCP tool {name}"));
-        assert_eq!(tool["inputSchema"]["required"], required);
-    }
+    let definitions = definitions.as_array().unwrap();
+    let review = definitions
+        .iter()
+        .find(|tool| tool["name"] == "collab_task_review")
+        .unwrap();
+    assert_eq!(review["inputSchema"]["required"], json!(["id", "evidence"]));
+    assert!(!definitions
+        .iter()
+        .any(|tool| tool["name"] == "collab_task_integrated"));
 }

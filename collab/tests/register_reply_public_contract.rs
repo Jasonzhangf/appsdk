@@ -32,7 +32,8 @@ fn initial_tmux_registers_once_without_participant_return() {
             .filter_map(Value::as_str)
             .any(|rule| {
                 rule.contains("no authorized next action remains")
-                    && rule.contains("request next work or explicit idle approval before stopping")
+                    && rule
+                        .contains("must not stop to report to the master and wait for a dispatch")
                     && rule.contains("Close unused owned patrol tasks and timed subscriptions")
                     && rule.contains("keep direct-message reception")
             })
@@ -790,5 +791,165 @@ fn unrecognized_process_with_agy_marker_does_not_assume_agy_and_fails_closed() {
     assert!(
         err.contains("IDENTITY_RESTORE_CROSS_PROJECT"),
         "unrecognized host must not claim AGY identity and must fail closed: {err}"
+    );
+}
+
+/// Seed the host operation journal with one admitted + cancelled operation.
+/// The host journal opens lazily on the first identity request, so this must
+/// run while the fixture daemon is stopped.
+fn seed_persisted_cancelled_operation(fixture: &Fixture, operation_id: &str) {
+    let admitted = json!({
+        "schema_version": 1,
+        "record_type": "identity_operation",
+        "sequence": 0,
+        "operation_id": operation_id,
+        "project_scope": "/tmp/project",
+        "app_scope_id": "appserver-cli",
+        "action": "context",
+        "invocation": "automatic",
+        "intent_digest": "digest-1",
+        "query_capability_hash": "sha256:seed-cancel",
+        "phase": "admitted",
+        "recorded_at_ms": 1
+    });
+    let cancelled = json!({
+        "schema_version": 1,
+        "record_type": "identity_operation",
+        "sequence": 1,
+        "operation_id": operation_id,
+        "project_scope": "/tmp/project",
+        "app_scope_id": "appserver-cli",
+        "action": "context",
+        "invocation": "automatic",
+        "intent_digest": "digest-1",
+        "query_capability_hash": "sha256:seed-cancel",
+        "phase": "cancelled",
+        "committed_phases": ["cancelled"],
+        "recorded_at_ms": 2
+    });
+    std::fs::write(
+        fixture.host_state.join("journal.jsonl"),
+        format!("{admitted}\n{cancelled}\n"),
+    )
+    .expect("seed persisted cancelled operation");
+}
+
+/// Send one late `context --return-challenge` reply through the real public
+/// CLI inside the selected pane, then read its typed JSON and exit status.
+fn send_late_register_reply(
+    fixture: &Fixture,
+    pane: &Pane,
+    label: &str,
+    operation_id: &str,
+) -> (Value, i32) {
+    let challenge = json!({
+        "operation_id": operation_id,
+        "command_id": "register-command",
+        "purpose": "manual_communication_restore",
+        "challenge": "register-marker"
+    });
+    let stdout = fixture.root.join(format!("{label}.reply.stdout"));
+    let stderr = fixture.root.join(format!("{label}.reply.stderr"));
+    let status_path = fixture.root.join(format!("{label}.reply.status"));
+    let done = fixture.root.join(format!("{label}.reply.done"));
+    let script = format!(
+        "\"$COLLAB_BINARY\" context --return-challenge {} >{} 2>{}\nprintf '%s' \"$?\" >{}\nprintf done >{}\nsleep 600\n",
+        shell_quote(&challenge.to_string()),
+        shell_quote(&stdout.to_string_lossy()),
+        shell_quote(&stderr.to_string_lossy()),
+        shell_quote(&status_path.to_string_lossy()),
+        shell_quote(&done.to_string_lossy()),
+    );
+    let consumer = fixture.run_interactive_in_pane(pane, label, &script);
+    assert!(
+        wait_until(Duration::from_secs(15), || done.exists()),
+        "late reply did not finish: {}",
+        consumer.output()
+    );
+    let output = std::fs::read_to_string(&stdout).expect("late reply stdout");
+    let parsed: Value = serde_json::from_str(&output).unwrap_or_else(|error| {
+        panic!(
+            "late reply must emit typed JSON: {error}: {output}; stderr={}",
+            std::fs::read_to_string(&stderr).unwrap_or_default()
+        )
+    });
+    let status = std::fs::read_to_string(&status_path)
+        .expect("late reply exit status")
+        .trim()
+        .parse::<i32>()
+        .expect("late reply exit status is numeric");
+    (parsed, status)
+}
+
+#[test]
+fn late_register_reply_after_persisted_cancel_rejects_without_evidence() {
+    let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (mut fixture, pane) = Fixture::isolated("late-reply-cancelled");
+    let operation_id = "ctxop-persisted-cancel";
+    fixture.stop_daemon();
+    seed_persisted_cancelled_operation(&fixture, operation_id);
+    fixture.restart_daemon();
+
+    let (response, status) = send_late_register_reply(&fixture, &pane, "cancel", operation_id);
+
+    assert_ne!(status, 0, "late reply must fail: {response}");
+    assert_eq!(response["ok"], false, "{response}");
+    assert_eq!(
+        response["error"], "IDENTITY_OPERATION_CANCELLED",
+        "a durable cancellation must win before reply acceptance: {response}"
+    );
+    assert!(
+        !fixture
+            .host_state
+            .join("register-reply-evidence.jsonl")
+            .exists(),
+        "a cancelled late reply must not write register-reply evidence"
+    );
+}
+
+#[test]
+fn malformed_operation_journal_keeps_nonidentity_usable_and_blocks_late_reply() {
+    let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (mut fixture, pane) = Fixture::isolated("late-reply-corrupt-journal");
+    fixture.stop_daemon();
+    std::fs::write(fixture.host_state.join("journal.jsonl"), b"{malformed}\n")
+        .expect("seed malformed host operation journal");
+    fixture.restart_daemon();
+
+    // The host journal is deferred: a non-identity request must stay usable
+    // while no host reducer reset is pending.
+    let ping_output = fixture.command(&["status"], None);
+    assert!(
+        ping_output.status.success(),
+        "non-identity status must stay usable: stdout={} stderr={}",
+        String::from_utf8_lossy(&ping_output.stdout),
+        String::from_utf8_lossy(&ping_output.stderr)
+    );
+    let ping: Value = serde_json::from_slice(&ping_output.stdout).expect("typed status result");
+    for field in ["messages", "tasks", "workers"] {
+        assert!(
+            ping[field].is_number(),
+            "missing status count {field}: {ping}"
+        );
+    }
+    assert!(ping["now"].is_string(), "missing status time: {ping}");
+
+    let (response, status) =
+        send_late_register_reply(&fixture, &pane, "corrupt", "ctxop-late-corrupt");
+
+    assert_ne!(status, 0, "late reply must fail: {response}");
+    assert_eq!(response["ok"], false, "{response}");
+    assert!(
+        response["error"]
+            .as_str()
+            .is_some_and(|error| error.starts_with("OPERATION_JOURNAL_REPLAY_FAILED")),
+        "a broken deferred journal must block reply acceptance: {response}"
+    );
+    assert!(
+        !fixture
+            .host_state
+            .join("register-reply-evidence.jsonl")
+            .exists(),
+        "a broken deferred journal must stop evidence writes before acceptance"
     );
 }

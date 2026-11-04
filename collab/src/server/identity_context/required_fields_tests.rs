@@ -1,8 +1,143 @@
 use super::*;
-use crate::proto::{DshCandidate, TmuxCandidate};
+use crate::proto::{DshCandidate, TmuxCandidate, TmuxPaneAnchor};
+use crate::server::binding_slot::{PendingEffect, PendingEffectKind};
+use crate::server::name_state::{NameOccupancy, NamePaneAnchor, TaskAssignment};
 use crate::server::operation_journal::{inject_next_append_fault, OperationJournal};
 use crate::server::peer_tests::test_server;
 use std::sync::Arc;
+
+/// Role recovery preserves the same carrier's ordinary work identity. It must
+/// not rewrite the stable-name mailbox or move open tasks as a side effect.
+#[test]
+fn restore_peer_role_recovery_does_not_rewrite_old_name_mailbox_or_tasks() {
+    let (host, runtime, manager, host_root, root, fixture_facts, _saved) =
+        persisted_context_fixture();
+    let context = recovery_context(&root);
+    let project_scope = context.project_scope.clone();
+    // The fixture starts with a committed stable name. Seed one unread message
+    // and one open task under that name so the regression is observable.
+    let name = {
+        let state = runtime.state.lock().unwrap();
+        state
+            .name_occupancies
+            .get(project_scope.as_str())
+            .and_then(|names| {
+                names
+                    .values()
+                    .find(|holder| holder.worker_id.as_str() == "saved-peer")
+            })
+            .map(|holder| holder.name.clone())
+            .expect("fixture owner has a stable name")
+    };
+    let worker = {
+        let state = runtime.state.lock().unwrap();
+        state
+            .workers
+            .get("saved-peer")
+            .expect("fixture worker")
+            .clone()
+    };
+    let message_id = "restore-peer-unread".to_owned();
+    runtime.commit(&[
+        Event::Sent {
+            msg: Message {
+                id: message_id.clone(),
+                from: "sender".into(),
+                to: worker.id.clone(),
+                mtype: "notify".into(),
+                subject: Some("restore-peer".into()),
+                body: "unread follows Jenny".into(),
+                in_reply_to: None,
+                created_ms: 1,
+                state: "pending".into(),
+                wake_attempt_count: 0,
+                last_wake_attempt_ms: 0,
+                retry_attempted: false,
+            },
+        },
+        Event::MailboxNameAddressed {
+            message_id: message_id.clone(),
+            address: name_mailbox::MailboxNameAddress {
+                project_scope: project_scope.as_str().to_owned(),
+                name: name.clone(),
+            },
+        },
+        Event::TaskCreated {
+            task: TaskRec {
+                id: "restore-peer-open".into(),
+                owner: worker.id.clone(),
+                created_by: "sender".into(),
+                feature_id: None,
+                worktree_path: None,
+                branch: None,
+                base_commit: None,
+                priority: "p1".into(),
+                status: "working".into(),
+                next_step: Some("keep".into()),
+                wait: None,
+                isolation_mode: None,
+                created_ms: 1,
+                updated_ms: 1,
+            },
+        },
+        Event::TaskAssignmentUpdated {
+            assignment: TaskAssignment {
+                task_id: "restore-peer-open".into(),
+                name: name.clone(),
+                session_id: worker
+                    .transport
+                    .as_ref()
+                    .and_then(|transport| transport.session_id.as_ref())
+                    .cloned()
+                    .unwrap_or_else(|| "saved-agent-session".into()),
+                assignment_revision: 1,
+                reflow: None,
+                updated_ms: 1,
+            },
+        },
+    ]);
+
+    let approval = json!({
+        "action": "restore_peer",
+        "authorization": "user releases Jenny",
+        "decision": "approved",
+    })
+    .to_string();
+    let facts = IdentityFacts {
+        caller_pid: Some(std::process::id()),
+        ..fixture_facts
+    };
+    let request = IdentityContextRequest {
+        grant_approval: Some(serde_json::from_str(&approval).unwrap()),
+        approval: None,
+        operation_id: "restore-peer-role".into(),
+        invocation: "approved_recovery".into(),
+        action: "context".into(),
+        facts,
+        invocation_cwd: Some(root.display().to_string()),
+        query: false,
+        query_capability: "restore-peer-role-capability".into(),
+        invocation_ticket: String::new(),
+    };
+    let (_, response) = manager.identity_context(context.clone(), request);
+    assert!(response.ok);
+    let state = runtime.state.lock().unwrap();
+    assert_eq!(state.worker_names["saved-peer"], name);
+    assert_eq!(state.msgs[&message_id].to, worker.id);
+    assert_eq!(
+        state.mailbox_name_addresses[&message_id].name, name,
+        "role recovery must not rewrite the old stable-name address"
+    );
+    assert_eq!(state.task_assignments["restore-peer-open"].name, name);
+    assert_eq!(state.tasks["restore-peer-open"].owner, worker.id);
+
+    drop(state);
+    drop(manager);
+    drop(runtime);
+    drop(host);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(host_root).unwrap();
+}
 
 #[test]
 fn dsh_facts_do_not_compete_with_launcher_tmux_ancestry() {
@@ -29,6 +164,971 @@ fn dsh_facts_do_not_compete_with_launcher_tmux_ancestry() {
     assert!(observed.tmux.is_none());
     assert!(observed.caller_pid.is_none());
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn register_control_commit_surfaces_unknown_durability_instead_of_swallowing_it() {
+    let (host, runtime, manager, _host_root, root, _facts, _saved) = persisted_context_fixture();
+    let context = recovery_context(&root);
+
+    // The register reducer already committed. Force the control resource's
+    // parent-directory sync to fail after its rename lands: the published file
+    // is visible, but its durability is unknown and must not be reported as a
+    // plain success.
+    crate::server::test_hooks::fail_next_parent_sync();
+    let durability = manager
+        .persist_registered_binding(&runtime, &context, "saved-peer")
+        .expect("published control commit must not become an error");
+    assert_eq!(
+        durability,
+        crate::server::binding_store::Durability::Unknown,
+        "unknown parent sync durability must be surfaced, not discarded"
+    );
+
+    // The published control file is visible and carries the project slot even
+    // though its durability is unknown.
+    let control_path = host.host_paths.state_root().join("routes.jsonl");
+    let published = crate::server::binding_store::BindingControlStore::at(&control_path)
+        .load()
+        .expect("published control file must remain readable");
+    assert!(
+        published
+            .slots()
+            .any(|slot| slot.identity_key.project_scope == context.project_scope),
+        "the published control set must carry the registered project slot"
+    );
+
+    crate::server::test_hooks::fail_next_parent_sync();
+    assert_eq!(
+        manager
+            .persist_registered_binding(&runtime, &context, "saved-peer")
+            .unwrap(),
+        crate::server::binding_store::Durability::Unknown,
+        "same-fact manager retry must confirm sync, not manufacture success"
+    );
+    assert_eq!(
+        manager
+            .persist_registered_binding(&runtime, &context, "saved-peer")
+            .unwrap(),
+        crate::server::binding_store::Durability::Confirmed
+    );
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn refreshed_binding_reports_unknown_control_durability() {
+    let (host, runtime, manager, host_root, root, _facts, mut identity) =
+        persisted_context_fixture();
+    let context = recovery_context(&root);
+    let binding = {
+        let state = runtime.state.lock().unwrap();
+        state
+            .global
+            .lookup_project_for_route(&RouteScope {
+                app_scope_id: context.app_scope_id.clone(),
+                project_scope_id: context.project_scope.clone(),
+            })
+            .unwrap()
+            .runtime_bindings
+            .values()
+            .find(|binding| binding.agent_id.as_str() == "saved-peer")
+            .unwrap()
+            .clone()
+    };
+    let transport = identity.transport.clone().unwrap();
+    let endpoint = transport.tmux_endpoint.as_ref().unwrap();
+    seed_saved_pane_name(
+        &runtime,
+        context.project_scope.as_str(),
+        "saved-peer",
+        binding.session_id.as_ref().unwrap().as_str(),
+        TmuxPaneAnchor {
+            socket_path: endpoint.socket_path.clone(),
+            pane_id: endpoint.pane_id.clone(),
+        },
+        &root.display().to_string(),
+    );
+    crate::server::test_hooks::fail_next_parent_sync();
+    let error = manager
+        .refresh_session_transport(
+            &runtime,
+            &binding,
+            transport,
+            &mut identity,
+            &Scope { root: root.clone() },
+        )
+        .expect_err("unknown control durability must not report a successful refresh");
+    assert!(
+        error
+            .to_string()
+            .contains("BINDING_CONTROL_DURABILITY_UNKNOWN"),
+        "{error}"
+    );
+    drop(manager);
+    drop(runtime);
+    drop(host);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(host_root).unwrap();
+}
+
+#[test]
+fn nameless_restored_identity_defers_its_control_slot() {
+    let (host, runtime, manager, host_root, root, _facts, mut identity) =
+        persisted_context_fixture();
+    let context = recovery_context(&root);
+    let binding = {
+        let state = runtime.state.lock().unwrap();
+        state
+            .global
+            .lookup_project_for_route(&RouteScope {
+                app_scope_id: context.app_scope_id.clone(),
+                project_scope_id: context.project_scope.clone(),
+            })
+            .unwrap()
+            .runtime_bindings
+            .values()
+            .find(|binding| binding.agent_id.as_str() == "saved-peer")
+            .unwrap()
+            .clone()
+    };
+    // Drop the registered name so the restored identity is a nameless legacy
+    // carrier. The refresh must not invent a pool name here: that would
+    // preempt the single context name decision, which runs later with live
+    // pane and cwd facts.
+    {
+        let mut state = runtime.state.lock().unwrap();
+        if let Some(names) = state
+            .name_occupancies
+            .get_mut(context.project_scope.as_str())
+        {
+            names.retain(|_name, holder| holder.worker_id.as_str() != "saved-peer");
+        }
+    }
+    let transport = identity.transport.clone().unwrap();
+    let result = manager.refresh_session_transport(
+        &runtime,
+        &binding,
+        transport,
+        &mut identity,
+        &Scope { root: root.clone() },
+    );
+    assert!(result.is_ok(), "{result:?}");
+
+    let control = crate::server::binding_store::BindingControlStore::at(
+        &host.host_paths.state_root().join("routes.jsonl"),
+    )
+    .load()
+    .expect("control resource must remain readable");
+    assert!(
+        !control.slots().any(|slot| {
+            slot.active_binding().is_some_and(|value| {
+                value.binding.agent_id.as_str() == "saved-peer"
+                    && value.binding.project_scope.as_str() == context.project_scope.as_str()
+            })
+        }),
+        "a nameless restored identity must not publish a control slot before its name decision"
+    );
+
+    drop(manager);
+    drop(runtime);
+    drop(host);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(host_root).unwrap();
+}
+
+#[test]
+fn automatic_context_name_publishes_control_slot_matching_business_occupancy() {
+    let (host, runtime, manager, host_root, root, facts, _saved) = persisted_context_fixture();
+    let context = recovery_context(&root);
+    let (_, response) = manager.dispatch_sync(
+        Some(context.clone()),
+        Req::IdentityContext {
+            facts,
+            identity_context: None,
+        },
+    );
+    assert!(response.ok, "{response:?}");
+    let name = {
+        let state = runtime.state.lock().unwrap();
+        state
+            .name_occupancies
+            .get(context.project_scope.as_str())
+            .and_then(|names| {
+                names
+                    .values()
+                    .find(|holder| holder.worker_id.as_str() == "saved-peer")
+            })
+            .map(|holder| holder.name.clone())
+    }
+    .expect("automatic context must keep or assign a stable name");
+    let control = crate::server::binding_store::BindingControlStore::at(
+        &host.host_paths.state_root().join("routes.jsonl"),
+    )
+    .load()
+    .expect("control resource must remain readable");
+    assert!(
+        control.slots().any(|slot| {
+            slot.identity_key.name == name
+                && slot.identity_key.project_scope == context.project_scope
+                && slot.active_binding().is_some_and(|value| {
+                    value.binding.agent_id.as_str() == "saved-peer"
+                        && value.binding.project_scope.as_str() == context.project_scope.as_str()
+                })
+        }),
+        "the published control slot must match the business occupancy name {name}"
+    );
+    drop(manager);
+    drop(runtime);
+    drop(host);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(host_root).unwrap();
+}
+
+#[test]
+fn completed_name_effect_is_cleared_without_replaying_occupancy() {
+    let (host, runtime, manager, host_root, root, _facts, _saved) = persisted_context_fixture();
+    let context = recovery_context(&root);
+    let holder = {
+        let state = runtime.state.lock().unwrap();
+        state
+            .name_occupancies
+            .get(context.project_scope.as_str())
+            .and_then(|names| {
+                names
+                    .values()
+                    .find(|holder| holder.worker_id.as_str() == "saved-peer")
+            })
+            .cloned()
+            .expect("fixture must have a committed name occupancy")
+    };
+    let effect_id = format!("name:{}:completed", context.project_scope.as_str());
+    let store = crate::server::binding_store::BindingControlStore::at(
+        &host.host_paths.state_root().join("routes.jsonl"),
+    );
+    store
+        .commit(crate::server::binding_store::ControlChange::SetEffect {
+            effect: PendingEffect {
+                kind: PendingEffectKind::Name,
+                effect_id: effect_id.clone(),
+                operation_id: "completed-name-effect".into(),
+                project_scope: context.project_scope.clone(),
+                app_scope_id: context.app_scope_id.clone(),
+                name: holder.name.clone(),
+                previous_worker_id: Some("older-worker".into()),
+                previous_session_id: Some("older-session".into()),
+                target_worker_id: holder.worker_id.clone(),
+                target_session_id: holder.session_id.clone(),
+                occupancy_revision: holder.occupancy_revision,
+                source_names: Vec::new(),
+                moves_existing_names: false,
+                pane_anchor: holder.pane_anchor.clone(),
+                created_ms: holder.updated_ms,
+            },
+        })
+        .unwrap();
+
+    manager.recover_pending_effects().unwrap();
+
+    let after = {
+        let state = runtime.state.lock().unwrap();
+        state
+            .name_occupancy(context.project_scope.as_str(), holder.name.as_str())
+            .cloned()
+            .expect("recovery must not remove the committed occupancy")
+    };
+    assert_eq!(after, holder);
+    assert!(store.load().unwrap().pending_effect(&effect_id).is_none());
+
+    // A second startup pass sees no effect and must not recreate or rewrite
+    // the already consumed handoff.
+    manager.recover_pending_effects().unwrap();
+    assert!(store.load().unwrap().pending_effect(&effect_id).is_none());
+
+    drop(manager);
+    drop(runtime);
+    drop(host);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(host_root).unwrap();
+}
+
+#[test]
+fn incomplete_register_effect_blocks_instead_of_synthesizing_a_worker() {
+    let (host, runtime, manager, host_root, root, _facts, _saved) = persisted_context_fixture();
+    let context = recovery_context(&root);
+    let effect_id = format!("register-{}:incomplete", context.project_scope.as_str());
+    let store = crate::server::binding_store::BindingControlStore::at(
+        &host.host_paths.state_root().join("routes.jsonl"),
+    );
+    store
+        .commit(crate::server::binding_store::ControlChange::SetEffect {
+            effect: PendingEffect {
+                kind: PendingEffectKind::Register,
+                effect_id: effect_id.clone(),
+                operation_id: "incomplete-register-effect".into(),
+                project_scope: context.project_scope.clone(),
+                app_scope_id: context.app_scope_id.clone(),
+                name: "missing-register-name".into(),
+                previous_worker_id: None,
+                previous_session_id: None,
+                target_worker_id: "missing-register-worker".into(),
+                target_session_id: "missing-register-session".into(),
+                occupancy_revision: 1,
+                source_names: Vec::new(),
+                moves_existing_names: false,
+                pane_anchor: None,
+                created_ms: 1,
+            },
+        })
+        .unwrap();
+
+    let error = manager.recover_pending_effects().unwrap_err();
+    assert!(error.contains("PENDING_EFFECT_TARGET_MISSING"), "{error}");
+    assert!(
+        store.load().unwrap().pending_effect(&effect_id).is_some(),
+        "a failed Register recovery must keep its durable effect"
+    );
+    assert!(
+        !runtime
+            .state
+            .lock()
+            .unwrap()
+            .workers
+            .contains_key("missing-register-worker"),
+        "recovery must not synthesize a carrier"
+    );
+
+    drop(manager);
+    drop(runtime);
+    drop(host);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(host_root).unwrap();
+}
+
+#[test]
+fn superseded_register_effect_is_retired_instead_of_blocking_forever() {
+    let (host, runtime, manager, host_root, root, _facts, _saved) = persisted_context_fixture();
+    let context = recovery_context(&root);
+    manager
+        .persist_registered_binding(&runtime, &context, "saved-peer")
+        .expect("fixture binding publishes a control slot");
+    let holder = {
+        let state = runtime.state.lock().unwrap();
+        state
+            .name_occupancies
+            .get(context.project_scope.as_str())
+            .and_then(|names| {
+                names
+                    .values()
+                    .find(|holder| holder.worker_id.as_str() == "saved-peer")
+            })
+            .cloned()
+            .expect("fixture must have a committed name occupancy")
+    };
+    let effect_id = format!("register-{}:superseded", context.project_scope.as_str());
+    let store = crate::server::binding_store::BindingControlStore::at(
+        &host.host_paths.state_root().join("routes.jsonl"),
+    );
+    store
+        .commit(crate::server::binding_store::ControlChange::SetEffect {
+            effect: PendingEffect {
+                kind: PendingEffectKind::Register,
+                effect_id: effect_id.clone(),
+                operation_id: "superseded-register-effect".into(),
+                project_scope: context.project_scope.clone(),
+                app_scope_id: context.app_scope_id.clone(),
+                name: holder.name.clone(),
+                previous_worker_id: None,
+                previous_session_id: None,
+                target_worker_id: holder.worker_id.clone(),
+                target_session_id: "older-superseded-session".into(),
+                occupancy_revision: holder.occupancy_revision.saturating_add(1),
+                source_names: Vec::new(),
+                moves_existing_names: false,
+                pane_anchor: None,
+                created_ms: holder.updated_ms,
+            },
+        })
+        .unwrap();
+
+    let proven = super::super::proven_pending_operations(
+        host.host_paths.state_root(),
+        context.app_scope_id.as_str(),
+        context.project_scope.as_str(),
+    )
+    .unwrap();
+    assert!(
+        !proven.contains("superseded-register-effect"),
+        "a superseded effect must not authorize trimming a business tail"
+    );
+
+    // The control slot for the holder name now points at a newer session. A
+    // recovery pass must retire the stale intent instead of blocking the scope
+    // forever, while still refusing to synthesize a carrier.
+    manager.recover_pending_effects().unwrap();
+    assert!(store.load().unwrap().pending_effect(&effect_id).is_none());
+    assert!(
+        runtime
+            .state
+            .lock()
+            .unwrap()
+            .workers
+            .contains_key("saved-peer"),
+        "retiring a stale effect must not remove the committed owner"
+    );
+
+    drop(manager);
+    drop(runtime);
+    drop(host);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(host_root).unwrap();
+}
+
+#[test]
+fn incomplete_register_effect_is_consumed_by_a_later_typed_register() {
+    let (host, runtime, manager, host_root, root, _facts, _saved) = persisted_context_fixture();
+    let context = recovery_context(&root);
+    let worker_id = "later-register-worker";
+    let token = "later-register-token";
+    let transport = crate::server::peer_tests::test_appserver_transport("thread-later-register");
+    let target_session_id = transport
+        .session_id
+        .clone()
+        .expect("typed Register transport must carry a session");
+    let target_name = "Bob";
+    runtime
+        .state
+        .lock()
+        .unwrap()
+        .name_occupancies
+        .entry(context.project_scope.as_str().to_owned())
+        .or_default()
+        .insert(
+            target_name.into(),
+            crate::server::name_state::NameOccupancy {
+                name: target_name.into(),
+                worker_id: worker_id.into(),
+                session_id: target_session_id.clone(),
+                occupancy_revision: 10,
+                updated_ms: 1,
+                pane_anchor: None,
+            },
+        );
+    let effect_id = format!("register-{}:completion", context.project_scope.as_str());
+    let store = crate::server::binding_store::BindingControlStore::at(
+        &host.host_paths.state_root().join("routes.jsonl"),
+    );
+    store
+        .commit(crate::server::binding_store::ControlChange::SetEffect {
+            effect: PendingEffect {
+                kind: PendingEffectKind::Register,
+                effect_id: effect_id.clone(),
+                operation_id: "later-register-completion".into(),
+                project_scope: context.project_scope.clone(),
+                app_scope_id: context.app_scope_id.clone(),
+                name: target_name.into(),
+                previous_worker_id: None,
+                previous_session_id: None,
+                target_worker_id: worker_id.into(),
+                target_session_id,
+                occupancy_revision: 1,
+                source_names: Vec::new(),
+                moves_existing_names: false,
+                pane_anchor: None,
+                created_ms: 1,
+            },
+        })
+        .unwrap();
+
+    // The first recovery pass must not invent the missing Register receipt.
+    let error = manager.recover_pending_effects().unwrap_err();
+    assert!(error.contains("PENDING_EFFECT_TARGET_MISSING"), "{error}");
+    assert!(
+        store.load().unwrap().pending_effect(&effect_id).is_some(),
+        "an incomplete Register must remain durable before the real business commit"
+    );
+
+    let prepared = runtime
+        .prepare_register_envelope_for_scope(
+            worker_id,
+            token,
+            &transport,
+            context.project_scope.clone(),
+            &root.to_string_lossy(),
+            context.app_scope_id.clone(),
+            false,
+        )
+        .expect("typed Register must prepare from the same project scope");
+    let registered =
+        consume_prepared_register_typed(&runtime, worker_id, &transport, prepared, None);
+    assert!(registered.ok, "{registered:?}");
+
+    // The later Register is the real business consumer. Once its name
+    // occupancy and worker are committed, the exact pending effect can be
+    // cleared without replaying or synthesizing a receipt.
+    manager
+        .recover_pending_effects_for_scope(&context)
+        .expect("the committed Register must converge the pending effect");
+    assert!(
+        store.load().unwrap().pending_effect(&effect_id).is_none(),
+        "the completed Register effect must be retired"
+    );
+    assert!(
+        runtime
+            .state
+            .lock()
+            .unwrap()
+            .workers
+            .contains_key(worker_id),
+        "the committed Register must remain the worker owner"
+    );
+
+    drop(manager);
+    drop(runtime);
+    drop(host);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(host_root).unwrap();
+}
+
+#[test]
+fn started_route_reconciler_keeps_committed_identity_when_control_is_stale() {
+    let (host, runtime, manager, host_root, root, _facts, saved) = persisted_context_fixture();
+    let context = recovery_context(&root);
+    let scope = RouteScope {
+        app_scope_id: context.app_scope_id.clone(),
+        project_scope_id: context.project_scope.clone(),
+    };
+    let binding = {
+        let state = runtime.state.lock().unwrap();
+        state
+            .global
+            .lookup_project_for_route(&scope)
+            .and_then(|project| {
+                project
+                    .runtime_bindings
+                    .values()
+                    .find(|binding| binding.agent_id.as_str() == "saved-peer")
+                    .cloned()
+            })
+            .expect("fixture owner binding")
+    };
+    let transport = saved.transport.clone().expect("fixture transport");
+
+    host.commit_checked(&[Event::GlobalCurrentThreadRouteRetired {
+        binding: binding.clone(),
+    }])
+    .expect("retire fixture host route");
+
+    // A stale control slot still points at the same principal but an older
+    // binding fact and has no durable handoff. It must not suppress the
+    // reducer's committed current identity from startup routing.
+    let mut stale = binding.clone();
+    stale.binding_id = crate::identity::BindingId::new("binding-stale-control").unwrap();
+    stale.endpoint_generation = 1;
+    let store = crate::server::binding_store::BindingControlStore::at(
+        &host.host_paths.state_root().join("routes.jsonl"),
+    );
+    store
+        .commit(crate::server::binding_store::ControlChange::Commit {
+            key: crate::server::binding_slot::IdentityBindingKey::new(
+                context.project_scope.clone(),
+                context.app_scope_id.clone(),
+                "Alice",
+            ),
+            value: crate::server::binding_slot::BindingValue::new(stale, transport),
+            expected_generation: None,
+        })
+        .unwrap();
+
+    manager
+        .reconcile_started_thread_routes(&store.load().unwrap())
+        .unwrap();
+
+    let published = host
+        .state
+        .lock()
+        .unwrap()
+        .global
+        .lookup_current_thread_route(
+            binding.session_id.as_ref().unwrap(),
+            binding.native_thread_id.as_ref().unwrap(),
+        )
+        .cloned();
+    assert_eq!(
+        published.as_ref(),
+        Some(&binding),
+        "a stale control slot without a pending handoff must not suppress the committed identity"
+    );
+
+    drop(manager);
+    drop(runtime);
+    drop(host);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(host_root).unwrap();
+}
+
+#[test]
+fn started_route_reconciler_keeps_newer_control_authoritative_without_pending_effect() {
+    let (host, runtime, manager, host_root, root, _facts, saved) = persisted_context_fixture();
+    let context = recovery_context(&root);
+    let scope = RouteScope {
+        app_scope_id: context.app_scope_id.clone(),
+        project_scope_id: context.project_scope.clone(),
+    };
+    let binding = {
+        let state = runtime.state.lock().unwrap();
+        state
+            .global
+            .lookup_project_for_route(&scope)
+            .and_then(|project| {
+                project
+                    .runtime_bindings
+                    .values()
+                    .find(|binding| binding.agent_id.as_str() == "saved-peer")
+                    .cloned()
+            })
+            .expect("fixture owner binding")
+    };
+    let transport = saved.transport.clone().expect("fixture transport");
+
+    host.commit_checked(&[Event::GlobalCurrentThreadRouteRetired {
+        binding: binding.clone(),
+    }])
+    .expect("retire fixture host route");
+
+    // A committed control fact with a strictly newer endpoint generation is
+    // authoritative even after its pending effect was cleared. The lagging
+    // reducer binding must not reappear in the delivery index.
+    let mut controlled = binding.clone();
+    controlled.binding_id = crate::identity::BindingId::new("binding-control-newer").unwrap();
+    controlled.endpoint_generation = binding.endpoint_generation + 2;
+    let store = crate::server::binding_store::BindingControlStore::at(
+        &host.host_paths.state_root().join("routes.jsonl"),
+    );
+    store
+        .commit(crate::server::binding_store::ControlChange::Commit {
+            key: crate::server::binding_slot::IdentityBindingKey::new(
+                context.project_scope.clone(),
+                context.app_scope_id.clone(),
+                "Alice",
+            ),
+            value: crate::server::binding_slot::BindingValue::new(controlled, transport),
+            expected_generation: None,
+        })
+        .unwrap();
+
+    manager
+        .reconcile_started_thread_routes(&store.load().unwrap())
+        .unwrap();
+
+    assert!(
+        host.state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_current_thread_route(
+                binding.session_id.as_ref().unwrap(),
+                binding.native_thread_id.as_ref().unwrap(),
+            )
+            .is_none(),
+        "a newer committed control fact must keep the lagging reducer route out"
+    );
+
+    drop(manager);
+    drop(runtime);
+    drop(host);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(host_root).unwrap();
+}
+
+#[test]
+fn started_route_reconciler_skips_old_identity_while_control_handoff_is_pending() {
+    let (host, runtime, manager, host_root, root, _facts, saved) = persisted_context_fixture();
+    let context = recovery_context(&root);
+    let scope = RouteScope {
+        app_scope_id: context.app_scope_id.clone(),
+        project_scope_id: context.project_scope.clone(),
+    };
+    let binding = {
+        let state = runtime.state.lock().unwrap();
+        state
+            .global
+            .lookup_project_for_route(&scope)
+            .and_then(|project| {
+                project
+                    .runtime_bindings
+                    .values()
+                    .find(|binding| binding.agent_id.as_str() == "saved-peer")
+                    .cloned()
+            })
+            .expect("fixture owner binding")
+    };
+    let name = {
+        let state = runtime.state.lock().unwrap();
+        state
+            .name_occupancies
+            .get(context.project_scope.as_str())
+            .and_then(|names| {
+                names
+                    .values()
+                    .find(|holder| holder.worker_id.as_str() == "saved-peer")
+            })
+            .map(|holder| holder.name.clone())
+            .expect("fixture owner has a stable name")
+    };
+    let transport = saved.transport.clone().expect("fixture transport");
+
+    host.commit_checked(&[Event::GlobalCurrentThreadRouteRetired {
+        binding: binding.clone(),
+    }])
+    .expect("retire fixture host route");
+
+    // A pending control handoff: the control slot has a newer binding fact
+    // and a durable Register effect. The old reducer binding must stay out
+    // of the delivery index until the real Register converges it.
+    let mut controlled = binding.clone();
+    controlled.binding_id = crate::identity::BindingId::new("binding-control-pending").unwrap();
+    controlled.endpoint_generation = binding.endpoint_generation + 1;
+    let effect = PendingEffect {
+        kind: PendingEffectKind::Register,
+        effect_id: "register:control-pending".into(),
+        operation_id: "control-pending-op".into(),
+        project_scope: context.project_scope.clone(),
+        app_scope_id: context.app_scope_id.clone(),
+        name: name.clone(),
+        previous_worker_id: None,
+        previous_session_id: None,
+        target_worker_id: binding.agent_id.as_str().to_owned(),
+        target_session_id: binding.session_id.as_ref().unwrap().as_str().to_owned(),
+        occupancy_revision: 1,
+        source_names: Vec::new(),
+        moves_existing_names: false,
+        pane_anchor: None,
+        created_ms: crate::server::now_ms(),
+    };
+    let store = crate::server::binding_store::BindingControlStore::at(
+        &host.host_paths.state_root().join("routes.jsonl"),
+    );
+    store
+        .commit(
+            crate::server::binding_store::ControlChange::CommitWithEffect {
+                key: crate::server::binding_slot::IdentityBindingKey::new(
+                    context.project_scope.clone(),
+                    context.app_scope_id.clone(),
+                    name,
+                ),
+                value: crate::server::binding_slot::BindingValue::new(
+                    controlled.clone(),
+                    transport,
+                ),
+                expected_generation: None,
+                effect,
+            },
+        )
+        .unwrap();
+
+    manager
+        .reconcile_started_thread_routes(&store.load().unwrap())
+        .unwrap();
+    manager
+        .reconcile_controlled_thread_routes(&store.load().unwrap())
+        .unwrap();
+
+    assert!(
+        host.state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_current_thread_route(
+                binding.session_id.as_ref().unwrap(),
+                binding.native_thread_id.as_ref().unwrap(),
+            )
+            .is_none(),
+        "a pending control handoff must keep the old identity out of the delivery index"
+    );
+
+    drop(manager);
+    drop(runtime);
+    drop(host);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(host_root).unwrap();
+}
+
+#[test]
+fn controlled_route_reconciler_publishes_exact_reducer_identity() {
+    let (host, runtime, manager, host_root, root, _facts, saved) = persisted_context_fixture();
+    let context = recovery_context(&root);
+    let scope = RouteScope {
+        app_scope_id: context.app_scope_id.clone(),
+        project_scope_id: context.project_scope.clone(),
+    };
+    let binding = {
+        let state = runtime.state.lock().unwrap();
+        state
+            .global
+            .lookup_project_for_route(&scope)
+            .and_then(|project| {
+                project
+                    .runtime_bindings
+                    .values()
+                    .find(|binding| binding.agent_id.as_str() == "saved-peer")
+                    .cloned()
+            })
+            .expect("fixture owner binding")
+    };
+    let name = {
+        let state = runtime.state.lock().unwrap();
+        state
+            .name_occupancies
+            .get(context.project_scope.as_str())
+            .and_then(|names| {
+                names
+                    .values()
+                    .find(|holder| holder.worker_id.as_str() == "saved-peer")
+            })
+            .map(|holder| holder.name.clone())
+            .expect("fixture owner has a stable name")
+    };
+    let transport = saved.transport.clone().expect("fixture transport");
+
+    host.commit_checked(&[Event::GlobalCurrentThreadRouteRetired {
+        binding: binding.clone(),
+    }])
+    .expect("retire fixture host route");
+
+    let store = crate::server::binding_store::BindingControlStore::at(
+        &host.host_paths.state_root().join("routes.jsonl"),
+    );
+    store
+        .commit(crate::server::binding_store::ControlChange::Commit {
+            key: crate::server::binding_slot::IdentityBindingKey::new(
+                context.project_scope.clone(),
+                context.app_scope_id.clone(),
+                name,
+            ),
+            value: crate::server::binding_slot::BindingValue::new(binding.clone(), transport),
+            expected_generation: None,
+        })
+        .unwrap();
+
+    manager
+        .reconcile_controlled_thread_routes(&store.load().unwrap())
+        .unwrap();
+
+    let published = host
+        .state
+        .lock()
+        .unwrap()
+        .global
+        .lookup_current_thread_route(
+            binding.session_id.as_ref().unwrap(),
+            binding.native_thread_id.as_ref().unwrap(),
+        )
+        .cloned();
+    assert_eq!(
+        published.as_ref(),
+        Some(&binding),
+        "an exact control slot must publish the committed current identity"
+    );
+
+    drop(manager);
+    drop(runtime);
+    drop(host);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(host_root).unwrap();
+}
+
+#[test]
+fn controlled_route_reconciler_does_not_install_a_control_only_identity() {
+    let (host, runtime, manager, host_root, root, _facts, saved) = persisted_context_fixture();
+    let context = recovery_context(&root);
+    let scope = RouteScope {
+        app_scope_id: context.app_scope_id.clone(),
+        project_scope_id: context.project_scope.clone(),
+    };
+    let binding = {
+        let state = runtime.state.lock().unwrap();
+        state
+            .global
+            .lookup_project_for_route(&scope)
+            .and_then(|project| {
+                project
+                    .runtime_bindings
+                    .values()
+                    .find(|binding| binding.agent_id.as_str() == "saved-peer")
+                    .cloned()
+            })
+            .expect("fixture owner binding")
+    };
+    let transport = saved.transport.clone().expect("fixture transport");
+
+    host.commit_checked(&[Event::GlobalCurrentThreadRouteRetired {
+        binding: binding.clone(),
+    }])
+    .expect("retire fixture host route");
+
+    // Control alone has a binding the reducer does not own and a pending
+    // Register effect. It must not fabricate credentials or force a route.
+    let mut controlled = binding.clone();
+    controlled.binding_id = crate::identity::BindingId::new("binding-control-only").unwrap();
+    controlled.endpoint_generation = binding.endpoint_generation + 1;
+    let effect = PendingEffect {
+        kind: PendingEffectKind::Register,
+        effect_id: "register:control-only".into(),
+        operation_id: "control-only-op".into(),
+        project_scope: context.project_scope.clone(),
+        app_scope_id: context.app_scope_id.clone(),
+        name: "Alice".into(),
+        previous_worker_id: None,
+        previous_session_id: None,
+        target_worker_id: binding.agent_id.as_str().to_owned(),
+        target_session_id: binding.session_id.as_ref().unwrap().as_str().to_owned(),
+        occupancy_revision: 1,
+        source_names: Vec::new(),
+        moves_existing_names: false,
+        pane_anchor: None,
+        created_ms: crate::server::now_ms(),
+    };
+    let store = crate::server::binding_store::BindingControlStore::at(
+        &host.host_paths.state_root().join("routes.jsonl"),
+    );
+    store
+        .commit(
+            crate::server::binding_store::ControlChange::CommitWithEffect {
+                key: crate::server::binding_slot::IdentityBindingKey::new(
+                    context.project_scope.clone(),
+                    context.app_scope_id.clone(),
+                    "Alice",
+                ),
+                value: crate::server::binding_slot::BindingValue::new(controlled, transport),
+                expected_generation: None,
+                effect,
+            },
+        )
+        .unwrap();
+
+    manager
+        .reconcile_controlled_thread_routes(&store.load().unwrap())
+        .unwrap();
+
+    assert!(
+        host.state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_current_thread_route(
+                binding.session_id.as_ref().unwrap(),
+                binding.native_thread_id.as_ref().unwrap(),
+            )
+            .is_none(),
+        "control alone cannot fabricate credentials or force a route without a committed reducer"
+    );
+
+    drop(manager);
+    drop(runtime);
+    drop(host);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(host_root).unwrap();
 }
 
 fn persisted_context_fixture() -> (
@@ -117,6 +1217,104 @@ fn persisted_context_fixture() -> (
         },
         saved,
     )
+}
+
+fn seed_saved_pane_name(
+    runtime: &Server,
+    project_scope: &str,
+    worker_id: &str,
+    session_id: &str,
+    pane: crate::proto::TmuxPaneAnchor,
+    cwd: &str,
+) {
+    let occupancy = crate::server::name_state::NameOccupancy {
+        name: "Alice".into(),
+        worker_id: worker_id.into(),
+        session_id: session_id.into(),
+        occupancy_revision: 10,
+        updated_ms: now_ms(),
+        pane_anchor: Some(crate::server::name_state::NamePaneAnchor {
+            pane,
+            cwd: cwd.into(),
+        }),
+    };
+    runtime
+        .try_commit(&[Event::NameResolutionCommitted {
+            project_scope: project_scope.into(),
+            occupancy,
+            assignments: vec![],
+        }])
+        .unwrap();
+}
+
+#[test]
+fn public_context_does_not_use_saved_transport_pane_without_live_observation() {
+    let (host, runtime, manager, host_root, root, facts, saved) = persisted_context_fixture();
+    let invocation_cwd = root.join("caller");
+    std::fs::create_dir_all(&invocation_cwd).unwrap();
+    let saved_pane = facts.tmux.as_ref().unwrap().endpoint.clone();
+    let project_scope = saved.project_scope.as_ref().unwrap().clone();
+    let saved_session = saved
+        .transport
+        .as_ref()
+        .and_then(|transport| transport.session_id.clone())
+        .unwrap();
+    let saved_thread = saved
+        .transport
+        .as_ref()
+        .and_then(|transport| transport.thread_id.clone())
+        .unwrap();
+    seed_saved_pane_name(
+        &runtime,
+        project_scope.as_str(),
+        &saved.worker_id,
+        "old-name-session",
+        crate::proto::TmuxPaneAnchor {
+            socket_path: saved_pane.socket_path.clone(),
+            pane_id: saved_pane.pane_id.clone(),
+        },
+        &invocation_cwd.to_string_lossy(),
+    );
+
+    // The request carries the saved pane as a placement fact, but it has no
+    // live caller observation. The saved transport must not become the pane
+    // anchor merely because it equals the durable binding.
+    let request = IdentityContextRequest {
+        operation_id: "ctxop-no-live-pane".into(),
+        invocation: "automatic".into(),
+        action: "context".into(),
+        facts: IdentityFacts {
+            session_id: Some(saved_session),
+            thread_id: Some(saved_thread),
+            endpoint: Some("unix:///tmp/current-native.sock".into()),
+            namespace: Some("codex_tui".into()),
+            ..IdentityFacts::default()
+        },
+        invocation_cwd: Some(invocation_cwd.to_string_lossy().into_owned()),
+        approval: None,
+        grant_approval: None,
+        query: false,
+        query_capability: "base64url:capability".into(),
+        invocation_ticket: String::new(),
+    };
+    let (_, response) = manager.dispatch_sync(
+        Some(recovery_context(&root)),
+        Req::IdentityContext {
+            facts: IdentityFacts::default(),
+            identity_context: Some(request),
+        },
+    );
+    assert!(response.ok, "{response:?}");
+    assert_eq!(
+        response.data["result"]["snapshot"]["name_resolution"]["name"], "Bob",
+        "no live caller pane means no pane inheritance; a new ordinary name is required"
+    );
+
+    drop(manager);
+    drop(runtime);
+    drop(host);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(host_root).unwrap();
 }
 
 #[test]
@@ -338,6 +1536,179 @@ fn ordinary_persisted_context_has_no_registration_effects() {
 }
 
 #[test]
+fn multiple_current_session_carriers_without_name_owner_report_conflict() {
+    let (host, runtime, manager, host_root, root, facts, _saved) = persisted_context_fixture();
+    let context = recovery_context(&root);
+    {
+        let mut state = runtime.state.lock().unwrap();
+        state
+            .name_occupancies
+            .remove(context.project_scope.as_str());
+        let mut second_worker = state.workers.get("saved-peer").unwrap().clone();
+        second_worker.id = "second-peer".into();
+        state
+            .workers
+            .insert(second_worker.id.clone(), second_worker);
+        let project = state
+            .global
+            .projects
+            .get_mut(context.project_scope.as_str())
+            .unwrap();
+        let mut second = project.runtime_bindings.values().next().unwrap().clone();
+        second.agent_id = AgentId::new("second-peer").unwrap();
+        second.binding_id = BindingId::new("binding-second-peer").unwrap();
+        project
+            .runtime_bindings
+            .insert(second.binding_id.as_str().into(), second);
+    }
+    let result = manager.current_session_identity(&context, &facts);
+    assert!(
+        matches!(&result, Err(error) if error.to_string().starts_with("IDENTITY_RESTORE_AMBIGUOUS:")),
+        "multiple current carriers without a name owner must not fall through to a new draft"
+    );
+    drop(manager);
+    drop(runtime);
+    drop(host);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(host_root).unwrap();
+}
+
+#[test]
+fn explicitly_restoring_peer_ignores_foreign_project_identity() {
+    let (host, _runtime, manager, host_root, root, facts, saved) = persisted_context_fixture();
+    let target_root = root.join("other-project");
+    std::fs::create_dir_all(&target_root).unwrap();
+    let target = recovery_context(&target_root);
+    let request = IdentityContextRequest {
+        operation_id: "ctxop-explicit-foreign-anchor".into(),
+        invocation: "approved_recovery".into(),
+        action: "context".into(),
+        facts,
+        invocation_cwd: None,
+        approval: None,
+        grant_approval: Some(json!({
+            "action": "restore_peer",
+            "authorization": "user explicitly approved a peer in this project"
+        })),
+        query: false,
+        query_capability: "explicit-foreign-capability".into(),
+        invocation_ticket: String::new(),
+    };
+    let admission = match manager.approved_recovery_admission(&target, &request) {
+        Ok(Some(admission)) => admission,
+        Ok(None) => panic!("explicit peer recovery must have an admission"),
+        Err(ApprovedAdmissionError::Error(error)) => {
+            panic!("foreign identity must not reject explicit target recovery: {error}")
+        }
+    };
+    assert_ne!(admission.identity.worker_id, saved.worker_id);
+    assert_eq!(
+        admission.identity.project_scope.as_ref(),
+        Some(&target.project_scope)
+    );
+    let retry = match manager.approved_recovery_admission(&target, &request) {
+        Ok(Some(admission)) => admission,
+        _ => panic!("retry must preserve the same target admission"),
+    };
+    assert_eq!(
+        retry.identity.worker_id, admission.identity.worker_id,
+        "the same session retry must not mint another target carrier"
+    );
+    let mut committed = admission.identity.clone();
+    let mut binding = saved.runtime.clone().unwrap();
+    binding.agent_id = AgentId::new(committed.worker_id.clone()).unwrap();
+    binding.binding_id = BindingId::new(format!("binding-{}", committed.worker_id)).unwrap();
+    identity::persist_registration_at(
+        &host.host_paths,
+        &Scope {
+            root: target_root.clone(),
+        },
+        &mut committed,
+        binding,
+        saved.transport.clone().unwrap(),
+    )
+    .unwrap();
+    let committed_retry = match manager.approved_recovery_admission(&target, &request) {
+        Ok(Some(admission)) => admission,
+        _ => panic!("retry must recover the committed target identity"),
+    };
+    assert_eq!(committed_retry.identity.worker_id, committed.worker_id);
+    assert!(
+        committed_retry.identity.token == committed.token,
+        "retry must reuse the committed target credential"
+    );
+    let other_target_root = root.join("third-project");
+    std::fs::create_dir_all(&other_target_root).unwrap();
+    let other_target = recovery_context(&other_target_root);
+    let other_admission = match manager.approved_recovery_admission(&other_target, &request) {
+        Ok(Some(admission)) => admission,
+        Ok(None) => panic!("explicit recovery in the other project returned no admission"),
+        Err(ApprovedAdmissionError::Error(error)) => {
+            panic!("explicit recovery in the other project failed: {error}")
+        }
+    };
+    assert_ne!(
+        other_admission.identity.worker_id, admission.identity.worker_id,
+        "different target projects must not share a carrier id"
+    );
+    let original = identity::read_persisted(&host.host_paths, &saved.worker_id)
+        .unwrap()
+        .unwrap();
+    assert!(
+        serde_json::to_value(original).unwrap() == serde_json::to_value(&saved).unwrap(),
+        "foreign identity must remain unchanged"
+    );
+    drop(manager);
+    drop(host);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(host_root).unwrap();
+}
+
+#[test]
+fn explicitly_restoring_master_ignores_foreign_project_identity() {
+    let (host, _runtime, manager, host_root, root, facts, saved) = persisted_context_fixture();
+    let target_root = root.join("other-project");
+    std::fs::create_dir_all(&target_root).unwrap();
+    let target = recovery_context(&target_root);
+    let request = IdentityContextRequest {
+        operation_id: "ctxop-explicit-foreign-master".into(),
+        invocation: "approved_recovery".into(),
+        action: "context".into(),
+        facts,
+        invocation_cwd: None,
+        approval: None,
+        grant_approval: Some(json!({
+            "action": "restore_master",
+            "authorization": "user explicitly approved master in this project"
+        })),
+        query: false,
+        query_capability: "explicit-master-capability".into(),
+        invocation_ticket: String::new(),
+    };
+    let admission = match manager.approved_recovery_admission(&target, &request) {
+        Ok(Some(admission)) => admission,
+        Ok(None) => panic!("foreign identity must not fall through to ordinary master recovery"),
+        Err(ApprovedAdmissionError::Error(error)) => {
+            panic!("explicit master recovery failed: {error}")
+        }
+    };
+    assert_ne!(admission.identity.worker_id, saved.worker_id);
+    assert_eq!(
+        admission.identity.project_scope.as_ref(),
+        Some(&target.project_scope)
+    );
+    assert_eq!(admission.identity_approval.action, "restore_master");
+    let original = identity::read_persisted(&host.host_paths, &saved.worker_id)
+        .unwrap()
+        .unwrap();
+    assert!(serde_json::to_value(original).unwrap() == serde_json::to_value(&saved).unwrap());
+    drop(manager);
+    drop(host);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(host_root).unwrap();
+}
+
+#[test]
 fn minimal_restore_master_grant_derives_current_identity_and_scope() {
     let (host, _runtime, manager, host_root, root, facts, saved) = persisted_context_fixture();
     let context = recovery_context(&root);
@@ -346,6 +1717,7 @@ fn minimal_restore_master_grant_derives_current_identity_and_scope() {
         invocation: "approved_recovery".into(),
         action: "context".into(),
         facts,
+        invocation_cwd: None,
         approval: None,
         grant_approval: Some(json!({
             "action": "restore_master",
@@ -964,6 +2336,7 @@ fn minimal_role_intent_is_an_explicit_authority_approval() {
             invocation: "approved_recovery".into(),
             action: "context".into(),
             facts: facts.clone(),
+            invocation_cwd: None,
             approval: Some(
                 json!({"decision":"approved", "target_identity":"saved-peer", "action":format!("restore_{role}"), "authorization":format!("user requests {role}"), "expected_incumbent":{"binding_id":"obsolete-caller-fence","endpoint_generation":999}}),
             ),
@@ -1013,6 +2386,7 @@ fn minimal_role_intent_is_an_explicit_authority_approval() {
     *runtime.journal.lock().unwrap() = std::fs::File::open(&runtime.journal_path).unwrap();
     let (_, failed) = manager.identity_context(context.clone(), IdentityContextRequest {
         operation_id: "ctxop-role-write-failure".into(), invocation: "approved_recovery".into(), action: "context".into(), facts,
+        invocation_cwd: None,
         approval: Some(json!({"decision":"approved", "target_identity":"saved-peer", "action":"restore_master", "authorization":"user requires master"})),
         grant_approval: None, query: false, query_capability: "role-failure-capability".into(), invocation_ticket: String::new(),
     });
@@ -1246,6 +2620,248 @@ fn tmux_anchor() -> TmuxCandidate {
     }
 }
 
+#[test]
+fn saved_pane_requires_this_invocation_live_observation_for_name_inheritance() {
+    let (host, runtime, manager, host_root, root, mut facts, saved) = persisted_context_fixture();
+    let context = recovery_context(&root);
+    let project_scope = context.project_scope.as_str().to_owned();
+    let saved_endpoint = saved
+        .transport
+        .as_ref()
+        .unwrap()
+        .tmux_endpoint
+        .clone()
+        .unwrap();
+    let exact_cwd = "/project/sub".to_owned();
+
+    runtime
+        .state
+        .lock()
+        .unwrap()
+        .name_occupancies
+        .entry(project_scope.clone())
+        .or_default()
+        .insert(
+            "Alice".into(),
+            NameOccupancy {
+                name: "Alice".into(),
+                worker_id: "old".into(),
+                session_id: "s1".into(),
+                occupancy_revision: 1,
+                updated_ms: 1,
+                pane_anchor: Some(NamePaneAnchor {
+                    pane: TmuxPaneAnchor {
+                        socket_path: saved_endpoint.socket_path.clone(),
+                        pane_id: saved_endpoint.pane_id.clone(),
+                    },
+                    cwd: exact_cwd.clone(),
+                }),
+            },
+        );
+
+    // The persisted identity still carries the old pane, but this invocation
+    // has no live tmux observation. The saved endpoint must not become a name
+    // inheritance anchor.
+    facts.tmux = None;
+    facts.caller_pid = None;
+    facts.pane_hint = None;
+    facts.endpoint = Some("unix:///tmp/unavailable-restore-adaptor.sock".into());
+    facts.namespace = Some("codex_tui".into());
+    let request = IdentityContextRequest {
+        operation_id: String::new(),
+        invocation: "automatic".into(),
+        action: "context".into(),
+        facts: facts.clone(),
+        invocation_cwd: Some(exact_cwd.clone()),
+        approval: None,
+        grant_approval: None,
+        query: false,
+        query_capability: String::new(),
+        invocation_ticket: String::new(),
+    };
+
+    let (_, response) = manager.dispatch_sync(
+        Some(context.clone()),
+        Req::IdentityContext {
+            facts: IdentityFacts::default(),
+            identity_context: Some(request),
+        },
+    );
+    assert!(response.ok, "{response:?}");
+    assert_eq!(
+        response.data["snapshot"]["name_resolution"]["name"], "Bob",
+        "{response:?}"
+    );
+
+    drop(manager);
+    drop(runtime);
+    drop(host);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(host_root).unwrap();
+}
+
+#[test]
+fn different_live_caller_pane_does_not_inherit_saved_transport_name() {
+    let (host, runtime, manager, host_root, root, mut facts, saved) = persisted_context_fixture();
+    let context = recovery_context(&root);
+    let project_scope = context.project_scope.as_str().to_owned();
+    let saved_endpoint = saved
+        .transport
+        .as_ref()
+        .unwrap()
+        .tmux_endpoint
+        .clone()
+        .unwrap();
+    let exact_cwd = "/project/sub".to_owned();
+
+    runtime
+        .state
+        .lock()
+        .unwrap()
+        .name_occupancies
+        .entry(project_scope.clone())
+        .or_default()
+        .insert(
+            "Alice".into(),
+            NameOccupancy {
+                name: "Alice".into(),
+                worker_id: "old".into(),
+                session_id: "s1".into(),
+                occupancy_revision: 1,
+                updated_ms: 1,
+                pane_anchor: Some(NamePaneAnchor {
+                    pane: TmuxPaneAnchor {
+                        socket_path: saved_endpoint.socket_path.clone(),
+                        pane_id: saved_endpoint.pane_id.clone(),
+                    },
+                    cwd: exact_cwd.clone(),
+                }),
+            },
+        );
+
+    // The persisted identity still carries the saved transport. This caller
+    // supplies a different current pane on the same socket with the same cwd;
+    // only the caller's own pane may seed the name anchor.
+    facts.caller_pid = None;
+    facts.pane_hint = None;
+    facts.tmux.as_mut().unwrap().endpoint.pane_id = "%42".into();
+    let request = IdentityContextRequest {
+        operation_id: String::new(),
+        invocation: "automatic".into(),
+        action: "context".into(),
+        facts: facts.clone(),
+        invocation_cwd: Some(exact_cwd.clone()),
+        approval: None,
+        grant_approval: None,
+        query: false,
+        query_capability: String::new(),
+        invocation_ticket: String::new(),
+    };
+
+    let (_, response) = manager.dispatch_sync(
+        Some(context.clone()),
+        Req::IdentityContext {
+            facts: IdentityFacts::default(),
+            identity_context: Some(request),
+        },
+    );
+    assert!(response.ok, "{response:?}");
+    assert_eq!(
+        response.data["snapshot"]["name_resolution"]["name"], "Bob",
+        "a different current caller pane must not inherit the saved transport name"
+    );
+
+    drop(manager);
+    drop(runtime);
+    drop(host);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(host_root).unwrap();
+}
+
+/// The saved transport equals the durable binding AND the seeded name anchor,
+/// but this invocation has no live caller pane observation. Equality alone
+/// proves persisted state consistency, never the current caller pane; the
+/// pane anchor must not be rebuilt from the saved transport.
+#[test]
+fn saved_transport_equal_to_binding_still_requires_live_caller_pane() {
+    let (host, runtime, manager, host_root, root, mut facts, saved) = persisted_context_fixture();
+    let context = recovery_context(&root);
+    let project_scope = context.project_scope.as_str().to_owned();
+    let saved_endpoint = saved
+        .transport
+        .as_ref()
+        .unwrap()
+        .tmux_endpoint
+        .clone()
+        .unwrap();
+    // A non-root cwd: the anchor must never be derived from the canonical
+    // project root, and the same pane with the project root must not match.
+    let exact_cwd = "/project/sub".to_owned();
+
+    runtime
+        .state
+        .lock()
+        .unwrap()
+        .name_occupancies
+        .entry(project_scope.clone())
+        .or_default()
+        .insert(
+            "Alice".into(),
+            NameOccupancy {
+                name: "Alice".into(),
+                worker_id: "old".into(),
+                session_id: "s1".into(),
+                occupancy_revision: 1,
+                updated_ms: 1,
+                pane_anchor: Some(NamePaneAnchor {
+                    pane: TmuxPaneAnchor {
+                        socket_path: saved_endpoint.socket_path.clone(),
+                        pane_id: saved_endpoint.pane_id.clone(),
+                    },
+                    cwd: exact_cwd.clone(),
+                }),
+            },
+        );
+
+    // facts.tmux still equals the saved transport (transport == binding ==
+    // seeded anchor), but caller_pid is None: there is no live caller pane
+    // observation in this invocation.
+    facts.caller_pid = None;
+    facts.pane_hint = None;
+    let request = IdentityContextRequest {
+        operation_id: "ctxop-transport-equals-binding".into(),
+        invocation: "automatic".into(),
+        action: "context".into(),
+        facts: facts.clone(),
+        invocation_cwd: Some(exact_cwd.clone()),
+        approval: None,
+        grant_approval: None,
+        query: false,
+        query_capability: "base64url:capability".into(),
+        invocation_ticket: String::new(),
+    };
+
+    let (_, response) = manager.dispatch_sync(
+        Some(context.clone()),
+        Req::IdentityContext {
+            facts: IdentityFacts::default(),
+            identity_context: Some(request),
+        },
+    );
+    assert!(response.ok, "{response:?}");
+    assert_eq!(
+        response.data["result"]["snapshot"]["name_resolution"]["name"],
+        "Bob",
+        "transport == binding only proves saved state, never the current caller pane; no live observation means no pane inheritance"
+    );
+
+    drop(manager);
+    drop(runtime);
+    drop(host);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(host_root).unwrap();
+}
+
 /// A dsh anchor with no observed App Server endpoint is complete on its own.
 #[test]
 fn dsh_anchor_alone_requires_no_appserver_fields() {
@@ -1306,6 +2922,7 @@ fn typed_operation_request_preserves_action_intent_and_capability_shape() {
         invocation: "automatic".into(),
         action: "context".into(),
         facts: IdentityFacts::default(),
+        invocation_cwd: None,
         approval: None,
         grant_approval: None,
         query: false,
@@ -1326,6 +2943,7 @@ fn query_and_missing_capability_are_rejected_before_operation_admission() {
         invocation: "query".into(),
         action: "query".into(),
         facts: IdentityFacts::default(),
+        invocation_cwd: None,
         approval: None,
         grant_approval: None,
         query: true,
@@ -1387,6 +3005,7 @@ fn s23_dispatch_preserves_typed_identity_operation() {
             }),
             ..IdentityFacts::default()
         },
+        invocation_cwd: None,
         approval: None,
         grant_approval: None,
         query: false,
@@ -1408,6 +3027,7 @@ fn s23_dispatch_preserves_typed_identity_operation() {
                 invocation: "query".into(),
                 action: "query".into(),
                 facts: IdentityFacts::default(),
+                invocation_cwd: None,
                 approval: None,
                 grant_approval: None,
                 query: true,
@@ -1443,6 +3063,7 @@ fn same_key_retry_returns_the_retained_projection_without_reconciliation() {
         invocation: "automatic".into(),
         action: "context".into(),
         facts: IdentityFacts::default(),
+        invocation_cwd: None,
         approval: None,
         grant_approval: None,
         query: false,
@@ -1562,6 +3183,7 @@ fn s23_b03_outer_sync_failure_prevents_register_consume() {
         Some(project_scope),
         Some(app_scope),
         false,
+        None,
         None,
         Some(&mut before_consume),
     );

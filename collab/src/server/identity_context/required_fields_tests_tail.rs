@@ -63,6 +63,7 @@ fn approved_recovery_without_durable_incumbent_is_denied_before_admission() {
         // `action` field carries `restore_identity` / `replace_binding`.
         action: "context".into(),
         facts,
+        invocation_cwd: None,
         approval: Some(approval),
         grant_approval: None,
         query: false,
@@ -691,6 +692,7 @@ fn approved_register_recovery_commits_binding_and_retains_master_grant() {
         invocation: "approved_recovery".into(),
         action: "context".into(),
         facts: facts.clone(),
+        invocation_cwd: None,
         approval: Some(identity_approval(
             &context,
             &facts,
@@ -801,6 +803,7 @@ fn approved_recovery_reads_current_incumbent_despite_stale_caller_fence() {
         invocation: "approved_recovery".into(),
         action: "context".into(),
         facts: facts.clone(),
+        invocation_cwd: None,
         approval: Some(identity_approval(
             &context,
             &facts,
@@ -875,6 +878,7 @@ fn dual_approval_commits_identity_and_separate_grant_replacement() {
         invocation: "approved_recovery".into(),
         action: "context".into(),
         facts: facts.clone(),
+        invocation_cwd: None,
         approval: Some(identity_approval(
             &context,
             &facts,
@@ -908,5 +912,144 @@ fn dual_approval_commits_identity_and_separate_grant_replacement() {
     assert_eq!(after_grant.endpoint_generation, new_generation);
     assert_eq!(after_grant.granted_by, "user");
     assert_ne!(after_grant.approval, before_grant.approval);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+fn late_participant_reply(operation_id: &str) -> crate::proto::RegisterParticipantReply {
+    crate::proto::RegisterParticipantReply {
+        operation_id: operation_id.into(),
+        command_id: "register-command".into(),
+        purpose: crate::proto::RegisterReplyPurpose::ManualCommunicationRestore,
+        challenge: "register-marker".into(),
+        anchor: None,
+        native: None,
+    }
+}
+
+fn late_participant_context(root: &std::path::Path) -> crate::proto::ProjectContext {
+    let canonical_root = root.canonicalize().unwrap();
+    crate::proto::ProjectContext {
+        app_scope_id: crate::identity::AppServerId::new(crate::identity::CLI_APP_SERVER_ID)
+            .unwrap(),
+        canonical_root: canonical_root.display().to_string(),
+        project_scope: crate::scope::ProjectScopeId::new(canonical_root.to_string_lossy().into_owned())
+            .unwrap(),
+        runtime_context: None,
+    }
+}
+
+fn register_reply_ledger_path(manager: &ProjectRuntimeManager) -> std::path::PathBuf {
+    manager
+        .operation_journal
+        .path()
+        .parent()
+        .expect("journal path has a state root parent")
+        .join("register-reply-evidence.jsonl")
+}
+
+fn append_persisted_cancelled_operation(manager: &ProjectRuntimeManager, operation_id: &str) {
+    let journal = manager.operation_journal.clone();
+    journal
+        .append(crate::server::operation_journal::OperationAdmission {
+            operation_id: operation_id.into(),
+            project_scope: "/tmp/project".into(),
+            app_scope_id: crate::identity::CLI_APP_SERVER_ID.into(),
+            action: "context".into(),
+            invocation: "automatic".into(),
+            intent_digest: "digest-1".into(),
+            query_capability_hash: crate::server::operation_journal::capability_hash(
+                "test-capability",
+            ),
+            phase: crate::proto::IdentityOperationPhase::Admitted,
+            committed_phases: Vec::new(),
+            nested_command_id: None,
+            nested_operation_id: None,
+            approval_evidence: None,
+        })
+        .unwrap();
+    journal
+        .transition(
+            operation_id,
+            crate::proto::IdentityOperationPhase::Validating,
+            Some("register-command".into()),
+            Some("register-operation".into()),
+        )
+        .unwrap();
+    journal.install_safe(operation_id, Vec::new());
+    journal.begin_owner_start(operation_id, "register").unwrap();
+    journal.reopen_safe(operation_id, Vec::new());
+    let cancelled = journal
+        .cancel(
+            operation_id,
+            "/tmp/project",
+            crate::identity::CLI_APP_SERVER_ID,
+            &crate::server::operation_journal::capability_hash("test-capability"),
+        )
+        .unwrap();
+    assert!(matches!(
+        cancelled,
+        crate::server::operation_journal::CancelOutcome::Cancelled(_)
+    ));
+}
+
+#[test]
+fn late_register_reply_after_persisted_cancel_is_rejected_without_acceptance() {
+    let (server, root) = test_server();
+    let server = Arc::new(server);
+    let host_paths = server.host_paths.clone();
+    let writer = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+    append_persisted_cancelled_operation(&writer, "ctxop-late-cancel");
+    drop(writer);
+    let manager = ProjectRuntimeManager::new(server, &host_paths).unwrap();
+    let context = late_participant_context(&root);
+    let ledger = register_reply_ledger_path(&manager);
+
+    let (_, response) =
+        manager.participant_register_reply(context, late_participant_reply("ctxop-late-cancel"));
+
+    assert!(!response.ok, "{response:?}");
+    assert_eq!(
+        response.error.as_deref(),
+        Some("IDENTITY_OPERATION_CANCELLED"),
+        "{response:?}"
+    );
+    assert!(
+        !ledger.exists(),
+        "a cancelled late reply must not write register-reply evidence"
+    );
+    drop(manager);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn malformed_deferred_journal_blocks_late_register_reply_without_acceptance() {
+    let (server, root) = test_server();
+    let journal_path = server.host_paths.journal_path();
+    std::fs::create_dir_all(journal_path.parent().unwrap()).unwrap();
+    std::fs::write(&journal_path, b"{malformed}\n").unwrap();
+    let host_paths = server.host_paths.clone();
+    let manager = ProjectRuntimeManager::new(Arc::new(server), &host_paths).unwrap();
+    let context = late_participant_context(&root);
+    let ledger = register_reply_ledger_path(&manager);
+
+    let (_, ping) = manager.dispatch_sync(None, Req::Ping);
+    assert!(ping.ok, "Ping must stay usable while the deferred journal is broken");
+
+    let (_, response) =
+        manager.participant_register_reply(context, late_participant_reply("ctxop-late-corrupt"));
+
+    assert!(!response.ok, "{response:?}");
+    assert!(
+        response
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("OPERATION_JOURNAL_REPLAY_FAILED")),
+        "{response:?}"
+    );
+    assert!(
+        !ledger.exists(),
+        "a broken deferred journal must stop reply acceptance before evidence writes"
+    );
+    drop(manager);
     std::fs::remove_dir_all(root).unwrap();
 }

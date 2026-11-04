@@ -891,6 +891,7 @@ fn lifecycle_close_retires_a_route_less_missing_tmux_target() {
             status_reason: None,
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
+            periodic_declared: false,
             created_ms: now,
             updated_ms: now,
             fired_count: 0,

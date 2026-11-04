@@ -82,6 +82,19 @@ impl ProjectRuntimeManager {
         context: &ProjectContext,
         facts: &IdentityFacts,
     ) -> anyhow::Result<IdentityFacts> {
+        self.observe_identity_facts_with_pane(context, facts)
+            .map(|(facts, _)| facts)
+    }
+
+    /// Return the live caller pane separately from the restored facts. Only
+    /// caller ancestry just observed here may populate the name pane anchor;
+    /// persisted transport, caller-supplied tmux candidates and pane anchors
+    /// completed from durable routes cannot.
+    fn observe_identity_facts_with_pane(
+        &self,
+        context: &ProjectContext,
+        facts: &IdentityFacts,
+    ) -> anyhow::Result<(IdentityFacts, Option<crate::proto::TmuxPaneAnchor>)> {
         let mut facts = facts.clone();
         if facts.dsh.is_some() || facts.dsh_session_id.is_some() {
             // DSH owns its gateway anchor. The process may still be launched
@@ -91,10 +104,10 @@ impl ProjectRuntimeManager {
             facts.tmux_anchor = None;
             facts.caller_pid = None;
             facts.pane_hint = None;
-            return Ok(facts);
+            return Ok((facts, None));
         }
         let Some(caller_pid) = facts.caller_pid else {
-            return Ok(facts);
+            return Ok((facts, None));
         };
         let mut endpoints =
             crate::client::adapters::tmux::host_endpoints_at(self.host.host_paths.state_root())
@@ -128,6 +141,10 @@ impl ProjectRuntimeManager {
         .unwrap_or_else(|_error| None);
         // Current ancestry supersedes every caller-supplied or historical
         // placement address. No observation means no tmux selection.
+        let observed_pane = observed.as_ref().map(|endpoint| crate::proto::TmuxPaneAnchor {
+            socket_path: endpoint.socket_path.clone(),
+            pane_id: endpoint.pane_id.clone(),
+        });
         facts.tmux = observed.map(|mut endpoint| {
             // Native anchors remain transport metadata. Selecting the peer
             // still uses the observed project/session before these anchors.
@@ -144,7 +161,7 @@ impl ProjectRuntimeManager {
         // a second time. These inputs never enter an intent digest.
         facts.caller_pid = None;
         facts.pane_hint = None;
-        Ok(facts)
+        Ok((facts, observed_pane))
     }
 
     fn current_session_identity(
@@ -194,8 +211,6 @@ impl ProjectRuntimeManager {
                 anyhow::bail!("IDENTITY_RESTORE_CONFLICT: DSH communication API differs from the current binding");
             }
         }
-        let master = current_master_grant(&state, Some(&route));
-
         // Typed name occupancy is the authoritative current session owner.
         // Historical runtime bindings that merely carry the same session
         // address are not owner evidence and must not veto the selection.
@@ -210,22 +225,15 @@ impl ProjectRuntimeManager {
             }
         }
 
-        // A single current binding still resumes that worker. Multiple current
-        // bindings with no unique typed owner are historical candidates only;
-        // they must not be guessed and must not block a fresh stable carrier.
+        // A single current binding still resumes that worker. Without a
+        // unique typed owner, multiple current bindings cannot identify the
+        // caller and must not fall through to a fresh carrier.
         if bindings.len() == 1 {
             let binding = bindings[0];
             return Ok(self.recovered_binding_identity(context, binding, &state));
         }
-        if dsh_session.is_some() && bindings.len() > 1 {
-            anyhow::bail!("IDENTITY_RESTORE_AMBIGUOUS: multiple current DSH bindings carry this session");
-        }
-        if let Some(binding) = bindings.iter().copied().find(|binding| {
-            master
-                .as_ref()
-                .is_some_and(|grant| grant.binding_id == binding.binding_id)
-        }) {
-            return Ok(self.recovered_binding_identity(context, binding, &state));
+        if bindings.len() > 1 {
+            anyhow::bail!("IDENTITY_RESTORE_AMBIGUOUS: multiple current bindings carry this session without a unique name owner");
         }
         Ok(None)
     }
@@ -366,9 +374,24 @@ impl ProjectRuntimeManager {
                     scope,
                     ident,
                     binding,
-                    transport,
+                    transport.clone(),
                 )?;
             }
+            let control_context = ProjectContext::for_registered_root_with_app(
+                &scope.root,
+                saved.app_scope_id.clone(),
+            )?;
+            // Publish the control slot only when the identity already holds a
+            // stable name. A nameless legacy identity must not be pool-named
+            // here: that would preempt the single context name decision, which
+            // runs later with the live pane and cwd facts.
+            self.publish_refresh_control_slot(
+                runtime,
+                &control_context,
+                &ident.worker_id,
+                saved.clone(),
+                transport.clone(),
+            )?;
             return Ok(saved.clone());
         }
 
@@ -428,10 +451,30 @@ impl ProjectRuntimeManager {
         binding.endpoint_generation = next.endpoint_generation;
         binding.session_id = next.session_id.clone();
         binding.native_thread_id = next.native_thread_id.clone();
-        identity::persist_registration_at(&self.host.host_paths, scope, ident, binding, transport)?;
+        identity::persist_registration_at(
+            &self.host.host_paths,
+            scope,
+            ident,
+            binding,
+            transport.clone(),
+        )?;
         // Publish the new route only after its credential is readable. Native
         // route readers share identity_gate with this convergence transaction.
         self.host.commit_checked(&publications)?;
+        let control_context = ProjectContext::for_registered_root_with_app(
+            &scope.root,
+            saved.app_scope_id.clone(),
+        )?;
+        // Publish the control slot only when the identity already holds a
+        // stable name. A nameless legacy identity is left for the later single
+        // context name decision, which publishes its own slot.
+        self.publish_refresh_control_slot(
+            runtime,
+            &control_context,
+            &ident.worker_id,
+            next.clone(),
+            transport,
+        )?;
         Ok(next)
     }
     fn current_anchor_binding(
@@ -537,6 +580,23 @@ impl ProjectRuntimeManager {
         });
         Ok(())
     }
+    fn scoped_recovery_worker_id(
+        context: &ProjectContext,
+        facts: &IdentityFacts,
+    ) -> Result<String, String> {
+        let anchor = facts.dsh_session_id.as_deref()
+            .or_else(|| facts.dsh.as_ref().map(|candidate| candidate.session_id.as_str()))
+            .map(|session| ("dsh", session))
+            .or_else(|| facts.session_id.as_deref().map(|session| ("session", session)))
+            .ok_or("COLLAB_IDENTITY_ANCHOR_MISSING: current agent session is required")?;
+        let mut digest = Sha256::new();
+        for part in [context.project_scope.as_str(), context.app_scope_id.as_str(), anchor.0, anchor.1] {
+            digest.update((part.len() as u64).to_be_bytes());
+            digest.update(part.as_bytes());
+        }
+        Ok(format!("codex-session-{:x}", digest.finalize()))
+    }
+
     fn approved_recovery_admission(
         &self,
         context: &ProjectContext,
@@ -560,6 +620,11 @@ impl ProjectRuntimeManager {
             }
             return Ok(None);
         }
+        let explicit_master = request
+            .grant_approval
+            .as_ref()
+            .or(request.approval.as_ref())
+            .is_some_and(|raw| raw["action"] == "restore_master" && raw.get("target_identity").is_none());
         if let Some(intent) = name_resolution::parse_name_intent(
             request
                 .grant_approval
@@ -576,11 +641,29 @@ impl ProjectRuntimeManager {
             // Name intent does not replace another principal's credential.
             // Its role transition belongs to the typed grant owner after the
             // current caller binding and the name decision are established.
-            return Ok(None);
+            if !explicit_master {
+                return Ok(None);
+            }
         }
         let observed_facts = self
             .observe_identity_facts(context, &request.facts)
             .map_err(|error| ApprovedAdmissionError::Error(error.to_string()))?;
+        if explicit_master {
+            if self.current_session_identity(context, &observed_facts)
+                .map_err(|error| ApprovedAdmissionError::Error(error.to_string()))?
+                .is_some()
+            {
+                return Ok(None);
+            }
+            let scope = Scope { root: PathBuf::from(&context.canonical_root) };
+            match identity::resolve_for_daemon_with_route_at(
+                &self.host.host_paths, &scope, &observed_facts, None,
+            ) {
+                Err(error) if error.to_string().starts_with("IDENTITY_RESTORE_CROSS_PROJECT:") => {}
+                Err(error) => return Err(ApprovedAdmissionError::Error(error.to_string())),
+                Ok(_) => return Ok(None),
+            }
+        }
         if let Some(raw) = request
             .grant_approval
             .as_ref()
@@ -602,13 +685,21 @@ impl ProjectRuntimeManager {
             {
                 identity
             } else {
-                identity::resolve_for_daemon_with_route_at(
+                match identity::resolve_for_daemon_with_route_at(
                     &self.host.host_paths,
                     &scope,
                     &observed_facts,
                     None,
-                )
-                .map_err(|error| ApprovedAdmissionError::Error(error.to_string()))?
+                ) {
+                    Ok(identity) => identity,
+                    Err(error) if error.to_string().starts_with("IDENTITY_RESTORE_CROSS_PROJECT:") => {
+                        let worker_id = Self::scoped_recovery_worker_id(context, &observed_facts)
+                            .map_err(ApprovedAdmissionError::Error)?;
+                        identity::draft_identity_with_id(&scope, &worker_id)
+                            .map_err(|error| ApprovedAdmissionError::Error(error.to_string()))?
+                    }
+                    Err(error) => return Err(ApprovedAdmissionError::Error(error.to_string())),
+                }
             };
             self.reconcile_committed_credential(&scope, &observed_facts, &mut identity)
                 .map_err(|error| ApprovedAdmissionError::Error(error.to_string()))?;
@@ -1114,7 +1205,11 @@ impl ProjectRuntimeManager {
         context.validate_registered_root(&root)?;
         validate_project_registration_cwd(&context.canonical_root, &root)
             .map_err(anyhow::Error::msg)?;
-        facts = self.observe_identity_facts(&context, &facts)?;
+        // The caller has already performed the single live observation and
+        // cleared caller_pid/pane_hint. Do not observe a second time. The pane
+        // anchor is derived only from that invocation's live observation by
+        // `resolve_context_name`; persisted or caller-supplied facts.tmux is
+        // never used as a live pane here.
         validate_facts(&facts)?;
         let scope = Scope { root };
         let required = if self.has_current_desktop_binding(&context, &facts)? {
@@ -1554,6 +1649,7 @@ impl ProjectRuntimeManager {
                 previous.2,
                 previous.3,
                 readback,
+                None,
             );
             (runtime, receipt, Some((staged_runtime, transport)))
         } else {

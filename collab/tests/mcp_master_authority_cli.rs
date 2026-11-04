@@ -6,6 +6,9 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+#[path = "support/daemon_readiness.rs"]
+mod daemon_readiness;
+
 fn binaries() -> (PathBuf, PathBuf) {
     let explicit_cli = std::env::var_os("COLLAB_TEST_BINARY");
     let cli = explicit_cli
@@ -133,17 +136,7 @@ impl Fixture {
                 .expect("spawn owned fixture serve"),
         );
         let socket = self.root.join("h/server.sock");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !socket.exists() && Instant::now() < deadline {
-            if let Some(status) = self.daemon.as_mut().unwrap().try_wait().unwrap() {
-                panic!(
-                    "owned fixture serve exited before readiness: {status}: {}",
-                    std::fs::read_to_string(log_path).unwrap_or_default()
-                );
-            }
-            thread::sleep(Duration::from_millis(25));
-        }
-        assert!(socket.exists(), "owned fixture serve did not create socket");
+        daemon_readiness::wait_for_ping(self.daemon.as_mut().unwrap(), &socket, Duration::from_secs(10));
     }
 
     fn stop_daemon(&mut self) {

@@ -1974,6 +1974,7 @@ fn routing_seat(server: &Server, name: &str, worker: &str) {
                 session_id: session,
                 occupancy_revision: 1,
                 updated_ms: now_ms(),
+                pane_anchor: None,
             },
         );
 }

@@ -14,6 +14,150 @@ fn test_root(name: &str) -> PathBuf {
     root
 }
 
+struct StartupRouteFixture {
+    root: PathBuf,
+    host: Arc<Server>,
+    manager: Arc<ProjectRuntimeManager>,
+    key: RouteKey,
+}
+
+fn startup_route_fixture(name: &str, binding_control: Option<&str>) -> StartupRouteFixture {
+    let root = test_root(name);
+    let host_root = root.join("host");
+    let project_root = root.join("project");
+    std::fs::create_dir_all(host_root.join(".agent-collab/server")).unwrap();
+    std::fs::create_dir_all(project_root.join(".agent-collab/server")).unwrap();
+
+    let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+    host_paths.ensure_root().unwrap();
+    let host_journal_path = host_root.join(".agent-collab/server/journal.jsonl");
+    let host_journal = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&host_journal_path)
+        .unwrap();
+    let host = Arc::new(Server {
+        config: crate::config::Config::default(),
+        root: host_root.clone(),
+        storage_root: host_root,
+        journal_path: host_journal_path,
+        host_paths: host_paths.clone(),
+        state: Mutex::new(State::default()),
+        journal: Mutex::new(host_journal),
+        appserver_candidate_check: default_appserver_candidate_check(),
+        appserver_notification_sink: default_appserver_notification_sink(),
+        appserver_thread_status: default_appserver_thread_status(),
+        appserver_thread_archive: default_appserver_thread_archive(),
+        mailbox_notify: Notify::new(),
+    });
+
+    let project_root = project_root.canonicalize().unwrap();
+    let project_scope = project_root.to_string_lossy().into_owned();
+    let key = ("fixture-app".to_owned(), project_scope.clone());
+    let record = HostRouteRecord {
+        version: 1,
+        op: "register".into(),
+        app_scope_id: key.0.clone(),
+        project_scope: project_scope.clone(),
+        canonical_root: project_scope.clone(),
+        storage_root: project_scope,
+        registered_ms: 1,
+    };
+    let mut routes = serde_json::to_string(&record).unwrap();
+    if let Some(binding_control) = binding_control {
+        routes.push('\n');
+        routes.push_str(binding_control);
+    }
+    routes.push('\n');
+    std::fs::write(host_paths.state_root().join("routes.jsonl"), routes).unwrap();
+
+    let manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
+    StartupRouteFixture {
+        root,
+        host,
+        manager,
+        key,
+    }
+}
+
+#[test]
+fn old_route_without_binding_control_stays_pending_until_selection() {
+    let fixture = startup_route_fixture("legacy-binding-control", None);
+    let pending = fixture
+        .manager
+        .routes
+        .lock()
+        .unwrap()
+        .get(&fixture.key)
+        .and_then(|route| route.runtime.clone());
+    assert!(
+        pending.is_none(),
+        "a legacy route must stay pending at startup when no control line exists"
+    );
+    assert!(
+        fixture.manager.project_locks.lock().unwrap().is_empty(),
+        "startup must not hold a writer-lock descriptor for a pending legacy route"
+    );
+    let log = std::fs::read_to_string(fixture.host.host_paths.log_path()).unwrap();
+    assert!(log.contains("RUNTIME_MATERIALIZATION_DEFERRED"), "{log}");
+
+    let context = crate::proto::ProjectContext::for_registered_root_with_app(
+        &fixture.root.join("project"),
+        crate::identity::AppServerId::new("fixture-app").unwrap(),
+    )
+    .unwrap();
+    let selected = fixture.manager.select_runtime(&context).unwrap();
+    assert!(
+        !Arc::ptr_eq(&selected, &fixture.host),
+        "selection must open the project runtime"
+    );
+    let installed = fixture
+        .manager
+        .routes
+        .lock()
+        .unwrap()
+        .get(&fixture.key)
+        .and_then(|route| route.runtime.clone())
+        .expect("selection installs the materialized route");
+    assert!(Arc::ptr_eq(&selected, &installed));
+    assert_eq!(fixture.manager.project_locks.lock().unwrap().len(), 1);
+    assert!(Arc::ptr_eq(
+        &selected,
+        &fixture.manager.select_runtime(&context).unwrap()
+    ));
+
+    drop(installed);
+    drop(selected);
+    drop(fixture.manager);
+    drop(fixture.host);
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
+#[test]
+fn binding_control_line_keeps_unbound_initialized_project_deferred() {
+    let fixture = startup_route_fixture(
+        "complete-binding-control",
+        Some(r#"{"kind":"binding_control","slots":[]}"#),
+    );
+    let runtime = fixture
+        .manager
+        .routes
+        .lock()
+        .unwrap()
+        .get(&fixture.key)
+        .and_then(|route| route.runtime.clone());
+    assert!(
+        runtime.is_none(),
+        "a complete control line must gate materialization"
+    );
+    let log = std::fs::read_to_string(fixture.host.host_paths.log_path()).unwrap();
+    assert!(log.contains("RUNTIME_MATERIALIZATION_DEFERRED"), "{log}");
+
+    drop(fixture.manager);
+    drop(fixture.host);
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
 async fn assert_active_isolated_server(socket: &std::path::Path) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while !crate::client::alive(socket) && tokio::time::Instant::now() < deadline {
@@ -69,54 +213,6 @@ fn legacy_host_fence_is_isolated_with_a_custom_state_root() {
     );
 
     std::fs::remove_dir_all(root).expect("remove custom state root");
-}
-
-#[tokio::test]
-async fn concurrent_degraded_shutdown_notifications_coalesce() {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    let root = test_root("maintenance-coalesce");
-    let paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
-    paths.ensure_root().unwrap();
-    let journal = Arc::new(
-        crate::server::operation_journal::OperationJournal::open(paths.journal_path()).unwrap(),
-    );
-    let (_shutdown, receiver) = tokio::sync::watch::channel(false);
-    let (sender, mut pending) = tokio::sync::mpsc::channel(1);
-    let mut tasks = Vec::new();
-    for _ in 0..3 {
-        let (server, mut client) = tokio::net::UnixStream::pair().unwrap();
-        tasks.push(tokio::spawn(conn_task_degraded(
-            journal.clone(),
-            Arc::from("fixture replay error"),
-            server,
-            paths.clone(),
-            Some("fixture-only".to_string()),
-            receiver.clone(),
-            sender.clone(),
-        )));
-        client
-            .write_all(b"{\"op\":\"Shutdown\",\"password\":\"fixture-only\"}\n")
-            .await
-            .unwrap();
-        let mut line = String::new();
-        BufReader::new(client).read_line(&mut line).await.unwrap();
-        let response: serde_json::Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(response["authorized"], true);
-    }
-    // Keep the listener's notification receiver alive but do not drain it.
-    // Every accepted connection must still finish after writing its response.
-    tokio::time::timeout(Duration::from_secs(1), async {
-        for task in tasks {
-            task.await.unwrap();
-        }
-    })
-    .await
-    .expect("shutdown notifications must coalesce without blocking connections");
-    assert_eq!(pending.try_recv(), Ok(()));
-    assert!(pending.try_recv().is_err());
-    assert!(paths.state_root().join("DOWN").exists());
-    drop(journal);
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[tokio::test]

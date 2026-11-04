@@ -14,6 +14,7 @@ fn same_session_name_commits_keep_one_carrier_and_replay_in_commit_order() {
         session_id: "s1".into(),
         occupancy_revision: 1,
         updated_ms: 1,
+        pane_anchor: None,
     };
     let assignment = TaskAssignment {
         task_id: "task-a".into(),
@@ -29,6 +30,7 @@ fn same_session_name_commits_keep_one_carrier_and_replay_in_commit_order() {
         session_id: "s1".into(),
         occupancy_revision: 1,
         updated_ms: 2,
+        pane_anchor: None,
     };
     let events = vec![
         Event::NameResolutionCommitted {
@@ -63,7 +65,10 @@ fn same_session_name_commits_keep_one_carrier_and_replay_in_commit_order() {
     }
     assert!(replayed.name_occupancy("/project", "Alice").is_none());
     assert_eq!(
-        replayed.name_occupancy("/project", "Bob").unwrap().worker_id,
+        replayed
+            .name_occupancy("/project", "Bob")
+            .unwrap()
+            .worker_id,
         "old-b"
     );
     assert_eq!(replayed.task_assignment("task-a"), Some(&assignment));
@@ -76,6 +81,7 @@ fn same_session_name_commits_keep_one_carrier_and_replay_in_commit_order() {
         session_id: "s2".into(),
         occupancy_revision: 1,
         updated_ms: 3,
+        pane_anchor: None,
     };
     state
         .apply_checked(&Event::NameResolutionCommitted {
@@ -89,7 +95,10 @@ fn same_session_name_commits_keep_one_carrier_and_replay_in_commit_order() {
         "s1"
     );
     assert_eq!(
-        state.name_occupancy("/project", "Carol").unwrap().session_id,
+        state
+            .name_occupancy("/project", "Carol")
+            .unwrap()
+            .session_id,
         "s2"
     );
 }
@@ -113,6 +122,7 @@ fn name_handoff_preserves_goal_schedule_and_terminal_history() {
         session_id: "s1".into(),
         occupancy_revision: 1,
         updated_ms: 1,
+        pane_anchor: None,
     };
     state
         .name_occupancies
@@ -220,15 +230,15 @@ fn same_session_intermediate_name_commit_carries_goal_schedule() {
         session_id: "shared-session".into(),
         occupancy_revision: 1,
         updated_ms: 1,
+        pane_anchor: None,
     };
     state
         .name_occupancies
         .entry(scope.clone())
         .or_default()
         .insert("Jenny".into(), previous);
-    let mut goal = state.notification_subscriptions
-        [&mailbox::default_direct_message_id("old")]
-        .clone();
+    let mut goal =
+        state.notification_subscriptions[&mailbox::default_direct_message_id("old")].clone();
     goal.id = "goal-schedule".into();
     goal.event = "deadline".into();
     goal.subject = Some("goal:owned".into());
@@ -263,6 +273,7 @@ fn same_session_intermediate_name_commit_carries_goal_schedule() {
         session_id: "shared-session".into(),
         occupancy_revision: 2,
         updated_ms: 2,
+        pane_anchor: None,
     };
     let events = build_name_resolution_events(&state, &scope, &intermediate);
     for event in &events {
@@ -273,8 +284,7 @@ fn same_session_intermediate_name_commit_carries_goal_schedule() {
     assert_eq!(moved.status, "armed");
     assert_eq!(state.msgs["pending-goal-message"].to, "new");
     assert_eq!(
-        state.wake_bindings["pending-goal-message"],
-        "goal-schedule",
+        state.wake_bindings["pending-goal-message"], "goal-schedule",
         "the pending goal wake must stay bound to its transferred schedule"
     );
 
@@ -284,6 +294,7 @@ fn same_session_intermediate_name_commit_carries_goal_schedule() {
         session_id: "shared-session".into(),
         occupancy_revision: 3,
         updated_ms: 3,
+        pane_anchor: None,
     };
     let events = build_name_resolution_events(&state, &scope, &promoted);
     for event in &events {
@@ -294,18 +305,18 @@ fn same_session_intermediate_name_commit_carries_goal_schedule() {
         "new"
     );
     assert_eq!(state.msgs["pending-goal-message"].to, "new");
-    assert_eq!(
-        state.wake_bindings["pending-goal-message"],
-        "goal-schedule"
-    );
-    assert!(!state.notification_subscriptions.values().any(|subscription| {
-        subscription.worker_id == "old"
-            && subscription.event == "deadline"
-            && subscription
-                .subject
-                .as_deref()
-                .is_some_and(|subject| subject.starts_with("goal:"))
-    }));
+    assert_eq!(state.wake_bindings["pending-goal-message"], "goal-schedule");
+    assert!(!state
+        .notification_subscriptions
+        .values()
+        .any(|subscription| {
+            subscription.worker_id == "old"
+                && subscription.event == "deadline"
+                && subscription
+                    .subject
+                    .as_deref()
+                    .is_some_and(|subject| subject.starts_with("goal:"))
+        }));
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -331,8 +342,12 @@ fn public_handlers_move_goal_schedule_and_pending_wake_across_intermediate_name(
     };
     assert!(register(&server, "old", 1, "shared-session").ok);
 
-    let promoted =
-        handle_master_promote(&server, "old".into(), "token-old".into(), "user approved old".into());
+    let promoted = handle_master_promote(
+        &server,
+        "old".into(),
+        "token-old".into(),
+        "user approved old".into(),
+    );
     assert!(promoted.ok, "{promoted:?}");
 
     let subscribed = handle_notification_subscribe(
@@ -378,8 +393,12 @@ fn public_handlers_move_goal_schedule_and_pending_wake_across_intermediate_name(
     assert_eq!(state.wake_bindings[&pending_id], goal_id);
     drop(state);
 
-    let promoted =
-        handle_master_promote(&server, "new".into(), "token-new".into(), "user approved new".into());
+    let promoted = handle_master_promote(
+        &server,
+        "new".into(),
+        "token-new".into(),
+        "user approved new".into(),
+    );
     assert!(promoted.ok, "{promoted:?}");
 
     let old_denied = handle_goal_schedule_reconcile(
@@ -422,6 +441,7 @@ fn confirmed_user_jenny_takeover_overrides_unknown_without_ordinary_name_bypass(
     next.intent = Some(NameIntent {
         requested_name: "Jenny".into(),
         user_authorized: true,
+        moves_existing_names: true,
         replace_confirmed: false,
     });
     assert!(matches!(
@@ -436,11 +456,6 @@ fn confirmed_user_jenny_takeover_overrides_unknown_without_ordinary_name_bypass(
         if occupancy.name == "Jenny" && occupancy.worker_id == "new" && occupancy.session_id == "s2")
     );
     committed(&mut state, &input("ordinary", "s3"));
-    next.intent.as_mut().unwrap().requested_name = "Alice".into();
-    assert!(matches!(
-        plan_name_resolution(&state, &next).unwrap().decision,
-        NameResolutionDecision::Pending { .. }
-    ));
 }
 
 fn input(worker: &str, session: &str) -> NameResolutionInput {
@@ -462,6 +477,7 @@ fn input(worker: &str, session: &str) -> NameResolutionInput {
         },
         intent: None,
         is_current_master: false,
+        pane_anchor: None,
     }
 }
 
@@ -548,14 +564,18 @@ fn name_session_refresh_updates_all_open_work_and_preserves_closed_and_reassigne
             .insert(id.into(), crate::board::BoardTaskDetails::default());
     }
     let before = serde_json::to_value(&state.tasks["c"]).unwrap();
-    committed(&mut state, &input("old", "s2"));
+    // A same-session carrier change is the valid anchor for inheriting the
+    // current name and its unfinished work.
+    committed(&mut state, &input("new", "s1"));
     for id in ["a", "b"] {
-        assert_eq!(state.task_assignments[id].session_id, "s2");
+        assert_eq!(state.task_assignments[id].session_id, "s1");
         assert_eq!(state.task_assignments[id].assignment_revision, 2);
         assert_eq!(state.tasks[id].worktree_path.as_deref(), Some("/resource"));
         assert_eq!(state.tasks[id].next_step.as_deref(), Some("preserved"));
         assert_eq!(state.board_details[id].revision, 1);
     }
+    assert_eq!(state.tasks["a"].owner, "new");
+    assert_eq!(state.tasks["b"].owner, "new");
     assert_eq!(state.tasks["b"].status, "accepted");
     assert_eq!(serde_json::to_value(&state.tasks["c"]).unwrap(), before);
     assert_eq!(state.task_assignments["c"].session_id, "s1");
@@ -563,13 +583,95 @@ fn name_session_refresh_updates_all_open_work_and_preserves_closed_and_reassigne
 }
 
 #[test]
-fn online_confirmation_unknown_pending_offline_inheritance_and_jenny_plan() {
+fn same_worker_without_session_or_pane_anchor_does_not_inherit_old_name_work_or_mailbox() {
+    let mut state = State::default();
+    committed(&mut state, &input("w1", "s1"));
+    state
+        .apply_checked(&Event::TaskCreated {
+            task: task("t", "working"),
+        })
+        .unwrap();
+    state.tasks.get_mut("t").unwrap().owner = "w1".into();
+    state
+        .apply_checked(&Event::TaskAssignmentUpdated {
+            assignment: TaskAssignment {
+                task_id: "t".into(),
+                name: "Alice".into(),
+                session_id: "s1".into(),
+                assignment_revision: 1,
+                reflow: None,
+                updated_ms: 1,
+            },
+        })
+        .unwrap();
+    state
+        .apply_checked(&Event::Sent {
+            msg: Message {
+                id: "pending".into(),
+                from: "sender".into(),
+                to: "w1".into(),
+                mtype: "notify".into(),
+                subject: Some("old-name".into()),
+                body: "original body".into(),
+                in_reply_to: None,
+                created_ms: 1,
+                state: "pending".into(),
+                wake_attempt_count: 2,
+                last_wake_attempt_ms: 1,
+                retry_attempted: false,
+            },
+        })
+        .unwrap();
+    state
+        .apply_checked(&Event::MailboxNameAddressed {
+            message_id: "pending".into(),
+            address: name_mailbox::MailboxNameAddress {
+                project_scope: "/project".into(),
+                name: "Alice".into(),
+            },
+        })
+        .unwrap();
+    let before_task = serde_json::to_value(&state.tasks["t"]).unwrap();
+    let before_assignment = serde_json::to_value(&state.task_assignments["t"]).unwrap();
+    let before_message = serde_json::to_value(&state.msgs["pending"]).unwrap();
+    let before_responsibility = state::responsibility_snapshot(&state, "w1");
+
+    let occupancy = committed(&mut state, &input("w1", "s2"));
+    assert_eq!(occupancy.name, "Bob");
+    assert_eq!(occupancy.session_id, "s2");
+    assert_eq!(
+        serde_json::to_value(&state.tasks["t"]).unwrap(),
+        before_task
+    );
+    assert_eq!(
+        serde_json::to_value(&state.task_assignments["t"]).unwrap(),
+        before_assignment
+    );
+    assert_eq!(
+        serde_json::to_value(&state.msgs["pending"]).unwrap(),
+        before_message
+    );
+    assert_eq!(
+        state.mailbox_name_addresses["pending"].name, "Alice",
+        "a fresh ordinary name must not inherit the old name's mailbox"
+    );
+    assert!(state.mailbox_handoffs.is_empty());
+    assert_eq!(
+        state::responsibility_snapshot(&state, "w1"),
+        before_responsibility,
+        "same worker id without an anchor must not move responsibility"
+    );
+}
+
+#[test]
+fn explicit_name_overrides_any_presence_and_jenny_plan() {
     let mut state = State::default();
     committed(&mut state, &input("old", "s1"));
     let mut i = input("new", "s2");
     i.intent = Some(NameIntent {
         requested_name: "Alice".into(),
         user_authorized: true,
+        moves_existing_names: true,
         replace_confirmed: false,
     });
     for presence in [
@@ -590,38 +692,10 @@ fn online_confirmation_unknown_pending_offline_inheritance_and_jenny_plan() {
             })
             .unwrap();
         let plan = plan_name_resolution(&state, &i).unwrap();
-        match presence {
-            AgentPresence::Unknown => {
-                let NameResolutionDecision::Pending { recovery } = plan.decision else {
-                    panic!()
-                };
-                assert_eq!(recovery.request.requested_name.as_deref(), Some("Alice"));
-                assert_eq!(recovery.occupancy_ref.worker_id, "old");
-                assert!(matches!(
-                    plan.events.as_slice(),
-                    [Event::NameRecoveryUpdated { .. }]
-                ));
-            }
-            AgentPresence::Online => {
-                assert!(matches!(
-                    plan.decision,
-                    NameResolutionDecision::NeedsConfirmation { .. }
-                ));
-                assert!(plan.events.is_empty());
-                let mut confirmed = i.clone();
-                confirmed.intent.as_mut().unwrap().replace_confirmed = true;
-                assert!(matches!(
-                    plan_name_resolution(&state, &confirmed).unwrap().decision,
-                    NameResolutionDecision::Committed { .. }
-                ));
-            }
-            AgentPresence::Offline => {
-                assert!(matches!(
-                    plan.decision,
-                    NameResolutionDecision::Committed { .. }
-                ));
-            }
-        }
+        assert!(matches!(
+            plan.decision,
+            NameResolutionDecision::Committed { .. }
+        ));
     }
     i.intent = parse_name_intent(Some(
         &json!({"action":"restore_master","decision":"approved"}),
@@ -665,7 +739,7 @@ fn authorization_text_is_sufficient_but_empty_authorization_is_not() {
 }
 
 #[test]
-fn registered_name_owner_checks_online_confirmation_and_master_clear() {
+fn registered_name_owner_replaces_online_master_with_user_authorization() {
     let (server, root) = super::peer_tests::test_server();
     let project = std::fs::canonicalize(&root)
         .unwrap()
@@ -712,18 +786,19 @@ fn registered_name_owner_checks_online_confirmation_and_master_clear() {
             )
             .unwrap();
     }
-    let denied = handle_master_promote(
+    let promoted = handle_master_promote(
         &server,
         "second".into(),
         "second".into(),
         "user asked".into(),
     );
-    assert!(!denied.ok);
-    assert_eq!(denied.data["outcome"], "confirmation_required");
-    assert!(denied.data["next_invocation"]
-        .as_str()
+    assert!(!promoted.ok, "{promoted:?}");
+    assert!(promoted
+        .error
+        .as_deref()
         .unwrap()
-        .contains("Jenny"));
+        .starts_with("NAME_RECOVERY_REQUIRED"));
+    assert_eq!(promoted.data["outcome"], "pending", "{promoted:?}");
     assert_eq!(
         current_master_holder(&server, &server.state.lock().unwrap())
             .unwrap()
@@ -738,6 +813,7 @@ fn registered_name_owner_checks_online_confirmation_and_master_clear() {
         Some(NameIntent {
             requested_name: "Jenny".into(),
             user_authorized: true,
+            moves_existing_names: true,
             replace_confirmed: true,
         }),
     )
@@ -830,7 +906,8 @@ fn holder_change_updates_legacy_owner_without_overwriting_reassigned_work() {
     i.intent = Some(NameIntent {
         requested_name: "Alice".into(),
         user_authorized: true,
-        replace_confirmed: true,
+        moves_existing_names: true,
+        replace_confirmed: false,
     });
     state
         .apply_checked(&Event::AgentPresenceObserved {
@@ -868,6 +945,154 @@ fn holder_change_updates_legacy_owner_without_overwriting_reassigned_work() {
 }
 
 #[test]
+fn plan_explicit_name_move_reports_target_and_retired_source_names() {
+    let (server, root) = peer_tests::test_server();
+    for id in ["old", "new"] {
+        assert!(peer_tests::register_synthetic_peer(&server, id, id).ok);
+    }
+    let scope = {
+        let state = server.state.lock().unwrap();
+        server_route_scope(&server, &state)
+            .unwrap()
+            .unwrap()
+            .project_scope_id
+            .as_str()
+            .to_owned()
+    };
+    {
+        let mut state = server.state.lock().unwrap();
+        let names = state.name_occupancies.entry(scope).or_default();
+        names.insert(
+            "Alice".into(),
+            NameOccupancy {
+                name: "Alice".into(),
+                worker_id: "old".into(),
+                session_id: "session-old".into(),
+                occupancy_revision: 1,
+                updated_ms: 1,
+                pane_anchor: None,
+            },
+        );
+        names.insert(
+            "Bob".into(),
+            NameOccupancy {
+                name: "Bob".into(),
+                worker_id: "new".into(),
+                session_id: "session-new".into(),
+                occupancy_revision: 1,
+                updated_ms: 1,
+                pane_anchor: None,
+            },
+        );
+    }
+
+    let moved = plan_explicit_name_move(
+        &server,
+        "new",
+        "names-restore",
+        "context",
+        &NameIntent {
+            requested_name: "Alice".into(),
+            user_authorized: true,
+            moves_existing_names: true,
+            replace_confirmed: false,
+        },
+        None,
+    )
+    .unwrap()
+    .expect("explicit ordinary rename must plan a control move");
+    assert_eq!(moved.target, "Alice");
+    assert_eq!(moved.source_names, vec!["Bob".to_owned()]);
+
+    let noop = plan_explicit_name_move(
+        &server,
+        "new",
+        "names-restore",
+        "context",
+        &NameIntent {
+            requested_name: "Bob".into(),
+            user_authorized: true,
+            moves_existing_names: true,
+            replace_confirmed: false,
+        },
+        None,
+    )
+    .unwrap();
+    assert!(
+        noop.is_none(),
+        "repeating the carrier's current name is not a move"
+    );
+
+    let jenny = plan_explicit_name_move(
+        &server,
+        "new",
+        "names-restore",
+        "context",
+        &NameIntent {
+            requested_name: "Jenny".into(),
+            user_authorized: true,
+            moves_existing_names: true,
+            replace_confirmed: false,
+        },
+        None,
+    )
+    .unwrap();
+    assert!(
+        jenny.is_none(),
+        "Jenny takeover stays on the existing grant/confirmation path"
+    );
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn plan_automatic_name_keeps_existing_carrier_and_only_pools_a_nameless_one() {
+    let (server, root) = peer_tests::test_server();
+    // Registration assigns each carrier a pool name, so this mirrors a named
+    // current carrier. The automatic planner must return that same name and
+    // not allocate a second one.
+    assert!(peer_tests::register_synthetic_peer(&server, "keep", "keep").ok);
+    let (assigned, scope) = {
+        let state = server.state.lock().unwrap();
+        let scope = server_route_scope(&server, &state)
+            .unwrap()
+            .unwrap()
+            .project_scope_id
+            .as_str()
+            .to_owned();
+        let name = state
+            .name_occupancies
+            .get(&scope)
+            .and_then(|names| names.values().find(|holder| holder.worker_id == "keep"))
+            .map(|holder| holder.name.clone())
+            .expect("registration assigns the carrier a name");
+        (name, scope)
+    };
+    let kept = plan_automatic_name(&server, "keep", "names-keep", "context", None)
+        .unwrap()
+        .expect("an already named carrier has a committed automatic decision");
+    assert_eq!(kept, assigned);
+
+    // A legacy identity may carry no occupancy at all. With the pool empty
+    // again, the automatic planner allocates the first pool name instead of
+    // referencing a name that the carrier does not hold.
+    {
+        let mut state = server.state.lock().unwrap();
+        state
+            .name_occupancies
+            .get_mut(&scope)
+            .expect("name occupancy table exists")
+            .retain(|_, holder| holder.worker_id != "keep");
+    }
+    let allocated = plan_automatic_name(&server, "keep", "names-fresh", "context", None)
+        .unwrap()
+        .expect("a nameless carrier receives a pool decision");
+    assert_eq!(allocated, "Alice");
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn current_occupancy_beats_duplicate_labels_and_internal_id_stays_unchanged() {
     let mut state = State::default();
     committed(&mut state, &input("holder", "s1"));
@@ -886,10 +1111,23 @@ fn name_intent_rejects_unapproved_invalid_and_untyped_requests() {
     for value in [
         json!({"action":"restore_name","requested_name":"Outside","decision":"approved"}),
         json!({"action":"restore_name"}),
-        json!({"action":"restore_master","replace_confirmed":"true"}),
     ] {
         assert!(parse_name_intent(Some(&value)).is_err());
     }
+    assert!(parse_name_intent(Some(
+        &json!({"action":"restore_master","replace_confirmed":"true"})
+    ))
+    .unwrap_err()
+    .contains("replace_confirmed must be boolean"));
+    assert!(matches!(
+        parse_name_intent(Some(&json!({"action":"restore_master"}))).unwrap(),
+        Some(NameIntent {
+            requested_name,
+            user_authorized: false,
+            moves_existing_names: true,
+            replace_confirmed: false,
+        }) if requested_name == "Jenny"
+    ));
     let mut i = input("worker", "s1");
     i.intent = parse_name_intent(Some(
         &json!({"action":"restore_name","requested_name":"Bob","decision":"denied"}),
@@ -905,45 +1143,27 @@ fn name_intent_rejects_unapproved_invalid_and_untyped_requests() {
         .contains("NAME_AUTHORIZATION_REQUIRED"));
 }
 
+fn pane_anchor(socket: &str, pane_id: &str, cwd: &str) -> NamePaneAnchor {
+    NamePaneAnchor {
+        pane: crate::proto::TmuxPaneAnchor {
+            socket_path: socket.into(),
+            pane_id: pane_id.into(),
+        },
+        cwd: cwd.into(),
+    }
+}
+
+fn planned_name(state: &State, i: &NameResolutionInput) -> String {
+    match plan_name_resolution(state, i).unwrap().decision {
+        NameResolutionDecision::Committed { occupancy, .. } => occupancy.name,
+        other => panic!("unexpected decision: {other:?}"),
+    }
+}
+
 #[test]
-fn pending_is_durable_idempotent_and_online_activity_unknown_is_not_pending() {
+fn explicit_name_overrides_online_holder_without_confirmation() {
     let mut state = State::default();
     committed(&mut state, &input("old", "s1"));
-    let mut i = input("new", "s2");
-    i.intent = Some(NameIntent {
-        requested_name: "Alice".into(),
-        user_authorized: true,
-        replace_confirmed: true,
-    });
-    let plan = plan_name_resolution(&state, &i).unwrap();
-    assert!(matches!(
-        plan.decision,
-        NameResolutionDecision::Pending { .. }
-    ));
-    for event in plan.events {
-        state.apply_checked(&event).unwrap();
-    }
-    assert_eq!(
-        state.name_occupancy("/project", "Alice").unwrap().worker_id,
-        "old"
-    );
-    assert!(plan_name_resolution(&state, &i).unwrap().events.is_empty());
-    state
-        .apply_checked(&Event::AgentPresenceObserved {
-            presence: AgentPresenceRecord {
-                project_scope: "/project".into(),
-                worker_id: "old".into(),
-                session_id: "stale-session".into(),
-                presence: AgentPresence::Offline,
-                reason: "stale".into(),
-                observed_ms: 20,
-            },
-        })
-        .unwrap();
-    assert!(matches!(
-        plan_name_resolution(&state, &i).unwrap().decision,
-        NameResolutionDecision::Pending { .. }
-    ));
     state
         .apply_checked(&Event::AgentPresenceObserved {
             presence: AgentPresenceRecord {
@@ -956,23 +1176,252 @@ fn pending_is_durable_idempotent_and_online_activity_unknown_is_not_pending() {
             },
         })
         .unwrap();
+    let mut i = input("new", "s2");
+    i.intent = Some(NameIntent {
+        requested_name: "Alice".into(),
+        user_authorized: true,
+        moves_existing_names: true,
+        replace_confirmed: false,
+    });
+    let plan = plan_name_resolution(&state, &i).unwrap();
+    assert!(
+        matches!(&plan.decision, NameResolutionDecision::Committed { occupancy, .. }
+            if occupancy.name == "Alice" && occupancy.worker_id == "new")
+    );
+}
+
+#[test]
+fn session_anchor_beats_stale_worker_name() {
+    let mut state = State::default();
+    committed(&mut state, &input("old", "s1"));
+    committed(&mut state, &input("bob", "s2"));
+    // The worker id is a carrier, not a name anchor: the current session's
+    // name wins over a stale occupancy left on the same worker id.
+    assert_eq!(planned_name(&state, &input("old", "s2")), "Bob");
+}
+
+#[test]
+fn duplicate_session_names_report_conflict_without_selecting_a_holder() {
+    let mut state = State::default();
+    let names = state.name_occupancies.entry("/project".into()).or_default();
+    for (name, worker) in [("Alice", "first"), ("Bob", "second")] {
+        names.insert(name.into(), NameOccupancy {
+            name: name.into(),
+            worker_id: worker.into(),
+            session_id: "same-session".into(),
+            occupancy_revision: 1,
+            updated_ms: 1,
+            pane_anchor: None,
+        });
+    }
+    let request = input("new", "same-session");
+    let error = match plan_name_resolution(&state, &request) {
+        Ok(_) => panic!("ambiguous session must not select a name"),
+        Err(error) => error,
+    };
+    assert!(error.starts_with("NAME_SESSION_CONFLICT:"), "{error}");
+    assert_eq!(state.name_occupancies["/project"].len(), 2);
+}
+
+#[test]
+fn same_pane_endpoint_and_exact_cwd_inherits_across_session() {
+    let mut state = State::default();
+    let anchor = pane_anchor("/tmp/collab-shared.sock", "%3", "/project/sub");
     state
-        .apply_checked(&Event::AgentActivityObserved {
-            activity: AgentActivityRecord {
-                project_scope: "/project".into(),
+        .name_occupancies
+        .entry("/project".into())
+        .or_default()
+        .insert(
+            "Alice".into(),
+            NameOccupancy {
+                name: "Alice".into(),
                 worker_id: "old".into(),
                 session_id: "s1".into(),
-                activity: AgentActivity::Unknown,
-                background: true,
-                reason: "background".into(),
-                observed_ms: 20,
-                idle_since_ms: None,
+                occupancy_revision: 1,
+                updated_ms: 1,
+                pane_anchor: Some(anchor.clone()),
+            },
+        );
+    let mut i = input("new", "s2");
+    i.pane_anchor = Some(anchor.clone());
+    let plan = plan_name_resolution(&state, &i).unwrap();
+    let NameResolutionDecision::Committed { occupancy, .. } = &plan.decision else {
+        panic!("{:?}", plan.decision);
+    };
+    assert_eq!(occupancy.name, "Alice");
+    assert_eq!(occupancy.worker_id, "new");
+    assert_eq!(occupancy.session_id, "s2");
+    assert_eq!(occupancy.pane_anchor, Some(anchor));
+}
+
+#[test]
+fn pane_anchor_requires_exact_pane_and_cwd() {
+    for caller_anchor in [
+        // Same pane, different invocation directory.
+        pane_anchor("/tmp/collab-shared.sock", "%3", "/project/other"),
+        // Same directory, different pane.
+        pane_anchor("/tmp/collab-shared.sock", "%4", "/project/sub"),
+        // Same %N on a different tmux server.
+        pane_anchor("/tmp/collab-other.sock", "%3", "/project/sub"),
+    ] {
+        let mut state = State::default();
+        state
+            .name_occupancies
+            .entry("/project".into())
+            .or_default()
+            .insert(
+                "Alice".into(),
+                NameOccupancy {
+                    name: "Alice".into(),
+                    worker_id: "old".into(),
+                    session_id: "s1".into(),
+                    occupancy_revision: 1,
+                    updated_ms: 1,
+                    pane_anchor: Some(pane_anchor("/tmp/collab-shared.sock", "%3", "/project/sub")),
+                },
+            );
+        let mut i = input("new", "s2");
+        i.pane_anchor = Some(caller_anchor);
+        assert_eq!(planned_name(&state, &i), "Bob");
+    }
+}
+
+#[test]
+fn pane_anchor_inherits_jenny_without_copying_master_grant() {
+    let mut state = State::default();
+    let anchor = pane_anchor("/tmp/collab-shared.sock", "%3", "/project/sub");
+    state
+        .name_occupancies
+        .entry("/project".into())
+        .or_default()
+        .insert(
+            "Jenny".into(),
+            NameOccupancy {
+                name: "Jenny".into(),
+                worker_id: "old".into(),
+                session_id: "s1".into(),
+                occupancy_revision: 1,
+                updated_ms: 1,
+                pane_anchor: Some(anchor.clone()),
+            },
+        );
+    let mut i = input("new", "s2");
+    i.pane_anchor = Some(anchor);
+    let plan = plan_name_resolution(&state, &i).unwrap();
+    let NameResolutionDecision::Committed { occupancy, .. } = &plan.decision else {
+        panic!("{:?}", plan.decision);
+    };
+    assert_eq!(occupancy.name, "Jenny");
+    assert_eq!(occupancy.worker_id, "new");
+    assert!(
+        !plan.requires_master_authorization,
+        "inheriting the Jenny name is not a master grant"
+    );
+    assert!(!plan.events.iter().any(|event| matches!(
+        event,
+        Event::GlobalMasterGranted { .. } | Event::GlobalMasterRevoked { .. }
+    )));
+}
+
+#[test]
+fn fresh_ordinary_name_does_not_migrate_same_worker_legacy_tasks() {
+    let mut state = State::default();
+    committed(&mut state, &input("w1", "s1"));
+    let mut record = task("legacy", "working");
+    record.owner = "w1".into();
+    state
+        .apply_checked(&Event::TaskCreated { task: record })
+        .unwrap();
+
+    // No session or pane anchor inherits Alice. Falling through to a fresh
+    // ordinary name must not use the same worker id as an identity anchor.
+    let plan = plan_name_resolution(&state, &input("w1", "s2")).unwrap();
+    let NameResolutionDecision::Committed { occupancy, .. } = &plan.decision else {
+        panic!("{:?}", plan.decision);
+    };
+    assert_eq!(occupancy.name, "Bob");
+    assert!(
+        !plan
+            .events
+            .iter()
+            .any(|event| matches!(event, Event::TaskUpdated { .. })),
+        "a fresh ordinary name must not move an unassigned legacy task"
+    );
+    assert!(
+        !plan
+            .events
+            .iter()
+            .any(|event| matches!(event, Event::NameResolutionCommitted { assignments, .. } if !assignments.is_empty())),
+        "a fresh ordinary name must not create a task assignment"
+    );
+}
+
+#[test]
+fn explicit_rename_migrates_callers_open_assignments_to_new_name() {
+    let mut state = State::default();
+    committed(&mut state, &input("w1", "s1"));
+    committed(&mut state, &input("w2", "s2"));
+    let mut record = task("t", "working");
+    record.owner = "w1".into();
+    state
+        .apply_checked(&Event::TaskCreated { task: record })
+        .unwrap();
+    state
+        .apply_checked(&Event::TaskAssignmentUpdated {
+            assignment: TaskAssignment {
+                task_id: "t".into(),
+                name: "Alice".into(),
+                session_id: "s1".into(),
+                assignment_revision: 1,
+                reflow: None,
+                updated_ms: 1,
             },
         })
         .unwrap();
-    i.intent.as_mut().unwrap().replace_confirmed = false;
-    assert!(matches!(
-        plan_name_resolution(&state, &i).unwrap().decision,
-        NameResolutionDecision::NeedsConfirmation { .. }
-    ));
+    state
+        .apply_checked(&Event::Sent {
+            msg: Message {
+                id: "pending".into(),
+                from: "sender".into(),
+                to: "w1".into(),
+                mtype: "notify".into(),
+                subject: Some("old-name".into()),
+                body: "original body".into(),
+                in_reply_to: None,
+                created_ms: 1,
+                state: "pending".into(),
+                wake_attempt_count: 4,
+                last_wake_attempt_ms: 1,
+                retry_attempted: false,
+            },
+        })
+        .unwrap();
+    state
+        .apply_checked(&Event::MailboxNameAddressed {
+            message_id: "pending".into(),
+            address: name_mailbox::MailboxNameAddress {
+                project_scope: "/project".into(),
+                name: "Alice".into(),
+            },
+        })
+        .unwrap();
+    let mut i = input("w1", "s1");
+    i.intent = Some(NameIntent {
+        requested_name: "Bob".into(),
+        user_authorized: true,
+        moves_existing_names: true,
+        replace_confirmed: false,
+    });
+    assert_eq!(committed(&mut state, &i).name, "Bob");
+    assert_eq!(state.tasks["t"].owner, "w1");
+    assert_eq!(state.tasks["t"].status, "working");
+    assert_eq!(state.task_assignments["t"].name, "Bob");
+    assert_eq!(state.task_assignments["t"].session_id, "s1");
+    assert_eq!(state.msgs["pending"].to, "w1");
+    assert_eq!(state.msgs["pending"].body, "original body");
+    assert_eq!(state.msgs["pending"].wake_attempt_count, 4);
+    assert_eq!(
+        state.mailbox_name_addresses["pending"].name, "Bob",
+        "explicit rename carries the caller's unconsumed name mailbox"
+    );
 }

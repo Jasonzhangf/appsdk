@@ -4,7 +4,7 @@ This page is for a new machine or a first install of the Collab CLI and global
 daemon. It records the issues that appeared during the first `jenny` install on
 2026-10-30 and the smallest setup that made the real Codex TUI work.
 
-## Install and autostart
+## Install and activation
 
 From the AppSDK checkout:
 
@@ -12,22 +12,47 @@ From the AppSDK checkout:
 scripts/install-global-collab.sh
 ```
 
-The macOS installer installs `collab` and `collab-mcp`, refreshes the Collab
-Skill, and installs the per-user LaunchAgent. The LaunchAgent label is
-`com.appsdk.collab` and it uses `RunAtLoad` plus
-`KeepAlive.SuccessfulExit=false`.
+The installer installs `collab`, `collab-mcp`, the `collab-desktop-mcp` helper
+and its `.mjs`, and refreshes the Collab Skill. It does not load or start the
+daemon, does not call `launchctl`, and does not create the daemon socket.
+
+Daemon activation belongs to `collab up`. Run it from the project root that
+Collab should bind:
+
+```sh
+~/.cargo/bin/collab up
+```
+
+`collab up` writes the service record for the current project first, then
+installs and loads the per-user LaunchAgent as a side capability. The
+LaunchAgent label is `com.appsdk.collab` and it uses `RunAtLoad` plus
+`KeepAlive.SuccessfulExit=false`. If autostart fails while a daemon was already
+serving, `up` still reports `ok` and `started:false` instead of disturbing the
+running daemon. If no daemon is serving, a real launchd or plist failure exits
+non-zero.
 
 Verify the installed binary, service, and socket:
 
 ```sh
 ~/.cargo/bin/collab --version
-launchctl print "gui/$(id -u)/com.appsdk.collab" | grep -E 'state =|pid ='
 test -S ~/.collab/server.sock && echo socket-ready
+launchctl print "gui/$(id -u)/com.appsdk.collab" | grep -E 'state =|pid ='
 ```
 
-The installer does not restart a running daemon. If a daemon was running before
-the install, keep the new binary for the next user-managed maintenance window.
+The installer does not start or restart a running daemon. If a daemon was
+running before the install, it keeps the old binary until the next user-managed
+maintenance window.
 Do not use `launchctl kickstart -k` for Collab as a normal install step.
+
+## Install target must be on the system data volume
+
+On macOS the installer refuses to write the Collab binaries or the Skill bundle
+onto an external volume. It resolves each install target to its real path
+through any symlinks and compares the target's device with the writable system
+data volume `/System/Volumes/Data`. Do not point `CARGO_HOME`, the Skill target,
+or a symlink in their path at a volume under `/Volumes/<external>`; the install
+fails before writing. The check is macOS-only: on Linux Collab reports its
+support scope and does not guess at physical devices.
 
 ## Permissions: YOLO is not required
 

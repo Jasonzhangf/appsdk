@@ -11,6 +11,7 @@ import {
   parseLeadingAddress,
   resolveAddress,
   resolveInboundRoute,
+  resolveQueuedCeoRoute,
 } from "../qqbot-receiver.mjs";
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -39,9 +40,10 @@ const targets = [
     project_root: "/projects/appsdk",
   },
   {
-    address: "ceo",
+    address: "fanzhang.Alice",
     worker_id: "worker-ceo",
     project_root: "/Users/fanzhang",
+    project: "fanzhang",
   },
 ];
 
@@ -104,6 +106,7 @@ test("CEO resolution uses the typed grant worker and workspace", () => {
     matchCeoTarget(targets, {
       workerId: "worker-ceo",
       workspace: "/Users/fanzhang",
+      name: "Alice",
     }).target.worker_id,
     "worker-ceo",
   );
@@ -111,6 +114,7 @@ test("CEO resolution uses the typed grant worker and workspace", () => {
     matchCeoTarget(targets, {
       workerId: "worker-ceo",
       workspace: "/elsewhere",
+      name: "Alice",
     }).error,
     /CEO_NOT_IN_DIRECTORY/,
   );
@@ -137,7 +141,11 @@ test("an explicit address never reads or falls back to the default", async () =>
 });
 
 test("unset default resolves to CEO and a set default never falls back", async () => {
-  const ceo = { workerId: "worker-ceo", workspace: "/Users/fanzhang" };
+  const ceo = {
+    workerId: "worker-ceo",
+    workspace: "/Users/fanzhang",
+    name: "Alice",
+  };
   const unset = await resolveInboundRoute({
     leading: null,
     targets,
@@ -159,6 +167,211 @@ test("unset default resolves to CEO and a set default never falls back", async (
   });
   assert.match(invalidDefault.error, /ADDRESS_NOT_FOUND/);
   assert.equal(ceos, 0);
+});
+
+test("ceo-default accepts the directory address only when its name matches the grant", async () => {
+  const ceoWorkers = [
+    {
+      address: "fanzhang.Alice",
+      worker_id: "worker-ceo",
+      project_root: "/Users/fanzhang",
+      project: "fanzhang",
+    },
+    {
+      address: "fanzhang.Jenny",
+      worker_id: "worker-jenny",
+      project_root: "/Users/fanzhang",
+      project: "fanzhang",
+    },
+  ];
+  const routed = await resolveInboundRoute({
+    leading: null,
+    targets: ceoWorkers,
+    lookupDefault: async () => null,
+    lookupCeo: async () => ({
+      workerId: "worker-ceo",
+      workspace: "/Users/fanzhang",
+      name: "Alice",
+    }),
+  });
+  assert.equal(routed.source, "ceo-default");
+  assert.equal(routed.target.worker_id, "worker-ceo");
+  assert.equal(routed.resolvedWorkerId, "worker-ceo");
+  assert.equal(routed.resolvedAddress, "fanzhang.Alice");
+});
+
+test("ceo-default rejects a grant worker whose directory name differs", async () => {
+  const staleDirectory = [
+    {
+      address: "fanzhang.Bob",
+      worker_id: "worker-ceo",
+      project_root: "/Users/fanzhang",
+      project: "fanzhang",
+    },
+    {
+      address: "fanzhang.Jenny",
+      worker_id: "worker-jenny",
+      project_root: "/Users/fanzhang",
+      project: "fanzhang",
+    },
+  ];
+  const routed = await resolveInboundRoute({
+    leading: null,
+    targets: staleDirectory,
+    lookupDefault: async () => null,
+    lookupCeo: async () => ({
+      workerId: "worker-ceo",
+      workspace: "/Users/fanzhang",
+      name: "Alice",
+    }),
+  });
+  assert.match(routed.error, /CEO_NAME_MISMATCH: granted Alice, directory fanzhang\.Bob/);
+  assert.equal(routed.target, undefined);
+});
+
+test("explicit [ceo] accepts a matching directory name and rejects a mismatch", async () => {
+  const routed = await resolveInboundRoute({
+    leading: { address: "ceo", body: "arbitrate" },
+    targets,
+    lookupDefault: async () => {
+      throw new Error("an explicit address must not read the default");
+    },
+    lookupCeo: async () => ({
+      workerId: "worker-ceo",
+      workspace: "/Users/fanzhang",
+      name: "Alice",
+    }),
+  });
+  assert.equal(routed.source, "explicit");
+  assert.equal(routed.target.worker_id, "worker-ceo");
+  assert.equal(routed.target.resolvedAddress, "fanzhang.Alice");
+
+  const stale = await resolveInboundRoute({
+    leading: { address: "ceo", body: "arbitrate" },
+    targets: [
+      {
+        address: "fanzhang.Bob",
+        worker_id: "worker-ceo",
+        project_root: "/Users/fanzhang",
+        project: "fanzhang",
+      },
+    ],
+    lookupDefault: async () => {
+      throw new Error("an explicit address must not read the default");
+    },
+    lookupCeo: async () => ({
+      workerId: "worker-ceo",
+      workspace: "/Users/fanzhang",
+      name: "Alice",
+    }),
+  });
+  assert.match(stale.error, /CEO_NAME_MISMATCH/);
+  assert.equal(stale.target, undefined);
+});
+
+test("a conversation default to a non-CEO peer keeps that peer", async () => {
+  let ceos = 0;
+  const routed = await resolveInboundRoute({
+    leading: null,
+    targets,
+    lookupDefault: async () => "appsdk.Bob",
+    lookupCeo: async () => {
+      ceos += 1;
+      return {
+        workerId: "worker-ceo",
+        workspace: "/Users/fanzhang",
+        name: "Alice",
+      };
+    },
+  });
+  assert.equal(routed.source, "default");
+  assert.equal(routed.target.worker_id, "worker-bob");
+  assert.equal(routed.target.address, "appsdk.Bob");
+  assert.equal(ceos, 0);
+});
+
+test("a queued CEO route follows the current grant instead of its stale target", async () => {
+  const refreshed = await resolveQueuedCeoRoute(
+    {
+      deliveryAddress: "ceo",
+      sendToAddress: "fanzhang.OldName",
+      resolvedAddress: "fanzhang.OldName",
+      resolvedWorkerId: "worker-old",
+      ownerProject: "/Users/fanzhang",
+    },
+    {
+      loadTargets: async () => [
+        {
+          address: "fanzhang.Alice",
+          worker_id: "worker-new",
+          project_root: "/Users/fanzhang/new",
+          project: "fanzhang",
+        },
+      ],
+      lookupCeo: async () => ({
+        workerId: "worker-new",
+        workspace: "/Users/fanzhang/new",
+        name: "Alice",
+      }),
+    },
+  );
+  assert.equal(refreshed.projectRoot, "/Users/fanzhang/new");
+  assert.equal(refreshed.sendToAddress, "ceo");
+  assert.equal(refreshed.resolvedAddress, "fanzhang.Alice");
+  assert.equal(refreshed.resolvedWorkerId, "worker-new");
+});
+
+test("a queued CEO route fails closed when the fresh grant name and directory disagree", async () => {
+  const refreshed = await resolveQueuedCeoRoute(
+    {
+      deliveryAddress: "ceo",
+      sendToAddress: "fanzhang.Alice",
+      resolvedAddress: "fanzhang.Alice",
+      resolvedWorkerId: "worker-ceo",
+      ownerProject: "/Users/fanzhang",
+    },
+    {
+      loadTargets: async () => [
+        {
+          address: "fanzhang.Bob",
+          worker_id: "worker-ceo",
+          project_root: "/Users/fanzhang",
+          project: "fanzhang",
+        },
+      ],
+      lookupCeo: async () => ({
+        workerId: "worker-ceo",
+        workspace: "/Users/fanzhang",
+        name: "Alice",
+      }),
+    },
+  );
+  assert.match(refreshed.error, /CEO_NAME_MISMATCH/);
+  assert.equal(refreshed.sendToAddress, undefined);
+  assert.equal(refreshed.projectRoot, undefined);
+});
+
+test("a queued non-CEO route keeps the recipient selected at admission", async () => {
+  const batch = {
+    projectRoot: "/projects/appsdk",
+    deliveryAddress: "appsdk.Bob",
+    sendToAddress: "appsdk.Bob",
+    resolvedAddress: "appsdk.Bob",
+    resolvedWorkerId: "worker-bob",
+    ownerProject: "/projects/appsdk",
+  };
+  const resolved = await resolveQueuedCeoRoute(batch, {
+    loadTargets: async () => {
+      throw new Error("a non-CEO route must not refresh through the CEO grant");
+    },
+    lookupCeo: async () => {
+      throw new Error("a non-CEO route must not read the CEO grant");
+    },
+  });
+  assert.equal(resolved.projectRoot, "/projects/appsdk");
+  assert.equal(resolved.sendToAddress, "appsdk.Bob");
+  assert.equal(resolved.resolvedAddress, "appsdk.Bob");
+  assert.equal(resolved.resolvedWorkerId, "worker-bob");
 });
 
 test("channel envelope keeps the external reply route and attachments typed", () => {

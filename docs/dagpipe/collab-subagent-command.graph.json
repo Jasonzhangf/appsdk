@@ -59,6 +59,7 @@
       "id": "admit_subagent_request",
       "operator": "appsdk.collab_subagent.admit_request",
       "operator_version": "1",
+      "description": "按当前身份与项目范围准入；普通 peer 沿 board 邀请，重复请求复用既有控制记录。",
       "inputs": [
         "reconciled_subagent_command"
       ],
@@ -82,6 +83,7 @@
       "id": "apply_subagent_action",
       "operator": "appsdk.collab_subagent.apply_action",
       "operator_version": "1",
+      "description": "调度先提交 typed 任务、消息和 admission，再按已有通知状态处理；活动日志不决定准入。",
       "inputs": [
         "admitted_subagent_command"
       ],
@@ -105,6 +107,7 @@
       "id": "emit_subagent_result",
       "operator": "appsdk.collab_subagent.emit_result",
       "operator_version": "1",
+      "description": "分别返回持久化错误、未决、已接受和实际消费结果，不以日志记录冒充投递。",
       "inputs": [
         "subagent_action_outcome"
       ],

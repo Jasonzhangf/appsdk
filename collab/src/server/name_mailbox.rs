@@ -28,7 +28,12 @@ pub struct MailboxHandoff {
     pub failure: Option<NotificationDeliveryFailure>,
 }
 
-pub(crate) fn handoff_events(state: &State, project: &str, next: &NameOccupancy) -> Vec<Event> {
+pub(crate) fn handoff_events(
+    state: &State,
+    project: &str,
+    next: &NameOccupancy,
+    rename_from: &[String],
+) -> Vec<Event> {
     let previous = state.name_occupancy(project, &next.name);
     if previous.is_some_and(|previous| {
         previous.worker_id == next.worker_id && previous.session_id == next.session_id
@@ -43,7 +48,11 @@ pub(crate) fn handoff_events(state: &State, project: &str, next: &NameOccupancy)
         .filter(|message| {
             matches!(message.state.as_str(), "pending" | "delivered")
                 && match state.mailbox_name_addresses.get(&message.id) {
-                    Some(address) => address.project_scope == project && address.name == next.name,
+                    Some(address) => {
+                        address.project_scope == project
+                            && (address.name == next.name
+                                || rename_from.iter().any(|name| name == &address.name))
+                    }
                     // Old journals cannot recover historical names. Only the
                     // current previous holder is a valid legacy selector.
                     None => previous.is_some_and(|holder| message.to == holder.worker_id),
@@ -101,6 +110,15 @@ impl State {
                     message.id.clone(),
                     super::mailbox::default_direct_message_id(&handoff.recipient),
                 );
+                if self.mailbox_name_addresses.contains_key(&message.id) {
+                    self.mailbox_name_addresses.insert(
+                        message.id.clone(),
+                        MailboxNameAddress {
+                            project_scope: handoff.project_scope.clone(),
+                            name: handoff.name.clone(),
+                        },
+                    );
+                }
             }
         }
     }

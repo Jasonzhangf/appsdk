@@ -99,6 +99,11 @@ pub(crate) struct RegisterOuterBinding {
     initial_business_receipts: Vec<String>,
     bound: Arc<Mutex<Option<(String, String)>>>,
     continuation: Option<register_reply::Continuation>,
+    /// This context invocation's live-observed pane plus exact cwd. It travels
+    /// with the context-driven Register so the first name decision uses the
+    /// same anchor the context owner will project, instead of committing a
+    /// pool name before the pane anchor is known.
+    name_pane_anchor: Option<crate::server::name_state::NamePaneAnchor>,
 }
 
 impl RegisterOuterBinding {
@@ -113,6 +118,7 @@ impl RegisterOuterBinding {
             initial_business_receipts: Vec::new(),
             bound: Arc::new(Mutex::new(None)),
             continuation: None,
+            name_pane_anchor: None,
         }
     }
 
@@ -134,6 +140,7 @@ impl RegisterOuterBinding {
             initial_business_receipts: Vec::new(),
             bound: Arc::new(Mutex::new(None)),
             continuation: None,
+            name_pane_anchor: None,
         }
     }
 
@@ -141,6 +148,21 @@ impl RegisterOuterBinding {
     /// automatic/supplement operations never carry one.
     pub(crate) fn approval(&self) -> Option<&RegisterApprovalProof> {
         self.approval.as_deref()
+    }
+
+    pub(crate) fn with_name_pane_anchor(
+        mut self,
+        anchor: Option<crate::server::name_state::NamePaneAnchor>,
+    ) -> Self {
+        self.name_pane_anchor = anchor;
+        self
+    }
+
+    /// The live pane+cwd this context invocation observed, if any. Only the
+    /// nested Register name decision consumes it; it never replaces the pane
+    /// source or persisted transport.
+    pub(crate) fn name_pane_anchor(&self) -> Option<&crate::server::name_state::NamePaneAnchor> {
+        self.name_pane_anchor.as_ref()
     }
 
     pub(crate) fn with_continuation(

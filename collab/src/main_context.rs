@@ -150,6 +150,7 @@ fn context_call_with_cancel(
                         invocation: "cancel".into(),
                         action: "cancel".into(),
                         facts: IdentityFacts::default(),
+                        invocation_cwd: None,
                         approval: None,
                         grant_approval: None,
                         query: false,
@@ -225,30 +226,6 @@ fn resolve_context_root_with(
     if let Ok(route) = scope::canonical_route_for_cwd(host_paths, cwd) {
         return Ok((Scope { root: route.root }, "canonical-route"));
     }
-    // A Git checkout root is identified by a `.git` marker, never by forking
-    // git. Under launchd a `git rev-parse` subprocess can block in getcwd and
-    // hang the identity gate, making every `collab context` call deadlock.
-    let git_root = canonical_cwd
-        .ancestors()
-        .map(|dir| dir.join(".git"))
-        .find(|marker| marker.is_dir() || marker.is_file())
-        .and_then(|marker| marker.parent().map(Path::to_path_buf))
-        .and_then(|root| std::fs::canonicalize(root).ok());
-    if let Some(git_root) = git_root {
-        if git_root != canonical_cwd {
-            anyhow::bail!(
-                "COLLAB_CONTEXT_UNRESOLVED: refusing to create a Collab baseline in Git subdirectory {}; run `collab context` from the Git checkout root {}",
-                canonical_cwd.display(),
-                git_root.display()
-            );
-        }
-        return Ok((
-            Scope {
-                root: canonical_cwd,
-            },
-            "cwd",
-        ));
-    }
     // A cwd inside an existing project (an ancestor carries `.agent-collab`)
     // binds to that project through its route; without a route it must fail
     // closed instead of creating a second baseline nested in the same project.
@@ -268,9 +245,7 @@ fn resolve_context_root_with(
             canonical_cwd.display()
         );
     }
-    // A non-Git workspace has no repository root to discover. Treat the
-    // explicit cwd as the project root, matching the existing local-baseline
-    // rule while keeping Git worktrees bound to their canonical checkout.
+    // With no marker or registered route, the explicit cwd is the project root.
     Ok((
         Scope {
             root: canonical_cwd,
@@ -814,6 +789,10 @@ pub(crate) fn context_operation_with_intent(
         )?
     };
     if !query {
+        prepared.request.invocation_cwd = client::supports_identity_context_cwd(&scope.sock_path())
+            .then(|| cwd.to_string_lossy().into_owned());
+    }
+    if !query {
         prepared.request.approval = approval;
         prepared.request.grant_approval = grant_approval;
         let prepare_request = crate::proto::IdentityContextRequest {
@@ -821,6 +800,7 @@ pub(crate) fn context_operation_with_intent(
             invocation: prepared.request.invocation.clone(),
             action: "prepare_invocation".into(),
             facts: prepared.request.facts.clone(),
+            invocation_cwd: prepared.request.invocation_cwd.clone(),
             approval: prepared.request.approval.clone(),
             grant_approval: prepared.request.grant_approval.clone(),
             query: false,

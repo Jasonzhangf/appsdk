@@ -65,6 +65,13 @@ pub(crate) enum GoalCmd {
         trigger_ms: Option<i64>,
         #[arg(long = "ttl-seconds")]
         ttl_seconds: Option<u64>,
+        /// Periodic interval in milliseconds for a sustained active goal
+        /// deadline; pair with --repeat. Omit both for a one-shot occurrence.
+        #[arg(long = "every-ms")]
+        interval_ms: Option<i64>,
+        /// Total deliveries for a periodic active goal deadline (1..=100)
+        #[arg(long = "repeat")]
+        repeat_count: Option<u32>,
         /// Caller-owned retained historical goal subject to retire alongside
         /// the canonical goal identity. Exact and stable-name scoped only.
         #[arg(long = "goal-subject")]
@@ -140,13 +147,13 @@ pub(crate) enum TaskCmd {
         #[arg(long = "for")]
         blocking_task: String,
     },
-    /// Record owner-local delivery evidence before integration
+    /// Record owner-local delivery evidence
     Deliver {
         id: String,
         #[arg(long)]
         evidence: String,
-        /// Explicitly classify this as read-only work with no code candidate.
-        #[arg(long, conflicts_with = "worktree")]
+        /// Legacy compatibility option; task delivery does not require a Git candidate.
+        #[arg(long)]
         no_candidate: bool,
         #[arg(long)]
         worktree: Option<String>,
@@ -161,7 +168,8 @@ pub(crate) enum TaskCmd {
         #[arg(long)]
         evidence: String,
     },
-    /// Record exact integration of an accepted task on main
+    /// Legacy compatibility entry; Collab does not manage Git integration.
+    #[command(hide = true)]
     Integrated {
         id: String,
         #[arg(long)]
@@ -175,29 +183,18 @@ pub(crate) enum TaskCmd {
         #[arg(long)]
         next: Option<String>,
     },
-    /// Complete the cleanup obligation left by a forced close.
-    ///
-    /// Verifies and removes the task's declared worktree/branch under the same
-    /// contract as a normal close, refuses while another non-closed task
-    /// references the same worktree or branch, replaces the unverified receipt
-    /// with verified evidence, stops the owner's automatic lease once its last
-    /// responsibility is verified, and releases dependent waiters exactly once.
-    /// A retry resumes the remaining release instead of double-releasing.
-    ///
-    /// When the task was force-closed without a recorded integration commit,
-    /// pass `--commit <sha>` with a commit reachable from `refs/heads/main`
-    /// (for example the squash commit) to authorize branch deletion.
+    /// Legacy compatibility entry; Collab does not remove Git resources.
+    #[command(hide = true)]
     FinalizeCleanup {
         id: String,
         #[arg(long)]
         commit: Option<String>,
     },
-    /// Close a merged task and clean up its declared worktree/branch.
+    /// Close a task after its Collab responsibilities are complete.
     /// With --force the current master may close any task. With no master
     /// assigned, the owner may close its task, or a registered peer may close an
     /// orphaned task after the owner's App Server identity is lost. Force close
-    /// stops keepalives without deleting the worktree or branch and requires
-    /// a non-empty --reason.
+    /// requires a non-empty --reason.
     Close {
         id: String,
         #[arg(long)]

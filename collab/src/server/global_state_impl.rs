@@ -25,7 +25,6 @@ impl GlobalState {
             current_thread_route_tombstones: BTreeMap::new(),
             command_receipts: BTreeMap::new(),
             migration_commit_evidence: BTreeMap::new(),
-            ledger_scan_receipts: BTreeMap::new(),
             master_grant_replacement_intents: BTreeMap::new(),
             master_grant_replacement_receipts: BTreeMap::new(),
         })
@@ -271,10 +270,6 @@ impl GlobalState {
                 )));
             }
         }
-        for receipt in self.ledger_scan_receipts.values() {
-            receipt.validate()?;
-        }
-
         let expected_bindings: Vec<&RuntimeBinding> = self
             .projects
             .values()

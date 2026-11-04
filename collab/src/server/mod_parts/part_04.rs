@@ -660,6 +660,7 @@ impl ProjectRuntimeManager {
         previous_worker: Option<WorkerRec>,
         previous_subscriptions: Vec<NotificationSubscription>,
         response: Resp,
+        register_effect_id: Option<&str>,
     ) -> (Arc<Server>, Resp) {
         let Some(worker_id) = worker_id.filter(|_| response.ok) else {
             return (runtime, response);
@@ -673,7 +674,10 @@ impl ProjectRuntimeManager {
             previous_worker.as_ref(),
             &previous_subscriptions,
         ) {
-            Ok(()) => (runtime, response),
+            Ok(()) => match self.clear_register_pending_effect(register_effect_id) {
+                Ok(()) => (runtime, response),
+                Err(error) => (runtime, Resp::err(error)),
+            },
             Err(error) => (
                 runtime,
                 Resp::err(format!(
@@ -842,9 +846,10 @@ impl ProjectRuntimeManager {
                 std::thread::sleep(std::time::Duration::from_millis(delay));
             }
         }
-        let (runtime, project_lock) = self.build_runtime(&root, &storage_root)?;
+        let (runtime, project_lock) = self.build_runtime(key, &root, &storage_root)?;
         self.install_runtime(key, runtime.clone(), project_lock);
         Ok(runtime)
     }
 }
 include!("part_04/runtime.rs");
+include!("part_04/binding_control.rs");

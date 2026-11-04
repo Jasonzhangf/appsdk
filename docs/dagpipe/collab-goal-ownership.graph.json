@@ -1,6 +1,6 @@
 {
   "id": "appsdk-collab-goal-ownership",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "一次本人长程目标请求的 SESE。master 与 peer 功能相同、层级不同，均自行登记、读取、更新、续订和取消目标。项目与稳定名字决定归属；会话与 worktree 只改变执行载体。目标结束/续订通过 daemon 的 GoalScheduleReconcile 只收敛该目标有限调度，不关闭 default direct-message 基础接收。项目 master（Jenny）初始化或恢复本人目标后默认确保本项目 worker 巡检已 arm：已有有效调度则复用，不重复创建，并以真实订阅回执为准；只读投影只报告真实 arm 状态，不宣称已 arm。任何错误均输出明确结果且不得改写他人记录。",
   "inputs": [{"id":"goal_request","schema":"Object"}],
   "nodes": [
@@ -24,7 +24,7 @@
     },
     {
       "id":"收敛本人目标调度","operator":"appsdk.collab_goal.reconcile_schedule","operator_version":"1",
-      "description":"按 desired active/ended 调用 daemon GoalScheduleReconcile：active 创建或保留一个匹配的一次性 bounded occurrence，重装先退役旧 occurrence；ended 仅退役该 goal 的 occurrence 并超期其待投 scheduler 消息，重复相同 desired 幂等。owner 为项目 master 时，同一收敛还确保本项目 worker 巡检已 arm：已有有效 armed 调度直接复用，不重复创建；无有效调度时按既有订阅接口创建并取得真实 subscription 回执。只处理 canonical project、稳定名字和 goal identity，不接收任意 subscription ID，永不触碰 default direct-message 基础接收。远端回执缺失时保持 pending，不宣称已取消或已 arm。",
+      "description":"按 desired active/ended 调用 daemon GoalScheduleReconcile：active 创建或保留一个匹配的 bounded occurrence；只有调用者在同一请求显式声明周期（携带独立 periodic_declared=true 且 every-ms/repeat 成对）时才按该间隔自动重复，受次数与 TTL 双重上限约束；缺省或仅携带 interval/repeat 而未显式声明周期时保持单次一次性 occurrence 兼容，旧记录不被自动升级为周期。相同计划的重复 reconcile 保持 subscription ID、已推进次数与 expiry，参数变更在同一事务内退役旧 occurrence 并创建新 occurrence，每 worker 的 3 active 上限内拒绝不得损坏旧计划；ended 仅退役该 goal 的 occurrence 并超期其待投 scheduler 消息，重复相同 desired 幂等。owner 为项目 master 时，同一收敛还确保本项目 worker 巡检已 arm：已有有效 armed 调度直接复用，不重复创建；无有效调度时按既有订阅接口创建并取得真实 subscription 回执。只处理 canonical project、稳定名字和 goal identity，不接收任意 subscription ID，永不触碰 default direct-message 基础接收。远端回执缺失时保持 pending，不宣称已取消或已 arm。",
       "inputs":["goal_transition_request"],"output":{"id":"goal_transition_result","schema":"Object"},
       "input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"
     },

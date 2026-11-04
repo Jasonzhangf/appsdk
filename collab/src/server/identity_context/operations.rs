@@ -56,18 +56,28 @@ impl ProjectRuntimeManager {
                 }
                 Ok(None) => {}
             }
+            let (observed_facts, observed_pane) =
+                match self.observe_identity_facts_with_pane(&context, &request.facts) {
+                    Ok(observed) => observed,
+                    Err(error) => return (self.host.clone(), Resp::err(format!("{error:#}"))),
+                };
+            let invocation_pane = observed_pane;
             return match self.reconcile_identity_context(
                 context.clone(),
-                request.facts.clone(),
+                observed_facts.clone(),
                 None,
                 None,
                 true,
             ) {
                 Ok((runtime, mut response, _)) => {
                     if response.ok && !response.data["identity_receipt"].is_null() {
-                        if let Err(error) =
-                            self.resolve_context_name(&runtime, &context, &request, &mut response)
-                        {
+                        if let Err(error) = self.resolve_context_name(
+                            &runtime,
+                            &context,
+                            &request,
+                            invocation_pane.as_ref(),
+                            &mut response,
+                        ) {
                             return (runtime, Resp::err_data(error, response.data));
                         }
                     }
@@ -210,7 +220,7 @@ impl ProjectRuntimeManager {
                 return (self.host.clone(), Resp::err(error));
             }
         };
-        let facts = match self.preflight_identity_facts(
+        let (facts, observed_pane) = match self.preflight_identity_facts(
             &context,
             continuation_facts.unwrap_or_else(|| request.facts.clone()),
         ) {
@@ -235,6 +245,10 @@ impl ProjectRuntimeManager {
                 return (self.host.clone(), Resp::err(format!("{error:#}")));
             }
         };
+        // Name inheritance uses only this invocation's caller pane. A
+        // continuation rebuilt from an admitted saved transport is not a
+        // current caller pane and must never seed the anchor.
+        let invocation_pane = observed_pane;
         let admitted = match self.admit_identity_operation(&context, &request) {
             Ok(operation) => operation,
             Err(error) => return (self.host.clone(), Resp::err(error)),
@@ -251,12 +265,16 @@ impl ProjectRuntimeManager {
         // Admitted-before-first-owner safe boundary: if a cancellation won
         // while we were paused here, return the durable cancelled projection
         // and never start the owner.
-        if self.operation_journal.is_cancelled(&request.operation_id) {
-            let projection = self
-                .latest_projection(&context, &request)
-                .unwrap_or(admitted.clone());
-            let result = operation_result(&request, projection, false, None);
-            return (self.host.clone(), typed_operation_resp(result));
+        match self.operation_journal.is_cancelled(&request.operation_id) {
+            Ok(true) => {
+                let projection = self
+                    .latest_projection(&context, &request)
+                    .unwrap_or(admitted.clone());
+                let result = operation_result(&request, projection, false, None);
+                return (self.host.clone(), typed_operation_resp(result));
+            }
+            Err(error) => return (self.host.clone(), Resp::err(error)),
+            Ok(false) => {}
         }
         let outer_binding = match approved.as_ref() {
             Some(approved) => RegisterOuterBinding::with_approval(
@@ -270,6 +288,25 @@ impl ProjectRuntimeManager {
             ),
         }
         .with_continuation(context.clone(), request.clone());
+        // Carry this invocation's live-observed pane plus exact cwd into the
+        // nested Register, so the first name decision anchors on the pane
+        // instead of taking a pool name that the later context resolution
+        // would then inherit. No second observation and no saved transport.
+        let outer_name_pane_anchor = invocation_pane.as_ref().and_then(|pane| {
+            request
+                .invocation_cwd
+                .as_deref()
+                .filter(|cwd| !cwd.trim().is_empty())
+                .map(|cwd| crate::server::name_state::NamePaneAnchor {
+                    pane: pane.clone(),
+                    cwd: cwd.to_owned(),
+                })
+        });
+        let outer_binding = if outer_name_pane_anchor.is_some() {
+            outer_binding.with_name_pane_anchor(outer_name_pane_anchor)
+        } else {
+            outer_binding
+        };
         let approved_identity = approved.as_ref().map(|approved| approved.identity.clone());
         // Do not hold identity serialization across selected-path dispatch.
         drop(_guard);
@@ -322,17 +359,21 @@ impl ProjectRuntimeManager {
                     nested_ref.map(|(_, operation_id)| operation_id.as_str()),
                     || false,
                 );
-                if self.operation_journal.is_cancelled(&request.operation_id) {
-                    let projection = self
-                        .latest_projection(&context, &request)
-                        .unwrap_or(admitted.clone());
-                    let result = operation_result(
-                        &request,
-                        projection,
-                        false,
-                        response.data.get("snapshot").cloned(),
-                    );
-                    return (runtime, typed_operation_resp(result));
+                match self.operation_journal.is_cancelled(&request.operation_id) {
+                    Ok(true) => {
+                        let projection = self
+                            .latest_projection(&context, &request)
+                            .unwrap_or(admitted.clone());
+                        let result = operation_result(
+                            &request,
+                            projection,
+                            false,
+                            response.data.get("snapshot").cloned(),
+                        );
+                        return (runtime, typed_operation_resp(result));
+                    }
+                    Err(error) => return (runtime, Resp::err(error)),
+                    Ok(false) => {}
                 }
                 let mut grant_committed = false;
                 if !response.data["identity_receipt"].is_null() {
@@ -341,7 +382,13 @@ impl ProjectRuntimeManager {
                         .begin_owner_start(&request.operation_id, "name")
                         .and_then(|_| {
                             self.converge_context_session_carriers(&runtime, &context, &mut response)?;
-                            self.resolve_context_name(&runtime, &context, &request, &mut response)
+                            self.resolve_context_name(
+                                &runtime,
+                                &context,
+                                &request,
+                                invocation_pane.as_ref(),
+                                &mut response,
+                            )
                         });
                     if resolution.is_err()
                         || !matches!(
@@ -406,17 +453,21 @@ impl ProjectRuntimeManager {
                             // A cancellation that won at the between-owners
                             // boundary must be returned as the durable
                             // cancelled projection, never as a repair result.
-                            if self.operation_journal.is_cancelled(&request.operation_id) {
-                                let projection = self
-                                    .latest_projection(&context, &request)
-                                    .unwrap_or(admitted.clone());
-                                let result = operation_result(
-                                    &request,
-                                    projection,
-                                    false,
-                                    response.data.get("snapshot").cloned(),
-                                );
-                                return (runtime, typed_operation_resp(result));
+                            match self.operation_journal.is_cancelled(&request.operation_id) {
+                                Ok(true) => {
+                                    let projection = self
+                                        .latest_projection(&context, &request)
+                                        .unwrap_or(admitted.clone());
+                                    let result = operation_result(
+                                        &request,
+                                        projection,
+                                        false,
+                                        response.data.get("snapshot").cloned(),
+                                    );
+                                    return (runtime, typed_operation_resp(result));
+                                }
+                                Err(error) => return (runtime, Resp::err(error)),
+                                Ok(false) => {}
                             }
                             let operation = self.record_incomplete_operation(
                                 &context,
@@ -650,8 +701,10 @@ impl ProjectRuntimeManager {
         context: ProjectContext,
         reply: crate::proto::RegisterParticipantReply,
     ) -> (Arc<Server>, Resp) {
-        if self.operation_journal.is_cancelled(&reply.operation_id) {
-            return (self.host.clone(), Resp::err("IDENTITY_OPERATION_CANCELLED"));
+        match self.operation_journal.is_cancelled(&reply.operation_id) {
+            Ok(true) => return (self.host.clone(), Resp::err("IDENTITY_OPERATION_CANCELLED")),
+            Err(error) => return (self.host.clone(), Resp::err(error)),
+            Ok(false) => {}
         }
         let record =
             match register_reply::accept(self.host.host_paths.state_root(), &context, &reply) {
@@ -810,6 +863,7 @@ impl ProjectRuntimeManager {
         runtime: &Server,
         context: &ProjectContext,
         request: &IdentityContextRequest,
+        observed_pane: Option<&crate::proto::TmuxPaneAnchor>,
         response: &mut Resp,
     ) -> Result<name_resolution::NameResolutionEffects, String> {
         let identity: identity::Identity =
@@ -838,6 +892,7 @@ impl ProjectRuntimeManager {
             intent = Some(name_resolution::NameIntent {
                 requested_name: name,
                 user_authorized: true,
+                moves_existing_names: false,
                 replace_confirmed: false,
             });
         }
@@ -856,6 +911,22 @@ impl ProjectRuntimeManager {
         } else {
             &request.operation_id
         };
+        let pane_anchor = request
+            .invocation_cwd
+            .as_deref()
+            .filter(|cwd| !cwd.trim().is_empty())
+            .and_then(|cwd| {
+                observed_pane.map(|pane| crate::server::name_state::NamePaneAnchor {
+                    pane: pane.clone(),
+                    cwd: cwd.to_owned(),
+                })
+            });
+        let authorization = request
+            .grant_approval
+            .as_ref()
+            .or(request.approval.as_ref())
+            .and_then(|approval| approval.get("authorization"))
+            .and_then(serde_json::Value::as_str);
         let outcome = if let Some((operation, verdict, evidence)) = control {
             let adjudication = super::name_stewardship::adjudicate(
                 runtime,
@@ -875,19 +946,33 @@ impl ProjectRuntimeManager {
             }
             adjudication.data
         } else {
-            name_resolution::resolve_registered_name_with_authorization(
+            match self.resolve_context_name_control_first(
                 runtime,
+                context,
                 &identity.worker_id,
                 operation,
                 &request.invocation,
-                intent,
-                request
-                    .grant_approval
-                    .as_ref()
-                    .or(request.approval.as_ref())
-                    .and_then(|approval| approval.get("authorization"))
-                    .and_then(serde_json::Value::as_str),
-            )?
+                intent.clone(),
+                authorization,
+                pane_anchor.clone(),
+            ) {
+                Ok(Some(value)) => value,
+                Ok(None) => {
+                    match name_resolution::resolve_registered_name_with_authorization(
+                        runtime,
+                        &identity.worker_id,
+                        operation,
+                        &request.invocation,
+                        intent,
+                        authorization,
+                        pane_anchor,
+                    ) {
+                        Ok(value) => value,
+                        Err(error) => return Err(error),
+                    }
+                }
+                Err(error) => return Err(error),
+            }
         };
         let effects = serde_json::from_value(outcome["effects"].clone())
             .map_err(|error| format!("NAME_EFFECTS_INVALID: {error}"))?;
@@ -921,6 +1006,124 @@ impl ProjectRuntimeManager {
         response.data["snapshot"]["name_resolution"] = outcome;
         add_optional_master_choice(&mut response.data["snapshot"]);
         Ok(effects)
+    }
+
+    /// Run a non-adjudication name decision in one critical section. The
+    /// register gate and the project-state lock are held across the preplay,
+    /// the control-slot publish and the business handoff, so the automatic or
+    /// explicit name that was planned is exactly the name that lands in the
+    /// durable slot and in the business occupancy. Holding only the gate, or
+    /// planning and committing under separate state locks, would let a
+    /// concurrent context decision change occupancy between the preplay and
+    /// the commit. Returns `None` when no control move applies (pending,
+    /// no-op, Jenny takeover, or an automatic pending decision); the caller
+    /// then keeps the plain business path.
+    fn resolve_context_name_control_first(
+        &self,
+        runtime: &Server,
+        context: &ProjectContext,
+        worker_id: &str,
+        operation_id: &str,
+        invocation: &str,
+        intent: Option<name_resolution::NameIntent>,
+        authorization: Option<&str>,
+        pane_anchor: Option<crate::server::name_state::NamePaneAnchor>,
+    ) -> Result<Option<serde_json::Value>, String> {
+        let _register = self.register_gate.lock().unwrap();
+        let mut state = runtime.state.lock().unwrap();
+        let effect_id = format!(
+            "name:{}:{}",
+            context.project_scope.as_str(),
+            operation_id
+        );
+        let decided_name = match &intent {
+            Some(intent) => self.commit_explicit_name_control_move_locked(
+                runtime,
+                &state,
+                context,
+                worker_id,
+                operation_id,
+                invocation,
+                intent,
+                pane_anchor.clone(),
+                &effect_id,
+            )?,
+            None => match name_resolution::plan_automatic_name_locked(
+                runtime,
+                &state,
+                worker_id,
+                operation_id,
+                invocation,
+                pane_anchor.clone(),
+            )? {
+                Some(target) => {
+                    let durability = self.commit_control_name_decision_locked(
+                        &state,
+                        context,
+                        worker_id,
+                        &target,
+                        operation_id,
+                        &effect_id,
+                        pane_anchor.clone(),
+                    )?;
+                    if durability == crate::server::binding_store::Durability::Unknown {
+                        return Err(
+                            "BINDING_CONTROL_DURABILITY_UNKNOWN: the name control slot was \
+                             published but its parent directory sync is unconfirmed"
+                                .into(),
+                        );
+                    }
+                    Some(target)
+                }
+                None => None,
+            },
+        };
+        let Some(decided_name) = decided_name else {
+            return Ok(None);
+        };
+        let (mut outcome, notices) = name_resolution::resolve_registered_name_locked(
+            runtime,
+            &mut state,
+            worker_id,
+            operation_id,
+            invocation,
+            intent,
+            authorization,
+            pane_anchor,
+        )
+        .map_err(|error| {
+            format!(
+                "CONTROL_COMMITTED_EFFECTS_PENDING: the name was moved in the control \
+                 resource but the business handoff failed: {error}"
+            )
+        })?;
+        drop(state);
+        if outcome.get("name").and_then(serde_json::Value::as_str)
+            != Some(decided_name.as_str())
+        {
+            return Err(format!(
+                "CONTROL_NAME_DIVERGED: published control slot {decided_name} but business \
+                 decided {}",
+                outcome
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("<missing>")
+            ));
+        }
+        // Clear the effect before any external notification. If the notice
+        // delivery or a later response fails, startup recovery must see the
+        // business handoff as already complete and only clear the durable
+        // intent; it must not replay the name move again.
+        if let Err(error) = self.clear_pending_effect_locked(&effect_id) {
+            return Err(format!(
+                "CONTROL_EFFECT_CLEAR_FAILED: the business name handoff committed but the \
+                 pending control effect could not be cleared: {error}"
+            ));
+        }
+        outcome["notifications"] = serde_json::json!(crate::server::deliver_relationship_notices(
+            runtime, &notices
+        ));
+        Ok(Some(outcome))
     }
 
     pub(super) fn name_recovery_readback(
@@ -1240,7 +1443,7 @@ impl ProjectRuntimeManager {
         &self,
         context: &ProjectContext,
         mut facts: IdentityFacts,
-    ) -> Result<IdentityFacts, PreflightIdentityError> {
+    ) -> Result<(IdentityFacts, Option<crate::proto::TmuxPaneAnchor>), PreflightIdentityError> {
         if context.app_scope_id.as_str() != identity::CLI_APP_SERVER_ID
             || context.runtime_context.is_some()
         {
@@ -1254,8 +1457,9 @@ impl ProjectRuntimeManager {
             .map_err(PreflightIdentityError::Error)?;
         validate_project_registration_cwd(&context.canonical_root, &root)
             .map_err(|error| PreflightIdentityError::Error(anyhow::Error::msg(error)))?;
-        facts = self
-            .observe_identity_facts(context, &facts)
+        let observed_pane;
+        (facts, observed_pane) = self
+            .observe_identity_facts_with_pane(context, &facts)
             .map_err(PreflightIdentityError::Error)?;
         self.complete_persisted_tmux_facts(context, &mut facts)
             .map_err(PreflightIdentityError::Error)?;
@@ -1303,7 +1507,7 @@ impl ProjectRuntimeManager {
                 "identity_receipt": null
             })));
         }
-        Ok(facts)
+        Ok((facts, observed_pane))
     }
 
     fn finish_identity_operation(

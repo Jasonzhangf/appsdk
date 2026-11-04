@@ -1872,6 +1872,7 @@ fn role_patrol_context_reminders_follow_master_and_peer_roles_across_restoration
         "re-arm",
         "report channel",
         "stop conditions",
+        "resumes and drives its own authorized work",
     ];
     assert_role_patrol_mentions("first peer context", &first_peer, "worker", &peer_keywords);
 

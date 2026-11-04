@@ -1,6 +1,3 @@
-use crate::server::global_state::{
-    LedgerScanReceipt, RuntimeBindingLedgerRecord, RuntimeBindingLedgerState,
-};
 use crate::server::state::{
     goal_deadline_key, is_goal_deadline, now_ms, Event, Message, NotificationSubscription,
     MAX_WAKE_ATTEMPTS,
@@ -59,7 +56,6 @@ fn tick_at(server: &Arc<Server>, now: i64) {
     super::name_monitor::tick(server, now);
     super::name_stewardship::tick(server, now);
     super::purge_expired_storage(server, now);
-    tick_ledger_maintenance_at(server, now);
     tick_default_lease_maintenance_at(server, now);
     if server.state.lock().unwrap().admission_frozen() {
         return;
@@ -174,7 +170,20 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
             {
                 continue;
             }
-            if subscription.fired_count > 0 {
+            // An explicit periodic goal deadline legitimately has
+            // `fired_count > 0` between occurrences, so only suppress it once
+            // its repeat budget is exhausted. Legacy and non-periodic goal
+            // occurrences keep the one-shot compatibility suppression.
+            if subscription.periodic_declared {
+                if subscription.fired_count >= subscription.repeat_count {
+                    lifecycle_events.push(Event::NotificationSuppressed {
+                        subscription_id: subscription.id.clone(),
+                        status: "consumed".into(),
+                        reason: "goal-deadline-periodic-exhausted".into(),
+                        updated_ms: now,
+                    });
+                }
+            } else if subscription.fired_count > 0 {
                 lifecycle_events.push(Event::NotificationSuppressed {
                     subscription_id: subscription.id.clone(),
                     status: "consumed".into(),
@@ -535,205 +544,6 @@ fn automatic_delivery_candidate(state: &super::state::State, message: &Message) 
         // keep their pre-existing automatic path unchanged.
         Some(_) => true,
     }
-}
-
-fn tick_ledger_maintenance_at(server: &Arc<Server>, now: i64) {
-    if !server.config.timers.enabled {
-        return;
-    }
-    let bindings = {
-        let state = server.state.lock().unwrap();
-        state
-            .global
-            .current_thread_routes
-            .values()
-            .cloned()
-            .collect::<Vec<_>>()
-    };
-    let mut classified = 0u32;
-    let mut transitioned = 0u32;
-    let mut unchanged = 0u32;
-    let mut blocked = 0u32;
-    let mut events = Vec::new();
-    for binding in bindings {
-        let Some(worker) = ({
-            let state = server.state.lock().unwrap();
-            // The ledger is resident control state. A host-wide route whose
-            // project scope this daemon never registered is not reducible here:
-            // the global reducer rejects the record, so classifying it would
-            // append an event that replay can never reduce again.
-            let owned = state
-                .global
-                .lookup_registration(&binding.project_scope, &binding.app_scope_id)
-                .is_some()
-                && state.global.lookup_binding(&binding.binding_id).is_some();
-            owned
-                .then(|| state.workers.get(binding.agent_id.as_str()).cloned())
-                .flatten()
-        }) else {
-            blocked = blocked.saturating_add(1);
-            continue;
-        };
-        // Ledger classification describes endpoint observation, not durable
-        // identity admission. Preserve the non-tmux cold/activity contract.
-        let presence = if super::selected_transport_for_worker(&worker)
-            .is_some_and(|transport| transport.kind == crate::proto::TransportKind::Tmux)
-        {
-            match super::worker_identity_and_endpoint(server, &worker).1 {
-                Some(true) => super::presence::IdentityPresence::Present,
-                Some(false) => super::presence::IdentityPresence::Missing,
-                None => super::presence::IdentityPresence::Unknown,
-            }
-        } else {
-            super::worker_presence(server, &worker)
-        };
-        let (state, reason) = match presence {
-            super::presence::IdentityPresence::Present => (RuntimeBindingLedgerState::Live, None),
-            super::presence::IdentityPresence::Cold => (RuntimeBindingLedgerState::Cold, None),
-            super::presence::IdentityPresence::Missing => (
-                RuntimeBindingLedgerState::Missing,
-                Some("registered transport probe returned missing; durable mailbox remains authoritative"),
-            ),
-            super::presence::IdentityPresence::Unknown => (
-                RuntimeBindingLedgerState::RepairRequired,
-                Some("transport probe returned unknown; preserving route and identity records"),
-            ),
-        };
-        let operation_id =
-            crate::identity::OperationId::new(format!("ledger-{now}-{}", binding.binding_id)).ok();
-        let receipt_id = crate::identity::OperationId::new(format!(
-            "ledger-receipt-{now}-{}",
-            binding.binding_id
-        ))
-        .ok();
-        let (operation_id, receipt_id) = match (operation_id, receipt_id) {
-            (Some(operation_id), Some(receipt_id)) => (operation_id, receipt_id),
-            _ => {
-                blocked = blocked.saturating_add(1);
-                continue;
-            }
-        };
-        let existing = server
-            .state
-            .lock()
-            .unwrap()
-            .global
-            .lookup_runtime_binding_ledger(
-                &binding.project_scope,
-                &binding.app_scope_id,
-                &binding.binding_id,
-            )
-            .cloned();
-        if existing
-            .map(|record| {
-                record.endpoint_generation == binding.endpoint_generation
-                    && record.state == state
-                    && record.probe_state == Some(state)
-            })
-            .unwrap_or(false)
-        {
-            unchanged = unchanged.saturating_add(1);
-            continue;
-        }
-        classified = classified.saturating_add(1);
-        transitioned = transitioned.saturating_add(1);
-        events.push(Event::GlobalRuntimeBindingLedgerClassified {
-            record: RuntimeBindingLedgerRecord {
-                project_scope: binding.project_scope.clone(),
-                app_scope_id: binding.app_scope_id.clone(),
-                agent_id: binding.agent_id.clone(),
-                runtime_id: binding.runtime_id.clone(),
-                binding_id: binding.binding_id.clone(),
-                endpoint_generation: binding.endpoint_generation,
-                state,
-                probe_state: Some(state),
-                reason: reason.map(str::to_owned),
-                classified_ms: now,
-                operation_id,
-                receipt_id: receipt_id.to_string(),
-            },
-        });
-    }
-    if classified > 0 || blocked > 0 {
-        let scan_id = format!("ledger-scan-{now}");
-        let scan_operation_id =
-            crate::identity::OperationId::new(format!("ledger-scan-op-{now}")).ok();
-        let scan_receipt_id =
-            crate::identity::OperationId::new(format!("ledger-scan-receipt-{now}")).ok();
-        if scan_operation_id.is_some() && scan_receipt_id.is_some() {
-            // Scan receipts are evidence, not delivery truth. The mailbox is not
-            // changed by classification, so the durable message count is unchanged.
-            events.push(Event::GlobalLedgerScanReceiptRecorded {
-                receipt: LedgerScanReceipt {
-                    scan_id,
-                    scanned_ms: now,
-                    classified,
-                    transitioned,
-                    unchanged,
-                    blocked,
-                    mailbox_messages_unchanged: true,
-                },
-            });
-        }
-    }
-    if !events.is_empty() {
-        // Re-check ownership under the same guard that commits. The snapshot at
-        // the top of this tick and this commit are taken under different
-        // guards, so a route can be retired or rebound in between. The reducer
-        // rejects a classification for a scope this index no longer owns, and a
-        // rejected commit fails the journal closed. Drop those classifications
-        // here, where the state they are checked against cannot change before
-        // the append.
-        let mut state = server.state.lock().unwrap();
-        let dropped = drop_unowned_ledger_classifications(&state, &mut events);
-        if dropped > 0 {
-            // The receipt counts these as blocked, which is also what a route
-            // this index never owned looks like. Record the race explicitly so
-            // it stays observable after the tick.
-            super::presence::append_log(
-                &server.log_path(),
-                &format!(
-                    "LEDGER_CLASSIFICATION_DROPPED_AT_COMMIT: {dropped} route(s) were no longer owned when the scan committed"
-                ),
-            );
-        }
-        if !events.is_empty() {
-            server.commit_locked_reporting(&mut state, &events);
-        }
-    }
-}
-
-/// Remove ledger classifications the reducer would reject, and correct the scan
-/// receipt so it still describes what was committed.
-///
-/// A route can be retired between the snapshot a tick reads and the commit that
-/// writes it. The reducer rejects a classification this project no longer
-/// holds, and a rejected commit fails the journal closed, so the commit
-/// boundary asks the reducer's own rejection. Returns the number of
-/// classifications dropped.
-fn drop_unowned_ledger_classifications(
-    state: &super::state::State,
-    events: &mut Vec<Event>,
-) -> u32 {
-    let before = events.len();
-    events.retain(|event| match event {
-        Event::GlobalRuntimeBindingLedgerClassified { record } => state
-            .global
-            .runtime_binding_ledger_rejection(record)
-            .is_none(),
-        _ => true,
-    });
-    let dropped = (before - events.len()) as u32;
-    if dropped > 0 {
-        for event in events.iter_mut() {
-            if let Event::GlobalLedgerScanReceiptRecorded { receipt } = event {
-                receipt.classified = receipt.classified.saturating_sub(dropped);
-                receipt.transitioned = receipt.transitioned.saturating_sub(dropped);
-                receipt.blocked = receipt.blocked.saturating_add(dropped);
-            }
-        }
-    }
-    dropped
 }
 
 /// Standing project patrol: a dedicated master-idle resource with the

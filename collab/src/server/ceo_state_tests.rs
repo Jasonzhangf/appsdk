@@ -679,6 +679,7 @@ fn ceo_progress_reports_master_patrol_armed_state() {
             status_reason: None,
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
+            periodic_declared: false,
         },
     }]);
     let non_canonical = progress(&manager, &root);
@@ -717,6 +718,7 @@ fn ceo_progress_reports_master_patrol_armed_state() {
             status_reason: None,
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
+            periodic_declared: false,
         },
     }]);
     let armed = progress(&manager, &root);

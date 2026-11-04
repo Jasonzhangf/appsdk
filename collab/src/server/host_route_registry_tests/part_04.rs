@@ -118,13 +118,15 @@
             Req::CrossProjectSend {
                 from: "source-master".into(),
                 from_project: "/foreign/project".into(),
-                source_master_assigned_by: "source-master".into(),
-                source_master_approval: Some("user approved source-master".into()),
-                source_master_assigned_ms: 1,
+                worker_id: "source-master".into(),
+                token: "token-source-master".into(),
+                command: None,
                 to: "target-master".into(),
                 subject: "cross-project".into(),
                 body: "must remain outside resident reducer".into(),
                 in_reply_to: None,
+                reply_policy: None,
+                target_session: None,
             },
         )
         .await;
@@ -871,7 +873,11 @@
             .join(".agent-collab/server/journal.jsonl")
             .exists());
 
-        let build_error = match manager.build_runtime(&project_root, &escape_storage_root) {
+        let escape_key = (
+            escape_context.app_scope_id.as_str().to_owned(),
+            escape_context.project_scope.as_str().to_owned(),
+        );
+        let build_error = match manager.build_runtime(&escape_key, &project_root, &escape_storage_root) {
             Ok(_) => panic!("runtime storage symlink escape must fail closed"),
             Err(error) => error,
         };

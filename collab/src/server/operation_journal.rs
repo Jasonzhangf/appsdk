@@ -145,7 +145,7 @@ pub(crate) enum CancelOutcome {
 #[derive(Debug)]
 pub(crate) struct OperationJournal {
     path: PathBuf,
-    file: Mutex<File>,
+    file: Mutex<Option<File>>,
     state: Mutex<OperationJournalState>,
 }
 
@@ -162,15 +162,68 @@ struct OperationJournalState {
     incomplete_tail: bool,
 }
 
+impl OperationJournalState {
+    fn empty() -> Self {
+        Self {
+            next_sequence: 0,
+            operations: BTreeMap::new(),
+            pending: BTreeMap::new(),
+            live: BTreeMap::new(),
+            incarnation: format!("{}-{}", std::process::id(), crate::server::state::now_ms()),
+            next_ticket: 0,
+            append_poisoned: None,
+            valid_prefix_bytes: 0,
+            incomplete_tail: false,
+        }
+    }
+}
+
 impl OperationJournal {
+    /// Create a handle without opening or replaying the journal. Startup uses
+    /// this form so a broken journal only blocks the identity consumer that
+    /// actually needs it, except when a host reducer reset is pending.
+    pub(crate) fn deferred(path: impl AsRef<Path>) -> Self {
+        Self {
+            path: path.as_ref().to_path_buf(),
+            file: Mutex::new(None),
+            state: Mutex::new(OperationJournalState::empty()),
+        }
+    }
+
+    fn ensure_open(&self) -> Result<(), String> {
+        let mut state = self.state.lock().unwrap();
+        let mut file = self.file.lock().unwrap();
+        if file.is_some() {
+            return Ok(());
+        }
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        let mut opened = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&self.path)
+            .map_err(|error| error.to_string())?;
+        let replay = replay_operation_journal(&mut opened)
+            .map_err(|error| format!("OPERATION_JOURNAL_REPLAY_FAILED: {error:#}"))?;
+        *state = replay;
+        *file = Some(opened);
+        Ok(())
+    }
+
     /// Scoped invalidation for the project reset owner. It uses this journal's
     /// writer and replay reducer, so old context operations cannot resume.
     pub(crate) fn reset_project(&self, project_scope: &str) -> Result<(), String> {
+        self.ensure_open()?;
         let mut state = self.state.lock().unwrap();
         if let Some(error) = &state.append_poisoned {
             return Err(format!("{ERR_OPERATION_APPEND}: {error}"));
         }
         let mut file = self.file.lock().unwrap();
+        let file = file
+            .as_mut()
+            .expect("ensure_open must leave a journal file");
         let bytes = std::fs::read(&self.path).map_err(|e| e.to_string())?;
         let mut body = Vec::new();
         let mut sequence = 0_u64;
@@ -223,21 +276,9 @@ impl OperationJournal {
     }
 
     pub(crate) fn open(path: impl AsRef<Path>) -> anyhow::Result<Self> {
-        let path = path.as_ref().to_path_buf();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(&path)?;
-        let replay = replay_operation_journal(&mut file)?;
-        Ok(Self {
-            path,
-            file: Mutex::new(file),
-            state: Mutex::new(replay),
-        })
+        let journal = Self::deferred(path);
+        journal.ensure_open().map_err(anyhow::Error::msg)?;
+        Ok(journal)
     }
 
     /// Reserve one context invocation before mutation bytes are sent. The
@@ -252,6 +293,7 @@ impl OperationJournal {
         intent_digest: &str,
         capability_hash: &str,
     ) -> Result<String, String> {
+        self.ensure_open()?;
         let mut state = self.state.lock().unwrap();
         if let Some(existing) = state.operations.get(operation_id) {
             if existing.project_scope == project_scope
@@ -313,6 +355,7 @@ impl OperationJournal {
         intent_digest: &str,
         capability_hash: &str,
     ) -> Result<(), String> {
+        self.ensure_open()?;
         if ticket.is_empty() {
             return Ok(());
         }
@@ -353,6 +396,7 @@ impl OperationJournal {
         operation_id: &str,
         ticket: &str,
     ) -> Result<(), String> {
+        self.ensure_open()?;
         let mut state = self.state.lock().unwrap();
         let Some(pending) = state.pending.get(operation_id) else {
             return Err(format!(
@@ -416,13 +460,16 @@ impl OperationJournal {
     /// True only when cancellation already won at a safe boundary for this
     /// invocation. The caller returns the durable cancelled projection and
     /// never starts the next owner.
-    pub(crate) fn is_cancelled(&self, operation_id: &str) -> bool {
+    pub(crate) fn is_cancelled(&self, operation_id: &str) -> Result<bool, String> {
+        self.ensure_open()?;
         let state = self.state.lock().unwrap();
-        matches!(state.live.get(operation_id), Some(LiveBoundary::Cancelled))
-            || state
-                .operations
-                .get(operation_id)
-                .is_some_and(|record| record.phase == IdentityOperationPhase::Cancelled)
+        Ok(
+            matches!(state.live.get(operation_id), Some(LiveBoundary::Cancelled))
+                || state
+                    .operations
+                    .get(operation_id)
+                    .is_some_and(|record| record.phase == IdentityOperationPhase::Cancelled),
+        )
     }
 
     pub(crate) fn live_receipts(&self, operation_id: &str) -> Option<Vec<String>> {
@@ -471,6 +518,7 @@ impl OperationJournal {
         app_scope_id: &str,
         capability_hash: &str,
     ) -> Result<CancelOutcome, String> {
+        self.ensure_open()?;
         let mut state = self.state.lock().unwrap();
         if let Some(pending) = state.pending.get_mut(operation_id) {
             if pending.project_scope != project_scope
@@ -519,7 +567,7 @@ impl OperationJournal {
                     recorded_at_ms: crate::server::state::now_ms(),
                     ..existing
                 };
-                let appended = append_record(&mut state, &self.file, record)?;
+                let appended = self.append_record(&mut state, record)?;
                 state
                     .live
                     .insert(operation_id.to_owned(), LiveBoundary::Cancelled);
@@ -569,6 +617,7 @@ impl OperationJournal {
         &self,
         admission: OperationAdmission,
     ) -> Result<IdentityOperationProjection, String> {
+        self.ensure_open()?;
         let mut state = self.state.lock().unwrap();
         if let Some(error) = &state.append_poisoned {
             return Err(format!("{ERR_OPERATION_APPEND}: {error}"));
@@ -602,7 +651,7 @@ impl OperationJournal {
         let mut admission = admission;
         admission.committed_phases.clear();
         let record = admission.to_record(sequence, crate::server::state::now_ms());
-        append_record(&mut state, &self.file, record)
+        self.append_record(&mut state, record)
     }
 
     /// Append one explicit phase transition for an already admitted operation.
@@ -631,6 +680,7 @@ impl OperationJournal {
         nested_operation_id: Option<String>,
         business_receipts: Option<Vec<String>>,
     ) -> Result<IdentityOperationProjection, String> {
+        self.ensure_open()?;
         let mut state = self.state.lock().unwrap();
         if let Some(error) = &state.append_poisoned {
             return Err(format!("{ERR_OPERATION_APPEND}: {error}"));
@@ -684,7 +734,7 @@ impl OperationJournal {
             recorded_at_ms: crate::server::state::now_ms(),
             ..existing
         };
-        append_record(&mut state, &self.file, record)
+        self.append_record(&mut state, record)
     }
 
     pub(crate) fn query(
@@ -693,6 +743,7 @@ impl OperationJournal {
         project_scope: &str,
         app_scope_id: &str,
     ) -> Result<IdentityContextResponseEnvelope, String> {
+        self.ensure_open()?;
         let state = self.state.lock().unwrap();
         let Some(record) = state.operations.get(&request.operation_id) else {
             return Err(format!(
@@ -720,43 +771,48 @@ impl OperationJournal {
     }
 }
 
-fn append_record(
-    state: &mut OperationJournalState,
-    file: &Mutex<File>,
-    record: OperationJournalRecord,
-) -> Result<IdentityOperationProjection, String> {
-    let mut line = serde_json::to_vec(&record)
-        .map_err(|error| format!("{ERR_OPERATION_APPEND}: serialize record: {error}"))?;
-    line.push(b'\n');
-    #[cfg(any(test, feature = "context-cancel-test-hooks"))]
-    if take_append_fault() {
-        let message = "injected operation journal append failure".to_string();
-        state.append_poisoned = Some(message.clone());
-        return Err(format!("{ERR_OPERATION_APPEND}: {message}"));
+impl OperationJournal {
+    fn append_record(
+        &self,
+        state: &mut OperationJournalState,
+        record: OperationJournalRecord,
+    ) -> Result<IdentityOperationProjection, String> {
+        let mut line = serde_json::to_vec(&record)
+            .map_err(|error| format!("{ERR_OPERATION_APPEND}: serialize record: {error}"))?;
+        line.push(b'\n');
+        #[cfg(any(test, feature = "context-cancel-test-hooks"))]
+        if take_append_fault() {
+            let message = "injected operation journal append failure".to_string();
+            state.append_poisoned = Some(message.clone());
+            return Err(format!("{ERR_OPERATION_APPEND}: {message}"));
+        }
+        let mut file = self.file.lock().unwrap();
+        let file = file
+            .as_mut()
+            .expect("ensure_open must leave a journal file before append");
+        if let Err(error) = file.seek(SeekFrom::Start(state.valid_prefix_bytes)) {
+            let message = format!("seek valid prefix: {error}");
+            state.append_poisoned = Some(message.clone());
+            return Err(format!("{ERR_OPERATION_APPEND}: {message}"));
+        }
+        if let Err(error) = file.write_all(&line) {
+            let message = format!("append: {error}");
+            state.append_poisoned = Some(message.clone());
+            return Err(format!("{ERR_OPERATION_APPEND}: {message}"));
+        }
+        if let Err(error) = file.sync_all() {
+            let message = format!("sync_all: {error}");
+            state.append_poisoned = Some(message.clone());
+            return Err(format!("{ERR_OPERATION_APPEND}: {message}"));
+        }
+        state.valid_prefix_bytes = state.valid_prefix_bytes.saturating_add(line.len() as u64);
+        state.next_sequence = state.next_sequence.saturating_add(1);
+        state.incomplete_tail = false;
+        state
+            .operations
+            .insert(record.operation_id.clone(), record.clone());
+        Ok(projection(&record))
     }
-    let mut file = file.lock().unwrap();
-    if let Err(error) = file.seek(SeekFrom::Start(state.valid_prefix_bytes)) {
-        let message = format!("seek valid prefix: {error}");
-        state.append_poisoned = Some(message.clone());
-        return Err(format!("{ERR_OPERATION_APPEND}: {message}"));
-    }
-    if let Err(error) = file.write_all(&line) {
-        let message = format!("append: {error}");
-        state.append_poisoned = Some(message.clone());
-        return Err(format!("{ERR_OPERATION_APPEND}: {message}"));
-    }
-    if let Err(error) = file.sync_all() {
-        let message = format!("sync_all: {error}");
-        state.append_poisoned = Some(message.clone());
-        return Err(format!("{ERR_OPERATION_APPEND}: {message}"));
-    }
-    state.valid_prefix_bytes = state.valid_prefix_bytes.saturating_add(line.len() as u64);
-    state.next_sequence = state.next_sequence.saturating_add(1);
-    state.incomplete_tail = false;
-    state
-        .operations
-        .insert(record.operation_id.clone(), record.clone());
-    Ok(projection(&record))
 }
 
 fn valid_transition(from: IdentityOperationPhase, to: IdentityOperationPhase) -> bool {

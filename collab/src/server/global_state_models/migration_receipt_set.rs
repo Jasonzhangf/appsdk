@@ -206,8 +206,6 @@ pub struct GlobalState {
     pub command_receipts: BTreeMap<String, CommandReceipt>,
     #[serde(default)]
     pub migration_commit_evidence: BTreeMap<String, MigrationCommitEvidence>,
-    #[serde(default)]
-    pub ledger_scan_receipts: BTreeMap<String, LedgerScanReceipt>,
     /// Durable, immutable grant-replacement intents and completion receipts.
     /// Keyed by the outer operation id; the intent is written before the first
     /// grant effect so an unresolved start survives restart without replay.
@@ -227,22 +225,4 @@ pub struct LedgerScanReceipt {
     pub unchanged: u32,
     pub blocked: u32,
     pub mailbox_messages_unchanged: bool,
-}
-
-impl LedgerScanReceipt {
-    pub fn validate(&self) -> Result<(), StateError> {
-        if self.scan_id.trim().is_empty() || self.scan_id.len() > 128 {
-            return Err(StateError::invalid(
-                "ledger scan receipt scan_id",
-                "must be a non-empty short identifier",
-            ));
-        }
-        if self.scanned_ms < 0 {
-            return Err(StateError::invalid(
-                "ledger scan receipt scanned_ms",
-                "must be non-negative",
-            ));
-        }
-        Ok(())
-    }
 }

@@ -16,6 +16,13 @@ pub(crate) const ORDINARY_NAME_POOL: [&str; 20] = [
 pub(crate) struct NameIntent {
     pub requested_name: String,
     pub user_authorized: bool,
+    /// A user-requested name change carries the caller's previous names with it.
+    /// Role recovery that allocates an ordinary name for the same carrier is not
+    /// a rename and must leave existing name work and mail at the old name.
+    pub moves_existing_names: bool,
+    /// Typed takeover confirmation for a name held by another carrier. The
+    /// legacy promote approval text never sets this; only the explicit typed
+    /// `restore_master`/`restore_name` approval object can.
     pub replace_confirmed: bool,
 }
 
@@ -77,6 +84,7 @@ pub(crate) fn parse_name_intent(
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|text| !text.trim().is_empty()),
         },
+        moves_existing_names: true,
         replace_confirmed,
     }))
 }
@@ -98,6 +106,7 @@ pub(crate) fn resolve_registered_name(
         invocation,
         intent,
         None,
+        None,
     )
 }
 
@@ -108,9 +117,41 @@ pub(crate) fn resolve_registered_name_with_authorization(
     invocation: &str,
     intent: Option<NameIntent>,
     authorization: Option<&str>,
+    pane_anchor: Option<super::name_state::NamePaneAnchor>,
 ) -> Result<serde_json::Value, String> {
-    use super::name_state::NameBindingReference;
     let mut state = server.state.lock().unwrap();
+    let (mut outcome, notices) = resolve_registered_name_locked(
+        server,
+        &mut state,
+        worker_id,
+        operation_id,
+        invocation,
+        intent,
+        authorization,
+        pane_anchor,
+    )?;
+    drop(state);
+    outcome["notifications"] =
+        serde_json::json!(super::deliver_relationship_notices(server, &notices));
+    Ok(outcome)
+}
+
+/// Core business name/handoff commit for a caller that already holds the
+/// project-state lock. Sharing that single lock with the control-slot commit
+/// is what keeps the preplayed name, the published control slot and the
+/// business occupancy on one snapshot; the public wrapper above and the
+/// control-first context path both build on this function.
+pub(crate) fn resolve_registered_name_locked(
+    server: &super::Server,
+    state: &mut State,
+    worker_id: &str,
+    operation_id: &str,
+    invocation: &str,
+    intent: Option<NameIntent>,
+    authorization: Option<&str>,
+    pane_anchor: Option<super::name_state::NamePaneAnchor>,
+) -> Result<(serde_json::Value, Vec<Event>), String> {
+    use super::name_state::NameBindingReference;
     let route = super::server_route_scope(server, &state)?
         .ok_or("NAME_IDENTITY_REQUIRED: registered project route required")?;
     let binding = state
@@ -143,32 +184,6 @@ pub(crate) fn resolve_registered_name_with_authorization(
             .is_some_and(|intent| intent.replace_confirmed),
         requested_ms: super::now_ms(),
     };
-    if let Some(saved) = state.name_recovery(operation_id) {
-        if saved.project_scope != route.project_scope_id.as_str()
-            || saved.request.caller_worker_id != worker_id
-            || saved.request.requested_name != request.requested_name
-            || saved.request.replace_confirmed != request.replace_confirmed
-        {
-            return Err("NAME_OPERATION_CONFLICT: resume the saved name recovery operation".into());
-        }
-        if saved.progress == NameRecoveryProgress::Applied {
-            let occupancy = state
-                .name_occupancy(&saved.project_scope, &saved.target_name)
-                .filter(|holder| holder.worker_id == worker_id)
-                .ok_or("NAME_OPERATION_CONFLICT: applied name belongs to another worker")?;
-            return Ok(
-                serde_json::json!({"outcome":"committed", "operation_id":operation_id,
-                "name":occupancy.name, "session_id":occupancy.session_id, "recovery":saved,
-                "effects":NameResolutionEffects::from_recovery(saved)}),
-            );
-        }
-        // Keep the original timestamp and invocation. Do not restart an
-        // adjudicated operation against a newer occupancy.
-        return Ok(
-            serde_json::json!({"outcome": saved.progress, "recovery": saved,
-            "operation_id": operation_id, "effects":NameResolutionEffects::default()}),
-        );
-    }
     let is_master =
         super::current_master_worker_id(&state, Some(&route)).as_deref() == Some(worker_id);
     let input = NameResolutionInput {
@@ -177,6 +192,7 @@ pub(crate) fn resolve_registered_name_with_authorization(
         request,
         intent,
         is_current_master: is_master,
+        pane_anchor,
     };
     let plan = plan_name_resolution(&state, &input)?;
     let mut events = Vec::new();
@@ -214,13 +230,6 @@ pub(crate) fn resolve_registered_name_with_authorization(
                 "session_id":occupancy.session_id, "synced_tasks":synced_tasks,
                 "operation_id":operation_id})
         }
-        NameResolutionDecision::NeedsConfirmation { occupancy } => {
-            let approval = serde_json::json!({"action":"restore_name", "requested_name":occupancy.name,
-                "authorization":"<user authorization>", "replace_confirmed":true});
-            serde_json::json!({"outcome":"confirmation_required", "occupancy":occupancy,
-                "operation_id":operation_id,
-                "next_invocation":format!("collab context --approve-grant '{approval}'")})
-        }
         NameResolutionDecision::Pending { recovery } => serde_json::json!({
             "outcome":"pending", "recovery":recovery, "operation_id":operation_id}),
     };
@@ -234,10 +243,15 @@ pub(crate) fn resolve_registered_name_with_authorization(
     };
     let mut notices = Vec::new();
     if let NameResolutionDecision::Committed { occupancy, .. } = &plan.decision {
-        if !is_master && occupancy.name != "Jenny"
-            && state.name_occupancy(route.project_scope_id.as_str(), &occupancy.name).is_none() {
+        if !is_master
+            && occupancy.name != "Jenny"
+            && state
+                .name_occupancy(route.project_scope_id.as_str(), &occupancy.name)
+                .is_none()
+        {
             if let Some(master) = super::current_master_worker_id(&state, Some(&route))
-                .filter(|master| master != worker_id && state.workers.contains_key(master)) {
+                .filter(|master| master != worker_id && state.workers.contains_key(master))
+            {
                 notices = super::relationship_notice_events(&state, route.project_scope_id.as_str(), &master,
                     "peer-registered", format!("新 peer {} 已加入。读取 collab board show 核对当前任务与可用人选；有已授权且可交付的子目标时，沿基础 master/peer 模板 publish 后 dispatch 或 invite。无需先设置专长或策略；没有可派任务则保留收件，不创建空转巡检。", occupancy.name));
             }
@@ -247,13 +261,93 @@ pub(crate) fn resolve_registered_name_with_authorization(
     events.extend(notices.clone());
     if !events.is_empty() {
         server
-            .commit_locked_checked(&mut state, &events)
+            .commit_locked_checked(&mut *state, &events)
             .map_err(|error| format!("NAME_DURABILITY_FAILED: {error}"))?;
     }
     outcome["effects"] = serde_json::to_value(effects).expect("name effects serialize");
-    drop(state);
-    outcome["notifications"] = serde_json::json!(super::deliver_relationship_notices(server, &notices));
-    Ok(outcome)
+    Ok((outcome, notices))
+}
+
+/// Decide or preserve the worker's stable name for a binding-control commit.
+///
+/// The control resource keys a slot by canonical project plus stable name, so
+/// a refresh/recovery must resolve the name before publishing the binding. An
+/// identity that already carries a name keeps it without asking for one. An
+/// identity without any name is assigned the ordinary name the name planner
+/// chooses from the same real current facts used by registration: the current
+/// agent session, the observed pane anchor (none on the transport-only path),
+/// and the fixed pool. This function never scans a project journal to discover
+/// a binding.
+pub(crate) fn ensure_worker_control_name(
+    server: &super::Server,
+    worker_id: &str,
+) -> Result<String, String> {
+    use super::name_state::NameBindingReference;
+
+    let mut state = server.state.lock().unwrap();
+    let route = super::server_route_scope(server, &state)?
+        .ok_or("NAME_IDENTITY_REQUIRED: registered project route required")?;
+    let project_scope = route.project_scope_id.as_str().to_owned();
+    if let Some(holder) = state
+        .name_occupancies
+        .get(&project_scope)
+        .and_then(|names| names.values().find(|holder| holder.worker_id == worker_id))
+    {
+        return Ok(holder.name.clone());
+    }
+
+    let binding = state
+        .global
+        .lookup_project_for_route(&route)
+        .and_then(|project| {
+            project
+                .runtime_bindings
+                .values()
+                .find(|binding| binding.agent_id.as_str() == worker_id)
+        })
+        .ok_or("NAME_IDENTITY_REQUIRED: current runtime binding required")?;
+    let session = binding
+        .session_id
+        .as_ref()
+        .ok_or("NAME_IDENTITY_REQUIRED: agent session required")?
+        .to_string();
+    let request = NameRecoveryRequest {
+        invocation: "transport_refresh".into(),
+        requested_name: None,
+        caller_worker_id: worker_id.into(),
+        caller_session_id: session,
+        caller_binding: NameBindingReference {
+            app_scope_id: binding.app_scope_id.to_string(),
+            binding_id: binding.binding_id.to_string(),
+            endpoint_generation: binding.endpoint_generation,
+        },
+        replace_confirmed: false,
+        requested_ms: super::now_ms(),
+    };
+    let is_master =
+        super::current_master_worker_id(&state, Some(&route)).as_deref() == Some(worker_id);
+    let input = NameResolutionInput {
+        project_scope,
+        operation_id: format!("control-{}", binding.binding_id),
+        request,
+        intent: None,
+        is_current_master: is_master,
+        pane_anchor: None,
+    };
+    let plan = plan_name_resolution(&state, &input)?;
+    let occupancy = match &plan.decision {
+        NameResolutionDecision::Committed { occupancy, .. } => occupancy.clone(),
+        NameResolutionDecision::Pending { .. } => {
+            return Err("NAME_PENDING: name decision requires user authorization".into());
+        }
+    };
+    let name = occupancy.name.clone();
+    if !plan.events.is_empty() {
+        server
+            .commit_locked_checked(&mut state, &plan.events)
+            .map_err(|error| format!("NAME_DURABILITY_FAILED: {error}"))?;
+    }
+    Ok(name)
 }
 
 /// Pure readback for query and same-key retries. Never allocates or rebinds.
@@ -286,6 +380,9 @@ pub(crate) struct NameResolutionInput {
     pub intent: Option<NameIntent>,
     /// Read from the authoritative role owner, never inferred from a label.
     pub is_current_master: bool,
+    /// The caller's currently observed pane and exact invocation cwd. Only the
+    /// third name anchor; never a stored identity or historical scan.
+    pub pane_anchor: Option<super::name_state::NamePaneAnchor>,
 }
 
 #[derive(Debug)]
@@ -293,9 +390,6 @@ pub(crate) enum NameResolutionDecision {
     Committed {
         occupancy: NameOccupancy,
         synced_tasks: usize,
-    },
-    NeedsConfirmation {
-        occupancy: NameOccupancy,
     },
     Pending {
         recovery: NameRecoveryPending,
@@ -308,6 +402,247 @@ pub(crate) struct NameResolutionPlan {
     pub events: Vec<Event>,
     /// The context owner must obtain the existing master's grant before commit.
     pub requires_master_authorization: bool,
+}
+
+/// A committed explicit name move, expressed in the terms the binding-control
+/// owner needs for one atomic control commit: the target stable name and the
+/// caller's previous names that must be retired at the same time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PlannedNameMove {
+    pub(crate) target: String,
+    pub(crate) source_names: Vec<String>,
+}
+
+/// Read-only planning for an explicit name change. It returns the control move
+/// only when the explicit decision commits a real carrier change. Pending
+/// decisions, Jenny takeovers and no-op repeats return `None`; the caller then
+/// keeps the existing name-resolution commit flow unchanged. This function
+/// never persists anything and never scans a journal.
+pub(crate) fn plan_explicit_name_move(
+    server: &super::Server,
+    worker_id: &str,
+    operation_id: &str,
+    invocation: &str,
+    intent: &NameIntent,
+    pane_anchor: Option<super::name_state::NamePaneAnchor>,
+) -> Result<Option<PlannedNameMove>, String> {
+    let state = server.state.lock().unwrap();
+    plan_explicit_name_move_locked(
+        server,
+        &state,
+        worker_id,
+        operation_id,
+        invocation,
+        intent,
+        pane_anchor,
+    )
+}
+
+/// State-locked form of [`plan_explicit_name_move`] for a caller that already
+/// holds the project-state lock. It never persists anything and never scans a
+/// journal.
+pub(crate) fn plan_explicit_name_move_locked(
+    server: &super::Server,
+    state: &State,
+    worker_id: &str,
+    operation_id: &str,
+    invocation: &str,
+    intent: &NameIntent,
+    pane_anchor: Option<super::name_state::NamePaneAnchor>,
+) -> Result<Option<PlannedNameMove>, String> {
+    use super::name_state::NameBindingReference;
+
+    let route = super::server_route_scope(server, &state)?
+        .ok_or("NAME_IDENTITY_REQUIRED: registered project route required")?;
+    let binding = state
+        .global
+        .lookup_project_for_route(&route)
+        .and_then(|project| {
+            project
+                .runtime_bindings
+                .values()
+                .find(|binding| binding.agent_id.as_str() == worker_id)
+        })
+        .ok_or("NAME_IDENTITY_REQUIRED: current runtime binding required")?;
+    let session = binding
+        .session_id
+        .as_ref()
+        .ok_or("NAME_IDENTITY_REQUIRED: agent session required")?
+        .to_string();
+    let request = NameRecoveryRequest {
+        invocation: invocation.into(),
+        requested_name: Some(intent.requested_name.clone()),
+        caller_worker_id: worker_id.into(),
+        caller_session_id: session,
+        caller_binding: NameBindingReference {
+            app_scope_id: binding.app_scope_id.to_string(),
+            binding_id: binding.binding_id.to_string(),
+            endpoint_generation: binding.endpoint_generation,
+        },
+        replace_confirmed: intent.replace_confirmed,
+        requested_ms: super::now_ms(),
+    };
+    let is_master =
+        super::current_master_worker_id(&state, Some(&route)).as_deref() == Some(worker_id);
+    let input = NameResolutionInput {
+        project_scope: route.project_scope_id.as_str().to_owned(),
+        operation_id: operation_id.into(),
+        request,
+        intent: Some(intent.clone()),
+        is_current_master: is_master,
+        pane_anchor,
+    };
+    let plan = plan_name_resolution(&state, &input)?;
+    match plan.decision {
+        NameResolutionDecision::Committed { occupancy, .. } => {
+            if occupancy.name == "Jenny" {
+                return Ok(None);
+            }
+            let source_names = names_held_by_worker(&state, &input.project_scope, worker_id);
+            if source_names.len() == 1 && source_names[0] == occupancy.name {
+                return Ok(None);
+            }
+            Ok(Some(PlannedNameMove {
+                target: occupancy.name,
+                source_names,
+            }))
+        }
+        NameResolutionDecision::Pending { .. } => Ok(None),
+    }
+}
+
+/// Read-only planning for the automatic (non-explicit) name decision. It
+/// returns only the committed target name; unlike an explicit rename it never
+/// retires the carrier's other names. `None` means the planner produced a
+/// pending decision. An automatic decision cannot normally pend, but the
+/// caller treats it as "no control to commit" instead of guessing a name.
+pub(crate) fn plan_automatic_name(
+    server: &super::Server,
+    worker_id: &str,
+    operation_id: &str,
+    invocation: &str,
+    pane_anchor: Option<super::name_state::NamePaneAnchor>,
+) -> Result<Option<String>, String> {
+    let state = server.state.lock().unwrap();
+    plan_automatic_name_locked(
+        server,
+        &state,
+        worker_id,
+        operation_id,
+        invocation,
+        pane_anchor,
+    )
+}
+
+/// State-locked form of [`plan_automatic_name`] for a caller that already
+/// holds the project-state lock. It never persists anything and never scans a
+/// journal.
+pub(crate) fn plan_automatic_name_locked(
+    server: &super::Server,
+    state: &State,
+    worker_id: &str,
+    operation_id: &str,
+    invocation: &str,
+    pane_anchor: Option<super::name_state::NamePaneAnchor>,
+) -> Result<Option<String>, String> {
+    use super::name_state::NameBindingReference;
+
+    let route = super::server_route_scope(server, &state)?
+        .ok_or("NAME_IDENTITY_REQUIRED: registered project route required")?;
+    let binding = state
+        .global
+        .lookup_project_for_route(&route)
+        .and_then(|project| {
+            project
+                .runtime_bindings
+                .values()
+                .find(|binding| binding.agent_id.as_str() == worker_id)
+        })
+        .ok_or("NAME_IDENTITY_REQUIRED: current runtime binding required")?;
+    let session = binding
+        .session_id
+        .as_ref()
+        .ok_or("NAME_IDENTITY_REQUIRED: agent session required")?
+        .to_string();
+    let request = NameRecoveryRequest {
+        invocation: invocation.into(),
+        requested_name: None,
+        caller_worker_id: worker_id.into(),
+        caller_session_id: session,
+        caller_binding: NameBindingReference {
+            app_scope_id: binding.app_scope_id.to_string(),
+            binding_id: binding.binding_id.to_string(),
+            endpoint_generation: binding.endpoint_generation,
+        },
+        replace_confirmed: false,
+        requested_ms: super::now_ms(),
+    };
+    let is_master =
+        super::current_master_worker_id(&state, Some(&route)).as_deref() == Some(worker_id);
+    let input = NameResolutionInput {
+        project_scope: route.project_scope_id.as_str().to_owned(),
+        operation_id: operation_id.into(),
+        request,
+        intent: None,
+        is_current_master: is_master,
+        pane_anchor,
+    };
+    let plan = plan_name_resolution(&state, &input)?;
+    match plan.decision {
+        NameResolutionDecision::Committed { occupancy, .. } => Ok(Some(occupancy.name)),
+        NameResolutionDecision::Pending { .. } => Ok(None),
+    }
+}
+
+/// Pure automatic-name planning for a Register candidate that has not been
+/// consumed yet. The prepared binding and transport are the only current
+/// facts needed; this deliberately does not require the binding to already be
+/// present in the reducer, so the control slot can be published before the
+/// business Register commit.
+pub(crate) fn plan_automatic_name_for_binding(
+    state: &State,
+    operation_id: &str,
+    invocation: &str,
+    binding: &super::RuntimeBinding,
+    pane_anchor: Option<super::name_state::NamePaneAnchor>,
+) -> Result<Option<String>, String> {
+    if binding.agent_id.as_str().trim().is_empty() {
+        return Err("NAME_IDENTITY_REQUIRED: candidate binding has no worker".into());
+    }
+    let session = binding
+        .session_id
+        .as_ref()
+        .ok_or("NAME_IDENTITY_REQUIRED: candidate binding has no agent session")?
+        .to_string();
+    let request = NameRecoveryRequest {
+        invocation: invocation.into(),
+        requested_name: None,
+        caller_worker_id: binding.agent_id.as_str().to_owned(),
+        caller_session_id: session,
+        caller_binding: super::name_state::NameBindingReference {
+            app_scope_id: binding.app_scope_id.to_string(),
+            binding_id: binding.binding_id.to_string(),
+            endpoint_generation: binding.endpoint_generation,
+        },
+        replace_confirmed: false,
+        requested_ms: super::now_ms(),
+    };
+    let route = binding.route_scope();
+    let is_master = super::current_master_worker_id(state, Some(&route)).as_deref()
+        == Some(binding.agent_id.as_str());
+    let input = NameResolutionInput {
+        project_scope: binding.project_scope.as_str().to_owned(),
+        operation_id: operation_id.into(),
+        request,
+        intent: None,
+        is_current_master: is_master,
+        pane_anchor,
+    };
+    let plan = plan_name_resolution(state, &input)?;
+    match plan.decision {
+        NameResolutionDecision::Committed { occupancy, .. } => Ok(Some(occupancy.name)),
+        NameResolutionDecision::Pending { .. } => Ok(None),
+    }
 }
 
 fn validate_name(name: &str) -> Result<(), String> {
@@ -336,7 +671,8 @@ pub(crate) fn available_ordinary_name(
     // Recovery preserves an ordinary work identity. Pool order only chooses a
     // name when this carrier has none, such as a transition away from Jenny.
     if let Some(name) = ORDINARY_NAME_POOL.iter().find(|name| {
-        state.name_occupancy(project, name)
+        state
+            .name_occupancy(project, name)
             .is_some_and(|holder| holder.worker_id == worker)
     }) {
         return Ok((*name).to_owned());
@@ -353,8 +689,52 @@ pub(crate) fn available_ordinary_name(
         .ok_or_else(|| "NAME_POOL_FULL: no ordinary name available for the former Jenny".into())
 }
 
+/// Names currently carried by one worker. Only an explicit rename (or an
+/// explicit authorized name change) uses these as handoff sources; automatic
+/// session or pane inheritance must never treat the same worker id as an
+/// identity anchor.
+pub(crate) fn names_held_by_worker(
+    state: &State,
+    project_scope: &str,
+    worker_id: &str,
+) -> Vec<String> {
+    let mut names: Vec<String> = state
+        .name_occupancies
+        .get(project_scope)
+        .into_iter()
+        .flat_map(|names| names.values())
+        .filter(|holder| holder.worker_id == worker_id)
+        .map(|holder| holder.name.clone())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
 /// Call with the current locked State and an admitted stable worker ID. No
 /// transport, historical label, activity, or old-session gate decides ownership.
+fn match_pane_holder<'a>(
+    names: &'a std::collections::HashMap<String, NameOccupancy>,
+    anchor: &super::name_state::NamePaneAnchor,
+) -> Result<Option<&'a NameOccupancy>, String> {
+    let mut matches = names.values().filter(|holder| {
+        holder.pane_anchor.as_ref().is_some_and(|stored| {
+            stored.pane.socket_path == anchor.pane.socket_path
+                && stored.pane.pane_id == anchor.pane.pane_id
+                && stored.cwd == anchor.cwd
+        })
+    });
+    let first = matches.next();
+    let second = matches.next();
+    match (first, second) {
+        (Some(holder), None) => Ok(Some(holder)),
+        (Some(_), Some(_)) => {
+            Err("NAME_PANE_CONFLICT: the current pane and cwd match multiple names".into())
+        }
+        (None, _) => Ok(None),
+    }
+}
+
 pub(crate) fn plan_name_resolution(
     state: &State,
     input: &NameResolutionInput,
@@ -378,108 +758,109 @@ pub(crate) fn plan_name_resolution(
             );
         }
     }
-    // Raw recovery fields alone are not an authorization to choose a name.
     if input.intent.is_none() && (request.requested_name.is_some() || request.replace_confirmed) {
         return Err("NAME_AUTHORIZATION_REQUIRED: requested name needs typed name intent".into());
     }
     let names = state.name_occupancies.get(&input.project_scope);
-    let current = names.and_then(|names| {
-        names
-            .values()
-            .find(|holder| holder.name != "Jenny" && holder.worker_id == request.caller_worker_id)
-    });
-    let same_session = names.and_then(|names| {
-        names
-            .values()
-            .find(|holder| holder.name != "Jenny" && holder.session_id == request.caller_session_id)
-    });
     let target = if let Some(intent) = &input.intent {
+        // An explicit name is decided before any pane lookup. A pane conflict
+        // must not block an authorized explicit rename.
         intent.requested_name.clone()
-    } else if input.is_current_master {
-        "Jenny".into()
-    } else if let Some(holder) = current.or(same_session) {
-        holder.name.clone()
     } else {
-        ORDINARY_NAME_POOL
-            .iter()
-            .find(|name| {
-                state
-                    .name_occupancy(&input.project_scope, name)
-                    .map(|holder| {
-                        holder_presence(state, &input.project_scope, holder)
-                            == AgentPresence::Offline
-                    })
-                    .unwrap_or(true)
-            })
-            .ok_or("NAME_POOL_FULL: all 20 ordinary project names are occupied; Jenny is reserved")?
-            .to_string()
-    };
-    let requires_master_authorization = target == "Jenny" && !input.is_current_master;
-    let previous = state.name_occupancy(&input.project_scope, &target);
-    if let Some(holder) = previous {
-        if holder.worker_id != request.caller_worker_id
-            && holder.session_id != request.caller_session_id
-        {
-            match holder_presence(state, &input.project_scope, holder) {
-                AgentPresence::Online
-                    if !input
-                        .intent
-                        .as_ref()
-                        .is_some_and(|intent| intent.replace_confirmed) =>
-                {
-                    return Ok(NameResolutionPlan {
-                        decision: NameResolutionDecision::NeedsConfirmation {
-                            occupancy: holder.clone(),
-                        },
-                        events: vec![],
-                        requires_master_authorization,
-                    });
-                }
-                AgentPresence::Unknown
-                    if target == "Jenny"
-                        && input.intent.as_ref().is_some_and(|intent| {
-                            intent.user_authorized && intent.replace_confirmed
-                        }) => {}
-                AgentPresence::Unknown => {
-                    let mut original = request.clone();
-                    original.requested_name = Some(target.clone());
-                    original.replace_confirmed = input
-                        .intent
-                        .as_ref()
-                        .is_some_and(|intent| intent.replace_confirmed);
-                    let recovery = NameRecoveryPending {
-                        operation_id: input.operation_id.clone(),
-                        project_scope: input.project_scope.clone(),
-                        target_name: target,
-                        occupancy_ref: holder.reference(&input.project_scope),
-                        request: original,
-                        progress: NameRecoveryProgress::Pending,
-                        decision: None,
-                        result: None,
-                        created_ms: request.requested_ms,
-                        updated_ms: request.requested_ms,
-                    };
-                    // Repeated calls with the same operation preserve adjudication progress.
-                    let recovery = match state.name_recovery(&input.operation_id) {
-                        Some(existing) if existing.occupancy_ref == recovery.occupancy_ref && existing.request == recovery.request => existing.clone(),
-                        Some(_) => return Err("NAME_OPERATION_CONFLICT: resume the existing recovery against its saved occupancy".into()),
-                        None => recovery,
-                    };
-                    let events = if state.name_recovery(&input.operation_id) == Some(&recovery) {
-                        vec![]
-                    } else {
-                        vec![Event::NameRecoveryUpdated {
-                            recovery: recovery.clone(),
-                        }]
-                    };
-                    return Ok(NameResolutionPlan {
-                        decision: NameResolutionDecision::Pending { recovery },
-                        events,
-                        requires_master_authorization,
-                    });
-                }
-                _ => {}
+        // Same sessionID inherits the current name, including Jenny. A name is
+        // not a master grant; the grant stays on its typed owner.
+        let same_session = if let Some(names) = names {
+            let mut matches = names
+                .values()
+                .filter(|holder| holder.session_id == request.caller_session_id);
+            let first = matches.next();
+            if matches.next().is_some() {
+                return Err(
+                    "NAME_SESSION_CONFLICT: the current session matches multiple names".into(),
+                );
             }
+            first
+        } else {
+            None
+        };
+        if let Some(holder) = same_session {
+            holder.name.clone()
+        } else {
+            // Only after explicit and same-session anchors are absent does the
+            // exact pane endpoint plus invocation cwd participate. The lookup
+            // stays in this function so a conflict can be returned directly.
+            let pane_holder = match (input.pane_anchor.as_ref(), names) {
+                (Some(anchor), Some(names)) => match_pane_holder(names, anchor)?,
+                _ => None,
+            };
+            if let Some(holder) = pane_holder {
+                holder.name.clone()
+            } else if input.is_current_master {
+                "Jenny".into()
+            } else {
+                ORDINARY_NAME_POOL
+                    .iter()
+                    .find(|name| {
+                        state
+                            .name_occupancy(&input.project_scope, name)
+                            .map(|holder| {
+                                holder_presence(state, &input.project_scope, holder)
+                                    == AgentPresence::Offline
+                            })
+                            .unwrap_or(true)
+                    })
+                    .ok_or("NAME_POOL_FULL: all 20 ordinary project names are occupied; Jenny is reserved")?
+                    .to_string()
+            }
+        }
+    };
+    // Only an explicit Jenny intent is a master transfer. Automatic name
+    // inheritance, including a pane match on Jenny, never copies the grant.
+    let explicit_jenny = input
+        .intent
+        .as_ref()
+        .is_some_and(|intent| intent.requested_name == "Jenny");
+    let requires_master_authorization = explicit_jenny && !input.is_current_master;
+    let previous = state.name_occupancy(&input.project_scope, &target);
+    // A legacy promote approval is free text: it authorizes an uncontested
+    // first Jenny, but it must not dislodge a Jenny held by another carrier.
+    // That continuation needs a typed restore_master with replace_confirmed.
+    if let Some(holder) = previous {
+        let other_carrier = holder.worker_id != request.caller_worker_id
+            || holder.session_id != request.caller_session_id;
+        if other_carrier
+            && explicit_jenny
+            && !input
+                .intent
+                .as_ref()
+                .is_some_and(|intent| intent.replace_confirmed)
+        {
+            let mut original = request.clone();
+            original.requested_name = Some(target.clone());
+            original.replace_confirmed = input
+                .intent
+                .as_ref()
+                .is_some_and(|intent| intent.replace_confirmed);
+            let recovery = NameRecoveryPending {
+                operation_id: input.operation_id.clone(),
+                project_scope: input.project_scope.clone(),
+                target_name: target,
+                occupancy_ref: holder.reference(&input.project_scope),
+                request: original,
+                progress: NameRecoveryProgress::Pending,
+                decision: None,
+                result: None,
+                created_ms: request.requested_ms,
+                updated_ms: request.requested_ms,
+            };
+            let events = vec![Event::NameRecoveryUpdated {
+                recovery: recovery.clone(),
+            }];
+            return Ok(NameResolutionPlan {
+                decision: NameResolutionDecision::Pending { recovery },
+                events,
+                requires_master_authorization,
+            });
         }
     }
     let occupancy = match previous {
@@ -487,7 +868,9 @@ pub(crate) fn plan_name_resolution(
             if holder.worker_id == request.caller_worker_id
                 && holder.session_id == request.caller_session_id =>
         {
-            holder.clone()
+            let mut holder = holder.clone();
+            holder.pane_anchor = input.pane_anchor.clone();
+            holder
         }
         _ => NameOccupancy {
             name: target.clone(),
@@ -498,9 +881,24 @@ pub(crate) fn plan_name_resolution(
                 .checked_add(1)
                 .ok_or("NAME_REVISION_EXHAUSTED")?,
             updated_ms: request.requested_ms,
+            pane_anchor: input.pane_anchor.clone(),
         },
     };
-    let events = build_name_resolution_events(state, &input.project_scope, &occupancy);
+    let rename_from = if input
+        .intent
+        .as_ref()
+        .is_some_and(|intent| intent.moves_existing_names)
+    {
+        names_held_by_worker(state, &input.project_scope, &request.caller_worker_id)
+    } else {
+        Vec::new()
+    };
+    let events = build_name_resolution_events_with_rename_from(
+        state,
+        &input.project_scope,
+        &occupancy,
+        &rename_from,
+    );
     let synced_tasks = events
         .iter()
         .find_map(|event| match event {
@@ -525,10 +923,28 @@ pub(crate) fn build_name_resolution_events(
     project_scope: &str,
     occupancy: &NameOccupancy,
 ) -> Vec<Event> {
+    build_name_resolution_events_with_rename_from(state, project_scope, occupancy, &[])
+}
+
+/// Build one transaction after a successful decision. `rename_from` carries
+/// the worker's previous names only when the caller explicitly renamed that
+/// worker. Automatic session/pane inheritance keeps the target-name handoff
+/// alone; a fresh ordinary name with no anchor must not move the old name's
+/// tasks or mailbox.
+pub(crate) fn build_name_resolution_events_with_rename_from(
+    state: &State,
+    project_scope: &str,
+    occupancy: &NameOccupancy,
+    rename_from: &[String],
+) -> Vec<Event> {
     let previous = state.name_occupancy(project_scope, &occupancy.name);
-    let legacy_owner = previous
-        .map(|holder| holder.worker_id.as_str())
-        .unwrap_or(&occupancy.worker_id);
+    // A fresh ordinary name has no previous holder. The caller worker id is
+    // not a legacy identity owner in that case; only the target name's prior
+    // holder or an explicit rename source can authorize a task handoff.
+    let legacy_owner = previous.map(|holder| holder.worker_id.as_str());
+    let target_held_by_other = previous.is_some_and(|holder| {
+        holder.worker_id != occupancy.worker_id || holder.session_id != occupancy.session_id
+    });
     let mut tasks: Vec<_> = state.tasks.values().collect();
     tasks.sort_by(|a, b| a.id.cmp(&b.id));
     let mut assignments = Vec::new();
@@ -538,13 +954,18 @@ pub(crate) fn build_name_resolution_events(
             continue;
         }
         let existing = state.task_assignment(&task.id);
-        if !existing
-            .map(|a| a.name == occupancy.name)
-            .unwrap_or(task.owner == legacy_owner)
-        {
+        let matches_rename_from = existing
+            .is_some_and(|assignment| rename_from.iter().any(|name| name == &assignment.name));
+        let matches_target_name = existing
+            .is_some_and(|assignment| assignment.name == occupancy.name && target_held_by_other);
+        let matches_caller_name = matches_rename_from || matches_target_name;
+        let matches_legacy_owner =
+            existing.is_none() && legacy_owner.is_some_and(|owner| task.owner == owner);
+        if !matches_caller_name && !matches_legacy_owner {
             continue;
         }
-        let assignment_changed = existing.is_none_or(|a| a.session_id != occupancy.session_id);
+        let assignment_changed = existing
+            .is_none_or(|a| a.name != occupancy.name || a.session_id != occupancy.session_id);
         let owner_changed = task.owner != occupancy.worker_id;
         if !assignment_changed && !owner_changed {
             continue;
@@ -557,6 +978,7 @@ pub(crate) fn build_name_resolution_events(
             reflow: None,
             updated_ms: occupancy.updated_ms,
         });
+        assignment.name = occupancy.name.clone();
         assignment.session_id = occupancy.session_id.clone();
         assignment.assignment_revision += 1;
         assignment.updated_ms = occupancy.updated_ms;
@@ -603,6 +1025,7 @@ pub(crate) fn build_name_resolution_events(
         state,
         project_scope,
         occupancy,
+        rename_from,
     ));
     // The name carries its finite goal schedules to the new execution carrier.
     // Reuse the subscription record/event so IDs, timing and terminal state stay
@@ -648,10 +1071,7 @@ pub(crate) fn build_name_resolution_events(
                             && s.subject
                                 .as_deref()
                                 .is_some_and(|subject| subject.starts_with("goal:"))
-                            && matches!(
-                                s.status.as_str(),
-                                "armed" | "transport-lost" | "consumed"
-                            );
+                            && matches!(s.status.as_str(), "armed" | "transport-lost" | "consumed");
                         let project_patrol = super::is_exact_project_patrol(s)
                             && matches!(s.status.as_str(), "armed" | "cancelled");
                         let not_expired =
@@ -684,9 +1104,7 @@ pub(crate) fn build_name_resolution_events(
                     // binding and move the message with its schedule.
                     let mut timer_handoffs = Vec::new();
                     for (message_id, bound) in state.wake_bindings.iter() {
-                        if bound != &subscription.id
-                            || already_handed_off.contains(message_id)
-                        {
+                        if bound != &subscription.id || already_handed_off.contains(message_id) {
                             continue;
                         }
                         let Some(message) = state.msgs.get(message_id) else {

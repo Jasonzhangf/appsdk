@@ -1561,9 +1561,11 @@ fn handle_master_promote(
         Some(name_resolution::NameIntent {
             requested_name: "Jenny".into(),
             user_authorized: true,
+            moves_existing_names: true,
             replace_confirmed: false,
         }),
         Some(&approval),
+        None,
     ) {
         Ok(resolution) => resolution,
         Err(error) => return Resp::err(error),
@@ -1635,11 +1637,18 @@ fn handle_master_clear(
             worker_id: holder.worker_id.clone(),
             session_id: holder.session_id.clone(),
             updated_ms: now_ms(),
+            pane_anchor: None,
         };
-        events.extend(name_resolution::build_name_resolution_events(
+        let rename_from = name_resolution::names_held_by_worker(
+            &state,
+            route_scope.project_scope_id.as_str(),
+            &holder.worker_id,
+        );
+        events.extend(name_resolution::build_name_resolution_events_with_rename_from(
             &state,
             route_scope.project_scope_id.as_str(),
             &occupancy,
+            &rename_from,
         ));
         resolution = json!({"outcome":"committed", "name":occupancy.name,
             "session_id":occupancy.session_id});
@@ -1712,12 +1721,19 @@ fn handle_master_delegate(
             .name_occupancy(route_scope.project_scope_id.as_str(), "Jenny")
             .map_or(1, |previous| previous.occupancy_revision + 1),
         updated_ms: now_ms(),
+        pane_anchor: None,
     };
     let mut events = master_authority_transfer_events(&state, &route_scope, grant);
-    events.extend(name_resolution::build_name_resolution_events(
+    let rename_from = name_resolution::names_held_by_worker(
+        &state,
+        route_scope.project_scope_id.as_str(),
+        &target_id,
+    );
+    events.extend(name_resolution::build_name_resolution_events_with_rename_from(
         &state,
         route_scope.project_scope_id.as_str(),
         &occupancy,
+        &rename_from,
     ));
     if let Err(error) = server.commit_locked_checked(&mut state, &events) {
         drop(state);

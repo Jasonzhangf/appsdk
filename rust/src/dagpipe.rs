@@ -300,7 +300,7 @@ fn ensure_graph_nodes_use_registered_operators(
 mod notification;
 use notification::{register_notification_operator, validate_notification_objects};
 
-fn embedded_graph_paths() -> [(&'static str, &'static str); 35] {
+fn embedded_graph_paths() -> [(&'static str, &'static str); 37] {
     [
         (
             "docs/dagpipe/collab-send-message.graph.json",
@@ -313,6 +313,14 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 35] {
         (
             "docs/dagpipe/collab-binding-lifecycle.graph.json",
             include_str!("../../docs/dagpipe/collab-binding-lifecycle.graph.json"),
+        ),
+        (
+            "docs/dagpipe/collab-startup-recovery.graph.json",
+            include_str!("../../docs/dagpipe/collab-startup-recovery.graph.json"),
+        ),
+        (
+            "docs/dagpipe/collab-installer.graph.json",
+            include_str!("../../docs/dagpipe/collab-installer.graph.json"),
         ),
         (
             "docs/dagpipe/collab-work-role-registration.graph.json",
@@ -445,13 +453,15 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 35] {
     ]
 }
 
-fn design_graph_ids() -> [&'static str; 33] {
+fn design_graph_ids() -> [&'static str; 35] {
     [
         "collab-send-message",
         "collab-qqbot-inbound",
         "collab-qqbot-outbound",
         "collab-reply-obligation",
         "appsdk-collab-binding-lifecycle",
+        "appsdk-collab-startup-recovery",
+        "appsdk-collab-installer",
         "collab-work-role-registration",
         "collab-role-assignment",
         "collab-required-review",
@@ -483,12 +493,25 @@ fn design_graph_ids() -> [&'static str; 33] {
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 168] {
+fn design_graph_operator_names() -> [&'static str; 184] {
     [
+        "appsdk.collab_startup.read_state",
+        "appsdk.collab_startup.resolve_storage",
+        "appsdk.collab_startup.load_routes",
+        "appsdk.collab_startup.discover_bindings",
+        "appsdk.collab_startup.restore_projects",
+        "appsdk.collab_startup.start_listener",
+        "appsdk.collab_startup.emit_result",
+        "appsdk.collab_install.select",
+        "appsdk.collab_install.location",
+        "appsdk.collab_install.install",
+        "appsdk.collab_install.result",
         "appsdk.collab_send.classify_identity",
         "appsdk.collab_send.classify_address_form",
         "appsdk.collab_send.resolve_recipient_route",
         "appsdk.collab_send.resolve_reply_route",
+        "appsdk.collab_send.authenticate_source",
+        "appsdk.collab_send.authorize_scope",
         "appsdk.collab_send.commit_durable_message",
         "appsdk.collab_send.notify_recipient",
         "appsdk.collab_send.emit_send_result",
@@ -556,7 +579,8 @@ fn design_graph_operator_names() -> [&'static str; 168] {
         "appsdk.collab_authority.resolve_scope",
         "appsdk.collab_authority.transfer_master",
         "appsdk.collab_context.classify_name_resolution",
-        "appsdk.collab_context.commit_name_resolution",
+        "appsdk.collab_context.commit_control_resolution",
+        "appsdk.collab_context.complete_pending_effects",
         "appsdk.collab_context.emit_snapshot",
         "appsdk.collab_context.env_view",
         "appsdk.collab_context.read_name_ownership",
@@ -572,7 +596,9 @@ fn design_graph_operator_names() -> [&'static str; 168] {
         "appsdk.collab_desktop_delivery.commit",
         "appsdk.collab_context.resolve_root",
         "appsdk.collab_control_plane.authorize_reset",
+        "appsdk.collab_control_plane.commit_reset_control",
         "appsdk.collab_control_plane.online_project_reset",
+        "appsdk.collab_control_plane.complete_reset_pending",
         "appsdk.collab_control_plane.record_reset_receipt",
         "appsdk.collab_dsh_channel.admit_dsh_transport",
         "appsdk.collab_dsh_channel.arm_default_lease",

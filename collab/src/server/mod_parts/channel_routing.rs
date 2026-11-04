@@ -17,6 +17,14 @@ pub(crate) struct ResolvedInbound {
     pub body: String,
 }
 
+pub(crate) struct ChannelInboundAddressIntent {
+    /// Address text selected by the leading-address, explicit, or default rule.
+    pub address: String,
+    /// Body after removing a leading address.
+    pub body: String,
+    pub explicit_to: bool,
+}
+
 struct LeadingAddress {
     raw: String,
     body: String,
@@ -83,14 +91,11 @@ fn resolve_name_case_insensitive(
     }
 }
 
-fn resolve_ceo_holder(
+pub(crate) fn resolve_ceo_holder_from_grant(
     state: &crate::server::state::State,
     project_scope: &str,
+    grant: &crate::ceo::CeoGrant,
 ) -> Result<String, String> {
-    let grant = state.ceo_grant.as_ref().ok_or_else(|| {
-        "CHANNEL_CEO_GRANT_MISSING: no typed CEO grant is active; [ceo] does not fall back to the project master"
-            .to_string()
-    })?;
     if grant.workspace != project_scope {
         return Err(
             "CHANNEL_CEO_ROUTE_UNAVAILABLE: the active CEO grant belongs to another project".into(),
@@ -114,6 +119,17 @@ fn resolve_ceo_holder(
         );
     }
     Ok(holder.worker_id.clone())
+}
+
+fn resolve_ceo_holder(
+    state: &crate::server::state::State,
+    project_scope: &str,
+) -> Result<String, String> {
+    let grant = state.ceo_grant.as_ref().ok_or_else(|| {
+        "CHANNEL_CEO_GRANT_MISSING: no typed CEO grant is active; [ceo] does not fall back to the project master"
+            .to_string()
+    })?;
+    resolve_ceo_holder_from_grant(state, project_scope, grant)
 }
 
 /// The single case-insensitive stable-address resolver shared by `sendmessage`,
@@ -238,5 +254,49 @@ pub(crate) fn resolve_channel_inbound_target(
         to,
         recipient_address: default.target_address,
         body: body.to_owned(),
+    })
+}
+
+/// Resolve only the address intent before selecting a runtime. This keeps
+/// `ceo` from being interpreted through the caller's project-local grant. The
+/// manager uses the result to decide whether it must route through the host
+/// authority owner; all other addresses continue through the existing local
+/// resolver.
+pub(crate) fn channel_inbound_address_intent(
+    state: &crate::server::state::State,
+    channel: &str,
+    channel_instance: &str,
+    conversation: &str,
+    body: &str,
+    explicit_to: &str,
+) -> Result<ChannelInboundAddressIntent, String> {
+    if let Some(leading) = parse_leading_address(body) {
+        return Ok(ChannelInboundAddressIntent {
+            address: leading.raw,
+            body: leading.body,
+            explicit_to: false,
+        });
+    }
+    if !explicit_to.trim().is_empty() {
+        return Ok(ChannelInboundAddressIntent {
+            address: explicit_to.to_owned(),
+            body: body.to_owned(),
+            explicit_to: true,
+        });
+    }
+    let default = crate::server::conversation_default::lookup_default(
+        state,
+        channel,
+        channel_instance,
+        conversation,
+    )
+    .ok_or_else(|| {
+        "CHANNEL_DEFAULT_MISSING: this conversation has no default target; send an explicit [address]"
+            .to_string()
+    })?;
+    Ok(ChannelInboundAddressIntent {
+        address: default.target_address.clone(),
+        body: body.to_owned(),
+        explicit_to: false,
     })
 }

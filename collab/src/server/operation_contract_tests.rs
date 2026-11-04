@@ -44,6 +44,7 @@ fn query_request(capability: &str) -> IdentityContextRequest {
         invocation: "query".into(),
         action: "query".into(),
         facts: Default::default(),
+        invocation_cwd: None,
         approval: None,
         grant_approval: None,
         query: true,
@@ -58,6 +59,7 @@ fn malformed_query_request(capability: &str) -> IdentityContextRequest {
         invocation: "automatic".into(),
         action: "query".into(),
         facts: Default::default(),
+        invocation_cwd: None,
         approval: None,
         grant_approval: None,
         query: false,
@@ -120,10 +122,10 @@ fn cancelled_pending_operation_remains_cancelled_after_journal_reopen() {
     ));
     drop(journal);
     let journal = OperationJournal::open(&path).unwrap();
-    assert!(journal.is_cancelled("ctxop-1"));
+    assert!(journal.is_cancelled("ctxop-1").unwrap());
     // Re-admission cannot erase the durable cancellation decision.
     journal.install_safe("ctxop-1", Vec::new());
-    assert!(journal.is_cancelled("ctxop-1"));
+    assert!(journal.is_cancelled("ctxop-1").unwrap());
     let query = journal
         .query(
             &query_request("raw-capability-that-must-not-persist"),
@@ -463,6 +465,66 @@ fn illegal_and_terminal_phase_transitions_are_rejected_without_journal_delta() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn malformed_operation_journal_does_not_block_manager_without_pending_reset() {
+    let (server, root) = peer_tests::test_server();
+    let server = Arc::new(server);
+    let journal_path = server.host_paths.journal_path();
+    std::fs::create_dir_all(journal_path.parent().unwrap()).unwrap();
+    std::fs::write(&journal_path, b"{malformed}\n").unwrap();
+
+    let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths)
+        .expect("startup without a pending reset must not replay the operation journal");
+    assert!(manager.prune_stale_routes().is_ok());
+    let error = manager
+        .operation_journal
+        .query(
+            &query_request("raw-capability-that-must-not-persist"),
+            "/tmp/project",
+            crate::identity::CLI_APP_SERVER_ID,
+        )
+        .expect_err("the first identity query must expose the broken journal");
+    assert!(
+        error.starts_with("OPERATION_JOURNAL_REPLAY_FAILED"),
+        "{error}"
+    );
+
+    drop(manager);
+    drop(server);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn malformed_operation_journal_blocks_startup_with_a_pending_reset() {
+    let (server, root) = peer_tests::test_server();
+    let server = Arc::new(server);
+    let journal_path = server.host_paths.journal_path();
+    std::fs::create_dir_all(journal_path.parent().unwrap()).unwrap();
+    std::fs::write(&journal_path, b"{malformed}\n").unwrap();
+
+    let project = root.join("pending-reset");
+    std::fs::create_dir_all(project.join(".agent-collab/server")).unwrap();
+    server
+        .commit_checked(&[Event::ProjectResetStarted {
+            project_scope: project.canonicalize().unwrap().display().to_string(),
+            clear_local: true,
+            worker_ids: Vec::new(),
+        }])
+        .unwrap();
+
+    let error = match ProjectRuntimeManager::new(server.clone(), &server.host_paths) {
+        Ok(_) => panic!("pending reset recovery must fail closed when the journal is broken"),
+        Err(error) => error,
+    };
+    assert!(
+        error.starts_with("OPERATION_JOURNAL_REPLAY_FAILED"),
+        "{error}"
+    );
+
+    drop(server);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 async fn send_request(socket: &Path, request: &RequestEnvelope) -> crate::proto::Resp {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let mut stream = tokio::net::UnixStream::connect(socket).await.unwrap();
@@ -490,7 +552,7 @@ async fn wait_for_socket(socket: &Path) {
 }
 
 #[tokio::test]
-async fn degraded_startup_serves_only_authorized_query_and_keeps_project_journal_unchanged() {
+async fn project_replay_failure_refuses_startup_without_publishing_socket() {
     let _startup_test_lock = startup_test_lock();
     let root = test_root("degraded");
     let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
@@ -520,74 +582,31 @@ async fn degraded_startup_serves_only_authorized_query_and_keeps_project_journal
     let host_before = std::fs::read(host_paths.journal_path()).unwrap();
 
     let socket = host_paths.socket_path();
-    let running = tokio::spawn(run_with_host_paths(
-        Scope { root: root.clone() },
-        host_paths.clone(),
-    ));
-    wait_for_socket(&socket).await;
-
-    let response = send_request(
-        &socket,
-        &RequestEnvelope::with_context(
-            Req::IdentityContext {
-                facts: Default::default(),
-                identity_context: Some(malformed_query_request("raw-malformed-capability")),
-            },
-            context.clone(),
-        ),
-    )
-    .await;
-    assert!(!response.ok);
-    assert_eq!(
-        response.error.as_deref(),
-        Some("IDENTITY_OPERATION_QUERY_SHAPE_INVALID")
+    let pid_path = host_paths.pid_path();
+    let error = run_with_host_paths(Scope { root: root.clone() }, host_paths.clone())
+        .await
+        .expect_err("a project replay failure must refuse startup");
+    let rendered = format!("{error:#}");
+    assert!(
+        rendered.contains("PROJECT_RUNTIME_REPLAY_FAILED"),
+        "{rendered}"
     );
-
-    let response = send_request(
-        &socket,
-        &RequestEnvelope::with_context(
-            Req::IdentityContext {
-                facts: Default::default(),
-                identity_context: Some(query_request("raw-capability-that-must-not-persist")),
-            },
-            context.clone(),
-        ),
-    )
-    .await;
-    assert!(response.ok, "{response:?}");
-    assert_eq!(response.data["result"]["operation_id"], "ctxop-1");
-    assert_eq!(
-        host_before,
-        std::fs::read(host_paths.journal_path()).unwrap()
+    assert!(rendered.contains("journal replay failed"), "{rendered}");
+    assert!(
+        !socket.exists(),
+        "{} must not be published",
+        socket.display()
     );
-
-    let response = send_request(
-        &socket,
-        &RequestEnvelope::with_context(
-            Req::Register {
-                worker_id: "worker-1".into(),
-                token: "token-1".into(),
-                cwd: root.display().to_string(),
-                candidates: Some(TransportCandidates::default()),
-            },
-            context,
-        ),
-    )
-    .await;
-    assert!(!response.ok);
-    assert!(response
-        .error
-        .as_deref()
-        .unwrap_or_default()
-        .starts_with("PROJECT_RUNTIME_UNAVAILABLE"));
+    assert!(
+        !pid_path.exists(),
+        "{} must not be published",
+        pid_path.display()
+    );
     assert_eq!(project_before, std::fs::read(&project_journal).unwrap());
     assert_eq!(
         host_before,
         std::fs::read(host_paths.journal_path()).unwrap()
     );
-
-    running.abort();
-    let _ = running.await;
     std::fs::remove_dir_all(root).unwrap();
 }
 

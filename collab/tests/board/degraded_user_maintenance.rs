@@ -64,19 +64,7 @@ fn degraded_daemon_keeps_authenticated_user_shutdown_available() {
     };
     let mut child = OwnedChild(start());
     let socket = host.join("server.sock");
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !socket.exists() && Instant::now() < deadline {
-        assert!(
-            child.0.try_wait().unwrap().is_none(),
-            "isolated daemon exited"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    assert!(
-        socket.exists(),
-        "isolated daemon did not become ready: {}",
-        std::fs::read_to_string(root.join("daemon.log")).unwrap_or_default()
-    );
+    super::daemon_readiness::wait_for_ping(&mut child.0, &socket, Duration::from_secs(30));
     assert_ne!(
         request(&socket, json!({"op":"Ping"}))["degraded"],
         true,
@@ -90,11 +78,7 @@ fn degraded_daemon_keeps_authenticated_user_shutdown_available() {
     std::fs::write(&journal, b"{malformed-fixture}\n").unwrap();
     std::fs::remove_file(&socket).ok();
     child.0 = start();
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !socket.exists() && Instant::now() < deadline {
-        assert!(child.0.try_wait().unwrap().is_none());
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    super::daemon_readiness::wait_for_ping(&mut child.0, &socket, Duration::from_secs(30));
     assert_eq!(request(&socket, json!({"op":"Ping"}))["degraded"], true);
     // Keep another client connected: successful maintenance must also release it.
     let mut idle_client = UnixStream::connect(&socket).unwrap();

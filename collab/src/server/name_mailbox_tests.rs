@@ -8,6 +8,7 @@ fn holder(worker: &str, session: &str, revision: u64) -> NameOccupancy {
         session_id: session.into(),
         occupancy_revision: revision,
         updated_ms: revision as i64,
+        pane_anchor: None,
     }
 }
 
@@ -45,6 +46,7 @@ fn mailbox_name_selection(release_previous: bool) {
         session_id: worker.into(),
         occupancy_revision: revision,
         updated_ms: revision as i64,
+        pane_anchor: None,
     };
     let mut ids = Vec::new();
     for name in ["Jenny", "Alice"] {
@@ -184,7 +186,7 @@ fn name_mailbox_typed_address_replay_snapshot_reset_and_history() {
     newer.session_id = "s3".into();
     newer.occupancy_revision = 3;
     snapshot.msgs.get_mut("legacy").unwrap().to = "new".into();
-    let handoffs = name_mailbox::handoff_events(&snapshot, "/project", &newer);
+    let handoffs = name_mailbox::handoff_events(&snapshot, "/project", &newer, &[]);
     assert_eq!(handoffs.len(), 2);
     for event in handoffs {
         snapshot.apply_checked(&event).unwrap();

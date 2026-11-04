@@ -81,8 +81,9 @@ impl ProjectRuntimeManager {
         &self,
         context: &ProjectContext,
         facts: &IdentityFacts,
+        continuation_verified: bool,
     ) -> anyhow::Result<IdentityFacts> {
-        self.observe_identity_facts_with_pane(context, facts)
+        self.observe_identity_facts_with_pane(context, facts, continuation_verified)
             .map(|(facts, _)| facts)
     }
 
@@ -90,10 +91,16 @@ impl ProjectRuntimeManager {
     /// caller ancestry just observed here may populate the name pane anchor;
     /// persisted transport, caller-supplied tmux candidates and pane anchors
     /// completed from durable routes cannot.
+    ///
+    /// `continuation_verified` marks facts the daemon rebuilt from a
+    /// participant-continuation transport already verified by
+    /// `register_reply::accept`. The flag is daemon-internal; a serialized
+    /// request can never set it.
     fn observe_identity_facts_with_pane(
         &self,
         context: &ProjectContext,
         facts: &IdentityFacts,
+        continuation_verified: bool,
     ) -> anyhow::Result<(IdentityFacts, Option<crate::proto::TmuxPaneAnchor>)> {
         let mut facts = facts.clone();
         if facts.dsh.is_some() || facts.dsh_session_id.is_some() {
@@ -108,9 +115,19 @@ impl ProjectRuntimeManager {
             return Ok((facts, None));
         }
         let Some(caller_pid) = facts.caller_pid else {
-            // A caller-supplied tmux name without a live daemon observation is
-            // not an identity fact. The name owner must fail closed to a fresh
-            // name rather than trust request payload it did not observe.
+            // A caller-supplied tmux candidate without a live daemon
+            // observation is not an identity fact. It must never influence
+            // staged-identity recovery or pane-route selection, and the name
+            // owner must fail closed to a fresh name rather than trust request
+            // payload the daemon did not observe. The one exception is a
+            // participant continuation, whose tmux transport was already
+            // verified by `register_reply::accept` (challenge, marker, and a
+            // live pane probe); that transport stays a selected identity fact.
+            if !continuation_verified {
+                facts.tmux = None;
+                facts.tmux_anchor = None;
+                facts.pane_hint = None;
+            }
             facts.tmux_session_name = None;
             return Ok((facts, None));
         };
@@ -650,7 +667,7 @@ impl ProjectRuntimeManager {
         }
         if name_adjudication_control(request)?.is_some() {
             let facts = self
-                .observe_identity_facts(context, &request.facts)
+                .observe_identity_facts(context, &request.facts, false)
                 .map_err(|error| ApprovedAdmissionError::Error(error.to_string()))?;
             if self
                 .current_session_identity(context, &facts)
@@ -689,7 +706,7 @@ impl ProjectRuntimeManager {
             }
         }
         let observed_facts = self
-            .observe_identity_facts(context, &request.facts)
+            .observe_identity_facts(context, &request.facts, false)
             .map_err(|error| ApprovedAdmissionError::Error(error.to_string()))?;
         if explicit_master {
             if self.current_session_identity(context, &observed_facts)

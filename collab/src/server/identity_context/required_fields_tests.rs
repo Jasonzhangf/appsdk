@@ -159,7 +159,9 @@ fn dsh_facts_do_not_compete_with_launcher_tmux_ancestry() {
         ..IdentityFacts::default()
     };
 
-    let observed = manager.observe_identity_facts(&context, &facts).unwrap();
+    let observed = manager
+        .observe_identity_facts(&context, &facts, false)
+        .unwrap();
 
     assert_eq!(observed.dsh, Some(dsh));
     assert!(observed.tmux.is_none());
@@ -178,11 +180,156 @@ fn caller_supplied_tmux_session_name_requires_live_pane_observation() {
         ..IdentityFacts::default()
     };
 
-    let observed = manager.observe_identity_facts(&context, &facts).unwrap();
+    let observed = manager
+        .observe_identity_facts(&context, &facts, false)
+        .unwrap();
 
     assert!(
         observed.tmux_session_name.is_none(),
         "a caller-controlled tmux name is not an observed name fact"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn caller_supplied_tmux_candidate_without_live_observation_is_cleared() {
+    let (host, root) = test_server();
+    let manager = recovery_manager(Arc::new(host));
+    let context = recovery_context(&root);
+    let candidate = tmux_anchor();
+    let facts = IdentityFacts {
+        caller_pid: None,
+        session_id: Some("caller-claimed-session".into()),
+        pane_hint: Some("%3".into()),
+        tmux_anchor: Some(TmuxPaneAnchor {
+            socket_path: candidate.endpoint.socket_path.clone(),
+            pane_id: candidate.endpoint.pane_id.clone(),
+        }),
+        tmux: Some(candidate),
+        tmux_session_name: Some("Alice".into()),
+        ..IdentityFacts::default()
+    };
+
+    let (observed, pane_anchor) = manager
+        .observe_identity_facts_with_pane(&context, &facts, false)
+        .unwrap();
+
+    assert!(
+        observed.tmux.is_none(),
+        "an unverified caller tmux candidate must not reach identity staging"
+    );
+    assert!(
+        observed.tmux_anchor.is_none(),
+        "an unverified caller pane anchor must not survive observation"
+    );
+    assert!(observed.tmux_session_name.is_none());
+    assert!(observed.pane_hint.is_none());
+    assert!(
+        pane_anchor.is_none(),
+        "no live pane observation may produce a name anchor from request facts"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn verified_daemon_continuation_tmux_fact_survives_observation() {
+    let (host, root) = test_server();
+    let manager = recovery_manager(Arc::new(host));
+    let context = recovery_context(&root);
+    let candidate = tmux_anchor();
+    let facts = IdentityFacts {
+        caller_pid: None,
+        session_id: Some("continuation-session".into()),
+        tmux: Some(candidate.clone()),
+        tmux_session_name: Some("Alice".into()),
+        ..IdentityFacts::default()
+    };
+
+    let (observed, _) = manager
+        .observe_identity_facts_with_pane(&context, &facts, true)
+        .unwrap();
+
+    assert_eq!(
+        observed.tmux.as_ref().map(|candidate| &candidate.endpoint),
+        Some(&candidate.endpoint),
+        "an accept-verified participant continuation keeps its tmux transport"
+    );
+    assert!(
+        observed.tmux_session_name.is_none(),
+        "the fixed session name is still re-observed, never taken from the request"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+fn rename_anchor_fixture(kind: TransportKind) -> (Arc<Server>, PathBuf) {
+    let (server, root) = test_server();
+    let server = Arc::new(server);
+    let mut transport = SelectedTransport {
+        kind: TransportKind::AppServer,
+        endpoint: Some("unix:///tmp/rename-anchor-native.sock".into()),
+        namespace: Some("codex_tui".into()),
+        session_id: Some("rename-anchor-session".into()),
+        thread_id: Some("rename-anchor-thread".into()),
+        capabilities: Default::default(),
+        tmux_endpoint: None,
+        self_check: "rename anchor fixture".into(),
+    };
+    if kind == TransportKind::Tmux {
+        let mut endpoint = tmux_anchor().endpoint;
+        endpoint.socket_path = std::env::temp_dir()
+            .join(format!(
+                "collab-rename-anchor-unreachable-{}-{}.sock",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ))
+            .to_string_lossy()
+            .into_owned();
+        transport.kind = TransportKind::Tmux;
+        transport.endpoint = Some(endpoint.socket_path.clone());
+        transport.namespace = Some(endpoint.tmux_session_id.clone());
+        transport.session_id = Some("rename-anchor-session".into());
+        transport.thread_id = Some("rename-anchor-thread".into());
+        transport.tmux_endpoint = Some(endpoint);
+    }
+    let receipt = crate::server::peer_tests::seed_committed_owner(
+        &server,
+        "rename-anchor-peer",
+        "rename-anchor-token",
+        &transport,
+        &root.display().to_string(),
+        Some(AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap()),
+    );
+    assert!(receipt.ok, "{receipt:?}");
+    (server, root)
+}
+
+#[test]
+fn registered_tui_binding_with_unreachable_session_aborts_rename() {
+    let (server, root) = rename_anchor_fixture(TransportKind::Tmux);
+    let result = rename_anchor(&server, "rename-anchor-peer", "Alice");
+    let error = match result {
+        Ok(_) => {
+            panic!("a registered TUI tmux endpoint that cannot be read must fail closed, not skip")
+        }
+        Err(error) => error,
+    };
+    assert!(
+        error.starts_with("TMUX_TUI_ANCHOR_UNREACHABLE:"),
+        "unreachable TUI anchor must be a typed failure: {error}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn binding_without_tmux_endpoint_skips_rename() {
+    let (server, root) = rename_anchor_fixture(TransportKind::AppServer);
+    let result = rename_anchor(&server, "rename-anchor-peer", "Alice");
+    assert!(
+        matches!(result, Ok(None)),
+        "a caller with no tmux endpoint skips the rename"
     );
     std::fs::remove_dir_all(root).unwrap();
 }

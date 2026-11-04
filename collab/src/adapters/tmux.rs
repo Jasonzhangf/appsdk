@@ -431,6 +431,22 @@ pub fn session_name_if_live(endpoint: &TmuxEndpoint) -> Result<Option<String>, S
     }
 }
 
+/// Read the current session name of a registered TUI binding, requiring the
+/// tmux endpoint to be reachable. Unlike `session_name_if_live`, a missing or
+/// unreachable server here is a typed failure: the identity owner must abort
+/// rather than commit a name without a live, readable anchor. `caller_pid`-less
+/// non-TUI callers never reach this path because they have no registered tmux
+/// endpoint.
+pub fn require_live_session_name(endpoint: &TmuxEndpoint) -> Result<String, String> {
+    match observe_session_name(endpoint) {
+        Ok(name) => Ok(name),
+        Err(error) if endpoint_is_absent(&error) => {
+            Err(format!("TMUX_TUI_ANCHOR_UNREACHABLE: {error}"))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 pub fn rename_session(endpoint: &TmuxEndpoint, target: &str) -> Result<(), String> {
     validate_endpoint(endpoint)?;
     validate_session_name(target)?;
@@ -1532,6 +1548,52 @@ pub(crate) mod tests {
         // success; callers must not treat a repeated context as a rename error.
         rename_session(&endpoint, "Jenny").unwrap();
         assert_eq!(observe_session_name(&endpoint).unwrap(), "Jenny");
+    }
+
+    #[test]
+    fn session_name_if_live_returns_none_for_absent_server() {
+        let endpoint = TmuxEndpoint {
+            socket_path: std::env::temp_dir()
+                .join("collab-session-name-if-live-absent.sock")
+                .to_string_lossy()
+                .into_owned(),
+            server_pid: 42,
+            tmux_session_id: "$1".into(),
+            pane_id: "%1".into(),
+            pane_pid: 99,
+            codex_session_id: None,
+            codex_thread_id: None,
+        };
+        // A non-TUI caller has no live anchor; the optional observation skips.
+        assert_eq!(session_name_if_live(&endpoint).unwrap(), None);
+    }
+
+    #[test]
+    fn registered_tui_endpoint_requires_a_live_readable_session() {
+        let endpoint = TmuxEndpoint {
+            socket_path: std::env::temp_dir()
+                .join("collab-registered-tui-unreachable.sock")
+                .to_string_lossy()
+                .into_owned(),
+            server_pid: 42,
+            tmux_session_id: "$1".into(),
+            pane_id: "%1".into(),
+            pane_pid: 99,
+            codex_session_id: None,
+            codex_thread_id: None,
+        };
+        // A registered TUI binding is not optional: its endpoint must be live
+        // and readable before a name commit, not silently skipped.
+        let error = require_live_session_name(&endpoint).unwrap_err();
+        assert!(error.starts_with("TMUX_TUI_ANCHOR_UNREACHABLE:"), "{error}");
+    }
+
+    #[test]
+    fn registered_tui_endpoint_reads_name_when_the_session_is_live() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let tmux = IsolatedTmux::start();
+        let endpoint = tmux.endpoint();
+        assert_eq!(require_live_session_name(&endpoint).unwrap(), "collab-test");
     }
 
     #[test]

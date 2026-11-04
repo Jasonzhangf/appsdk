@@ -81,11 +81,12 @@ pub(crate) fn rename_anchor(
             });
         (caller, outgoing)
     };
-    let Some(caller_previous) =
-        crate::client::adapters::tmux::session_name_if_live(&caller)?
-    else {
-        return Ok(None);
-    };
+    // The caller carries a registered TUI binding, so its tmux endpoint must
+    // be a live, readable session before any name move. An absent or
+    // unreachable server is a typed failure here, not a non-TUI skip: a name
+    // commit without a readable anchor would persist a stale session name.
+    // Only a binding with no tmux endpoint (handled above) skips the rename.
+    let caller_previous = crate::client::adapters::tmux::require_live_session_name(&caller)?;
     if caller_previous == target {
         return Ok(None);
     }
@@ -183,7 +184,7 @@ impl ProjectRuntimeManager {
                 Ok(None) => {}
             }
             let (observed_facts, _) =
-                match self.observe_identity_facts_with_pane(&context, &request.facts) {
+                match self.observe_identity_facts_with_pane(&context, &request.facts, false) {
                     Ok(observed) => observed,
                     Err(error) => return (self.host.clone(), Resp::err(format!("{error:#}"))),
                 };
@@ -275,6 +276,7 @@ impl ProjectRuntimeManager {
                             match self.completed_context_readback(
                                 &context,
                                 continuation_facts.as_ref().unwrap_or(&request.facts),
+                                continuation_facts.is_some(),
                             ) {
                                 Ok((runtime, snapshot)) => (runtime, Some(snapshot)),
                                 Err(error) => {
@@ -346,9 +348,11 @@ impl ProjectRuntimeManager {
                 return (self.host.clone(), Resp::err(error));
             }
         };
+        let continuation_verified = continuation_facts.is_some();
         let facts = match self.preflight_identity_facts(
             &context,
             continuation_facts.unwrap_or_else(|| request.facts.clone()),
+            continuation_verified,
         ) {
             Ok((facts, _)) => facts,
             Err(PreflightIdentityError::MissingFacts(data)) => {
@@ -857,6 +861,7 @@ impl ProjectRuntimeManager {
         &self,
         context: &ProjectContext,
         facts: &IdentityFacts,
+        continuation_verified: bool,
     ) -> anyhow::Result<(Arc<Server>, serde_json::Value)> {
         if context.app_scope_id.as_str() != identity::CLI_APP_SERVER_ID
             || context.runtime_context.is_some()
@@ -866,7 +871,9 @@ impl ProjectRuntimeManager {
             );
         }
         let mut facts = facts.clone();
-        facts = self.observe_identity_facts(context, &facts)?;
+        facts = self
+            .observe_identity_facts_with_pane(context, &facts, continuation_verified)
+            .map(|(facts, _)| facts)?;
         self.complete_persisted_tmux_facts(context, &mut facts)?;
         validate_facts(&facts)?;
         let scope = Scope {
@@ -1591,6 +1598,7 @@ impl ProjectRuntimeManager {
         &self,
         context: &ProjectContext,
         mut facts: IdentityFacts,
+       continuation_verified: bool,
     ) -> Result<(IdentityFacts, Option<crate::proto::TmuxPaneAnchor>), PreflightIdentityError> {
         if context.app_scope_id.as_str() != identity::CLI_APP_SERVER_ID
             || context.runtime_context.is_some()
@@ -1607,7 +1615,7 @@ impl ProjectRuntimeManager {
             .map_err(|error| PreflightIdentityError::Error(anyhow::Error::msg(error)))?;
         let observed_pane;
         (facts, observed_pane) = self
-            .observe_identity_facts_with_pane(context, &facts)
+            .observe_identity_facts_with_pane(context, &facts, continuation_verified)
             .map_err(PreflightIdentityError::Error)?;
         self.complete_persisted_tmux_facts(context, &mut facts)
             .map_err(PreflightIdentityError::Error)?;

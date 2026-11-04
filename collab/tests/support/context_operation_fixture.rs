@@ -121,7 +121,7 @@ impl Fixture {
             host_state,
             tmux_socket: tmux_socket.clone(),
             daemon: None,
-            owned_sessions: std::sync::Mutex::new(vec![label.to_owned()]),
+            owned_sessions: std::sync::Mutex::new(Vec::new()),
             hidden_project_journal: None,
             hook_socket: None,
         };
@@ -129,6 +129,7 @@ impl Fixture {
             &tmux_socket,
             &["new-session", "-d", "-s", label, pane_command],
         );
+        fixture.track_tmux_session(label);
         std::fs::write(
             fixture.host_state.join("tmux-endpoints.json"),
             serde_json::to_vec(&json!({"endpoints": [tmux_socket]})).unwrap(),
@@ -891,7 +892,25 @@ impl Drop for DaemonPause {
 
 impl Fixture {
     pub fn track_tmux_session(&self, session: impl Into<String>) {
-        self.owned_sessions.lock().unwrap().push(session.into());
+        let target = session.into();
+        let stable = String::from_utf8(
+            tmux(
+                &self.tmux_socket,
+                &[
+                    "display-message",
+                    "-p",
+                    "-t",
+                    target.as_str(),
+                    "#{session_id}",
+                ],
+            )
+            .stdout,
+        )
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(target);
+        self.owned_sessions.lock().unwrap().push(stable);
     }
 }
 

@@ -69,6 +69,7 @@ fn facts(
         caller_pid: None,
         pane_hint: None,
         tmux,
+        tmux_session_name: None,
         tmux_anchor: None,
         dsh_session_id: None,
     }
@@ -831,6 +832,7 @@ fn archived_route_recovery_reads_without_calling_back() {
         caller_pid: None,
         pane_hint: None,
         tmux: Some(candidate.clone()),
+        tmux_session_name: None,
         tmux_anchor: None,
         dsh_session_id: None,
     };

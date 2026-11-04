@@ -1552,6 +1552,14 @@ fn handle_master_promote(
         return Resp::err("master promotion requires explicit user approval");
     }
     drop(state);
+    // Promotion changes the fixed role name from the pool name to Jenny. Use
+    // the same temporary-name exchange as context so an incumbent Jenny tmux
+    // session never collides with the incoming one; a failed rename aborts
+    // promotion instead of leaving the committed name and session out of sync.
+    let anchor_rename = match identity_context::rename_anchor(server, &worker_id, "Jenny") {
+        Ok(rename) => rename,
+        Err(error) => return Resp::err(error),
+    };
     let operation_id = format!("master-promote-{worker_id}-{}", now_ms());
     let resolution = match name_resolution::resolve_registered_name_with_authorization(
         server,
@@ -1568,9 +1576,23 @@ fn handle_master_promote(
         None,
     ) {
         Ok(resolution) => resolution,
-        Err(error) => return Resp::err(error),
+        Err(error) => {
+            if let Some(rename) = anchor_rename.as_ref() {
+                if let Err(rollback) = rename.rollback() {
+                    return Resp::err(format!(
+                        "{error}; TMUX_SESSION_RENAME_ROLLBACK_FAILED: {rollback}"
+                    ));
+                }
+            }
+            return Resp::err(error);
+        }
     };
     if resolution["outcome"] != "committed" {
+        if let Some(rename) = anchor_rename.as_ref() {
+            if let Err(error) = rename.rollback() {
+                return Resp::err(format!("TMUX_SESSION_RENAME_ROLLBACK_FAILED: {error}"));
+            }
+        }
         return Resp::err_data("NAME_RECOVERY_REQUIRED: continue through collab context --approve-grant with restore_master and the reported confirmation or pending operation", resolution);
     }
     let state = server.state.lock().unwrap();

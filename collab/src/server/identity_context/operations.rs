@@ -1,3 +1,129 @@
+/// Undo record for a TUI session-name move. A master transfer swaps the
+/// incoming and outgoing role names, so both sessions may need restoration.
+pub(crate) struct TmuxAnchorRename {
+    caller: crate::proto::TmuxEndpoint,
+    caller_previous: String,
+    target: String,
+    outgoing: Option<crate::proto::TmuxEndpoint>,
+}
+
+impl TmuxAnchorRename {
+    pub(crate) fn rollback(&self) -> Result<(), String> {
+        let Some(outgoing) = self.outgoing.as_ref() else {
+            return crate::client::adapters::tmux::rename_session(
+                &self.caller,
+                &self.caller_previous,
+            );
+        };
+        // The forward swap leaves caller=target and outgoing=caller_previous.
+        // Restore in reverse order through a temporary name so neither the
+        // caller nor the outgoing session needs to claim a duplicate name.
+        let temporary = anchor_swap_name();
+        crate::client::adapters::tmux::rename_session(&self.caller, &temporary)?;
+        if let Err(error) =
+            crate::client::adapters::tmux::rename_session(outgoing, &self.target)
+        {
+            let _ = crate::client::adapters::tmux::rename_session(&self.caller, &self.target);
+            return Err(error);
+        }
+        if let Err(error) = crate::client::adapters::tmux::rename_session(&self.caller, &self.caller_previous) {
+            let _ = crate::client::adapters::tmux::rename_session(outgoing, &self.caller_previous);
+            let _ = crate::client::adapters::tmux::rename_session(&self.caller, &self.target);
+            return Err(error);
+        }
+        Ok(())
+    }
+}
+
+fn anchor_swap_name() -> String {
+    format!("collab-anchor-{}-{}", std::process::id(), super::now_ms())
+}
+
+/// Move the calling TUI session to the name the name owner is about to
+/// commit. When that name is still carried by the outgoing master, swap the
+/// two session names through a temporary anchor so neither commit nor rename
+/// observes two sessions with the same fixed name.
+pub(crate) fn rename_anchor(
+    server: &Server,
+    worker_id: &str,
+    target: &str,
+) -> Result<Option<TmuxAnchorRename>, String> {
+    let (caller, outgoing) = {
+        let state = server.state.lock().unwrap();
+        let Some(route) = server_route_scope(server, &state)? else {
+            return Ok(None);
+        };
+        let Some(project) = state.global.lookup_project_for_route(&route) else {
+            return Ok(None);
+        };
+        let Some(caller) = project
+            .runtime_bindings
+            .values()
+            .find(|binding| binding.agent_id.as_str() == worker_id)
+            .and_then(|binding| binding.tmux_endpoint.clone())
+        else {
+            return Ok(None);
+        };
+        let outgoing = state
+            .name_occupancy(route.project_scope_id.as_str(), target)
+            .filter(|holder| holder.worker_id != worker_id)
+            .and_then(|holder| {
+                project
+                    .runtime_bindings
+                    .values()
+                    .filter(|binding| {
+                        binding.agent_id.as_str() == holder.worker_id.as_str()
+                            && binding.session_id.as_ref().map(|session| session.as_str())
+                                == Some(holder.session_id.as_str())
+                    })
+                    .max_by_key(|binding| binding.endpoint_generation)
+                    .and_then(|binding| binding.tmux_endpoint.clone())
+            });
+        (caller, outgoing)
+    };
+    let Some(caller_previous) =
+        crate::client::adapters::tmux::session_name_if_live(&caller)?
+    else {
+        return Ok(None);
+    };
+    if caller_previous == target {
+        return Ok(None);
+    }
+    if let Some(outgoing) = outgoing.as_ref() {
+        if outgoing != &caller
+            && crate::client::adapters::tmux::session_name_if_live(outgoing)?
+                == Some(target.to_owned())
+        {
+            let temporary = anchor_swap_name();
+            crate::client::adapters::tmux::rename_session(&caller, &temporary)?;
+            if let Err(error) =
+                crate::client::adapters::tmux::rename_session(outgoing, &caller_previous)
+            {
+                let _ = crate::client::adapters::tmux::rename_session(&caller, &caller_previous);
+                return Err(error);
+            }
+            if let Err(error) = crate::client::adapters::tmux::rename_session(&caller, target) {
+                let _ = crate::client::adapters::tmux::rename_session(outgoing, target);
+                let _ = crate::client::adapters::tmux::rename_session(&caller, &caller_previous);
+                return Err(error);
+            }
+            return Ok(Some(TmuxAnchorRename {
+                caller,
+                caller_previous,
+                target: target.to_owned(),
+                outgoing: Some(outgoing.clone()),
+            }));
+        }
+    }
+    crate::client::adapters::tmux::rename_session(&caller, target)?;
+    Ok(Some(TmuxAnchorRename {
+        caller,
+        caller_previous,
+        target: target.to_owned(),
+        outgoing: None,
+    }))
+}
+
 impl ProjectRuntimeManager {
     pub(super) fn identity_context(
         &self,
@@ -927,6 +1053,22 @@ impl ProjectRuntimeManager {
             .or(request.approval.as_ref())
             .and_then(|approval| approval.get("authorization"))
             .and_then(serde_json::Value::as_str);
+        let rename_target = if control.is_none() {
+            name_resolution::preview_registered_name(
+                runtime,
+                &identity.worker_id,
+                operation,
+                &request.invocation,
+                intent.clone(),
+                pane_anchor.clone(),
+            )?
+        } else {
+            None
+        };
+        let mut anchor_rename = None;
+        if let Some(target) = rename_target.as_deref() {
+            anchor_rename = rename_anchor(runtime, &identity.worker_id, target)?;
+        }
         let outcome = if let Some((operation, verdict, evidence)) = control {
             let adjudication = super::name_stewardship::adjudicate(
                 runtime,
@@ -944,7 +1086,16 @@ impl ProjectRuntimeManager {
                     json!({"outcome":"failed", "operation_id":operation, "error":error});
                 return Err(error);
             }
-            adjudication.data
+            let data = adjudication.data;
+            // The adjudication owner commits the target occupancy itself, so
+            // re-anchor after that commit. The call is idempotent when the
+            // session already carries the applied name.
+            if data["outcome"] == "applied" {
+                if let Some(target) = data["recovery"]["target_name"].as_str() {
+                    rename_anchor(runtime, &identity.worker_id, target)?;
+                }
+            }
+            data
         } else {
             match self.resolve_context_name_control_first(
                 runtime,
@@ -967,11 +1118,35 @@ impl ProjectRuntimeManager {
                         authorization,
                         pane_anchor,
                     ) {
-                        Ok(value) => value,
-                        Err(error) => return Err(error),
+                        Ok(outcome) if outcome["outcome"] == "committed" => outcome,
+                        Ok(outcome) => {
+                            if let Some(rename) = anchor_rename.as_ref() {
+                                rename.rollback()?;
+                            }
+                            outcome
+                        }
+                        Err(error) => {
+                            if let Some(rename) = anchor_rename.as_ref() {
+                                if let Err(rollback) = rename.rollback() {
+                                    return Err(format!(
+                                        "{error}; TMUX_SESSION_RENAME_ROLLBACK_FAILED: {rollback}"
+                                    ));
+                                }
+                            }
+                            return Err(error);
+                        }
                     }
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    if let Some(rename) = anchor_rename.as_ref() {
+                        if let Err(rollback) = rename.rollback() {
+                            return Err(format!(
+                                "{error}; TMUX_SESSION_RENAME_ROLLBACK_FAILED: {rollback}"
+                            ));
+                        }
+                    }
+                    return Err(error);
+                }
             }
         };
         let effects = serde_json::from_value(outcome["effects"].clone())
@@ -993,9 +1168,7 @@ impl ProjectRuntimeManager {
             )
             .1;
         if !refreshed.ok {
-            return Err(refreshed
-                .error
-                .unwrap_or_else(|| "NAME_READBACK_FAILED".into()));
+            return Err(refreshed.error.unwrap_or_else(|| "NAME_READBACK_FAILED".into()));
         }
         response.data["snapshot"] = refreshed.data;
         name_resolution::project_registered_name(

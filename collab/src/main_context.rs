@@ -384,6 +384,7 @@ fn parse_identity_supplement(raw: &str) -> anyhow::Result<IdentityFacts> {
         caller_pid: None,
         pane_hint: None,
         tmux: None,
+        tmux_session_name: None,
         tmux_anchor: None,
     })
 }

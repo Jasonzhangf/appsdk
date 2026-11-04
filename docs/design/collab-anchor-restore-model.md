@@ -1,12 +1,12 @@
 # Collab 身份恢复：当前项目与 session
 
-本文件是身份选择的唯一设计正文。2026-10-20 用户明确要求以当前 cwd 和 tmux session 为准，替换历史 pane 归属、歧义拒绝和多重批准流程。实现入口是 `identity_resolver.rs::resolve_for_daemon_with_route_at`，提交仍由现有身份和 master authority owner 完成。
+本文件是身份选择的唯一设计正文。2026-10-20 用户明确要求以当前 cwd 和 tmux session 为准，替换历史 pane 归属、歧义拒绝和多重批准流程。2026-11-03 用户进一步要求：TUI 的稳定身份键是首次成功注册后固定的 tmux session 名字（角色注册名），首次绑定把当前 tmux session 改名为该名字并读回确认，之后该 pane 固定此名，后续绑定与恢复按此名续接；改名失败不提交身份，持久化失败回滚原名。Codex Desktop 按 agent sessionID、DSH 按 gateway sessionID 绑定，两者不执行 tmux 改名。实现入口是 `identity_resolver.rs::resolve_for_daemon_with_route_at`，提交仍由现有身份和 master authority owner 完成。
 
 ## 默认 context
 
-`collab context` 读取当前 cwd 所属 project 和当前 tmux session。历史 pane 绑定到哪个 worker 或 project 都不能改变当前 project，也不能阻断恢复。已有 worktree 的项目映射可用于解析 cwd；worktree 中的任务和工作内容不参与身份准入。
+`collab context` 读取当前 cwd 所属 project 和当前 tmux session 名字。历史 pane 绑定到哪个 worker 或 project 都不能改变当前 project，也不能阻断恢复。已有 worktree 的项目映射可用于解析 cwd；worktree 中的任务和工作内容不参与身份准入。
 
-tmux session 由观测到的 socket/server 和 `tmux_session_id` 区分。pane、pane PID、Codex thread、旧任务和旧角色不是身份选择依据。同 project/session 已有身份直接复用，切换 pane 只更新投递地址。历史额外记录不产生新的用户裁决门禁。
+TUI 的稳定身份键是固定的 tmux session 名字。首次注册把 tmux session 改名为角色注册名并读回确认；已有固定名时直接按名续接。tmux session `$N`、socket、server PID、pane 和 pane PID 只定位投递与观测，不是身份选择依据；切换 pane 或 `$N` 但固定名不变时只更新投递地址。Codex thread、旧任务和旧角色不是身份选择依据。同 project/固定名已有身份直接复用。历史额外记录不产生新的用户裁决门禁。
 
 | 当前状态 | context 的结果 |
 | --- | --- |
@@ -27,10 +27,16 @@ Collab 是一个全局、由用户管理的 daemon。agent 只连接现有服务
 
 ## 其他宿主
 
-非 tmux 的 AppServer 仍使用其观测到的 session/thread，DSH 使用 `DSH_SESSION_ID`。缺失事实只按实际 adapter 所需字段补充一次。不借其他宿主的历史 pane 选择身份，不要求用户额外证明历史身份或完成第二次恢复。
+非 tmux 的 AppServer（含 Codex Desktop）使用其观测到的 session/thread，DSH 使用 `DSH_SESSION_ID` 作为传输载体；两者不执行 tmux 改名，但名字仍是身份、投递和任务的锚点。任何宿主第一次绑定都分配一个固定名字；后续绑定与恢复可以显式继承已有名字；新注册为新会话新增名字；旧名字在旧持有者离线或获得用户授权时可被顶替。缺失事实只按实际 adapter 所需字段补充一次。不借其他宿主的历史 pane 选择身份，不要求用户额外证明历史身份或完成第二次恢复。
+
+## 名字唯一锚点与一次性迁移
+
+名字是项目内唯一的工作归属、身份、投递和任务锚点。TUI 的固定 tmux session 名字、Codex Desktop 的 agent session 和 DSH 的 gateway session 都是承载当前执行的载体，不是第二套归属键；pane、`$N`、socket、server PID、thread 和进程只定位投递与观测。
+
+旧版本升级到新版本时，按名字做一次性迁移：从已有 worker、名字占用、任务和投递记录重建当前名字持有者与身份绑定，保留任务、消息、证据和资源归属。迁移完成后，身份恢复以名字为准，不再依赖旧 operation journal；旧 journal 可以作废，不需要逐条重放、回滚或人工清理。
 
 ## 验收边界
 
-公开 `context` 用例覆盖：旧 pane 属于 A 时当前 cwd B 仍恢复为 B 的 peer；同 project/session 换 pane 保持身份；已有 master 时 peer 可用；一次用户授权直接替换 master；重复 context 不再询问或 Register；daemon PID 不变。peer 恢复与 master 恢复分别实际发送、接收并回复，检查消费回执。项目任务与旧记录保留，不成为身份恢复的拒绝条件。
+公开 `context` 用例覆盖：首次注册后真实 tmux session 名字变为角色注册名；已有固定名恢复时名字与 binding 不变；同 project 固定名换 pane 或 `$N` 保持身份；改名失败不提交身份且保留原名；持久化失败回滚原名；已有 master 时 peer 可用；一次用户授权直接替换 master；重复 context 不再询问或 Register；daemon PID 不变。peer 恢复与 master 恢复分别实际发送、接收并回复，检查消费回执。项目任务与旧记录保留，不成为身份恢复的拒绝条件。
 
 外层 operation/query/cancellation 的持久化实现见 [context 合同](collab-identity-context-recovery-contract-20261008.md)。其中历史 pane/fence 设计不覆盖本文件的当前身份选择规则。图入口为 `docs/dagpipe/collab-context.graph.json` 与独立 master authority 图。

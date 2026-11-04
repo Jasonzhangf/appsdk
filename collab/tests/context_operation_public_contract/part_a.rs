@@ -581,7 +581,6 @@ fn second_pane(fixture: &Fixture, label: &str, server_pid: u32) -> Pane {
         &fixture.tmux_socket,
         &["new-session", "-d", "-P", "-F", "#{pane_id}", "-s", label, "sleep 600"],
     );
-    fixture.owned_sessions.lock().unwrap().push(label.to_owned());
     let pane_id = String::from_utf8(output.stdout)
         .expect("second pane id is UTF-8")
         .trim()

@@ -143,6 +143,11 @@ pub struct IdentityFacts {
     pub pane_hint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tmux: Option<TmuxCandidate>,
+    /// Current tmux session name. This is the fixed TUI identity anchor after
+    /// first registration; it is observed by the daemon, never selected from
+    /// a caller-controlled environment value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmux_session_name: Option<String>,
     /// Stable address available without display/capture or native runtime IDs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tmux_anchor: Option<TmuxPaneAnchor>,

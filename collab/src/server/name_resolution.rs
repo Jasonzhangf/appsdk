@@ -350,6 +350,87 @@ pub(crate) fn ensure_worker_control_name(
     Ok(name)
 }
 
+/// Read the name that the same commit path will assign without committing it.
+/// The context owner uses this to rename the tmux session before the name
+/// transaction, so a rename failure leaves the old identity unchanged.
+pub(crate) fn preview_registered_name(
+    server: &super::Server,
+    worker_id: &str,
+    operation_id: &str,
+    invocation: &str,
+    intent: Option<NameIntent>,
+    pane_anchor: Option<super::name_state::NamePaneAnchor>,
+) -> Result<Option<String>, String> {
+    use super::name_state::NameBindingReference;
+    let state = server.state.lock().unwrap();
+    let route = super::server_route_scope(server, &state)?
+        .ok_or("NAME_IDENTITY_REQUIRED: registered project route required")?;
+    let binding = state
+        .global
+        .lookup_project_for_route(&route)
+        .and_then(|project| {
+            project
+                .runtime_bindings
+                .values()
+                .find(|binding| binding.agent_id.as_str() == worker_id)
+        })
+        .ok_or("NAME_IDENTITY_REQUIRED: current runtime binding required")?;
+    let session = binding
+        .session_id
+        .as_ref()
+        .ok_or("NAME_IDENTITY_REQUIRED: agent session required")?
+        .to_string();
+    let request = NameRecoveryRequest {
+        invocation: invocation.into(),
+        requested_name: intent.as_ref().map(|intent| intent.requested_name.clone()),
+        caller_worker_id: worker_id.into(),
+        caller_session_id: session,
+        caller_binding: NameBindingReference {
+            app_scope_id: binding.app_scope_id.to_string(),
+            binding_id: binding.binding_id.to_string(),
+            endpoint_generation: binding.endpoint_generation,
+        },
+        replace_confirmed: intent
+            .as_ref()
+            .is_some_and(|intent| intent.replace_confirmed),
+        requested_ms: super::now_ms(),
+    };
+    if let Some(saved) = state.name_recovery(operation_id) {
+        if saved.project_scope != route.project_scope_id.as_str()
+            || saved.request.caller_worker_id != worker_id
+            || saved.request.requested_name != request.requested_name
+            || saved.request.replace_confirmed != request.replace_confirmed
+        {
+            return Err("NAME_OPERATION_CONFLICT: resume the saved name recovery operation".into());
+        }
+        return Ok((saved.progress == NameRecoveryProgress::Applied)
+            .then(|| saved.target_name.clone()));
+    }
+    let is_master =
+        super::current_master_worker_id(&state, Some(&route)).as_deref() == Some(worker_id);
+    let input = NameResolutionInput {
+        project_scope: route.project_scope_id.as_str().to_owned(),
+        operation_id: operation_id.into(),
+        request,
+        intent,
+        is_current_master: is_master,
+        pane_anchor,
+    };
+    let plan = plan_name_resolution(&state, &input)?;
+    match &plan.decision {
+        NameResolutionDecision::Committed { occupancy, .. }
+            if !plan.requires_master_authorization
+                || input
+                    .intent
+                    .as_ref()
+                    .is_some_and(|intent| intent.user_authorized) =>
+        {
+            Ok(Some(occupancy.name.clone()))
+        }
+        _ => Ok(None),
+    }
+}
+
 /// Pure readback for query and same-key retries. Never allocates or rebinds.
 pub(crate) fn project_registered_name(
     server: &super::Server,

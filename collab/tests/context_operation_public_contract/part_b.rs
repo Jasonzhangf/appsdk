@@ -1,3 +1,162 @@
+fn tmux_session_name(fixture: &Fixture, pane: &Pane) -> String {
+    String::from_utf8(
+        tmux(
+            &fixture.tmux_socket,
+            &[
+                "display-message",
+                "-p",
+                "-t",
+                pane.pane_id.as_str(),
+                "#{session_name}",
+            ],
+        )
+        .stdout,
+    )
+    .expect("tmux session name is UTF-8")
+    .trim()
+    .to_owned()
+}
+
+#[test]
+fn public_context_fixes_the_tmux_session_name_and_restores_by_it() {
+    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (mut fixture, pane) = Fixture::isolated("session-name-anchor");
+    let original = tmux_session_name(&fixture, &pane);
+    assert_ne!(original, "Alice");
+
+    let first = success_payload(&run_context_cli(
+        &fixture,
+        Some(&pane),
+        Some("ctxop-session-name-first"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+    ));
+    let snapshot = &first["result"]["snapshot"];
+    let role = snapshot["name"]
+        .as_str()
+        .expect("first context assigns a role name")
+        .to_owned();
+    let worker = snapshot["identity"]["worker_id"]
+        .as_str()
+        .expect("first context returns a worker id")
+        .to_owned();
+    assert_eq!(tmux_session_name(&fixture, &pane), role);
+    fixture.track_tmux_session(role.clone());
+
+    let repeated = success_payload(&run_context_cli(
+        &fixture,
+        Some(&pane),
+        Some("ctxop-session-name-first"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+    ));
+    assert_eq!(repeated["result"]["snapshot"]["name"], role);
+    assert_eq!(repeated["result"]["snapshot"]["identity"]["worker_id"], worker);
+    assert_eq!(tmux_session_name(&fixture, &pane), role);
+
+    fixture.restart_daemon();
+    let resumed_pane = Pane {
+        session_anchor: "session-after-daemon-restart".into(),
+        thread_anchor: "thread-after-daemon-restart".into(),
+        ..pane.clone()
+    };
+    let resumed = success_payload(&run_context_cli(
+        &fixture,
+        Some(&resumed_pane),
+        Some("ctxop-session-name-restart"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+    ));
+    assert_eq!(resumed["result"]["snapshot"]["identity"]["worker_id"], worker);
+    assert_eq!(resumed["result"]["snapshot"]["name"], role);
+
+    let moved_pane_id = String::from_utf8(
+        tmux(
+            &fixture.tmux_socket,
+            &[
+                "split-window",
+                "-d",
+                "-P",
+                "-F",
+                "#{pane_id}",
+                "-t",
+                pane.pane_id.as_str(),
+                "sleep 600",
+            ],
+        )
+        .stdout,
+    )
+    .expect("split pane id is UTF-8")
+    .trim()
+    .to_owned();
+    fixture.start_pane_runner_on_socket(&fixture.tmux_socket, &moved_pane_id, "sleep 600");
+    let moved_pane = Pane {
+        pane_id: moved_pane_id,
+        session_anchor: "session-after-pane-move".into(),
+        thread_anchor: "thread-after-pane-move".into(),
+        ..pane.clone()
+    };
+    assert_eq!(tmux_session_name(&fixture, &moved_pane), role);
+    let moved = success_payload(&run_context_cli(
+        &fixture,
+        Some(&moved_pane),
+        Some("ctxop-session-name-pane-move"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+    ));
+    assert_eq!(moved["result"]["snapshot"]["identity"]["worker_id"], worker);
+    assert_eq!(moved["result"]["snapshot"]["name"], role);
+}
+
+#[test]
+fn public_context_rename_failure_keeps_the_original_session_and_name_uncommitted() {
+    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (fixture, pane) = Fixture::isolated("session-name-conflict");
+    let original = tmux_session_name(&fixture, &pane);
+    tmux(
+        &fixture.tmux_socket,
+        &["new-session", "-d", "-s", "Alice", "sleep 600"],
+    );
+    fixture.track_tmux_session("Alice");
+
+    let output = run_context_cli(
+        &fixture,
+        Some(&pane),
+        Some("ctxop-session-name-conflict"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+    );
+    assert!(!output.status.success(), "{}", text(&output));
+    let typed = json_stdout(&output);
+    assert_eq!(
+        typed["result"]["owner_readback"]["name_resolution"]["error"],
+        "TMUX_SESSION_RENAME_FAILED: duplicate session: Alice",
+        "{}",
+        text(&output)
+    );
+    assert_eq!(tmux_session_name(&fixture, &pane), original);
+}
+
 #[test]
 fn public_context_bootstraps_an_empty_resident_route() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();

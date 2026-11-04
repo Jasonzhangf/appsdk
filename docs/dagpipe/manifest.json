@@ -148,6 +148,10 @@
     {
       "id": "collab-qqbot-outbound",
       "path": "docs/dagpipe/collab-qqbot-outbound.graph.json"
+    },
+    {
+      "id": "appsdk-collab-identity-anchor",
+      "path": "docs/dagpipe/collab-identity-anchor.graph.json"
     }
   ]
 }

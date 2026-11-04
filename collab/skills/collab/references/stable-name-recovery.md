@@ -103,10 +103,15 @@ runtime 仍返回裸 `IDENTITY_RESTORE_AMBIGUOUS`，保留 operation_id 和原�
 
 ## 名字、角色与会话
 
-名字承载项目内工作归属，master/peer 表示角色和权限，agent sessionID 是当前
-执行载体。注册报告 agent sessionID 并由 daemon 绑定。tmux session、pane、socket
-和 server PID 仅定位探测与投递，不是身份或任务键；明确弃用旧的 tmux session
-选择 peer 规则，不以历史 pane/native 绑定否决当前恢复。
+名字是 TUI、Codex Desktop 和 DSH 唯一的工作归属、身份、投递和任务锚点，
+master/peer 表示角色和权限，agent sessionID 是当前执行载体。第一次绑定分配固定
+名字；后续绑定与恢复可显式继承已有名字；新注册为新会话新增名字；旧名字在旧
+持有者离线或获得用户授权时可顶替。TUI 的固定名字是首次成功注册后固定的 tmux
+session 名字：首次绑定把 tmux session 改名为角色注册名并读回确认；改名失败不
+提交身份，持久化失败回滚原名。Codex Desktop 按 agent sessionID、DSH 按 gateway
+sessionID 承载传输，不改 tmux。tmux session `$N`、pane、socket 和 server PID 仅
+定位探测与投递，不是身份或任务键；不以历史 pane/native 绑定否决当前恢复。旧版本
+按名字一次性迁移后，身份恢复不依赖 operation journal，journal 可作废。
 
 名字仍归当前工作者而 sessionID 变化时，daemon 更新名字的 sessionID，并自动
 同步 board 中该名字下全部未关闭任务的 sessionID。任务 ID、状态、证据、资源与

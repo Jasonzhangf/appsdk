@@ -17,8 +17,12 @@ master 权限。只有用户要求注册时才初始化；未注册或初始化�
 可做任务，不寻找或等待 master。
 
 已注册身份、角色、任务、消息和订阅以当前 `collab context` 为真源。项目由本次真实
-cwd 确定，稳定名字承接工作；sessionID 承载当前执行，tmux pane、thread 和 socket
-仅定位通信。不得猜身份、复制 token、编辑控制状态或以 pane 内容证明消息消费。
+cwd 确定，名字是 TUI、Codex Desktop 和 DSH 唯一的工作归属、身份、投递与任务锚点；
+sessionID 只承载当前执行。第一次绑定分配固定名字，后续绑定与恢复可显式继承名字，
+新注册为新会话新增名字，旧名字在旧持有者离线或获得用户授权时可顶替。TUI 的固定
+tmux session 名字就是该角色名；tmux session `$N`、pane、thread 和 socket 仅定位
+通信。旧版本按名字一次性迁移后，身份恢复不依赖 operation journal。不得猜身份、
+复制 token、编辑控制状态或以 pane 内容证明消息消费。
 恢复失败只停受影响协作，保留原任务及资源。
 
 ## 恢复身份后不等待派遣

@@ -1,0 +1,108 @@
+{
+  "id": "appsdk-collab-identity-anchor",
+  "version": "0.2.0",
+  "description": "身份锚点完整对象流：一次 context 或注册请求从真实宿主 session 收敛到一个持久身份、名字和 master grant。入口有两种：首次注册（无既存固定 session 名）以当前 tmux session 名决定角色注册名，并把 tmux session 改名为该名并固定；已有固定名恢复（session 名已存在）按固定 session 名直接续接，不重新分配、不改名。tui 的稳定身份键是 tmux session 名字，后续绑定和恢复都按这个名字绑死；codex desktop 和 dsh 按各自 session 名字绑定，恢复遵循同一规则。tmux session 的 $N、pane、socket、PID 只用于投递定位，不作为身份键。显式失败终点：改名失败终止身份提交并保留原 session 名；名字占用待确认进入 pending/confirmation_required，不静默接管；身份持久化失败时回滚旧 tmux session 名并返回 explicit_failure，不留下成功身份、名字或 grant。sessionID 是执行载体，名字承接工作，master grant 按固定名字与 binding_id 设栅。本图是设计产物，不证明运行实现。",
+  "inputs": [
+    {"id": "context_request", "schema": "Object"}
+  ],
+  "nodes": [
+    {
+      "id": "读取当前宿主身份事实",
+      "operator": "appsdk.collab_identity.collect",
+      "operator_version": "1",
+      "description": "从当前 Codex/DSH/Desktop 宿主采集真实 sessionID、threadID 与通信端点。tui 必须同时读取真实 tmux session 名字；codex desktop 和 dsh 读取各自 session 名字。此处界定本次入口：无既存固定 session 名是首次注册，以当前真实 tmux session 名为初始锚点；已有固定 session 名是恢复，按该名续接。tmux session 的 $N、pane、socket、PID 只用于投递定位，不能替代固定 session 名字作为身份键。缺 sessionID 或无可固定 session 名时显式返回 missing_facts，不得用进程列表或历史 pane 猜身份。",
+      "inputs": ["context_request"],
+      "output": {"id": "identity_facts", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "定位当前绑定与名字占用",
+      "operator": "appsdk.collab_identity.resolve",
+      "operator_version": "1",
+      "description": "按当前 project/app 与稳定 session 名字查找唯一当前 runtime binding：tui 用固定 tmux session 名字，codex desktop 和 dsh 用各自 session 名字。已有固定 session 名命中唯一 typed 占用的绑定直接进入续接；无固定名占用是首次注册，需先占用确认再提交。typed 名字占用优先于历史 binding；名字被在线其他工作者占用时返回 confirmation_required 并停在占用确认，不静默接管。多个 binding 且无唯一 typed owner 时不猜选。跨项目历史锚点 fail-closed，不得回退到 cwd、旧 pane 或旧 socket。",
+      "inputs": ["identity_facts"],
+      "output": {"id": "binding_candidate", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "校验作用域与端点",
+      "operator": "appsdk.collab_identity.admit",
+      "operator_version": "1",
+      "description": "确认 project_scope、app_scope_id、binding_id、endpoint_generation 与 caller 事实一致。同 principal 的名称代际递增可重绑；不同 agent 的同一固定名字占用进入 claimant 回收。旧代际不能覆盖新代际。续接以固定 session 名为准：tui 的 pane、$N 或 socket 变化不影响同一固定 session 名字的续接，desktop/dsh 的各自 session 名同理。",
+      "inputs": ["binding_candidate"],
+      "output": {"id": "admission_result", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "决定稳定角色名",
+      "operator": "appsdk.collab_name.resolve",
+      "operator_version": "1",
+      "description": "先决定最终固定角色名，再执行任何宿主改名。首次注册时 tui 生成角色注册名并把它写回 tmux session 名字，之后该 pane 固定此名；已有固定 session 名恢复时角色名必须与该固定名一致，不改名、不重分配。codex desktop 和 dsh 用各自 session 名字续接。当前 master 恢复为 Jenny；同名 worker 或同名固定 session 续接普通名字；否则按固定池分配。名字决策必须读历史 Jenny 与目标名占用，不能只看当前 master grant；目标名被其他在线工作者占用时停在占用确认，不进入改名。",
+      "inputs": ["admission_result"],
+      "output": {"id": "name_decision", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "固定 tmux session 名",
+      "operator": "appsdk.collab_identity.anchor",
+      "operator_version": "1",
+      "description": "仅首次注册的 tui 在当前 session 内把 tmux session 改名为已决定的角色注册名，并读回确认；当前名已是目标名时幂等，不重复改名。已有固定 session 名恢复时角色名与 session 名一致，不执行改名。codex desktop 和 dsh 不执行 tmux 改名。改名失败或读回名不一致时终止本次身份提交，保留原 session 名，不进入 binding 或名字提交，并作为显式失败终点返回 explicit_failure。",
+      "inputs": ["name_decision"],
+      "output": {"id": "anchored_session", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "提交 binding 与名字并回收占用者",
+      "operator": "appsdk.collab_binding.bind",
+      "operator_version": "1",
+      "description": "在同一状态锁内提交固定 session 名字对应的 binding、名字占用与 endpoint generation；提交成功才进入续接与快照。同主体重绑递增 endpoint_generation；新 session 注册建立新 binding。对同一固定名字或同一 pane 的旧 claimant 原子提交 WorkerClosed，但不得删除持 master grant 的身份；grant 跟随固定名字迁移。持久化失败时回滚本次 tmux session 改名并恢复旧 session 名，返回 explicit_failure，不留下成功身份、名字或 grant，作为显式失败终点不进入续接。",
+      "inputs": ["anchored_session"],
+      "output": {"id": "committed_binding", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "续接或授权 master",
+      "operator": "appsdk.collab_master.resolve",
+      "operator_version": "1",
+      "description": "同 principal 同一固定 session 名字且 generation 递增时重发原 grant；否则恢复 Jenny 必须经 typed user authorization。tui 按固定 tmux session 名、desktop/dsh 按各自 session 名绑定；固定名字未变时，pane、$N 或 socket 变化不得回收旧 grant。恢复路径按固定 session 名绑定，不因执行载体变化重复要求用户批准。",
+      "inputs": ["committed_binding"],
+      "output": {"id": "authority_result", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "投影当前身份快照",
+      "operator": "appsdk.collab_identity.readback",
+      "operator_version": "1",
+      "description": "成功路径返回当前名字、角色、固定 session 名、binding、master grant 与可达性；失败或占用确认路径返回 explicit_failure/confirmation_required，不伪装为成功快照。transport liveness 只做独立观察，不撤销授权。",
+      "inputs": ["authority_result"],
+      "output": {"id": "snapshot", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {"from": "读取当前宿主身份事实", "to": "定位当前绑定与名字占用", "arc_id": "identity_facts"},
+    {"from": "定位当前绑定与名字占用", "to": "校验作用域与端点", "arc_id": "binding_candidate"},
+    {"from": "校验作用域与端点", "to": "决定稳定角色名", "arc_id": "admission_result"},
+    {"from": "决定稳定角色名", "to": "固定 tmux session 名", "arc_id": "name_decision"},
+    {"from": "固定 tmux session 名", "to": "提交 binding 与名字并回收占用者", "arc_id": "anchored_session"},
+    {"from": "提交 binding 与名字并回收占用者", "to": "续接或授权 master", "arc_id": "committed_binding"},
+    {"from": "续接或授权 master", "to": "投影当前身份快照", "arc_id": "authority_result"}
+  ],
+  "outputs": ["snapshot"]
+}

@@ -145,6 +145,11 @@ impl ProjectRuntimeManager {
             socket_path: endpoint.socket_path.clone(),
             pane_id: endpoint.pane_id.clone(),
         });
+        facts.tmux_session_name = observed
+            .as_ref()
+            .and_then(|endpoint| {
+                crate::client::adapters::tmux::observe_session_name(endpoint).ok()
+            });
         facts.tmux = observed.map(|mut endpoint| {
             // Native anchors remain transport metadata. Selecting the peer
             // still uses the observed project/session before these anchors.
@@ -189,6 +194,36 @@ impl ProjectRuntimeManager {
         let Some(project) = state.global.lookup_project_for_route(&route) else {
             return Ok(None);
         };
+        // A fixed tmux session name is the TUI identity anchor. When a role
+        // name occupies that session, it selects the current worker before
+        // session-id matching, so a new Codex session in the same named tmux
+        // session resumes the same stable name. DSH and native callers keep
+        // their existing session-id anchors.
+        if facts.dsh.is_none() && facts.tmux.is_some() {
+            if let Some(name) = facts.tmux_session_name.as_deref() {
+                let holder = state
+                    .name_occupancies
+                    .get(context.project_scope.as_str())
+                    .and_then(|names| {
+                        names.values().find(|holder| holder.name == name)
+                    });
+                if let Some(holder) = holder {
+                    let mut named = project
+                        .runtime_bindings
+                        .values()
+                        .filter(|binding| {
+                            binding.agent_id.as_str() == holder.worker_id
+                                && state.workers.contains_key(binding.agent_id.as_str())
+                        })
+                        .collect::<Vec<_>>();
+                    named
+                        .sort_by_key(|binding| std::cmp::Reverse(binding.endpoint_generation));
+                    if let Some(binding) = named.first().copied() {
+                        return Ok(self.recovered_binding_identity(context, binding, &state));
+                    }
+                }
+            }
+        }
         let mut bindings = project
             .runtime_bindings
             .values()

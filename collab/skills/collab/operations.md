@@ -318,18 +318,23 @@ master 代写来绕过当前身份失败。只读一次 `collab --version` 可�
 
 源码合同与三张操作图见 [工作角色与分工设计](../../docs/design/work-roles-and-assignment.md)。
 
-## 升级交接：明确弃用 tmux session 身份规则
+## 升级交接：TUI 固定 tmux session 名字，弃用 pane/$N 身份规则
 
 名字承载工作归属，agent sessionID 是当前执行载体。注册报告并绑定 agent sessionID；
 同名字续接时自动更新 sessionID，并同步该名字下全部未关闭 board 任务。旧 sessionID
 不是恢复门禁，不要求 Jenny 重新 assign；已关闭任务保留历史。具体合同见
 [名字、会话与工作继承](references/stable-name-recovery.md)。
 
-升级后必须摒弃旧规则“当前 tmux session 决定 peer”“按 pane/socket 恢复工作归属”。
-tmux session、pane、socket 和 server PID 仅供探测与投递定位，不是身份键、名字占用键
-或任务 owner。不要根据旧文档重新添加这些耦合，也不要把 tmux session ID 当作
-agent sessionID。历史数据由 daemon 在正常注册或恢复时兼容，不要求 agent 手改
-journal、清空 board、重建 pane 或重启 tmux。
+升级后必须摒弃旧规则“当前 tmux session `$N` 决定 peer”“按 pane/socket 恢复工作
+归属”。名字是 TUI、Codex Desktop 和 DSH 唯一的工作归属、身份、投递和任务锚点：
+第一次绑定分配固定名字；后续绑定与恢复可显式继承已有名字；新注册为新会话新增
+名字；旧名字在旧持有者离线或获得用户授权时可顶替。TUI 首次绑定把 tmux session
+改名为角色注册名并读回确认；改名失败不提交身份，持久化失败回滚原名。Codex
+Desktop 的 agent sessionID 和 DSH 的 gateway sessionID 只是传输载体，不执行 tmux
+改名。tmux session `$N`、pane、socket 和 server PID 仅供探测与投递定位，不是
+身份键、名字占用键或任务 owner。旧版本按名字做一次性迁移重建身份和名字占用；
+迁移后 journal 可作废，不要求 agent 逐条重放或手改 journal、清空 board、重建
+pane 或重启 tmux。
 
 交接给恢复者时报告当前名字、master/peer 角色、agent sessionID、未完成目标、
 所持资源与需要巡检的事项。名字的当前工作者接续任务；旧执行者不另行处理。
@@ -384,9 +389,11 @@ not an error-driven fallback. Once a native binding is selected, tmux is never
 a message, wake, presence, or status fallback. Its
 observed tmux endpoint is delivery placement only. cwd selects the project,
 and the stable name owns the work. The reported agent sessionID is the current
-execution carrier; tmux session, pane, socket and server PID locate transport
-only. Same-name session changes update all unclosed board assignments. Pane
-history and old native addresses do not select or protect identity.
+execution carrier; tmux session `$N`, pane, socket and server PID locate
+transport only, while the TUI's fixed tmux session name (the role name set at
+first successful registration) is its identity anchor. Same-name session
+changes update all unclosed board assignments. Pane history and old native
+addresses do not select or protect identity.
 Desktop agents use the same CLI entry as other hosts: `collab context`,
 `collab sendmessage` and `collab recv`. Calling an MCP tool is not an identity
 or messaging prerequisite. Desktop's identity anchor is the current agent
@@ -808,9 +815,15 @@ replace it directly. Do not require target snapshots, old credentials, digests,
 grant generations or a second identity approval. Omitted approval leaves peer
 restoration successful and the incumbent unchanged.
 
-Tmux identity uses current project and socket/server/session facts. Pane, pane
-PID, native thread, activity and capture do not select the identity. Endpoint
-status and message delivery remain separate from identity restoration.
+Tmux (TUI) uses the fixed tmux session name as its identity anchor. The first
+successful registration renames the current tmux session to the role name and
+reads it back; later bindings and recovery continue by that fixed name. Pane,
+tmux session `$N`, pane PID, socket, server PID, native thread, activity and
+capture locate delivery and observation only and do not select the identity.
+Rename failure aborts the identity commit; persistence failure rolls back the
+previous session name. Desktop binds by agent sessionID and DSH by gateway
+sessionID; neither renames tmux. Endpoint status and message delivery remain
+separate from identity restoration.
 
 The CLI reads `DSH_SESSION_ID`, `CODEX_SESSION_ID`, `CODEX_THREAD_ID` and
 current pane facts. A unique saved DSH identity restores from its current
@@ -1382,7 +1395,8 @@ Legacy managed records do not receive child-targeted liveness work or new
 assignments. Their historical `subagent-status` facts remain diagnostic input.
 Codex thread history is read only from the owning AppServer when supported and
 is never fabricated. A tmux pane locates delivery and observation only; it is
-not an identity anchor, task owner, or snapshot receipt.
+not an identity anchor, task owner, or snapshot receipt. The TUI identity
+anchor is the fixed tmux session name, not the pane or session `$N`.
 
 ## 全局 CEO 与项目 master
 
@@ -2099,7 +2113,7 @@ action=restore_master），或由已授权 master 委托。注册前先确认自
 | 宿主 | 身份锚点 | 注册时报告的事实 | 不许做的事 |
 | --- | --- | --- | --- |
 | DSH | gateway session（`DSH_SESSION_ID`）+ communication API（gateway 控制 socket 与 runtime id） | 普通 `collab context` 由 CLI 读取 gateway 发布的控制能力并查询该真实 session 的当前事实；已有注册沿已提交 route 恢复。`--provide` 仅用于显式提供真实 DSH 能力 | 不手工猜测或从日志、plist 找 ids；不填 Codex thread/namespace；不与 appserver/tmux 候选混报；不用 tmux pane 当锚点 |
-| Codex TUI / CLI | AppServer session + thread，或当前 tmux pane | `session_id`、`thread_id`、`endpoint`、`namespace`；CLI 自动读 `CODEX_SESSION_ID`、`CODEX_THREAD_ID`、`TMUX_PANE` | 不假设自己一定有 tmux pane；不填 pane 冒充 Codex 会话；不借用其他进程的 AppServer endpoint |
+| Codex TUI / CLI | AppServer session + thread，或首次注册后固定的 tmux session 名字（角色注册名，不是 `$N`/pane） | `session_id`、`thread_id`、`endpoint`、`namespace`；CLI 自动读 `CODEX_SESSION_ID`、`CODEX_THREAD_ID`、`TMUX_PANE` | 不假设自己一定有 tmux pane；不把 `$N`/pane 当身份键；不填 pane 冒充 Codex 会话；不借用其他进程的 AppServer endpoint |
 | Codex Desktop | 当前 agent sessionID；native thread 定位通信 | 普通 `collab context` 自动接入 runtime 共享 bridge，由 native host 核实 thread/cwd 并登记；不需要先调用 MCP | 不手填 socket 或执行 turn，不猜 AppServer endpoint；daemon 只连 bridge UDS |
 
 锚点归属规则：一个宿主只有一个锚点；DSH 的锚点是 gateway session 加 gateway

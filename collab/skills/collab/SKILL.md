@@ -25,6 +25,25 @@ tmux session 名字就是该角色名；tmux session `$N`、pane、thread 和 so
 复制 token、编辑控制状态或以 pane 内容证明消息消费。
 恢复失败只停受影响协作，保留原任务及资源。
 
+## 关闭门禁：未验证不得关闭
+
+board issue 和 Collab task 只有在适用证据齐备后才能 `close`。关闭前逐项核对：
+
+1. `completion_missing` 必须为空。仍含 `review`、`integration`、`manual_termination`、
+   `cleanup` 或其他未完成项时不得关闭。
+2. 代码任务必须有真实入口或公开接口的黑盒证据；单测、build、候选分支、review PASS
+   或 merge 分别只证明对应范围，不能替代运行验收。
+3. 代码候选只有在对应 owner 已 merge、push 并核对远端后，才能走 integration/close；
+   `task close` 在 pending merge 下失败是正确行为，不是可绕过错误。
+4. Collab runtime/daemon/安装包变更按
+   [Collab runtime delivery DAG](operations.md#collab-runtime-delivery-dag单源单汇)，
+   安装、live 激活和受影响真实行为未完成时报告 `INCOMPLETE`，不能标 closed。
+5. 只读诊断或无候选任务仍需真实回执、消费证据和 owner cleanup，之后按正常关闭。
+6. `--force` 只用于已授权取消或已验证 lifecycle cleanup，且必须写清原因和 cleanup
+   receipt；不能为停止提醒、清理未完成工作或掩盖 blocker 而 force-close。
+7. 已错误关闭且仍缺证据的任务先 reopen，再补验收；不得删除历史、重写正文或伪造
+   回执。已关闭任务保留历史，不把补验写成重新交付。
+
 ## 恢复身份后不等待派遣
 
 `collab context` 恢复身份不是等待派遣的信号。peer 恢复后立即继续并推进本人已授权的

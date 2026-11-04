@@ -667,6 +667,26 @@ impl Fixture {
         self.host_state.join(HOST_EVENTS)
     }
 
+    /// Durable daemon activity log that sits beside the project journal. The
+    /// daemon persists one `daemon_start` receipt per start, after replay and
+    /// synchronous recovery finish, so it is the observable startup boundary.
+    pub fn project_events(&self) -> PathBuf {
+        self.project_journal().with_file_name(HOST_EVENTS)
+    }
+
+    pub fn wait_for_daemon_start(&self, timeout: Duration) -> bool {
+        let pid = self.daemon_pid();
+        wait_until(timeout, || {
+            std::fs::read_to_string(self.project_events())
+                .ok()
+                .is_some_and(|events| {
+                    events.lines().filter_map(|line| serde_json::from_str::<Value>(line).ok()).any(
+                        |row| row["kind"] == "daemon_start" && row["detail"]["pid"] == pid,
+                    )
+                })
+        })
+    }
+
     pub fn proof_path(&self, operation_id: &str) -> PathBuf {
         self.host_state
             .join("context-operations")

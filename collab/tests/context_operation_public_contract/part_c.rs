@@ -705,16 +705,20 @@ fn c13_cancellation_after_owner_begins_never_claims_cancelled() {
         let register_effects_before_restart = project_register_effect_counts(&fixture.project_journal());
         fixture.stop_daemon();
         fixture.restart_daemon();
-        // The resident timer emits only changed classifications. An already
-        // current classification survives restart without another scan receipt.
-        assert!(wait_until(Duration::from_secs(10), || read_lines(&fixture.project_journal())
-            .iter().rev().find(|row| row["ev"] == "GlobalRuntimeBindingLedgerClassified"
-                && row["record"]["binding_id"] == new_binding_id)
-            .is_some_and(|row| row["record"]["endpoint_generation"] == new_endpoint_generation
-                && row["record"]["state"] == "Live" && row["record"]["probe_state"] == "Live")),
-            "the exact current owned binding must have its real resident ledger classification");
+        assert!(
+            fixture.wait_for_daemon_start(Duration::from_secs(10)),
+            "normal restart must persist its daemon-start receipt before query"
+        );
         assert_eq!(project_register_effect_counts(&fixture.project_journal()), register_effects_before_restart,
             "startup ledger maintenance must not repeat any Register, binding or route effect");
+        // The scheduler acknowledges a tick only at its entry point, after the
+        // preceding tick has finished. Hold the next tick before taking the
+        // byte snapshot so post-restart name recovery cannot race the query.
+        let held_timer_tick = harness.hold(
+            TIMER_TICK_BOUNDARY,
+            TIMER_TICK_ID,
+            Duration::from_secs(30),
+        );
         let journal_before = fs::read(fixture.host_journal()).expect("host journal before query");
         let project_before =
             fs::read(fixture.project_journal()).expect("project journal before query");
@@ -757,6 +761,7 @@ fn c13_cancellation_after_owner_begins_never_claims_cancelled() {
             project_before,
             "restart query must not replay the Register owner"
         );
+        drop(held_timer_tick);
     }
 
     // 2) Register is proven committed, then the required grant owner fails

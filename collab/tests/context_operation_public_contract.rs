@@ -785,25 +785,8 @@ fn peer_lifecycle_r1_authenticated_self_read_is_pure() {
 fn peer_lifecycle_r2_unknown_observation_is_pure() {
     let (fixture, host, identity) = lifecycle_native_fixture("peer-r2");
     drop(host);
-    // Let the resident ledger classify the dropped host before taking the
-    // pure-Read baseline. Keep the full surface comparison below: Read must
-    // not append anything, including another ledger event.
-    assert!(
-        wait_until(Duration::from_secs(10), || {
-            read_lines(&fixture.project_journal())
-                .iter()
-                .rev()
-                .find(|row| {
-                    row["ev"] == "GlobalRuntimeBindingLedgerClassified"
-                        && row["record"]["agent_id"] == identity["worker_id"]
-                })
-                .is_some_and(|row| {
-                    row["record"]["state"] == "RepairRequired"
-                        && row["record"]["probe_state"] == "RepairRequired"
-                })
-        }),
-        "the resident ledger must classify this dropped host before the pure-Read baseline"
-    );
+    // Resident ledger classification is retired. The read itself must observe
+    // the dropped host as unknown without adding any durable surface.
     let before = lifecycle_surfaces(&fixture, &identity);
     let read = lifecycle_read(&fixture, &identity, None);
     assert_eq!(read["result"]["outcome"], "unknown", "{read}");
@@ -909,20 +892,9 @@ fn peer_lifecycle_r4_managed_visibility_is_authorized_and_pure() {
             "created_ms": 1, "ready_deadline_ms": 0, "last_message": "private-assignment", "error": null
         }})],
     );
-    // The independent resident scan must classify every registered binding
-    // before Read purity is measured. Read itself must still change no surface.
     assert!(
-        wait_until(Duration::from_secs(5), || {
-            let rows = read_lines(&fixture.project_journal());
-            [&parent, &child, &other].iter().all(|identity| {
-                rows.iter().rev().any(|row| {
-                    row["ev"] == "GlobalRuntimeBindingLedgerClassified"
-                        && row["record"]["agent_id"] == identity["worker_id"]
-                        && row["record"]["state"] == "Live"
-                })
-            })
-        }),
-        "the resident scan must classify all three bindings before the pure-Read baseline"
+        fixture.wait_for_daemon_start(Duration::from_secs(10)),
+        "the replayed daemon must persist its startup receipt before Read purity"
     );
     let before = lifecycle_surfaces(&fixture, &parent);
     let own = lifecycle_read(&fixture, &other, None);

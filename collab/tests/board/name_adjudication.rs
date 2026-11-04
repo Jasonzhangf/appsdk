@@ -23,17 +23,33 @@ fn explicit_name_takeover_commits_and_is_idempotent() {
     let resumed = fixture.run_public(&["context", "--op", op, "--approve-grant",
         r#"{"action":"restore_name","requested_name":"Alice","authorization":"fixture inheritance"}"#], THREAD_C);
     assert_eq!(resumed["name"], "Alice", "{resumed}");
-    assert_eq!(resumed["name_resolution"]["outcome"], "committed", "{resumed}");
+    assert_eq!(
+        resumed["name_resolution"]["outcome"], "committed",
+        "{resumed}"
+    );
     let repeat = fixture.run_public(&["context", "--op", op, "--approve-grant",
         r#"{"action":"restore_name","requested_name":"Alice","authorization":"fixture inheritance"}"#], THREAD_C);
-    assert_eq!(repeat["identity"]["worker_id"], resumed["identity"]["worker_id"]);
+    assert_eq!(
+        repeat["identity"]["worker_id"],
+        resumed["identity"]["worker_id"]
+    );
 }
 
 #[test]
 fn explicit_name_takeover_preserves_unread_message() {
     let mut fixture = AppFixture::new();
     setup(&mut fixture);
-    let sent = fixture.run_public(&["sendmessage", "--to", "Alice", "--subject", "handoff", "unread message"], THREAD_B);
+    let sent = fixture.run_public(
+        &[
+            "sendmessage",
+            "--to",
+            "Alice",
+            "--subject",
+            "handoff",
+            "unread message",
+        ],
+        THREAD_B,
+    );
     let id = sent["msg_id"].as_str().unwrap();
     let next = fixture.run_public(&["context", "--approve-grant",
         r#"{"action":"restore_name","requested_name":"Alice","authorization":"confirmed handoff","replace_confirmed":true}"#], THREAD_C);
@@ -77,7 +93,10 @@ fn context_adjudication_uses_current_session_and_inherits_open_tasks_after_repla
         r#"{"action":"restore_name","requested_name":"Alice","authorization":"fixture inheritance"}"#], session, THREAD_C);
     assert!(output.status.success(), "{:?}", output);
     let takeover: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(takeover["result"]["snapshot"]["name_resolution"]["outcome"], "committed");
+    assert_eq!(
+        takeover["result"]["snapshot"]["name_resolution"]["outcome"],
+        "committed"
+    );
     fixture.restart_daemon();
     let output = fixture.command_public_with_session(&["context"], session, THREAD_C);
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();

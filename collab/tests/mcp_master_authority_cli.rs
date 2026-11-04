@@ -136,7 +136,11 @@ impl Fixture {
                 .expect("spawn owned fixture serve"),
         );
         let socket = self.root.join("h/server.sock");
-        daemon_readiness::wait_for_ping(self.daemon.as_mut().unwrap(), &socket, Duration::from_secs(10));
+        daemon_readiness::wait_for_ping(
+            self.daemon.as_mut().unwrap(),
+            &socket,
+            Duration::from_secs(10),
+        );
     }
 
     fn stop_daemon(&mut self) {

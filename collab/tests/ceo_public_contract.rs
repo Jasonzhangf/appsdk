@@ -694,8 +694,17 @@ fn ceo_cross_project_task_message_reply_progress_and_clear_roundtrip() {
 
     let master_context = run_ok_at(&fixture, &target_root, &target_pane, &["context"], false);
     let master_context = &master_context["result"]["snapshot"];
-    let master_progress = run_at(&fixture, &target_root, &target_pane, &["ceo", "progress"], false);
-    assert!(!master_progress.status.success(), "project master must not read CEO progress");
+    let master_progress = run_at(
+        &fixture,
+        &target_root,
+        &target_pane,
+        &["ceo", "progress"],
+        false,
+    );
+    assert!(
+        !master_progress.status.success(),
+        "project master must not read CEO progress"
+    );
     assert!(
         String::from_utf8_lossy(&master_progress.stderr).contains("CEO_AUTHORITY_REQUIRED"),
         "unexpected progress failure: {}",

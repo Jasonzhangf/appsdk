@@ -2314,4 +2314,262 @@ fn different_agent_session_does_not_inherit_name_across_invocation_cwd() {
     );
 }
 
+#[test]
+fn public_goal_schedule_and_pending_wake_move_across_agent_session_to_new_jenny() {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (fixture, pane) = Fixture::isolated("name-anchor-takeover");
+    assert_eq!(fixture.tmux_socket, fixture.root.join("t.sock"));
+    assert!(fixture.tmux_socket.exists());
+
+    let old = fixture.registered_context("name-anchor-takeover-old", &pane);
+    let (old_ordinary_name, old_worker_id) = seeded_name_and_worker(&old);
+    let old_session_id = old["result"]["snapshot"]["binding"]["session_id"]
+        .as_str()
+        .expect("old identity has a session id")
+        .to_owned();
+    assert_ne!(old_ordinary_name, "Jenny");
+
+    fixture.run_ok(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "isolated name-anchor takeover old promotes to Jenny",
+        ],
+        Some(&pane),
+    );
+
+    let goal_id = "name-anchor-takeover-goal";
+    let trigger_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock after epoch")
+        .as_millis() as i64
+        + 2_000;
+    let armed = fixture.run_ok(
+        &[
+            "goal",
+            "reconcile",
+            "--goal-id",
+            goal_id,
+            "--owner",
+            "Jenny",
+            "--desired",
+            "active",
+            "--at-ms",
+            &trigger_ms.to_string(),
+            "--ttl-seconds",
+            "300",
+        ],
+        Some(&pane),
+    );
+    assert_eq!(armed["status"], "armed", "{armed}");
+    let subscription_id = armed["subscription"]["id"]
+        .as_str()
+        .expect("armed goal has a subscription id")
+        .to_owned();
+
+    let project_journal = fixture.project_journal();
+    let pending_id = {
+        assert!(
+            wait_until(Duration::from_secs(15), || {
+                let events = read_lines(&project_journal);
+                events.iter().any(|event| {
+                    event["ev"] == "WakeBound"
+                        && event["subscription_id"].as_str() == Some(subscription_id.as_str())
+                        && event["message_id"].as_str().is_some_and(|message_id| {
+                            events.iter().any(|sent| {
+                                sent["ev"] == "Sent"
+                                    && sent["msg"]["id"].as_str() == Some(message_id)
+                                    && sent["msg"]["state"] == "pending"
+                            })
+                        })
+                })
+            }),
+            "the real daemon did not commit a pending goal wake"
+        );
+
+        read_lines(&project_journal)
+            .into_iter()
+            .rev()
+            .find(|event| {
+                event["ev"] == "WakeBound"
+                    && event["subscription_id"].as_str() == Some(subscription_id.as_str())
+            })
+            .expect("the pending wake names its goal subscription")["message_id"]
+            .as_str()
+            .expect("the pending wake names its message")
+            .to_owned()
+    };
+
+    let events = read_lines(&project_journal);
+    let pending_message = events
+        .iter()
+        .rev()
+        .find(|event| event["ev"] == "Sent" && event["msg"]["id"] == pending_id.as_str())
+        .expect("the pending wake has a durable Sent message");
+    assert_eq!(
+        pending_message["msg"]["state"],
+        "pending",
+        "{pending_message}"
+    );
+
+    let successor = second_pane(&fixture, "name-anchor-takeover-second", pane.server_pid);
+    let root = PathBuf::from(canonical_root(&fixture));
+    let successor_context = pane_identity_context(
+        &fixture,
+        &successor,
+        "name-anchor-takeover-context",
+        &root,
+        &format!("session-name-anchor-takeover-second-{}", successor.pane_id),
+        &format!("thread-name-anchor-takeover-second-{}", successor.pane_id),
+        "name-anchor-takeover-context",
+    );
+    let successor_snapshot = &successor_context["result"]["snapshot"];
+    let successor_worker_id = successor_snapshot["identity"]["worker_id"]
+        .as_str()
+        .expect("successor context names its worker")
+        .to_owned();
+    let successor_name = successor_snapshot["name_resolution"]["name"]
+        .as_str()
+        .expect("successor names its ordinary name")
+        .to_owned();
+    let successor_session_id = successor_snapshot["binding"]["session_id"]
+        .as_str()
+        .expect("successor identity has a session id")
+        .to_owned();
+    assert_ne!(successor_worker_id, old_worker_id);
+    assert_ne!(successor_session_id, old_session_id);
+    assert_ne!(successor_name, "Jenny");
+
+    let takeover = fixture.command(
+        &[
+            "context",
+            "--op",
+            "name-anchor-takeover-approve",
+            "--approve-grant",
+            r#"{"action":"restore_master","authorization":"isolated name-anchor takeover restore master","replace_confirmed":true}"#,
+        ],
+        Some(&successor),
+    );
+    assert!(
+        takeover.status.success(),
+        "restore_master must take Jenny from the old session: stdout={} stderr={}",
+        String::from_utf8_lossy(&takeover.stdout),
+        String::from_utf8_lossy(&takeover.stderr)
+    );
+
+    let successor_status = fixture.run_ok(&["notify", "status"], Some(&successor));
+    let successor_goal = successor_status["subscriptions"]
+        .as_array()
+        .expect("notify status lists successor subscriptions")
+        .iter()
+        .find(|subscription| subscription["id"] == subscription_id)
+        .expect("successor owns the goal subscription");
+    assert_eq!(
+        successor_goal["worker_id"], successor_worker_id,
+        "{successor_goal}"
+    );
+
+    let old_status = fixture.run_ok(&["notify", "status"], Some(&pane));
+    assert!(
+        !old_status["subscriptions"]
+            .as_array()
+            .expect("notify status lists old subscriptions")
+            .iter()
+            .any(|subscription| subscription["id"] == subscription_id),
+        "old worker must not retain the goal subscription: {old_status}"
+    );
+
+    let events = read_lines(&project_journal);
+    let handoff = events
+        .iter()
+        .rev()
+        .find(|event| {
+            event["ev"] == "MailboxReassigned"
+                && event["handoff"]["message_id"] == pending_id.as_str()
+        })
+        .expect("the pending wake must be reassigned to the successor");
+    assert_eq!(
+        handoff["handoff"]["previous_recipient"],
+        old_worker_id,
+        "{handoff}"
+    );
+    assert_eq!(
+        handoff["handoff"]["recipient"],
+        successor_worker_id,
+        "{handoff}"
+    );
+    assert_eq!(
+        handoff["handoff"]["previous_subscription"],
+        subscription_id,
+        "{handoff}"
+    );
+    let latest_wake = events
+        .iter()
+        .rev()
+        .find(|event| {
+            event["ev"] == "WakeBound" && event["message_id"] == pending_id.as_str()
+        })
+        .expect("the reassigned wake keeps a wake binding");
+    assert_eq!(
+        latest_wake["subscription_id"],
+        subscription_id,
+        "{latest_wake}"
+    );
+
+    let denied = fixture.command(
+        &[
+            "goal",
+            "reconcile",
+            "--goal-id",
+            goal_id,
+            "--owner",
+            "Jenny",
+            "--desired",
+            "ended",
+        ],
+        Some(&pane),
+    );
+    let denied_text = text(&denied);
+    assert!(!denied.status.success(), "{denied_text}");
+    assert!(
+        denied_text.contains("GOAL_SCHEDULE_OWNER_MISMATCH"),
+        "old worker must be rejected as the goal owner: {denied_text}"
+    );
+
+    let ended = fixture.run_ok(
+        &[
+            "goal",
+            "reconcile",
+            "--goal-id",
+            goal_id,
+            "--owner",
+            "Jenny",
+            "--desired",
+            "ended",
+        ],
+        Some(&successor),
+    );
+    assert_eq!(ended["status"], "ended", "{ended}");
+    assert!(
+        ended["retired_subscription_ids"]
+            .as_array()
+            .is_some_and(|ids| {
+                ids.iter()
+                    .any(|id| id.as_str() == Some(subscription_id.as_str()))
+            }),
+        "{ended}"
+    );
+    let successor_status = fixture.run_ok(&["notify", "status"], Some(&successor));
+    let successor_goal = successor_status["subscriptions"]
+        .as_array()
+        .expect("notify status keeps the retired occurrence")
+        .iter()
+        .find(|subscription| subscription["id"] == subscription_id)
+        .expect("the retired goal occurrence remains observable");
+    assert_eq!(successor_goal["status"], "cancelled", "{successor_goal}");
+}
+
 include!("part_b_tail.rs");

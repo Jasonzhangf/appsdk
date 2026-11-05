@@ -296,63 +296,9 @@
         "version": 2
       },
       "version": 11
-    },
-    {
-      "request": {
-        "authorization": {
-          "original_text": "重新审计dag图，用tmux session改名为角色注册名，绑死；tui 都靠tmux session名字，第一次绑定后生成了名字后，该pane固定这个名字，后续绑定就pane固定这个名字；codex desktop和dsh都按照session绑定名字；恢复也按这个规则",
-          "role": "user",
-          "source": "Current Codex conversation: explicit tmux session name binding rule, 2026-11-03"
-        },
-        "base_version": 5,
-        "operation": "replace",
-        "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
-        "request_id": "appsdk-collab-tmux-session-name-anchor-20261103",
-        "requirement_id": "req-collab-communication-notifications",
-        "text": "Collab 通信仍以已具备的统一基础能力模块为先验，不做新增 live probe；缺少必需模块时该通信路径不可用。TUI 的身份锚点是首次绑定后固定的 tmux session 名字：首次成功注册必须把 tmux session 改名为角色注册名并读回确认，后续绑定和恢复都按该固定名字续接；pane、tmux session $N、socket 和 server PID 只用于投递定位，不作为身份键。改名失败则本次身份提交失败并保留原 session 名；身份持久化失败时回滚 session 名，不留下成功身份、名字或 grant。Codex Desktop 和 DSH 分别按各自 session 名字绑定；恢复遵循同一规则。统一状态持久化身份、角色、固定 session 名字、adaptor 绑定和真实收发回执，daemon 重启后自动恢复并同步漂移。"
-      },
-      "result": {
-        "authorization": {
-          "original_text": "重新审计dag图，用tmux session改名为角色注册名，绑死；tui 都靠tmux session名字，第一次绑定后生成了名字后，该pane固定这个名字，后续绑定就pane固定这个名字；codex desktop和dsh都按照session绑定名字；恢复也按这个规则",
-          "role": "user",
-          "source": "Current Codex conversation: explicit tmux session name binding rule, 2026-11-03"
-        },
-        "requirement_id": "req-collab-communication-notifications",
-        "status": "active",
-        "text": "Collab 通信仍以已具备的统一基础能力模块为先验，不做新增 live probe；缺少必需模块时该通信路径不可用。TUI 的身份锚点是首次绑定后固定的 tmux session 名字：首次成功注册必须把 tmux session 改名为角色注册名并读回确认，后续绑定和恢复都按该固定名字续接；pane、tmux session $N、socket 和 server PID 只用于投递定位，不作为身份键。改名失败则本次身份提交失败并保留原 session 名；身份持久化失败时回滚 session 名，不留下成功身份、名字或 grant。Codex Desktop 和 DSH 分别按各自 session 名字绑定；恢复遵循同一规则。统一状态持久化身份、角色、固定 session 名字、adaptor 绑定和真实收发回执，daemon 重启后自动恢复并同步漂移。",
-        "version": 6
-      },
-      "version": 12
-    },
-    {
-      "request": {
-        "authorization": {
-          "original_text": "对于没有tmux pane的角色，就第一次绑定一个名字，后续可以显式继承一个名字，新注册加名字，旧名字可以顶替。所有投递，身份，任务都是以名字为锚点；旧版本到新版本也根据名字做一次性迁移，Journal就可以作废了",
-          "role": "user",
-          "source": "Current Codex conversation: universal name anchor across hosts and one-time name migration, 2026-11-03"
-        },
-        "base_version": 6,
-        "operation": "replace",
-        "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
-        "request_id": "appsdk-collab-universal-name-anchor-20261103",
-        "requirement_id": "req-collab-communication-notifications",
-        "text": "Collab 通信仍以已具备的统一基础能力模块为先验，不做新增 live probe。名字是项目内唯一的工作归属、身份、投递和任务锚点，覆盖 TUI、Codex Desktop 和 DSH 三种宿主：任何角色第一次绑定都得到一个固定名字；后续绑定与恢复可显式继承已有名字；新注册可为新会话新增名字；旧名字在旧持有者离线或获得用户授权时可被顶替。TUI 的锚点是首次绑定后固定的 tmux session 名字（角色注册名），首次成功注册把 tmux session 改名为该名并读回确认；改名失败不提交身份，持久化失败回滚原名。Codex Desktop 按 agent sessionID、DSH 按 gateway sessionID 作为传输载体，但名字仍是身份、投递和任务锚点。pane、tmux session $N、socket 和 server PID 只用于投递定位，不作身份键。旧版本到新版本按名字做一次性迁移，重建身份与名字占用；迁移后身份恢复不再依赖旧 operation journal，journal 可以作废。"
-      },
-      "result": {
-        "authorization": {
-          "original_text": "对于没有tmux pane的角色，就第一次绑定一个名字，后续可以显式继承一个名字，新注册加名字，旧名字可以顶替。所有投递，身份，任务都是以名字为锚点；旧版本到新版本也根据名字做一次性迁移，Journal就可以作废了",
-          "role": "user",
-          "source": "Current Codex conversation: universal name anchor across hosts and one-time name migration, 2026-11-03"
-        },
-        "requirement_id": "req-collab-communication-notifications",
-        "status": "active",
-        "text": "Collab 通信仍以已具备的统一基础能力模块为先验，不做新增 live probe。名字是项目内唯一的工作归属、身份、投递和任务锚点，覆盖 TUI、Codex Desktop 和 DSH 三种宿主：任何角色第一次绑定都得到一个固定名字；后续绑定与恢复可显式继承已有名字；新注册可为新会话新增名字；旧名字在旧持有者离线或获得用户授权时可被顶替。TUI 的锚点是首次绑定后固定的 tmux session 名字（角色注册名），首次成功注册把 tmux session 改名为该名并读回确认；改名失败不提交身份，持久化失败回滚原名。Codex Desktop 按 agent sessionID、DSH 按 gateway sessionID 作为传输载体，但名字仍是身份、投递和任务锚点。pane、tmux session $N、socket 和 server PID 只用于投递定位，不作身份键。旧版本到新版本按名字做一次性迁移，重建身份与名字占用；迁移后身份恢复不再依赖旧 operation journal，journal 可以作废。",
-        "version": 7
-      },
-      "version": 13
     }
   ],
   "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
   "schema_version": 1,
-  "version": 13
+  "version": 11
 }

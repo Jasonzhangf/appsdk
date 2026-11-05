@@ -431,6 +431,49 @@ pub fn session_name_if_live(endpoint: &TmuxEndpoint) -> Result<Option<String>, S
     }
 }
 
+/// Find a live tmux pane whose session currently carries `name`. This is used
+/// only to move an orphaned role-name session aside before a successor takes
+/// the same name; the socket-scoped listing does not touch the session.
+pub fn find_live_session_by_name(
+    socket_path: &str,
+    name: &str,
+) -> Result<Option<TmuxEndpoint>, String> {
+    validate_session_name(name)?;
+    let output = match tmux_command(
+        socket_path,
+        &[
+            "list-panes",
+            "-a",
+            "-F",
+            "#{pid}\t#{session_id}\t#{session_name}\t#{pane_id}\t#{pane_pid}",
+        ],
+    ) {
+        Ok(output) => output,
+        Err(error) if endpoint_is_absent(&error) => return Ok(None),
+        Err(error) => return Err(format!("TMUX_SESSION_LOOKUP_FAILED: {error}")),
+    };
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let fields = line.split('\t').collect::<Vec<_>>();
+        if fields.len() != 5 || fields[2] != name {
+            continue;
+        }
+        return Ok(Some(TmuxEndpoint {
+            socket_path: socket_path.to_owned(),
+            server_pid: fields[0]
+                .parse()
+                .map_err(|error| format!("TMUX_SESSION_LOOKUP_INVALID: {error}"))?,
+            tmux_session_id: fields[1].to_owned(),
+            pane_id: fields[3].to_owned(),
+            pane_pid: fields[4]
+                .parse()
+                .map_err(|error| format!("TMUX_SESSION_LOOKUP_INVALID: {error}"))?,
+            codex_session_id: None,
+            codex_thread_id: None,
+        }));
+    }
+    Ok(None)
+}
+
 /// Read the current session name of a registered TUI binding, requiring the
 /// tmux endpoint to be reachable. Unlike `session_name_if_live`, a missing or
 /// unreachable server here is a typed failure: the identity owner must abort

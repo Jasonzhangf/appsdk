@@ -29,9 +29,25 @@ fn worker_display_name(state: &State, id: &str, is_master: bool) -> String {
         .workers
         .get(id)
         .and_then(|worker| state.name_occupancies.get(&worker.cwd))
-        .and_then(|names| names.values().find(|holder| holder.worker_id == id));
-    if let Some(holder) = scoped.or_else(|| (current.len() == 1).then(|| current[0])) {
-        return holder.name.clone();
+        .map(|names| {
+            let mut holders: Vec<_> = names
+                .values()
+                .filter(|holder| holder.worker_id == id)
+                .collect();
+            if is_master {
+                // The role name wins over a retained ordinary work name.
+                holders
+                    .iter()
+                    .find(|holder| holder.name == "Jenny")
+                    .or_else(|| holders.first())
+                    .map(|holder| holder.name.clone())
+            } else {
+                holders.first().map(|holder| holder.name.clone())
+            }
+        })
+        .flatten();
+    if let Some(name) = scoped.or_else(|| (current.len() == 1).then(|| current[0].name.clone())) {
+        return name;
     }
     if let Some(name) = state.worker_names.get(id) {
         if !state

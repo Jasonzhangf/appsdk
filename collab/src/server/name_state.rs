@@ -370,10 +370,17 @@ impl State {
         // One agent session has one current name carrier. A later commit for
         // the same session releases the previous worker's names too, while
         // task assignments and message history stay in their own records.
+        // Taking the master role name Jenny is not an ordinary rename: the
+        // carrier keeps its stable ordinary name so its tasks, occupancy and
+        // name-addressed mail do not become ownerless during the role change.
+        let master_role_takeover = occupancy.name == "Jenny";
         occupancies.retain(|name, current| {
             name == &occupancy.name
                 || (current.worker_id != occupancy.worker_id
                     && current.session_id != occupancy.session_id)
+                || (master_role_takeover
+                    && current.worker_id == occupancy.worker_id
+                    && current.session_id == occupancy.session_id)
         });
         occupancies.insert(occupancy.name.clone(), occupancy);
     }

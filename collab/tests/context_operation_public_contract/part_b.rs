@@ -434,6 +434,7 @@ fn single_context_master_peer_intent_overrides_and_replays_after_restart() {
     let other = second_pane(&fixture, "unrelated-master", pane.server_pid);
     let other_context = fixture.registered_context("ctxop-other-seed", &other);
     let other_id = other_context["result"]["snapshot"]["identity"]["worker_id"].clone();
+    let other_name = other_context["result"]["snapshot"]["identity"]["display_name"].clone();
     fixture.run_ok(
         &[
             "master",
@@ -511,21 +512,23 @@ fn single_context_master_peer_intent_overrides_and_replays_after_restart() {
                 fence.worker_id
             );
             assert_ne!(other_id, fence.worker_id);
-            assert_eq!(demoted["result"]["snapshot"]["identity"]["display_name"], work_name);
+            assert_eq!(demoted["result"]["snapshot"]["identity"]["display_name"], other_name);
         } else {
             assert!(
                 grant.is_null(),
                 "target peer intent clears its own master grant"
             );
-            assert_ne!(result["result"]["snapshot"]["identity"]["display_name"], work_name);
+            assert_eq!(result["result"]["snapshot"]["identity"]["display_name"], work_name);
         }
         let task = fixture.run_ok(&["task", "status", "role-preserved-task"], Some(&pane));
-        let expected_owner = if step == 0 { json!(fence.worker_id) } else { other_id.clone() };
+        // Ordinary-name work stays at its stable carrier across peer -> master -> peer
+        // and restart/replay. Only work already addressed to Jenny follows the role.
+        let expected_owner = json!(fence.worker_id);
         assert_eq!(task["owner"], expected_owner, "work stays with {work_name}: {task}");
         let occupancy = read_lines(&fixture.project_journal()).into_iter().rev()
             .find(|event| event["ev"] == "NameResolutionCommitted" && event["occupancy"]["name"] == work_name)
             .expect("work name has typed occupancy");
-        assert_eq!(occupancy["occupancy"]["worker_id"], expected_owner);
+        assert_eq!(occupancy["occupancy"]["worker_id"], expected_owner, "{work_name} occupancy stays with its stable carrier");
         assert_eq!(role_consumer_task_facts(&fixture, &pane), task_baseline);
         let messages = read_lines(&fixture.project_journal());
         assert_eq!(messages.iter().find(|event| event["ev"] == "Sent" && event["msg"]["id"] == message_baseline["id"]).unwrap()["msg"], message_baseline);

@@ -326,19 +326,8 @@ fn public_handlers_move_goal_schedule_and_pending_wake_across_intermediate_name(
     let (server, root) = peer_tests::test_server();
     let server = std::sync::Arc::new(server);
     let register = |server: &Server, id: &str, pane: u32, session: &str| {
-        peer_tests::register_tmux(
-            server,
-            id,
-            crate::proto::TmuxEndpoint {
-                socket_path: format!("/tmp/collab-shared-{id}-{}", std::process::id()),
-                server_pid: 1,
-                tmux_session_id: format!("${pane}"),
-                pane_id: format!("%{pane}"),
-                pane_pid: 2,
-                codex_session_id: Some(session.into()),
-                codex_thread_id: Some(format!("thread-{id}")),
-            },
-        )
+        let _ = pane;
+        peer_tests::register(server, id, session)
     };
     assert!(register(&server, "old", 1, "shared-session").ok);
 

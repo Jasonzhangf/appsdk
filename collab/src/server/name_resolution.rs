@@ -855,14 +855,39 @@ pub(crate) fn plan_name_resolution(
         // Same sessionID inherits the current name, including Jenny. A name is
         // not a master grant; the grant stays on its typed owner.
         let same_session = if let Some(names) = names {
-            let mut matches = names
+            let matches: Vec<_> = names
                 .values()
-                .filter(|holder| holder.session_id == request.caller_session_id);
-            let first = matches.next();
-            if matches.next().is_some() {
-                return Err("NAME_SESSION_CONFLICT: the current session matches multiple names".into());
+                .filter(|holder| holder.session_id == request.caller_session_id)
+                .collect();
+            match matches.as_slice() {
+                [] => None,
+                [holder] => Some(*holder),
+                // The current master keeps its ordinary name beside Jenny;
+                // the role name is the fixed tmux anchor while the grant holds.
+                _ if input.is_current_master => matches
+                    .iter()
+                    .find(|holder| holder.name == "Jenny")
+                    .copied(),
+                // A successor carrier on the same session first inherits the
+                // stable ordinary name. Jenny follows the grant through its
+                // own transfer owner, not session inheritance.
+                _ => {
+                    let ordinary: Vec<_> = matches
+                        .iter()
+                        .filter(|holder| holder.name != "Jenny")
+                        .copied()
+                        .collect();
+                    match ordinary.as_slice() {
+                        [holder] => Some(*holder),
+                        _ => {
+                            return Err(
+                                "NAME_SESSION_CONFLICT: the current session matches multiple names"
+                                    .into(),
+                            )
+                        }
+                    }
+                }
             }
-            first
         } else {
             None
         };
@@ -1115,7 +1140,18 @@ pub(crate) fn build_name_resolution_events_with_rename_from(
             details,
         });
     }
-    if previous != Some(occupancy) || !assignments.is_empty() {
+    let releases_extra_names = occupancy.name != "Jenny"
+        && state
+            .name_occupancies
+            .get(project_scope)
+            .is_some_and(|names| {
+                names.values().any(|holder| {
+                    holder.worker_id == occupancy.worker_id
+                        && holder.session_id == occupancy.session_id
+                        && holder.name != occupancy.name
+                })
+            });
+    if previous != Some(occupancy) || !assignments.is_empty() || releases_extra_names {
         events.insert(
             0,
             Event::NameResolutionCommitted {

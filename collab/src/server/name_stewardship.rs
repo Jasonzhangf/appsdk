@@ -112,6 +112,28 @@ fn tick_with_notifier(
             if !unknown {
                 continue;
             }
+            // A master keeps its ordinary work name beside Jenny on the same
+            // session. Presence belongs to the session, so adjudicate one
+            // deterministic name (Jenny first) and let that observation cover
+            // both occupancies instead of emitting duplicate control mail.
+            let mut same_session: Vec<_> = names
+                .values()
+                .filter(|other| {
+                    other.worker_id == occupancy.worker_id
+                        && other.session_id == occupancy.session_id
+                        && state
+                            .agent_presence(scope, &other.worker_id)
+                            .is_some_and(|presence| {
+                                presence.session_id == other.session_id
+                                    && presence.presence == AgentPresence::Unknown
+                            })
+                })
+                .map(|other| other.name.as_str())
+                .collect();
+            same_session.sort_by_key(|name| (*name != "Jenny", *name));
+            if same_session.first().copied() != Some(occupancy.name.as_str()) {
+                continue;
+            }
             let existing = state.name_recoveries.values().any(|recovery| {
                 recovery.occupancy_ref.matches(scope, occupancy)
                     && matches!(

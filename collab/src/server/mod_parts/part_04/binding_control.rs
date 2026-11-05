@@ -89,6 +89,12 @@ impl ProjectRuntimeManager {
         let mut by_worker = names
             .values()
             .filter(|holder| holder.worker_id.as_str() == worker_id);
+        // A master keeps both its ordinary work name and the Jenny role name.
+        // The fixed tmux anchor is the role name while the grant is held, so
+        // the control slot follows Jenny for the current master; every other
+        // carrier must have exactly one stable name.
+        let is_master = current_master_worker_id(&state, Some(&binding.route_scope()))
+            .is_some_and(|master| master == worker_id);
         let holder = match binding.session_id.as_ref() {
             Some(session) => {
                 let matches = by_worker
@@ -101,6 +107,17 @@ impl ProjectRuntimeManager {
                             "BINDING_CONTROL_NAME_MISSING: {worker_id} has no stable name for session {session}"
                         ))
                     }
+                    _ if is_master => match matches
+                        .iter()
+                        .find(|holder| holder.name == "Jenny")
+                    {
+                        Some(holder) => *holder,
+                        None => {
+                            return Err(format!(
+                                "BINDING_CONTROL_NAME_AMBIGUOUS: {worker_id} has multiple stable names for session {session}"
+                            ))
+                        }
+                    },
                     _ => {
                         return Err(format!(
                             "BINDING_CONTROL_NAME_AMBIGUOUS: {worker_id} has multiple stable names for session {session}"

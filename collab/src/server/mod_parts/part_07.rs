@@ -1746,16 +1746,14 @@ fn handle_master_delegate(
         pane_anchor: None,
     };
     let mut events = master_authority_transfer_events(&state, &route_scope, grant);
-    let rename_from = name_resolution::names_held_by_worker(
-        &state,
-        route_scope.project_scope_id.as_str(),
-        &target_id,
-    );
+    // Delegating Jenny is a role takeover, not an ordinary-name rename. The
+    // target's retained ordinary name keeps its tasks, occupancy and
+    // name-addressed mail, so no rename source is handed to the transfer.
     events.extend(name_resolution::build_name_resolution_events_with_rename_from(
         &state,
         route_scope.project_scope_id.as_str(),
         &occupancy,
-        &rename_from,
+        &[],
     ));
     if let Err(error) = server.commit_locked_checked(&mut state, &events) {
         drop(state);

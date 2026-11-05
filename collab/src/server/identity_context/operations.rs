@@ -48,7 +48,7 @@ pub(crate) fn rename_anchor(
     worker_id: &str,
     target: &str,
 ) -> Result<Option<TmuxAnchorRename>, String> {
-    let (caller, outgoing) = {
+    let (caller, outgoing, outgoing_stable) = {
         let state = server.state.lock().unwrap();
         let Some(route) = server_route_scope(server, &state)? else {
             return Ok(None);
@@ -64,22 +64,61 @@ pub(crate) fn rename_anchor(
         else {
             return Ok(None);
         };
-        let outgoing = state
+        let outgoing_holder = state
             .name_occupancy(route.project_scope_id.as_str(), target)
-            .filter(|holder| holder.worker_id != worker_id)
-            .and_then(|holder| {
-                project
-                    .runtime_bindings
-                    .values()
-                    .filter(|binding| {
-                        binding.agent_id.as_str() == holder.worker_id.as_str()
-                            && binding.session_id.as_ref().map(|session| session.as_str())
-                                == Some(holder.session_id.as_str())
-                    })
-                    .max_by_key(|binding| binding.endpoint_generation)
-                    .and_then(|binding| binding.tmux_endpoint.clone())
-            });
-        (caller, outgoing)
+            .filter(|holder| holder.worker_id != worker_id);
+        let mut outgoing = outgoing_holder.and_then(|holder| {
+            project
+                .runtime_bindings
+                .values()
+                .filter(|binding| {
+                    binding.agent_id.as_str() == holder.worker_id.as_str()
+                        && binding.session_id.as_ref().map(|session| session.as_str())
+                            == Some(holder.session_id.as_str())
+                })
+                .max_by_key(|binding| binding.endpoint_generation)
+                .and_then(|binding| binding.tmux_endpoint.clone())
+                // A successor registration may already have retired the
+                // outgoing binding while its live tmux session still carries
+                // the role name. The worker's current transport locates it.
+                .or_else(|| {
+                    state
+                        .workers
+                        .get(holder.worker_id.as_str())
+                        .and_then(super::selected_transport_for_worker)
+                        .and_then(|transport| transport.tmux_endpoint.clone())
+                })
+        });
+        if outgoing.is_none() && target == "Jenny" {
+            // A successor carrier can adopt the ordinary name first and
+            // release the old Jenny occupancy before promoting. The prior
+            // role session is then orphaned in tmux but still live; locate it
+            // by the fixed role name so the swap can move it aside.
+            outgoing = crate::client::adapters::tmux::find_live_session_by_name(
+                &caller.socket_path,
+                target,
+            )?;
+        }
+        // A demoted master keeps its ordinary work name. The swap must place
+        // that name on its session, not the incoming worker's ordinary name,
+        // so both carriers remain distinct and their work stays stable.
+        let outgoing_stable = outgoing_holder.and_then(|holder| {
+            state
+                .name_occupancies
+                .get(route.project_scope_id.as_str())
+                .and_then(|names| {
+                    names
+                        .values()
+                        .filter(|name| {
+                            name.worker_id == holder.worker_id
+                                && name.session_id == holder.session_id
+                                && name.name != "Jenny"
+                        })
+                        .map(|name| name.name.clone())
+                        .min()
+                })
+        });
+        (caller, outgoing, outgoing_stable)
     };
     // The caller carries a registered TUI binding, so its tmux endpoint must
     // be a live, readable session before any name move. An absent or
@@ -87,6 +126,8 @@ pub(crate) fn rename_anchor(
     // commit without a readable anchor would persist a stale session name.
     // Only a binding with no tmux endpoint (handled above) skips the rename.
     let caller_previous = crate::client::adapters::tmux::require_live_session_name(&caller)?;
+    // A live session that already carries the fixed role name keeps it. The
+    // name resolution commits Jenny without another tmux move.
     if caller_previous == target {
         return Ok(None);
     }
@@ -95,10 +136,15 @@ pub(crate) fn rename_anchor(
             && crate::client::adapters::tmux::session_name_if_live(outgoing)?
                 == Some(target.to_owned())
         {
+            let outgoing_target = if target == "Jenny" {
+                outgoing_stable.as_deref().unwrap_or(&caller_previous)
+            } else {
+                &caller_previous
+            };
             let temporary = anchor_swap_name();
             crate::client::adapters::tmux::rename_session(&caller, &temporary)?;
             if let Err(error) =
-                crate::client::adapters::tmux::rename_session(outgoing, &caller_previous)
+                crate::client::adapters::tmux::rename_session(outgoing, outgoing_target)
             {
                 let _ = crate::client::adapters::tmux::rename_session(&caller, &caller_previous);
                 return Err(error);

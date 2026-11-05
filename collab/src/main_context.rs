@@ -212,9 +212,10 @@ fn resolve_context_root_with(
     allow_first_registration: bool,
 ) -> anyhow::Result<(Scope, &'static str)> {
     let canonical_cwd = std::fs::canonicalize(cwd)?;
-    // The project marker is `.agent-collab`. Collab never consults git, so the
-    // same rule works for plain directories, nested directories, and task
-    // worktrees. A symlinked marker binds a task directory to its project.
+    // The project marker `.agent-collab` wins for plain directories, nested
+    // directories, and task worktrees. A symlinked marker binds a task
+    // directory to its project. Git is only a first-registration boundary
+    // below and must not create baselines inside Git subdirectories.
     if let Some(root) = scope::project_root_for_cwd(&canonical_cwd) {
         let resolution = if root == canonical_cwd {
             "cwd"
@@ -225,6 +226,22 @@ fn resolve_context_root_with(
     }
     if let Ok(route) = scope::canonical_route_for_cwd(host_paths, cwd) {
         return Ok((Scope { root: route.root }, "canonical-route"));
+    }
+    // A Git checkout root is identified by a valid `.git` marker, never by
+    // forking git. First registration inside a Git checkout but below its root
+    // would create a second baseline nested in the same repository, so it must
+    // fail closed. A query or other registered-only caller still falls through
+    // to the fail-closed checks below when no baseline or route exists.
+    if allow_first_registration {
+        if let Some(git_root) = scope::git_checkout_root_for_cwd(&canonical_cwd) {
+            if git_root != canonical_cwd {
+                anyhow::bail!(
+                    "COLLAB_CONTEXT_UNRESOLVED: refusing to create a Collab baseline in Git subdirectory {}; run `collab context` from the Git checkout root {}",
+                    canonical_cwd.display(),
+                    git_root.display()
+                );
+            }
+        }
     }
     // A cwd inside an existing project (an ancestor carries `.agent-collab`)
     // binds to that project through its route; without a route it must fail

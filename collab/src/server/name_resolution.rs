@@ -1033,6 +1033,15 @@ pub(crate) fn build_name_resolution_events_with_rename_from(
     rename_from: &[String],
 ) -> Vec<Event> {
     let previous = state.name_occupancy(project_scope, &occupancy.name);
+    // Jenny is the master role name, so taking Jenny is a role takeover, not
+    // an ordinary work rename. Only work already addressed to Jenny hands
+    // over with the role; the caller's ordinary names keep their tasks and
+    // name-addressed mail so those continue to follow the stable name.
+    let rename_from: &[String] = if occupancy.name == "Jenny" {
+        &[]
+    } else {
+        rename_from
+    };
     // A fresh ordinary name has no previous holder. The caller worker id is
     // not a legacy identity owner in that case; only the target name's prior
     // holder or an explicit rename source can authorize a task handoff.
@@ -1051,8 +1060,14 @@ pub(crate) fn build_name_resolution_events_with_rename_from(
         let existing = state.task_assignment(&task.id);
         let matches_rename_from = existing
             .is_some_and(|assignment| rename_from.iter().any(|name| name == &assignment.name));
-        let matches_target_name = existing
-            .is_some_and(|assignment| assignment.name == occupancy.name && target_held_by_other);
+        // A task already addressed to this name follows the name to its
+        // current carrier. The previous-holder check would miss a release and
+        // later re-take by a different session, but a same-session commit is
+        // still a no-op.
+        let matches_target_name = existing.is_some_and(|assignment| {
+            assignment.name == occupancy.name
+                && (target_held_by_other || assignment.session_id != occupancy.session_id)
+        });
         let matches_caller_name = matches_rename_from || matches_target_name;
         let matches_legacy_owner =
             existing.is_none() && legacy_owner.is_some_and(|owner| task.owner == owner);

@@ -176,6 +176,29 @@ pub(crate) fn resolve_for_daemon_with_route_at(
     facts: &crate::proto::IdentityFacts,
     _route: Option<&crate::proto::RouteResolution>,
 ) -> anyhow::Result<Identity> {
+    resolve_for_daemon_with_route_mode_at(host_paths, scope, facts, false)
+}
+
+/// Automatic recovery has already established that no current worker owns the
+/// observed session. Duplicate persisted archives are history in that state,
+/// not competing owners. Keep the unique and cross-project branches unchanged,
+/// but allow a scoped session carrier when the only blocker is historical
+/// ambiguity.
+pub(crate) fn resolve_for_unowned_daemon_with_route_at(
+    host_paths: &HostPaths,
+    scope: &Scope,
+    facts: &crate::proto::IdentityFacts,
+    _route: Option<&crate::proto::RouteResolution>,
+) -> anyhow::Result<Identity> {
+    resolve_for_daemon_with_route_mode_at(host_paths, scope, facts, true)
+}
+
+fn resolve_for_daemon_with_route_mode_at(
+    host_paths: &HostPaths,
+    scope: &Scope,
+    facts: &crate::proto::IdentityFacts,
+    tolerate_ambiguous_history: bool,
+) -> anyhow::Result<Identity> {
     let observed = AnchorObservation::from_facts(facts);
     if !observed.has_anchor() {
         anyhow::bail!(
@@ -196,6 +219,9 @@ pub(crate) fn resolve_for_daemon_with_route_at(
     match identity_by_current_anchors_same_scope_at(host_paths, scope, &anchor_match) {
         Ok(Some(identity)) => return Ok(identity),
         Ok(None) => {}
+        Err(error)
+            if tolerate_ambiguous_history
+                && error.to_string().starts_with("IDENTITY_RESTORE_AMBIGUOUS:") => {}
         Err(error) => return Err(error),
     }
     let worker_id = draft_worker_id_at(&observed)?;

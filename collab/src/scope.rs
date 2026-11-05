@@ -380,25 +380,14 @@ struct GitWorktreeRoots {
 }
 
 fn git_worktree_roots_if_any(cwd: &Path) -> anyhow::Result<Option<GitWorktreeRoots>> {
-    let Some(worktree_root) = git_marker_root(cwd) else {
+    let Some(worktree_root) = git_checkout_root_for_cwd(cwd) else {
         return Ok(None);
     };
     let marker = worktree_root.join(".git");
+    let Some(gitdir) = gitdir_for_marker(&marker) else {
+        return Ok(None);
+    };
     let main_root = if marker.is_file() {
-        let text = match std::fs::read_to_string(&marker) {
-            Ok(text) => text,
-            _ => return Ok(None),
-        };
-        let path = text.trim().strip_prefix("gitdir:").map(str::trim);
-        let Some(path) = path.filter(|path| !path.is_empty()) else {
-            return Ok(None);
-        };
-        let gitdir = PathBuf::from(path);
-        let gitdir = if gitdir.is_absolute() {
-            gitdir
-        } else {
-            worktree_root.join(gitdir)
-        };
         // A linked worktree gitdir lives at `.git/worktrees/<name>` inside the
         // common dir; the parent of the common dir is the main checkout root.
         let common = gitdir
@@ -421,11 +410,31 @@ fn git_worktree_roots_if_any(cwd: &Path) -> anyhow::Result<Option<GitWorktreeRoo
     }))
 }
 
-fn git_marker_root(cwd: &Path) -> Option<PathBuf> {
+pub(crate) fn git_checkout_root_for_cwd(cwd: &Path) -> Option<PathBuf> {
     cwd.ancestors()
-        .map(|dir| dir.join(".git"))
-        .find(|marker| marker.is_dir() || marker.is_file())
-        .and_then(|marker| marker.parent().map(Path::to_path_buf))
+        .find(|dir| gitdir_for_marker(&dir.join(".git")).is_some())
+        .map(Path::to_path_buf)
+}
+
+fn gitdir_for_marker(marker: &Path) -> Option<PathBuf> {
+    if marker.is_dir() {
+        return marker.join("HEAD").is_file().then(|| marker.to_path_buf());
+    }
+    if !marker.is_file() {
+        return None;
+    }
+    let text = std::fs::read_to_string(marker).ok()?;
+    let path = text.trim().strip_prefix("gitdir:")?.trim();
+    if path.is_empty() {
+        return None;
+    }
+    let gitdir = PathBuf::from(path);
+    let gitdir = if gitdir.is_absolute() {
+        gitdir
+    } else {
+        marker.parent()?.join(gitdir)
+    };
+    gitdir.join("HEAD").is_file().then_some(gitdir)
 }
 
 fn resolve_state_root(

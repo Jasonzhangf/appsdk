@@ -90,7 +90,17 @@ fn c04_approved_identity_recovery_retires_exact_incumbent_without_grant_change()
 #[test]
 fn c05_minimal_approval_reads_current_incumbent_without_second_approval() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
-    let (fixture, pane) = Fixture::isolated("collab-v23-c05");
+    let (mut fixture, pane) = Fixture::isolated("collab-v23-c05");
+    // Replay purity compares the exact durable bytes. The default 1s scheduler
+    // would interleave daemon timer presence rows with the request under test,
+    // so this fixture declares the maximum tick interval before recovery starts.
+    let config_path = fixture.root.join("home/.appsdk/config.toml");
+    fs::create_dir_all(config_path.parent().expect("fixture config parent"))
+        .expect("create fixture app config directory");
+    fixture.stop_daemon();
+    fs::write(&config_path, "[timers]\ntick_interval_ms=60000\n")
+        .expect("write fixture timer interval");
+    fixture.start_daemon();
     let operation_id = "ctxop-v23-c05-seed";
     let fence = seed_stale_identity(&fixture, &pane, operation_id, false);
     let recovery_id = "ctxop-v23-c05-recovery";
@@ -199,7 +209,8 @@ fn c05_minimal_approval_reads_current_incumbent_without_second_approval() {
             fs::read(fixture.host_journal()).unwrap(),
             fs::read(fixture.project_journal()).unwrap()
         ),
-        before_replay
+        before_replay,
+        "same-key replay must not alter the operation-owned durable state"
     );
     assert_eq!(
         fs::read(&fence.identity_path).unwrap(),

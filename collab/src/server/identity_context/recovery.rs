@@ -1468,7 +1468,7 @@ impl ProjectRuntimeManager {
             // Equality-only credential refresh would reject the split again.
             identity
         } else {
-            let mut identity = identity::resolve_for_daemon_with_route_at(
+            let mut identity = identity::resolve_for_unowned_daemon_with_route_at(
                 &self.host.host_paths,
                 &scope,
                 &facts,

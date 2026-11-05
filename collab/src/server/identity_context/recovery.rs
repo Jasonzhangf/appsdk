@@ -1,3 +1,18 @@
+/// Provenance of facts entering daemon observation. A caller-supplied request
+/// cannot select this; only `participant_register_reply` may ask the daemon to
+/// treat its rebuilt transport as verified by `register_reply::accept`.
+#[derive(Clone, Copy)]
+enum FactProvenance {
+    Caller,
+    VerifiedContinuation,
+}
+
+impl FactProvenance {
+    fn is_verified_continuation(self) -> bool {
+        matches!(self, Self::VerifiedContinuation)
+    }
+}
+
 impl ProjectRuntimeManager {
     fn recovered_binding_identity(
         &self,
@@ -81,9 +96,8 @@ impl ProjectRuntimeManager {
         &self,
         context: &ProjectContext,
         facts: &IdentityFacts,
-        continuation_verified: bool,
     ) -> anyhow::Result<IdentityFacts> {
-        self.observe_identity_facts_with_pane(context, facts, continuation_verified)
+        self.observe_identity_facts_with_pane(context, facts)
             .map(|(facts, _)| facts)
     }
 
@@ -91,16 +105,31 @@ impl ProjectRuntimeManager {
     /// caller ancestry just observed here may populate the name pane anchor;
     /// persisted transport, caller-supplied tmux candidates and pane anchors
     /// completed from durable routes cannot.
-    ///
-    /// `continuation_verified` marks facts the daemon rebuilt from a
-    /// participant-continuation transport already verified by
-    /// `register_reply::accept`. The flag is daemon-internal; a serialized
-    /// request can never set it.
     fn observe_identity_facts_with_pane(
         &self,
         context: &ProjectContext,
         facts: &IdentityFacts,
-        continuation_verified: bool,
+    ) -> anyhow::Result<(IdentityFacts, Option<crate::proto::TmuxPaneAnchor>)> {
+        self.observe_identity_facts_from(context, facts, FactProvenance::Caller)
+    }
+
+    /// Observe facts rebuilt by `participant_register_reply` from a transport
+    /// already verified by `register_reply::accept` (challenge, marker and a
+    /// live pane probe). The daemon chooses this provenance at the internal
+    /// continuation entry point; a serialized request cannot set it.
+    fn observe_verified_continuation_facts_with_pane(
+        &self,
+        context: &ProjectContext,
+        facts: &IdentityFacts,
+    ) -> anyhow::Result<(IdentityFacts, Option<crate::proto::TmuxPaneAnchor>)> {
+        self.observe_identity_facts_from(context, facts, FactProvenance::VerifiedContinuation)
+    }
+
+    fn observe_identity_facts_from(
+        &self,
+        context: &ProjectContext,
+        facts: &IdentityFacts,
+        provenance: FactProvenance,
     ) -> anyhow::Result<(IdentityFacts, Option<crate::proto::TmuxPaneAnchor>)> {
         let mut facts = facts.clone();
         if facts.dsh.is_some() || facts.dsh_session_id.is_some() {
@@ -123,7 +152,7 @@ impl ProjectRuntimeManager {
             // participant continuation, whose tmux transport was already
             // verified by `register_reply::accept` (challenge, marker, and a
             // live pane probe); that transport stays a selected identity fact.
-            if !continuation_verified {
+            if !provenance.is_verified_continuation() {
                 facts.tmux = None;
                 facts.tmux_anchor = None;
                 facts.pane_hint = None;
@@ -667,7 +696,7 @@ impl ProjectRuntimeManager {
         }
         if name_adjudication_control(request)?.is_some() {
             let facts = self
-                .observe_identity_facts(context, &request.facts, false)
+                .observe_identity_facts(context, &request.facts)
                 .map_err(|error| ApprovedAdmissionError::Error(error.to_string()))?;
             if self
                 .current_session_identity(context, &facts)
@@ -706,7 +735,7 @@ impl ProjectRuntimeManager {
             }
         }
         let observed_facts = self
-            .observe_identity_facts(context, &request.facts, false)
+            .observe_identity_facts(context, &request.facts)
             .map_err(|error| ApprovedAdmissionError::Error(error.to_string()))?;
         if explicit_master {
             if self.current_session_identity(context, &observed_facts)
@@ -1996,4 +2025,112 @@ fn typed_session_owner(
     } else {
         None
     })
+}
+
+#[cfg(test)]
+mod anchor_provenance_tests {
+    use super::*;
+    use crate::proto::{TmuxCandidate, TmuxPaneAnchor};
+    use crate::server::operation_journal::OperationJournal;
+    use crate::server::peer_tests::test_server;
+    use std::sync::Arc;
+
+    fn recovery_manager(server: Arc<Server>) -> Arc<ProjectRuntimeManager> {
+        let host_paths = server.host_paths.clone();
+        let journal = Arc::new(OperationJournal::open(host_paths.journal_path()).unwrap());
+        ProjectRuntimeManager::new_with_operation_journal(server, &host_paths, journal).unwrap()
+    }
+
+    fn recovery_context(root: &std::path::Path) -> ProjectContext {
+        ProjectContext::for_registered_root_with_app(
+            root,
+            AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn tmux_anchor() -> TmuxCandidate {
+        TmuxCandidate {
+            endpoint: crate::proto::TmuxEndpoint {
+                socket_path: "/tmp/tmux-test.sock".into(),
+                server_pid: 42,
+                tmux_session_id: "$7".into(),
+                pane_id: "%3".into(),
+                pane_pid: 99,
+                codex_session_id: Some("saved-agent-session".into()),
+                codex_thread_id: Some("saved-agent-thread".into()),
+            },
+            cwd: "/tmp/project".into(),
+        }
+    }
+
+    #[test]
+    fn caller_supplied_tmux_candidate_without_live_observation_is_cleared() {
+        let (host, root) = test_server();
+        let manager = recovery_manager(Arc::new(host));
+        let context = recovery_context(&root);
+        let candidate = tmux_anchor();
+        let facts = IdentityFacts {
+            caller_pid: None,
+            session_id: Some("caller-claimed-session".into()),
+            pane_hint: Some("%3".into()),
+            tmux_anchor: Some(TmuxPaneAnchor {
+                socket_path: candidate.endpoint.socket_path.clone(),
+                pane_id: candidate.endpoint.pane_id.clone(),
+            }),
+            tmux: Some(candidate),
+            tmux_session_name: Some("Alice".into()),
+            ..IdentityFacts::default()
+        };
+
+        let (observed, pane_anchor) = manager
+            .observe_identity_facts_with_pane(&context, &facts)
+            .unwrap();
+
+        assert!(
+            observed.tmux.is_none(),
+            "an unverified caller tmux candidate must not reach identity staging"
+        );
+        assert!(
+            observed.tmux_anchor.is_none(),
+            "an unverified caller pane anchor must not survive observation"
+        );
+        assert!(observed.tmux_session_name.is_none());
+        assert!(observed.pane_hint.is_none());
+        assert!(
+            pane_anchor.is_none(),
+            "no live pane observation may produce a name anchor from request facts"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn verified_daemon_continuation_tmux_fact_survives_observation() {
+        let (host, root) = test_server();
+        let manager = recovery_manager(Arc::new(host));
+        let context = recovery_context(&root);
+        let candidate = tmux_anchor();
+        let facts = IdentityFacts {
+            caller_pid: None,
+            session_id: Some("continuation-session".into()),
+            tmux: Some(candidate.clone()),
+            tmux_session_name: Some("Alice".into()),
+            ..IdentityFacts::default()
+        };
+
+        let (observed, _) = manager
+            .observe_verified_continuation_facts_with_pane(&context, &facts)
+            .unwrap();
+
+        assert_eq!(
+            observed.tmux.as_ref().map(|candidate| &candidate.endpoint),
+            Some(&candidate.endpoint),
+            "an accept-verified participant continuation keeps its tmux transport"
+        );
+        assert!(
+            observed.tmux_session_name.is_none(),
+            "the fixed session name is still re-observed, never taken from the request"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

@@ -184,7 +184,7 @@ impl ProjectRuntimeManager {
                 Ok(None) => {}
             }
             let (observed_facts, _) =
-                match self.observe_identity_facts_with_pane(&context, &request.facts, false) {
+                match self.observe_identity_facts_with_pane(&context, &request.facts) {
                     Ok(observed) => observed,
                     Err(error) => return (self.host.clone(), Resp::err(format!("{error:#}"))),
                 };
@@ -871,9 +871,12 @@ impl ProjectRuntimeManager {
             );
         }
         let mut facts = facts.clone();
-        facts = self
-            .observe_identity_facts_with_pane(context, &facts, continuation_verified)
-            .map(|(facts, _)| facts)?;
+        let observed = if continuation_verified {
+            self.observe_verified_continuation_facts_with_pane(context, &facts)
+        } else {
+            self.observe_identity_facts_with_pane(context, &facts)
+        };
+        facts = observed.map(|(facts, _)| facts)?;
         self.complete_persisted_tmux_facts(context, &mut facts)?;
         validate_facts(&facts)?;
         let scope = Scope {
@@ -1598,7 +1601,7 @@ impl ProjectRuntimeManager {
         &self,
         context: &ProjectContext,
         mut facts: IdentityFacts,
-       continuation_verified: bool,
+        continuation_verified: bool,
     ) -> Result<(IdentityFacts, Option<crate::proto::TmuxPaneAnchor>), PreflightIdentityError> {
         if context.app_scope_id.as_str() != identity::CLI_APP_SERVER_ID
             || context.runtime_context.is_some()
@@ -1614,9 +1617,12 @@ impl ProjectRuntimeManager {
         validate_project_registration_cwd(&context.canonical_root, &root)
             .map_err(|error| PreflightIdentityError::Error(anyhow::Error::msg(error)))?;
         let observed_pane;
-        (facts, observed_pane) = self
-            .observe_identity_facts_with_pane(context, &facts, continuation_verified)
-            .map_err(PreflightIdentityError::Error)?;
+        (facts, observed_pane) = if continuation_verified {
+            self.observe_verified_continuation_facts_with_pane(context, &facts)
+        } else {
+            self.observe_identity_facts_with_pane(context, &facts)
+        }
+        .map_err(PreflightIdentityError::Error)?;
         self.complete_persisted_tmux_facts(context, &mut facts)
             .map_err(PreflightIdentityError::Error)?;
         validate_facts(&facts).map_err(PreflightIdentityError::Error)?;
@@ -1950,5 +1956,90 @@ impl ProjectRuntimeManager {
         self.operation_journal
             .install_safe(&request.operation_id, Vec::new());
         Ok(admission)
+    }
+}
+
+#[cfg(test)]
+mod rename_anchor_tests {
+    use super::*;
+    use crate::server::peer_tests::{seed_committed_owner, test_server};
+    use std::sync::Arc;
+
+    fn rename_anchor_fixture(kind: TransportKind) -> (Arc<Server>, std::path::PathBuf) {
+        let (server, root) = test_server();
+        let server = Arc::new(server);
+        let mut transport = SelectedTransport {
+            kind: TransportKind::AppServer,
+            endpoint: Some("unix:///tmp/rename-anchor-native.sock".into()),
+            namespace: Some("codex_tui".into()),
+            session_id: Some("rename-anchor-session".into()),
+            thread_id: Some("rename-anchor-thread".into()),
+            capabilities: Default::default(),
+            tmux_endpoint: None,
+            self_check: "rename anchor fixture".into(),
+        };
+        if kind == TransportKind::Tmux {
+            let endpoint = crate::proto::TmuxEndpoint {
+                socket_path: std::env::temp_dir()
+                    .join(format!(
+                        "collab-rename-anchor-unreachable-{}-{}.sock",
+                        std::process::id(),
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_nanos()
+                    ))
+                    .to_string_lossy()
+                    .into_owned(),
+                server_pid: 42,
+                tmux_session_id: "$7".into(),
+                pane_id: "%3".into(),
+                pane_pid: 99,
+                codex_session_id: Some("rename-anchor-session".into()),
+                codex_thread_id: Some("rename-anchor-thread".into()),
+            };
+            transport.kind = TransportKind::Tmux;
+            transport.endpoint = Some(endpoint.socket_path.clone());
+            transport.namespace = Some(endpoint.tmux_session_id.clone());
+            transport.tmux_endpoint = Some(endpoint);
+        }
+        let receipt = seed_committed_owner(
+            &server,
+            "rename-anchor-peer",
+            "rename-anchor-token",
+            &transport,
+            &root.display().to_string(),
+            Some(AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap()),
+        );
+        assert!(receipt.ok, "{receipt:?}");
+        (server, root)
+    }
+
+    #[test]
+    fn registered_tui_binding_with_unreachable_session_aborts_rename() {
+        let (server, root) = rename_anchor_fixture(TransportKind::Tmux);
+        let result = rename_anchor(&server, "rename-anchor-peer", "Alice");
+        let error = match result {
+            Ok(_) => {
+                panic!("a registered TUI tmux endpoint that cannot be read must fail closed, not skip")
+            }
+            Err(error) => error,
+        };
+        assert!(
+            error.starts_with("TMUX_TUI_ANCHOR_UNREACHABLE:"),
+            "unreachable TUI anchor must be a typed failure: {error}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn binding_without_tmux_endpoint_skips_rename() {
+        let (server, root) = rename_anchor_fixture(TransportKind::AppServer);
+        let result = rename_anchor(&server, "rename-anchor-peer", "Alice");
+        assert!(
+            matches!(result, Ok(None)),
+            "a caller with no tmux endpoint skips the rename"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

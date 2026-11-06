@@ -909,6 +909,155 @@ fn verify_rejects_contracts_that_drop_canonical_semantics() {
 }
 
 #[test]
+fn verify_admission_accepts_const_and_enum_subsets() {
+    let root = temp_root("declared-enum-const-compatible");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let worktree_path = root.join("contracts/records/worktree-record.schema.json");
+    let worktree_projection_path =
+        root.join(".appsdk/contracts/records/worktree-record.schema.json");
+    let canonical = fs::read(&worktree_path).unwrap();
+    let cases = [
+        ("const", serde_json::json!({"const":"isolated_worktree"})),
+        ("single_enum", serde_json::json!({"enum":["isolated_worktree"]})),
+        (
+            "full_enum",
+            serde_json::json!({"enum":["isolated_worktree","layerfs_workspace"]}),
+        ),
+        (
+            "const_and_enum",
+            serde_json::json!({"const":"isolated_worktree","enum":["isolated_worktree"]}),
+        ),
+    ];
+
+    for (name, isolation_mode) in cases {
+        let mut schema: Value = serde_json::from_slice(&canonical).unwrap();
+        schema["properties"]["isolation_mode"] = isolation_mode;
+        let declaration = serde_json::to_string_pretty(&schema).unwrap() + "\n";
+        fs::write(&worktree_path, &declaration).unwrap();
+        fs::write(&worktree_projection_path, &declaration).unwrap();
+        set_sdk_resource_digest(
+            &root,
+            "contracts/records/worktree-record.schema.json",
+            &worktree_projection_path,
+        );
+        let declared_before = fs::read(&worktree_path).unwrap();
+        let projection_before = fs::read(&worktree_projection_path).unwrap();
+        let verified = run(&["verify", "--admission", root_text]);
+        assert!(
+            verified.status.success(),
+            "case={name} stdout={} stderr={}",
+            String::from_utf8_lossy(&verified.stdout),
+            String::from_utf8_lossy(&verified.stderr)
+        );
+        assert_eq!(
+            fs::read(&worktree_path).unwrap(),
+            declared_before,
+            "case={name} verify rewrote the declaration"
+        );
+        assert_eq!(
+            fs::read(&worktree_projection_path).unwrap(),
+            projection_before,
+            "case={name} verify rewrote the declaration projection"
+        );
+        let result: Value = serde_json::from_slice(&verified.stdout).unwrap();
+        for key in ["ok", "command_ok", "delivery_assessed", "delivery_verified"] {
+            assert_eq!(result[key], true, "case={name} key={key}");
+        }
+        assert_eq!(result["reason"], Value::Null, "case={name}");
+    }
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn verify_admission_rejects_invalid_const_and_enum() {
+    let root = temp_root("declared-enum-const-incompatible");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let worktree_path = root.join("contracts/records/worktree-record.schema.json");
+    let worktree_projection_path =
+        root.join(".appsdk/contracts/records/worktree-record.schema.json");
+    let canonical = fs::read(&worktree_path).unwrap();
+    let cases = [
+        (
+            "invalid_const",
+            serde_json::json!({"const":"unsupported_isolation_mode"}),
+        ),
+        ("null_const", serde_json::json!({"const":null})),
+        ("empty_enum", serde_json::json!({"enum":[]})),
+        (
+            "unsupported_enum",
+            serde_json::json!({"enum":["isolated_worktree","unsupported_isolation_mode"]}),
+        ),
+        (
+            "non_array_enum",
+            serde_json::json!({"enum":"isolated_worktree"}),
+        ),
+        ("missing_const_and_enum", serde_json::json!({})),
+        (
+            "valid_const_empty_enum",
+            serde_json::json!({"const":"isolated_worktree","enum":[]}),
+        ),
+        (
+            "valid_const_unsupported_enum",
+            serde_json::json!({
+                "const":"isolated_worktree",
+                "enum":["isolated_worktree","unsupported_isolation_mode"]
+            }),
+        ),
+        (
+            "invalid_const_valid_enum",
+            serde_json::json!({
+                "const":"unsupported_isolation_mode",
+                "enum":["isolated_worktree"]
+            }),
+        ),
+    ];
+
+    for (name, isolation_mode) in cases {
+        let mut schema: Value = serde_json::from_slice(&canonical).unwrap();
+        schema["properties"]["isolation_mode"] = isolation_mode;
+        let declaration = serde_json::to_string_pretty(&schema).unwrap() + "\n";
+        fs::write(&worktree_path, &declaration).unwrap();
+        fs::write(&worktree_projection_path, &declaration).unwrap();
+        set_sdk_resource_digest(
+            &root,
+            "contracts/records/worktree-record.schema.json",
+            &worktree_projection_path,
+        );
+        let declared_before = fs::read(&worktree_path).unwrap();
+        let projection_before = fs::read(&worktree_projection_path).unwrap();
+        let rejected = run(&["verify", "--admission", root_text]);
+        assert!(
+            !rejected.status.success(),
+            "case={name} stdout={} stderr={}",
+            String::from_utf8_lossy(&rejected.stdout),
+            String::from_utf8_lossy(&rejected.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr).contains(
+                "DECLARED_RECORD_CONTRACT_MISMATCH:contracts/records/worktree-record.schema.json/properties/isolation_mode"
+            ),
+            "case={name} stderr={}",
+            String::from_utf8_lossy(&rejected.stderr)
+        );
+        assert_eq!(
+            fs::read(&worktree_path).unwrap(),
+            declared_before,
+            "case={name} verify rewrote the declaration"
+        );
+        assert_eq!(
+            fs::read(&worktree_projection_path).unwrap(),
+            projection_before,
+            "case={name} verify rewrote the declaration projection"
+        );
+    }
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn verify_rejects_nested_and_noncanonical_contract_weakening() {
     let root = temp_root("declared-contract-nested-and-zone-minimums");
     let root_text = root.to_str().unwrap();

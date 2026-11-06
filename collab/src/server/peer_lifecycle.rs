@@ -1011,6 +1011,222 @@ fn target_for_self_binding(state: &State, binding: &RuntimeBinding) -> PeerLifec
     }
 }
 
+fn maintenance_binding_for(state: &State, worker: &WorkerRec) -> Option<RuntimeBinding> {
+    let transport = worker.transport.as_ref()?;
+    let mut bindings = state
+        .global
+        .projects
+        .values()
+        .flat_map(|project| project.runtime_bindings.values())
+        .filter(|binding| {
+            binding.agent_id.as_str() == worker.id
+                && binding.tmux_endpoint == transport.tmux_endpoint
+                && binding.session_id.as_ref().map(|id| id.as_str())
+                    == transport.session_id.as_deref()
+                && binding.native_thread_id.as_ref().map(|id| id.as_str())
+                    == transport.thread_id.as_deref()
+        });
+    let binding = bindings.next()?.clone();
+    bindings.next().is_none().then_some(binding)
+}
+
+fn maintenance_actor(target_worker_id: &str) -> String {
+    let actor = "daemon:stale-identity-maintenance".to_owned();
+    if actor == target_worker_id {
+        format!("{actor}:target-safe")
+    } else {
+        actor
+    }
+}
+
+fn identity_presence_label(presence: IdentityPresence) -> &'static str {
+    match presence {
+        IdentityPresence::Present => "present",
+        IdentityPresence::Cold => "cold",
+        IdentityPresence::Unknown => "unknown",
+        IdentityPresence::Missing => "missing",
+    }
+}
+
+struct DefinitiveMissingCandidate {
+    worker: WorkerRec,
+    target: PeerLifecycleTarget,
+    snapshot: state::ResponsibilitySnapshot,
+    snapshot_captured_ms: Option<i64>,
+    active_fences: Vec<String>,
+    pending_reply_obligations: Vec<String>,
+    endpoint_target: super::CloseEndpointTarget,
+}
+
+fn maintenance_retained(
+    worker_id: &str,
+    binding_id: &str,
+    reason: serde_json::Value,
+) -> serde_json::Value {
+    json!({
+        "worker_id": worker_id,
+        "binding_id": binding_id,
+        "reason": reason,
+    })
+}
+
+/// Run one bounded daemon-owned stale identity maintenance round.
+///
+/// Candidate and responsibility identities are captured under the reducer
+/// lock. Host probes run after that lock is released. Only definitive adapter
+/// absence enters retirement, and responsibility-bearing candidates remain
+/// untouched.
+pub(super) fn maintain_definitive_missing(server: &Server, now: i64) -> serde_json::Value {
+    let (mut candidates, mut unknown) = {
+        let state = server.state.lock().unwrap();
+        let mut candidates = Vec::new();
+        let mut unknown = Vec::new();
+        let mut workers = state.workers.values().cloned().collect::<Vec<_>>();
+        workers.sort_by(|left, right| left.id.cmp(&right.id));
+        for worker in workers {
+            let Some(binding) = maintenance_binding_for(&state, &worker) else {
+                unknown.push(json!({
+                    "worker_id": worker.id,
+                    "reason": {
+                        "kind": "current_binding_missing_or_ambiguous"
+                    }
+                }));
+                continue;
+            };
+            let target = target_for_self_binding(&state, &binding);
+            let snapshot = state::responsibility_snapshot(&state, &worker.id);
+            let snapshot_captured_ms =
+                target.transport.thread_id.as_deref().and_then(|thread_id| {
+                    state
+                        .worker_snapshots
+                        .get(&worker.id)
+                        .filter(|receipt| receipt.thread_id == thread_id)
+                        .map(|receipt| receipt.captured_ms)
+                });
+            let mut active_fences = state
+                .responsibility_fences
+                .values()
+                .filter(|fence| fence.worker_id == worker.id && fence.is_active())
+                .map(|fence| fence.operation_id.clone())
+                .collect::<Vec<_>>();
+            active_fences.sort();
+            active_fences.dedup();
+            let mut pending_reply_obligations = state
+                .reply_obligations
+                .values()
+                .filter(|obligation| {
+                    obligation.from_worker_id == worker.id
+                        || obligation.recipient_worker_id == worker.id
+                })
+                .map(|obligation| obligation.message_id.clone())
+                .collect::<Vec<_>>();
+            pending_reply_obligations.sort();
+            pending_reply_obligations.dedup();
+            candidates.push(DefinitiveMissingCandidate {
+                endpoint_target: close_endpoint_target(&state, &worker.id),
+                worker,
+                target,
+                snapshot,
+                snapshot_captured_ms,
+                active_fences,
+                pending_reply_obligations,
+            });
+        }
+        (candidates, unknown)
+    };
+
+    let mut retired = Vec::new();
+    let mut retained = Vec::new();
+    for candidate in candidates.drain(..) {
+        let worker_id = candidate.target.worker_id.as_str();
+        let binding_id = candidate.target.binding_id.as_str();
+        let presence = if candidate.target.transport.kind == TransportKind::Tmux {
+            close_endpoint_presence(server, &candidate.endpoint_target)
+        } else {
+            worker_presence(server, &candidate.worker)
+        };
+        if presence != IdentityPresence::Missing {
+            retained.push(maintenance_retained(
+                worker_id,
+                binding_id,
+                json!({
+                    "kind": "identity_presence",
+                    "presence": identity_presence_label(presence),
+                }),
+            ));
+            continue;
+        }
+        if let Some(requires) = close_responsibility_requires(&candidate.snapshot) {
+            retained.push(maintenance_retained(worker_id, binding_id, json!(requires)));
+            continue;
+        }
+        if !candidate.active_fences.is_empty() {
+            retained.push(maintenance_retained(
+                worker_id,
+                binding_id,
+                json!({
+                    "kind": "active_responsibility_fence",
+                    "operation_ids": candidate.active_fences,
+                }),
+            ));
+            continue;
+        }
+        if !candidate.pending_reply_obligations.is_empty() {
+            retained.push(maintenance_retained(
+                worker_id,
+                binding_id,
+                json!({
+                    "kind": "pending_reply_obligation",
+                    "message_ids": candidate.pending_reply_obligations,
+                }),
+            ));
+            continue;
+        }
+
+        let operation_id = format!(
+            "stale-identity-maintenance:{}:{}",
+            candidate.target.binding_id.as_str(),
+            now
+        );
+        let actor_id = maintenance_actor(&candidate.target.worker_id);
+        let close = retire_control_plane_target(
+            server,
+            &actor_id,
+            &candidate.target,
+            &operation_id,
+            &candidate.snapshot,
+            PeerLifecycleStage::Missing,
+            None,
+            candidate.snapshot_captured_ms,
+        );
+        if close_phase(&close) == PeerLifecyclePhase::Complete {
+            retired.push(json!({
+                "worker_id": candidate.target.worker_id,
+                "binding_id": candidate.target.binding_id,
+                "operation_id": operation_id,
+                "close": close,
+            }));
+        } else {
+            unknown.push(json!({
+                "worker_id": candidate.target.worker_id,
+                "binding_id": candidate.target.binding_id,
+                "operation_id": operation_id,
+                "reason": {
+                    "kind": "retirement_incomplete",
+                    "detail": close.close_outcome,
+                },
+                "close": close,
+            }));
+        }
+    }
+
+    json!({
+        "retired": retired,
+        "retained": retained,
+        "unknown": unknown,
+    })
+}
+
 fn self_removal_failure(error: impl Into<String>, outcome: PeerLifecycleOutcome) -> Resp {
     let error = error.into();
     response(result(PeerLifecycleAction::Close, outcome), Some(&error))
@@ -1130,8 +1346,27 @@ fn retire_control_plane_target(
     close.runtime_archive.state = runtime_archive.clone();
     let self_unregister = actor_id == target.worker_id;
     let now = now_ms();
+    let preserve_master = !self_unregister && runtime_archive == PeerLifecycleStage::Missing;
     let (events, route_binding) = {
         let state = server.state.lock().unwrap();
+        let target_still_current = state.workers.get(&target.worker_id).is_some_and(|worker| {
+            worker.transport.as_ref().is_some_and(|transport| {
+                transport.kind == target.transport.kind
+                    && transport.endpoint == target.transport.endpoint
+                    && transport.namespace == target.transport.namespace
+                    && transport.session_id == target.transport.session_id
+                    && transport.thread_id == target.transport.thread_id
+                    && transport.tmux_endpoint == target.transport.tmux_endpoint
+            })
+        });
+        if !target_still_current {
+            close.worker_retirement.state = PeerLifecycleStage::Failed;
+            close.binding_retirement.state = PeerLifecycleStage::NotAttempted;
+            close.route_retirement.state = PeerLifecycleStage::NotAttempted;
+            close.subscription_retirement.state = PeerLifecycleStage::NotAttempted;
+            close.close_outcome = "cleanup-open: PEER_LIFECYCLE_TARGET_CHANGED".into();
+            return close;
+        }
         let route_scope = RouteScope {
             app_scope_id: target.app_scope_id.clone(),
             project_scope_id: target.project_scope.clone(),
@@ -1166,6 +1401,19 @@ fn retire_control_plane_target(
         retired.endpoint_generation = next_generation;
         retired.native_thread_id = None;
         retired.tmux_endpoint = None;
+        let preserved_master = preserve_master
+            .then(|| {
+                state
+                    .global
+                    .lookup_master_grant_for(&route_scope, &binding.binding_id)
+                    .cloned()
+            })
+            .flatten()
+            .filter(|grant| grant.endpoint_generation == binding.endpoint_generation)
+            .map(|mut grant| {
+                grant.endpoint_generation = next_generation;
+                grant
+            });
         let mut events = Vec::new();
         for subscription_id in &snapshot.subscription_ids {
             if state
@@ -1187,6 +1435,9 @@ fn retire_control_plane_target(
             binding: binding.clone(),
         });
         events.push(state::Event::GlobalRuntimeBound { binding: retired });
+        if let Some(grant) = preserved_master {
+            events.push(state::Event::GlobalMasterGranted { grant });
+        }
         events.push(state::Event::WorkerClosed {
             worker_id: target.worker_id.clone(),
             closed_by: actor_id.to_owned(),
@@ -1314,3 +1565,7 @@ include!("peer_lifecycle/create_query.rs");
 #[cfg(test)]
 #[path = "peer_lifecycle/self_removal_tests.rs"]
 mod self_removal_tests;
+
+#[cfg(test)]
+#[path = "peer_lifecycle/maintenance_tests.rs"]
+mod maintenance_tests;

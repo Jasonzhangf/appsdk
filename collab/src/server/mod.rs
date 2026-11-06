@@ -56,8 +56,8 @@ use serde_json::json;
 use state::{
     derive_isolation_mode, goal_deadline_key, is_goal_deadline, now_ms, task_resource_active,
     wait_cycle, CleanupReceipt, CleanupVerification, Event, GlobalEvent, Message, MigrationRecord,
-    NotificationSubscription, State, TaskRec, TypedCommand, TypedEnvelope, WaitSpec, WorkerRec,
-    WorktreeBinding, MAX_WAKE_ATTEMPTS,
+    NotificationSubscription, State, TaskBlockRequest, TaskBlockRequestState, TaskRec,
+    TypedCommand, TypedEnvelope, WaitSpec, WorkerRec, WorktreeBinding, MAX_WAKE_ATTEMPTS,
 };
 use std::path::{Path, PathBuf};
 use std::process::Command;

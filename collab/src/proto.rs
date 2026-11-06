@@ -957,6 +957,15 @@ pub enum Req {
         task_id: String,
         status: Option<String>,
         next_step: Option<String>,
+        /// `approve` or `reject` one pending business block application. Only
+        /// the task's current supervisor (project master), or the current CEO
+        /// for a master-owned task, may decide; the requester may never decide
+        /// its own request. Reuses the task update surface so the member
+        /// application and the supervisor decision stay one command family.
+        #[serde(default)]
+        blocker_action: Option<String>,
+        #[serde(default)]
+        decision_reason: Option<String>,
     },
     TaskAccept {
         worker_id: String,

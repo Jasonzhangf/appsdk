@@ -12,6 +12,8 @@ use std::time::{Duration, Instant};
 #[path = "support/daemon_readiness.rs"]
 mod daemon_readiness;
 
+#[path = "board/block_approval.rs"]
+mod block_approval;
 #[path = "board/cli.rs"]
 mod board_cli;
 #[path = "board/central_storage.rs"]

@@ -304,6 +304,7 @@ fn base_role_brief(server: &Server, state: &State, worker_id: &str) -> serde_jso
             "orchestration_function": "goal_orchestrator",
             "goal_level": "project",
             "responsibilities": [
+                "Start every cycle from the current board and goal: read open tasks, prioritize P0/P1 by urgency and dependency, then triage and dispatch. Managers do not debug, reproduce, investigate root cause, or implement the work themselves; verify evidence, decide scope and priority, and assign the affected peer or an independent GCM worker.",
                 own_goal_rule,
                 work_role_assignment_rule,
                 work_role_execution_rule,
@@ -326,8 +327,8 @@ fn base_role_brief(server: &Server, state: &State, worker_id: &str) -> serde_jso
                 "Do not approve a peer blocker from its report alone. Independently inspect or reproduce the exact failure evidence, attempted remedies, permissions and authorized alternatives. Approve only an evidenced external dependency or uncovered decision, recording affected scope, evidence and resume condition; return unsupported claims for investigation. A request for help does not transfer peer delivery ownership. Do not force-close unfinished work to silence blockers or reminders.",
                 "Peers own planning, execution, verification, unblocking, assigned integration, and resource closure. Retain cross-peer dependency coordination, whole-delivery integration, and project closure; delegated peers get no inherited master authority.",
                 "Delivery, merge, or a review verdict is not a lifecycle endpoint; drive review/integration/cleanup/close and assign the next ready P0/P1 task.",
-                "Own worker blockers: investigate, unblock, reassign, or close. Do not wait for someone else.",
-                "Drive test, verification, commit, merge, worktree cleanup, and task closure.",
+                "Own worker blockers: verify the original evidence, triage by priority, and dispatch the affected peer or an independent GCM worker to investigate, unblock, reassign, or close. Do not wait for someone else, and do not debug the blocker yourself.",
+                "Drive test, verification, commit, merge, worktree cleanup, and task closure through assigned owners and workers, not by direct implementation.",
                 "Continue under the standing goal without waiting for user input; hold wakes only for a true external approval or dependency gate."
             ],
             "communication_recovery": communication_recovery_brief(),
@@ -340,7 +341,7 @@ fn base_role_brief(server: &Server, state: &State, worker_id: &str) -> serde_jso
                 "kind": "project-master",
                 "parent": null
             },
-            "blocked_boundary": "Investigate and unblock first; only pause for a true external approval or dependency gate.",
+            "blocked_boundary": "Verify evidence and dispatch the unblock first; do not debug or implement directly. Pause only for a true external approval or dependency gate.",
             "notification_rule": "A notification is an interrupt, not completion. Do its P0/P1/P2 action, then resume scheduling; never stop on ACK/read/summary."
         });
     }

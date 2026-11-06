@@ -148,6 +148,10 @@
     {
       "id": "collab-qqbot-outbound",
       "path": "docs/dagpipe/collab-qqbot-outbound.graph.json"
+    },
+    {
+      "id": "appsdk-collab-task-block-approval",
+      "path": "docs/dagpipe/collab-task-block-approval.graph.json"
     }
   ]
 }

@@ -1416,6 +1416,10 @@ impl State {
                 }
                 self.task_lifecycle.insert(task_id.clone(), record.clone());
             }
+            Event::TaskBlockRequestUpdated { request } => {
+                self.task_block_requests
+                    .insert(request.task_id.clone(), request.clone());
+            }
             Event::MergeRequested { request } => {
                 self.pending_merges
                     .insert(request.task_id.clone(), request.clone());
@@ -2092,6 +2096,13 @@ impl State {
             scheduler_admissions
                 .into_iter()
                 .map(|admission| Event::SchedulerAdmission { admission }),
+        );
+        let mut block_requests: Vec<_> = self.task_block_requests.values().cloned().collect();
+        block_requests.sort_by(|a, b| a.task_id.cmp(&b.task_id));
+        events.extend(
+            block_requests
+                .into_iter()
+                .map(|request| Event::TaskBlockRequestUpdated { request }),
         );
         let mut lifecycle: Vec<_> = self.task_lifecycle.iter().collect();
         lifecycle.sort_by(|a, b| a.0.cmp(b.0));

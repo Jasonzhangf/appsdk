@@ -609,6 +609,14 @@ fn ceo_cross_project_task_message_reply_progress_and_clear_roundtrip() {
         role_task.contains("Coordinate authorized goals across projects"),
         "CEO role_task is missing from role_brief: {role_task}"
     );
+    assert!(
+        role_task.contains("prioritize P0/P1 across projects, triage, and dispatch"),
+        "CEO role_task must be board-first and priority oriented: {role_task}"
+    );
+    assert!(
+        role_task.contains("instead of debugging or implementing project work yourself"),
+        "CEO role_task must forbid manager-level debug/implementation: {role_task}"
+    );
     let card = &role_brief["ceo_workflow_template"];
     assert_eq!(card["target"], "ceo", "{current}");
     assert_eq!(card["source"], "base", "{current}");

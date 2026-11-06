@@ -1100,6 +1100,8 @@ fn migration_freeze_rejects_mutations_but_allows_rebind_and_reads() {
             task_id: "task".into(),
             status: Some("verifying".into()),
             next_step: None,
+            blocker_action: None,
+            decision_reason: None,
         },
         Req::MigrationPlan {
             worker_id: "peer".into(),

@@ -139,8 +139,8 @@ fn tools() -> Value {
         ),
         tool(
             "collab_task_update",
-            "Update an authorized task state through the Server.",
-            json!({"id":{"type":"string"},"status":{"type":"string"},"next":{"type":"string"}}),
+            "Update an authorized task state through the Server, or decide one pending business block application with blocker_action approve/reject. Only the task's current supervisor, or the current CEO for a master-owned task, may decide.",
+            json!({"id":{"type":"string"},"status":{"type":"string"},"next":{"type":"string"},"blocker_action":{"type":"string","enum":["approve","reject"]},"decision_reason":{"type":"string"}}),
             &["id"]
         ),
         tool(
@@ -686,6 +686,8 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
             argv.extend(["task".into(), "update".into(), required(args, "id")?]);
             optional_flag(&mut argv, args, "status", "--status")?;
             optional_flag(&mut argv, args, "next", "--next")?;
+            optional_flag(&mut argv, args, "blocker_action", "--blocker-action")?;
+            optional_flag(&mut argv, args, "decision_reason", "--decision-reason")?;
         }
         "collab_task_close" => argv.extend(["task".into(), "close".into(), required(args, "id")?]),
         "collab_migrate" => {

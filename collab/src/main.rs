@@ -2088,12 +2088,20 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     next_step: next,
                     goal_prompt: goal,
                 },
-                TaskCmd::Update { id, status, next } => Req::TaskUpdate {
+                TaskCmd::Update {
+                    id,
+                    status,
+                    next,
+                    blocker_action,
+                    decision_reason,
+                } => Req::TaskUpdate {
                     worker_id: worker_id.clone(),
                     token: token.clone(),
                     task_id: id,
                     status,
                     next_step: next,
+                    blocker_action,
+                    decision_reason,
                 },
                 TaskCmd::Accept {
                     id,
@@ -2202,6 +2210,8 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     task_id: id,
                     status: Some("blocked".into()),
                     next_step: next,
+                    blocker_action: None,
+                    decision_reason: None,
                 },
                 TaskCmd::Close { id, force, reason } => Req::TaskClose {
                     worker_id: worker_id.clone(),

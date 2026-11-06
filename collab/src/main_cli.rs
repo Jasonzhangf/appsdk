@@ -123,6 +123,13 @@ pub(crate) enum TaskCmd {
         status: Option<String>,
         #[arg(long)]
         next: Option<String>,
+        /// `approve` or `reject` one pending business block application.
+        /// Only the task's current supervisor, or the current CEO for a
+        /// master-owned task, may decide. The requester cannot self-approve.
+        #[arg(long, conflicts_with = "status")]
+        blocker_action: Option<String>,
+        #[arg(long)]
+        decision_reason: Option<String>,
     },
     /// Accept a board invitation (with revision), or a legacy assigned task
     Accept {

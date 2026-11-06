@@ -1890,11 +1890,6 @@ fn verified_public_create_can_be_bound_and_read_back_as_managed() {
         &["task", "update", &assigned_task, "--status", "blocked"],
         true,
     );
-    let next_reply = subagent_mcp_call(json!({
-        "action":"send", "id":"managed-created-peer",
-        "subject":"next task after blocker", "body":"Continue independent work while the first task stays blocked."
-    }));
-    assert_eq!(next_reply["isError"], false, "{next_reply}");
     let mut promote_again = fixture.configured_command(
         &[
             "master",
@@ -1906,6 +1901,25 @@ fn verified_public_create_can_be_bound_and_read_back_as_managed() {
     );
     configure_runtime(&mut promote_again);
     assert!(promote_again.output().unwrap().status.success());
+    // The member block above is a pending application; the master confirms the
+    // external gate so the task actually becomes blocked and frees the slot.
+    board_call(
+        &[
+            "task",
+            "update",
+            &assigned_task,
+            "--blocker-action",
+            "approve",
+            "--decision-reason",
+            "confirmed external dependency",
+        ],
+        false,
+    );
+    let next_reply = subagent_mcp_call(json!({
+        "action":"send", "id":"managed-created-peer",
+        "subject":"next task after blocker", "body":"Continue independent work while the first task stays blocked."
+    }));
+    assert_eq!(next_reply["isError"], false, "{next_reply}");
 
     // Exercise the public partial-commit path with a second managed child.
     // Its ready transition and durable message commit must remain visible when

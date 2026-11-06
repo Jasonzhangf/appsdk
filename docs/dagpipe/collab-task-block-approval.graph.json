@@ -1,0 +1,75 @@
+{
+  "id": "appsdk-collab-task-block-approval",
+  "version": "0.1.0",
+  "description": "一次成员业务阻塞申请或主管决定请求到一次权威结果。请求方是本任务当前 owner 时，daemon 只登记 typed 待审批申请，任务状态保持原值，不能直接变成已批准 blocked；请求方是当前直属主管（peer 任务）或 CEO（master 任务）时，daemon 在同一锁内按任务 revision、申请当前状态和严格角色边界批准、拒绝或解阻。禁止自审批：决定者必须不是申请人。stale、重复决定、越权、无当前主管或无 CEO 都返回明确结果，不产生半提交或伪造批准。资源冲突创建、等待到期和依赖释放属于 daemon 资源/安全隔离，直接由各自 owner 写入，不登记业务审批，也不得冒充已批准业务 blocked。唯一结果输出保留 pending、approved、rejected、stale、unauthorized、self_approval_denied、cancelled 与 failure；不新增自动重试、fallback 或第二状态 owner。",
+  "inputs": [
+    {
+      "id": "block_approval_request",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "接收阻塞申请或决定请求",
+      "operator": "appsdk.collab_task_block_approval.receive_request",
+      "operator_version": "1",
+      "description": "从公开 CLI/MCP 入口接收一次请求：成员对自己的任务申请 blocked，或主管/CEO 对一条已登记申请作出决定。只接收调用者 token 与任务标识；不接收调用方自报的角色、审批正文或他人凭据。",
+      "inputs": ["block_approval_request"],
+      "output": {"id": "raw_block_request", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "核对身份与当前决定权限",
+      "operator": "appsdk.collab_task_block_approval.admit_decision",
+      "operator_version": "1",
+      "description": "用 daemon 当前保存的 token 与 binding 核实调用者身份。申请分支只要求调用者是该任务的当前 owner。决定分支要求调用者是该任务的当前直属主管（peer 任务的当前项目 master）或 master 任务的当前 CEO，并经现有 typed grant 核实；不把 work role、名字或消息正文当作审批授权。无当前主管或不满足授权时不写任何状态，返回精确的授权结果。",
+      "inputs": ["raw_block_request"],
+      "output": {"id": "admitted_context", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "分类申请或决定并检查时效",
+      "operator": "appsdk.collab_task_block_approval.classify_request",
+      "operator_version": "1",
+      "description": "申请分支：owner 申请 blocked 时产生或复用一条 pending typed 申请，任务状态不变；重复申请同一任务保持幂等，不叠加第二条申请。决定分支按申请当前状态和任务 revision 分类：pending 且 revision 未推进才可批准/拒绝；申请已被决定、已被更新申请取代或任务 revision 已推进，判为 stale；决定者等于申请人，判为 self_approval_denied；决定者超出授权范围，判为 unauthorized。只做判定，不写状态。",
+      "inputs": ["admitted_context"],
+      "output": {"id": "classified_decision", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "原子提交申请或决定",
+      "operator": "appsdk.collab_task_block_approval.commit_decision",
+      "operator_version": "1",
+      "description": "在同一个 daemon 锁与一次 checked 事件批次内提交结果：pending 只写申请记录；approved 在同一批次把申请置 approved 并只允许把任务从可阻塞状态推进到 blocked；rejected/stale/unauthorized 只写申请终态或返回错误，绝不改任务状态。资源冲突、等待到期和依赖释放各由自己的 owner 直接写任务，不进入本申请记录。提交前再次核对 revision 与申请状态，旧决定不能覆盖后来的申请。部分写失败保留原 journal 与内存状态。",
+      "inputs": ["classified_decision"],
+      "output": {"id": "committed_state", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "投影唯一审批结果",
+      "operator": "appsdk.collab_task_block_approval.emit_result",
+      "operator_version": "1",
+      "description": "输出本次调用的实际终态：pending、approved、rejected、stale、unauthorized、self_approval_denied、cancelled 或 failure，并携带任务 id、申请人、决定者、申请/决定时间和当前任务与申请状态。pending 或失败不得投影为已批准 blocked；结果不证明消息投递、消费或交付。",
+      "inputs": ["committed_state"],
+      "output": {"id": "block_approval_result", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {"from": "接收阻塞申请或决定请求", "to": "核对身份与当前决定权限", "arc_id": "raw_block_request"},
+    {"from": "核对身份与当前决定权限", "to": "分类申请或决定并检查时效", "arc_id": "admitted_context"},
+    {"from": "分类申请或决定并检查时效", "to": "原子提交申请或决定", "arc_id": "classified_decision"},
+    {"from": "原子提交申请或决定", "to": "投影唯一审批结果", "arc_id": "committed_state"}
+  ],
+  "outputs": ["block_approval_result"]
+}

@@ -1663,6 +1663,109 @@ fn two_tui_appserver_receipt_flow() {
     drop(app_fixture);
 }
 
+fn native_input_texts(input: &Value) -> Vec<String> {
+    let mut texts = Vec::new();
+    if let Some(items) = input["input"].as_array() {
+        for item in items {
+            if let Some(text) = item["text"].as_str() {
+                texts.push(text.to_owned());
+            }
+        }
+    }
+    if let Some(text) = input["toolOutput"]["output"].as_str() {
+        texts.push(text.to_owned());
+    }
+    texts
+}
+
+/// Black-box batch-delivery contract at the real App Server entry: the batch
+/// body anchors on `entries=` (each entry already carrying its id, title and
+/// preview) and no longer repeats `message_ids=` or `last=`.
+#[test]
+fn appserver_batch_delivery_emits_entries_format_without_removed_fields() {
+    let fixture = AppFixture::new();
+    let context_a = fixture.run_public(&["context"], THREAD_A);
+    let context_b = fixture.run_public(&["context"], THREAD_B);
+    let recipient = context_b["identity"]["worker_id"]
+        .as_str()
+        .expect("daemon receipt names TUI worker B")
+        .to_owned();
+    assert!(context_a["identity"]["worker_id"].as_str().is_some());
+
+    let mut app_fixture = fixture;
+    app_fixture.run_public(
+        &[
+            "send",
+            "--to",
+            &recipient,
+            "--subject",
+            "batch format one",
+            "batch format one body",
+        ],
+        THREAD_A,
+    );
+    app_fixture.run_public(
+        &[
+            "send",
+            "--to",
+            &recipient,
+            "--subject",
+            "batch format two",
+            "batch format two body",
+        ],
+        THREAD_A,
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut observed_batch: Option<String> = None;
+    loop {
+        let batch = {
+            let inputs = app_fixture.state.lock().unwrap();
+            inputs.get(THREAD_B).map_or(None, |state| {
+                state.inputs.iter().find_map(|input| {
+                    native_input_texts(input).into_iter().find(|text| {
+                        text.contains("[notification-batch]") && text.contains("Batch wake:")
+                    })
+                })
+            })
+        };
+        if let Some(text) = batch {
+            observed_batch = Some(text);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "batch notification never reached worker B native input"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    let batch_text = observed_batch.expect("captured a notification-batch delivery");
+    let seed_id = batch_text
+        .split_once("COLLAB_NOTIFY ")
+        .and_then(|(_, rest)| rest.split_once(" [notification-batch]"))
+        .map(|(id, _)| id.trim())
+        .expect("batch notification names its seed message id");
+    assert!(
+        batch_text.contains("Batch wake: entries="),
+        "batch body must anchor on entries: {batch_text}"
+    );
+    assert!(
+        !batch_text.contains("message_ids="),
+        "batch body must not re-list message_ids: {batch_text}"
+    );
+    assert!(
+        !batch_text.contains(" last="),
+        "batch body must not repeat the last title: {batch_text}"
+    );
+    assert!(
+        batch_text.contains(&format!("entries={seed_id}:")),
+        "the first entry must carry the notification seed id: {batch_text}"
+    );
+
+    drop(app_fixture);
+}
+
 fn native_input_has_message(input: &Value, message_id: &str) -> bool {
     input["input"]
         .as_array()

@@ -874,7 +874,11 @@ fn responsibility_effect<'a>(state: &'a State, event: &'a Event) -> Responsibili
             }
         }
         Event::GlobalMasterGranted { grant } => {
-            ResponsibilityEffect::Mutates(grant.agent_id.as_str())
+            if master_grant_is_closing_refresh(state, grant) {
+                ResponsibilityEffect::Safe
+            } else {
+                ResponsibilityEffect::Mutates(grant.agent_id.as_str())
+            }
         }
         // A rollback can restore a worker, its route, and its subscriptions.
         // Refuse it while the exact failed target is fenced.
@@ -890,6 +894,50 @@ fn responsibility_effect<'a>(state: &'a State, event: &'a Event) -> Responsibili
         Event::ReducerSnapshot { .. } => ResponsibilityEffect::Safe,
         _ => ResponsibilityEffect::Safe,
     }
+}
+
+/// A master grant is only safe under an active closing fence when it refreshes
+/// the fence's own binding to the next endpoint generation. That is the
+/// retirement's master-preservation step for an already-granted binding; any
+/// new grant, different binding, different owner, or stale generation stays a
+/// fenced responsibility mutation.
+fn master_grant_is_closing_refresh(
+    state: &State,
+    grant: &super::global_state::MasterGrant,
+) -> bool {
+    state.responsibility_fences.values().any(|active_fence| {
+        if !active_fence.is_active() || active_fence.worker_id != grant.agent_id.as_str() {
+            return false;
+        }
+        let Ok(project_scope) =
+            crate::scope::ProjectScopeId::new(active_fence.project_scope.clone())
+        else {
+            return false;
+        };
+        let Ok(app_scope_id) = crate::identity::AppServerId::new(active_fence.app_scope.clone())
+        else {
+            return false;
+        };
+        let Ok(binding_id) = crate::identity::BindingId::new(active_fence.binding_id.clone())
+        else {
+            return false;
+        };
+        let matching_target = active_fence.project_scope.as_str() == grant.project_scope.as_str()
+            && active_fence.app_scope.as_str() == grant.app_scope_id.as_str()
+            && active_fence.binding_id == grant.binding_id.as_str()
+            && grant.endpoint_generation == active_fence.endpoint_generation + 1;
+        matching_target
+            && state
+                .global
+                .lookup_master_grant_for(
+                    &crate::scope::RouteScope {
+                        app_scope_id,
+                        project_scope_id: project_scope,
+                    },
+                    &binding_id,
+                )
+                .is_some_and(|prior| prior.agent_id == grant.agent_id)
+    })
 }
 
 /// Batch-level preflight used before any journal bytes are written.

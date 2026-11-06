@@ -1011,6 +1011,11 @@ fn target_for_self_binding(state: &State, binding: &RuntimeBinding) -> PeerLifec
     }
 }
 
+/// Stable prefix for daemon maintenance lifecycle operations. The operation id
+/// stays constant per exact target so a retry reuses the durable operation and
+/// its fence instead of creating a new one each timer round.
+const MAINTENANCE_OPERATION_PREFIX: &str = "stale-identity-maintenance:";
+
 fn maintenance_binding_for(state: &State, worker: &WorkerRec) -> Option<RuntimeBinding> {
     let transport = worker.transport.as_ref()?;
     let mut bindings = state
@@ -1058,6 +1063,94 @@ struct DefinitiveMissingCandidate {
     endpoint_target: super::CloseEndpointTarget,
 }
 
+/// Resample the exact responsibility and control-plane obligations for one
+/// candidate. Used both for the initial candidate set and for the fresh
+/// recheck after the host probe, so the two always use the same definition.
+fn sample_candidate(
+    state: &State,
+    worker: &WorkerRec,
+    binding: RuntimeBinding,
+) -> DefinitiveMissingCandidate {
+    let target = target_for_self_binding(state, &binding);
+    let snapshot = state::responsibility_snapshot(state, &worker.id);
+    let snapshot_captured_ms = target.transport.thread_id.as_deref().and_then(|thread_id| {
+        state
+            .worker_snapshots
+            .get(&worker.id)
+            .filter(|receipt| receipt.thread_id == thread_id)
+            .map(|receipt| receipt.captured_ms)
+    });
+    let mut active_fences = state
+        .responsibility_fences
+        .values()
+        .filter(|fence| {
+            fence.worker_id == worker.id
+                && fence.is_active()
+                // The maintenance operation's own persisted fence is reused on
+                // retry, not treated as a foreign blocker.
+                && !fence.operation_id.starts_with(MAINTENANCE_OPERATION_PREFIX)
+        })
+        .map(|fence| fence.operation_id.clone())
+        .collect::<Vec<_>>();
+    active_fences.sort();
+    active_fences.dedup();
+    let mut pending_reply_obligations = state
+        .reply_obligations
+        .values()
+        .filter(|obligation| {
+            obligation.from_worker_id == worker.id || obligation.recipient_worker_id == worker.id
+        })
+        .map(|obligation| obligation.message_id.clone())
+        .collect::<Vec<_>>();
+    pending_reply_obligations.sort();
+    pending_reply_obligations.dedup();
+    DefinitiveMissingCandidate {
+        endpoint_target: close_endpoint_target(state, &worker.id),
+        worker: worker.clone(),
+        target,
+        snapshot,
+        snapshot_captured_ms,
+        active_fences,
+        pending_reply_obligations,
+    }
+}
+
+/// True when the fresh sample added responsibility the probe-time sample did
+/// not have. Disappeared responsibility is safe to ignore: the close may
+/// proceed with the fresher snapshot.
+fn responsibility_gained(
+    before: &DefinitiveMissingCandidate,
+    after: &DefinitiveMissingCandidate,
+) -> bool {
+    let gained = |old: &[String], new: &[String]| new.iter().any(|id| !old.contains(id));
+    gained(&before.snapshot.task_ids, &after.snapshot.task_ids)
+        || gained(
+            &before.snapshot.scheduler_request_ids,
+            &after.snapshot.scheduler_request_ids,
+        )
+        || gained(
+            &before.snapshot.managed_subagent_ids,
+            &after.snapshot.managed_subagent_ids,
+        )
+        || gained(
+            &before.snapshot.worktree_binding_ids,
+            &after.snapshot.worktree_binding_ids,
+        )
+        || gained(
+            &before.snapshot.subscription_ids,
+            &after.snapshot.subscription_ids,
+        )
+        || gained(
+            &before.snapshot.unread_message_ids,
+            &after.snapshot.unread_message_ids,
+        )
+        || gained(&before.active_fences, &after.active_fences)
+        || gained(
+            &before.pending_reply_obligations,
+            &after.pending_reply_obligations,
+        )
+}
+
 fn maintenance_retained(
     worker_id: &str,
     binding_id: &str,
@@ -1070,13 +1163,78 @@ fn maintenance_retained(
     })
 }
 
+/// Admit one automatic close through the existing lifecycle operation owner.
+///
+/// The same reducer event installs the operation's exact-target responsibility
+/// fence, so any responsibility created after this admission is rejected until
+/// the operation settles. A surviving cleanup-open or crash window therefore
+/// retains the durable operation and fence instead of losing them in the
+/// per-round aggregate.
+fn admit_maintenance_close(
+    server: &Server,
+    target: &PeerLifecycleTarget,
+    snapshot: state::ResponsibilitySnapshot,
+    operation_id: &str,
+    actor_id: &str,
+) -> Result<state::PeerLifecycleOperationRecord, String> {
+    let existing = server
+        .state
+        .lock()
+        .unwrap()
+        .peer_lifecycle_operations
+        .get(operation_id)
+        .cloned();
+    if let Some(existing) = existing {
+        if existing.phase == PeerLifecyclePhase::IntentPersisted {
+            let dispatched = advance_record_with_close(
+                &existing,
+                PeerLifecyclePhase::HostDispatched,
+                None,
+                existing.close.clone(),
+            );
+            commit_record(server, &dispatched)?;
+            return Ok(dispatched);
+        }
+        return Ok(existing);
+    }
+    let created_ms = now_ms();
+    let mut close = close_readback("maintenance-intent-persisted");
+    close.runtime_archive.state = PeerLifecycleStage::Missing;
+    let record = state::PeerLifecycleOperationRecord {
+        operation_id: operation_id.to_owned(),
+        action: PeerLifecycleAction::Close,
+        actor_id: actor_id.to_owned(),
+        project_scope: target.project_scope.clone(),
+        app_scope_id: target.app_scope_id.clone(),
+        target: Some(target.clone()),
+        intent_digest: close_intent_digest(operation_id, target, "stale-identity-maintenance"),
+        query_capability_hash: capability_hash(""),
+        responsibility_snapshot: Some(snapshot),
+        phase: PeerLifecyclePhase::IntentPersisted,
+        update: None,
+        close: Some(close),
+        create: None,
+        created_ms,
+        updated_ms: created_ms,
+    };
+    commit_record(server, &record)?;
+    let dispatched = advance_record_with_close(
+        &record,
+        PeerLifecyclePhase::HostDispatched,
+        None,
+        record.close.clone(),
+    );
+    commit_record(server, &dispatched)?;
+    Ok(dispatched)
+}
+
 /// Run one bounded daemon-owned stale identity maintenance round.
 ///
 /// Candidate and responsibility identities are captured under the reducer
 /// lock. Host probes run after that lock is released. Only definitive adapter
 /// absence enters retirement, and responsibility-bearing candidates remain
 /// untouched.
-pub(super) fn maintain_definitive_missing(server: &Server, now: i64) -> serde_json::Value {
+pub(super) fn maintain_definitive_missing(server: &Server, _now: i64) -> serde_json::Value {
     let (mut candidates, mut unknown) = {
         let state = server.state.lock().unwrap();
         let mut candidates = Vec::new();
@@ -1093,44 +1251,8 @@ pub(super) fn maintain_definitive_missing(server: &Server, now: i64) -> serde_js
                 }));
                 continue;
             };
-            let target = target_for_self_binding(&state, &binding);
-            let snapshot = state::responsibility_snapshot(&state, &worker.id);
-            let snapshot_captured_ms =
-                target.transport.thread_id.as_deref().and_then(|thread_id| {
-                    state
-                        .worker_snapshots
-                        .get(&worker.id)
-                        .filter(|receipt| receipt.thread_id == thread_id)
-                        .map(|receipt| receipt.captured_ms)
-                });
-            let mut active_fences = state
-                .responsibility_fences
-                .values()
-                .filter(|fence| fence.worker_id == worker.id && fence.is_active())
-                .map(|fence| fence.operation_id.clone())
-                .collect::<Vec<_>>();
-            active_fences.sort();
-            active_fences.dedup();
-            let mut pending_reply_obligations = state
-                .reply_obligations
-                .values()
-                .filter(|obligation| {
-                    obligation.from_worker_id == worker.id
-                        || obligation.recipient_worker_id == worker.id
-                })
-                .map(|obligation| obligation.message_id.clone())
-                .collect::<Vec<_>>();
-            pending_reply_obligations.sort();
-            pending_reply_obligations.dedup();
-            candidates.push(DefinitiveMissingCandidate {
-                endpoint_target: close_endpoint_target(&state, &worker.id),
-                worker,
-                target,
-                snapshot,
-                snapshot_captured_ms,
-                active_fences,
-                pending_reply_obligations,
-            });
+            let candidate = sample_candidate(&state, &worker, binding);
+            candidates.push(candidate);
         }
         (candidates, unknown)
     };
@@ -1140,11 +1262,7 @@ pub(super) fn maintain_definitive_missing(server: &Server, now: i64) -> serde_js
     for candidate in candidates.drain(..) {
         let worker_id = candidate.target.worker_id.as_str();
         let binding_id = candidate.target.binding_id.as_str();
-        let presence = if candidate.target.transport.kind == TransportKind::Tmux {
-            close_endpoint_presence(server, &candidate.endpoint_target)
-        } else {
-            worker_presence(server, &candidate.worker)
-        };
+        let presence = maintenance_presence(server, &candidate.endpoint_target);
         if presence != IdentityPresence::Missing {
             retained.push(maintenance_retained(
                 worker_id,
@@ -1152,6 +1270,39 @@ pub(super) fn maintain_definitive_missing(server: &Server, now: i64) -> serde_js
                 json!({
                     "kind": "identity_presence",
                     "presence": identity_presence_label(presence),
+                }),
+            ));
+            continue;
+        }
+        // The probe ran after the candidate snapshot; anything added to this
+        // exact target in that window must hold the retirement before the
+        // durable fence is installed.
+        let fresh = {
+            let state = server.state.lock().unwrap();
+            match maintenance_binding_for(&state, &candidate.worker) {
+                Some(binding) => Some(sample_candidate(&state, &candidate.worker, binding)),
+                None => None,
+            }
+        };
+        let fresh = match fresh {
+            Some(fresh) => fresh,
+            None => {
+                retained.push(maintenance_retained(
+                    worker_id,
+                    binding_id,
+                    json!({
+                        "kind": "current_binding_changed_during_probe",
+                    }),
+                ));
+                continue;
+            }
+        };
+        if responsibility_gained(&candidate, &fresh) {
+            retained.push(maintenance_retained(
+                worker_id,
+                binding_id,
+                json!({
+                    "kind": "responsibility_added_during_probe",
                 }),
             ));
             continue;
@@ -1184,22 +1335,56 @@ pub(super) fn maintain_definitive_missing(server: &Server, now: i64) -> serde_js
         }
 
         let operation_id = format!(
-            "stale-identity-maintenance:{}:{}",
-            candidate.target.binding_id.as_str(),
-            now
+            "{MAINTENANCE_OPERATION_PREFIX}{}",
+            candidate.target.binding_id.as_str()
         );
         let actor_id = maintenance_actor(&candidate.target.worker_id);
-        let close = retire_control_plane_target(
+        let record = match admit_maintenance_close(
             server,
-            &actor_id,
             &candidate.target,
+            candidate.snapshot.clone(),
             &operation_id,
-            &candidate.snapshot,
+            &actor_id,
+        ) {
+            Ok(record) => record,
+            Err(error) => {
+                unknown.push(json!({
+                    "worker_id": candidate.target.worker_id,
+                    "binding_id": candidate.target.binding_id,
+                    "operation_id": operation_id,
+                    "reason": {
+                        "kind": "maintenance_admission_failed",
+                        "detail": error,
+                    },
+                }));
+                continue;
+            }
+        };
+        let close = retire_control_plane(
+            server,
+            &record,
             PeerLifecycleStage::Missing,
             None,
             candidate.snapshot_captured_ms,
         );
-        if close_phase(&close) == PeerLifecyclePhase::Complete {
+        let phase = close_phase(&close);
+        let terminal = advance_record_with_close(&record, phase.clone(), None, Some(close.clone()));
+        if let Err(error) = commit_record(server, &terminal) {
+            // The durable HostDispatched admission and its fence remain, so
+            // the unresolved operation survives to a later maintenance round.
+            unknown.push(json!({
+                "worker_id": candidate.target.worker_id,
+                "binding_id": candidate.target.binding_id,
+                "operation_id": operation_id,
+                "reason": {
+                    "kind": "terminal_record_durability_failed",
+                    "detail": error,
+                },
+                "close": close,
+            }));
+            continue;
+        }
+        if phase == PeerLifecyclePhase::Complete {
             retired.push(json!({
                 "worker_id": candidate.target.worker_id,
                 "binding_id": candidate.target.binding_id,

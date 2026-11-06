@@ -1,4 +1,5 @@
 use super::*;
+use crate::server::name_state::{AgentPresence, AgentPresenceRecord};
 use crate::server::peer_tests::{
     register_tmux, seed_committed_owner, test_appserver_transport, test_server,
 };
@@ -28,6 +29,13 @@ fn install_appserver_status(server: &mut Server) {
         "thread-authdenied" => Err("ADAPTER_AUTH_DENIED: permission denied".into()),
         "thread-unknown" => Err("fixture App Server status unavailable".into()),
         "thread-missing" => Err("thread not found".into()),
+        "thread-system-error" => Ok(serde_json::json!({
+            "thread": {
+                "id": thread_id,
+                "status": {"type": "systemError"},
+                "canAcceptDirectInput": false
+            }
+        })),
         other => panic!("unexpected App Server thread {other}"),
     });
 }
@@ -276,14 +284,18 @@ fn definitive_missing_appserver_worker_retires_without_self_removal() {
     let retired = entry(&summary, "retired", "missing-peer");
     assert_eq!(
         retired["operation_id"],
-        format!(
-            "stale-identity-maintenance:{}:{}",
-            binding.binding_id.as_str(),
-            1_234
-        )
+        format!("stale-identity-maintenance:{}", binding.binding_id.as_str())
     );
     assert_eq!(retired["close"]["runtime_archive"]["state"], "missing");
+    let operation_id = retired["operation_id"].as_str().unwrap();
     let state = server.state.lock().unwrap();
+    let operation = &state.peer_lifecycle_operations[operation_id];
+    assert_eq!(operation.action, PeerLifecycleAction::Close);
+    assert_eq!(operation.phase, PeerLifecyclePhase::Complete);
+    assert!(
+        !state.responsibility_fences.contains_key(operation_id),
+        "a completed maintenance operation releases its fence"
+    );
     assert!(!state.workers.contains_key("missing-peer"));
     let closure = &state.worker_closures["missing-peer"];
     assert_ne!(closure.closed_by, "missing-peer");
@@ -352,6 +364,7 @@ fn non_definitive_presence_is_retained_without_mutation() {
         ("thread-unknown", "unknown"),
         ("thread-timeout", "unknown"),
         ("thread-authdenied", "unknown"),
+        ("thread-system-error", "unknown"),
     ] {
         let (mut server, root) = test_server();
         install_appserver_status(&mut server);
@@ -379,6 +392,90 @@ fn non_definitive_presence_is_retained_without_mutation() {
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }
+}
+
+#[test]
+fn stale_offline_telemetry_does_not_retire_a_live_appserver_thread() {
+    let (mut server, root) = test_server();
+    install_appserver_status(&mut server);
+    let binding = register_appserver(&server, "telemetry-peer", "thread-present");
+    let session = server.state.lock().unwrap().workers["telemetry-peer"]
+        .transport
+        .as_ref()
+        .and_then(|transport| transport.session_id.clone())
+        .expect("AppServer fixture has a session");
+    server.commit(&[Event::AgentPresenceObserved {
+        presence: AgentPresenceRecord {
+            project_scope: binding.project_scope.as_str().into(),
+            worker_id: "telemetry-peer".into(),
+            session_id: session,
+            presence: AgentPresence::Offline,
+            reason: "stale telemetry fixture".into(),
+            observed_ms: 1,
+        },
+    }]);
+
+    let summary = maintain_definitive_missing(&server, 3_500);
+
+    assert_only_bucket(&summary, "retained", "telemetry-peer");
+    let retained = entry(&summary, "retained", "telemetry-peer");
+    assert_eq!(retained["reason"]["kind"], "identity_presence");
+    assert_eq!(retained["reason"]["presence"], "present");
+    let state = server.state.lock().unwrap();
+    assert!(state.workers.contains_key("telemetry-peer"));
+    assert!(!state.worker_closures.contains_key("telemetry-peer"));
+    assert!(
+        state.peer_lifecycle_operations.is_empty()
+            || !state
+                .peer_lifecycle_operations
+                .values()
+                .any(|operation| operation
+                    .target
+                    .as_ref()
+                    .is_some_and(|target| { target.worker_id == "telemetry-peer" }))
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn maintenance_incomplete_result_keeps_durable_operation_and_fence() {
+    let (mut server, root) = test_server();
+    install_appserver_status(&mut server);
+    let mut binding = register_appserver(&server, "exhausted-peer", "thread-missing");
+    binding.endpoint_generation = u64::MAX;
+    server.commit(&[Event::GlobalRuntimeBound {
+        binding: binding.clone(),
+    }]);
+
+    let summary = maintain_definitive_missing(&server, 8_000);
+
+    assert_only_bucket(&summary, "unknown", "exhausted-peer");
+    let unknown = entry(&summary, "unknown", "exhausted-peer");
+    assert_eq!(unknown["reason"]["kind"], "retirement_incomplete");
+    let operation_id = unknown["operation_id"].as_str().unwrap().to_owned();
+    let state = server.state.lock().unwrap();
+    let operation = &state.peer_lifecycle_operations[&operation_id];
+    assert_eq!(operation.action, PeerLifecycleAction::Close);
+    assert_eq!(operation.phase, PeerLifecyclePhase::CleanupOpen);
+    let fence = &state.responsibility_fences[&operation_id];
+    assert!(fence.is_active(), "cleanup-open must retain its fence");
+    assert_eq!(fence.worker_id, "exhausted-peer");
+    drop(state);
+
+    // The durable fence rejects a responsibility added after admission, so a
+    // late task cannot be removed together with the target.
+    let rejected = server.try_commit(&[Event::TaskCreated {
+        task: open_task("exhausted-peer", "late-task"),
+    }]);
+    assert!(rejected.is_err(), "late responsibility must be fenced");
+    assert!(server
+        .state
+        .lock()
+        .unwrap()
+        .tasks
+        .get("late-task")
+        .is_none());
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -483,6 +580,59 @@ fn a_missing_probe_does_not_create_a_permanent_tombstone() {
         .unwrap()
         .workers
         .contains_key("recovering-peer"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn responsibility_added_during_probe_is_retained_before_admission() {
+    let (mut server, root) = test_server();
+    let (probe_started_tx, probe_started_rx) = std::sync::mpsc::channel::<()>();
+    let (commit_done_tx, commit_done_rx) = std::sync::mpsc::channel::<()>();
+    let probe_started_tx = Mutex::new(probe_started_tx);
+    let commit_done_rx = Mutex::new(commit_done_rx);
+    server.appserver_thread_status = Arc::new(move |_, thread_id| {
+        if thread_id != "thread-race" {
+            panic!("unexpected App Server thread {thread_id}");
+        }
+        // This is the exact window the reviewer identified: the host probe
+        // runs after the candidate snapshot and before admission, with the
+        // state lock free for a concurrent writer.
+        probe_started_tx.lock().unwrap().send(()).unwrap();
+        commit_done_rx.lock().unwrap().recv().unwrap();
+        Err("thread not found".into())
+    });
+    let server = Arc::new(server);
+    register_appserver(&server, "race-peer", "thread-race");
+    let writer_server = Arc::clone(&server);
+    let writer = std::thread::spawn(move || {
+        probe_started_rx.recv().unwrap();
+        writer_server
+            .try_commit(&[Event::TaskCreated {
+                task: open_task("race-peer", "task-arrived-during-probe"),
+            }])
+            .unwrap();
+        commit_done_tx.send(()).unwrap();
+    });
+
+    let summary = maintain_definitive_missing(&server, 6_100);
+    writer.join().unwrap();
+
+    assert_only_bucket(&summary, "retained", "race-peer");
+    assert_eq!(
+        entry(&summary, "retained", "race-peer")["reason"]["kind"],
+        "responsibility_added_during_probe"
+    );
+    let state = server.state.lock().unwrap();
+    assert!(state.workers.contains_key("race-peer"));
+    assert!(state.tasks.contains_key("task-arrived-during-probe"));
+    assert!(state
+        .peer_lifecycle_operations
+        .values()
+        .all(|operation| !operation
+            .operation_id
+            .starts_with("stale-identity-maintenance:")));
+    assert!(state.responsibility_fences.is_empty());
+    drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }
 

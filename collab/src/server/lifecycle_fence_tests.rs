@@ -229,6 +229,102 @@ fn fence(server: &Server, worker_id: &str, operation_id: &str) {
         .unwrap();
 }
 
+fn master_grant(
+    agent_id: &str,
+    binding_id: &str,
+    endpoint_generation: u64,
+) -> state::Event {
+    state::Event::GlobalMasterGranted {
+        grant: super::global_state::MasterGrant {
+            project_scope: ProjectScopeId::new("/tmp/lifecycle-fence-project").unwrap(),
+            app_scope_id: AppServerId::new("tui-default").unwrap(),
+            agent_id: AgentId::new(agent_id.to_owned()).unwrap(),
+            boundary: "project".into(),
+            granted_by: "master".into(),
+            approval: "fixture".into(),
+            grant_id: binding_id.to_owned(),
+            grant_generation: endpoint_generation,
+            binding_id: BindingId::new(binding_id.to_owned()).unwrap(),
+            endpoint_generation,
+            granted_at_ms: 1,
+        },
+    }
+}
+
+fn retired_binding(binding_id: &str, endpoint_generation: u64) -> super::global_state::RuntimeBinding {
+    super::global_state::RuntimeBinding {
+        project_scope: ProjectScopeId::new("/tmp/lifecycle-fence-project").unwrap(),
+        app_scope_id: AppServerId::new("tui-default").unwrap(),
+        agent_id: AgentId::new(TARGET.to_owned()).unwrap(),
+        runtime_id: RuntimeId::new("runtime-target").unwrap(),
+        binding_id: BindingId::new(binding_id.to_owned()).unwrap(),
+        endpoint_generation,
+        session_id: None,
+        native_thread_id: None,
+        tmux_endpoint: None,
+    }
+}
+
+/// The maintenance close preserves an existing master grant by advancing its
+/// endpoint generation. That exact refresh must commit while the closing fence
+/// holds, but a new grant, another owner, or a stale/forward generation must
+/// stay fenced.
+#[test]
+fn fence_allows_only_exact_master_generation_refresh() {
+    let (server, root) = fence_server();
+    server
+        .commit_checked(&[
+            Event::GlobalProjectRegistered {
+                registration: super::global_state::ProjectRegistration::new(
+                    ProjectScopeId::new("/tmp/lifecycle-fence-project").unwrap(),
+                    AppServerId::new("tui-default").unwrap(),
+                )
+                .unwrap(),
+            },
+            Event::GlobalRuntimeBound {
+                binding: retired_binding("binding-target", 1),
+            },
+            master_grant(TARGET, "binding-target", 1),
+        ])
+        .unwrap();
+    fence(&server, TARGET, "close-op");
+
+    // Same binding, same owner, one generation forward: the retirement's own
+    // master-preservation step.
+    server
+        .commit_checked(&[
+            Event::GlobalRuntimeBound {
+                binding: retired_binding("binding-target", 2),
+            },
+            master_grant(TARGET, "binding-target", 2),
+        ])
+        .unwrap();
+
+    // A different binding or a generation that is not the fence's immediate
+    // successor is not a refresh and stays preflight-rejected.
+    for grant in [
+        master_grant(TARGET, "binding-other", 2),
+        master_grant(TARGET, "binding-target", 3),
+    ] {
+        let (reject_server, reject_root) = fence_server();
+        fence(&reject_server, TARGET, "close-op");
+        assert_rejected_before_bytes(&reject_server, &reject_root, &[grant]);
+        std::fs::remove_dir_all(reject_root).unwrap();
+    }
+
+    // A grant for another owner never targets this fence and still reaches its
+    // normal reducer validation.
+    let (other_server, other_root) = fence_server();
+    fence(&other_server, TARGET, "close-op");
+    let error = other_server
+        .commit_checked(&[master_grant("other", "binding-target", 2)])
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("global reducer rejected event"), "{error}");
+    std::fs::remove_dir_all(other_root).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 fn assert_rejected_before_bytes(server: &Server, root: &Path, events: &[Event]) -> String {
     let journal_path = root.join(".agent-collab/server/journal.jsonl");
     let before = std::fs::read(&journal_path).unwrap();
